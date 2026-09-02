@@ -1,7 +1,15 @@
 module Agent.TUI.MarkdownSpec (spec) where
 
 import Agent.TUI.Markdown
-import Agent.Syntax (loadSyntaxHighlighterFrom)
+import Agent.Syntax
+    ( SyntaxClass(SyntaxComment)
+    , SyntaxSpan(syntaxClass)
+    , loadSyntaxHighlighterFrom
+    )
+import Agent.TUI.Presentation
+    ( DiffDisplayLine(..)
+    , DiffLineKind(..)
+    )
 import Agent.TUI.TextWidth
     ( displayTerminalText
     , graphemeCellWidth
@@ -25,6 +33,7 @@ import Control.Monad (forM_)
 import Data.Char (isControl)
 import Data.Foldable (toList)
 import Data.List (find, findIndex, isInfixOf, sortOn)
+import Data.Maybe (isJust)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
 import qualified Graphics.Vty as V
@@ -258,12 +267,163 @@ spec = describe "fullscreen Markdown rendering" do
         Text.filter (/= ' ') (Text.concat rows)
             `shouldBe` Text.filter (/= ' ') code
 
+    it "fills a semantic code background across the available row" do
+        let width = 18
+            widget :: Widget ()
+            widget =
+                codeWidgetWithSyntaxHighlightingOn
+                    Nothing
+                    "haskell"
+                    Theme.diffAddedAttr
+                    "value = 1"
+            image =
+                V.picImage $
+                    renderWidget
+                        (Just (Theme.themeAttrMap Theme.Midnight))
+                        [widget]
+                        (width, 2)
+        V.imageWidth image `shouldBe` width
+
+    it "preserves lexical state across old and new diff streams" do
+        syntaxDirectory <- sourceSyntaxDirectory
+        loadSyntaxHighlighterFrom syntaxDirectory >>= \case
+            Left message -> expectationFailure (Text.unpack message)
+            Right highlighter -> do
+                let line kind marker code =
+                        DiffDisplayLine
+                            { diffDisplayGutter = ""
+                            , diffDisplayMarker = marker
+                            , diffDisplayCode = code
+                            , diffDisplayKind = kind
+                            }
+                    diffLines =
+                        [ line DiffLineContext " " "{-"
+                        , line DiffLineRemoved "-" "-}"
+                        , line DiffLineAdded "+" "new inside comment"
+                        , line DiffLineContext " " "new context remains comment"
+                        , line DiffLineContext " " "-}"
+                        ]
+                case highlightDiffCodeRows highlighter "haskell" diffLines of
+                    Left message -> expectationFailure (Text.unpack message)
+                    Right [_, removedLine, addedLine, contextLine, _] -> do
+                        removedLine `shouldSatisfy` (not . null)
+                        addedLine `shouldSatisfy` (not . null)
+                        contextLine `shouldSatisfy` (not . null)
+                        map (.syntaxClass) removedLine
+                            `shouldSatisfy` all (== SyntaxComment)
+                        map (.syntaxClass) addedLine
+                            `shouldSatisfy` all (== SyntaxComment)
+                        map (.syntaxClass) contextLine
+                            `shouldSatisfy` all (== SyntaxComment)
+                    Right _ ->
+                        expectationFailure
+                            "expected one highlighted row per diff row"
+
     it "preserves spaces inside wrapped code and string literals" do
         let code = "putStrLn \"alpha beta gamma delta epsilon\""
             widget :: Widget ()
             widget = codeWidgetWithSyntaxHighlighting Nothing "haskell" code
         Text.concat (renderedCodePayloadRows 18 widget)
             `shouldBe` code
+
+    it "discovers every language used by a multi-file edit preview" do
+        diffSyntaxLanguages
+            "Main module.hs"
+            (Text.unlines
+                [ "  -main = old"
+                , "  update web/my app.ts"
+                , "  +const answer = 42"
+                , "  move scripts/old.py → crates/new module.rs"
+                , "  +fn main() {}"
+                ])
+            `shouldBe` ["haskell", "typescript", "python", "rust"]
+
+    it "syntax-highlights edit lines over full-width diff backgrounds" do
+        syntaxDirectory <- sourceSyntaxDirectory
+        loadSyntaxHighlighterFrom syntaxDirectory >>= \case
+            Left message -> expectationFailure (Text.unpack message)
+            Right highlighter -> do
+                let width = 32
+                    widget :: Widget ()
+                    widget =
+                        diffWidgetWithSyntaxHighlighting
+                            (Just highlighter)
+                            "Main module.hs"
+                            "  12 -message = \"before\"\n  12 +message = \"after\""
+                    picture =
+                        renderWidget
+                            (Just Theme.terminalDefault)
+                            [widget]
+                            (width, 4)
+                    rows =
+                        map toList $
+                            toList $
+                                displayOpsForPic picture (width, 4)
+                    findText expected =
+                        find (containsText expected) (concat rows)
+                    stringForeground =
+                        V.attrForeColor $
+                            attrMapLookup
+                                Theme.syntaxStringAttr
+                                Theme.terminalDefault
+                    removedBackground =
+                        V.attrBackColor $
+                            attrMapLookup
+                                Theme.diffRemovedAttr
+                                Theme.terminalDefault
+                    addedBackground =
+                        V.attrBackColor $
+                            attrMapLookup
+                                Theme.diffAddedAttr
+                                Theme.terminalDefault
+                V.imageWidth (V.picImage picture) `shouldBe` width
+                findText "  12 -" `shouldSatisfy` isJust
+                findText "  12 +" `shouldSatisfy` isJust
+                fmap (V.attrForeColor . spanAttr) (findText "\"before\"")
+                    `shouldBe` Just stringForeground
+                fmap (V.attrBackColor . spanAttr) (findText "\"before\"")
+                    `shouldBe` Just removedBackground
+                fmap (V.attrForeColor . spanAttr) (findText "\"after\"")
+                    `shouldBe` Just stringForeground
+                fmap (V.attrBackColor . spanAttr) (findText "\"after\"")
+                    `shouldBe` Just addedBackground
+
+    it "uses source and destination grammars for moved diff lines" do
+        syntaxDirectory <- sourceSyntaxDirectory
+        loadSyntaxHighlighterFrom syntaxDirectory >>= \case
+            Left message -> expectationFailure (Text.unpack message)
+            Right highlighter -> do
+                let widget :: Widget ()
+                    widget =
+                        diffWidgetWithSyntaxHighlighting
+                            (Just highlighter)
+                            "old module.py"
+                            (Text.unlines
+                                [ "  move old module.py → new module.rs"
+                                , "  -# source comment"
+                                , "  +// destination comment"
+                                ])
+                    rows =
+                        concat $
+                            map toList $
+                                toList $
+                                    displayOpsForPic
+                                        (renderWidget
+                                            (Just Theme.terminalDefault)
+                                            [widget]
+                                            (40, 4))
+                                        (40, 4)
+                    commentForeground =
+                        V.attrForeColor $
+                            attrMapLookup
+                                Theme.syntaxCommentAttr
+                                Theme.terminalDefault
+                fmap (V.attrForeColor . spanAttr)
+                    (find (containsText "source comment") rows)
+                    `shouldBe` Just commentForeground
+                fmap (V.attrForeColor . spanAttr)
+                    (find (containsText "destination comment") rows)
+                    `shouldBe` Just commentForeground
 
     it "renders terminal controls as inert visible glyphs" do
         let unsafe = "\ESC]0;owned\BEL\t\r"
@@ -368,19 +528,31 @@ spec = describe "fullscreen Markdown rendering" do
         rendered `shouldSatisfy` (not . null)
 
     describe "tables" do
-        it "renders naturally sized columns with a segmented rule" do
+        it "renders naturally sized columns inside a full grid" do
             renderRows 80
                 "| A | BB |\n| --- | --- |\n| x | yy |"
                 `shouldBe`
-                    [ " A    BB"
-                    , "───  ────"
-                    , " x    yy"
+                    [ "┌───┬────┐"
+                    , "│ A │ BB │"
+                    , "├───┼────┤"
+                    , "│ x │ yy │"
+                    , "└───┴────┘"
                     ]
-            renderRows 80
-                "| A | BB |\n| --- | --- |\n| x | yy |"
-                `shouldSatisfy` all (not . Text.isInfixOf "│")
 
-        it "wraps constrained cells without clipping content" do
+        it "draws a divider between every logical row" do
+            renderRows 80
+                "| A | B |\n| --- | --- |\n| x | y |\n| u | v |"
+                `shouldBe`
+                    [ "┌───┬───┐"
+                    , "│ A │ B │"
+                    , "├───┼───┤"
+                    , "│ x │ y │"
+                    , "├───┼───┤"
+                    , "│ u │ v │"
+                    , "└───┴───┘"
+                    ]
+
+        it "wraps constrained cells without clipping content or borders" do
             let rows =
                     renderRows 48 $
                         Text.unlines
@@ -388,12 +560,14 @@ spec = describe "fullscreen Markdown rendering" do
                             , "| --- | --- | --- |"
                             , "| Codex | short description | 0123456789ABCDEFVISIBLE |"
                             ]
+                contentRows = filter (Text.isPrefixOf "│") rows
             map rowDisplayWidth rows
                 `shouldSatisfy` all (<= 48)
+            contentRows `shouldSatisfy` (not . null)
+            contentRows `shouldSatisfy`
+                all (Text.isSuffixOf "│")
             Text.unlines rows `shouldSatisfy` Text.isInfixOf "VISIBLE"
             Text.unlines rows `shouldSatisfy` Text.isInfixOf "description"
-            Text.unlines rows `shouldSatisfy`
-                (not . Text.isInfixOf "│")
 
         it "keeps short columns natural while sharing constrained space" do
             let longLeft = Text.replicate 50 "l"
@@ -434,7 +608,8 @@ spec = describe "fullscreen Markdown rendering" do
             mapM_ (\value ->
                 compactText `shouldSatisfy` Text.isInfixOf value)
                 ["A", "B", "C", "x", "y", "z"]
-            Text.unlines grid `shouldSatisfy` Text.isInfixOf "─"
+            expectFirstRow grid
+                (shouldSatisfyText (Text.isPrefixOf "┌"))
             map rowDisplayWidth grid `shouldSatisfy` all (<= 7)
 
         it "preserves every ASCII column down to a one-cell viewport" do
@@ -451,28 +626,25 @@ spec = describe "fullscreen Markdown rendering" do
         it "switches cell padding only when the padded grid fits" do
             let input =
                     "| A | B |\n| --- | --- |\n| x | y |"
-                compactGrid = renderRows 7 input
-                paddedGrid = renderRows 8 input
+                compactGrid = renderRows 8 input
+                paddedGrid = renderRows 9 input
             expectFirstRow compactGrid
-                (shouldSatisfyText (not . Text.isInfixOf "┌"))
+                (`shouldBe` "┌─┬─┐")
             expectFirstRow paddedGrid
-                (shouldSatisfyText (const True))
-            case drop 1 paddedGrid of
-                rule : _ ->
-                    rule `shouldSatisfy` Text.isInfixOf "───"
-                [] -> expectationFailure "missing table rule"
+                (`shouldBe` "┌───┬───┐")
 
         it "accounts for wide glyphs when choosing grid or compact layout" do
             let input =
                     "| A | B |\n| --- | --- |\n| 漢 | z |"
-                compact = renderRows 4 input
-                grid = renderRows 5 input
+                compact = renderRows 5 input
+                grid = renderRows 6 input
             Text.unlines compact `shouldSatisfy` Text.isInfixOf "漢"
             Text.unlines compact `shouldSatisfy` Text.isInfixOf "z"
             expectFirstRow compact
-                (shouldSatisfyText (not . Text.isInfixOf "─"))
-            Text.unlines grid `shouldSatisfy` Text.isInfixOf "─"
-            map rowDisplayWidth grid `shouldSatisfy` all (<= 5)
+                (shouldSatisfyText (not . Text.isPrefixOf "┌"))
+            expectFirstRow grid
+                (shouldSatisfyText (Text.isPrefixOf "┌"))
+            map rowDisplayWidth grid `shouldSatisfy` all (<= 6)
 
         it "preserves styled text and hyperlink metadata while wrapping" do
             let url = "https://example.com"
@@ -550,8 +722,7 @@ spec = describe "fullscreen Markdown rendering" do
             plain `shouldSatisfy` Text.isInfixOf "c|d"
             plain `shouldSatisfy` Text.isInfixOf "e|f"
             plain `shouldSatisfy` (not . Text.isInfixOf "`")
-            Text.unlines rows `shouldSatisfy`
-                (not . Text.isInfixOf "│")
+            Text.unlines rows `shouldSatisfy` Text.isInfixOf "│"
 
         it "handles odd and even backslash runs before pipes" do
             let oddEscaped =
@@ -594,7 +765,7 @@ spec = describe "fullscreen Markdown rendering" do
             plain `shouldSatisfy` Text.isInfixOf "one"
             plain `shouldSatisfy` Text.isInfixOf "two"
             plain `shouldSatisfy` (not . Text.isInfixOf "EXTRA")
-            plain `shouldSatisfy` (not . Text.isInfixOf "│")
+            plain `shouldSatisfy` Text.isInfixOf "│"
 
         it "accepts alignment markers and rejects malformed separators" do
             let aligned =
@@ -605,13 +776,13 @@ spec = describe "fullscreen Markdown rendering" do
                 malformed =
                     renderRows 80
                         "| A | B |\n| ---x | --- |\n| x | y |"
-                body = last aligned
-            Text.unlines aligned `shouldSatisfy`
-                (Text.isInfixOf "─")
-            body `shouldSatisfy` Text.isInfixOf "1"
-            body `shouldSatisfy` Text.isInfixOf "y"
+                rendered = Text.unlines aligned
+            expectFirstRow aligned
+                (shouldSatisfyText (Text.isPrefixOf "┌"))
+            rendered `shouldSatisfy` Text.isInfixOf "1"
+            rendered `shouldSatisfy` Text.isInfixOf "y"
             Text.unlines malformed `shouldSatisfy`
-                (not . Text.isInfixOf "─")
+                (not . Text.isInfixOf "┌")
             Text.unlines malformed `shouldSatisfy`
                 Text.isInfixOf "---x"
 
@@ -620,8 +791,8 @@ spec = describe "fullscreen Markdown rendering" do
                     renderRows 80
                         "A | B\n--- | ---\nx | y"
                 plain = Text.unlines rows
-            Text.unlines rows `shouldSatisfy`
-                (Text.isInfixOf "─")
+            expectFirstRow rows
+                (shouldSatisfyText (Text.isPrefixOf "┌"))
             plain `shouldSatisfy` Text.isInfixOf "x"
             plain `shouldSatisfy` Text.isInfixOf "y"
 
@@ -633,9 +804,9 @@ spec = describe "fullscreen Markdown rendering" do
                     renderRows 80
                         "| a \\| b\n| --- |\n| value |"
             Text.unlines mismatched `shouldSatisfy`
-                (not . Text.isInfixOf "─")
+                (not . Text.isInfixOf "┌")
             Text.unlines escapedOnly `shouldSatisfy`
-                (not . Text.isInfixOf "─")
+                (not . Text.isInfixOf "┌")
 
         it "renders a header-only table and leaves following prose outside it" do
             let headerOnly =
@@ -645,8 +816,11 @@ spec = describe "fullscreen Markdown rendering" do
                     renderRows 80
                         "| A | B |\n| --- | --- |\n| x | y |\nafter table"
                 proseIndex = findIndex (Text.isInfixOf "after table") withProse
-            length headerOnly `shouldBe` 2
-            Text.unlines headerOnly `shouldSatisfy` Text.isInfixOf "─"
+            headerOnly `shouldBe`
+                [ "┌───┬───┐"
+                , "│ A │ B │"
+                , "└───┴───┘"
+                ]
             proseIndex `shouldSatisfy` maybe False (const True)
 
 sourceSyntaxDirectory :: IO FilePath

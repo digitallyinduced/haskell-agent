@@ -4,6 +4,7 @@ import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.Markdown
     ( MarkdownFragmentSplit(..)
     , renderMarkdown
+    , renderMarkdownAtWidth
     , renderMarkdownFragment
     , splitMarkdownFragment
     )
@@ -21,13 +22,34 @@ import Test.QuickCheck
     )
 
 stripAnsi :: Text -> Text
-stripAnsi text = case Text.break (== '\ESC') text of
-    (before, rest)
-        | Text.null rest -> before
-        | otherwise ->
-            let afterEsc = Text.drop 1 rest
-                dropped = Text.drop 1 (Text.dropWhile (/= 'm') afterEsc)
-            in before <> stripAnsi dropped
+stripAnsi = go
+  where
+    go text =
+        case Text.break (== '\ESC') text of
+            (before, rest)
+                | Text.null rest -> before
+                | Just after <- Text.stripPrefix "\ESC[" rest ->
+                    before <> go (dropCsi after)
+                | Just after <- Text.stripPrefix "\ESC]" rest ->
+                    before <> go (dropOsc after)
+                | otherwise ->
+                    before <> go (Text.drop 1 rest)
+
+    dropCsi =
+        Text.drop 1
+            . Text.dropWhile
+                (\character ->
+                    not (character >= '@' && character <= '~'))
+
+    dropOsc text =
+        case Text.break
+            (\character -> character == '\BEL' || character == '\ESC')
+            text of
+            (_, rest)
+                | Text.null rest -> ""
+                | Text.isPrefixOf "\BEL" rest -> Text.drop 1 rest
+                | Text.isPrefixOf "\ESC\\" rest -> Text.drop 2 rest
+                | otherwise -> dropOsc (Text.drop 1 rest)
 
 osc8Payload :: Text -> Text -> Maybe Text
 osc8Payload url output = do
@@ -257,11 +279,15 @@ spec = do
         it "renders a basic pipe table" do
             let sample = "| file | status |\n| --- | --- |\n| a.hs | ok |"
                 out = renderMarkdown True sample
-            out `shouldSatisfy` Text.isInfixOf "file"
-            out `shouldSatisfy` Text.isInfixOf "a.hs"
+                cleaned = stripAnsi out
+            cleaned `shouldSatisfy` Text.isInfixOf "┌──────┬────────┐"
+            cleaned `shouldSatisfy` Text.isInfixOf "│ file │ status │"
+            cleaned `shouldSatisfy` Text.isInfixOf "├──────┼────────┤"
+            cleaned `shouldSatisfy` Text.isInfixOf "│ a.hs │ ok     │"
+            cleaned `shouldSatisfy` Text.isInfixOf "└──────┴────────┘"
             out `shouldSatisfy` (not . Text.isInfixOf "|")
 
-        it "renders borderless tables with GFM column alignment" do
+        it "renders full-grid tables with GFM column alignment" do
             let sample =
                     "| Name | Footprint |\n\
                     \| --- | ---: |\n\
@@ -272,22 +298,103 @@ spec = do
                         (filter (not . Text.null . Text.strip)
                             (Text.lines (renderMarkdown True sample)))
                 bodyRows =
-                    filter
-                        (\row -> not (Text.isInfixOf "─" row))
-                        (drop 2 rows)
+                    drop 1 (filter (Text.isPrefixOf "│") rows)
                 valueEnd needle row =
                     let offset = Text.length (fst (Text.breakOn needle row))
                     in offset + Text.length needle
-            rows `shouldSatisfy` all
-                (\row -> not (Text.any (`elem` ("┌┐└┘├┤┬┴┼│" :: String)) row))
-            rows `shouldSatisfy` any (Text.isInfixOf "─")
+                contentRows = filter (Text.isPrefixOf "│") rows
+            rows `shouldSatisfy` any (Text.isPrefixOf "┌")
+            rows `shouldSatisfy` any (Text.isPrefixOf "├")
+            rows `shouldSatisfy` any (Text.isPrefixOf "└")
+            contentRows `shouldSatisfy` all (Text.isSuffixOf "│")
             case bodyRows of
                 webkit : control : _ ->
                     valueEnd "27.7 GiB" webkit
                         `shouldBe` valueEnd "4.6 GiB" control
                 _ -> expectationFailure "expected two table body rows"
 
-        prop "right-aligns generated table values without box borders" $
+        it "constrains table grids to the requested terminal width" do
+            let sample =
+                    "| Product | Description | Difference |\n\
+                    \| --- | --- | ---: |\n\
+                    \| Codex | Compact and fast | 18% |\n\
+                    \| Other | Polished borders | 24% |"
+                rows =
+                    map stripAnsi
+                        (filter (not . Text.null . Text.strip)
+                            (Text.lines
+                                (renderMarkdownAtWidth True 24 sample)))
+                content = Text.concat rows
+            map terminalTextWidth rows `shouldSatisfy` all (<= 24)
+            rows `shouldSatisfy` any (Text.isPrefixOf "┌")
+            filter (Text.isPrefixOf "│") rows
+                `shouldSatisfy` all (Text.isSuffixOf "│")
+            content `shouldSatisfy` Text.isInfixOf "Codex"
+            content `shouldSatisfy` Text.isInfixOf "24%"
+
+        it "reflows a grid when the terminal is one cell too narrow" do
+            let sample =
+                    "| Name | Value |\n\
+                    \| --- | ---: |\n\
+                    \| alpha | 12345 |"
+                naturalRows =
+                    map stripAnsi
+                        (filter (not . Text.null . Text.strip)
+                            (Text.lines (renderMarkdown True sample)))
+                available =
+                    maximum (map terminalTextWidth naturalRows) - 1
+                constrainedRows =
+                    map stripAnsi
+                        (filter (not . Text.null . Text.strip)
+                            (Text.lines
+                                (renderMarkdownAtWidth
+                                    True available sample)))
+            map terminalTextWidth constrainedRows
+                `shouldSatisfy` all (<= available)
+            constrainedRows `shouldSatisfy`
+                any (Text.isPrefixOf "┌")
+            filter (Text.isPrefixOf "│") constrainedRows
+                `shouldSatisfy` all (Text.isSuffixOf "│")
+
+        it "uses wrapped compact rows below the minimum grid width" do
+            let sample =
+                    "| A | B | C |\n\
+                    \| --- | --- | --- |\n\
+                    \| x | y | z |"
+                rows =
+                    map stripAnsi
+                        (filter (not . Text.null . Text.strip)
+                            (Text.lines
+                                (renderMarkdownAtWidth True 6 sample)))
+                content = Text.concat rows
+            map terminalTextWidth rows `shouldSatisfy` all (<= 6)
+            content `shouldSatisfy` (not . Text.isInfixOf "┌")
+            mapM_
+                (\value ->
+                    content `shouldSatisfy` Text.isInfixOf value)
+                ["A", "B", "C", "x", "y", "z"]
+
+        it "accounts for displayed link destinations while wrapping tables" do
+            let url = "https://example.com/docs"
+                sample =
+                    "| Kind | Value |\n\
+                    \| --- | --- |\n\
+                    \| link | [docs](" <> url <> ") |"
+                out = renderMarkdownAtWidth True 20 sample
+                rows =
+                    map stripAnsi
+                        (filter (not . Text.null . Text.strip)
+                            (Text.lines out))
+                visibleContent =
+                    Text.filter
+                        (\character ->
+                            character /= ' ' && character /= '│')
+                        (Text.concat rows)
+            map terminalTextWidth rows `shouldSatisfy` all (<= 20)
+            out `shouldSatisfy` Text.isInfixOf ("\ESC]8;;" <> url)
+            visibleContent `shouldSatisfy` Text.isInfixOf url
+
+        prop "right-aligns generated table values inside a full grid" $
             forAll generatedRightAlignedTable $ \(firstValue, secondValue) ->
                 let sample =
                         "Name | Value\n--- | ---:\nfirst | " <> firstValue
@@ -297,17 +404,22 @@ spec = do
                             (filter (not . Text.null . Text.strip)
                                 (Text.lines (renderMarkdown True sample)))
                     bodyRows =
-                        filter (not . Text.isInfixOf "─") (drop 2 rows)
+                        drop 1 (filter (Text.isPrefixOf "│") rows)
                     valueEnd needle row =
                         Text.length (fst (Text.breakOn needle row))
                             + Text.length needle
-                    noBoxBorders = all
-                        (not . Text.any (`elem` ("┌┐└┘├┤┬┴┼│" :: String)))
-                        rows
+                    hasFullGrid = case rows of
+                        top : (_ : rest) ->
+                            Text.isPrefixOf "┌" top
+                                && any (Text.isPrefixOf "└") rest
+                                && all
+                                    (Text.isSuffixOf "│")
+                                    (filter (Text.isPrefixOf "│") rows)
+                        _ -> False
                 in case bodyRows of
                     firstRow : secondRow : _ ->
                         counterexample (show rows) $
-                            ( noBoxBorders
+                            ( hasFullGrid
                             , valueEnd firstValue firstRow
                             )
                                 === (True, valueEnd secondValue secondRow)

@@ -3,17 +3,22 @@ module Agent.TUI.Presentation
     ( SearchReplaceAction(..)
     , SearchReplaceDiff(..)
     , SearchReplaceLine(..)
+    , DiffDisplayLine(..)
+    , DiffLineKind(..)
     , TodoDisplayLine(..)
     , TodoDisplayStatus(..)
     , formatSearchReplaceDiff
     , formatSearchReplaceDiffRelative
     , formatToolDiffRelative
+    , formatToolDiffRelativeWithOutput
     , formatTodoList
     , formatToolOutput
     , formatToolOutputRelative
+    , diffHeaderParts
     , isInspectionTool
     , liveTodoPanelLines
     , parseApplyPatchDiffs
+    , parseDiffDisplayLine
     , parseSearchReplaceDiff
     , parseWriteFileDiff
     , parseTodoList
@@ -28,11 +33,13 @@ module Agent.TUI.Presentation
     , todoListHasOpenWork
     , todoStatusGlyph
     , toolCallInput
+    , toolCallHeaderRelative
     , toolCallTitle
     , toolCallTitleRelative
     , toolCallDiff
     , toolCallDiffs
     , toolDetail
+    , toolOutputCodeLanguage
     , toolPathArgument
     , toolVerb
     , workspaceRelativeDisplayPath
@@ -47,10 +54,17 @@ import Agent.ToolDispatch
     , canonicalToolName
     )
 import Control.Applicative ((<|>))
-import Data.Char (isSpace)
-import Data.Maybe (fromMaybe, mapMaybe)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Encode.Pretty as AesonPretty
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LazyByteString
+import Data.Char (isDigit, isSpace)
+import qualified Data.Foldable as Foldable
+import Data.List (sortOn)
+import Data.Maybe (fromMaybe, mapMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 
 summarizeToolCall :: ToolCall -> Text
 summarizeToolCall = summarizeToolCallRelative ""
@@ -59,7 +73,10 @@ summarizeToolCall = summarizeToolCallRelative ""
 -- shown relative to that workspace.
 summarizeToolCallRelative :: Text -> ToolCall -> Text
 summarizeToolCallRelative workspace call =
-    let verb = toolVerb call.name
+    let verb = case canonicalToolName call.name of
+            "mcp_call" -> mcpCallDisplayName call.arguments
+            "use_tool" -> mcpCallDisplayName call.arguments
+            _ -> toolVerb call.name
         detail = case toolPathArgument call of
             Just path -> workspaceRelativeDisplayPath workspace path
             Nothing -> toolDetail call
@@ -124,6 +141,18 @@ toolCallTitleRelative workspace call
     | canonicalToolName call.name == "exec" = "$ exec"
     | otherwise = summarizeToolCallRelative workspace call
 
+-- | Separate a filesystem action from its path so renderers can style the
+-- path without guessing from the human-readable title. Non-filesystem calls
+-- retain their complete title and have no separate header detail.
+toolCallHeaderRelative :: Text -> ToolCall -> (Text, Maybe Text)
+toolCallHeaderRelative workspace call =
+    case toolPathArgument call of
+        Just path ->
+            ( toolVerb call.name
+            , Just (workspaceRelativeDisplayPath workspace path)
+            )
+        Nothing -> (toolCallTitleRelative workspace call, Nothing)
+
 -- | Full invocation text that benefits from dedicated code rendering.
 toolCallInput :: ToolCall -> Text
 toolCallInput call = case canonicalToolName call.name of
@@ -151,6 +180,22 @@ data SearchReplaceAction
 data SearchReplaceLine
     = SearchReplaceRemoved !Text
     | SearchReplaceAdded !Text
+    | SearchReplaceContext !Text
+    | SearchReplaceOmitted !Int !Int !Int
+    deriving (Eq, Show)
+
+data DiffLineKind
+    = DiffLineRemoved
+    | DiffLineAdded
+    | DiffLineContext
+    deriving (Eq, Show)
+
+data DiffDisplayLine = DiffDisplayLine
+    { diffDisplayGutter :: !Text
+    , diffDisplayMarker :: !Text
+    , diffDisplayCode :: !Text
+    , diffDisplayKind :: !DiffLineKind
+    }
     deriving (Eq, Show)
 
 data SearchReplaceDiff = SearchReplaceDiff
@@ -242,13 +287,85 @@ parseApplyPatchDiffs patch =
         diffs -> diffs
 
     makeDiff path action raw =
-        let shown = take 20 raw
+        let shown = cappedPatchPreview 20 raw
+            shownRows =
+                length (filter (not . isOmission) shown)
         in SearchReplaceDiff
             { diffPath = path
             , diffAction = action
             , diffLines = shown
-            , diffHiddenLines = length raw - length shown
+            , diffHiddenLines = length raw - shownRows
             }
+
+    -- Prefer actual changes when long context runs exceed the preview budget.
+    -- Remaining slots show the context closest to those changes, in source
+    -- order, so an approval preview cannot consist entirely of unchanged rows.
+    cappedPatchPreview limit raw
+        | length raw <= limit = raw
+        | null changed = take limit raw
+        | otherwise =
+            markOmissions raw selectedIndices
+      where
+        indexed = zip [0 :: Int ..] raw
+        changed =
+            filter (isChanged . snd) indexed
+        shownChanges = take limit changed
+        changedIndices = map fst shownChanges
+        contextBudget = limit - length shownChanges
+        contextByProximity =
+            sortOn
+                (\(index, _) ->
+                    ( minimum
+                        (map (abs . (index -)) changedIndices)
+                    , index
+                    ))
+                (filter (not . isChanged . snd) indexed)
+        selectedIndices =
+            changedIndices
+                <> map fst (take contextBudget contextByProximity)
+
+    markOmissions raw selectedIndices =
+        go 0
+            [ (index, line)
+            | (index, line) <- zip [0 :: Int ..] raw
+            , index `elem` selectedIndices
+            ]
+      where
+        go offset [] = omission (drop offset raw)
+        go offset ((index, line) : rest) =
+            omission (take (index - offset) (drop offset raw))
+                <> [line]
+                <> go (index + 1) rest
+
+        omission [] = []
+        omission hidden =
+            [ SearchReplaceOmitted
+                (length hidden)
+                (sum (map oldLineSpan hidden))
+                (sum (map newLineSpan hidden))
+            ]
+
+    isChanged = \case
+        SearchReplaceContext _ -> False
+        SearchReplaceRemoved _ -> True
+        SearchReplaceAdded _ -> True
+        SearchReplaceOmitted{} -> False
+
+    isOmission = \case
+        SearchReplaceOmitted{} -> True
+        _ -> False
+
+    oldLineSpan = \case
+        SearchReplaceRemoved _ -> 1
+        SearchReplaceAdded _ -> 0
+        SearchReplaceContext _ -> 1
+        SearchReplaceOmitted _ oldLines _ -> oldLines
+
+    newLineSpan = \case
+        SearchReplaceRemoved _ -> 0
+        SearchReplaceAdded _ -> 1
+        SearchReplaceContext _ -> 1
+        SearchReplaceOmitted _ _ newLines -> newLines
 
     patchBoundary line =
         any (`Text.isPrefixOf` line)
@@ -268,6 +385,7 @@ parseApplyPatchDiffs patch =
     changedLine line = case Text.uncons line of
         Just ('-', text) -> Just (SearchReplaceRemoved text)
         Just ('+', text) -> Just (SearchReplaceAdded text)
+        Just (' ', text) -> Just (SearchReplaceContext text)
         _ -> Nothing
 
     nonEmptyText text =
@@ -300,8 +418,24 @@ formatToolDiffRelative workspace call =
     Text.intercalate "\n" $
         map (formatDiffRelative workspace) (toolCallDiffs call)
 
+-- | Completed diff body, enriched with exact source location metadata emitted
+-- by edit tools. While a tool is running we deliberately keep the preview
+-- unnumbered rather than guessing where a search string will match.
+formatToolDiffRelativeWithOutput :: Text -> ToolCall -> Text -> Text
+formatToolDiffRelativeWithOutput workspace call output =
+    Text.intercalate "\n" $
+        map (formatDiffRelativeAt workspace lineStart) (toolCallDiffs call)
+  where
+    lineStart
+        | canonicalToolName call.name == "search_replace" =
+            searchReplaceLineStart output
+        | otherwise = Nothing
+
 formatDiffRelative :: Text -> SearchReplaceDiff -> Text
-formatDiffRelative workspace diff =
+formatDiffRelative workspace = formatDiffRelativeAt workspace Nothing
+
+formatDiffRelativeAt :: Text -> Maybe Int -> SearchReplaceDiff -> Text
+formatDiffRelativeAt workspace reportedStart diff =
     let SearchReplaceDiff { diffPath, diffAction, diffLines, diffHiddenLines } =
             diff
         displayedPath = workspaceRelativeDisplayPath workspace diffPath
@@ -316,21 +450,149 @@ formatDiffRelative workspace diff =
                     <> " → "
                     <> workspaceRelativeDisplayPath workspace destination
             Nothing -> ""
-        shown = map formatLine diffLines
+        lineStart = reportedStart <|> actionLineStart diffAction
+        shown = formatDisplayLines lineStart diffLines
+        unmarkedHidden =
+            max 0
+                (diffHiddenLines - sum
+                    [ rows
+                    | SearchReplaceOmitted rows _ _ <- diffLines
+                    ])
         more
-            | diffHiddenLines == 0 = []
+            | unmarkedHidden == 0 = []
             | otherwise =
-                ["  … " <> Text.pack (show diffHiddenLines) <> " more"]
+                ["  … " <> Text.pack (show unmarkedHidden) <> " more"]
     in Text.intercalate "\n" (filter (not . Text.null) (header : shown <> more))
   where
-    formatLine = \case
-        SearchReplaceRemoved line -> "  -" <> line
-        SearchReplaceAdded line -> "  +" <> line
+    formatDisplayLines start lines_ =
+        let numbered = numberLines start start lines_
+            largest =
+                maximum
+                    (1 :
+                        [ number
+                        | (oldLine, newLine, _) <- numbered
+                        , number <- maybeToList oldLine <> maybeToList newLine
+                        ])
+            width = max 3 (length (show largest))
+        in map (formatNumberedLine width) numbered
+
+    numberLines
+        :: Maybe Int
+        -> Maybe Int
+        -> [SearchReplaceLine]
+        -> [(Maybe Int, Maybe Int, SearchReplaceLine)]
+    numberLines _ _ [] = []
+    numberLines oldLine newLine (line : rest) =
+        case line of
+            SearchReplaceRemoved _ ->
+                (oldLine, Nothing, line)
+                    : numberLines (advance oldLine) newLine rest
+            SearchReplaceAdded _ ->
+                (Nothing, newLine, line)
+                    : numberLines oldLine (advance newLine) rest
+            SearchReplaceContext _ ->
+                (oldLine, newLine, line)
+                    : numberLines
+                        (advance oldLine)
+                        (advance newLine)
+                        rest
+            SearchReplaceOmitted _ oldLines newLines ->
+                (Nothing, Nothing, line)
+                    : numberLines
+                        (advanceBy oldLines oldLine)
+                        (advanceBy newLines newLine)
+                        rest
+
+    advance = fmap (+ 1)
+    advanceBy count = fmap (+ count)
+
+    formatNumberedLine
+        :: Int
+        -> (Maybe Int, Maybe Int, SearchReplaceLine)
+        -> Text
+    formatNumberedLine width (oldLine, newLine, line) =
+        case line of
+            SearchReplaceOmitted rows _ _ ->
+                "  … " <> Text.pack (show rows) <> " omitted"
+            SearchReplaceRemoved text -> formatVisibleLine "-" text
+            SearchReplaceAdded text -> formatVisibleLine "+" text
+            SearchReplaceContext text -> formatVisibleLine " " text
+      where
+        formatVisibleLine marker text =
+            "  "
+                <> numberColumn width oldLine
+                <> " "
+                <> numberColumn width newLine
+                <> " │ "
+                <> marker
+                <> text
+
+    numberColumn :: Int -> Maybe Int -> Text
+    numberColumn width =
+        Text.justifyRight width ' ' . maybe "" (Text.pack . show)
+
+    actionLineStart = \case
+        Just SearchReplaceCreate -> Just 1
+        Just SearchReplaceWrite -> Just 1
+        _ -> Nothing
+
+-- | Split a formatted multi-file header into its semantic action and path.
+diffHeaderParts :: Text -> Maybe (Text, Text)
+diffHeaderParts line =
+    firstMatch
+        [ "create"
+        , "delete"
+        , "write"
+        , "update"
+        , "move"
+        ]
+  where
+    firstMatch [] = Nothing
+    firstMatch (action : rest) =
+        case Text.stripPrefix ("  " <> action <> " ") line of
+            Just path
+                | not (Text.null (Text.strip path)) ->
+                    Just (action, path)
+            _ -> firstMatch rest
+
+-- | Decode the stable line-number gutter emitted by 'formatDiffRelative'.
+parseDiffDisplayLine :: Text -> Maybe DiffDisplayLine
+parseDiffDisplayLine line =
+    let (gutter, separatorAndPayload) = Text.breakOn " │ " line
+    in do
+        payload <- Text.stripPrefix " │ " separatorAndPayload
+        (marker, code) <- Text.uncons payload
+        kind <- case marker of
+            '-' -> Just DiffLineRemoved
+            '+' -> Just DiffLineAdded
+            ' ' -> Just DiffLineContext
+            _ -> Nothing
+        pure DiffDisplayLine
+            { diffDisplayGutter = gutter
+            , diffDisplayMarker = Text.singleton marker
+            , diffDisplayCode = code
+            , diffDisplayKind = kind
+            }
+
+searchReplaceLineStart :: Text -> Maybe Int
+searchReplaceLineStart output =
+    case Text.breakOn marker output of
+        (_, rest)
+            | Text.null rest -> Nothing
+            | otherwise ->
+                let digits = Text.takeWhile isDigit (Text.drop (Text.length marker) rest)
+                in case reads (Text.unpack digits) of
+                    [(lineNumber, "")] | lineNumber > 0 -> Just lineNumber
+                    _ -> Nothing
+  where
+    marker = "Changed lines start at "
 
 formatToolOutput :: ToolCall -> Text -> Text
 formatToolOutput call output = case canonicalToolName call.name of
     "computer" -> "Screenshot captured"
     "exec" -> completedExecOutput output
+    "mcp_call" -> formatMcpOutput output
+    "use_tool" -> formatMcpOutput output
     name | name `elem` ["spawn_agent", "spawn_agent_in_worktree"] ->
         maybe output ("Agent: " <>) (nonEmptyJsonText "task_name" output)
     "wait_agent" ->
@@ -347,6 +609,58 @@ formatToolOutput call output = case canonicalToolName call.name of
     "todo_write" -> formatTodoList output
     "update_plan" -> formatTodoList output
     _ -> output
+
+-- | MCP servers commonly return a compact @CallToolResult@ envelope whose
+-- text block is itself JSON. Show the useful text payload rather than escaped
+-- transport JSON when every content block is textual, then indent JSON values.
+-- This is presentation-only; the canonical tool result remains unchanged.
+formatMcpOutput :: Text -> Text
+formatMcpOutput output =
+    case decodeJsonValue output of
+        Just value ->
+            case mcpTextBlocks value of
+                Just texts | not (null texts) ->
+                    Text.intercalate "\n" (map beautifyJson texts)
+                _ -> prettyJsonValue value
+        Nothing -> output
+
+beautifyJson :: Text -> Text
+beautifyJson text =
+    case decodeJsonValue text of
+        Just value@Aeson.Object{} -> prettyJsonValue value
+        Just value@Aeson.Array{} -> prettyJsonValue value
+        _ -> text
+
+-- | Select syntax highlighting for structured tool output. Primitive JSON
+-- values stay as ordinary text; objects and arrays benefit from JSON token
+-- colors without changing the retained transcript body.
+toolOutputCodeLanguage :: Text -> Maybe Text
+toolOutputCodeLanguage text =
+    case decodeJsonValue text of
+        Just Aeson.Object{} -> Just "json"
+        Just Aeson.Array{} -> Just "json"
+        _ -> Nothing
+
+decodeJsonValue :: Text -> Maybe Aeson.Value
+decodeJsonValue =
+    Aeson.decodeStrict' . TextEncoding.encodeUtf8 . Text.strip
+
+prettyJsonValue :: Aeson.Value -> Text
+prettyJsonValue =
+    TextEncoding.decodeUtf8
+        . LazyByteString.toStrict
+        . AesonPretty.encodePretty
+
+mcpTextBlocks :: Aeson.Value -> Maybe [Text]
+mcpTextBlocks (Aeson.Object object) = do
+    Aeson.Array blocks <- KeyMap.lookup "content" object
+    traverse textBlock (Foldable.toList blocks)
+  where
+    textBlock (Aeson.Object block) = do
+        Aeson.String text <- KeyMap.lookup "text" block
+        pure text
+    textBlock _ = Nothing
+mcpTextBlocks _ = Nothing
 
 -- The exec protocol keeps status and timing metadata for the model. In the
 -- transcript, the invocation itself already communicates successful
@@ -725,6 +1039,29 @@ mcpToolDisplayName name =
             , not (Text.null toolName) ->
                 server <> ": " <> toolName
         _ -> name
+
+-- | The generic MCP wrapper keeps the selected tool in its arguments. Display
+-- that identity as @server: tool@ instead of the unhelpful @mcp_call@ name.
+mcpCallDisplayName :: Text -> Text
+mcpCallDisplayName arguments =
+    case nonEmptyJsonText "name" arguments
+        <|> nonEmptyJsonText "tool_name" arguments of
+        Just qualifiedName -> qualifiedMcpDisplayName qualifiedName
+        Nothing -> "MCP call"
+
+qualifiedMcpDisplayName :: Text -> Text
+qualifiedMcpDisplayName name =
+    case Text.breakOn "__" name of
+        (server, rest)
+            | not (Text.null server)
+            , Just tool <- Text.stripPrefix "__" rest
+            , not (Text.null tool) ->
+                unescape server <> ": " <> unescape tool
+        _ -> name
+  where
+    unescape =
+        Text.replace "%25" "%"
+            . Text.replace "%5F%5F" "__"
 
 toolDetail :: ToolCall -> Text
 toolDetail call = case canonicalToolName call.name of

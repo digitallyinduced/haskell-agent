@@ -12,9 +12,10 @@ module Agent.CLI.TUI.Composer.Render
 import Agent.CLI.Command
     ( SlashMenu(..)
     , SlashSuggestion(..)
+    , slashCommandHighlightToken
     )
 import Agent.CLI.Input (truncateDisplayText, displayEditorText)
-import Agent.CLI.TUI.Composer.Edit (wrapDraftWindow)
+import Agent.CLI.TUI.Composer.Edit (draftWindowStart, wrapDraftWindow)
 import Agent.CLI.TUI.Composer.Logic (currentSlashMenu)
 import Agent.CLI.TUI.History (HistoryWindow, historyWindowHasBlocks)
 import Agent.CLI.TUI.Types
@@ -26,7 +27,7 @@ import qualified Brick.Types as B
 import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
 import qualified Brick.Widgets.Border.Style as BorderStyle
-import Data.List (intersperse)
+import Data.List (intersperse, mapAccumL)
 import Data.Sequence (ViewL(..))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
@@ -143,6 +144,17 @@ drawComposer appState =
                     draftWidth
                     state.uiDraft
                     state.uiCursor
+            slashCommandLength =
+                case slashCommandHighlightToken
+                        appState.appSlashCatalog
+                        state.uiDraft of
+                    Just token
+                        | draftWindowStart
+                            maxComposerRows
+                            state.uiDraft
+                            state.uiCursor == 0 ->
+                                Text.length token
+                    _ -> 0
             bodyHeight = min maxComposerRows (length draftRows)
             leading =
                 filter (not . Text.null)
@@ -178,6 +190,7 @@ drawComposer appState =
                                 (renderDraft
                                     focused
                                     bodyHeight
+                                    slashCommandLength
                                     state
                                     draftLayout)
                             ]
@@ -266,14 +279,17 @@ controlInteractionAttr state name
 renderDraft
     :: Bool
     -> Int
+    -> Int
     -> UiState
     -> ([Text], (Int, Int))
     -> Widget Name
-renderDraft focused height state (rows, (row, column)) =
+renderDraft focused height slashCommandLength state (rows, (row, column)) =
     padRight Max cursorContent
   where
     firstVisibleRow = max 0 (row - height + 1)
-    visibleRows = take height (drop firstVisibleRow rows)
+    (_, highlightedRows) =
+        mapAccumL splitHighlightedRow slashCommandLength rows
+    visibleRows = take height (drop firstVisibleRow highlightedRows)
     visibleCursorRow = row - firstVisibleRow
     content
         | Text.null state.uiDraft =
@@ -294,9 +310,24 @@ renderDraft focused height state (rows, (row, column)) =
 
     -- Empty visual rows still need one cell so Brick preserves their height
     -- and can place the insertion cursor on them.
-    renderRow row
-        | Text.null row = txt " "
-        | otherwise = terminalTxt (displayEditorText row)
+    renderRow (highlighted, rest)
+        | Text.null highlighted && Text.null rest = txt " "
+        | otherwise =
+            hBox
+                ( [ withAttr Theme.slashCommandAttr
+                        (terminalTxt (displayEditorText highlighted))
+                  | not (Text.null highlighted)
+                  ]
+                    <> [ terminalTxt (displayEditorText rest)
+                       | not (Text.null rest)
+                       ]
+                )
+
+    splitHighlightedRow remaining rowText =
+        let highlightedLength = min remaining (Text.length rowText)
+        in ( remaining - highlightedLength
+           , Text.splitAt highlightedLength rowText
+           )
 
 terminalTxt :: Text -> Widget n
 terminalTxt text =

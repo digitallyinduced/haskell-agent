@@ -5,6 +5,7 @@ module Agent.CLI.TUI.Render.Internal
     , agentPaneVisible
     , agentPaneEntryLimit
     , backgroundActivityText
+    , cacheableBlock
     , conversationScrollbarRenderer
     , choiceRowColumns
     , filterChoiceRowLimit
@@ -190,7 +191,7 @@ import qualified Graphics.Vty as V
       vertCat )
 import qualified Graphics.Vty.CrossPlatform as Vty ()
 
-import Agent.CLI.TUI.Render.Blocks (todoStatusAttr)
+import Agent.CLI.TUI.Render.Blocks (cacheableBlock, todoStatusAttr)
 import Agent.CLI.TUI.Render.Overlays
     ( drawNotice, drawFollowStatus, drawFooter, drawPermission, drawResume
     , drawChoice, drawTextPrompt, drawMetaConsole, choiceRowColumns

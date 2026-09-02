@@ -1,0 +1,61 @@
+cabal-version:      3.0
+name:               agent-connectivity
+version:            0.1.0.0
+synopsis:           Connection recovery for the agent harness
+description:        Provider submission retries and operating-system network
+                    recovery notifications shared by agent frontends.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           System
+build-type:         Simple
+
+common common-options
+    default-language: GHC2021
+    default-extensions: BlockArguments
+                      , LambdaCase
+                      , NumericUnderscores
+                      , OverloadedRecordDot
+                      , OverloadedStrings
+    ghc-options:      -Wall
+                      -Wcompat
+                      -Widentities
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wincomplete-record-updates
+                      -Wpartial-fields
+                      -Wno-name-shadowing
+
+library
+    import:           common-options
+    hs-source-dirs:   src
+    exposed-modules:  Agent.Connectivity
+                    , Agent.Connectivity.NetworkPath
+    build-depends:    agent-core >= 0.1 && < 0.2
+                    , async
+                    , base >= 4.17 && < 5
+                    , safe-exceptions
+                    , stm
+                    , text >= 2.0 && < 2.2
+    if os(darwin)
+        c-sources:    cbits/NetworkPathMonitor.c
+        cc-options:   -fblocks
+        frameworks:   Network
+
+test-suite agent-connectivity-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    ghc-options:      -threaded
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    Agent.ConnectivitySpec
+    build-depends:    agent-connectivity
+                    , agent-core
+                    , async
+                    , base >= 4.17 && < 5
+                    , hspec >= 2.11 && < 2.12
+                    , safe-exceptions
+                    , stm

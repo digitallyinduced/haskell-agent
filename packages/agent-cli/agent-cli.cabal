@@ -149,7 +149,6 @@ library
                     , Agent.CLI.CodeModeRuntime
                     , Agent.CLI.Compaction
                     , Agent.CLI.Context
-                    , Agent.CLI.Connectivity
                     , Agent.CLI.Command
                     , Agent.CLI.ComputerUse
                     , Agent.CLI.Config
@@ -267,6 +266,7 @@ library
                     , agent-cli-runtime:Agent.CLI.SessionLock as Agent.CLI.SessionLock
     build-depends:    agent-cli-runtime >= 0.1 && < 0.2
                     , agent-mail >= 0.1 && < 0.2
+                    , agent-connectivity >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
                     , agent-mcp >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
@@ -325,7 +325,6 @@ library
                     , vty-crossplatform >= 0.4 && < 0.5
                     , wai
                     , warp
-
 executable agent-cli
     import:           common-options
     hs-source-dirs:   app
@@ -560,6 +559,7 @@ test-suite agent-cli-test
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
                     , agent-cli-runtime
+                    , agent-connectivity
                     , agent-runtime-daemon
                     , agent-mail
                     , agent-core

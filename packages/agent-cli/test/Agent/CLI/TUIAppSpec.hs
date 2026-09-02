@@ -9,8 +9,12 @@ import Agent.CLI.AgentViewport
 import Agent.CLI.Input (ReplLine(..), terminalTextWidth)
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.Command
-    ( SlashCatalog(slashCatalogToolNames)
+    ( SlashCatalog(..)
     , defaultSlashCatalog
+    )
+import Agent.CLI.Resume
+    ( ResumeBrowser(..)
+    , initialResumeBrowser
     )
 import Agent.CLI.TUI.App
     ( applyStoredFullscreenWindowTitle
@@ -22,10 +26,12 @@ import Agent.CLI.TUI.App
     , agentPaneEntryLimit
     , agentPaneVisible
     , backgroundActivityText
+    , cacheableBlock
     , completionFlashTransitions
     , completionRequiresRedraw
     , conversationScrollbarRenderer
     , choiceRowColumns
+    , drawApp
     , filterChoiceRowLimit
     , choiceClosesOnUiTransition
     , elapsedMillisSince
@@ -36,6 +42,7 @@ import Agent.CLI.TUI.App
     , fullscreenSurface
     , fullscreenApp
     , initialFullscreenAppState
+    , isCommandPaletteKey
     , isMetaConsoleToggle
     , mergeConversationView
     , newFullscreenInputBuffer
@@ -76,7 +83,12 @@ import Agent.CLI.TUI.Types
     , ChoiceOverlay(..)
     , ChoicePresentation(..)
     , ChoiceSelection(..)
+    , CommandPaletteAction(..)
+    , CommandPaletteEntry(..)
     , FullscreenInput(..)
+    , commandPaletteActionAt
+    , commandPaletteEntries
+    , commandPaletteRows
     , choiceVisibleRows
     , selectedChoiceIndex
     , selectedChoice
@@ -84,6 +96,7 @@ import Agent.CLI.TUI.Types
     , HistoryCommit(..)
     , MetaConsoleOverlay(..)
     , Name(..)
+    , ResumeOverlay(..)
     , TerminalFocus(..)
     , TextInputMode(..)
     , TextOverlay(..)
@@ -154,8 +167,12 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
+import qualified Data.Text.Lazy as LazyText
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.Output.Mock as VMock
+import Graphics.Vty.PictureToSpans (displayOpsForPic)
+import Graphics.Vty.Span (SpanOp(..))
 import qualified Agent.CLI.TUI.Composer as Composer
 import System.Timeout (timeout)
 import Test.Hspec
@@ -196,6 +213,53 @@ spec = do
             toolImageBlockId "code-mode:1:show_image" ui `shouldBe` Nothing
             toolImageBlockId "code-mode:1:show_image" initialUiState
                 `shouldBe` Nothing
+
+    describe "inspection block caching" do
+        it "does not cache a completed group while it can still be extended" do
+            let call =
+                    functionToolCall
+                        "read-1"
+                        "read_file"
+                        "{\"target_file\":\"src/Main.hs\"}"
+                running =
+                    reduceUi
+                        (UiLoop (ToolStarted call))
+                        initialUiState
+                completed =
+                    reduceUi
+                        (UiLoop
+                            (ToolFinished
+                                (ToolCallResult
+                                    "read-1"
+                                    "module Main where"
+                                    FunctionCallKind)))
+                        running
+            runtime <- newScriptRuntime completed
+            let appState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            case Seq.lookup 0 completed.uiBlocks of
+                Nothing -> expectationFailure "expected an inspection block"
+                Just inspection ->
+                    cacheableBlock
+                        appState
+                        AgentRoot
+                        completed
+                        inspection
+                        `shouldBe` False
+
+            let closed =
+                    reduceUi
+                        (UiSystemMessage "Continuing")
+                        completed
+            case Seq.lookup 0 closed.uiBlocks of
+                Nothing -> expectationFailure "expected an inspection block"
+                Just inspection ->
+                    cacheableBlock
+                        (appState { appUi = closed })
+                        AgentRoot
+                        closed
+                        inspection
+                        `shouldBe` True
 
     describe "background activity status" do
         it "names a running agent and its current step" do
@@ -251,6 +315,49 @@ spec = do
             syntaxLanguagesForBlocks (toList conversation.uiBlocks)
                 `shouldBe` Set.singleton "javascript"
 
+        it "requests grammars for every file in an edit preview" do
+            let patch =
+                    Text.unlines
+                        [ "*** Begin Patch"
+                        , "*** Update File: Main module.hs"
+                        , "@@"
+                        , "-main = old"
+                        , "+main = new"
+                        , "*** Update File: web/my app.ts"
+                        , "@@"
+                        , "-const oldValue = 1"
+                        , "+const newValue = 2"
+                        , "*** Update File: scripts/old module.py"
+                        , "*** Move to: crates/new module.rs"
+                        , "@@"
+                        , "-# source comment"
+                        , "+// destination comment"
+                        , "*** End Patch"
+                        ]
+                conversation =
+                    reduceUi
+                        (UiLoop
+                            (ToolStarted
+                                (customToolCall
+                                    "edit-1"
+                                    "apply_patch"
+                                    patch)))
+                        initialUiState
+            syntaxLanguagesForBlocks (toList conversation.uiBlocks)
+                `shouldBe`
+                    Set.fromList
+                        ["haskell", "python", "rust", "typescript"]
+
+        it "requests grammars used by edit titles and diff headers" do
+            let editBlock =
+                    (markerBlock (BlockId 1) "  update scripts/check.py")
+                        { blockKind = BlockEdit
+                        , blockTitle = "Edited"
+                        , blockDetail = "src/Agent/Syntax.hs"
+                        }
+            syntaxLanguagesForBlocks [editBlock]
+                `shouldBe` Set.fromList ["haskell", "python"]
+
     describe "externalUrlCommand" do
         it "opens HTTP(S) URLs without passing through a shell" do
             let url = "https://github.com/digitallyinduced/haskell-agent"
@@ -297,6 +404,103 @@ spec = do
                 `shouldBe` value
             normalizeTextOverlayInsertion TextInputSecret value
                 `shouldBe` "first"
+
+        it "wraps long plain answers so the draft tail stays visible" do
+            runtime <- newScriptRuntime initialUiState
+            let marker = "TAILVISIBLE"
+                draft = Text.replicate 1000 "a" <> marker
+                size = (80, 24)
+                state =
+                    (initialFullscreenAppState
+                        runtime
+                        []
+                        AgentRoot
+                        []
+                        0)
+                        { appTextPrompt =
+                            Just
+                                (textOverlay draft (Text.length draft))
+                                    { textTitle = "Request changes"
+                                    , textBody =
+                                        "What should be changed in the plan?"
+                                    }
+                        }
+                rendered =
+                    Text.unlines $
+                        map
+                            (Text.concat . map spanText . toList)
+                            (toList
+                                (displayOpsForPic
+                                    (renderWidget
+                                        Nothing
+                                        (drawApp state)
+                                        size)
+                                    size))
+                spanText = \case
+                    TextSpan _ _ _ text -> LazyText.toStrict text
+                    Skip width -> Text.replicate width " "
+                    RowEnd width -> Text.replicate width " "
+            rendered `shouldSatisfy` Text.isInfixOf marker
+
+    describe "search overlay input viewport" do
+        it "keeps the tail of a long searchable choice query visible" do
+            runtime <- newScriptRuntime initialUiState
+            let marker = "CHOICETAIL"
+                query = Text.replicate 1000 "a" <> marker
+                state =
+                    (initialFullscreenAppState
+                        runtime
+                        []
+                        AgentRoot
+                        []
+                        0)
+                        { appChoice =
+                            Just
+                                (choiceOverlay False)
+                                    { choiceSearch = True
+                                    , choiceQuery = query
+                                    }
+                        }
+            renderedAppText (80, 24) state
+                `shouldSatisfy` Text.isInfixOf marker
+
+        it "keeps a long resume query visible while editing and afterward" do
+            runtime <- newScriptRuntime initialUiState
+            let marker = "RESUMETAIL"
+                query = Text.replicate 1000 "a" <> marker
+                browser =
+                    (initialResumeBrowser
+                        (posixSecondsToUTCTime 0)
+                        [])
+                        { resumeBrowserQuery = query
+                        , resumeBrowserSearching = True
+                        }
+                state =
+                    (initialFullscreenAppState
+                        runtime
+                        []
+                        AgentRoot
+                        []
+                        0)
+                        { appResume =
+                            Just ResumeOverlay
+                                { resumeOverlayBrowser = browser
+                                }
+                        }
+                inactiveState =
+                    state
+                        { appResume =
+                            Just ResumeOverlay
+                                { resumeOverlayBrowser =
+                                    browser
+                                        { resumeBrowserSearching = False
+                                        }
+                                }
+                        }
+            renderedAppText (80, 24) state
+                `shouldSatisfy` Text.isInfixOf marker
+            renderedAppText (80, 24) inactiveState
+                `shouldSatisfy` Text.isInfixOf marker
 
     describe "text overlay grapheme editing" do
         it "moves across a ZWJ emoji as one visible glyph" do
@@ -463,6 +667,167 @@ spec = do
                 `shouldBe` Composer.fullscreenInputCountLimit
 
     describe "choice overlay lifecycle" do
+        it "derives searchable command rows and aliases from the slash catalog" do
+            let entries = commandPaletteEntries defaultSlashCatalog
+                commandEntries =
+                    filter
+                        (Text.isPrefixOf "Command · "
+                            . (.commandPaletteLabel))
+                        entries
+                modelEntry =
+                    find
+                        (Text.isPrefixOf "/model"
+                            . (.commandPaletteDetail))
+                        entries
+                diffEntry =
+                    find
+                        (Text.isPrefixOf "/diff"
+                            . (.commandPaletteDetail))
+                        entries
+                searchEntry =
+                    find
+                        (Text.isPrefixOf "/search"
+                            . (.commandPaletteDetail))
+                        entries
+            length commandEntries
+                `shouldBe`
+                    length defaultSlashCatalog.slashCatalogCommands
+            (.commandPaletteDetail) <$> modelEntry
+                `shouldSatisfy`
+                    maybe False (Text.isInfixOf "aliases /m")
+            (.commandPaletteAction) <$> modelEntry
+                `shouldBe` Just (CommandPaletteSubmit "/model")
+            (.commandPaletteAction) <$> diffEntry
+                `shouldBe` Just (CommandPaletteSubmit "/diff")
+            (.commandPaletteAction) <$> searchEntry
+                `shouldBe` Just (CommandPaletteInsert "/search ")
+            commandPaletteRows defaultSlashCatalog
+                `shouldSatisfy`
+                    any
+                        ((== "Ctrl-P") . snd)
+
+        it "maps a filtered palette selection back to its source command" do
+            let catalog = defaultSlashCatalog
+                rows = commandPaletteRows catalog
+                query = "Open the model picker"
+                sourceIndex =
+                    fst <$> find
+                        (Text.isInfixOf query . fst . snd)
+                        (zip [0 ..] rows)
+                filtered =
+                    (choiceOverlay False)
+                        { choiceSearch = True
+                        , choiceQuery = query
+                        , choiceRows = rows
+                        , choiceIndex = 0
+                        }
+            selectedChoiceIndex filtered `shouldBe` sourceIndex
+            (sourceIndex >>= (`commandPaletteActionAt` catalog))
+                `shouldBe` Just (CommandPaletteSubmit "/model")
+
+        it "recognizes Ctrl-P in modified and legacy terminal encodings" do
+            isCommandPaletteKey
+                (V.EvKey (V.KChar 'p') [V.MCtrl])
+                `shouldBe` True
+            isCommandPaletteKey
+                (V.EvKey (V.KChar '\DLE') [])
+                `shouldBe` True
+            isCommandPaletteKey
+                (V.EvKey (V.KChar 'p') [V.MAlt])
+                `shouldBe` False
+
+        it "clears palette search on the first Escape, then closes it" do
+            runtime <- newScriptRuntime initialUiState
+            let initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+                openAndSearch =
+                    [ FullscreenScriptVty
+                        (V.EvKey (V.KChar 'p') [V.MCtrl])
+                    , FullscreenScriptVty
+                        (V.EvKey (V.KChar 'm') [])
+                    , FullscreenScriptVty (V.EvKey V.KEsc [])
+                    ]
+            (_, searchedState) <-
+                runFullscreenScriptWithState
+                    initialState
+                    (openAndSearch <> [FullscreenScriptHalt])
+            (.choiceQuery) <$> searchedState.appChoice
+                `shouldBe` Just ""
+            (_, closedState) <-
+                runFullscreenScriptWithState
+                    initialState
+                    (openAndSearch
+                        <> [ FullscreenScriptVty (V.EvKey V.KEsc [])
+                           , FullscreenScriptHalt
+                           ])
+            closedState.appChoice `shouldBe` Nothing
+
+        it "inserts required command prefixes at the composer cursor" do
+            let ui =
+                    reduceUi (UiSetDraft "ask later" 4) initialUiState
+            runtime <- newScriptRuntime ui
+            let initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, finalState) <-
+                runFullscreenScriptWithState
+                    initialState
+                    [ FullscreenScriptApp
+                        (AppCommandPaletteSelected
+                            (CommandPaletteInsert "/search "))
+                    , FullscreenScriptHalt
+                    ]
+            finalState.appUi.uiDraft `shouldBe` "ask /search later"
+            finalState.appUi.uiCursor `shouldBe` 12
+
+        it "dispatches complete commands while preserving a draft" do
+            let draft = "? unfinished prompt"
+                ui =
+                    reduceUi
+                        (UiSetDraft draft (Text.length draft))
+                        initialUiState
+            runtime <- newScriptRuntime ui
+            let initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, finalState) <-
+                runFullscreenScriptWithState
+                    initialState
+                    [ FullscreenScriptApp
+                        (AppCommandPaletteSelected
+                            (CommandPaletteSubmit "/diff"))
+                    , FullscreenScriptHalt
+                    ]
+            inputs <- atomically $
+                Composer.readFullscreenInputs runtime.runtimeInput
+            (.fullscreenInputLine) <$> toList inputs
+                `shouldBe` [ReplText "/diff"]
+            finalState.appUi.uiDraft `shouldBe` draft
+
+        it "shows palette commands queued during a running turn" do
+            let ui =
+                    initialUiState
+                        { uiRunning = True
+                        , uiAwaitingInput = False
+                        }
+            runtime <- newScriptRuntime ui
+            let initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (rendered, finalState) <-
+                runFullscreenScriptWithState
+                    initialState
+                    [ FullscreenScriptApp
+                        (AppCommandPaletteSelected
+                            (CommandPaletteSubmit "/clear"))
+                    , FullscreenScriptHalt
+                    ]
+            inputs <- atomically $
+                Composer.readFullscreenInputs runtime.runtimeInput
+            (.fullscreenInputDisplay) <$> toList inputs
+                `shouldBe` [Just "/clear"]
+            finalState.appUi.uiQueuedInputs
+                `shouldBe` Seq.singleton "/clear"
+            rendered `shouldSatisfy`
+                ByteString.isInfixOf (encoded "/clear")
+
         it "renders and dismisses changelog release notes without choice rows" do
             runtime <- newScriptRuntime initialUiState
             reply <- newEmptyTMVarIO
@@ -661,6 +1026,14 @@ spec = do
                 , ( Nothing
                   , "\ESC[107:75:75;9:1u"
                   , V.EvKey (V.KChar 'k') [V.MMeta]
+                  )
+                , ( Nothing
+                  , "\ESC[223;9u"
+                  , V.EvKey (V.KChar 'ß') [V.MMeta]
+                  )
+                , ( Nothing
+                  , "\ESC[223;9:1u"
+                  , V.EvKey (V.KChar 'ß') [V.MMeta]
                   )
                 , ( Nothing
                   , "\ESC[114;5u"
@@ -927,7 +1300,7 @@ spec = do
                 `shouldBe`
                     [ (QuickStartWorktree, "New worktree", "/worktree")
                     , (QuickStartResume, "Resume session", "/resume")
-                    , (QuickStartCommands, "Browse commands", "/")
+                    , (QuickStartCommands, "Browse commands", "Ctrl-P")
                     , (QuickStartModel, "Manage models", "/model")
                     , (QuickStartChangelog, "View changelog", "/changelog")
                     ]
@@ -1125,6 +1498,44 @@ spec = do
                         `shouldBe`
                             initialUiState { uiTodos = previous.uiTodos }
 
+        it "keeps child shell auto-collapse across a completion snapshot" do
+            let call =
+                    functionToolCall
+                        "shell-1"
+                        "shell_command"
+                        "{\"command\":\"git status\"}"
+                running =
+                    foldl
+                        (flip reduceUi)
+                        initialUiState
+                        [ UiLoop TurnStarted
+                        , UiLoop (ToolStarted call)
+                        ]
+                completed =
+                    reduceUi
+                        (UiLoop
+                            (ToolFinished ToolCallResult
+                                { callId = "shell-1"
+                                , output = "Exit code: 0\nclean"
+                                , callKind = FunctionCallKind
+                                }))
+                        running
+                merged = mergeConversationView running completed
+                reopened =
+                    mergeConversationView
+                        (reduceUi UiToggleSelected completed)
+                        completed
+            fmap (.blockExpanded)
+                (find
+                    ((== BlockShell) . (.blockKind))
+                    merged.uiBlocks)
+                `shouldBe` Just False
+            fmap (.blockExpanded)
+                (find
+                    ((== BlockShell) . (.blockKind))
+                    reopened.uiBlocks)
+                `shouldBe` Just True
+
         it "keeps a child's live todo list across empty snapshot refreshes" do
             let todoCall =
                     functionToolCall
@@ -1159,6 +1570,108 @@ spec = do
                 `shouldBe` ["Keep this list"]
             map (.todoLineStatus) updated.uiTodos
                 `shouldBe` [TodoDisplayCompleted]
+
+    describe "shell block rendering" do
+        it "renders a completed command as one line until it is reopened" do
+            let completeCall resultCallId resultCallKind call output =
+                    reduceUi
+                        (UiLoop
+                            (ToolFinished ToolCallResult
+                                { callId = resultCallId
+                                , output
+                                , callKind = resultCallKind
+                                }))
+                        (foldl
+                            (flip reduceUi)
+                            initialUiState
+                            [ UiLoop TurnStarted
+                            , UiLoop (ToolStarted call)
+                            ])
+                call =
+                    functionToolCall
+                        "shell-render"
+                        "shell_command"
+                        "{\"command\":\"printf shell-command\"}"
+                completed = completeCall
+                    "shell-render"
+                    FunctionCallKind
+                    call
+                    "exit: 0\nshell-output-marker\nsecond-line"
+                reopened = reduceUi UiToggleSelected completed
+                ghciCompleted =
+                    completeCall
+                        "ghci-render"
+                        FunctionCallKind
+                        (functionToolCall
+                            "ghci-render"
+                            "run_ghci"
+                            "{\"expression\":\"putStrLn \\\"invocation-marker\\\"\"}")
+                        "exit: 0\nghci-output-marker"
+                execCompleted =
+                    completeCall
+                        "exec-render"
+                        CustomCallKind
+                        (customToolCall
+                            "exec-render"
+                            "exec"
+                            "text(\"exec-invocation-marker\");")
+                        "Script completed\nexec-output-marker"
+                failed =
+                    completeCall
+                        "failed-render"
+                        FunctionCallKind
+                        (functionToolCall
+                            "failed-render"
+                            "shell_command"
+                            "{\"command\":\"false\"}")
+                        "exit: 7\nfailed-output-marker"
+            runtime <- newScriptRuntime completed
+            let size = (80, 20)
+                renderShell ui =
+                    Text.unlines $
+                        map
+                            (Text.concat . map spanText . toList)
+                            (toList
+                                (displayOpsForPic
+                                    (renderWidget
+                                        Nothing
+                                        (drawApp
+                                            ((initialFullscreenAppState
+                                                runtime
+                                                []
+                                                AgentRoot
+                                                []
+                                                0)
+                                                { appUi = ui }))
+                                        size)
+                                    size))
+                spanText = \case
+                    TextSpan _ _ _ text -> LazyText.toStrict text
+                    Skip width -> Text.replicate width " "
+                    RowEnd width -> Text.replicate width " "
+                collapsedText = renderShell completed
+                reopenedText = renderShell reopened
+                ghciText = renderShell ghciCompleted
+                execText = renderShell execCompleted
+                failedText = renderShell failed
+            collapsedText `shouldSatisfy`
+                Text.isInfixOf "$ printf shell-command"
+            collapsedText `shouldNotSatisfy`
+                Text.isInfixOf "shell-output-marker"
+            reopenedText `shouldSatisfy`
+                Text.isInfixOf "shell-output-marker"
+            ghciText `shouldSatisfy`
+                Text.isInfixOf "$ ghci · putStrLn \"invocation-marker\""
+            ghciText `shouldNotSatisfy`
+                Text.isInfixOf "ghci-output-marker"
+            execText `shouldSatisfy`
+                Text.isInfixOf "$ exec · text(\"exec-invocation-marker\");"
+            execText `shouldNotSatisfy`
+                Text.isInfixOf "exec-output-marker"
+            failedText `shouldSatisfy`
+                Text.isInfixOf "› ✗ $ false"
+            failedText `shouldNotSatisfy`
+                Text.isInfixOf "failed-output-marker"
 
     describe "conversation scrollbar" do
         it "uses a visible trough that repaints old thumb cells" do
@@ -1551,6 +2064,29 @@ spec = do
             completionFlashTransitions completed completed
                 `shouldBe` []
 
+        it "does not schedule completion flashes for inspection blocks" do
+            let call =
+                    functionToolCall
+                        "inspect-1"
+                        "read_file"
+                        "{\"target_file\":\"README.md\"}"
+                running =
+                    reduceUi
+                        (UiLoop (ToolStarted call))
+                        (reduceUi (UiLoop TurnStarted) initialUiState)
+                completed =
+                    reduceUi
+                        (UiLoop
+                            (ToolFinished
+                                ToolCallResult
+                                    { callId = "inspect-1"
+                                    , output = "contents"
+                                    , callKind = FunctionCallKind
+                                    }))
+                        running
+            completionFlashTransitions running completed
+                `shouldBe` []
+
         it "ignores assistant streams and unsuccessful terminal states" do
             let assistantRunning =
                     reduceUi
@@ -1663,6 +2199,7 @@ replacementAfterHistoryReplacement scenario = do
             , blockState = BlockComplete
             , blockExpanded = False
             , blockCallId = Nothing
+            , blockInspectionGroupable = False
             }
         durableTurn = HistoryTurn
             { historyTurnCursor = HistoryCursor 0
@@ -2233,7 +2770,23 @@ markerBlock blockId body = UiBlock
     , blockState = BlockComplete
     , blockExpanded = False
     , blockCallId = Nothing
+    , blockInspectionGroupable = False
     }
+
+renderedAppText :: (Int, Int) -> AppState -> Text
+renderedAppText size state =
+    Text.unlines $
+        map
+            (Text.concat . map spanText . toList)
+            (toList
+                (displayOpsForPic
+                    (renderWidget Nothing (drawApp state) size)
+                    size))
+  where
+    spanText = \case
+        TextSpan _ _ _ text -> LazyText.toStrict text
+        Skip width -> Text.replicate width " "
+        RowEnd width -> Text.replicate width " "
 
 encoded :: Text -> ByteString.ByteString
 encoded = TextEncoding.encodeUtf8

@@ -104,7 +104,7 @@ import Agent.CLI.TUI.ImagePreview ( NativePreviewPlacement(..)
     , renderTuiImagePreview
     , sameNativePreviewLayout
     )
-import Agent.TUI.Markdown ( codeWidgetWithSyntaxHighlighting , markdownWidgetWithLinks , markdownWidgetWithSyntaxHighlightingAndLinks )
+import Agent.TUI.Markdown ( codeWidgetWithSyntaxHighlighting , diffSyntaxLanguages , markdownWidgetWithLinks , markdownWidgetWithSyntaxHighlightingAndLinks )
 import Agent.TUI.FencedCode ( FencedBlock(..)
     , fencedBlocks
     )
@@ -122,7 +122,8 @@ import Agent.TUI.Motion ( MotionDemand(..)
     , quietIndicator
     , waitingIndicator
     )
-import Agent.TUI.Presentation ( permissionToolCallPromptRelative )
+import Agent.TUI.Presentation
+    ( permissionToolCallPromptRelative )
 import Agent.Loop (ImageAttachment(..), LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
@@ -258,8 +259,14 @@ handleUiEvents uiEvents = do
                         || (Bridge.eventFollows uiEvent
                             && next.appUi.uiFollow)
                 invalidates =
-                    invalidated || uiEvent == UiConversationCleared
+                    invalidated || uiEventInvalidatesCache uiEvent
             in (next, progress, follows, invalidates)
+
+uiEventInvalidatesCache :: UiEvent -> Bool
+uiEventInvalidatesCache = \case
+    UiConversationCleared -> True
+    UiLoop (ToolRetracted _) -> True
+    _ -> False
 
 applyConversationUiEvent :: Int -> UiEvent -> AppState -> AppState
 applyConversationUiEvent renderedContentHeight uiEvent state =
@@ -608,7 +615,18 @@ syntaxLanguagesForBlock block =
         BlockShell
             | Just language <- blockCodeLanguage block ->
                 [language]
+        BlockEdit ->
+            diffSyntaxLanguages (editInitialPath block) block.blockBody
         _ -> []
+  where
+    editInitialPath block
+        | Text.null (Text.strip block.blockDetail) =
+            editTitlePath block.blockTitle
+        | otherwise = block.blockDetail
+
+    editTitlePath title =
+        let (_, suffix) = Text.breakOn " " title
+        in Text.strip (Text.drop 1 suffix)
 
 resumeNativeProgressIfRunning :: EventM Name AppState ()
 resumeNativeProgressIfRunning = do

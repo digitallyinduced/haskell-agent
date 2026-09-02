@@ -2,9 +2,12 @@ module Agent.CLI.TUIComposerSpec (spec) where
 
 import Agent.CLI.Dictation
     ( DictationBackend(..)
+    , DictationTarget(..)
     , dictationBackendForProvider
+    , dictationTargetForSession
     , insertDictation
     )
+import Agent.CLI.GatewayClient (newGatewayModelAccessWith)
 import Agent.Provider (Provider(..))
 import Agent.CLI.Input
     ( ReplLine(..)
@@ -117,6 +120,10 @@ spec = describe "fullscreen composer" do
             (rows, location) = wrapDraftWindow 8 10 draft cursor
         rows `shouldBe` map (Text.pack . show) [93 :: Int .. 100]
         location `shouldBe` (7, 3)
+        Text.drop (draftWindowStart 8 draft cursor) draft
+            `shouldBe` Text.intercalate
+                "\n"
+                (map (Text.pack . show) [93 :: Int .. 100])
 
     it "keeps enough following rows when the cursor is near the start" do
         let draft =
@@ -126,6 +133,7 @@ spec = describe "fullscreen composer" do
             (rows, location) = wrapDraftWindow 8 10 draft 0
         take 8 rows `shouldBe` map (Text.pack . show) [1 :: Int .. 8]
         location `shouldBe` (0, 0)
+        draftWindowStart 8 draft 0 `shouldBe` 0
 
     it "distinguishes the cursor positions before and after a full-row newline" do
         wrapDraft 2 "ab\nc" 2
@@ -245,6 +253,18 @@ spec = describe "fullscreen composer" do
         dictationBackendForProvider ClaudeCodeProvider
             `shouldBe` Left
                 "Dictation is not supported for claude-code models"
+
+    it "keeps organization-gateway dictation inside the gateway boundary" do
+        case dictationTargetForSession XAIProvider Nothing of
+            DirectDictation provider ->
+                provider `shouldBe` XAIProvider
+            GatewayDictation _ ->
+                expectationFailure "expected direct dictation"
+        gateway <- newGatewayModelAccessWith (pure (Right []))
+        case dictationTargetForSession XAIProvider (Just gateway) of
+            GatewayDictation _ -> pure ()
+            DirectDictation _ ->
+                expectationFailure "expected gateway dictation"
 
     it "keeps dictation stop keys inside the composer" do
         dictationKeyAction (V.EvKey V.KEnter [])

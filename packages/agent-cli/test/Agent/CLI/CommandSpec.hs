@@ -615,6 +615,32 @@ spec = do
             displays "/ra" 3 `shouldSatisfy` ("/reload-auth" `elem`)
             displays "look at /mo" 11 `shouldBe` []
 
+        it "identifies available command prefixes for live highlighting" do
+            map (slashCommandHighlightToken defaultSlashCatalog)
+                [ "/"
+                , "/res"
+                , "/resume"
+                , "/resume session-id"
+                , "/M"
+                , "/yolo now"
+                ]
+                `shouldBe`
+                    map Just
+                        [ "/"
+                        , "/res"
+                        , "/resume"
+                        , "/resume"
+                        , "/M"
+                        , "/yolo"
+                        ]
+            map (slashCommandHighlightToken defaultSlashCatalog)
+                [ "/blorp test"
+                , "/absolute/path/template.png"
+                , "look at /resume"
+                , " /resume"
+                ]
+                `shouldBe` replicate 4 Nothing
+
         it "offers argument rows" do
             let menu = slashMenuFor "/effort h" 9
             fmap (.slashMenuReplaceStart) menu `shouldBe` Just 8
@@ -721,6 +747,10 @@ spec = do
                 (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))
                 (slashMenuForCatalog enabled "/loo" 4)
                 `shouldBe` Just ["/loop"]
+            slashCommandHighlightToken disabled "/loo"
+                `shouldBe` Nothing
+            slashCommandHighlightToken enabled "/loo"
+                `shouldBe` Just "/loo"
 
         it "expands /loop while preserving the submitted slash text" do
             case parseReplLineWithCatalog enabled
@@ -856,6 +886,10 @@ spec = do
             let help = formatSlashHelpWithSkills False skills (Just "deploy")
             Text.unpack help `shouldSatisfy` ("Deploy the service" `isInfixOf`)
             Text.unpack help `shouldSatisfy` ("skill · repo · agents" `isInfixOf`)
+            slashCommandHighlightToken
+                (slashCatalogWithSkills skills defaultSlashCatalog)
+                "/dep production"
+                `shouldBe` Just "/dep"
 
         it "offers Codex-style dollar skill mentions inside prompts" do
             fmap (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))

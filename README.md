@@ -281,6 +281,10 @@ credential types are configured. OpenAI credentials can come from
 `OPENAI_API_KEY`, `CODEX_API_KEY`, or a managed OpenAI account.
 For Grok models, dictation uses the configured xAI subscription or API-key
 credential; set `XAI_STT_LANGUAGE` to override xAI's default `en`.
+When an organization gateway is connected, the recording is sent only to the
+gateway's authenticated `/v1/audio/transcriptions` endpoint. The gateway uses
+its organization-managed transcription pool and returns a final transcript
+after recording stops; it never falls back to local provider credentials.
 Dictation is currently unavailable for providers without a speech-to-text
 integration.
 
@@ -381,6 +385,11 @@ The provider-neutral loop sees typed turns, tool calls, tool results, usage,
 and streamed events. Provider packages own wire formats, authentication,
 transport, and provider-specific continuation. Presentation consumes the same
 events through renderer-independent state.
+
+`agent-connectivity` wraps individual provider submissions with replay-safe
+retry policy. On macOS it also uses `NWPathMonitor` to wake an interrupted
+submission as soon as the network path recovers; other platforms retain the
+portable polling fallback.
 
 `agent-cli-runtime` is the headless frontend library shared by the terminal
 CLI and gateways. Interactive parsing, rendering, and TTY state remain in

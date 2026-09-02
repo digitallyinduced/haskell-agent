@@ -204,7 +204,6 @@ completionFlashTransitions previous next =
         `elem`
             [ BlockThinking
             , BlockTool
-            , BlockInspect
             , BlockTodo
             , BlockShell
             , BlockEdit

@@ -12,7 +12,7 @@ import Agent.CLI.Clipboard ( formatImageSize )
 import Agent.CLI.Command ()
 import Agent.CLI.Dictation ()
 import Agent.CLI.ImagePreview ()
-import Agent.CLI.Input ()
+import Agent.CLI.Input ( truncateDisplayText )
 import Agent.CLI.Interrupt ()
 import Agent.CLI.Permission ()
 import Agent.CLI.Recap ()
@@ -48,6 +48,7 @@ import Agent.Loop ()
 import Agent.Syntax ( SyntaxHighlighter )
 import Agent.TUI.Markdown
     ( codeWidgetWithSyntaxHighlighting,
+      diffWidgetWithSyntaxHighlighting,
       markdownWidgetWithLinks,
       markdownWidgetWithSyntaxHighlightingAndLinks )
 import Agent.TUI.Model
@@ -59,10 +60,11 @@ import Agent.TUI.Model
       BlockState(BlockComplete, BlockFailed, BlockCancelled, BlockDenied,
                  BlockRunning, BlockStreaming),
       Focus(FocusScrollback),
+      InspectionGroup(inspectionGroupOpen),
       RetryCountdown(retryCountdownBlockId),
       UiBlock(blockId, blockTimestamp, blockTitle, blockKind, blockState,
               blockDetail, blockExpanded, blockBody),
-      UiState(uiRetryCountdown, uiSelectedBlock, uiFocus) )
+      UiState(uiRetryCountdown, uiSelectedBlock, uiFocus, uiInspectionGroups) )
 import Agent.TUI.Motion
     ( foregroundIndicator,
       nativeProgressAnimationEnabled,
@@ -72,6 +74,7 @@ import Agent.TUI.Presentation
     ( TodoDisplayLine(todoLineText, todoLineStatus),
       parseTodoList,
       todoStatusGlyph,
+      toolOutputCodeLanguage,
       TodoDisplayStatus(..) )
 import Agent.TUI.TextWidth ( displayTerminalText )
 import Agent.ToolDispatch ()
@@ -139,16 +142,21 @@ import qualified Brick.Widgets.Border as Border
 import qualified Agent.CLI.TUI.Bridge as Bridge ()
 import qualified Agent.CLI.TUI.Composer as Composer
     ( controlAttr )
-import qualified Data.Map.Strict as Map ( findWithDefault, member )
+import qualified Data.Map.Strict as Map ( findWithDefault, lookup, member )
 import qualified Agent.CLI.TUI.Scroll as Scroll ()
 import qualified Data.Sequence as Seq ()
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text
-    ( isPrefixOf,
+    ( breakOn,
+      drop,
+      length,
       lines,
       null,
       strip,
+      take,
       unlines,
+      unwords,
+      words,
       pack )
 import qualified Data.Text.Encoding as TextEncoding ()
 import qualified Agent.TUI.Theme as Theme
@@ -159,6 +167,7 @@ import qualified Agent.TUI.Theme as Theme
       controlLinkAttr,
       dimAttr,
       errorAttr,
+      inspectAttr,
       mutedAttr,
       successAttr,
       syntaxCommentAttr,
@@ -173,6 +182,7 @@ import qualified Agent.TUI.Theme as Theme
       todoInProgressAttr,
       todoPendingAttr,
       toolAttr,
+      toolPathAttr,
       userAttr,
       userMutedAttr,
       waitingDimAttr,
@@ -254,20 +264,26 @@ drawBlock state target ui block =
                     (blockStateGlyph state target block
                         <> block.blockTitle
                         <> detailSuffix block)
-                    (bodySections (visibleBody block)
+                    (toolBodySections
+                        state.appSyntaxHighlighter
+                        block.blockBody
+                        (visibleBody block)
                         <> toolImageSections state target block)
             BlockInspect ->
-                accentBlockWithSections
+                accentFileBlockWithSections
                     state
                     target
                     ui
                     block
                     waveElapsed
-                    (statusAttr state target block)
-                    (blockStateGlyph state target block
-                        <> block.blockTitle
-                        <> detailSuffix block)
-                    (bodySections (visibleBody block)
+                    (inspectionStatusAttr block)
+                    (blockStateGlyph state target block)
+                    block.blockTitle
+                    block.blockDetail
+                    (toolBodySections
+                        state.appSyntaxHighlighter
+                        block.blockBody
+                        (visibleBody block)
                         <> toolImageSections state target block)
             BlockTodo ->
                 accentBlockWithSections
@@ -288,22 +304,30 @@ drawBlock state target ui block =
                     state.appSyntaxHighlighter
                     waveElapsed
                     (statusAttr state target block)
-                    (blockStateGlyph state target block <> block.blockTitle)
-                    block.blockDetail
+                    (blockStateGlyph state target block
+                        <> shellBlockTitle block)
+                    (if block.blockExpanded then block.blockDetail else "")
                     (visibleShellBody block)
-                    (toolImageSections state target block)
+                    (if block.blockExpanded
+                        then toolImageSections state target block
+                        else [])
             BlockEdit ->
-                accentBlockWithSections
+                accentFileBlockWithSections
                     state
                     target
                     ui
                     block
                     waveElapsed
                     (statusAttr state target block)
-                    (blockStateGlyph state target block
-                        <> block.blockTitle
-                        <> detailSuffix block)
-                    (editBodyWidgets (visibleBody block))
+                    (blockStateGlyph state target block)
+                    block.blockTitle
+                    block.blockDetail
+                    [ diffWidgetWithSyntaxHighlighting
+                        state.appSyntaxHighlighter
+                        (editInitialPath block)
+                        (visibleBody block)
+                    | not (Text.null (Text.strip (visibleBody block)))
+                    ]
             BlockSystem ->
                 withAttr Theme.mutedAttr
                     (terminalTxtWrap block.blockBody)
@@ -367,6 +391,7 @@ drawBlock state target ui block =
 hoverReadableAttrs :: Widget Name -> Widget Name
 hoverReadableAttrs =
     overrideAttr Theme.mutedAttr Theme.transcriptHoverMutedAttr
+        . overrideAttr Theme.inspectAttr Theme.transcriptHoverMutedAttr
         . overrideAttr
             Theme.thinkingBodyAttr
             Theme.transcriptHoverMutedItalicAttr
@@ -535,6 +560,15 @@ cacheableBlock :: AppState -> AgentTarget -> UiState -> UiBlock -> Bool
 cacheableBlock state target ui block =
     block.blockState
         `notElem` [BlockStreaming, BlockRunning]
+        -- A completed tail inspection can still accept another adjacent call.
+        -- Keep it out of Brick's cache until the reducer closes the group.
+        && not
+            ( block.blockKind == BlockInspect
+                && maybe
+                    False
+                    (.inspectionGroupOpen)
+                    (Map.lookup block.blockId ui.uiInspectionGroups)
+            )
         && maybe
             True
             ((/= block.blockId) . (.retryCountdownBlockId))
@@ -569,14 +603,25 @@ conversationBlockHovered state target ui block =
                    ]
 
 blockStateGlyph :: AppState -> AgentTarget -> UiBlock -> Text
-blockStateGlyph state target block = case block.blockState of
-    BlockRunning -> liveGlyph
-    BlockStreaming -> liveGlyph
-    BlockComplete -> completedGlyph
-    BlockFailed -> "✗ "
-    BlockDenied -> "⊘ "
-    BlockCancelled -> "⊘ "
+blockStateGlyph state target block
+    | block.blockKind == BlockShell
+    , not block.blockExpanded =
+        "› " <> collapsedShellStateGlyph
+    | otherwise = case block.blockState of
+        BlockRunning -> liveGlyph
+        BlockStreaming -> liveGlyph
+        BlockComplete -> completedGlyph
+        BlockFailed -> "✗ "
+        BlockDenied -> "⊘ "
+        BlockCancelled -> "⊘ "
   where
+    collapsedShellStateGlyph = case block.blockState of
+        BlockRunning -> liveGlyph
+        BlockStreaming -> liveGlyph
+        BlockFailed -> "✗ "
+        BlockDenied -> "⊘ "
+        BlockCancelled -> "⊘ "
+        BlockComplete -> ""
     completedGlyph
         | block.blockKind == BlockInspect = "◇ "
         | block.blockKind
@@ -603,25 +648,41 @@ blockStateGlyph state target block = case block.blockState of
                 state.appMotionElapsedMillis
                 <> " "
 
+shellBlockTitle :: UiBlock -> Text
+shellBlockTitle block
+    | block.blockExpanded = block.blockTitle
+    | block.blockTitle `notElem` ["$ ghci", "$ exec"] = block.blockTitle
+    | Text.null invocation = block.blockTitle
+    | otherwise = block.blockTitle <> " · " <> invocation
+  where
+    invocation =
+        truncateDisplayText 120 $
+            Text.unwords $
+                Text.words $
+                    Text.take 512 block.blockDetail
+
+editInitialPath :: UiBlock -> Text
+editInitialPath block
+    | Text.null (Text.strip block.blockDetail) =
+        let (_, suffix) = Text.breakOn " " block.blockTitle
+        in Text.strip (Text.drop 1 suffix)
+    | otherwise = block.blockDetail
+
 bodySections :: Text -> [Widget Name]
 bodySections body
     | Text.null (Text.strip body) = []
     | otherwise = [terminalTxtWrap body]
 
-editBodyWidgets :: Text -> [Widget Name]
-editBodyWidgets body
-    | Text.null (Text.strip body) = []
-    | otherwise = [vBox (map editLineWidget (Text.lines body))]
-  where
-    editLineWidget line
-        | "  -" `Text.isPrefixOf` line =
-            withAttr Theme.errorAttr (terminalTxtWrap line)
-        | "  +" `Text.isPrefixOf` line =
-            withAttr Theme.successAttr (terminalTxtWrap line)
-        | "  …" `Text.isPrefixOf` line
-            || "… +" `Text.isPrefixOf` line =
-                withAttr Theme.mutedAttr (terminalTxtWrap line)
-        | otherwise = terminalTxtWrap line
+toolBodySections
+    :: Maybe SyntaxHighlighter
+    -> Text
+    -> Text
+    -> [Widget Name]
+toolBodySections syntaxHighlighter completeBody visible
+    | Text.null (Text.strip visible) = []
+    | Just language <- toolOutputCodeLanguage completeBody =
+        [codeWidgetWithSyntaxHighlighting syntaxHighlighter language visible]
+    | otherwise = bodySections visible
 
 accentMarkdownBlock
     :: AppState
@@ -696,6 +757,57 @@ accentBlockWithSections
     accent
     title
     sections =
+    accentBlockWithHeader
+        state target ui block waveElapsed accent title Nothing sections
+
+-- File-oriented calls keep the action animated/status-colored while the path
+-- has its own stable semantic color, matching first-party tool-call chrome.
+accentFileBlockWithSections
+    :: AppState
+    -> AgentTarget
+    -> UiState
+    -> UiBlock
+    -> Maybe Int
+    -> AttrName
+    -> Text
+    -> Text
+    -> Text
+    -> [Widget Name]
+    -> Widget Name
+accentFileBlockWithSections
+    state target ui block waveElapsed accent glyph verb path sections =
+    accentBlockWithHeader
+        state
+        target
+        ui
+        block
+        waveElapsed
+        accent
+        (glyph <> verb)
+        (if Text.null path then Nothing else Just path)
+        sections
+
+accentBlockWithHeader
+    :: AppState
+    -> AgentTarget
+    -> UiState
+    -> UiBlock
+    -> Maybe Int
+    -> AttrName
+    -> Text
+    -> Maybe Text
+    -> [Widget Name]
+    -> Widget Name
+accentBlockWithHeader
+    state
+    target
+    ui
+    block
+    waveElapsed
+    accent
+    title
+    path
+    sections =
     accentRail
         motionGlyphSet
         accent
@@ -711,9 +823,24 @@ accentBlockWithSections
         Theme.waveTroughForTheme
             theme
             state.appRuntime.runtimeWaveTrough
-    titleWidget = case waveElapsed of
+    titleWidget
+        | block.blockKind == BlockShell
+        , not block.blockExpanded =
+            singleLineTitle renderTitle title
+        | otherwise = renderTitle title
+    renderTitle fittedTitle = case path of
+        Nothing -> animatedTitle fittedTitle
+        Just value ->
+            hBox
+                [ hLimit
+                    (Text.length fittedTitle)
+                    (animatedTitle fittedTitle)
+                , withAttr Theme.toolPathAttr
+                    (terminalTxtWrap (" " <> value))
+                ]
+    animatedTitle fittedTitle = case waveElapsed of
         Nothing ->
-            withAttr accent (terminalTxtWrap title)
+            withAttr accent (terminalTxtWrap fittedTitle)
         Just elapsedMillis ->
             waveHeader
                 accent
@@ -721,7 +848,7 @@ accentBlockWithSections
                 trough
                 theme
                 elapsedMillis
-                title
+                fittedTitle
     paddedBody = map (padTop (Pad 1)) sections
     bodyWidgets
         | cacheableRunningBody state target ui block
@@ -734,6 +861,13 @@ accentBlockWithSections
                 (vBox paddedBody)
             ]
         | otherwise = paddedBody
+
+singleLineTitle :: (Text -> Widget n) -> Text -> Widget n
+singleLineTitle renderTitle title =
+    Widget Fixed Fixed do
+        context <- getContext
+        render $
+            renderTitle (truncateDisplayText context.availWidth title)
 
 -- Skip non-empty running bodies: live tool output changes without a new
 -- block id, and Brick cache keys must stay stable.
@@ -809,12 +943,7 @@ truncatedLines shownCount body =
 visibleShellBody :: UiBlock -> Text
 visibleShellBody block
     | block.blockExpanded = block.blockBody
-    | otherwise =
-        let rows = Text.lines block.blockBody
-            shown
-                | length rows <= 5 = rows
-                | otherwise = take 2 rows <> ["…"] <> drop (length rows - 3) rows
-        in Text.unlines shown
+    | otherwise = ""
 
 detailSuffix :: UiBlock -> Text
 detailSuffix block
@@ -833,6 +962,15 @@ statusAttr state target block
         BlockComplete -> Theme.successAttr
         BlockRunning -> Theme.toolAttr
         BlockStreaming -> Theme.thinkingAttr
+
+inspectionStatusAttr :: UiBlock -> AttrName
+inspectionStatusAttr block = case block.blockState of
+    BlockFailed -> Theme.errorAttr
+    BlockCancelled -> Theme.mutedAttr
+    BlockDenied -> Theme.errorAttr
+    BlockComplete -> Theme.inspectAttr
+    BlockRunning -> Theme.inspectAttr
+    BlockStreaming -> Theme.inspectAttr
 
 thinkingBlockAttr :: AppState -> AgentTarget -> UiBlock -> AttrName
 thinkingBlockAttr state target block

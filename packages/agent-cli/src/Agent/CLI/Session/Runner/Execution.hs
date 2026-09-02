@@ -69,6 +69,7 @@ import Agent.CLI.Request
 import Agent.CLI.Tools
 import Agent.CLI.Error
 import Agent.CLI.Dialects
+import Agent.CLI.Dictation (dictationTargetForSession)
 import Agent.CLI.TUI.App
 import Agent.TUI.Model
 import Agent.TUI.Motion
@@ -977,7 +978,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     forM_ fullscreen \runtime ->
         setFullscreenSessionActions
             runtime
-            (if isJust gatewayAccess then Nothing else Just provider)
+            (Just (dictationTargetForSession provider gatewayAccess))
             (requestCancel toolEnv.toolCancel)
             (\pasted text -> do
                 images <- loadImagesFromPastedText text

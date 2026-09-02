@@ -684,6 +684,13 @@ appEventLogicalBytes = \case
                 skills)
     AppSetModelIds modelIds ->
         saturatingAdd 256 (logicalTextsBytes modelIds)
+    AppCommandPaletteSelected action ->
+        case action of
+            CommandPaletteSubmit text ->
+                saturatingAdd 128 (logicalTextBytes text)
+            CommandPaletteInsert text ->
+                saturatingAdd 128 (logicalTextBytes text)
+            CommandPaletteDismiss -> 128
     AppSetTheme{} ->
         256
     AppAgentSnapshot target entries ->
@@ -823,6 +830,23 @@ uiStateLogicalBytes ui =
                         (toolCallLogicalBytes call))
             0
             ui.uiToolCalls
+        , Map.foldl'
+            (\size group ->
+                saturatingAdd size $
+                    foldl'
+                        (\groupSize item ->
+                            saturatingAdd groupSize $
+                                saturatingAdd 192 $
+                                    logicalTextsBytes
+                                        [ item.inspectionCallId
+                                        , item.inspectionToolName
+                                        , item.inspectionTitle
+                                        , item.inspectionBody
+                                        ])
+                        128
+                        group.inspectionGroupItems)
+            0
+            ui.uiInspectionGroups
         , foldl'
             (\size todo ->
                 saturatingAdd size

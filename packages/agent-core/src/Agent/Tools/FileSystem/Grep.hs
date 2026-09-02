@@ -15,7 +15,7 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , decodeToolArguments
     , toolArgumentsValue
-    , typedTool
+    , typedStreamingTool
     )
 import Agent.Tools.IO (resolveForRead)
 import Agent.Tools.Scheduling
@@ -31,14 +31,20 @@ import Agent.Tools.Types
     , withToolResourceClaims
     )
 import Control.Applicative ((<|>))
-import Control.Concurrent.Async (concurrently)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (concurrently, withAsync)
 import Control.Exception.Safe
     ( mask
     , onException
     , tryAny
     )
-import Control.Monad (void)
+import Control.Monad (forM_, void, when)
 import qualified Data.ByteString as BS
+import Data.IORef
+    ( atomicModifyIORef'
+    , newIORef
+    , readIORef
+    )
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -122,7 +128,7 @@ grepTool env = withToolResourceClaims (grepClaims env) $
     ]
     True
     ParallelSafe
-    (typedTool "grep" grepArgsDecoder (runGrep env))
+    (typedStreamingTool "grep" grepArgsDecoder (runGrep env))
 
 grepClaims
     :: ToolEnv
@@ -151,8 +157,8 @@ grepDescription =
     \- Only filter by 'type' or 'glob' when you are sure of the file type; import paths may not match source file types (.js vs .ts).\n\
     \- Output is ripgrep-style: ':' marks match lines, '-' marks context lines, grouped by file. Large results are capped and report \"at least\" counts."
 
-runGrep :: ToolEnv -> GrepArgs -> IO (Either Text Text)
-runGrep env args = do
+runGrep :: ToolEnv -> (Text -> IO ()) -> GrepArgs -> IO (Either Text Text)
+runGrep env emitOutput args = do
     let searchRoot = maybe env.toolCwd fromText args.path
     resolveForRead env searchRoot >>= \case
         Left err -> pure (Left err)
@@ -161,8 +167,15 @@ runGrep env args = do
                 "rg is not installed. Install ripgrep to use the grep tool."
             Just rgPath -> do
                 let limit = effectiveHeadLimit args
+                    emitCapture capture =
+                        emitOutput
+                            (formatGrepCard
+                                env.toolCwd
+                                (decodeCapture capture)
+                                limit
+                                capture.captureTruncation)
                 canonicalCwd <- canonicalizePath (unsafeToFilePath env.toolCwd)
-                runRipgrep rgPath canonicalCwd path args >>= \case
+                runRipgrep rgPath canonicalCwd path args emitCapture >>= \case
                     GrepFailed raw diagnostic ->
                         pure $ Left (formatGrepFailure
                             env.toolCwd
@@ -192,6 +205,13 @@ data GrepCapture = GrepCapture
     , captureTruncation :: !GrepTruncation
     }
 
+data GrepProgress = GrepProgress
+    { progressVersion :: !Int
+    , progressByteCount :: !Int
+    , progressReversed :: ![BS.ByteString]
+    , progressTruncation :: !GrepTruncation
+    }
+
 data GrepRunResult
     = GrepSucceeded !Text !GrepTruncation
     | GrepFailed !Text !Text
@@ -201,8 +221,9 @@ runRipgrep
     -> FilePath
     -> OsPath
     -> GrepArgs
+    -> (GrepCapture -> IO ())
     -> IO GrepRunResult
-runRipgrep rgPath workspace path args = mask \restore -> do
+runRipgrep rgPath workspace path args emitCapture = mask \restore -> do
     let absoluteSearchPath = unsafeToFilePath path
         workspaceRelativePath = makeRelative workspace absoluteSearchPath
         searchWithinWorkspace =
@@ -216,7 +237,7 @@ runRipgrep rgPath workspace path args = mask \restore -> do
             | otherwise =
                 (Nothing, absoluteSearchPath)
     let rgArgs = concat
-            [ ["--heading", "--with-filename", "--line-number"]
+            [ ["--heading", "--with-filename", "--line-number", "--line-buffered"]
             , ["--no-config", "--color=never", "--max-columns", "1000"]
             , maybe [] (\g -> ["--glob", Text.unpack g]) args.glob
             , maybe [] (\n -> ["-B", show n]) args.before
@@ -252,7 +273,8 @@ runRipgrep rgPath workspace path args = mask \restore -> do
                 ph
                 stdoutHandle
                 (effectiveHeadLimit args + 1)
-                grepOutputByteLimit)
+                grepOutputByteLimit
+                emitCapture)
             (readBoundedDrain stderrHandle grepDiagnosticByteLimit)
         code <- waitForProcess ph
         closeHandle stdoutHandle
@@ -287,21 +309,67 @@ grepDiagnosticByteLimit = 1024 * 1024
 grepLineByteLimit :: Int
 grepLineByteLimit = 256 * 1024
 
+grepProgressIntervalMicroseconds :: Int
+grepProgressIntervalMicroseconds = 100 * 1000
+
 readBoundedStdout
     :: ProcessHandle
     -> Handle
     -> Int
     -> Int
+    -> (GrepCapture -> IO ())
     -> IO GrepCapture
-readBoundedStdout processHandle handle lineLimit byteLimit =
-    go BS.empty [] 0 0
+readBoundedStdout processHandle handle lineLimit byteLimit emitCapture = do
+    progressRef <- newIORef Nothing
+    emittedVersionRef <- newIORef 0
+    let recordProgress byteCount reversed truncation
+            | null reversed = pure ()
+            | otherwise =
+                atomicModifyIORef' progressRef \previous ->
+                    case previous of
+                        Just progress
+                            | progress.progressByteCount == byteCount
+                            , progress.progressTruncation == truncation ->
+                                (previous, ())
+                        _ ->
+                            let version =
+                                    maybe 1 ((+ 1) . (.progressVersion)) previous
+                            in ( Just GrepProgress
+                                    { progressVersion = version
+                                    , progressByteCount = byteCount
+                                    , progressReversed = reversed
+                                    , progressTruncation = truncation
+                                    }
+                               , ()
+                               )
+        emitProgress = do
+            current <- readIORef progressRef
+            forM_ current \progress -> do
+                changed <- atomicModifyIORef' emittedVersionRef \emitted ->
+                    if progress.progressVersion <= emitted
+                        then (emitted, False)
+                        else (progress.progressVersion, True)
+                when changed $
+                    emitCapture
+                        (finish
+                            progress.progressReversed
+                            progress.progressTruncation)
+        sampleProgress = do
+            threadDelay grepProgressIntervalMicroseconds
+            emitProgress
+            sampleProgress
+    capture <- withAsync sampleProgress \_sampler ->
+        go recordProgress BS.empty [] 0 0
+    unlessEmptyCapture capture emitCapture
+    pure capture
   where
-    go pending reversed totalBytes totalLines = do
+    go recordProgress pending reversed totalBytes totalLines = do
+        recordProgress totalBytes reversed GrepComplete
         chunk <- BS.hGetSome handle 32768
         if BS.null chunk
             then finishPending pending reversed totalBytes
             else consume (if BS.null pending then chunk else pending <> chunk)
-                reversed totalBytes totalLines
+                recordProgress reversed totalBytes totalLines
 
     finish reversed truncation =
         GrepCapture
@@ -309,20 +377,24 @@ readBoundedStdout processHandle handle lineLimit byteLimit =
             , captureTruncation = truncation
             }
 
-    consume bytes reversed totalBytes totalLines =
+    consume bytes recordProgress reversed totalBytes totalLines =
         case BS.elemIndex 10 bytes of
             Nothing
                 | BS.length bytes > retainedLineLimit ->
                     truncateAndDrain
+                        recordProgress
+                        totalBytes
                         (BS.take retainedLineLimit bytes)
                         reversed
                         retainedLineTruncation
                 | otherwise ->
-                    go bytes reversed totalBytes totalLines
+                    go recordProgress bytes reversed totalBytes totalLines
             Just newlineIndex -> do
                 let line = BS.take (newlineIndex + 1) bytes
                 if BS.length line > retainedLineLimit
                     then truncateAndDrain
+                        recordProgress
+                        totalBytes
                         (BS.take retainedLineLimit line)
                         reversed
                         retainedLineTruncation
@@ -332,12 +404,15 @@ readBoundedStdout processHandle handle lineLimit byteLimit =
                             nextBytes = totalBytes + BS.length line
                         in if totalLines + 1 >= lineLimit
                             then truncateAndDrain
+                                recordProgress
+                                nextBytes
                                 BS.empty
                                 nextReversed
                                 GrepLineTruncated
                             else
                                 consume
                                     (BS.drop (newlineIndex + 1) bytes)
+                                    recordProgress
                                     nextReversed
                                     nextBytes
                                     (totalLines + 1)
@@ -365,12 +440,20 @@ readBoundedStdout processHandle handle lineLimit byteLimit =
                     if BS.null keep then reversed else keep : reversed
             in pure (finish nextReversed truncation)
 
-    truncateAndDrain kept reversed truncation = do
+    truncateAndDrain recordProgress totalBytes kept reversed truncation = do
+        let nextReversed =
+                if BS.null kept then reversed else kept : reversed
+        recordProgress
+            (totalBytes + BS.length kept)
+            nextReversed
+            truncation
         void (tryAny (terminateProcess processHandle))
         drainHandle handle
-        pure (finish
-            (if BS.null kept then reversed else kept : reversed)
-            truncation)
+        pure (finish nextReversed truncation)
+
+unlessEmptyCapture :: GrepCapture -> (GrepCapture -> IO ()) -> IO ()
+unlessEmptyCapture capture action =
+    when (not (BS.null capture.captureBytes)) (action capture)
 
 data DiagnosticCapture = DiagnosticCapture
     { diagnosticBytes :: !BS.ByteString

@@ -1,5 +1,5 @@
 { mkDerivation, aeson, agent-claude, agent-cli-runtime, agent-mail
-, agent-codex-dialect, agent-core, agent-gemini
+, agent-codex-dialect, agent-connectivity, agent-core, agent-gemini
 , agent-grok-build-dialect, agent-json, agent-mcp, agent-openai
 , agent-openrouter, agent-process, agent-responses
 , agent-responses-types, agent-runtime-daemon, agent-store
@@ -22,10 +22,10 @@ mkDerivation {
   # cabal2nix does not emit a separate foreign-library dependency list.
   # Keep agent-runtime-daemon here for the Darwin bridge component.
   libraryHaskellDepends = [
-    aeson agent-claude agent-cli-runtime agent-codex-dialect agent-core
-    agent-gemini agent-grok-build-dialect agent-json agent-mail agent-mcp
-    agent-openai agent-openrouter agent-process agent-responses
-    agent-runtime-daemon
+    aeson agent-claude agent-cli-runtime agent-codex-dialect
+    agent-connectivity agent-core agent-gemini agent-grok-build-dialect
+    agent-json agent-mail agent-mcp agent-openai agent-openrouter
+    agent-process agent-responses agent-runtime-daemon
     agent-responses-types agent-store agent-syntax agent-tui agent-xai
     ansi-terminal async base base64-bytestring brick bytestring colour
     containers crypton crypton-connection directory entropy filelock
@@ -40,13 +40,14 @@ mkDerivation {
     safe-exceptions text time unix
   ];
   testHaskellDepends = [
-    aeson agent-claude agent-cli-runtime agent-codex-dialect agent-core
-    agent-gemini agent-grok-build-dialect agent-json agent-mail agent-mcp
-    agent-openai agent-openrouter agent-responses agent-responses-types
-    agent-runtime-daemon agent-store agent-tui agent-xai ansi-terminal
-    async base brick bytestring colour containers directory filepath
-    haskeline hspec http-types JuicyPixels network network-uri process
-    QuickCheck safe-exceptions stm text time transformers unix vty
+    aeson agent-claude agent-cli-runtime agent-codex-dialect
+    agent-connectivity agent-core agent-gemini agent-grok-build-dialect
+    agent-json agent-mail agent-mcp agent-openai agent-openrouter
+    agent-responses agent-responses-types agent-runtime-daemon agent-store
+    agent-tui agent-xai ansi-terminal async base brick bytestring colour
+    containers directory filepath haskeline hspec http-client http-types
+    JuicyPixels network network-uri process QuickCheck safe-exceptions stm
+    text time transformers unix vty wai warp
   ];
   benchmarkHaskellDepends = [
     aeson agent-core agent-json agent-responses agent-responses-types

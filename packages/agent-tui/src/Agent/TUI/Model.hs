@@ -9,6 +9,8 @@ module Agent.TUI.Model
     , PermissionOverlay(..)
     , PromptLimitStatus(..)
     , PromptState(..)
+    , InspectionGroup(..)
+    , InspectionItem(..)
     , UiBlock(..)
     , UiEvent(..)
     , UiNotice(..)
@@ -43,10 +45,12 @@ module Agent.TUI.Model
 
 import Agent.TUI.Presentation
     ( formatToolDiffRelative
+    , formatToolDiffRelativeWithOutput
     , formatToolOutputRelative
     , isInspectionTool
     , todoListFromToolArguments
     , todoListFromToolOutput
+    , toolCallHeaderRelative
     , toolCallInput
     , toolCallTitleRelative
     )
@@ -275,6 +279,7 @@ reduceUi event state = case event of
             , uiTurnStartBlock = 0
             , uiAttemptStartBlock = 0
             , uiToolCalls = Map.empty
+            , uiInspectionGroups = Map.empty
             , uiShellProcesses = Map.empty
             , uiShellPolls = Map.empty
             , uiRetryCountdown = Nothing
@@ -327,6 +332,7 @@ reduceUi event state = case event of
             , uiNoticeElapsedMillis = 0
             , uiCompletionRemainingMillis = 0
             , uiToolCalls = Map.empty
+            , uiInspectionGroups = Map.empty
             , uiShellProcesses = processes
             , uiShellPolls =
                 retainShellPolls processes state.uiShellPolls
@@ -384,6 +390,7 @@ reduceLoop event state = case event of
                 , uiTurnStartBlock = Seq.length state.uiBlocks
                 , uiAttemptStartBlock = Seq.length state.uiBlocks
                 , uiToolCalls = Map.empty
+                , uiInspectionGroups = Map.empty
                 }
     ReasoningDelta delta ->
         appendOrExtend BlockThinking "Thought" delta BlockStreaming $
@@ -427,6 +434,7 @@ reduceLoop event state = case event of
                 , uiNoticeElapsedMillis = 0
                 , uiAttemptStartBlock = Seq.length finalized.uiBlocks
                 , uiToolCalls = Map.empty
+                , uiInspectionGroups = Map.empty
                 }
     ToolStarted call
         | Map.member call.callId state.uiToolCalls
@@ -514,7 +522,7 @@ startToolCall :: ToolCall -> UiState -> UiState
 startToolCall call state
     | Just sessionId <- emptyWriteStdinSession call
     , Map.member sessionId state.uiShellProcesses =
-        state
+        closeInspectionGroups state
             { uiRunning = True
             , uiGenerating = False
             , uiAwaitingInput = False
@@ -523,7 +531,7 @@ startToolCall call state
                 Map.insert call.callId sessionId state.uiShellPolls
             }
     | isTodoTool call.name =
-        state
+        closeInspectionGroups state
             { uiRunning = True
             , uiGenerating = False
             , uiAwaitingInput = False
@@ -534,26 +542,284 @@ startToolCall call state
                     (Seq.length state.uiBlocks, call)
                     state.uiToolCalls
             }
+    | toolBlockKind call.name == BlockInspect
+    , isGroupableInspectionTool call.name =
+        startInspectionCall call state
     | otherwise =
         let
             kind = toolBlockKind call.name
-            title = toolCallTitleRelative state.uiWorkspaceRoot call
+            activity = toolCallTitleRelative state.uiWorkspaceRoot call
+            (title, headerDetail) =
+                toolCallHeaderRelative state.uiWorkspaceRoot call
             blockIndex = Seq.length state.uiBlocks
             body = formatToolDiffRelative state.uiWorkspaceRoot call
-            detail = toolCallInput call
+            detail = fromMaybe (toolCallInput call) headerDetail
         in appendBlock kind title body detail
             BlockRunning (Just call.callId)
             state
                 { uiRunning = True
                 , uiGenerating = False
                 , uiAwaitingInput = False
-                , uiActivity = title
+                , uiActivity = activity
                 , uiToolCalls =
                     Map.insert
                         call.callId
                         (blockIndex, call)
                         state.uiToolCalls
                 }
+
+startInspectionCall :: ToolCall -> UiState -> UiState
+startInspectionCall call state =
+    case Seq.viewr state.uiBlocks of
+        _ Seq.:> block
+            | block.blockKind == BlockInspect
+            , Just group <- Map.lookup block.blockId state.uiInspectionGroups
+            , group.inspectionGroupOpen ->
+                extend block group
+        _ -> start
+  where
+    activity = toolCallTitleRelative state.uiWorkspaceRoot call
+    (title, headerDetail) =
+        toolCallHeaderRelative state.uiWorkspaceRoot call
+    detail = fromMaybe "" headerDetail
+    item = InspectionItem
+        { inspectionCallId = call.callId
+        , inspectionToolName = canonicalToolName call.name
+        , inspectionTitle = title
+        , inspectionDetail = detail
+        , inspectionBody =
+            formatToolDiffRelative state.uiWorkspaceRoot call
+        , inspectionState = BlockRunning
+        }
+    common current =
+        current
+            { uiRunning = True
+            , uiGenerating = False
+            , uiAwaitingInput = False
+            , uiActivity = activity
+            }
+    extend block group =
+        let
+            blockIndex = Seq.length state.uiBlocks - 1
+            updatedGroup =
+                group
+                    { inspectionGroupItems =
+                        group.inspectionGroupItems <> [item]
+                    }
+        in common state
+            { uiBlocks =
+                Seq.adjust
+                    (renderInspectionGroup updatedGroup)
+                    blockIndex
+                    state.uiBlocks
+            , uiInspectionGroups =
+                Map.insert
+                    block.blockId
+                    updatedGroup
+                    state.uiInspectionGroups
+            , uiToolCalls =
+                Map.insert
+                    call.callId
+                    (blockIndex, call)
+                    state.uiToolCalls
+            }
+    start =
+        let
+            prepared = closeInspectionGroups state
+            blockIndex = Seq.length prepared.uiBlocks
+            ident = BlockId prepared.uiNextBlockId
+            group = InspectionGroup
+                { inspectionGroupOpen = True
+                , inspectionGroupItems = [item]
+                }
+            appended =
+                appendBlock
+                    BlockInspect
+                    title
+                    item.inspectionBody
+                    detail
+                    BlockRunning
+                    (Just call.callId)
+                    (common prepared)
+        in appended
+            { uiBlocks =
+                Seq.adjust
+                    (\block ->
+                        block { blockInspectionGroupable = True })
+                    blockIndex
+                    appended.uiBlocks
+            , uiInspectionGroups =
+                Map.insert ident group appended.uiInspectionGroups
+            , uiToolCalls =
+                Map.insert
+                    call.callId
+                    (blockIndex, call)
+                    appended.uiToolCalls
+            }
+
+-- | Close a burst when another visible event intervenes. Keep its item
+-- metadata until the turn ends so a provider can still retract an individual
+-- completed call without removing the rest of the grouped block.
+closeInspectionGroups :: UiState -> UiState
+closeInspectionGroups state =
+    state
+        { uiInspectionGroups =
+            Map.map
+                (\group -> group { inspectionGroupOpen = False })
+                state.uiInspectionGroups
+        }
+
+renderInspectionGroup :: InspectionGroup -> UiBlock -> UiBlock
+renderInspectionGroup group block =
+    block
+        { blockTitle = inspectionGroupTitle items
+        , blockBody = inspectionGroupBody items
+        , blockState = inspectionGroupState items
+        , blockDetail = inspectionGroupDetail items
+        , blockCallId = (.inspectionCallId) <$> listToMaybe items
+        , blockInspectionGroupable =
+            block.blockInspectionGroupable && length items == 1
+        }
+  where
+    items = group.inspectionGroupItems
+
+inspectionGroupTitle :: [InspectionItem] -> Text
+inspectionGroupTitle [] = "Inspected"
+inspectionGroupTitle [item] = item.inspectionTitle
+inspectionGroupTitle items =
+    Text.intercalate ", " (inspectionSummaries items)
+        <> statusSuffix
+  where
+    failed =
+        length
+            (filter
+                ((== BlockFailed) . (.inspectionState))
+                items)
+    denied =
+        length
+            (filter
+                ((== BlockDenied) . (.inspectionState))
+                items)
+    suffixes =
+        [ Text.pack (show failed) <> " failed" | failed > 0 ]
+            <> [ Text.pack (show denied) <> " denied" | denied > 0 ]
+    statusSuffix =
+        case suffixes of
+            [] -> ""
+            _ -> " · " <> Text.intercalate ", " suffixes
+
+inspectionGroupDetail :: [InspectionItem] -> Text
+inspectionGroupDetail [item] = item.inspectionDetail
+inspectionGroupDetail _ = ""
+
+inspectionSummaries :: [InspectionItem] -> [Text]
+inspectionSummaries =
+    map render . foldl add []
+  where
+    add counts item =
+        let label = inspectionSummaryLabel item.inspectionToolName
+        in case break ((== label) . fst) counts of
+            (before, (_, count) : after) ->
+                before <> [(label, count + 1)] <> after
+            _ -> counts <> [(label, 1)]
+    render :: (Text, Int) -> Text
+    render (label, count) =
+        label
+            <> " "
+            <> Text.pack (show count)
+            <> if count == 1 then " item" else " items"
+
+inspectionSummaryLabel :: Text -> Text
+inspectionSummaryLabel name
+    | name `elem` ["read_file", "read_tool_output", "mcp_read_resource"] =
+        "Read"
+    | name
+        `elem` ["list_dir", "mcp_list_resources", "list_agents", "ListAgents", "Glob"] =
+        "Listed"
+    | name
+        `elem`
+            [ "grep"
+            , "search_tool_output"
+            , "mcp_search"
+            , "search_tool"
+            , "conversation_search"
+            , "skill_search"
+            , "WebSearch"
+            , "ToolSearch"
+            ] =
+        "Searched"
+    | otherwise = "Inspected"
+
+-- Image rendering and long-running task-output polling attach lifecycle data
+-- to one exact block, so only compact read/list/search calls join a burst.
+isGroupableInspectionTool :: Text -> Bool
+isGroupableInspectionTool rawName =
+    canonicalToolName rawName
+        `elem`
+            [ "read_file"
+            , "list_dir"
+            , "grep"
+            , "read_tool_output"
+            , "search_tool_output"
+            , "mcp_search"
+            , "search_tool"
+            , "mcp_list_resources"
+            , "mcp_read_resource"
+            , "conversation_search"
+            , "skill_search"
+            , "view_skill"
+            , "list_agents"
+            , "Glob"
+            , "WebSearch"
+            , "ToolSearch"
+            , "ListAgents"
+            ]
+
+inspectionGroupBody :: [InspectionItem] -> Text
+inspectionGroupBody [item] = item.inspectionBody
+inspectionGroupBody items =
+    Text.intercalate "\n" headers
+        <> if null details
+            then ""
+            else "\n\n" <> Text.intercalate "\n\n" details
+  where
+    headers = map inspectionItemHeader items
+    details =
+        [ inspectionItemTitle item <> "\n"
+            <> Text.unlines
+                (map ("    " <>) (Text.lines item.inspectionBody))
+        | item <- items
+        , not (Text.null (Text.strip item.inspectionBody))
+        ]
+
+inspectionItemHeader :: InspectionItem -> Text
+inspectionItemHeader item =
+    "  "
+        <> inspectionStateGlyph item.inspectionState
+        <> " "
+        <> inspectionItemTitle item
+
+inspectionItemTitle :: InspectionItem -> Text
+inspectionItemTitle item
+    | Text.null item.inspectionDetail = item.inspectionTitle
+    | otherwise = item.inspectionTitle <> " " <> item.inspectionDetail
+
+inspectionStateGlyph :: BlockState -> Text
+inspectionStateGlyph = \case
+    BlockComplete -> "◇"
+    BlockFailed -> "✗"
+    BlockCancelled -> "⊘"
+    BlockDenied -> "⊘"
+    BlockStreaming -> "◆"
+    BlockRunning -> "◆"
+
+inspectionGroupState :: [InspectionItem] -> BlockState
+inspectionGroupState items
+    | any ((== BlockRunning) . (.inspectionState)) items = BlockRunning
+    | any ((== BlockFailed) . (.inspectionState)) items = BlockFailed
+    | any ((== BlockDenied) . (.inspectionState)) items = BlockDenied
+    | any ((== BlockCancelled) . (.inspectionState)) items = BlockCancelled
+    | otherwise = BlockComplete
 
 replaceOrAppendRecap :: Text -> BlockState -> UiState -> UiState
 replaceOrAppendRecap body blockState state =
@@ -619,6 +885,11 @@ removeBlockAt index state =
                         then Nothing
                         else Just (adjustIndex blockIndex, call))
                 state.uiToolCalls
+        , uiInspectionGroups =
+            Map.filterWithKey
+                (\blockId _ ->
+                    any ((== blockId) . (.blockId)) remaining)
+                state.uiInspectionGroups
         , uiShellProcesses = processes
         , uiShellPolls = retainShellPolls processes state.uiShellPolls
         , uiTurnStartBlock = adjustIndex state.uiTurnStartBlock
@@ -635,8 +906,9 @@ appendBlock
     -> UiState
     -> UiState
 appendBlock kind title body detail blockState callId state =
-    let index = Seq.length state.uiBlocks
-        ident = BlockId state.uiNextBlockId
+    let prepared = closeInspectionGroups state
+        index = Seq.length prepared.uiBlocks
+        ident = BlockId prepared.uiNextBlockId
         block = UiBlock
             { blockId = ident
             , blockKind = kind
@@ -647,14 +919,17 @@ appendBlock kind title body detail blockState callId state =
             , blockState
             , blockExpanded =
                 kind `elem` [BlockUser, BlockAssistant, BlockSystem, BlockRecap, BlockError]
+                    || (kind == BlockShell
+                        && blockState `elem` [BlockStreaming, BlockRunning])
             , blockCallId = callId
+            , blockInspectionGroupable = False
             }
-    in state
-        { uiBlocks = state.uiBlocks Seq.|> block
-        , uiNextBlockId = state.uiNextBlockId + 1
+    in prepared
+        { uiBlocks = prepared.uiBlocks Seq.|> block
+        , uiNextBlockId = prepared.uiNextBlockId + 1
         , uiSelectedBlock = Just ident
         , uiSelectedBlockIndex = Just index
-        , uiBlockIndices = Map.insert ident index state.uiBlockIndices
+        , uiBlockIndices = Map.insert ident index prepared.uiBlockIndices
         }
 
 -- | Attach one captured wall-clock label to newly appended conversation
@@ -678,24 +953,63 @@ timestampNewMessageBlocks firstNewIndex timestamp state
 completeTool :: Int -> ToolCall -> ToolCallResult -> UiState -> UiState
 completeTool blockIndex call result state =
     let resultState = toolResultState result.output
-        diff = formatToolDiffRelative state.uiWorkspaceRoot call
+        diff =
+            formatToolDiffRelativeWithOutput
+                state.uiWorkspaceRoot
+                call
+                result.output
         body
             | resultState == BlockComplete
             , not (Text.null (Text.strip diff)) = diff
             | otherwise = result.output
-    in state
-        { uiBlocks =
-            Seq.adjust
-                (\block ->
-                    if block.blockCallId == Just result.callId
-                        then block
-                            { blockBody = body
-                            , blockState = resultState
-                            }
-                        else block)
-                blockIndex
-                state.uiBlocks
-        }
+    in case Seq.lookup blockIndex state.uiBlocks of
+        Just block
+            | Just group <-
+                Map.lookup block.blockId state.uiInspectionGroups
+            , any
+                ((== result.callId) . (.inspectionCallId))
+                group.inspectionGroupItems ->
+                    let
+                        updatedGroup =
+                            group
+                                { inspectionGroupItems =
+                                    map
+                                        (\item ->
+                                            if item.inspectionCallId
+                                                == result.callId
+                                                then item
+                                                    { inspectionBody = body
+                                                    , inspectionState =
+                                                        resultState
+                                                    }
+                                                else item)
+                                        group.inspectionGroupItems
+                                }
+                    in state
+                        { uiBlocks =
+                            Seq.adjust
+                                (renderInspectionGroup updatedGroup)
+                                blockIndex
+                                state.uiBlocks
+                        , uiInspectionGroups =
+                            Map.insert
+                                block.blockId
+                                updatedGroup
+                                state.uiInspectionGroups
+                        }
+        _ ->
+            state
+                { uiBlocks =
+                    Seq.adjust
+                        (\block ->
+                            if block.blockCallId == Just result.callId
+                                then
+                                    setBlockState resultState block
+                                        { blockBody = body }
+                                else block)
+                        blockIndex
+                        state.uiBlocks
+                }
 
 finishToolResult :: ToolCallResult -> UiState -> UiState
 finishToolResult result state =
@@ -800,8 +1114,7 @@ reconcileVisibleShellContinuation call result state =
                                                 Nothing -> state.uiBlocks
                                                 Just (blockIndex, _) ->
                                                     Seq.adjust
-                                                        (\block ->
-                                                            block { blockState })
+                                                        (setBlockState blockState)
                                                         blockIndex
                                                         state.uiBlocks
                                     in state
@@ -822,10 +1135,8 @@ retainRunningShell blockIndex sessionId output state =
                 { uiBlocks =
                     Seq.adjust
                         (\block ->
-                            block
-                                { blockBody = output
-                                , blockState = BlockRunning
-                                })
+                            setBlockState BlockRunning block
+                                { blockBody = output })
                         blockIndex
                         state.uiBlocks
                 , uiShellProcesses =
@@ -885,10 +1196,8 @@ appendShellOutput blockIndex output blockState state =
         { uiBlocks =
             Seq.adjust
                 (\block ->
-                    block
-                        { blockBody = block.blockBody <> output
-                        , blockState
-                        })
+                    setBlockState blockState block
+                        { blockBody = block.blockBody <> output })
                 blockIndex
                 state.uiBlocks
         }
@@ -896,20 +1205,54 @@ appendShellOutput blockIndex output blockState state =
 finalizeAttempt :: BlockState -> UiState -> UiState
 finalizeAttempt terminalState state =
     let
-        blocks =
+        terminalBlocks =
             Seq.mapWithIndex
                 (\index block ->
                     if index >= state.uiAttemptStartBlock
                         && block.blockState == BlockRunning
-                        then block { blockState = terminalState }
+                        then setBlockState terminalState block
                         else block)
                 state.uiBlocks
+        blocks =
+            finalizeInspectionBlocks
+                terminalState
+                state.uiBlockIndices
+                state.uiInspectionGroups
+                terminalBlocks
         processes = retainShellProcesses blocks state.uiShellProcesses
     in state
         { uiBlocks = blocks
         , uiShellProcesses = processes
         , uiShellPolls = retainShellPolls processes state.uiShellPolls
         }
+
+finalizeInspectionBlocks
+    :: BlockState
+    -> Map.Map BlockId Int
+    -> Map.Map BlockId InspectionGroup
+    -> Seq UiBlock
+    -> Seq UiBlock
+finalizeInspectionBlocks terminalState indices groups blocks =
+    Map.foldlWithKey' finalizeGroup blocks groups
+  where
+    finalizeGroup blocks blockId group =
+        case Map.lookup blockId indices of
+            Nothing -> blocks
+            Just index ->
+                let finalized =
+                        group
+                            { inspectionGroupItems =
+                                map finish group.inspectionGroupItems
+                            }
+                in Seq.adjust
+                    (renderInspectionGroup finalized)
+                    index
+                    blocks
+
+    finish item
+        | item.inspectionState `elem` [BlockRunning, BlockStreaming] =
+            item { inspectionState = terminalState }
+        | otherwise = item
 
 updateToolCall :: ToolCall -> UiState -> UiState
 updateToolCall call state =
@@ -931,11 +1274,46 @@ updateVisibleToolCall call state =
     case Map.lookup call.callId state.uiToolCalls of
         Nothing -> state
         Just (blockIndex, previous) ->
-            let title =
+            let activity =
                     toolCallTitleRelative state.uiWorkspaceRoot call
+                (title, headerDetail) =
+                    toolCallHeaderRelative state.uiWorkspaceRoot call
                 body = formatToolDiffRelative state.uiWorkspaceRoot call
+                inspectionUpdate = do
+                    block <- Seq.lookup blockIndex state.uiBlocks
+                    group <-
+                        Map.lookup block.blockId state.uiInspectionGroups
+                    guard $
+                        any
+                            ((== call.callId) . (.inspectionCallId))
+                            group.inspectionGroupItems
+                    let updatedGroup =
+                            group
+                                { inspectionGroupItems =
+                                    map updateItem group.inspectionGroupItems
+                                }
+                    pure (block.blockId, updatedGroup)
+                updateItem item
+                    | item.inspectionCallId == call.callId =
+                        item
+                            { inspectionToolName =
+                                canonicalToolName call.name
+                            , inspectionTitle = title
+                            , inspectionDetail =
+                                fromMaybe "" headerDetail
+                            , inspectionBody =
+                                if Text.null body
+                                    then item.inspectionBody
+                                    else body
+                            }
+                    | otherwise = item
                 blocks
                     | isTodoTool previous.name = state.uiBlocks
+                    | Just (_, group) <- inspectionUpdate =
+                        Seq.adjust
+                            (renderInspectionGroup group)
+                            blockIndex
+                            state.uiBlocks
                     | otherwise =
                         Seq.adjust
                             (\block ->
@@ -947,14 +1325,26 @@ updateVisibleToolCall call state =
                                             if Text.null body
                                                 then block.blockBody
                                                 else body
-                                        , blockDetail = toolCallInput call
+                                        , blockDetail =
+                                            fromMaybe
+                                                (toolCallInput call)
+                                                headerDetail
                                         }
                                     else block)
                             blockIndex
                             state.uiBlocks
+                groups =
+                    case inspectionUpdate of
+                        Just (blockId, group) ->
+                            Map.insert
+                                blockId
+                                group
+                                state.uiInspectionGroups
+                        Nothing -> state.uiInspectionGroups
             in state
                 { uiBlocks = blocks
-                , uiActivity = title
+                , uiActivity = activity
+                , uiInspectionGroups = groups
                 , uiToolCalls =
                     Map.insert
                         call.callId
@@ -998,24 +1388,79 @@ retractVisibleToolCall :: Text -> UiState -> UiState
 retractVisibleToolCall callId state =
     case Map.lookup callId state.uiToolCalls of
         Nothing ->
-            case Seq.findIndexL
-                ((== Just callId) . (.blockCallId))
-                state.uiBlocks of
-                Just blockIndex -> removeBlockAt blockIndex state
-                Nothing -> state
+            case inspectionBlockIndexForCall callId state of
+                Just blockIndex ->
+                    fromMaybe state
+                        (retractInspectionItemAt callId blockIndex state)
+                Nothing ->
+                    case Seq.findIndexL
+                        ((== Just callId) . (.blockCallId))
+                        state.uiBlocks of
+                        Just blockIndex -> removeBlockAt blockIndex state
+                        Nothing -> state
         Just (_, call)
             | isTodoTool call.name ->
                 state
                     { uiToolCalls = Map.delete callId state.uiToolCalls }
         Just (blockIndex, _) ->
-            case Seq.lookup blockIndex state.uiBlocks of
-                Just block
-                    | block.blockCallId == Just callId ->
-                        removeBlockAt blockIndex state
-                _ ->
+            case retractInspectionItemAt callId blockIndex state of
+                Just retracted -> retracted
+                Nothing ->
+                    case Seq.lookup blockIndex state.uiBlocks of
+                        Just block
+                            | block.blockCallId == Just callId ->
+                                removeBlockAt blockIndex state
+                        _ ->
+                            state
+                                { uiToolCalls =
+                                    Map.delete callId state.uiToolCalls }
+
+inspectionBlockIndexForCall :: Text -> UiState -> Maybe Int
+inspectionBlockIndexForCall callId state =
+    listToMaybe
+        [ blockIndex
+        | (blockId, group) <- Map.toList state.uiInspectionGroups
+        , any
+            ((== callId) . (.inspectionCallId))
+            group.inspectionGroupItems
+        , Just blockIndex <- [Map.lookup blockId state.uiBlockIndices]
+        ]
+
+retractInspectionItemAt :: Text -> Int -> UiState -> Maybe UiState
+retractInspectionItemAt callId blockIndex state = do
+    block <- Seq.lookup blockIndex state.uiBlocks
+    group <- Map.lookup block.blockId state.uiInspectionGroups
+    let remaining =
+            filter
+                ((/= callId) . (.inspectionCallId))
+                group.inspectionGroupItems
+    guard (length remaining < length group.inspectionGroupItems)
+    pure $
+        if null remaining
+            then
+                removeBlockAt
+                    blockIndex
                     state
                         { uiToolCalls =
-                            Map.delete callId state.uiToolCalls }
+                            Map.delete callId state.uiToolCalls
+                        }
+            else
+                let updatedGroup =
+                        group { inspectionGroupItems = remaining }
+                in state
+                    { uiBlocks =
+                        Seq.adjust
+                            (renderInspectionGroup updatedGroup)
+                            blockIndex
+                            state.uiBlocks
+                    , uiInspectionGroups =
+                        Map.insert
+                            block.blockId
+                            updatedGroup
+                            state.uiInspectionGroups
+                    , uiToolCalls =
+                        Map.delete callId state.uiToolCalls
+                    }
 
 discardResponseAttempt :: UiState -> UiState
 discardResponseAttempt state =
@@ -1034,6 +1479,11 @@ discardResponseAttempt state =
             Map.filter (< boundary) state.uiBlockIndices
         , uiToolCalls =
             Map.filter ((< boundary) . fst) state.uiToolCalls
+        , uiInspectionGroups =
+            Map.filterWithKey
+                (\blockId _ ->
+                    any ((== blockId) . (.blockId)) blocks)
+                state.uiInspectionGroups
         , uiShellProcesses = processes
         , uiShellPolls = retainShellPolls processes state.uiShellPolls
         , uiGenerating = False
@@ -1044,34 +1494,74 @@ updateToolOutput callId output state =
     case Map.lookup callId state.uiToolCalls of
         Nothing -> state
         Just (blockIndex, _) ->
-            state
-                { uiBlocks =
-                    Seq.adjust
-                        (\block ->
-                            if block.blockCallId == Just callId
-                                && block.blockState == BlockRunning
-                                then block { blockBody = output }
-                                else block)
-                        blockIndex
-                        state.uiBlocks
-                }
+            case Seq.lookup blockIndex state.uiBlocks of
+                Just block
+                    | Just group <-
+                        Map.lookup block.blockId state.uiInspectionGroups ->
+                            let updatedGroup =
+                                    group
+                                        { inspectionGroupItems =
+                                            map
+                                                (\item ->
+                                                    if item.inspectionCallId
+                                                        == callId
+                                                        && item.inspectionState
+                                                            == BlockRunning
+                                                        then item
+                                                            { inspectionBody =
+                                                                output
+                                                            }
+                                                        else item)
+                                                group.inspectionGroupItems
+                                        }
+                            in state
+                                { uiBlocks =
+                                    Seq.adjust
+                                        (renderInspectionGroup updatedGroup)
+                                        blockIndex
+                                        state.uiBlocks
+                                , uiInspectionGroups =
+                                    Map.insert
+                                        block.blockId
+                                        updatedGroup
+                                        state.uiInspectionGroups
+                                }
+                _ ->
+                    state
+                        { uiBlocks =
+                            Seq.adjust
+                                (\block ->
+                                    if block.blockCallId == Just callId
+                                        && block.blockState == BlockRunning
+                                        then block { blockBody = output }
+                                        else block)
+                                blockIndex
+                                state.uiBlocks
+                        }
 
 finalizeTurn :: BlockState -> UiState -> UiState
 finalizeTurn terminalState state =
     let
         generationMillis = state.uiGenerationLastDeltaMillis
         shellOwners = Map.elems state.uiShellProcesses
-    in state
-        { uiBlocks =
+        terminalBlocks =
             Seq.mapWithIndex
                 (\index block ->
                     if (index >= state.uiTurnStartBlock
                             || block.blockId `elem` shellOwners)
                         && block.blockState
                             `elem` [BlockStreaming, BlockRunning]
-                        then block { blockState = terminalState }
+                        then setBlockState terminalState block
                         else block)
                 state.uiBlocks
+        blocks =
+            finalizeInspectionBlocks
+                terminalState
+                state.uiBlockIndices
+                state.uiInspectionGroups
+                terminalBlocks
+    in state
+        { uiBlocks = blocks
         , uiRunning = False
         , uiGenerating = False
         , uiGenerationMillis = generationMillis
@@ -1094,8 +1584,24 @@ finalizeTurn terminalState state =
                 | notice.noticeKind == NoticeProgress -> 0
             _ -> state.uiNoticeElapsedMillis
         , uiToolCalls = Map.empty
+        , uiInspectionGroups = Map.empty
         , uiShellProcesses = Map.empty
         , uiShellPolls = Map.empty
+        }
+
+-- Shell commands start open while output is live, then compact to a one-line
+-- summary. Preserve any manual folding while they are still running; a user
+-- can also expand the completed block again with the normal block toggle.
+setBlockState :: BlockState -> UiBlock -> UiBlock
+setBlockState blockState block =
+    block
+        { blockState
+        , blockExpanded =
+            if block.blockKind == BlockShell
+                && block.blockState `elem` [BlockStreaming, BlockRunning]
+                && blockState `notElem` [BlockStreaming, BlockRunning]
+                then False
+                else block.blockExpanded
         }
 
 infoNotice, successNotice, warningNotice, progressNotice, errorNotice
@@ -1124,7 +1630,7 @@ finalizeStreams state =
             fmap
                 (\block ->
                     if block.blockState == BlockStreaming
-                        then block { blockState = BlockComplete }
+                        then setBlockState BlockComplete block
                         else block)
                 state.uiBlocks
         }

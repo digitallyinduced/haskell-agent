@@ -32,6 +32,7 @@ import Agent.CLI.Notification
     , notifyAttention
     )
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
+import Agent.CLI.Render (renderAssistantTextForHandle)
 import Agent.CLI.Style
     ( agentBackground
     , glyphWarn
@@ -144,7 +145,9 @@ decideExit provider interrupt resolveColor planBody = do
     isTty <- hIsTerminalDevice stdin
     putTextLn stderr ""
     putTextLn stderr (roleMuted color "── plan ──")
-    Text.hPutStrLn stderr (renderPlanMarkdown color planBody)
+    renderedPlan <-
+        renderAssistantTextForHandle stderr color planBody
+    Text.hPutStrLn stderr renderedPlan
     hFlush stderr
     putTextLn stderr (roleMuted color "──────────")
     if not isTty

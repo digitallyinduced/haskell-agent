@@ -24,19 +24,21 @@ import Agent.CLI.Command
 import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.CLI.Compaction ()
 import Agent.CLI.Config ()
-import Agent.CLI.Connectivity ()
+import Agent.Connectivity ()
 import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ()
+import Agent.CLI.Dictation
+    ( dictationTargetForSession )
 import Agent.CLI.GatewayClient
     ( cachedGatewayModels
     , gatewayModelIds
     )
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input
-    ( readReplLineWithCatalog
-    , readReplLineWithCatalogForProvider
+    ( readReplLineWithCatalogForProvider
+    , readReplLineWithCatalogForTarget
     )
 import Agent.CLI.Interrupt ()
 import Agent.CLI.LearnedSkills ()
@@ -393,8 +395,11 @@ replWithDraft env@SessionEnv
                             then Text.pack clearFromCursorToLineEndCode
                             else mempty
             result <- case gatewayAccess of
-                Just _ ->
-                    readReplLineWithCatalog
+                Just gateway ->
+                    readReplLineWithCatalogForTarget
+                        (dictationTargetForSession
+                            env.sessionProvider
+                            (Just gateway))
                         slashCatalog
                         interrupt chromePrompt draft
                 Nothing ->

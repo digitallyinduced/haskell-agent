@@ -120,6 +120,17 @@
                     ];
                 };
 
+                agentConnectivitySource = nix-filter.lib {
+                    root = ./packages/agent-connectivity;
+                    include = [
+                        "cbits"
+                        "src"
+                        "test"
+                        "agent-connectivity.cabal"
+                        "LICENSE"
+                    ];
+                };
+
                 agentRuntimeDaemonSource = nix-filter.lib {
                     root = ./packages/agent-runtime-daemon;
                     include = [
@@ -508,6 +519,14 @@
                             {
                                 src = agentProcessSource;
                             });
+                        agent-connectivity = localPackage
+                            (pkgs.haskell.lib.overrideSrc
+                                (final.callPackage
+                                    ./packages/agent-connectivity/package.nix
+                                    { })
+                                {
+                                    src = agentConnectivitySource;
+                                });
                         agent-runtime-daemon = localPackage
                             (pkgs.haskell.lib.overrideSrc
                                 (final.callPackage
@@ -657,6 +676,8 @@
                 agentMailPackage = productionHaskellPackages.agent-mail;
                 agentJsonPackage = productionHaskellPackages.agent-json;
                 agentProcessPackage = productionHaskellPackages.agent-process;
+                agentConnectivityPackage =
+                    productionHaskellPackages.agent-connectivity;
                 agentRuntimeDaemonPackage =
                     productionHaskellPackages.agent-runtime-daemon;
                 agentCodexDialectPackage = productionHaskellPackages.agent-codex-dialect;
@@ -958,6 +979,7 @@
                 packages.agent-mail = agentMailPackage;
                 packages.agent-json = agentJsonPackage;
                 packages.agent-process = agentProcessPackage;
+                packages.agent-connectivity = agentConnectivityPackage;
                 packages.agent-runtime-daemon = agentRuntimeDaemonExecutable;
                 packages.agent-codex-dialect = agentCodexDialectPackage;
                 packages.agent-grok-build-dialect = agentGrokBuildDialectPackage;
@@ -1002,6 +1024,7 @@
                         packages.agent-mail
                         packages.agent-json
                         packages.agent-process
+                        packages.agent-connectivity
                         packages.agent-runtime-daemon
                         packages.agent-codex-dialect
                         packages.agent-grok-build-dialect
@@ -1060,6 +1083,7 @@
                     agent-mail = haskellPackages.agent-mail;
                     agent-json = haskellPackages.agent-json;
                     agent-process = haskellPackages.agent-process;
+                    agent-connectivity = haskellPackages.agent-connectivity;
                     agent-runtime-daemon =
                         haskellPackages.agent-runtime-daemon;
                     agent-codex-dialect = haskellPackages.agent-codex-dialect;

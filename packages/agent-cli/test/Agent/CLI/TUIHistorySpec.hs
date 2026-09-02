@@ -669,6 +669,7 @@ block identifier =
         , blockState = BlockComplete
         , blockExpanded = False
         , blockCallId = Nothing
+        , blockInspectionGroupable = False
         }
 
 isRight :: Either a b -> Bool

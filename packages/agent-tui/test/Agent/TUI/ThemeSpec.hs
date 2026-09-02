@@ -27,6 +27,7 @@ spec = do
                 , Theme.selectedAttr
                 , Theme.selectedMutedAttr
                 , Theme.todoPendingAttr
+                , Theme.toolPathAttr
                 ]
                 `shouldBe`
                     [ V.SetTo V.brightBlack
@@ -40,9 +41,43 @@ spec = do
                     , V.SetTo V.brightWhite
                     , V.SetTo V.white
                     , V.Default
+                    , V.SetTo V.brightYellow
                     ]
 
     describe "syntax theme attributes" do
+        it "uses quiet semantic depth in the default Midnight theme" do
+            let theme = Theme.themeAttrMap Theme.Midnight
+                base = attrMapLookup Theme.baseAttr theme
+                user = attrMapLookup Theme.userAttr theme
+                selected = attrMapLookup Theme.selectedAttr theme
+                assistant = attrMapLookup Theme.assistantAttr theme
+                header = attrMapLookup Theme.headerAttr theme
+                muted = attrMapLookup Theme.mutedAttr theme
+                border = attrMapLookup Theme.borderAttr theme
+                activeBorder = attrMapLookup Theme.borderActiveAttr theme
+            V.attrBackColor base `shouldBe` V.SetTo (RGBColor 20 20 20)
+            V.attrBackColor user `shouldBe` V.SetTo (RGBColor 36 36 36)
+            V.attrBackColor selected `shouldBe` V.SetTo (RGBColor 44 44 44)
+            V.attrForeColor assistant
+                `shouldBe` V.SetTo (RGBColor 200 200 200)
+            V.attrForeColor header
+                `shouldBe` V.SetTo (RGBColor 225 225 225)
+            V.attrForeColor muted
+                `shouldBe` V.SetTo (RGBColor 108 108 108)
+            V.attrForeColor border
+                `shouldBe` V.SetTo (RGBColor 50 50 55)
+            V.attrForeColor activeBorder
+                `shouldBe` V.SetTo (RGBColor 60 60 65)
+
+        it "gives fixed-theme hover attributes explicit surfaces" do
+            let theme = Theme.themeAttrMap Theme.Midnight
+                hover = attrMapLookup Theme.transcriptHoverAttr theme
+                hoverMuted =
+                    attrMapLookup Theme.transcriptHoverMutedAttr theme
+            V.attrBackColor hover `shouldBe` V.SetTo (RGBColor 44 44 44)
+            V.attrBackColor hoverMuted
+                `shouldBe` V.SetTo (RGBColor 44 44 44)
+
         it "keeps the daylight page background while dimming overlays" do
             V.attrBackColor
                 (attrMapLookup Theme.dimAttr (Theme.themeAttrMap Theme.Daylight))
@@ -60,6 +95,61 @@ spec = do
                     (Theme.themeAttrMap Theme.Daylight))
                 `shouldBe` V.SetTo (RGBColor 255 255 255)
 
+        it "uses the readable daylight accent for tool paths" do
+            V.attrForeColor
+                (attrMapLookup
+                    Theme.toolPathAttr
+                    (Theme.themeAttrMap Theme.Daylight))
+                `shouldBe` V.SetTo (RGBColor 144 80 150)
+
+        it "uses the link color for recognized slash commands" do
+            let terminal =
+                    attrMapLookup Theme.slashCommandAttr Theme.terminalDefault
+                midnight =
+                    attrMapLookup
+                        Theme.slashCommandAttr
+                        (Theme.themeAttrMap Theme.Midnight)
+                noColor =
+                    attrMapLookup Theme.slashCommandAttr Theme.monochrome
+            V.attrForeColor terminal `shouldBe` V.SetTo V.blue
+            V.attrForeColor midnight
+                `shouldBe` V.SetTo (RGBColor 122 162 247)
+            V.attrBackColor midnight
+                `shouldBe`
+                    V.attrBackColor
+                        (attrMapLookup
+                            Theme.baseAttr
+                            (Theme.themeAttrMap Theme.Midnight))
+            V.attrStyle noColor `shouldBe` V.SetTo V.bold
+
+        it "sets backgrounds on force-painted attributes in every fixed theme" do
+            mapM_
+                ( \kind ->
+                    map
+                        ( \name ->
+                            V.attrBackColor
+                                (attrMapLookup
+                                    name
+                                    (Theme.themeAttrMap kind))
+                        )
+                        forcePaintedAttributes
+                        `shouldSatisfy` all (/= V.Default)
+                )
+                [ Theme.Midnight
+                , Theme.Daylight
+                , Theme.TokyoNight
+                , Theme.RosePineMoon
+                , Theme.OscuraMidnight
+                ]
+
+        it "uses distinct semantic surfaces for fixed-theme diff rows" do
+            let theme = Theme.themeAttrMap Theme.Daylight
+                added = attrMapLookup Theme.diffAddedAttr theme
+                removed = attrMapLookup Theme.diffRemovedAttr theme
+            V.attrBackColor added `shouldNotBe` V.Default
+            V.attrBackColor removed `shouldNotBe` V.Default
+            V.attrBackColor added `shouldNotBe` V.attrBackColor removed
+
         it "sets a daylight background on semantic text attributes" do
             map
                 ( V.attrBackColor
@@ -73,8 +163,11 @@ spec = do
                 , Theme.footerAttr
                 , Theme.mutedAttr
                 , Theme.assistantAttr
+                , Theme.slashCommandAttr
                 , Theme.thinkingAttr
                 , Theme.toolAttr
+                , Theme.inspectAttr
+                , Theme.toolPathAttr
                 , Theme.errorAttr
                 , Theme.successAttr
                 , Theme.codeAttr
@@ -91,6 +184,30 @@ spec = do
                 )
                 allSyntaxClasses
                 `shouldBe` replicate (length allSyntaxClasses) V.Default
+
+        it "uses distinct full-row backgrounds for added and removed lines" do
+            let added =
+                    attrMapLookup Theme.diffAddedAttr Theme.terminalDefault
+                removed =
+                    attrMapLookup Theme.diffRemovedAttr Theme.terminalDefault
+            V.attrBackColor added `shouldBe` V.SetTo (Color240 22)
+            V.attrBackColor removed `shouldBe` V.SetTo (Color240 52)
+            V.attrForeColor added `shouldBe` V.SetTo V.brightGreen
+            V.attrForeColor removed `shouldBe` V.SetTo V.brightRed
+
+        it "tints diff bands against the selected fixed-theme background" do
+            let theme = Theme.themeAttrMap Theme.Daylight
+                page =
+                    V.attrBackColor (attrMapLookup Theme.baseAttr theme)
+                added =
+                    V.attrBackColor
+                        (attrMapLookup Theme.diffAddedAttr theme)
+                removed =
+                    V.attrBackColor
+                        (attrMapLookup Theme.diffRemovedAttr theme)
+            added `shouldNotBe` page
+            removed `shouldNotBe` page
+            added `shouldNotBe` removed
 
         it "uses a readable neutral panel for selections" do
             let selected =
@@ -111,6 +228,25 @@ spec = do
             V.attrForeColor active `shouldBe` V.SetTo V.brightBlack
             V.attrStyle border `shouldBe` V.SetTo V.dim
             V.attrStyle active `shouldBe` V.Default
+
+        it "styles inspection summaries as bold muted text" do
+            let terminalInspection =
+                    attrMapLookup Theme.inspectAttr Theme.terminalDefault
+                terminalMuted =
+                    attrMapLookup Theme.mutedAttr Theme.terminalDefault
+                daylight = Theme.themeAttrMap Theme.Daylight
+                daylightInspection =
+                    attrMapLookup Theme.inspectAttr daylight
+                daylightMuted =
+                    attrMapLookup Theme.mutedAttr daylight
+            V.attrForeColor terminalInspection
+                `shouldBe` V.attrForeColor terminalMuted
+            V.attrStyle terminalInspection `shouldBe` V.SetTo V.bold
+            V.attrForeColor daylightInspection
+                `shouldBe` V.attrForeColor daylightMuted
+            V.attrBackColor daylightInspection
+                `shouldBe` V.attrBackColor daylightMuted
+            V.attrStyle daylightInspection `shouldBe` V.SetTo V.bold
 
         it "gives user messages a palette gray panel distinct from assistant messages" do
             let user = attrMapLookup Theme.userAttr Theme.terminalDefault
@@ -170,6 +306,15 @@ spec = do
                 ]
                 `shouldBe` replicate 5 (V.Default, V.Default)
 
+        it "does not paint diff bands in monochrome mode" do
+            map
+                ( \name ->
+                    let attr = attrMapLookup name Theme.monochrome
+                    in (V.attrForeColor attr, V.attrBackColor attr)
+                )
+                [Theme.diffAddedAttr, Theme.diffRemovedAttr]
+                `shouldBe` replicate 2 (V.Default, V.Default)
+
         it "retains reverse video for muted monochrome hover text" do
             let theme = Theme.monochrome
                 hover =
@@ -195,6 +340,8 @@ spec = do
             Theme.wavePeakForTheme Theme.Daylight Theme.toolAttr
                 `shouldBe` RGBColor 144 80 150
             Theme.wavePeakForTheme Theme.Daylight Theme.thinkingAttr
+                `shouldBe` RGBColor 110 105 100
+            Theme.wavePeakForTheme Theme.Daylight Theme.inspectAttr
                 `shouldBe` RGBColor 110 105 100
             V.attrBackColor
                 (Theme.waitingPulseAttrForTheme
@@ -225,6 +372,8 @@ spec = do
             Theme.runningWavePeak `shouldBe` RGBColor 187 154 247
             Theme.waveTrough `shouldBe` RGBColor 36 40 59
             Theme.wavePeakFor Theme.thinkingAttr
+                `shouldBe` Theme.thinkingWavePeak
+            Theme.wavePeakFor Theme.inspectAttr
                 `shouldBe` Theme.thinkingWavePeak
             Theme.wavePeakFor Theme.toolAttr
                 `shouldBe` Theme.runningWavePeak
@@ -269,3 +418,17 @@ isRgbForeground = \case
 
 allSyntaxClasses :: [SyntaxClass]
 allSyntaxClasses = [minBound .. maxBound]
+
+forcePaintedAttributes :: [AttrName]
+forcePaintedAttributes =
+    [ Theme.dimAttr
+    , Theme.mutedAttr
+    , Theme.selectedAttr
+    , Theme.transcriptHoverAttr
+    , Theme.transcriptHoverMutedAttr
+    , Theme.transcriptHoverMutedItalicAttr
+    , Theme.transcriptHoverMutedCancelledAttr
+    , Theme.controlLinkAttr
+    , Theme.controlLinkHoverAttr
+    , Theme.controlLinkActiveAttr
+    ]

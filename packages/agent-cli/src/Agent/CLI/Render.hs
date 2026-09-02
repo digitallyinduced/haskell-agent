@@ -39,11 +39,13 @@ module Agent.CLI.Render
     , formatTurnStatus
     , putTextLn
     , renderAssistantText
+    , renderAssistantTextForHandle
     , renderEvent
     , renderPrintedText
     , resetRenderPrintedText
     , setRenderActivity
     , streamMarkdown
+    , streamMarkdownAtWidth
     , summarizeToolCall
     , summarizeToolCallRelative
     , thinkingMaxWidth
@@ -53,12 +55,15 @@ module Agent.CLI.Render
 
 import Agent.CLI.Markdown
     ( renderMarkdown
+    , renderMarkdownAtWidth
     )
 import Agent.CLI.Render.MarkdownStream
     ( MarkdownStreamState
     , emptyMarkdownStreamState
     , feedMarkdownStream
+    , feedMarkdownStreamAtWidth
     , flushMarkdownStream
+    , flushMarkdownStreamAtWidth
     )
 import Agent.CLI.Render.Status
     ( formatActivityLine
@@ -92,6 +97,7 @@ import Agent.CLI.Style
     , paintBackgroundLines
     , osc8Link
     , roleError
+    , roleInspectName
     , roleMuted
     , roleToolArrow
     , roleToolCommand
@@ -161,8 +167,9 @@ import Agent.TUI.Motion
     , motionIntervalMicros
     , nativeProgressAnimationEnabled
     )
+import System.Console.ANSI (hGetTerminalSize)
 import System.Environment (lookupEnv)
-import System.IO (Handle, hFlush)
+import System.IO (Handle, hFlush, hIsTerminalDevice)
 
 summarizeToolCall :: ToolCall -> Text
 summarizeToolCall call =
@@ -339,6 +346,17 @@ streamMarkdown :: Text -> RenderState -> (RenderState, Text)
 streamMarkdown input state =
     let (markdown', output) =
             feedMarkdownStream state.stateMarkdownState input
+    in (state{stateMarkdownState = markdown'}, output)
+
+streamMarkdownAtWidth
+    :: Int
+    -> Text
+    -> RenderState
+    -> (RenderState, Text)
+streamMarkdownAtWidth width input state =
+    let (markdown', output) =
+            feedMarkdownStreamAtWidth
+                width state.stateMarkdownState input
     in (state{stateMarkdownState = markdown'}, output)
 
 renderEvent :: RenderConfig -> LoopEvent -> IO ()
@@ -550,6 +568,19 @@ renderAssistantText :: Bool -> Text -> Text
 renderAssistantText color text =
     paintBackgroundLines color agentBackground (renderMarkdown color text)
 
+renderAssistantTextAtWidth :: Bool -> Int -> Text -> Text
+renderAssistantTextAtWidth color width text =
+    paintBackgroundLines color agentBackground
+        (renderMarkdownAtWidth color width text)
+
+renderAssistantTextForHandle :: Handle -> Bool -> Text -> IO Text
+renderAssistantTextForHandle handle color text = do
+    availableWidth <- terminalColumns handle
+    pure $
+        case availableWidth of
+            Nothing -> renderAssistantText color text
+            Just width -> renderAssistantTextAtWidth color width text
+
 -- | Stream assistant text append-only. Ordinary prose is emitted as soon as
 -- incomplete inline constructs permit, while line prefixes that may introduce
 -- blocks are held until they can be classified. Fences and tables are buffered
@@ -564,8 +595,16 @@ streamAssistantDelta config delta
     | Text.null delta = pure ()
     | otherwise = do
         let safe = Text.filter (/= '\ESC') delta
+        availableWidth <-
+            if Text.any (== '\n') safe
+                then terminalColumns config.renderStdout
+                else pure Nothing
+        let transition =
+                case availableWidth of
+                    Nothing -> streamMarkdown safe
+                    Just width -> streamMarkdownAtWidth width safe
         ready <-
-            modifyRenderState config (streamMarkdown safe)
+            modifyRenderState config transition
         unless (Text.null ready) do
             modifyRenderState config \state ->
                 (state{statePrintedText = True, stateLiveActive = True}, ())
@@ -581,13 +620,19 @@ streamAssistantDelta config delta
 -- Returns whether anything was written.
 finalizeAssistantBuffer :: RenderConfig -> Maybe Text -> IO Bool
 finalizeAssistantBuffer config assistantText = do
+    availableWidth <- terminalColumns config.renderStdout
     (pendingOutput, live) <-
         modifyRenderState config \state ->
             ( state
                 { stateMarkdownState = emptyMarkdownStreamState
                 , stateLiveActive = False
                 }
-            , ( flushMarkdownStream state.stateMarkdownState
+            , ( case availableWidth of
+                    Nothing ->
+                        flushMarkdownStream state.stateMarkdownState
+                    Just width ->
+                        flushMarkdownStreamAtWidth
+                            width state.stateMarkdownState
               , state.stateLiveActive
               )
             )
@@ -613,11 +658,21 @@ finalizeAssistantBuffer config assistantText = do
                         (state{statePrintedText = True}, ())
                     Text.hPutStr config.renderStdout $
                         if Text.null pendingOutput
-                            then renderAssistantText True raw
+                            then case availableWidth of
+                                Nothing -> renderAssistantText True raw
+                                Just width ->
+                                    renderAssistantTextAtWidth True width raw
                             else paintBackgroundLines
                                 True agentBackground pendingOutput
                     hFlush config.renderStdout
                     pure True
+
+terminalColumns :: Handle -> IO (Maybe Int)
+terminalColumns handle = do
+    isTerminal <- hIsTerminalDevice handle
+    if isTerminal
+        then fmap (max 1 . snd) <$> hGetTerminalSize handle
+        else pure Nothing
 
 -- | Clear a leftover thinking status line. Safe to call when none is visible.
 -- Commits a streamed reasoning block first so cancel/error still leave the
@@ -790,8 +845,9 @@ formatToolStarted color = formatToolStartedRelative color ""
 
 formatToolStartedRelative :: Bool -> Text -> ToolCall -> Text
 formatToolStartedRelative color workspace call =
-    let marker
-            | isInspectionTool call.name = glyphInspect
+    let inspection = isInspectionTool call.name
+        marker
+            | inspection = glyphInspect
             | otherwise = glyphTool
         arrow = roleToolArrow color marker
         detail = toolDetail call
@@ -804,7 +860,9 @@ formatToolStartedRelative color workspace call =
                         else roleToolCommand color detail
             in arrow <> prompt <> command
         ToolChrome verb kind ->
-            let name = roleToolName color verb
+            let name
+                    | inspection = roleInspectName color verb
+                    | otherwise = roleToolName color verb
                 paintedDetail = case kind of
                     ToolDetailNone -> ""
                     ToolDetailMuted
@@ -813,9 +871,13 @@ formatToolStartedRelative color workspace call =
                     ToolDetailPath
                         | Text.null detail -> ""
                         | otherwise ->
-                            " " <> renderToolPath color workspace detail
+                            " "
+                                <> if inspection
+                                    then renderInspectionPath color workspace detail
+                                    else renderToolPath color workspace detail
                     ToolDetailCommand
                         | Text.null detail -> ""
+                        | inspection -> " " <> roleToolDetail color detail
                         | otherwise -> " " <> roleToolCommand color detail
             in arrow <> name <> paintedDetail
 
@@ -924,12 +986,18 @@ paintDiffRelative color workspace diff =
                     <> renderToolPath color workspace destination
             Nothing -> ""
         shown = map paintLine diffLines
+        unmarkedHidden =
+            max 0
+                (diffHiddenLines - sum
+                    [ rows
+                    | SearchReplaceOmitted rows _ _ <- diffLines
+                    ])
         more =
-            if diffHiddenLines == 0
+            if unmarkedHidden == 0
                 then []
                 else
                     [ roleMuted color
-                        ("  … " <> Text.pack (show diffHiddenLines) <> " more")
+                        ("  … " <> Text.pack (show unmarkedHidden) <> " more")
                     ]
         body = shown <> more
     in Text.intercalate "\n" (filter (not . Text.null) (header : body))
@@ -939,11 +1007,24 @@ paintDiffRelative color workspace diff =
             style color [terminalRed] ("  -" <> line)
         SearchReplaceAdded line ->
             style color [terminalGreen] ("  +" <> line)
+        SearchReplaceContext line ->
+            roleMuted color ("   " <> line)
+        SearchReplaceOmitted rows _ _ ->
+            roleMuted color
+                ("  … " <> Text.pack (show rows) <> " omitted")
 
 renderToolPath :: Bool -> Text -> Text -> Text
-renderToolPath color workspace path =
+renderToolPath color =
+    renderToolPathWith (roleToolPath color) color
+
+renderInspectionPath :: Bool -> Text -> Text -> Text
+renderInspectionPath color =
+    renderToolPathWith (roleToolDetail color) color
+
+renderToolPathWith :: (Text -> Text) -> Bool -> Text -> Text -> Text
+renderToolPathWith paint color workspace path =
     let displayed = workspaceRelativeDisplayPath workspace path
-        styled = roleToolPath color displayed
+        styled = paint displayed
         absolute = absoluteToolPath workspace path
     in if "/" `Text.isPrefixOf` absolute
         then osc8Link color (fileUri (Text.unpack absolute)) styled

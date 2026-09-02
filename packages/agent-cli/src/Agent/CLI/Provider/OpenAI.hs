@@ -11,7 +11,8 @@ import Agent.CLI.Compaction
     , OpenAiCompactionSender
     , autoCompactOpenAiBackendWithSenderAndHook
     )
-import Agent.CLI.Connectivity (withConnectionRecovery)
+import Agent.Connectivity (withConnectionRecoveryOn)
+import Agent.Connectivity.NetworkPath (NetworkRecovery)
 import Agent.Loop
     ( Backend(..)
     , TokenUsage
@@ -58,7 +59,8 @@ data OpenAiPersistentConnection
 -- its continuation because the active WebSocket is not multiplexed and
 -- transcript mutation must not interleave between those two requests.
 lockedOpenAiSession
-    :: Bool
+    :: Maybe NetworkRecovery
+    -> Bool
     -- ^ When true, every model and compaction request must remain on the
     -- gateway WebSocket; direct provider HTTP fallback is forbidden.
     -> Maybe Int
@@ -72,8 +74,9 @@ lockedOpenAiSession
     -> (TokenUsage -> IO ())
     -> (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
     -> (OpenAiCompactionSender, Backend)
-lockedOpenAiSession gatewayOnly compactThreshold showRawReasoning wsLock fallbackActive
-        provider activeConnection getParams contextTokens
+lockedOpenAiSession networkRecovery gatewayOnly compactThreshold
+        showRawReasoning wsLock fallbackActive provider activeConnection
+        getParams contextTokens
         recordCompactionUsage onCompacted =
     let sendResponse request previousResponseId onEvent = do
             OpenAiPersistentConnection
@@ -129,7 +132,7 @@ lockedOpenAiSession gatewayOnly compactThreshold showRawReasoning wsLock fallbac
                 (\request _onEvent -> sendHttp request)
                 getParams
         baseBackend =
-            withConnectionRecovery $
+            withConnectionRecoveryOn networkRecovery $
                 if gatewayOnly
                     then websocketBackend
                     else

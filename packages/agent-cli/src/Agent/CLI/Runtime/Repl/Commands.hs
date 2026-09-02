@@ -62,7 +62,7 @@ import Agent.CLI.Transcript
     , foldTranscriptTurns
     )
 import qualified Agent.CLI.Transcript as Transcript
-import Agent.CLI.Connectivity ()
+import Agent.Connectivity ()
 import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Desktop ( openDesktopConversation )

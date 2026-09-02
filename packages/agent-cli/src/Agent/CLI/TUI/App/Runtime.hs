@@ -7,10 +7,10 @@ import Agent.CLI.TUI.App.Mailbox
     , enqueueAppEvent
     )
 
-import Agent.Provider (Provider)
 import Agent.CLI.Clipboard ( formatImageSize )
 import Agent.CLI.Dictation ( DictationControl(..)
     , DictationResult(..)
+    , DictationTarget
     , dictateWith
     , insertDictation
     )
@@ -78,7 +78,6 @@ import Agent.CLI.Terminal ( TerminalCapabilities(..)
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     , kittySuperCsiBodies
-    , kittySuperVCsiBodies
     , shiftEnterCsiBodies
     )
 import qualified Agent.TUI.Theme as Theme
@@ -315,7 +314,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
         themeRef <- newIORef theme
         windowTitle <- newIORef Nothing
         sessionActions <- newIORef FullscreenSessionActions
-            { sessionProvider = Nothing
+            { sessionDictationTarget = Nothing
             , sessionCancel = cancelAction
             , sessionSteer = \_ _ -> pure (Right ())
             , sessionBtw = const (pure ())
@@ -383,7 +382,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
 
 setFullscreenSessionActions
     :: FullscreenRuntime
-    -> Maybe Provider
+    -> Maybe DictationTarget
     -> IO ()
     -> (Bool -> Text -> IO (Either Text ()))
     -> (Text -> IO ())
@@ -395,7 +394,7 @@ setFullscreenSessionActions
     -> IO ()
 setFullscreenSessionActions
     runtime
-    provider
+    dictationTarget
     cancelAction
     steerAction
     btwAction
@@ -405,7 +404,7 @@ setFullscreenSessionActions
     agentSnapshot
     agentSelect =
         writeIORef runtime.runtimeSessionActions FullscreenSessionActions
-            { sessionProvider = provider
+            { sessionDictationTarget = dictationTarget
             , sessionCancel = cancelAction
             , sessionSteer = steerAction
             , sessionBtw = btwAction
@@ -834,17 +833,19 @@ fullscreenVtyConfig =
                | character <- ['a'..'z']
                , body <- kittyCtrlCsiBodies character
                ]
+            -- The Kitty disambiguation mode reports every Command-modified
+            -- printable key as CSI-u, not only shortcuts we handle. Vty
+            -- otherwise emits an unknown sequence's body as literal text
+            -- (for example Cmd+ß appeared as "[223;9u"). Decode the
+            -- characters available on ASCII and Latin-1 keyboard layouts;
+            -- Composer will act on supported shortcuts and ignore the rest.
             <> [ ( Nothing
                  , "\ESC[" <> body
-                 , V.EvKey (V.KChar 'v') [V.MMeta]
+                 , V.EvKey (V.KChar character) [V.MMeta]
                  )
-               | body <- kittySuperVCsiBodies
-               ]
-            <> [ ( Nothing
-                 , "\ESC[" <> body
-                 , V.EvKey (V.KChar 'k') [V.MMeta]
-                 )
-               | body <- kittySuperCsiBodies 'k'
+               | character <-
+                    [' '..'~'] <> ['\x00a0'..'\x00ff']
+               , body <- kittySuperCsiBodies character
                ]
             <> [ ( Nothing
                  , "\ESC[" <> body

@@ -38,6 +38,15 @@ spec = describe "syntax highlighting" do
             map resolveFenceLanguage ["text", "txt", "plain", "plaintext"]
                 `shouldBe` replicate 4 Nothing
 
+    describe "file path language resolution" do
+        it "uses the complete path when filenames contain whitespace" do
+            resolvePathLanguage "Main module.hs"
+                `shouldBe` Just "haskell"
+            resolvePathLanguage "src/my module.py"
+                `shouldBe` Just "python"
+            resolvePathLanguage "web\\typed module.ts"
+                `shouldBe` Just "typescript"
+
     it "loads the packaged grammar set and highlights representative languages" do
         highlighter <- requireHighlighter
         mapM_
