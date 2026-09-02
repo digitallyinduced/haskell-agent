@@ -119,12 +119,12 @@ import Agent.CLI.Auth
     , openaiAuthStateFromJson
     , xaiOAuthClientId
     )
+import qualified Agent.CLI.GatewayBoundary as GatewayBoundary
 import Agent.CLI.GatewayClient
     ( GatewayCredential(..)
     , GatewayDeviceAuthorization(..)
     , GatewayPollResult(..)
     , exchangeNativeGatewayAuthorizationCodeWith
-    , gatewayCredentialIdentity
     , loadGatewayCredential
     , pollNativeGatewayAuthorizationAndSaveWith
     , removeGatewayCredentialWith
@@ -2833,18 +2833,17 @@ ha_session_fork sessionBytes (CSize sessionLength) throughIndex callback context
             Right (Right sessionId) -> do
                 _ <- forkIO do
                     result <- tryAny $ withNativeSessionStore \pool root ->
-                        withGatewayCredentialLease $
-                            withNativeSessionBoundary
-                                pool root sessionId \gatewayIdentity _ ->
-                                    forkSessionAtTurn
-                                        pool root sessionId throughIndex >>= \case
-                                            Left err -> pure (Left err)
-                                            Right forkedSessionId ->
-                                                pure
-                                                    (Right
-                                                        ( gatewayIdentity
-                                                        , forkedSessionId
-                                                        ))
+                        withNativeSessionBoundary
+                            pool root sessionId \gatewayIdentity _ ->
+                                forkSessionAtTurn
+                                    pool root sessionId throughIndex >>= \case
+                                        Left err -> pure (Left err)
+                                        Right forkedSessionId ->
+                                            pure
+                                                (Right
+                                                    ( gatewayIdentity
+                                                    , forkedSessionId
+                                                    ))
                     completeBoundarySessionResult callback context result
                 pure 0
 
@@ -2927,33 +2926,32 @@ ha_session_import bytes (CSize length) callback context
                                 let meta =
                                         envelope.transferSession.transferMeta
                                 withNativeSessionStore \pool root ->
-                                    withGatewayCredentialLease $
-                                        withNativeGatewayBoundary
-                                            \gatewayIdentity ->
-                                                case
-                                                    validateResumedGatewayBoundary
-                                                        gatewayIdentity
-                                                        meta.metaConnection
-                                                        meta.metaGatewayIdentity
-                                                of
-                                                    Left err -> pure (Left err)
-                                                    Right () ->
-                                                        importSessionTransferRemapped
-                                                            pool
-                                                            root
-                                                            Nothing
-                                                            envelope >>= \case
-                                                                Left err ->
+                                    withNativeGatewayBoundary
+                                        \gatewayIdentity ->
+                                            case
+                                                validateResumedGatewayBoundary
+                                                    gatewayIdentity
+                                                    meta.metaConnection
+                                                    meta.metaGatewayIdentity
+                                            of
+                                                Left err -> pure (Left err)
+                                                Right () ->
+                                                    importSessionTransferRemapped
+                                                        pool
+                                                        root
+                                                        Nothing
+                                                        envelope >>= \case
+                                                            Left err ->
+                                                                pure
+                                                                    (Left
+                                                                        err)
+                                                            Right
+                                                                importedSessionId ->
                                                                     pure
-                                                                        (Left
-                                                                            err)
-                                                                Right
-                                                                    importedSessionId ->
-                                                                        pure
-                                                                            (Right
-                                                                                ( gatewayIdentity
-                                                                                , importedSessionId
-                                                                                ))
+                                                                        (Right
+                                                                            ( gatewayIdentity
+                                                                            , importedSessionId
+                                                                            ))
             completeBoundarySessionResult callback context result
         pure 0
 
@@ -2969,17 +2967,13 @@ withNativeSessionStore action = do
             bracket (pure opened) closeStore \store ->
                 action (trustedPool store) (sessionsRoot home)
 
-loadNativeGatewaySnapshot
-    :: IO (Either Text (Maybe GatewayCredential))
-loadNativeGatewaySnapshot =
-    loadGatewayCredential >>= \case
-        Left err ->
-            pure (Left ("Could not load gateway credentials: " <> err))
-        Right credential -> pure (Right credential)
-
 loadNativeGatewayIdentity :: IO (Either Text (Maybe Text))
 loadNativeGatewayIdentity =
-    fmap (fmap (fmap gatewayCredentialIdentity)) loadNativeGatewaySnapshot
+    GatewayBoundary.loadGatewayBoundary >>= \case
+        Left err ->
+            pure (Left (GatewayBoundary.renderGatewayBoundaryError err))
+        Right boundary ->
+            pure (Right boundary.gatewayBoundaryIdentity)
 
 withNativeGatewayBoundary
     :: (Maybe Text -> IO (Either Text a))
@@ -2992,53 +2986,54 @@ withNativeGatewayCredentialBoundary
     :: (Maybe GatewayCredential -> Maybe Text -> IO (Either Text a))
     -> IO (Either Text a)
 withNativeGatewayCredentialBoundary action =
-    loadNativeGatewaySnapshot >>= \case
-        Left err -> pure (Left err)
-        Right credential ->
-            let gatewayIdentity =
-                    gatewayCredentialIdentity <$> credential
-            in action credential gatewayIdentity >>= \case
-                Left err -> pure (Left err)
-                Right value ->
-                    loadNativeGatewayIdentity >>= \case
-                        Left err -> pure (Left err)
-                        Right currentIdentity
-                            | currentIdentity == gatewayIdentity ->
-                                pure (Right value)
-                            | otherwise ->
-                                pure
-                                    (Left
-                                        "Gateway credentials changed during \
-                                        \the session operation.")
+    GatewayBoundary.withCurrentGatewayCredentialBoundary
+        (\snapshot ->
+            action
+                snapshot.gatewayBoundaryCredential
+                snapshot.gatewayBoundary.gatewayBoundaryIdentity)
+        >>= \case
+            Left err ->
+                pure
+                    (Left
+                        (GatewayBoundary.renderGatewayBoundaryError err))
+            Right result -> pure result
 
 ensureNativeGatewayIdentity :: Maybe Text -> IO (Either Text ())
 ensureNativeGatewayIdentity expected =
-    loadNativeGatewayIdentity >>= \case
-        Left err -> pure (Left err)
-        Right current
-            | nativeTurnRouteMatchesBoundary expected current ->
-                pure (Right ())
-            | otherwise ->
-                pure
-                    (Left
-                        "Gateway credentials changed during the session \
-                        \operation.")
+    GatewayBoundary.loadGatewayBoundary >>= \case
+        Left err ->
+            pure (Left (GatewayBoundary.renderGatewayBoundaryError err))
+        Right current ->
+            pure $
+                case
+                    GatewayBoundary.validateGatewayBoundary
+                        (GatewayBoundary.GatewayBoundary expected)
+                        current
+                of
+                    Left err ->
+                        Left (GatewayBoundary.renderGatewayBoundaryError err)
+                    Right () -> Right ()
 
 -- | A queued or running native turn belongs to the exact gateway credential
 -- identity captured when the turn was accepted. Direct and gateway routes are
 -- distinct, as are two successive credentials for the same gateway.
 nativeTurnRouteMatchesBoundary :: Maybe Text -> Maybe Text -> Bool
-nativeTurnRouteMatchesBoundary = (==)
+nativeTurnRouteMatchesBoundary expected current =
+    GatewayBoundary.gatewayBoundariesMatch
+        (GatewayBoundary.GatewayBoundary expected)
+        (GatewayBoundary.GatewayBoundary current)
 
 emitForNativeGatewayBoundary
     :: Maybe Text
     -> IO ()
     -> IO (Either Text ())
 emitForNativeGatewayBoundary gatewayIdentity emit =
-    withGatewayCredentialLease $
-        ensureNativeGatewayIdentity gatewayIdentity >>= \case
-            Left err -> pure (Left err)
-            Right () -> emit >> pure (Right ())
+    GatewayBoundary.withExpectedGatewayBoundary
+        (GatewayBoundary.GatewayBoundary gatewayIdentity)
+        emit >>= \case
+            Left err ->
+                pure (Left (GatewayBoundary.renderGatewayBoundaryError err))
+            Right () -> pure (Right ())
 
 -- | Revalidate immediately before every asynchronous item and terminal
 -- callback. If the boundary changes, no later item is emitted.
@@ -3074,10 +3069,11 @@ validateNativeSessionBoundary pool root gatewayIdentity sessionId =
     loadSessionMeta pool root sessionId >>= \loaded ->
         pure do
             meta <- loaded
-            validateResumedGatewayBoundary
-                gatewayIdentity
-                meta.metaConnection
-                meta.metaGatewayIdentity
+            first GatewayBoundary.renderGatewayBoundaryError $
+                GatewayBoundary.validateGatewaySessionBoundary
+                    (GatewayBoundary.GatewayBoundary gatewayIdentity)
+                    meta.metaConnection
+                    meta.metaGatewayIdentity
             pure meta
 
 withNativeSessionBoundary
@@ -3107,8 +3103,8 @@ nativeSessionRouteMatchesBoundary
     -> Bool
 nativeSessionRouteMatchesBoundary gatewayIdentity connection persistedIdentity =
     isRight
-        (validateResumedGatewayBoundary
-            gatewayIdentity
+        (GatewayBoundary.validateGatewaySessionBoundary
+            (GatewayBoundary.GatewayBoundary gatewayIdentity)
             connection
             persistedIdentity)
 
@@ -4636,19 +4632,20 @@ supervisorLoop
         EngineStop ->
             shutdownSupervisor supervisor
         EngineSearch query limit searchCallback searchContext -> do
-            loadGatewayCredential >>= \case
-                Left err ->
-                    sendSearchFailure searchCallback searchContext
-                        ("Could not load gateway credentials: " <> err)
-                Right credential ->
+            GatewayBoundary.withCurrentGatewayBoundary
+                (\boundary ->
                     runConversationSearch
                         config
                         store
-                        (gatewayCredentialIdentity <$> credential)
+                        boundary.gatewayBoundaryIdentity
                         query
                         limit
                         searchCallback
-                        searchContext
+                        searchContext) >>= \case
+                Left err ->
+                    sendSearchFailure searchCallback searchContext
+                        (GatewayBoundary.renderGatewayBoundaryError err)
+                Right () -> pure ()
             go supervisor
         EngineSessionMutation mutation resultCallback resultContext -> do
             runSessionMutation
@@ -5149,9 +5146,8 @@ runSessionMutation config store root mutation callback context = do
                 SessionRename identifier _ -> identifier
                 SessionDelete identifier -> identifier
                 SessionArchive identifier _ -> identifier
-        withGatewayCredentialLease $
-            withNativeSessionBoundary
-                pool root sessionId \gatewayIdentity _ ->
+        withNativeSessionBoundary
+            pool root sessionId \gatewayIdentity _ ->
                 case mutation of
                     SessionRename _ title -> do
                         result <- renameSession pool root sessionId title
