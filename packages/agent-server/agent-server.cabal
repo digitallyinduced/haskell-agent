@@ -1,0 +1,106 @@
+cabal-version:      3.0
+name:               agent-server
+version:            0.1.0.0
+synopsis:           Local HTTP API for managing haskell-agent sessions
+description:        A versioned REST and SSE server that runs agent turns
+                    in-process and exposes durable session management.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Development
+build-type:         Simple
+data-files:         openapi.json
+
+common common-options
+    default-language: GHC2021
+    default-extensions: BlockArguments
+                      , DuplicateRecordFields
+                      , LambdaCase
+                      , NamedFieldPuns
+                      , NoFieldSelectors
+                      , OverloadedRecordDot
+                      , OverloadedStrings
+                      , RecordWildCards
+                      , ScopedTypeVariables
+    ghc-options:      -Wall
+                      -Wcompat
+                      -Widentities
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wincomplete-record-updates
+                      -Wpartial-fields
+                      -Wno-name-shadowing
+
+library
+    import:           common-options
+    hs-source-dirs:   src
+    autogen-modules:  Paths_agent_server
+    exposed-modules:  Agent.Server
+                    , Agent.Server.Application
+                    , Agent.Server.Auth
+                    , Agent.Server.Backend
+                    , Agent.Server.Config
+                    , Agent.Server.Event
+                    , Agent.Server.Runtime
+                    , Agent.Server.Supervisor
+                    , Agent.Server.Types
+    build-depends:    agent-cli >= 0.1 && < 0.2
+                    , agent-cli-runtime >= 0.1 && < 0.2
+                    , agent-core >= 0.1 && < 0.2
+                    , agent-store >= 0.1 && < 0.2
+                    , aeson >= 2.0
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , crypton
+                    , directory
+                    , filepath
+                    , hasql-pool >= 1.3 && < 2
+                    , http-types
+                    , memory
+                    , optparse-applicative >= 0.18 && < 0.19
+                    , safe-exceptions
+                    , stm
+                    , text >= 2.0 && < 2.2
+                    , time
+                    , unix
+                    , wai
+                    , warp
+
+executable agent-server
+    import:           common-options
+    hs-source-dirs:   app
+    main-is:          Main.hs
+    ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M4G"
+    build-depends:    agent-server
+                    , base >= 4.17 && < 5
+
+test-suite agent-server-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    Agent.Server.ApplicationSpec
+                    , Agent.Server.AuthSpec
+                    , Agent.Server.EventSpec
+                    , Agent.Server.SupervisorSpec
+    ghc-options:      -threaded
+    build-depends:    agent-server
+                    , aeson
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , hspec >= 2.11 && < 2.12
+                    , http-types
+                    , safe-exceptions
+                    , stm
+                    , text
+                    , time
+                    , wai
+                    , wai-extra
+
