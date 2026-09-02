@@ -43,6 +43,25 @@ spec = describe "search_replace" do
             result.output
                 `shouldBe` "The file src/Main.hs has been created successfully."
 
+    it "reports the resolved start line for a unique replacement" do
+        withSystemTempDirectory "agent-search-replace" \dir -> do
+            let source = dir </> "Main.hs"
+            writeFile source "first\nold\nlast\n"
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            typesRef <- newIORef Map.empty
+            coding <- newGrokCodingTools env Nothing Nothing typesRef
+            result <-
+                dispatchToolCall testConfig
+                    (map (.appToolHandler) coding.grokAppTools)
+                    (functionToolCall
+                        "edit-line"
+                        "search_replace"
+                        "{\"file_path\":\"Main.hs\",\"old_string\":\"old\",\
+                        \\"new_string\":\"new\"}")
+            coding.grokClose
+            result.output `shouldSatisfy`
+                Text.isSuffixOf "\nChanged lines start at 2."
+
 testConfig :: ToolDispatchConfig
 testConfig = ToolDispatchConfig
     { toolDispatchUnknownTool = \name -> "unknown:" <> name

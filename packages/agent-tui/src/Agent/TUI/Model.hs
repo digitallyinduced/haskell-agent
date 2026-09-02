@@ -43,6 +43,7 @@ module Agent.TUI.Model
 
 import Agent.TUI.Presentation
     ( formatToolDiffRelative
+    , formatToolDiffRelativeWithOutput
     , formatToolOutputRelative
     , isInspectionTool
     , todoListFromToolArguments
@@ -678,7 +679,11 @@ timestampNewMessageBlocks firstNewIndex timestamp state
 completeTool :: Int -> ToolCall -> ToolCallResult -> UiState -> UiState
 completeTool blockIndex call result state =
     let resultState = toolResultState result.output
-        diff = formatToolDiffRelative state.uiWorkspaceRoot call
+        diff =
+            formatToolDiffRelativeWithOutput
+                state.uiWorkspaceRoot
+                call
+                result.output
         body
             | resultState == BlockComplete
             , not (Text.null (Text.strip diff)) = diff

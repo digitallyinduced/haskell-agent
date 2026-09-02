@@ -8,6 +8,7 @@ module Agent.TUI.Presentation
     , formatSearchReplaceDiff
     , formatSearchReplaceDiffRelative
     , formatToolDiffRelative
+    , formatToolDiffRelativeWithOutput
     , formatTodoList
     , formatToolOutput
     , formatToolOutputRelative
@@ -47,7 +48,8 @@ import Agent.ToolDispatch
     , canonicalToolName
     )
 import Control.Applicative ((<|>))
-import Data.Char (isSpace)
+import Data.Char (isDigit, isSpace)
+import Data.List (mapAccumL)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -288,8 +290,24 @@ formatToolDiffRelative workspace call =
     Text.intercalate "\n" $
         map (formatDiffRelative workspace) (toolCallDiffs call)
 
+-- | Completed diff body, enriched with exact source location metadata emitted
+-- by edit tools. While a tool is running we deliberately keep the preview
+-- unnumbered rather than guessing where a search string will match.
+formatToolDiffRelativeWithOutput :: Text -> ToolCall -> Text -> Text
+formatToolDiffRelativeWithOutput workspace call output =
+    Text.intercalate "\n" $
+        map (formatDiffRelativeAt workspace lineStart) (toolCallDiffs call)
+  where
+    lineStart
+        | canonicalToolName call.name == "search_replace" =
+            searchReplaceLineStart output
+        | otherwise = Nothing
+
 formatDiffRelative :: Text -> SearchReplaceDiff -> Text
-formatDiffRelative workspace diff =
+formatDiffRelative workspace = formatDiffRelativeAt workspace Nothing
+
+formatDiffRelativeAt :: Text -> Maybe Int -> SearchReplaceDiff -> Text
+formatDiffRelativeAt workspace reportedStart diff =
     let SearchReplaceDiff { diffPath, diffAction, diffLines, diffHiddenLines } =
             diff
         displayedPath = workspaceRelativeDisplayPath workspace diffPath
@@ -304,7 +322,9 @@ formatDiffRelative workspace diff =
                     <> " → "
                     <> workspaceRelativeDisplayPath workspace destination
             Nothing -> ""
-        shown = map formatLine diffLines
+        lineStart = reportedStart <|> actionLineStart diffAction
+        shown = maybe (map formatLine diffLines) (`formatNumberedLines` diffLines)
+            lineStart
         more
             | diffHiddenLines == 0 = []
             | otherwise =
@@ -314,6 +334,44 @@ formatDiffRelative workspace diff =
     formatLine = \case
         SearchReplaceRemoved line -> "  -" <> line
         SearchReplaceAdded line -> "  +" <> line
+
+    actionLineStart = \case
+        Just SearchReplaceCreate -> Just 1
+        Just SearchReplaceWrite -> Just 1
+        _ -> Nothing
+
+formatNumberedLines :: Int -> [SearchReplaceLine] -> [Text]
+formatNumberedLines start lines_ =
+    let numbered = snd (mapAccumL numberLine (start, start) lines_)
+        width = maximum (1 : map (Text.length . Text.pack . show . fst) numbered)
+    in map (formatNumbered width) numbered
+  where
+    numberLine (oldLine, newLine) = \case
+        SearchReplaceRemoved line ->
+            ((oldLine + 1, newLine), (oldLine, SearchReplaceRemoved line))
+        SearchReplaceAdded line ->
+            ((oldLine, newLine + 1), (newLine, SearchReplaceAdded line))
+
+    formatNumbered width (lineNumber, changedLine) =
+        "  "
+            <> Text.justifyRight width ' ' (Text.pack (show lineNumber))
+            <> " "
+            <> case changedLine of
+                SearchReplaceRemoved line -> "-" <> line
+                SearchReplaceAdded line -> "+" <> line
+
+searchReplaceLineStart :: Text -> Maybe Int
+searchReplaceLineStart output =
+    case Text.breakOn marker output of
+        (_, rest)
+            | Text.null rest -> Nothing
+            | otherwise ->
+                let digits = Text.takeWhile isDigit (Text.drop (Text.length marker) rest)
+                in case reads (Text.unpack digits) of
+                    [(lineNumber, "")] | lineNumber > 0 -> Just lineNumber
+                    _ -> Nothing
+  where
+    marker = "Changed lines start at "
 
 formatToolOutput :: ToolCall -> Text -> Text
 formatToolOutput call output = case canonicalToolName call.name of

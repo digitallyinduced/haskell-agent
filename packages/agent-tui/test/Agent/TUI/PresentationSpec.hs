@@ -150,7 +150,7 @@ spec = describe "tool presentation" do
         formatToolDiffRelative ""
             (functionToolCall "w" "Write"
                 "{\"file_path\":\"src/New.hs\",\"content\":\"main = pure ()\\n\"}")
-            `shouldBe` "  write src/New.hs\n  +main = pure ()"
+            `shouldBe` "  write src/New.hs\n  1 +main = pure ()"
         todoListFromToolArguments
             "{\"todos\":[{\"content\":\"Find repos\",\"status\":\"in_progress\",\
             \\"activeForm\":\"Finding repos\"},{\"content\":\"Fix\",\"status\":\"pending\"}]}"
@@ -297,6 +297,22 @@ spec = describe "tool presentation" do
         length parsed.diffLines `shouldBe` 20
         parsed.diffHiddenLines `shouldBe` 10
 
+    it "uses resolved search-replace line numbers in completed diffs" do
+        let call = customToolCall "edit" "search_replace"
+                "{\"file_path\":\"src/Main.hs\",\
+                \\"old_string\":\"old one\\nold two\",\
+                \\"new_string\":\"new one\\nnew two\\nnew three\"}"
+            output =
+                "The file src/Main.hs has been updated successfully.\n\
+                \Changed lines start at 95."
+        formatToolDiffRelativeWithOutput "/workspace" call output
+            `shouldBe`
+                "  95 -old one\n\
+                \  96 -old two\n\
+                \  95 +new one\n\
+                \  96 +new two\n\
+                \  97 +new three"
+
     it "formats compact multi-file apply_patch diffs" do
         let workspace = "/workspace"
             patch =
@@ -331,7 +347,7 @@ spec = describe "tool presentation" do
                 "  -old\n\
                 \  +new\n\
                 \  create src/B.hs\n\
-                \  +one\n\
+                \  1 +one\n\
                 \  move src/Old.hs → src/New.hs\n\
                 \  -before\n\
                 \  +after\n\

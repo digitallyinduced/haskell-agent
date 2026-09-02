@@ -178,14 +178,19 @@ replaceInFile env args = do
     when (count > 1 && not args.replaceAll) $
         throwE
             "The string to replace was found multiple times in the file. Use replace_all to replace all occurrences, or include more context to only edit one occurrence."
-    let updated = replaceOccurrences args.oldString args.newString args.replaceAll content
+    let (beforeMatch, _) = Text.breakOn args.oldString content
+        lineStart = Text.count "\n" beforeMatch + 1
+        updated = replaceOccurrences args.oldString args.newString args.replaceAll content
     ExceptT (writeTextFile path updated)
     pure $
-        if args.replaceAll && count > 1
+        (if args.replaceAll && count > 1
             then "The file " <> display
                 <> " has been updated. All occurrences were successfully replaced."
             else "The file " <> display
-                <> " has been updated successfully."
+                <> " has been updated successfully.")
+            <> if count == 1
+                then "\nChanged lines start at " <> Text.pack (show lineStart) <> "."
+                else ""
 
 resolvePath :: ToolEnv -> Text -> ExceptT Text IO OsPath
 resolvePath env path =
