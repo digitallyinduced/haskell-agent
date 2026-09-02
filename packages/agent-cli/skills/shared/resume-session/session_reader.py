@@ -93,6 +93,13 @@ def warning(code: str, message: str) -> dict[str, str]:
     return {"code": code, "message": message}
 
 
+def image_omission_warning(count: int) -> dict[str, str]:
+    return warning(
+        "image_content_omitted",
+        f"Omitted {count} image content block(s); visual content is unavailable.",
+    )
+
+
 def canonical(path: str | Path) -> str:
     return os.path.normcase(os.path.realpath(os.path.expanduser(str(path))))
 
@@ -400,31 +407,39 @@ def decode_jsonish(raw: Any) -> Any:
         return None
 
 
-def content_text(content: Any) -> str:
+def content_text_with_omissions(content: Any) -> tuple[str, int]:
     if isinstance(content, str):
-        return clipped(content)
+        return clipped(content), 0
+    if isinstance(content, dict):
+        content = [content]
     if not isinstance(content, list):
-        return ""
+        return "", 0
     parts: list[str] = []
+    omitted_images = 0
     for block in content:
         if not isinstance(block, dict):
             continue
         block_type = safe_string(block.get("type")).lower()
+        if block_type in {"input_image", "image"}:
+            omitted_images += 1
+            continue
         if block_type in {
             "thinking",
             "reasoning",
             "redacted_thinking",
             "encrypted_content",
             "signature",
-            "input_image",
-            "image",
         }:
             continue
         if block_type in {"text", "input_text", "output_text"}:
             text = block.get("text", block.get("content"))
             if isinstance(text, str):
                 parts.append(text)
-    return clipped("\n".join(parts))
+    return clipped("\n".join(parts)), omitted_images
+
+
+def content_text(content: Any) -> str:
+    return content_text_with_omissions(content)[0]
 
 
 def tagged_user_request(text: str) -> str | None:
@@ -706,20 +721,23 @@ def discover_codex(cwd: str) -> list[dict[str, Any]]:
 
 def codex_turn(
     payload: Any, max_tool_chars: int
-) -> tuple[dict[str, Any] | None, bool]:
+) -> tuple[dict[str, Any] | None, bool, int]:
     if not isinstance(payload, dict):
-        return None, True
+        return None, True, 0
     kind = safe_string(payload.get("type"))
     if kind == "message":
         role = safe_string(payload.get("role"))
-        turn = inert_turn(role, content_text(payload.get("content")))
-        return turn, role not in {"user", "assistant"}
+        text, omitted_images = content_text_with_omissions(
+            payload.get("content")
+        )
+        turn = inert_turn(role, text)
+        return turn, role not in {"user", "assistant"}, omitted_images
     if kind == "local_shell_call":
         call = {
             "name": "local_shell",
             "arguments": json_preview(payload.get("action"), max_tool_chars),
         }
-        return inert_turn("assistant", tool_calls=[call]), False
+        return inert_turn("assistant", tool_calls=[call]), False, 0
     if kind in {"function_call", "custom_tool_call"}:
         call = {
             "name": safe_string(payload.get("name") or kind),
@@ -727,7 +745,7 @@ def codex_turn(
                 payload.get("arguments", payload.get("input")), max_tool_chars
             ),
         }
-        return inert_turn("assistant", tool_calls=[call]), False
+        return inert_turn("assistant", tool_calls=[call]), False, 0
     if kind in {"function_call_output", "custom_tool_call_output"}:
         result = {
             "call_id": safe_string(payload.get("call_id")),
@@ -736,8 +754,8 @@ def codex_turn(
             ),
             "stale": "true",
         }
-        return inert_turn("assistant", tool_results=[result]), False
-    return None, True
+        return inert_turn("assistant", tool_results=[result]), False, 0
+    return None, True, 0
 
 
 class BoundedTurns:
@@ -873,12 +891,13 @@ class CodexTurnJournal:
 
 def process_codex_stream(
     path: str | Path, max_tool_chars: int, turns: Any
-) -> tuple[int, int, bool]:
+) -> tuple[int, int, int, bool]:
     skipped = 0
+    omitted_images = 0
     requires_journal = False
 
     def consume_record(record: dict[str, Any]) -> None:
-        nonlocal requires_journal, skipped
+        nonlocal omitted_images, requires_journal, skipped
         record_type = record.get("type")
         payload = record.get("payload")
         if record_type == "compacted":
@@ -890,20 +909,23 @@ def process_codex_stream(
             if isinstance(replacement, list):
                 turns.clear()
                 skipped = 0
+                omitted_images = 0
                 requires_journal = False
                 for replacement_payload in replacement:
-                    turn, unsafe = codex_turn(
+                    turn, unsafe, images = codex_turn(
                         replacement_payload, max_tool_chars
                     )
                     skipped += int(unsafe)
+                    omitted_images += images
                     if turn:
                         turns.append(turn)
             return
         if requires_journal:
             return
         if record_type == "response_item":
-            turn, unsafe = codex_turn(payload, max_tool_chars)
+            turn, unsafe, images = codex_turn(payload, max_tool_chars)
             skipped += int(unsafe)
+            omitted_images += images
             if turn:
                 turns.append(turn)
         elif (
@@ -922,12 +944,12 @@ def process_codex_stream(
             skipped += 1
 
     malformed = consume_jsonl(path, consume_record)
-    return malformed, skipped, requires_journal
+    return malformed, skipped, omitted_images, requires_journal
 
 
 def read_codex(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
     bounded = BoundedTurns()
-    malformed, skipped, requires_journal = process_codex_stream(
+    malformed, skipped, omitted_images, requires_journal = process_codex_stream(
         item["path"], max_tool_chars, bounded
     )
     if requires_journal:
@@ -940,7 +962,7 @@ def read_codex(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
                     str(Path(temporary) / "turns.sqlite")
                 )
                 journal = CodexTurnJournal(turns_database)
-                malformed, skipped, _ = process_codex_stream(
+                malformed, skipped, omitted_images, _ = process_codex_stream(
                     item["path"], max_tool_chars, journal
                 )
                 turns = journal.recent()
@@ -967,6 +989,8 @@ def read_codex(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
                 f"Skipped {skipped} instruction, reasoning, or unsupported record(s).",
             )
         )
+    if omitted_images:
+        warnings.append(image_omission_warning(omitted_images))
     result = {**public_candidate(item), "turns": turns}
     result = finalise(result, warnings)
     result["last_user_request"] = last_user_request
@@ -1176,16 +1200,17 @@ def discover_claude(cwd: str) -> list[dict[str, Any]]:
 
 def claude_turn(
     record: dict[str, Any], max_tool_chars: int
-) -> tuple[dict[str, Any] | None, int]:
+) -> tuple[dict[str, Any] | None, int, int]:
     if record.get("isMeta") or record.get("isCompactSummary"):
-        return None, 1
+        return None, 1, 0
     role = safe_string(record.get("type"))
     if role not in {"user", "assistant"}:
-        return None, 1
+        return None, 1, 0
     message = record.get("message")
     if not isinstance(message, dict):
-        return None, 1
+        return None, 1, 0
     content = message.get("content")
+    text, omitted_images = content_text_with_omissions(content)
     calls: list[dict[str, str]] = []
     results: list[dict[str, str]] = []
     skipped = 0
@@ -1204,18 +1229,22 @@ def claude_turn(
                     }
                 )
             elif kind == "tool_result":
+                output, result_images = content_text_with_omissions(
+                    block.get("content")
+                )
+                omitted_images += result_images
                 results.append(
                     {
                         "call_id": safe_string(block.get("tool_use_id")),
                         "output": historical_tool_result(
-                            content_text(block.get("content")), max_tool_chars
+                            output, max_tool_chars
                         ),
                         "stale": "true",
                     }
                 )
             elif kind in {"thinking", "redacted_thinking"}:
                 skipped += 1
-    return inert_turn(role, content_text(content), calls, results), skipped
+    return inert_turn(role, text, calls, results), skipped, omitted_images
 
 
 def read_claude(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
@@ -1223,6 +1252,7 @@ def read_claude(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
     turns_from_leaf: list[dict[str, Any]] = []
     last_text: dict[str, str] = {}
     skipped = 0
+    omitted_images = 0
     with tempfile.TemporaryDirectory(prefix="resume-claude-chain-") as temporary:
         try:
             with closing(
@@ -1232,8 +1262,11 @@ def read_claude(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
                 malformed = consume_jsonl(path, index.consume)
                 skipped += index.unindexable
                 for record in index.active_chain_from_leaf():
-                    turn, record_skipped = claude_turn(record, max_tool_chars)
+                    turn, record_skipped, record_images = claude_turn(
+                        record, max_tool_chars
+                    )
                     skipped += record_skipped
+                    omitted_images += record_images
                     if not turn:
                         continue
                     role = safe_string(turn.get("role"))
@@ -1257,6 +1290,8 @@ def read_claude(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
                 f"Skipped {skipped} hidden or unsupported record(s).",
             )
         )
+    if omitted_images:
+        warnings.append(image_omission_warning(omitted_images))
     result = finalise({**public_candidate(item), "turns": turns}, warnings)
     result["last_user_request"] = last_text.get("user")
     result["last_assistant_action"] = last_text.get("assistant")
@@ -1302,13 +1337,16 @@ def discover_grok(cwd: str) -> list[dict[str, Any]]:
 
 def grok_turn(
     record: dict[str, Any], max_tool_chars: int
-) -> tuple[dict[str, Any] | None, int]:
+) -> tuple[dict[str, Any] | None, int, int]:
     kind = safe_string(record.get("type")).lower()
     if record.get("synthetic_reason"):
-        return None, 1
+        return None, 1, 0
     if kind in {"user", "assistant"}:
         calls: list[dict[str, str]] = []
         skipped = 0
+        text, omitted_images = content_text_with_omissions(
+            record.get("content")
+        )
         if kind == "assistant" and isinstance(record.get("tool_calls"), list):
             for raw_call in record["tool_calls"]:
                 if not isinstance(raw_call, dict):
@@ -1327,10 +1365,9 @@ def grok_turn(
                     }
                 )
         return (
-            inert_turn(
-                kind, content_text(record.get("content")), tool_calls=calls
-            ),
+            inert_turn(kind, text, tool_calls=calls),
             skipped,
+            omitted_images,
         )
     if kind in {"tool_call", "backend_tool_call"}:
         call = {
@@ -1341,7 +1378,7 @@ def grok_turn(
                 record.get("arguments", record.get("input")), max_tool_chars
             ),
         }
-        return inert_turn("assistant", tool_calls=[call]), 0
+        return inert_turn("assistant", tool_calls=[call]), 0, 0
     if kind == "tool_result":
         result = {
             "call_id": safe_string(
@@ -1352,8 +1389,8 @@ def grok_turn(
             ),
             "stale": "true",
         }
-        return inert_turn("assistant", tool_results=[result]), 0
-    return None, 1
+        return inert_turn("assistant", tool_results=[result]), 0, 0
+    return None, 1, 0
 
 
 def read_grok(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
@@ -1366,11 +1403,15 @@ def read_grok(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
     )
     bounded = BoundedTurns()
     skipped = 0
+    omitted_images = 0
 
     def consume_record(record: dict[str, Any]) -> None:
-        nonlocal skipped
-        turn, record_skipped = grok_turn(record, max_tool_chars)
+        nonlocal omitted_images, skipped
+        turn, record_skipped, record_images = grok_turn(
+            record, max_tool_chars
+        )
         skipped += record_skipped
+        omitted_images += record_images
         if turn:
             bounded.append(turn)
 
@@ -1394,6 +1435,8 @@ def read_grok(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
                 f"Skipped {skipped} hidden or unsupported record(s).",
             )
         )
+    if omitted_images:
+        warnings.append(image_omission_warning(omitted_images))
     result = finalise({**public_candidate(item), "turns": turns}, warnings)
     result["last_user_request"] = bounded.last_text("user")
     result["last_assistant_action"] = bounded.last_text("assistant")
@@ -1681,7 +1724,8 @@ def consume_cursor_turns(
     value: Any,
     max_tool_chars: int,
     consume: Callable[[dict[str, Any]], None],
-) -> None:
+) -> int:
+    omitted_images = 0
     pending = [value]
     while pending:
         current = pending.pop()
@@ -1712,14 +1756,14 @@ def consume_cursor_turns(
                 "text", current.get("content", current.get("message"))
             )
             if isinstance(text, dict):
-                text = text.get("text", text.get("content"))
-            rendered = (
-                content_text(text)
-                if isinstance(text, list)
-                else text
-                if isinstance(text, str)
-                else ""
-            )
+                nested_text = text.get("text", text.get("content"))
+                if nested_text is not None:
+                    text = nested_text
+            if isinstance(text, (dict, list)):
+                rendered, text_images = content_text_with_omissions(text)
+                omitted_images += text_images
+            else:
+                rendered = text if isinstance(text, str) else ""
             calls: list[dict[str, str]] = []
             results: list[dict[str, str]] = []
             content = current.get("content")
@@ -1742,13 +1786,17 @@ def consume_cursor_turns(
                         }
                     )
                 elif kind in {"tool_result", "tool_output"}:
+                    output, result_images = content_text_with_omissions(
+                        block.get("content")
+                    )
+                    omitted_images += result_images
                     results.append(
                         {
                             "call_id": safe_string(
                                 block.get("tool_use_id") or block.get("call_id")
                             ),
                             "output": historical_tool_result(
-                                content_text(block.get("content")), max_tool_chars
+                                output, max_tool_chars
                             ),
                             "stale": "true",
                         }
@@ -1780,15 +1828,22 @@ def consume_cursor_turns(
                 consume(turn)
                 continue
         elif role in {"tool", "tool_result", "tool_output"}:
+            raw_output = (
+                current.get("content")
+                or current.get("output")
+                or current.get("text")
+            )
+            if isinstance(raw_output, (dict, list)):
+                output, result_images = content_text_with_omissions(raw_output)
+                omitted_images += result_images
+            else:
+                output = raw_output
             result = {
                 "call_id": safe_string(
                     current.get("tool_call_id") or current.get("call_id")
                 ),
                 "output": historical_tool_result(
-                    content_text(current.get("content"))
-                    or current.get("output")
-                    or current.get("text"),
-                    max_tool_chars,
+                    output, max_tool_chars
                 ),
                 "stale": "true",
             }
@@ -1803,6 +1858,7 @@ def consume_cursor_turns(
             and isinstance(child, (dict, list))
         ]
         pending.extend(reversed(children))
+    return omitted_images
 
 
 def generic_cursor_turns(
@@ -1817,9 +1873,13 @@ def read_cursor(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
     path = Path(item["path"])
     bounded = BoundedTurns()
     warnings: list[dict[str, str]] = []
+    omitted_images = 0
 
     def consume_value(value: Any) -> None:
-        consume_cursor_turns(value, max_tool_chars, bounded.append)
+        nonlocal omitted_images
+        omitted_images += consume_cursor_turns(
+            value, max_tool_chars, bounded.append
+        )
 
     if path.is_file() and not path.is_symlink() and path.suffix == ".jsonl":
         transcript = path
@@ -1909,6 +1969,8 @@ def read_cursor(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
                 )
         except (ReaderError, sqlite3.Error, UnicodeError, ValueError) as exc:
             warnings.append(warning("cursor_store_error", one_line(exc, 200)))
+    if omitted_images:
+        warnings.append(image_omission_warning(omitted_images))
     turns = bounded.recent()
     if not turns:
         warnings.append(

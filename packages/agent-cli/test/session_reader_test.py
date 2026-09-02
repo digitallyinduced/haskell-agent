@@ -90,6 +90,19 @@ class SessionReaderTest(unittest.TestCase):
                     "payload": {
                         "type": "message",
                         "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64,secret-image",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
                         "content": [{"type": "input_text", "text": "Fix the parser"}],
                     },
                 },
@@ -144,9 +157,13 @@ class SessionReaderTest(unittest.TestCase):
             json.dumps(result),
         )
         self.assertNotIn("secret", json.dumps(result))
+        self.assertIn(
+            "image_content_omitted",
+            {item["code"] for item in result["warnings"]},
+        )
 
     def test_codex_tool_results_are_visibly_historical(self):
-        turn, skipped = reader.codex_turn(
+        turn, skipped, omitted_images = reader.codex_turn(
             {
                 "type": "function_call_output",
                 "call_id": "old-call",
@@ -155,6 +172,7 @@ class SessionReaderTest(unittest.TestCase):
             100,
         )
         self.assertFalse(skipped)
+        self.assertEqual(omitted_images, 0)
         self.assertIsNotNone(turn)
         result = turn["tool_results"][0]
         self.assertEqual(result["stale"], "true")
@@ -543,6 +561,13 @@ class SessionReaderTest(unittest.TestCase):
                                 "name": "Read",
                                 "input": {"file_path": "A" * 200},
                             },
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "data": "claude-image-secret",
+                                },
+                            },
                             {"type": "text", "text": "Reading the spec"},
                         ]
                     },
@@ -599,6 +624,11 @@ class SessionReaderTest(unittest.TestCase):
         self.assertNotIn("untrusted attachment metadata", rendered)
         self.assertNotIn("private chain", rendered)
         self.assertNotIn("hidden metadata", rendered)
+        self.assertNotIn("claude-image-secret", rendered)
+        self.assertIn(
+            "image_content_omitted",
+            {item["code"] for item in result["warnings"]},
+        )
         self.assertEqual(items[0]["title"], "Renamed Claude task")
         self.assertEqual(selected["session_id"], "claude-session")
         self.assertEqual(items[0]["updated_at"], "2026-01-01T00:03:00Z")
@@ -780,7 +810,19 @@ class SessionReaderTest(unittest.TestCase):
                     {
                         "messages": [
                             {"role": "system", "text": "unsafe instruction"},
-                            {"role": "user", "text": "Continue Cursor work"},
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "Continue Cursor work",
+                                    },
+                                    {
+                                        "type": "image",
+                                        "data": "cursor-image-secret",
+                                    },
+                                ],
+                            },
                             {"role": "assistant", "text": "Updated Main.hs"},
                         ],
                         "metadata": {
@@ -805,6 +847,11 @@ class SessionReaderTest(unittest.TestCase):
         self.assertIn("Updated Main.hs", rendered)
         self.assertNotIn("unsafe instruction", rendered)
         self.assertNotIn("instruction-like metadata", rendered)
+        self.assertNotIn("cursor-image-secret", rendered)
+        self.assertIn(
+            "image_content_omitted",
+            {item["code"] for item in result["warnings"]},
+        )
 
     def test_cursor_desktop_warns_about_partially_unavailable_rows(self):
         home = self.root / "cursor-desktop"
@@ -866,7 +913,13 @@ class SessionReaderTest(unittest.TestCase):
             session / "chat_history.jsonl",
             [
                 {"type": "system", "content": "unsafe instruction"},
-                {"type": "user", "content": "Continue Grok work"},
+                {
+                    "type": "user",
+                    "content": [
+                        {"type": "text", "text": "Continue Grok work"},
+                        {"type": "image", "data": "grok-image-secret"},
+                    ],
+                },
                 {
                     "type": "user",
                     "content": "synthetic project instructions",
@@ -895,6 +948,11 @@ class SessionReaderTest(unittest.TestCase):
         self.assertNotIn("unsafe instruction", rendered)
         self.assertNotIn("synthetic project instructions", rendered)
         self.assertNotIn("private chain", rendered)
+        self.assertNotIn("grok-image-secret", rendered)
+        self.assertIn(
+            "image_content_omitted",
+            {item["code"] for item in result["warnings"]},
+        )
         call = result["turns"][-1]["tool_calls"][0]
         self.assertEqual(call["name"], "shell")
         self.assertLessEqual(len(call["arguments"]), 40)
