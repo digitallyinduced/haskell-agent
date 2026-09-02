@@ -276,7 +276,7 @@ spec = describe "fullscreen Markdown rendering" do
                 , "  move scripts/old.py → crates/new module.rs"
                 , "  +fn main() {}"
                 ])
-            `shouldBe` ["haskell", "typescript", "rust"]
+            `shouldBe` ["haskell", "typescript", "python", "rust"]
 
     it "syntax-highlights edit lines over full-width diff backgrounds" do
         syntaxDirectory <- sourceSyntaxDirectory
@@ -327,6 +327,43 @@ spec = describe "fullscreen Markdown rendering" do
                     `shouldBe` Just stringForeground
                 fmap (V.attrBackColor . spanAttr) (findText "\"after\"")
                     `shouldBe` Just addedBackground
+
+    it "uses source and destination grammars for moved diff lines" do
+        syntaxDirectory <- sourceSyntaxDirectory
+        loadSyntaxHighlighterFrom syntaxDirectory >>= \case
+            Left message -> expectationFailure (Text.unpack message)
+            Right highlighter -> do
+                let widget :: Widget ()
+                    widget =
+                        diffWidgetWithSyntaxHighlighting
+                            (Just highlighter)
+                            "old module.py"
+                            (Text.unlines
+                                [ "  move old module.py → new module.rs"
+                                , "  -# source comment"
+                                , "  +// destination comment"
+                                ])
+                    rows =
+                        concat $
+                            map toList $
+                                toList $
+                                    displayOpsForPic
+                                        (renderWidget
+                                            (Just Theme.terminalDefault)
+                                            [widget]
+                                            (40, 4))
+                                        (40, 4)
+                    commentForeground =
+                        V.attrForeColor $
+                            attrMapLookup
+                                Theme.syntaxCommentAttr
+                                Theme.terminalDefault
+                fmap (V.attrForeColor . spanAttr)
+                    (find (containsText "source comment") rows)
+                    `shouldBe` Just commentForeground
+                fmap (V.attrForeColor . spanAttr)
+                    (find (containsText "destination comment") rows)
+                    `shouldBe` Just commentForeground
 
     it "renders terminal controls as inert visible glyphs" do
         let unsafe = "\ESC]0;owned\BEL\t\r"

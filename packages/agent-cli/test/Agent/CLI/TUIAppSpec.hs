@@ -267,6 +267,11 @@ spec = do
                         , "@@"
                         , "-const oldValue = 1"
                         , "+const newValue = 2"
+                        , "*** Update File: scripts/old module.py"
+                        , "*** Move to: crates/new module.rs"
+                        , "@@"
+                        , "-# source comment"
+                        , "+// destination comment"
                         , "*** End Patch"
                         ]
                 conversation =
@@ -279,7 +284,9 @@ spec = do
                                     patch)))
                         initialUiState
             syntaxLanguagesForBlocks (toList conversation.uiBlocks)
-                `shouldBe` Set.fromList ["haskell", "typescript"]
+                `shouldBe`
+                    Set.fromList
+                        ["haskell", "python", "rust", "typescript"]
 
     describe "externalUrlCommand" do
         it "opens HTTP(S) URLs without passing through a shell" do

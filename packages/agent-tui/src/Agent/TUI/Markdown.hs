@@ -42,7 +42,7 @@ import qualified Brick.Types as B
 import Data.Bits ((.|.))
 import Data.Char (isDigit, isSpace)
 import qualified Data.List as List
-import Data.Maybe (fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
@@ -159,7 +159,7 @@ diffSyntaxLanguages initialPath body =
     List.nub
         [ language
         | line <- parseDiffLines initialPath body
-        , Just path <- [line.diffPathHint]
+        , path <- diffPathHints line.diffPaths
         , Just language <- [resolvePathLanguage path]
         ]
 
@@ -209,15 +209,21 @@ data DiffLineKind
     | DiffLinePlain
     deriving (Eq)
 
+data DiffPaths = DiffPaths
+    { diffRemovedPath :: !(Maybe Text)
+    , diffAddedPath :: !(Maybe Text)
+    }
+    deriving (Eq)
+
 data ParsedDiffLine = ParsedDiffLine
     { diffLineKind :: !DiffLineKind
-    , diffPathHint :: !(Maybe Text)
+    , diffPaths :: !DiffPaths
     , diffLinePrefix :: !Text
     , diffLineText :: !Text
     }
 
 data DiffRun
-    = DiffChangedRun !DiffLineKind !(Maybe Text) ![(Text, Text)]
+    = DiffChangedRun !DiffLineKind !DiffPaths ![(Text, Text)]
     | DiffPlainRun !ParsedDiffLine
 
 data StyledDiffRow = StyledDiffRow
@@ -226,23 +232,26 @@ data StyledDiffRow = StyledDiffRow
     }
 
 parseDiffLines :: Text -> Text -> [ParsedDiffLine]
-parseDiffLines initialPath = go (nonEmptyText initialPath) . Text.lines
+parseDiffLines initialPath =
+    go
+        (maybe emptyDiffPaths sameDiffPaths (nonEmptyText initialPath))
+        . Text.lines
   where
     go _ [] = []
-    go currentPath (line : rest)
-        | Just nextPath <- diffHeaderPath line =
-            ParsedDiffLine DiffLineHeader (Just nextPath) "" line
-                : go (Just nextPath) rest
+    go currentPaths (line : rest)
+        | Just nextPaths <- diffHeaderPaths line =
+            ParsedDiffLine DiffLineHeader nextPaths "" line
+                : go nextPaths rest
         | Just (kind, prefix, source) <- changedDiffLine line =
-            ParsedDiffLine kind currentPath prefix source
-                : go currentPath rest
+            ParsedDiffLine kind currentPaths prefix source
+                : go currentPaths rest
         | "  …" `Text.isPrefixOf` line
             || "… +" `Text.isPrefixOf` line =
-            ParsedDiffLine DiffLineMeta currentPath "" line
-                : go currentPath rest
+            ParsedDiffLine DiffLineMeta currentPaths "" line
+                : go currentPaths rest
         | otherwise =
-            ParsedDiffLine DiffLinePlain currentPath "" line
-                : go currentPath rest
+            ParsedDiffLine DiffLinePlain currentPaths "" line
+                : go currentPaths rest
 
 changedDiffLine :: Text -> Maybe (DiffLineKind, Text, Text)
 changedDiffLine line =
@@ -273,8 +282,8 @@ numberedDiffLine line = do
                 , source
                 )
 
-diffHeaderPath :: Text -> Maybe Text
-diffHeaderPath line =
+diffHeaderPaths :: Text -> Maybe DiffPaths
+diffHeaderPaths line =
     actionPath
         [ "  create "
         , "  delete "
@@ -285,15 +294,47 @@ diffHeaderPath line =
     actionPath [] = movePath
     actionPath (prefix : rest) =
         case Text.stripPrefix prefix line of
-            Just path -> nonEmptyText path
+            Just path -> sameDiffPaths <$> nonEmptyText path
             Nothing -> actionPath rest
 
     movePath = do
         moved <- Text.stripPrefix "  move " line
         let (source, destinationWithArrow) = Text.breakOn " → " moved
+        sourcePath <- nonEmptyText source
         case Text.stripPrefix " → " destinationWithArrow of
-            Just destination -> nonEmptyText destination
-            Nothing -> nonEmptyText source
+            Just destination -> do
+                destinationPath <- nonEmptyText destination
+                pure
+                    (DiffPaths
+                        { diffRemovedPath = Just sourcePath
+                        , diffAddedPath = Just destinationPath
+                        })
+            Nothing -> pure (sameDiffPaths sourcePath)
+
+emptyDiffPaths :: DiffPaths
+emptyDiffPaths =
+    DiffPaths
+        { diffRemovedPath = Nothing
+        , diffAddedPath = Nothing
+        }
+
+sameDiffPaths :: Text -> DiffPaths
+sameDiffPaths path =
+    DiffPaths
+        { diffRemovedPath = Just path
+        , diffAddedPath = Just path
+        }
+
+diffPathHints :: DiffPaths -> [Text]
+diffPathHints paths =
+    List.nub (catMaybes [paths.diffRemovedPath, paths.diffAddedPath])
+
+diffPathForKind :: DiffLineKind -> DiffPaths -> Maybe Text
+diffPathForKind kind paths =
+    case kind of
+        DiffLineRemoved -> paths.diffRemovedPath
+        DiffLineAdded -> paths.diffAddedPath
+        _ -> Nothing
 
 nonEmptyText :: Text -> Maybe Text
 nonEmptyText value =
@@ -308,11 +349,11 @@ diffRuns (line : rest)
                 span
                     (\next ->
                         next.diffLineKind == line.diffLineKind
-                            && next.diffPathHint == line.diffPathHint)
+                            && next.diffPaths == line.diffPaths)
                     rest
         in DiffChangedRun
                 line.diffLineKind
-                line.diffPathHint
+                line.diffPaths
                 (map
                     (\changed ->
                         (changed.diffLinePrefix, changed.diffLineText))
@@ -351,13 +392,13 @@ resolveDiffRun
                       )
                     ]
                 ]
-        DiffChangedRun kind path changedLines -> do
+        DiffChangedRun kind paths changedLines -> do
             let background =
                     if kind == DiffLineAdded then addedAttr else removedAttr
                 sourceLines = map snd changedLines
                 highlightedLines = do
                     highlighter <- syntaxHighlighter
-                    sourcePath <- path
+                    sourcePath <- diffPathForKind kind paths
                     language <- resolvePathLanguage sourcePath
                     either (const Nothing) Just $
                         highlightCode
