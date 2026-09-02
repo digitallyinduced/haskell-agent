@@ -20,6 +20,7 @@ module Agent.Store.Postgres.Session.Types
     , SessionTaskPlanStatus(..)
     , SessionTaskPlanItem(..)
     , SessionTaskPlan(..)
+    , SessionTaskPlanSnapshot(..)
     ) where
 
 import Data.Int (Int32, Int64)
@@ -46,6 +47,13 @@ data SessionTaskPlan = SessionTaskPlan
     { sessionTaskPlanRevision :: !Int64
     , sessionTaskPlanExplanation :: !(Maybe Text)
     , sessionTaskPlanItems :: ![SessionTaskPlanItem]
+    }
+    deriving (Eq, Show)
+
+-- | An unversioned task plan imported together with a session snapshot.
+data SessionTaskPlanSnapshot = SessionTaskPlanSnapshot
+    { sessionTaskPlanSnapshotExplanation :: !(Maybe Text)
+    , sessionTaskPlanSnapshotItems :: ![SessionTaskPlanItem]
     }
     deriving (Eq, Show)
 
@@ -228,5 +236,6 @@ data LegacySession = LegacySession
     , legacyMetadata :: !SessionMetadata
     , legacyTurns :: ![SessionTurn]
     , legacyPromptSnapshot :: !(Maybe SessionPromptSnapshot)
+    , legacyTaskPlan :: !(Maybe SessionTaskPlanSnapshot)
     }
     deriving (Eq, Show)

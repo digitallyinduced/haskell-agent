@@ -1212,6 +1212,73 @@ spec = do
                     expectationFailure "expected compaction to fail"
 
     describe "task-plan compaction context" do
+        it "removes generated task plans before remote compaction" do
+            let stale =
+                    taskPlanContextText $
+                        CurrentTaskPlan 8 $
+                            TaskPlan Nothing
+                                [TaskPlanItem "stale" TaskPlanInProgress]
+                history =
+                    [ taskPlanMessage RoleDeveloper stale
+                    , userTextItem stale
+                    , userTextItem "retained"
+                    ]
+            params <- newIORef defaultResponseCreateParams
+            transcript <- newIORef history
+            requests <- newIORef []
+            result <-
+                runProviderCompactWith
+                    (Just \request -> do
+                        modifyIORef' requests (<> [request])
+                        pure (Right remoteCompactionResponse))
+                    (const (pure ()))
+                    OpenAIProvider
+                    Nothing
+                    params
+                    transcript
+                    Nothing
+            result `shouldSatisfy` either (const False) (const True)
+            map requestItems <$> readIORef requests
+                `shouldReturn`
+                    [ [ userTextItem "retained"
+                      , compactionTriggerItem
+                      ]
+                    ]
+
+        it "removes generated task plans before local summarization" do
+            let stale =
+                    taskPlanContextText $
+                        CurrentTaskPlan 8 $
+                            TaskPlan Nothing
+                                [TaskPlanItem "stale" TaskPlanInProgress]
+                history =
+                    [ taskPlanMessage RoleDeveloper stale
+                    , userTextItem stale
+                    , userTextItem "retained"
+                    ]
+                focus = Just "focus on the remaining work"
+            params <- newIORef defaultResponseCreateParams
+            transcript <- newIORef history
+            requests <- newIORef []
+            result <-
+                runProviderCompactWith
+                    (Just \request -> do
+                        modifyIORef' requests (<> [request])
+                        pure (Right (summaryResponse "local summary")))
+                    (const (pure ()))
+                    OpenAIProvider
+                    Nothing
+                    params
+                    transcript
+                    focus
+            result `shouldSatisfy` either (const False) (const True)
+            map requestItems <$> readIORef requests
+                `shouldReturn`
+                    [ [ userTextItem "retained"
+                      , userTextItem (summarizationPrompt focus)
+                      ]
+                    ]
+
         it "replaces stale generated copies from authoritative state" do
             let stale =
                     taskPlanContextText $
@@ -1336,6 +1403,58 @@ spec = do
                 >>= (`shouldSatisfy` any responseItemHasTaskPlan)
             readIORef continuationHistory
                 >>= (`shouldSatisfy` any responseItemHasTaskPlan)
+
+        it "does not duplicate a pending task-plan reminder after compaction" do
+            let history = [userTextItem "old"]
+                threshold = 2_000
+                plan = TaskPlan Nothing
+                    [TaskPlanItem "continue implementation" TaskPlanInProgress]
+            taskPlanEnv <- newTaskPlanEnv Nothing Nothing
+            current <- replaceTaskPlan taskPlanEnv plan >>= \case
+                Left err -> expectationFailure (Text.unpack err) >> fail "plan"
+                Right value -> pure value
+            contextState <- newIORef
+                (Just (reportedOccupancy threshold (length history)))
+            hookHistory <- newIORef []
+            continuationHistory <- newIORef []
+            let sender _request =
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _previous _inputs _onEvent -> do
+                    writeIORef continuationHistory state.backendItems
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , providerTelemetry = Nothing
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSenderHookAndDecorator
+                        (Just threshold)
+                        sender
+                        (const (pure ()))
+                        (pure defaultResponseCreateParams)
+                        (decorateCompactOutcomeWithTaskPlan
+                            (Just taskPlanEnv))
+                        (\outcome _inputs -> do
+                            writeIORef hookHistory outcome.compactHistory
+                            pure CompactionInstalled)
+                        contextState
+                        base
+                reminder = taskPlanContextText current
+            result <-
+                backend.submitTurn
+                    (initialBackendSnapshot history)
+                    Nothing
+                    [UserMessage reminder, UserMessage "new"]
+                    (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef hookHistory
+                >>= (`shouldSatisfy` all (not . responseItemHasTaskPlan))
+            readIORef continuationHistory
+                >>= (`shouldSatisfy`
+                    ((== 1) . length . filter responseItemHasTaskPlan))
 
         it "compacts at a configured threshold below the model default" do
             let history = [userTextItem "old"]
@@ -2281,6 +2400,17 @@ responseItemHasTaskPlan = \case
     MessageItem message ->
         any isTaskPlanContextText (responseMessageTexts message)
     _ -> False
+
+taskPlanMessage :: ResponseRole -> Text -> ResponseItem
+taskPlanMessage role text =
+    MessageItem ResponseMessage
+        { messageId = Nothing
+        , content = MessageContentParts [InputTextPart text Nothing]
+        , role = role
+        , status = Nothing
+        , phase = Nothing
+        , passthrough = Nothing
+        }
 
 responseMessageHasText :: Text -> ResponseMessage -> Bool
 responseMessageHasText expected =

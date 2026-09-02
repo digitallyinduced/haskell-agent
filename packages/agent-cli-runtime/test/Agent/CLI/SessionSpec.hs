@@ -1641,6 +1641,43 @@ spec = describe "Agent.CLI.Session" do
                                         `shouldReturn`
                                             Right (Just sampleStoredTaskPlan)
 
+        it "rolls back failed task-plan imports so the transfer can be retried" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                    sessionId = "session-atomic-transfer"
+                    invalidPlan = TaskPlan
+                        { taskPlanExplanation = Nothing
+                        , taskPlanItems =
+                            [ TaskPlanItem
+                                "first active step"
+                                TaskPlanInProgress
+                            , TaskPlanItem
+                                "second active step"
+                                TaskPlanInProgress
+                            ]
+                        }
+                    transfer = SessionTransfer
+                        { transferMeta = testMeta sessionId
+                        , transferTaskPlan = Just invalidPlan
+                        , transferTurns = []
+                        }
+                    sessionDir =
+                        root </> unsafeEncodeUtf (Text.unpack sessionId)
+                importSessionTransfer pool root Nothing transfer
+                    >>= (`shouldSatisfy` either (const True) (const False))
+                Store.loadSession pool sessionId
+                    `shouldReturn` Right Nothing
+                doesDirectoryExist sessionDir `shouldReturn` False
+
+                importSessionTransfer
+                    pool
+                    root
+                    Nothing
+                    (transfer { transferTaskPlan = Just sampleTaskPlan })
+                    `shouldReturn` Right sessionId
+                Store.loadSessionTaskPlan pool sessionId
+                    `shouldReturn` Right (Just sampleStoredTaskPlan)
+
         it "materializes pending persistence into a resumable session ID" $
             withTempStore \store root -> do
                 let pool = trustedPool store

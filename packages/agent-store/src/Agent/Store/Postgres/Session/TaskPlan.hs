@@ -8,6 +8,7 @@
 module Agent.Store.Postgres.Session.TaskPlan
     ( loadSessionTaskPlan
     , replaceSessionTaskPlan
+    , replaceSessionTaskPlanTransaction
     , clearSessionTaskPlan
     , copySessionTaskPlan
     ) where
@@ -51,15 +52,23 @@ replaceSessionTaskPlan
     -> IO (Either StoreError (Maybe Int64))
 replaceSessionTaskPlan pool sessionKey explanation items =
     withSession pool $
-        Transactions.transaction Transactions.Serializable Transactions.Write do
-            Transaction.statement
-                (sessionKey, explanation)
-                replacePlanHeaderStatement >>= \case
-                    Nothing -> pure Nothing
-                    Just (sessionId, revision) -> do
-                        _ <- Transaction.statement sessionId deletePlanItemsStatement
-                        insertItems sessionId items
-                        pure (Just revision)
+        Transactions.transaction Transactions.Serializable Transactions.Write $
+            replaceSessionTaskPlanTransaction sessionKey explanation items
+
+replaceSessionTaskPlanTransaction
+    :: Text
+    -> Maybe Text
+    -> [SessionTaskPlanItem]
+    -> Transaction.Transaction (Maybe Int64)
+replaceSessionTaskPlanTransaction sessionKey explanation items =
+    Transaction.statement
+        (sessionKey, explanation)
+        replacePlanHeaderStatement >>= \case
+            Nothing -> pure Nothing
+            Just (sessionId, revision) -> do
+                _ <- Transaction.statement sessionId deletePlanItemsStatement
+                insertItems sessionId items
+                pure (Just revision)
 
 clearSessionTaskPlan
     :: StorePool

@@ -199,6 +199,7 @@ spec = describe "PostgreSQL session schema" do
                                     , legacyTurns = []
                                     , legacyPromptSnapshot =
                                         Just importedPrompt
+                                    , legacyTaskPlan = Nothing
                                     }
                             importLegacySession pool legacy
                                 `shouldReturn` Right True
@@ -210,6 +211,65 @@ spec = describe "PostgreSQL session schema" do
                                             { sessionPromptEpochIndex = 0
                                             , sessionPromptEpochSnapshot =
                                                 importedPrompt
+                                            })
+                            let atomicImportKey = "session-atomic-import"
+                                atomicMetadata = promptMetadata
+                                    { sessionMetadataKey = atomicImportKey
+                                    }
+                                invalidPlanItems =
+                                    [ SessionTaskPlanItem
+                                        "first active step"
+                                        SessionTaskPlanInProgress
+                                    , SessionTaskPlanItem
+                                        "second active step"
+                                        SessionTaskPlanInProgress
+                                    ]
+                                invalidLegacy = LegacySession
+                                    { legacySourcePath =
+                                        "afk:session-atomic-import"
+                                    , legacyContentHash = "invalid-plan"
+                                    , legacyMetadata = atomicMetadata
+                                    , legacyTurns = []
+                                    , legacyPromptSnapshot = Nothing
+                                    , legacyTaskPlan =
+                                        Just SessionTaskPlanSnapshot
+                                            { sessionTaskPlanSnapshotExplanation =
+                                                Nothing
+                                            , sessionTaskPlanSnapshotItems =
+                                                invalidPlanItems
+                                            }
+                                    }
+                            importLegacySession pool invalidLegacy
+                                >>= (`shouldSatisfy`
+                                    either (const True) (const False))
+                            loadSession pool atomicImportKey
+                                `shouldReturn` Right Nothing
+                            let validPlanItems =
+                                    [ SessionTaskPlanItem
+                                        "retry safely"
+                                        SessionTaskPlanInProgress
+                                    ]
+                                validLegacy = invalidLegacy
+                                    { legacyContentHash = "valid-plan"
+                                    , legacyTaskPlan =
+                                        Just SessionTaskPlanSnapshot
+                                            { sessionTaskPlanSnapshotExplanation =
+                                                Just "atomic import"
+                                            , sessionTaskPlanSnapshotItems =
+                                                validPlanItems
+                                            }
+                                    }
+                            importLegacySession pool validLegacy
+                                `shouldReturn` Right True
+                            loadSessionTaskPlan pool atomicImportKey
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 1
+                                            , sessionTaskPlanExplanation =
+                                                Just "atomic import"
+                                            , sessionTaskPlanItems =
+                                                validPlanItems
                                             })
                             createSession pool metadata
                                 `shouldReturn` Right True

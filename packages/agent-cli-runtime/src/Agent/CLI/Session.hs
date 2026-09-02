@@ -1837,6 +1837,16 @@ importSessionTransfer pool root cwd transfer = runExceptT do
             , legacyTurns = map toStoredTurn transfer.transferTurns
             , legacyPromptSnapshot =
                 toStoredPromptSnapshot <$> meta.metaPromptSnapshot
+            , legacyTaskPlan =
+                fmap
+                    (\plan ->
+                        Store.SessionTaskPlanSnapshot
+                            { Store.sessionTaskPlanSnapshotExplanation =
+                                plan.taskPlanExplanation
+                            , Store.sessionTaskPlanSnapshotItems =
+                                map toStoredTaskPlanItem plan.taskPlanItems
+                            })
+                    transfer.transferTaskPlan
             }
     lift (Store.importLegacySession pool legacy) >>= \case
         Left err -> do
@@ -1845,32 +1855,12 @@ importSessionTransfer pool root cwd transfer = runExceptT do
         Right False -> do
             lift (cleanupTransfer dir sessionId)
             throwE ("session already exists: " <> sessionId)
-        Right True -> do
-            case transfer.transferTaskPlan of
-                Nothing -> pure sessionId
-                Just plan ->
-                    lift (Store.replaceSessionTaskPlan
-                        pool
-                        sessionId
-                        plan.taskPlanExplanation
-                        (map toStoredTaskPlanItem plan.taskPlanItems)) >>= \case
-                            Left err -> do
-                                lift (cleanupImportedSession dir sessionId)
-                                throwE (renderStoreError err)
-                            Right Nothing -> do
-                                lift (cleanupImportedSession dir sessionId)
-                                throwE ("session not found: " <> sessionId)
-                            Right (Just _) -> pure sessionId
+        Right True -> pure sessionId
   where
     cleanupTransfer dir sessionId = do
         _ <- tryIO (removePathForcibly dir)
         _ <- removeSessionTemp root sessionId
         pure ()
-    cleanupImportedSession dir sessionId = do
-        now <- getCurrentTime
-        _ <- Store.deleteSession pool sessionId now
-        cleanupTransfer dir sessionId
-
 -- | Import a validated transfer as a new session. The source id is never
 -- reused, which makes importing the same file safe and preserves the source
 -- transcript as an immutable object.

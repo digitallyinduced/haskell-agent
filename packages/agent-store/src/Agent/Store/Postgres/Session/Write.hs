@@ -40,6 +40,9 @@ import Agent.Store.Postgres.Connection
     , withSession
     )
 import Agent.Store.Postgres.Hasql (mkStatement)
+import Agent.Store.Postgres.Session.TaskPlan
+    ( replaceSessionTaskPlanTransaction
+    )
 import Agent.Store.Postgres.Session.Types
 import Agent.Store.Postgres.SessionItem (insertResponseItems)
 import Agent.Store.Types (StoreError)
@@ -467,6 +470,14 @@ importLegacySession pool legacy =
                         "legacy.import_completed"
                         metadata
                         legacy.legacyTurns
+                    forM_ legacy.legacyTaskPlan \plan -> do
+                        revision <- replaceSessionTaskPlanTransaction
+                            sessionKey
+                            plan.sessionTaskPlanSnapshotExplanation
+                            plan.sessionTaskPlanSnapshotItems
+                        case revision of
+                            Just 1 -> pure ()
+                            _ -> Transaction.condemn
                     forM_ legacy.legacyPromptSnapshot \snapshot -> do
                         epoch <- Transaction.statement
                             (sessionKey, snapshot)

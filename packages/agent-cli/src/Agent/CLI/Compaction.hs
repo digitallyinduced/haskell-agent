@@ -304,7 +304,7 @@ summarizeBackendLocalAttempt contextWindow makeBackend params history focus
     | contextWindow <= 0 =
         pure $ compactApiFailure
             "model context_window must be positive"
-    | null history =
+    | null sourceHistory =
         pure $ compactApiFailure "nothing to compact"
     | null summaryHistory =
         pure $ compactApiFailure "nothing compatible to compact"
@@ -375,7 +375,7 @@ summarizeBackendLocalAttempt contextWindow makeBackend params history focus
                                                 contextWindow
                                                 params
                                                 6
-                                                history
+                                                sourceHistory
                                                 summary
                                     if estimateRequestTokensWithItems params items
                                             > contextWindow
@@ -395,7 +395,8 @@ summarizeBackendLocalAttempt contextWindow makeBackend params history focus
                                 , compactAttemptResult = outcome
                                 }
   where
-    summaryHistory = filter isPortableLocalSummaryItem history
+    sourceHistory = stripTaskPlanContextItems history
+    summaryHistory = filter isPortableLocalSummaryItem sourceHistory
 
 compactApiFailure :: Text -> CompactAttempt ApiError
 compactApiFailure message =
@@ -553,7 +554,7 @@ decorateCompactOutcomeWithTaskPlan
 decorateCompactOutcomeWithTaskPlan taskPlanEnv outcome = do
     current <- maybe (pure Nothing) readTaskPlan taskPlanEnv
     let history =
-            filter (not . isTaskPlanContextItem) outcome.compactHistory
+            stripTaskPlanContextItems outcome.compactHistory
                 <> maybe [] (pure . taskPlanContextItem) current
     pure outcome
         { compactHistory = history
@@ -604,6 +605,12 @@ isTaskPlanContextItem = \case
     MessageItem message ->
         any isTaskPlanContextText (taskPlanMessageTexts message.content)
     _ -> False
+
+-- Task-plan messages are projections of mutable session state. Never let a
+-- compactor bake an obsolete projection into an opaque checkpoint or summary.
+stripTaskPlanContextItems :: [ResponseItem] -> [ResponseItem]
+stripTaskPlanContextItems =
+    filter (not . isTaskPlanContextItem)
 
 taskPlanMessageTexts :: MessageContent -> [Text]
 taskPlanMessageTexts = \case
@@ -682,7 +689,7 @@ compactRemoteV2AttemptWithRetainedBudget
     -> IO (CompactAttempt ApiError)
 compactRemoteV2AttemptWithRetainedBudget
         send params history before retainedBudgetFor
-    | null history =
+    | null sourceHistory =
         pure $ CompactAttempt emptyTokenUsage $
             Left (ProviderError InvalidRequestError "nothing to compact" Nothing)
     | otherwise = do
@@ -692,7 +699,7 @@ compactRemoteV2AttemptWithRetainedBudget
                 trimRemoteCompactionRequestToFit
                     contextWindow
                     params
-                    history
+                    sourceHistory
             request = buildRemoteCompactionRequest params requestHistory
         if estimateResponseCreateParamsTokens request > contextWindow
             then pure $ CompactAttempt emptyTokenUsage $
@@ -723,7 +730,7 @@ compactRemoteV2AttemptWithRetainedBudget
                                                     )
                                                 )
                                             )
-                                            history
+                                            sourceHistory
                                             checkpoint
                                 if
                                     estimateRequestTokensWithItems params items
@@ -743,6 +750,7 @@ compactRemoteV2AttemptWithRetainedBudget
                                             }
                             }
   where
+    sourceHistory = stripTaskPlanContextItems history
     protocolError message =
         ProviderError ApiErrorType message Nothing
 
@@ -787,7 +795,7 @@ summarizeLocalAttemptWith
     -> IO (CompactAttempt ApiError)
 summarizeLocalAttemptWith contextWindow prepareHistory send params history
         before focus
-    | null history =
+    | null sourceHistory =
         pure $ CompactAttempt emptyTokenUsage $
             Left (ProviderError InvalidRequestError "nothing to compact" Nothing)
     | null summaryHistory =
@@ -859,7 +867,7 @@ summarizeLocalAttemptWith contextWindow prepareHistory send params history
                                                             contextWindow
                                                             params
                                                             6
-                                                            history
+                                                            sourceHistory
                                                             summary
                                                 in if
                                                     estimateRequestTokensWithItems
@@ -878,7 +886,8 @@ summarizeLocalAttemptWith contextWindow prepareHistory send params history
                                                         }
                             }
   where
-    summaryHistory = prepareHistory history
+    sourceHistory = stripTaskPlanContextItems history
+    summaryHistory = prepareHistory sourceHistory
 
 isPortableLocalSummaryItem :: ResponseItem -> Bool
 isPortableLocalSummaryItem = \case
@@ -1235,8 +1244,20 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
                 contextState snapshot previous inputs onEvent
   where
     runCompaction history inputs =
-        (.compactAttemptResult)
-            <$> runAttemptAndRecord recordUsage (compactAction history inputs)
+        fmap
+            (fmap (deduplicatePendingTaskPlan inputs) . (.compactAttemptResult))
+            (runAttemptAndRecord
+                recordUsage
+                (compactAction (stripTaskPlanContextItems history) inputs))
+
+    deduplicatePendingTaskPlan inputs outcome
+        | any isTaskPlanContextItem (turnInputsToItems inputs) =
+            let history = stripTaskPlanContextItems outcome.compactHistory
+            in outcome
+                { compactHistory = history
+                , compactAfterTokens = estimateItemsTokens history
+                }
+        | otherwise = outcome
 
     isCompletedTool = \case
         CompletedTool{} -> True

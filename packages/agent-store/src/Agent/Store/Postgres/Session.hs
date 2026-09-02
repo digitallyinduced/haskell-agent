@@ -45,6 +45,7 @@ module Agent.Store.Postgres.Session
     , SessionTaskPlanStatus(..)
     , SessionTaskPlanItem(..)
     , SessionTaskPlan(..)
+    , SessionTaskPlanSnapshot(..)
     , loadRecentSessionTurns
     , loadRecentSessionHistoryTurns
     , loadSessionTurnsBefore
