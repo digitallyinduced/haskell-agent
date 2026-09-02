@@ -92,6 +92,7 @@ import Agent.CLI.Style
     , paintBackgroundLines
     , osc8Link
     , roleError
+    , roleInspectName
     , roleMuted
     , roleToolArrow
     , roleToolCommand
@@ -790,8 +791,9 @@ formatToolStarted color = formatToolStartedRelative color ""
 
 formatToolStartedRelative :: Bool -> Text -> ToolCall -> Text
 formatToolStartedRelative color workspace call =
-    let marker
-            | isInspectionTool call.name = glyphInspect
+    let inspection = isInspectionTool call.name
+        marker
+            | inspection = glyphInspect
             | otherwise = glyphTool
         arrow = roleToolArrow color marker
         detail = toolDetail call
@@ -804,7 +806,9 @@ formatToolStartedRelative color workspace call =
                         else roleToolCommand color detail
             in arrow <> prompt <> command
         ToolChrome verb kind ->
-            let name = roleToolName color verb
+            let name
+                    | inspection = roleInspectName color verb
+                    | otherwise = roleToolName color verb
                 paintedDetail = case kind of
                     ToolDetailNone -> ""
                     ToolDetailMuted
@@ -813,9 +817,13 @@ formatToolStartedRelative color workspace call =
                     ToolDetailPath
                         | Text.null detail -> ""
                         | otherwise ->
-                            " " <> renderToolPath color workspace detail
+                            " "
+                                <> if inspection
+                                    then renderInspectionPath color workspace detail
+                                    else renderToolPath color workspace detail
                     ToolDetailCommand
                         | Text.null detail -> ""
+                        | inspection -> " " <> roleToolDetail color detail
                         | otherwise -> " " <> roleToolCommand color detail
             in arrow <> name <> paintedDetail
 
@@ -941,9 +949,17 @@ paintDiffRelative color workspace diff =
             style color [terminalGreen] ("  +" <> line)
 
 renderToolPath :: Bool -> Text -> Text -> Text
-renderToolPath color workspace path =
+renderToolPath color =
+    renderToolPathWith (roleToolPath color) color
+
+renderInspectionPath :: Bool -> Text -> Text -> Text
+renderInspectionPath color =
+    renderToolPathWith (roleToolDetail color) color
+
+renderToolPathWith :: (Text -> Text) -> Bool -> Text -> Text -> Text
+renderToolPathWith paint color workspace path =
     let displayed = workspaceRelativeDisplayPath workspace path
-        styled = roleToolPath color displayed
+        styled = paint displayed
         absolute = absoluteToolPath workspace path
     in if "/" `Text.isPrefixOf` absolute
         then osc8Link color (fileUri (Text.unpack absolute)) styled

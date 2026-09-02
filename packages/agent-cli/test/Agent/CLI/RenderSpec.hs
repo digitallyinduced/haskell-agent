@@ -1,7 +1,16 @@
 module Agent.CLI.RenderSpec (spec) where
 
 import Agent.CLI.Render
-import Agent.CLI.Style (motionGlyphSet)
+import Agent.CLI.Style
+    ( glyphInspect
+    , glyphTool
+    , motionGlyphSet
+    , roleInspectName
+    , roleToolArrow
+    , roleToolDetail
+    , roleToolName
+    , roleToolPath
+    )
 import Agent.Error (ApiError(..), ErrorType(..), credentialsExhausted)
 import Agent.Loop
     ( LoopError(..)
@@ -323,6 +332,28 @@ spec = do
                     "wait_commands_or_subagents"
                     "{\"task_ids\":[\"t1\"]}")
                 `shouldBe` "◆ Waited"
+
+        it "keeps inspection labels and paths in subdued gray" do
+            formatToolStarted True
+                (functionToolCall
+                    "inspect-read"
+                    "read_file"
+                    "{\"target_file\":\"src/A.hs\"}")
+                `shouldBe`
+                    roleToolArrow True glyphInspect
+                        <> roleInspectName True "Read"
+                        <> " "
+                        <> roleToolDetail True "src/A.hs"
+            formatToolStarted True
+                (functionToolCall
+                    "action-edit"
+                    "search_replace"
+                    "{\"file_path\":\"src/A.hs\"}")
+                `shouldBe`
+                    roleToolArrow True glyphTool
+                        <> roleToolName True "Edited"
+                        <> " "
+                        <> roleToolPath True "src/A.hs"
 
         it "keeps unknown tool names" do
             formatToolStarted False (functionToolCall "c5" "custom_tool" "{\"x\":1}")

@@ -14,6 +14,7 @@ module Agent.TUI.Theme
     , dimAttr
     , emphasisAttr
     , headingAttr
+    , inspectAttr
     , inlineCodeAttr
     , lambdaDimAttr
     , lambdaGlowAttr
@@ -181,6 +182,7 @@ fixedThemePalette = \case
 
 baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
 userAttr, userMutedAttr, assistantAttr, thinkingAttr, thinkingBodyAttr, toolAttr :: AttrName
+inspectAttr :: AttrName
 todoPendingAttr, todoInProgressAttr, todoCompletedAttr, todoCancelledAttr :: AttrName
 errorAttr, successAttr, selectedAttr, selectedMutedAttr, borderAttr, borderActiveAttr :: AttrName
 transcriptHoverAttr :: AttrName
@@ -204,6 +206,7 @@ assistantAttr = attrName "assistant"
 thinkingAttr = attrName "thinking"
 thinkingBodyAttr = attrName "thinking-body"
 toolAttr = attrName "tool"
+inspectAttr = attrName "inspect"
 todoPendingAttr = attrName "todo-pending"
 todoInProgressAttr = attrName "todo-in-progress"
 todoCompletedAttr = attrName "todo-completed"
@@ -284,6 +287,7 @@ terminalDefault =
         , (waitingDimAttr, palette V.brightBlack)
         , (waitingMidAttr, palette V.yellow)
         , (toolAttr, palette V.cyan)
+        , (inspectAttr, palette V.brightBlack `V.withStyle` V.bold)
         , (todoPendingAttr, V.defAttr)
         , (todoInProgressAttr, palette V.yellow `V.withStyle` V.bold)
         , (todoCompletedAttr, palette V.brightBlack)
@@ -351,6 +355,7 @@ monochrome =
         , (waitingDimAttr, V.defAttr)
         , (waitingMidAttr, V.defAttr)
         , (toolAttr, V.defAttr)
+        , (inspectAttr, V.defAttr `V.withStyle` V.bold)
         , (todoPendingAttr, V.defAttr)
         , (todoInProgressAttr, V.defAttr `V.withStyle` V.bold)
         , (todoCompletedAttr, V.defAttr)
@@ -435,6 +440,7 @@ mkTheme background foreground muted accent link =
         , (waitingDimAttr, mutedA)
         , (waitingMidAttr, accentA)
         , (toolAttr, linkA)
+        , (inspectAttr, mutedA `V.withStyle` V.bold)
         , (todoPendingAttr, base)
         , (todoInProgressAttr, accentA `V.withStyle` V.bold)
         , (todoCompletedAttr, mutedA)
@@ -558,7 +564,8 @@ waveTrough = RGBColor 36 40 59
 runningWavePeak :: V.Color
 runningWavePeak = RGBColor 187 154 247
 
--- | Quiet gray-blue peak (#3b4261) so reasoning rails sit behind tool rails.
+-- | Quiet gray-blue peak (#3b4261) so reasoning and inspection rails sit
+-- behind action-tool rails.
 thinkingWavePeak :: V.Color
 thinkingWavePeak = RGBColor 59 66 97
 
@@ -653,7 +660,7 @@ waveCellForTheme theme True trough peak brightness glyph
 
 wavePeakFor :: AttrName -> V.Color
 wavePeakFor attr
-    | attr == thinkingAttr = thinkingWavePeak
+    | attr == thinkingAttr || attr == inspectAttr = thinkingWavePeak
     | otherwise = runningWavePeak
 
 wavePeakForTheme :: ThemeKind -> AttrName -> V.Color
@@ -661,7 +668,8 @@ wavePeakForTheme theme attr =
     case fixedThemePalette theme of
         Nothing -> wavePeakFor attr
         Just palette
-            | attr == thinkingAttr -> palette.themePaletteMuted
+            | attr == thinkingAttr || attr == inspectAttr ->
+                palette.themePaletteMuted
             | otherwise -> palette.themePaletteAccent
 
 waitingPeakForTheme :: ThemeKind -> V.Color
