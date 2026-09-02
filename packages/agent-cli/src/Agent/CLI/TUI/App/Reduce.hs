@@ -104,7 +104,7 @@ import Agent.CLI.TUI.ImagePreview ( NativePreviewPlacement(..)
     , renderTuiImagePreview
     , sameNativePreviewLayout
     )
-import Agent.TUI.Markdown ( codeWidgetWithSyntaxHighlighting , markdownWidgetWithLinks , markdownWidgetWithSyntaxHighlightingAndLinks )
+import Agent.TUI.Markdown ( codeWidgetWithSyntaxHighlighting , diffSyntaxLanguages , markdownWidgetWithLinks , markdownWidgetWithSyntaxHighlightingAndLinks )
 import Agent.TUI.FencedCode ( FencedBlock(..)
     , fencedBlocks
     )
@@ -608,6 +608,8 @@ syntaxLanguagesForBlock block =
         BlockShell
             | Just language <- blockCodeLanguage block ->
                 [language]
+        BlockEdit ->
+            diffSyntaxLanguages block.blockDetail block.blockBody
         _ -> []
 
 resumeNativeProgressIfRunning :: EventM Name AppState ()

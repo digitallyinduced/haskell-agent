@@ -2,6 +2,8 @@
 module Agent.TUI.Markdown
     ( Inline(..)
     , codeWidgetWithSyntaxHighlighting
+    , diffSyntaxLanguages
+    , diffWidgetWithSyntaxHighlighting
     , inlinePlainText
     , markdownWidget
     , markdownWidgetWithLinks
@@ -26,6 +28,7 @@ import Agent.Syntax
     ( SyntaxHighlighter
     , SyntaxSpan(..)
     , highlightCode
+    , resolveFenceLanguage
     )
 import Agent.TUI.TextWidth
     ( displayTerminalText
@@ -148,6 +151,255 @@ codeWidgetWithSyntaxHighlighting
 codeWidgetWithSyntaxHighlighting syntaxHighlighter language =
     renderCodeBodyWith wrapStyledCode syntaxHighlighter language
         . codeBodyLines
+
+-- | Languages needed to render a compact edit preview. The first file path is
+-- supplied separately, while later files are introduced by body headers.
+diffSyntaxLanguages :: Text -> Text -> [Text]
+diffSyntaxLanguages initialPath body =
+    List.nub
+        [ language
+        | line <- parseDiffLines initialPath body
+        , Just path <- [line.diffPathHint]
+        , Just language <- [resolveFenceLanguage (diffFenceInfo path)]
+        ]
+
+-- | Render a compact edit preview with token-level syntax foregrounds over
+-- full-width added/removed backgrounds.
+diffWidgetWithSyntaxHighlighting
+    :: Maybe SyntaxHighlighter
+    -> Text
+    -> Text
+    -> Widget n
+diffWidgetWithSyntaxHighlighting syntaxHighlighter initialPath body =
+    B.Widget B.Greedy B.Fixed do
+        context <- B.getContext
+        codeAttr <- B.lookupAttrName Theme.codeAttr
+        baseAttr <- B.lookupAttrName Theme.assistantAttr
+        mutedAttr <- B.lookupAttrName Theme.mutedAttr
+        addedAttr <- B.lookupAttrName Theme.diffAddedAttr
+        removedAttr <- B.lookupAttrName Theme.diffRemovedAttr
+        styledRows <-
+            fmap concat $
+                traverse
+                    (resolveDiffRun
+                        syntaxHighlighter
+                        codeAttr
+                        baseAttr
+                        mutedAttr
+                        addedAttr
+                        removedAttr)
+                    (diffRuns (parseDiffLines initialPath body))
+        let availableWidth = max 1 context.availWidth
+            rows =
+                concatMap
+                    (renderStyledDiffRow availableWidth)
+                    styledRows
+            image = V.vertCat rows
+            boundedImage
+                | V.imageWidth image > availableWidth =
+                    V.cropRight availableWidth image
+                | otherwise = image
+        pure B.emptyResult { B.image = boundedImage }
+
+data DiffLineKind
+    = DiffLineAdded
+    | DiffLineRemoved
+    | DiffLineHeader
+    | DiffLineMeta
+    | DiffLinePlain
+    deriving (Eq)
+
+data ParsedDiffLine = ParsedDiffLine
+    { diffLineKind :: !DiffLineKind
+    , diffPathHint :: !(Maybe Text)
+    , diffLineText :: !Text
+    }
+
+data DiffRun
+    = DiffChangedRun !DiffLineKind !(Maybe Text) ![Text]
+    | DiffPlainRun !ParsedDiffLine
+
+data StyledDiffRow = StyledDiffRow
+    { styledDiffBackground :: !(Maybe V.Attr)
+    , styledDiffFragments :: ![(V.Attr, Text)]
+    }
+
+parseDiffLines :: Text -> Text -> [ParsedDiffLine]
+parseDiffLines initialPath = go (nonEmptyText initialPath) . Text.lines
+  where
+    go _ [] = []
+    go currentPath (line : rest)
+        | Just nextPath <- diffHeaderPath line =
+            ParsedDiffLine DiffLineHeader (Just nextPath) line
+                : go (Just nextPath) rest
+        | Just source <- Text.stripPrefix "  -" line =
+            ParsedDiffLine DiffLineRemoved currentPath source
+                : go currentPath rest
+        | Just source <- Text.stripPrefix "  +" line =
+            ParsedDiffLine DiffLineAdded currentPath source
+                : go currentPath rest
+        | "  …" `Text.isPrefixOf` line
+            || "… +" `Text.isPrefixOf` line =
+            ParsedDiffLine DiffLineMeta currentPath line
+                : go currentPath rest
+        | otherwise =
+            ParsedDiffLine DiffLinePlain currentPath line
+                : go currentPath rest
+
+diffHeaderPath :: Text -> Maybe Text
+diffHeaderPath line =
+    actionPath
+        [ "  create "
+        , "  delete "
+        , "  write "
+        , "  update "
+        ]
+  where
+    actionPath [] = movePath
+    actionPath (prefix : rest) =
+        case Text.stripPrefix prefix line of
+            Just path -> nonEmptyText path
+            Nothing -> actionPath rest
+
+    movePath = do
+        moved <- Text.stripPrefix "  move " line
+        let (source, destinationWithArrow) = Text.breakOn " → " moved
+        case Text.stripPrefix " → " destinationWithArrow of
+            Just destination -> nonEmptyText destination
+            Nothing -> nonEmptyText source
+
+nonEmptyText :: Text -> Maybe Text
+nonEmptyText value =
+    let stripped = Text.strip value
+    in if Text.null stripped then Nothing else Just stripped
+
+diffRuns :: [ParsedDiffLine] -> [DiffRun]
+diffRuns [] = []
+diffRuns (line : rest)
+    | changedKind line.diffLineKind =
+        let (matching, remaining) =
+                span
+                    (\next ->
+                        next.diffLineKind == line.diffLineKind
+                            && next.diffPathHint == line.diffPathHint)
+                    rest
+        in DiffChangedRun
+                line.diffLineKind
+                line.diffPathHint
+                (map (.diffLineText) (line : matching))
+                : diffRuns remaining
+    | otherwise =
+        DiffPlainRun line : diffRuns rest
+  where
+    changedKind kind =
+        kind == DiffLineAdded || kind == DiffLineRemoved
+
+resolveDiffRun
+    :: Maybe SyntaxHighlighter
+    -> V.Attr
+    -> V.Attr
+    -> V.Attr
+    -> V.Attr
+    -> V.Attr
+    -> DiffRun
+    -> B.RenderM n [StyledDiffRow]
+resolveDiffRun
+    syntaxHighlighter
+    codeAttr
+    baseAttr
+    mutedAttr
+    addedAttr
+    removedAttr = \case
+        DiffPlainRun line ->
+            pure
+                [ StyledDiffRow
+                    Nothing
+                    [ ( if line.diffLineKind == DiffLineMeta
+                            then mutedAttr
+                            else baseAttr
+                      , displayTerminalText line.diffLineText
+                      )
+                    ]
+                ]
+        DiffChangedRun kind path sourceLines -> do
+            let background =
+                    if kind == DiffLineAdded then addedAttr else removedAttr
+                prefix =
+                    if kind == DiffLineAdded then "  +" else "  -"
+                highlightedLines = do
+                    highlighter <- syntaxHighlighter
+                    sourcePath <- path
+                    either (const Nothing) Just $
+                        highlightCode
+                            highlighter
+                            (diffFenceInfo sourcePath)
+                            (Text.intercalate "\n" sourceLines)
+            contentRows <-
+                case highlightedLines of
+                    Just rows
+                        | length rows == length sourceLines ->
+                            traverse
+                                (traverse
+                                    (\span_ -> do
+                                        attr <-
+                                            B.lookupAttrName
+                                                (Theme.syntaxClassAttr
+                                                    span_.syntaxClass)
+                                        pure
+                                            ( withDiffBackground
+                                                background
+                                                attr
+                                            , displayTerminalText
+                                                span_.syntaxText
+                                            )))
+                                rows
+                    _ ->
+                        pure
+                            [ [ ( withDiffBackground background codeAttr
+                                , displayTerminalText source
+                                )
+                              ]
+                            | source <- sourceLines
+                            ]
+            pure
+                [ StyledDiffRow
+                    (Just background)
+                    ((background, prefix) : content)
+                | content <- contentRows
+                ]
+
+withDiffBackground :: V.Attr -> V.Attr -> V.Attr
+withDiffBackground background attr =
+    case V.attrBackColor background of
+        V.SetTo color -> attr `V.withBackColor` color
+        _ -> attr
+
+-- A bare filename is unambiguously a path in an edit preview. Prefixing it
+-- keeps the general fence parser's support for dotted language identifiers
+-- (for example, @asp.net@) while still resolving root-level file extensions.
+diffFenceInfo :: Text -> Text
+diffFenceInfo path
+    | Text.any (`elem` ['/', '\\']) path = path
+    | otherwise = "./" <> path
+
+renderStyledDiffRow :: Int -> StyledDiffRow -> [V.Image]
+renderStyledDiffRow availableWidth row =
+    map renderPhysicalRow $
+        wrapStyledCode availableWidth row.styledDiffFragments
+  where
+    renderPhysicalRow fragments =
+        let content = renderStyledLine fragments
+        in case row.styledDiffBackground of
+            Nothing -> content
+            Just background ->
+                let padding =
+                        max 0 (availableWidth - V.imageWidth content)
+                in V.horizCat
+                    [ content
+                    , if padding == 0
+                        then V.emptyImage
+                        else V.charFill background ' ' padding 1
+                    ]
 
 renderChunk
     :: Ord n

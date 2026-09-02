@@ -265,6 +265,66 @@ spec = describe "fullscreen Markdown rendering" do
         Text.concat (renderedCodePayloadRows 18 widget)
             `shouldBe` code
 
+    it "discovers every language used by a multi-file edit preview" do
+        diffSyntaxLanguages
+            "Main.hs"
+            (Text.unlines
+                [ "  -main = old"
+                , "  update web/app.ts"
+                , "  +const answer = 42"
+                , "  move scripts/old.py → crates/new.rs"
+                , "  +fn main() {}"
+                ])
+            `shouldBe` ["haskell", "typescript", "rust"]
+
+    it "syntax-highlights edit lines over full-width diff backgrounds" do
+        syntaxDirectory <- sourceSyntaxDirectory
+        loadSyntaxHighlighterFrom syntaxDirectory >>= \case
+            Left message -> expectationFailure (Text.unpack message)
+            Right highlighter -> do
+                let width = 32
+                    widget :: Widget ()
+                    widget =
+                        diffWidgetWithSyntaxHighlighting
+                            (Just highlighter)
+                            "Main.hs"
+                            "  -message = \"before\"\n  +message = \"after\""
+                    picture =
+                        renderWidget
+                            (Just Theme.terminalDefault)
+                            [widget]
+                            (width, 4)
+                    rows =
+                        map toList $
+                            toList $
+                                displayOpsForPic picture (width, 4)
+                    findText expected =
+                        find (containsText expected) (concat rows)
+                    stringForeground =
+                        V.attrForeColor $
+                            attrMapLookup
+                                Theme.syntaxStringAttr
+                                Theme.terminalDefault
+                    removedBackground =
+                        V.attrBackColor $
+                            attrMapLookup
+                                Theme.diffRemovedAttr
+                                Theme.terminalDefault
+                    addedBackground =
+                        V.attrBackColor $
+                            attrMapLookup
+                                Theme.diffAddedAttr
+                                Theme.terminalDefault
+                V.imageWidth (V.picImage picture) `shouldBe` width
+                fmap (V.attrForeColor . spanAttr) (findText "\"before\"")
+                    `shouldBe` Just stringForeground
+                fmap (V.attrBackColor . spanAttr) (findText "\"before\"")
+                    `shouldBe` Just removedBackground
+                fmap (V.attrForeColor . spanAttr) (findText "\"after\"")
+                    `shouldBe` Just stringForeground
+                fmap (V.attrBackColor . spanAttr) (findText "\"after\"")
+                    `shouldBe` Just addedBackground
+
     it "renders terminal controls as inert visible glyphs" do
         let unsafe = "\ESC]0;owned\BEL\t\r"
             prose = Text.concat (renderRows 40 unsafe)
