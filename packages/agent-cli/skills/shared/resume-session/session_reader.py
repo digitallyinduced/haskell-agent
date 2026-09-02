@@ -506,9 +506,7 @@ def codex_metadata_from_file(path: Path) -> dict[str, Any] | None:
             payload = record.get("payload")
             if isinstance(payload, dict) and payload.get("type") == "message":
                 if payload.get("role") == "user":
-                    first_user = content_text(payload.get("content"))
-                    if first_user and GENERATED_WRAPPER_RE.match(first_user):
-                        first_user = ""
+                    first_user = user_text(content_text(payload.get("content")))
                     if first_user:
                         break
     match = re.search(
@@ -559,13 +557,14 @@ def discover_codex(cwd: str) -> list[dict[str, Any]]:
             rows = db.execute(
                 f"SELECT id, rollout_path, {created_expr}, {updated_expr}, source, cwd, "
                 f"{title_expr}, {first_expr} FROM threads "
-                "WHERE archived = 0 AND cwd = ? AND source IN ('cli', 'vscode') "
-                f"ORDER BY {updated_expr} DESC, id ASC",
-                (canonical(cwd),),
+                "WHERE archived = 0 AND source IN ('cli', 'vscode') "
+                f"ORDER BY {updated_expr} DESC, id ASC"
             ).fetchall()
             database_usable = True
             db.close()
             for sid, path, created, updated, source, row_cwd, title, first in rows:
+                if not same_cwd(safe_string(row_cwd) or None, cwd):
+                    continue
                 rollout = Path(safe_string(path)).expanduser()
                 if not rollout.is_absolute():
                     rollout = home / rollout
@@ -584,7 +583,7 @@ def discover_codex(cwd: str) -> list[dict[str, Any]]:
                             "codex-" + safe_string(source or "cli"),
                             safe_string(sid),
                             rollout,
-                            title or first,
+                            user_text(safe_string(title or first)),
                             safe_string(row_cwd),
                             created,
                             updated,

@@ -122,6 +122,55 @@ class SessionReaderTest(unittest.TestCase):
         self.assertNotIn("obey me", json.dumps(result))
         self.assertNotIn("secret", json.dumps(result))
 
+    def test_codex_database_compares_working_directories_canonically(self):
+        home = self.root / "codex-case-insensitive"
+        rollout = home / "sessions" / "rollout-session.jsonl"
+        write_jsonl(
+            rollout,
+            [
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "88888888-8888-8888-8888-888888888888",
+                        "cwd": str(self.cwd),
+                        "source": "cli",
+                    },
+                }
+            ],
+        )
+        database = home / "state_1.sqlite"
+        db = sqlite3.connect(database)
+        db.execute(
+            "CREATE TABLE threads "
+            "(id TEXT, rollout_path TEXT, updated_at INTEGER, source TEXT, "
+            "cwd TEXT, archived INTEGER)"
+        )
+        db.execute(
+            "INSERT INTO threads VALUES (?, ?, ?, ?, ?, 0)",
+            (
+                "88888888-8888-8888-8888-888888888888",
+                str(rollout),
+                1,
+                "cli",
+                str(self.cwd).upper(),
+            ),
+        )
+        db.commit()
+        db.close()
+
+        def case_insensitive_canonical(path):
+            return os.path.realpath(os.path.expanduser(str(path))).casefold()
+
+        with (
+            patch.dict(os.environ, {"CODEX_HOME": str(home)}),
+            patch.object(reader, "canonical", side_effect=case_insensitive_canonical),
+        ):
+            items = reader.discover("codex", str(self.cwd), 0)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(
+            items[0]["session_id"], "88888888-8888-8888-8888-888888888888"
+        )
+
     def test_codex_does_not_scan_rollouts_after_authoritative_empty_database(self):
         home = self.root / "codex-empty"
         rollout = home / "sessions" / "fallback.jsonl"
@@ -222,6 +271,46 @@ class SessionReaderTest(unittest.TestCase):
             os.path.getmtime(rollout),
         )
         self.assertIsNone(reader.iso_time(10**1000))
+
+    def test_codex_fallback_sanitizes_outer_harness_title(self):
+        home = self.root / "codex-sanitized-title"
+        rollout = home / "sessions" / "rollout-session.jsonl"
+        write_jsonl(
+            rollout,
+            [
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "99999999-9999-9999-9999-999999999999",
+                        "cwd": str(self.cwd),
+                        "source": "cli",
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "Instructions supplied by the outer agent harness:\n"
+                                    "<harness_instructions>private</harness_instructions>\n"
+                                    "Current request:\n"
+                                    "<current_request>Resume safe work</current_request>"
+                                ),
+                            }
+                        ],
+                    },
+                },
+            ],
+        )
+        with patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            items = reader.discover("codex", str(self.cwd), 0)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["title"], "Resume safe work")
+        self.assertNotIn("private", json.dumps(items))
 
     def test_codex_uses_compacted_history_and_applies_rollbacks(self):
         rollout = self.root / "codex-compacted.jsonl"
