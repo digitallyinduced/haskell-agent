@@ -20,6 +20,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,10 +33,11 @@ UUID_RE = re.compile(
     re.IGNORECASE,
 )
 GENERATED_WRAPPER_RE = re.compile(
-    r"^\s*<(?:system-reminder|environment_context|system|developer|"
+    r"^\s*(?:#\s*AGENTS\.md instructions for(?:\s|$)|"
+    r"<(?:system-reminder|environment_context|system|developer|instructions|"
     r"user_instructions|manually_attached_skills|timestamp|local-command-caveat|"
     r"harness_instructions|prior_conversation|current_request|user_query)"
-    r"(?:\s|>)",
+    r"(?:\s|>))",
     re.IGNORECASE,
 )
 OUTER_HARNESS_RE = re.compile(
@@ -2135,6 +2137,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("tool", choices=TOOLS)
     result.add_argument("operation", choices=("list", "show"))
     result.add_argument("reference", nargs="?")
+    result.add_argument("--reference", dest="reference_option")
     result.add_argument("--cwd", default=os.getcwd())
     result.add_argument("--within-min", type=int, default=0)
     result.add_argument("--max-tool-chars", type=int, default=300)
@@ -2142,10 +2145,16 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def stdout_safe_text(value: Any) -> str:
-    return safe_string(value).encode(
-        "utf-8", errors="backslashreplace"
-    ).decode("utf-8")
+def terminal_safe_text(value: Any) -> str:
+    pieces: list[str] = []
+    for character in safe_string(value):
+        if unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}:
+            pieces.append(
+                character.encode("unicode_escape").decode("ascii")
+            )
+        else:
+            pieces.append(character)
+    return "".join(pieces)
 
 
 def emit(value: Any, as_json: bool) -> None:
@@ -2156,7 +2165,7 @@ def emit(value: Any, as_json: bool) -> None:
         if isinstance(value, list):
             for item in value:
                 sys.stdout.write(
-                    stdout_safe_text(
+                    terminal_safe_text(
                         f"{item.get('updated_at') or '-'}  "
                         f"{item.get('session_id')}  {item.get('title')}"
                     )
@@ -2180,7 +2189,17 @@ def main() -> int:
                 for item in discover(args.tool, cwd, args.within_min)
             ]
         else:
-            selected = resolve(args.tool, cwd, args.reference, args.within_min)
+            if args.reference is not None and args.reference_option is not None:
+                raise ReaderError(
+                    "pass the session reference either positionally or with "
+                    "--reference, not both"
+                )
+            reference = (
+                args.reference_option
+                if args.reference_option is not None
+                else args.reference
+            )
+            selected = resolve(args.tool, cwd, reference, args.within_min)
             value = READERS[args.tool](selected, args.max_tool_chars)
         emit(value, args.json)
         return 0

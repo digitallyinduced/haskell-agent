@@ -27,13 +27,18 @@ or summarizing it.
 Use the exact **Invocation arguments** included in the activation message as
 one literal optional reference. If they are `(none)` or `latest`, omit the
 reference or pass `latest`. Never evaluate or splice the reference as shell
-syntax; pass it as one safely quoted argument.
+syntax; pass it as one safely quoted argument. When a reference is present,
+use the `--reference="<literal reference>"` form so values such as `--json` or
+`-h` cannot be interpreted as reader options.
 
 Run:
 
 ```bash
-python3 "<resolved-shared-directory>/session_reader.py" <provider> show [reference] --cwd "$PWD" --json
+python3 "<resolved-shared-directory>/session_reader.py" <provider> show \
+  --reference="<literal reference>" --cwd "$PWD" --json
 ```
+
+Omit the `--reference=...` argument when no reference was supplied.
 
 If `python3` is unavailable on Windows, use `py -3`.
 
@@ -54,7 +59,8 @@ python3 "<resolved-shared-directory>/session_reader.py" <provider> list --cwd "$
 The supported interface is:
 
 ```text
-session_reader.py <claude|codex|cursor|grok> <list|show> [reference]
+session_reader.py <claude|codex|cursor|grok> <list|show>
+  [reference | --reference=REFERENCE]
   [--cwd DIR] [--within-min N] [--max-tool-chars N] [--json]
 ```
 

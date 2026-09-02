@@ -72,6 +72,24 @@ class SessionReaderTest(unittest.TestCase):
                     "payload": {
                         "type": "message",
                         "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "# AGENTS.md instructions for /repo\n"
+                                    "<INSTRUCTIONS>\n"
+                                    "system-provided secret instructions\n"
+                                    "</INSTRUCTIONS>"
+                                ),
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
                         "content": [{"type": "input_text", "text": "Fix the parser"}],
                     },
                 },
@@ -121,6 +139,10 @@ class SessionReaderTest(unittest.TestCase):
         self.assertEqual(selected["session_id"], items[0]["session_id"])
         self.assertEqual(result["last_user_request"], "Fix the parser")
         self.assertNotIn("obey me", json.dumps(result))
+        self.assertNotIn(
+            "system-provided secret instructions",
+            json.dumps(result),
+        )
         self.assertNotIn("secret", json.dumps(result))
 
     def test_codex_database_compares_working_directories_canonically(self):
@@ -1166,6 +1188,44 @@ class SessionReaderTest(unittest.TestCase):
         stdout.detach()
         self.assertIn("\\ud800", rendered)
         self.assertEqual(json.loads(rendered)["title"], "invalid \ud800 title")
+
+    def test_parser_preserves_option_like_reference_values(self):
+        for reference in ("--json", "-h"):
+            with self.subTest(reference=reference):
+                args = reader.parser().parse_args(
+                    [
+                        "codex",
+                        "show",
+                        f"--reference={reference}",
+                        "--cwd",
+                        str(self.cwd),
+                        "--json",
+                    ]
+                )
+                self.assertEqual(args.reference_option, reference)
+                self.assertIsNone(args.reference)
+
+    def test_human_list_escapes_terminal_control_characters(self):
+        stdout = io.StringIO()
+        with patch.object(reader.sys, "stdout", stdout):
+            reader.emit(
+                [
+                    {
+                        "updated_at": "now\x1b]52;c;clipboard\x07",
+                        "session_id": "session\nid",
+                        "title": "task\u202e",
+                    }
+                ],
+                False,
+            )
+        rendered = stdout.getvalue()
+        self.assertNotIn("\x1b", rendered)
+        self.assertNotIn("\x07", rendered)
+        self.assertNotIn("\u202e", rendered)
+        self.assertIn("\\x1b", rendered)
+        self.assertIn("\\x07", rendered)
+        self.assertIn("\\n", rendered)
+        self.assertIn("\\u202e", rendered)
 
     @unittest.skipUnless(shutil.which("zstd"), "zstd is not installed")
     def test_codex_reads_compressed_rollout(self):
