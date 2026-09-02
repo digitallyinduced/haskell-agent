@@ -30,6 +30,7 @@ import Data.IORef
     )
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Text.Read (readMaybe)
 import Test.Hspec
 
 spec :: Spec
@@ -48,6 +49,24 @@ spec = describe "in-process MCP server" do
         listed `shouldSatisfy`
             hasPath ["result", "tools"]
         inProcessMcpToolNames server `shouldBe` ["echo"]
+
+    it "advertises fresh-approval metadata for statically sensitive tools" do
+        let sensitive = jsonAppToolWithExecution
+                "sensitive"
+                "Sensitive"
+                []
+                AlwaysConfirm
+                TurnSequential
+                (noArgsTool "sensitive" (pure (Right "ok")))
+        server <- testServer (const (pure (Right True))) [sensitive]
+        listed <- handleInProcessMcpMessage server $
+            request 2 "tools/list" (object [])
+        lookupPath
+            [ "result", "tools", "0", "_meta"
+            , "dev.haskell-agent/fresh-approval"
+            ]
+            listed
+            `shouldBe` Just (Bool True)
 
     it "runs approved calls through the registered handler" do
         approved <- newIORef []
@@ -189,6 +208,17 @@ lookupPath :: [Text] -> Maybe Value -> Maybe Value
 lookupPath keys root = root >>= go keys
   where
     go [] value = Just value
+    go (key : rest) (Array values) = do
+        index <- readMaybe (Text.unpack key)
+        value <- toList values `atMay` index
+        go rest value
     go (key : rest) (Object value) =
         KeyMap.lookup (Key.fromText key) value >>= go rest
     go _ _ = Nothing
+
+atMay :: [a] -> Int -> Maybe a
+atMay values index
+    | index < 0 = Nothing
+    | otherwise = case drop index values of
+        value : _ -> Just value
+        [] -> Nothing

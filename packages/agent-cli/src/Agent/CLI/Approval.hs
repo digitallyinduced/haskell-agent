@@ -14,6 +14,7 @@ module Agent.CLI.Approval
     , childApprove
     , planApproval
     , resolveApprovalPrompt
+    , resolveApprovalPromptWith
     , setApprovalPolicy
     , toggleAlwaysApprove
     ) where
@@ -25,11 +26,13 @@ import Agent.CLI.Approval.Decision
     , ApprovalPlan(..)
     , planApproval
     , resolveApprovalPrompt
+    , resolveApprovalPromptWith
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Permission
     ( PermissionChoice
     , promptPermission
+    , promptPermissionOnce
     )
 import Agent.CLI.Project (saveProjectAutoApprove)
 import Agent.CLI.Render (putTextLn)
@@ -50,10 +53,14 @@ import Agent.Tools.PlanMode
     , planFilePath
     )
 import Agent.Tools.Types
-    ( ToolRegistry
+    ( AppTool(..)
+    , ApprovalRequirement(..)
+    , ApprovalRule(..)
+    , ToolRegistry
     , lookupRegisteredTool
     , toolAcceptsCall
     , toolAllowsWithoutPrompt
+    , toolApprovalRequirement
     )
 import Data.IORef
     ( IORef
@@ -111,11 +118,13 @@ approveToolDecisionClassified
     -> IO (Either Text Bool)
 approveToolDecisionClassified classifyReadOnly
         policyRef allowedToolsRef tools planMode projectRoot cwd call = do
-    approveToolDecisionWithReporterAndPersistenceClassified
+    approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
         classifyReadOnly
-        (\requested -> do
+        (\requiresExplicit requested -> do
             color <- resolveColor stderr
-            promptPermission color (toText cwd) requested)
+            if requiresExplicit
+                then promptPermissionOnce color (toText cwd) requested
+                else promptPermission color (toText cwd) requested)
         (\case
             ApprovalWarning message -> do
                 color <- resolveColor stderr
@@ -196,6 +205,31 @@ approveToolDecisionWithReporterAndPersistenceClassified
 approveToolDecisionWithReporterAndPersistenceClassified
         classifyReadOnly requestPermission report persistAlwaysApprove
         policyRef allowedToolsRef tools planMode call =
+    approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
+        classifyReadOnly
+        (const requestPermission)
+        report
+        persistAlwaysApprove
+        policyRef
+        allowedToolsRef
+        tools
+        planMode
+        call
+
+approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
+    :: (ToolCall -> IO (Maybe Bool))
+    -> (Bool -> ToolCall -> IO (Maybe PermissionChoice))
+    -> (ApprovalNotice -> IO ())
+    -> IO ()
+    -> IORef ApprovalPolicy
+    -> IORef (Set Text)
+    -> ToolRegistry
+    -> PlanModeEnv
+    -> ToolCall
+    -> IO (Either Text Bool)
+approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
+        classifyReadOnly requestPermission report persistAlwaysApprove
+        policyRef allowedToolsRef tools planMode call =
     case lookupRegisteredTool call.name tools of
         Just tool
             | not (toolAcceptsCall tool call) -> do
@@ -213,6 +247,7 @@ approveToolDecisionWithReporterAndPersistenceClassified
                     , planPath
                     , readOnly = Nothing
                     , allowedForSession = Nothing
+                    , requiresExplicitApproval = False
                     , call
                     }
             interpret initialFacts (planApproval initialFacts)
@@ -222,12 +257,24 @@ approveToolDecisionWithReporterAndPersistenceClassified
             mapM_ runAction actions
             pure result
         NeedReadOnlyClassification -> do
-            readOnly <- classifyReadOnly call >>= \case
-                Just value -> pure value
-                Nothing -> case lookupRegisteredTool call.name tools of
-                    Nothing -> pure False
-                    Just tool -> toolAllowsWithoutPrompt tool call
-            let nextFacts = facts { readOnly = Just readOnly }
+            let registeredTool = lookupRegisteredTool call.name tools
+            requirement <- case registeredTool of
+                Just tool -> case tool.appToolApproval of
+                    AlwaysConfirm -> pure FreshApprovalRequired
+                    ClassifyApproval classify -> classify call
+                    _ -> classifyReadOnly call >>= \case
+                        Just True -> pure ApprovalNotRequired
+                        Just False -> pure ApprovalPromptRequired
+                        Nothing -> toolApprovalRequirement tool call
+                Nothing -> classifyReadOnly call >>= \case
+                    Just True -> pure ApprovalNotRequired
+                    _ -> pure ApprovalPromptRequired
+            let requiresExplicit = requirement == FreshApprovalRequired
+                readOnly = requirement == ApprovalNotRequired
+            let nextFacts = facts
+                    { readOnly = Just readOnly
+                    , requiresExplicitApproval = requiresExplicit
+                    }
             interpret nextFacts (planApproval nextFacts)
         NeedSessionAllowance -> do
             allowed <- readIORef allowedToolsRef
@@ -238,8 +285,10 @@ approveToolDecisionWithReporterAndPersistenceClassified
                     }
             interpret nextFacts (planApproval nextFacts)
         NeedPermissionPrompt -> do
-            choice <- requestPermission call
-            interpret facts (resolveApprovalPrompt call choice)
+            choice <- requestPermission facts.requiresExplicitApproval call
+            interpret facts
+                (resolveApprovalPromptWith
+                    facts.requiresExplicitApproval call choice)
 
     runAction = \case
         SetApprovalPolicy next ->
@@ -284,21 +333,38 @@ childApprove _ _ call
     | isComputerToolCallKind call.callKind =
         pure $ Left
             "Computer use requires an explicit parent approval for every call."
-childApprove policy tools call = case policy of
-    ApproveAll -> pure (Right True)
-    DenyMutating -> do
-        allowed <- isReadOnlyCall tools call
-        pure $ if allowed then Right True else Right False
-    PromptMutating -> do
-        allowed <- isReadOnlyCall tools call
-        if allowed
-            then pure (Right True)
-            else pure $ Left
-                "Subagent cannot prompt for approval on mutating tools. \
-                \Re-run the parent with auto-approve/--yolo, or have the \
-                \parent perform this edit."
+childApprove policy tools call =
+    case lookupRegisteredTool call.name tools of
+        Just tool -> case tool.appToolApproval of
+            AlwaysConfirm -> decide FreshApprovalRequired
+            ClassifyApproval classify -> classify call >>= decide
+            _ -> ordinaryDecision (Just tool)
+        Nothing -> ordinaryDecision Nothing
+  where
+    decide FreshApprovalRequired =
+        pure $ Left
+            "This sensitive tool requires an explicit parent approval for every call."
+    decide requirement = case policy of
+        ApproveAll -> pure (Right True)
+        DenyMutating ->
+            pure (Right (requirement == ApprovalNotRequired))
+        PromptMutating
+            | requirement == ApprovalNotRequired -> pure (Right True)
+            | otherwise -> childCannotPrompt
 
-isReadOnlyCall :: ToolRegistry -> ToolCall -> IO Bool
-isReadOnlyCall tools call = case lookupRegisteredTool call.name tools of
-    Just tool -> toolAllowsWithoutPrompt tool call
-    Nothing -> pure False
+    ordinaryDecision tool = case policy of
+        ApproveAll -> pure (Right True)
+        DenyMutating -> Right <$> isReadOnly tool
+        PromptMutating ->
+            isReadOnly tool >>= \case
+                True -> pure (Right True)
+                False -> childCannotPrompt
+
+    isReadOnly = \case
+        Just tool -> toolAllowsWithoutPrompt tool call
+        Nothing -> pure False
+
+    childCannotPrompt = pure $ Left
+        "Subagent cannot prompt for approval on mutating tools. \
+        \Re-run the parent with auto-approve/--yolo, or have the \
+        \parent perform this edit."

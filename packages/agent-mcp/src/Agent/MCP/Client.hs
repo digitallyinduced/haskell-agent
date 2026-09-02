@@ -161,6 +161,22 @@ maxInputRounds = 8
 hardTimeoutMultiplier :: Int
 hardTimeoutMultiplier = 10
 
+-- | Keep server-selected task polling responsive even when requests have no
+-- configured hard deadline. The hard-deadline remainder is an additional,
+-- tighter cap when a timeout is configured.
+maximumTaskPollIntervalMs :: Int
+maximumTaskPollIntervalMs = 30 * 1000
+
+minimumTaskPollIntervalMs :: Int
+minimumTaskPollIntervalMs = 100
+
+maximumPaginationPages, maximumPaginationItems
+    , maximumPaginationCursorBytes, maximumPaginationBytes :: Int
+maximumPaginationPages = 100
+maximumPaginationItems = 10000
+maximumPaginationCursorBytes = 8 * 1024
+maximumPaginationBytes = 16 * 1024 * 1024
+
 -- * Client construction
 
 startMcpClient :: McpServerConfig -> IO McpClient
@@ -258,6 +274,8 @@ newClientRecord hooks eraHint config transport = do
     lifecycle <- newTVarIO ClientPending
     serverInfo <- newTVarIO Nothing
     discoveredSkills <- newTVarIO []
+    toolsRevision <- newTVarIO 0
+    readyToolsRevision <- newTVarIO Nothing
     workers <- newTVarIO []
     eventHandler <- newIORef (const (pure ()))
     pure McpClient
@@ -272,6 +290,8 @@ newClientRecord hooks eraHint config transport = do
         , clientLifecycle = lifecycle
         , clientServerInfo = serverInfo
         , clientDiscoveredSkills = discoveredSkills
+        , clientToolsRevision = toolsRevision
+        , clientReadyToolsRevision = readyToolsRevision
         , clientEventHandler = eventHandler
         , clientEraHint = eraHint
         }
@@ -347,39 +367,87 @@ ensureMcpClientReadyWith publishReady client = mask \restore -> do
                     closeMcpClient client
                 initialize = do
                     negotiateProtocol client
-                    (tools, warnings) <- discoverMcpTools client
                     skillWarnings <- discoverMcpSkills client
                     startSubscriptions client
-                    pure (tools, warnings <> skillWarnings)
+                    discoverStableTools skillWarnings 0
+                discoverStableTools skillWarnings attempt = do
+                    revision <- readTVarIO client.clientToolsRevision
+                    (tools, warnings) <- discoverMcpTools client
+                    published <- atomically do
+                        state <- readTVar client.clientLifecycle
+                        currentRevision <- readTVar client.clientToolsRevision
+                        case state of
+                            ClientInitializing current
+                                | current == completion
+                                , currentRevision == revision -> do
+                                    let ready =
+                                            (tools, warnings <> skillWarnings)
+                                    publishReady tools
+                                    writeTVar
+                                        client.clientReadyToolsRevision
+                                        (Just revision)
+                                    writeTVar client.clientLifecycle
+                                        (uncurry ClientReady ready)
+                                    void (tryPutTMVar completion (Right ready))
+                                    pure (Just (Right ready))
+                                | current == completion ->
+                                    pure Nothing
+                            ClientClosed -> do
+                                let closed = Left "MCP server closed"
+                                void (tryPutTMVar completion closed)
+                                pure (Just closed)
+                            ClientFailed err -> do
+                                let failed = Left err
+                                void (tryPutTMVar completion failed)
+                                pure (Just failed)
+                            _ -> do
+                                let changed =
+                                        Left "MCP client lifecycle changed during initialization"
+                                void (tryPutTMVar completion changed)
+                                pure (Just changed)
+                    case published of
+                        Just result -> pure result
+                        Nothing
+                            | attempt < maximumInitializationRelists ->
+                                discoverStableTools skillWarnings (attempt + 1)
+                            | otherwise -> do
+                                let changed =
+                                        Left "MCP tools changed repeatedly during initialization"
+                                atomically do
+                                    state <- readTVar client.clientLifecycle
+                                    case state of
+                                        ClientInitializing current
+                                            | current == completion ->
+                                                writeTVar
+                                                    client.clientLifecycle
+                                                    (ClientFailed
+                                                        "MCP tools changed repeatedly during initialization")
+                                        _ -> pure ()
+                                    void (tryPutTMVar completion changed)
+                                pure changed
             outcome <-
                 restore (tryAny initialize)
                     `onException` cancelled
-            let result = case outcome of
-                    Left exception ->
-                        Left
-                            (redactConfiguredValues client.clientConfig
-                                (exceptionSummary exception))
-                    Right ready -> Right ready
-            atomically do
-                state <- readTVar client.clientLifecycle
-                case state of
-                    ClientClosed ->
-                        void $
-                            tryPutTMVar completion
-                                (Left "MCP server closed")
-                    ClientInitializing current
-                        | current == completion -> do
-                            case result of
-                                Left err ->
+            case outcome of
+                Right result -> pure result
+                Left exception -> do
+                    let err =
+                            redactConfiguredValues client.clientConfig
+                                (exceptionSummary exception)
+                        result = Left err
+                    atomically do
+                        state <- readTVar client.clientLifecycle
+                        case state of
+                            ClientInitializing current
+                                | current == completion ->
                                     writeTVar client.clientLifecycle
                                         (ClientFailed err)
-                                Right (tools, warnings) -> do
-                                    publishReady tools
-                                    writeTVar client.clientLifecycle
-                                        (ClientReady tools warnings)
-                            void (tryPutTMVar completion result)
-                    _ -> void (tryPutTMVar completion result)
-            pure result
+                            _ -> pure ()
+                        void (tryPutTMVar completion result)
+                    pure result
+
+maximumInitializationRelists :: Int
+maximumInitializationRelists = 8
 
 mcpClientStatus :: McpClient -> IO McpServerStatus
 mcpClientStatus client = do
@@ -634,35 +702,95 @@ discoverMcpTools client = do
             ]
     pure (accepted, warnings)
 
--- | Fetch every page of a list request.
+-- | Fetch every page of a list request. Catalogs are untrusted server input,
+-- so bound both traversal and accumulation and reject cursor cycles.
 paginate
     :: McpClient
     -> Text
     -> Text
     -> Json.Decoder a
     -> IO (Either McpError [a])
-paginate client method key itemDecoder = go Nothing []
+paginate client method key itemDecoder = go 0 [] Nothing [] 0 0
   where
-    go cursor collected = do
-        let parameters = maybe mempty
-                (\value -> AesonEncoding.pair "cursor" (rawJsonEncoding value))
-                cursor
-        requestMcpFull client (clientRequest client method parameters) >>= \case
-            Left err -> pure (Left err)
-            Right result ->
-                case Json.decodeEither pageDecoder (rawJsonBytes result) of
-                    Left err ->
-                        pure . Left . McpTransportError $
-                            "invalid " <> method <> " response: " <> err.jsonErrorMessage
-                    Right (items, nextCursor) ->
-                        case nextCursor of
-                            Just next -> go (Just next) (collected <> items)
-                            Nothing -> pure (Right (collected <> items))
+    go pageCount seenCursors cursor pages itemCount byteCount
+        | pageCount >= maximumPaginationPages =
+            pure (Left (paginationError "too many pages"))
+        | otherwise = do
+            let parameters = maybe mempty
+                    (\value ->
+                        AesonEncoding.pair "cursor" (rawJsonEncoding value))
+                    cursor
+            requestMcpFull
+                client
+                (clientRequest client method parameters)
+                >>= \case
+                    Left err -> pure (Left err)
+                    Right result -> do
+                        let resultBytes = rawJsonBytes result
+                            byteCount' = byteCount + BS.length resultBytes
+                        if byteCount' > maximumPaginationBytes
+                            then
+                                pure
+                                    (Left
+                                        (paginationError
+                                            "catalog is too large"))
+                            else
+                                case
+                                    Json.decodeEither
+                                        pageDecoder
+                                        resultBytes
+                                of
+                                    Left err ->
+                                        pure . Left . McpTransportError $
+                                            "invalid " <> method <> " response: "
+                                                <> err.jsonErrorMessage
+                                    Right (items, nextCursor) -> do
+                                        let itemCount' =
+                                                itemCount + length items
+                                            pages' = items : pages
+                                        if itemCount'
+                                                > maximumPaginationItems
+                                            then
+                                                pure
+                                                    (Left
+                                                        (paginationError
+                                                            "too many items"))
+                                            else case nextCursor of
+                                                Nothing ->
+                                                    pure
+                                                        (Right
+                                                            (concat
+                                                                (reverse
+                                                                    pages')))
+                                                Just next
+                                                    | BS.length
+                                                        (rawJsonBytes next)
+                                                            > maximumPaginationCursorBytes ->
+                                                        pure
+                                                            (Left
+                                                                (paginationError
+                                                                    "cursor is too large"))
+                                                    | next `elem` seenCursors ->
+                                                        pure
+                                                            (Left
+                                                                (paginationError
+                                                                    "cursor cycle"))
+                                                    | otherwise ->
+                                                        go
+                                                            (pageCount + 1)
+                                                            (next : seenCursors)
+                                                            (Just next)
+                                                            pages'
+                                                            itemCount'
+                                                            byteCount'
 
     pageDecoder = Json.object $
         (,)
             <$> Json.defaultKey [] key (Json.list itemDecoder)
             <*> Json.optionalKey "nextCursor" rawJsonDecoder
+    paginationError reason =
+        McpTransportError
+            ("invalid " <> method <> " pagination: " <> reason)
 
 -- | Enumerate skill metadata only.  Skill resources are intentionally not
 -- fetched here; hosts retrieve and verify SKILL.md when the user activates a
@@ -672,37 +800,23 @@ discoverMcpSkills client = do
     capability <- clientSkillsCapability client
     case capability of
         Nothing -> pure []
-        Just _ -> go Nothing []
+        Just _ ->
+            paginate client "skills/list" "skills" rawJsonDecoder >>= \case
+                Left err -> pure
+                    [ "MCP server " <> client.clientConfig.mcpServerName
+                        <> " skills/list failed: " <> renderMcpError err
+                    ]
+                Right rawSkills -> do
+                    let skills = mapMaybe decodeSkill rawSkills
+                        invalid = length skills /= length rawSkills
+                    atomically $ modifyTVar' client.clientDiscoveredSkills
+                        (<> skills)
+                    pure
+                        [ "MCP server " <> client.clientConfig.mcpServerName
+                            <> " returned invalid skills/list entry"
+                        | invalid
+                        ]
   where
-    go cursor warnings = do
-        let parameters = maybe mempty
-                (\value -> AesonEncoding.pair "cursor" (rawJsonEncoding value))
-                cursor
-        requestMcpFull client (clientRequest client "skills/list" parameters) >>= \case
-            Left err -> pure ["MCP server " <> client.clientConfig.mcpServerName
-                <> " skills/list failed: " <> renderMcpError err]
-            Right result ->
-                case Json.decodeEither pageDecoder (rawJsonBytes result) of
-                    Left err -> pure ["MCP server "
-                        <> client.clientConfig.mcpServerName
-                        <> " returned invalid skills/list response: " <> err.jsonErrorMessage]
-                    Right (rawSkills, nextCursor) -> do
-                        let skills = mapMaybe decodeSkill rawSkills
-                            invalid = length skills /= length rawSkills
-                        atomically $ modifyTVar' client.clientDiscoveredSkills
-                            (<> skills)
-                        let pageWarnings =
-                                [ "MCP server " <> client.clientConfig.mcpServerName
-                                    <> " returned invalid skills/list entry"
-                                | invalid
-                                ]
-                        case nextCursor of
-                            Nothing -> pure (warnings <> pageWarnings)
-                            Just next -> go (Just next) (warnings <> pageWarnings)
-
-    pageDecoder = Json.object $
-        (,) <$> Json.defaultKey [] "skills" (Json.list rawJsonDecoder)
-            <*> Json.optionalKey "nextCursor" rawJsonDecoder
     decodeSkill value =
         case Json.decodeEither mcpSkillEntryDecoder (rawJsonBytes value) of
             Left _ -> Nothing
@@ -834,18 +948,44 @@ appToolFor client tool = AppTool
         RawJsonFunctionSchema (toJSON tool.discoveredInputSchema)
     , appToolHandler =
         typedStreamingTool qualifiedName rawObjectDecoder \publish arguments -> do
-            -- Snapshots accumulate: each progress line is appended to the
-            -- text already shown for this call.
-            shown <- newIORef Text.empty
-            callDiscoveredToolWith client tool arguments $ Just \progress -> do
-                snapshot <- atomicModifyIORef' shown \current ->
-                    let next = current <> formatProgress progress
-                    in (next, next)
-                publish snapshot
+            current <- readTVarIO client.clientLifecycle
+            case current of
+                ClientReady tools _
+                    | Just live <-
+                        find
+                            ((== tool.discoveredName) . (.discoveredName))
+                            tools
+                    , live == tool -> do
+                        -- Snapshots accumulate: each progress line is
+                        -- appended to the text already shown for this call.
+                        shown <- newIORef Text.empty
+                        callDiscoveredToolWith
+                            client
+                            tool
+                            arguments
+                            (Just \progress -> do
+                                snapshot <-
+                                    atomicModifyIORef' shown \accumulated ->
+                                        let next =
+                                                accumulated
+                                                    <> formatProgress progress
+                                        in (next, next)
+                                publish snapshot)
+                _ ->
+                    pure
+                        (Left
+                            "MCP tool changed after registration; discover and approve it again")
     , appToolApproval =
-        if tool.discoveredReadOnly then AlwaysReadOnly else AlwaysPrompt
+        if tool.discoveredRequiresFreshApproval
+            then AlwaysConfirm
+            else if tool.discoveredReadOnly
+                then AlwaysReadOnly
+                else AlwaysPrompt
     , appToolExecution =
-        if tool.discoveredReadOnly then ParallelSafe else TurnSequential
+        if tool.discoveredReadOnly
+                && not tool.discoveredRequiresFreshApproval
+            then ParallelSafe
+            else TurnSequential
     , appToolResourceClaims = Nothing
     }
   where
@@ -915,10 +1055,15 @@ callDiscoveredToolWith client tool arguments onProgress = do
             { requestName = Just tool.discoveredName
             , requestHeaderParams = headerParamValues tool arguments
             , requestOnProgress = onProgress
+            , requestAllowReissue = toolAllowsAutomaticReissue tool
             }
         >>= \case
         Left err -> pure (Left (renderMcpError err))
         Right result -> pure (normalizeMcpToolResult result)
+
+toolAllowsAutomaticReissue :: McpTool -> Bool
+toolAllowsAutomaticReissue =
+    not . (.discoveredRequiresFreshApproval)
 
 -- | Render a @CallToolResult@ for the model.
 normalizeMcpToolResult :: RawJson -> Either Text Text
@@ -999,7 +1144,7 @@ mcpToolResultDecoder = Json.object do
     rawError <- Json.optionalKey "isError" rawJsonDecoder
     structured <- Json.optionalKey "structuredContent" rawJsonDecoder
     rawContent <- Json.optionalKey "content" rawJsonDecoder
-    let isError = maybe False (projectRawOr False Json.bool) rawError
+    let isError = maybe False (projectRawOr True Json.bool) rawError
         blocks = maybe [] (projectRawOr [] (Json.list contentBlockDecoder)) rawContent
     pure (isError, structured, blocks)
 
@@ -1181,6 +1326,10 @@ data McpRequest = McpRequest
     , requestMeta :: !Bool
     -- ^ Whether to attach @_meta@ at all (@initialize@ carries none).
     , requestOnProgress :: !(Maybe (McpProgress -> IO ()))
+    , requestAllowReissue :: !Bool
+    -- ^ Whether the exact request may automatically be sent again (for
+    -- input-required continuation or OAuth refresh). Sensitive tools whose
+    -- approval is explicitly one-shot disable this.
     }
 
 clientRequest :: McpClient -> Text -> Series -> McpRequest
@@ -1194,6 +1343,7 @@ clientRequest client method parameters = McpRequest
     , requestEra = Nothing
     , requestMeta = True
     , requestOnProgress = Nothing
+    , requestAllowReissue = True
     }
 
 -- | Compatibility entry point: one request, rendered error.
@@ -1208,6 +1358,23 @@ requestMcp client timeoutMicros method parameters =
         <$> requestMcpFull client
             (clientRequest client method parameters)
                 { requestTimeoutMicros = timeoutMicros }
+
+-- | Issue exactly one request. Unlike 'requestMcp', this never transparently
+-- resends after an OAuth refresh. Use it when a higher layer has granted
+-- one-shot approval for a potentially mutating operation.
+requestMcpOnce
+    :: McpClient
+    -> Int
+    -> Text
+    -> Series
+    -> IO (Either Text RawJson)
+requestMcpOnce client timeoutMicros method parameters =
+    either (Left . renderMcpError) Right
+        <$> requestMcpFull client
+            (clientRequest client method parameters)
+                { requestTimeoutMicros = timeoutMicros
+                , requestAllowReissue = False
+                }
 
 requestMcpFull :: McpClient -> McpRequest -> IO (Either McpError RawJson)
 requestMcpFull client request = do
@@ -1315,8 +1482,38 @@ awaitResponse client requestId pending request
 
 pastHardDeadline :: Word64 -> Word64 -> Int -> Bool
 pastHardDeadline start now sliceMicros =
-    now - start
-        >= fromIntegral sliceMicros * fromIntegral hardTimeoutMultiplier * 1000
+    remainingHardDeadlineMicros start now sliceMicros <= 0
+
+-- | Remaining request hard deadline, rounded up to microseconds. Arithmetic
+-- is performed as unbounded Integer so a configured timeout near maxBound
+-- cannot wrap the deadline.
+remainingHardDeadlineMicros :: Word64 -> Word64 -> Int -> Int
+remainingHardDeadlineMicros start now sliceMicros =
+    fromInteger
+        (min
+            (toInteger (maxBound :: Int))
+            ((remainingNanoseconds + 999) `div` 1000))
+  where
+    elapsedNanoseconds = toInteger (now - start)
+    hardDeadlineNanoseconds =
+        toInteger (max 1 sliceMicros)
+            * toInteger hardTimeoutMultiplier
+            * 1000
+    remainingNanoseconds =
+        max 0 (hardDeadlineNanoseconds - elapsedNanoseconds)
+
+-- | Normalize an untrusted task interval before converting milliseconds to
+-- microseconds. Non-positive values use the minimum; huge values use the
+-- finite polling cap. Applying the optional remaining-deadline cap after the
+-- safe conversion prevents both Int overflow and sleeping past the deadline.
+boundedTaskPollDelayMicros :: Int -> Maybe Int -> Int
+boundedTaskPollDelayMicros intervalMs remainingMicros =
+    maybe normalizedMicros (min normalizedMicros . max 0) remainingMicros
+  where
+    normalizedMs =
+        max minimumTaskPollIntervalMs
+            (min maximumTaskPollIntervalMs intervalMs)
+    normalizedMicros = normalizedMs * 1000
 
 timeoutError :: Text -> Int -> McpError
 timeoutError method sliceMicros =
@@ -1360,6 +1557,9 @@ invokeWithInputRounds client request = go (0 :: Int) mempty
                 ResultUnknown kind ->
                     pure (Left (McpTransportError ("unrecognized resultType \"" <> kind <> "\"")))
                 ResultInputRequired
+                    | not request.requestAllowReissue ->
+                        pure (Left (McpTransportError
+                            "MCP tool requires fresh approval before continuing an input_required response"))
                     | rounds >= maxInputRounds ->
                         pure (Left (McpTransportError
                             ("MCP server kept requesting input after "
@@ -1478,46 +1678,122 @@ awaitTask client request raw =
                         <> maybe "" (": " <>) task.taskStatusMessage)
                 }
     poll' start count intervalMs = do
-        threadDelay (max 100 intervalMs * 1000)
-        now <- getMonotonicTimeNSec
-        if request.requestTimeoutMicros > 0 && pastHardDeadline start now slice
+        beforeSleep <- getMonotonicTimeNSec
+        let remaining
+                | request.requestTimeoutMicros > 0 =
+                    Just
+                        (remainingHardDeadlineMicros
+                            start
+                            beforeSleep
+                            slice)
+                | otherwise = Nothing
+        if maybe False (<= 0) remaining
             then do
                 _ <- requestMcpFull client
                     (clientRequest client "tasks/cancel" ("taskId" .= taskIdOf))
                 pure (Left (timeoutError (request.requestMethod <> " task") slice))
-            else
-                requestMcpFull client
-                    (clientRequest client "tasks/get" ("taskId" .= taskIdOf))
-                    >>= \case
-                    Left err -> pure (Left err)
-                    Right state ->
-                        case Json.decodeEither taskDecoder (rawJsonBytes state) of
-                            Left err ->
-                                pure (Left (McpTransportError
-                                    ("invalid tasks/get result: " <> err.jsonErrorMessage)))
-                            Right task -> do
-                                report count task
-                                case task.taskStatus of
-                                    "completed" -> case task.taskResult of
-                                        Just result -> pure (Right result)
-                                        Nothing -> legacyTaskResult
-                                    "failed" ->
-                                        pure . Left $ fromMaybe
-                                            (McpTransportError "MCP task failed")
-                                            (task.taskError >>= decodeRpcError)
-                                    "cancelled" ->
-                                        pure (Left (McpTransportError "MCP task was cancelled"))
-                                    "input_required" ->
-                                        fulfilInputRequests client task.taskInputRequests
-                                            >>= \case
-                                            Left err -> pure (Left err)
-                                            Right responses -> do
-                                                _ <- requestMcpFull client
-                                                    (clientRequest client "tasks/update"
-                                                        ("taskId" .= taskIdOf
-                                                            <> inputResponsesSeries responses))
-                                                poll' start (count + 1) task.taskPollIntervalMs
-                                    _ -> poll' start (count + 1) task.taskPollIntervalMs
+            else do
+                threadDelay
+                    (boundedTaskPollDelayMicros intervalMs remaining)
+                now <- getMonotonicTimeNSec
+                if request.requestTimeoutMicros > 0
+                        && pastHardDeadline start now slice
+                    then do
+                        _ <- requestMcpFull client
+                            (clientRequest
+                                client
+                                "tasks/cancel"
+                                ("taskId" .= taskIdOf))
+                        pure
+                            (Left
+                                (timeoutError
+                                    (request.requestMethod <> " task")
+                                    slice))
+                    else
+                        requestMcpFull
+                            client
+                            (clientRequest
+                                client
+                                "tasks/get"
+                                ("taskId" .= taskIdOf))
+                            >>= \case
+                                Left err -> pure (Left err)
+                                Right state ->
+                                    case
+                                        Json.decodeEither
+                                            taskDecoder
+                                            (rawJsonBytes state)
+                                    of
+                                        Left err ->
+                                            pure
+                                                (Left
+                                                    (McpTransportError
+                                                        ("invalid tasks/get result: "
+                                                            <> err.jsonErrorMessage)))
+                                        Right task -> do
+                                            report count task
+                                            case task.taskStatus of
+                                                "completed" ->
+                                                    case task.taskResult of
+                                                        Just result ->
+                                                            pure (Right result)
+                                                        Nothing ->
+                                                            legacyTaskResult
+                                                "failed" ->
+                                                    pure . Left $ fromMaybe
+                                                        (McpTransportError
+                                                            "MCP task failed")
+                                                        (task.taskError
+                                                            >>= decodeRpcError)
+                                                "cancelled" ->
+                                                    pure
+                                                        (Left
+                                                            (McpTransportError
+                                                                "MCP task was cancelled"))
+                                                "input_required" ->
+                                                    if not
+                                                        request.requestAllowReissue
+                                                        then
+                                                            pure
+                                                                (Left
+                                                                    (McpTransportError
+                                                                        "MCP tool requires fresh approval before continuing an input_required task"))
+                                                        else
+                                                            fulfilInputRequests
+                                                                client
+                                                                task.taskInputRequests
+                                                                >>= \case
+                                                                    Left err ->
+                                                                        pure
+                                                                            (Left
+                                                                                err)
+                                                                    Right responses ->
+                                                                        requestMcpFull
+                                                                            client
+                                                                            ( (clientRequest
+                                                                                client
+                                                                                "tasks/update"
+                                                                                ("taskId" .= taskIdOf
+                                                                                    <> inputResponsesSeries responses))
+                                                                                { requestAllowReissue =
+                                                                                    False
+                                                                                }
+                                                                            )
+                                                                            >>= \case
+                                                                                Left err ->
+                                                                                    pure
+                                                                                        (Left
+                                                                                            err)
+                                                                                Right _ ->
+                                                                                    poll'
+                                                                                        start
+                                                                                        (count + 1)
+                                                                                        task.taskPollIntervalMs
+                                                _ ->
+                                                    poll'
+                                                        start
+                                                        (count + 1)
+                                                        task.taskPollIntervalMs
       where
         taskIdOf = initialTaskId
     initialTaskId =
@@ -1769,7 +2045,21 @@ handleNotification client method params =
                 forM_ pending \entry -> do
                     atomically $ modifyTVar' entry.pendingActivity (+ 1)
                     void (tryAny (entry.pendingOnProgress progress))
-        "notifications/tools/list_changed" -> emit McpToolsListChanged
+        "notifications/tools/list_changed" -> do
+            -- This invalidation is deliberately client-local and precedes
+            -- the replaceable fleet handler. It therefore also covers
+            -- notifications received during initialization, startup before
+            -- a fleet exists, and reconnect before the replacement client is
+            -- installed in the fleet.
+            atomically do
+                modifyTVar' client.clientToolsRevision (+ 1)
+                writeTVar client.clientReadyToolsRevision Nothing
+                readTVar client.clientLifecycle >>= \case
+                    ClientReady _ warnings ->
+                        writeTVar client.clientLifecycle
+                            (ClientReady [] warnings)
+                    _ -> pure ()
+            emit McpToolsListChanged
         "notifications/prompts/list_changed" -> emit McpPromptsListChanged
         "notifications/resources/list_changed" -> emit McpResourcesListChanged
         "notifications/resources/updated" ->
@@ -1900,6 +2190,10 @@ httpExchange client transport era request pending message = do
                     { HC.method = "POST"
                     , HC.requestBody = RequestBodyLBS body
                     , HC.requestHeaders = headersFor token
+                    -- Never forward an MCP bearer or session capability to a
+                    -- redirect target. Servers must expose their canonical
+                    -- Streamable HTTP endpoint directly.
+                    , HC.redirectCount = 0
                     , HC.responseTimeout =
                         if slice <= 0
                             then HC.responseTimeoutNone
@@ -1965,13 +2259,42 @@ httpExchange client transport era request pending message = do
         Left err -> pure (Left (McpTransportError err))
         Right configuredToken ->
             perform configuredToken >>= \case
-                Right (HttpUnauthorized 401 _)
-                    | Just path <- lookup "MCP_OAUTH_TOKEN_FILE" client.clientConfig.mcpServerEnv ->
-                        OAuth.refreshOAuthTokenFile mcpHttpManager path >>= \case
-                            Left err -> pure (Left (McpTransportError ("MCP OAuth refresh failed: " <> err)))
-                            Right (OAuth.OAuthTokenFile _ _ token _ _) ->
-                                perform (Just token) >>= settle
+                outcome@(Right (HttpUnauthorized 401 _)) ->
+                    retryUnauthorizedOnce
+                        request.requestAllowReissue
+                        (lookup "MCP_OAUTH_TOKEN_FILE"
+                            client.clientConfig.mcpServerEnv)
+                        (\path ->
+                            fmap
+                                (fmap (.tokenAccessToken))
+                                (OAuth.refreshOAuthTokenFile
+                                    mcpHttpManager path))
+                        (perform . Just)
+                        >>= \case
+                            Left err ->
+                                pure (Left (McpTransportError
+                                    ("MCP OAuth refresh failed: " <> err)))
+                            Right Nothing -> settle outcome
+                            Right (Just retried) -> settle retried
                 outcome -> settle outcome
+
+-- | Run the OAuth refresh and exact-request replay at most once. Keeping the
+-- allow bit at this boundary makes it impossible for one-shot tools to invoke
+-- either effect after a 401.
+retryUnauthorizedOnce
+    :: Bool
+    -> Maybe path
+    -> (path -> IO (Either err token))
+    -> (token -> IO outcome)
+    -> IO (Either err (Maybe outcome))
+retryUnauthorizedOnce allowReissue path refresh replay
+    | not allowReissue = pure (Right Nothing)
+    | otherwise = case path of
+        Nothing -> pure (Right Nothing)
+        Just tokenPath ->
+            refresh tokenPath >>= \case
+                Left err -> pure (Left err)
+                Right token -> Right . Just <$> replay token
 
 -- | Read a whole response body with a size cap.  The over-limit case is
 -- reported before retaining any further bytes, so an unexpectedly large
@@ -2310,6 +2633,7 @@ closeHttpSession client transport = do
                             <> maybe [] (\token ->
                                 [ ("Authorization", "Bearer " <> TextEncoding.encodeUtf8 token) ])
                                 bearer
+                        , HC.redirectCount = 0
                         }
                 void $ timeout (secondsToMicros client.clientConfig.mcpServerRequestTimeoutSeconds)
                     (HC.httpNoBody request' mcpHttpManager)

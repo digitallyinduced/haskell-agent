@@ -209,7 +209,7 @@ decodeToolCall = \case
 
 toolDescription :: AppTool -> Value
 toolDescription tool =
-    object
+    object $
         [ "name" .= tool.appToolName
         , "description" .= tool.appToolDescription
         , "inputSchema" .= schemaValue tool.appToolSchema
@@ -217,6 +217,11 @@ toolDescription tool =
             [ "readOnlyHint" .= isStaticallyReadOnly tool.appToolApproval
             ]
         ]
+        <> [ "_meta" .= object
+                [ "dev.haskell-agent/fresh-approval" .= True
+                ]
+           | isStaticallyFreshApproval tool.appToolApproval
+           ]
 
 schemaValue :: ToolSchema -> Value
 schemaValue = \case
@@ -239,7 +244,14 @@ isStaticallyReadOnly = \case
     AlwaysReadOnly -> True
     AlwaysAllowed -> False
     AlwaysPrompt -> False
+    AlwaysConfirm -> False
     ClassifyReadOnly _ -> False
+    ClassifyApproval _ -> False
+
+isStaticallyFreshApproval :: ApprovalRule -> Bool
+isStaticallyFreshApproval = \case
+    AlwaysConfirm -> True
+    _ -> False
 
 requestedProtocolVersion :: Maybe Value -> Text
 requestedProtocolVersion = \case

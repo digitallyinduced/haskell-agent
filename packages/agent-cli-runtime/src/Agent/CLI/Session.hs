@@ -373,10 +373,14 @@ sessionTempsRoot root =
         </> unsafeEncodeUtf "sessions"
 
 newPendingPersistence :: SessionCreate -> IO Persistence
-newPendingPersistence spec = do
+newPendingPersistence spec = mask \restore -> do
     validateSessionCreateGatewayBoundary spec
-    (sessionId, tempDir) <- allocateSessionTemp spec.createRoot
-    newPendingPersistenceReserved spec sessionId tempDir
+    (sessionId, tempDir) <-
+        restore (allocateSessionTemp spec.createRoot)
+    restore (newPendingPersistenceReserved spec sessionId tempDir)
+        `onException` do
+            _ <- removeSessionTemp spec.createRoot sessionId
+            pure ()
 
 newPendingPersistenceReserved
     :: SessionCreate
@@ -2059,17 +2063,17 @@ forkSessionAtTurn pool root sourceId throughIndex = runExceptT do
         in turn.turnResponseId <|> base
 
 deleteSession :: StorePool -> OsPath -> Text -> IO (Either Text ())
-deleteSession pool root sessionId = runExceptT do
+deleteSession pool root sessionId = mask \restore -> runExceptT do
     dir <- except (sessionDirForId root sessionId)
-    exists <- lift (doesDirectoryExist dir)
+    exists <- lift (restore (doesDirectoryExist dir))
+    now <- lift (restore getCurrentTime)
     lock <- if exists
         then lift (acquireSessionLock dir sessionId) >>= \case
             Left _ -> throwE "cannot delete a running session"
             Right lock -> pure (Just lock)
         else pure Nothing
-    now <- lift getCurrentTime
     deleted <- lift $
-        Store.deleteSession pool sessionId now
+        restore (Store.deleteSession pool sessionId now)
             `finally` maybe (pure ()) releaseSessionLock lock
     case deleted of
         Left err -> throwE (renderStoreError err)
@@ -2077,13 +2081,13 @@ deleteSession pool root sessionId = runExceptT do
         Right True
             | not exists -> pure ()
             | otherwise ->
-                lift (tryIO (removePathForcibly dir)) >>= \case
+                lift (restore (tryIO (removePathForcibly dir))) >>= \case
                     Left err ->
                         throwE
                             ("session deleted but artifacts could not be removed: "
                                 <> Text.pack (displayException err))
                     Right () -> pure ()
-    tempRemoved <- lift (removeSessionTemp root sessionId)
+    tempRemoved <- lift (restore (removeSessionTemp root sessionId))
     except tempRemoved
 
 renameSession
@@ -2349,11 +2353,19 @@ allocateSessionTemp root = do
                         (sessionMaterializationMetaPath root sessionId)
             if durableExists || recoveryExists
                 then go tempRoot now (attempt + 1)
-                else tryIO (createDirectory tempDir) >>= \case
-                    Left _ -> go tempRoot now (attempt + 1)
-                    Right () -> do
-                        setFileMode (unsafeToFilePath tempDir) 0o700
-                        pure (sessionId, tempDir)
+                else mask \restore ->
+                    tryIO (createDirectory tempDir) >>= \case
+                        Left _ -> restore (go tempRoot now (attempt + 1))
+                        Right () ->
+                            restore
+                                (do
+                                    setFileMode
+                                        (unsafeToFilePath tempDir)
+                                        0o700
+                                    pure (sessionId, tempDir))
+                                `onException` do
+                                    _ <- removeSessionTemp root sessionId
+                                    pure ()
 
 -- | Take a shared lease for a session's scratch directory. Automatic cleanup
 -- requires the matching exclusive lock, so a live process cannot lose its
@@ -2365,11 +2377,16 @@ acquireSessionTempLease
 acquireSessionTempLease root path =
     case sessionTempId root path of
         Nothing -> pure (Right Nothing)
-        Just sessionId -> do
+        Just sessionId -> mask \restore -> do
             let lockPath = sessionTempLockPath root sessionId
-            result <- tryAny $
-                ensurePrivateDir (takeDirectory lockPath)
-                    >> FileLock.tryLockFile
+            prepared <- tryAny $
+                restore (ensurePrivateDir (takeDirectory lockPath))
+            result <- case prepared of
+                Left exception -> pure (Left exception)
+                Right () -> tryAny do
+                    -- Keep async exceptions masked from successful acquisition
+                    -- until the lock is wrapped in its owning lease.
+                    FileLock.tryLockFile
                         (unsafeToFilePath lockPath)
                         FileLock.Shared
             pure case result of
@@ -2471,12 +2488,12 @@ cleanupStaleSessionTemp
     :: OsPath
     -> OsPath
     -> IO SessionTempCleanupReport
-cleanupStaleSessionTemp root candidate =
+cleanupStaleSessionTemp root candidate = mask \restore ->
     case sessionTempId root candidate of
         Nothing -> pure mempty
         Just sessionId -> do
             let durableDir = root </> sessionId
-            durableExists <- doesDirectoryExist durableDir
+            durableExists <- restore (doesDirectoryExist durableDir)
             durableLock <-
                 if durableExists
                     then fmap (fmap Just) $
@@ -2487,14 +2504,17 @@ cleanupStaleSessionTemp root candidate =
                 -- scratch directory. Treat either case conservatively.
                 Left _ -> pure mempty
                 Right lock ->
-                    cleanupWithSessionLock sessionId
+                    restore (cleanupWithSessionLock sessionId)
                         `finally` mapM_ releaseSessionLock lock
   where
-    cleanupWithSessionLock sessionId = do
+    cleanupWithSessionLock sessionId = mask \restore -> do
         let lockPath = sessionTempLockPath root sessionId
-        locked <- tryAny $
-            ensurePrivateDir (takeDirectory lockPath)
-                >> FileLock.tryLockFile
+        prepared <- tryAny $
+            restore (ensurePrivateDir (takeDirectory lockPath))
+        locked <- case prepared of
+            Left exception -> pure (Left exception)
+            Right () -> tryAny $
+                FileLock.tryLockFile
                     (unsafeToFilePath lockPath)
                     FileLock.Exclusive
         case locked of
@@ -2504,7 +2524,7 @@ cleanupStaleSessionTemp root candidate =
                 pure mempty
             Right (Just lock) -> do
                 removed <- tryAny $
-                    (do
+                    restore (do
                         symbolicLinkStatusMaybe candidate >>= \case
                             -- Another startup cleaner may have removed the
                             -- candidate before this process acquired its

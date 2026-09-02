@@ -212,13 +212,18 @@ acquireWorktreeLease
 acquireWorktreeLease root path =
     case managedWorktreePath root path of
         Nothing -> pure (Right Nothing)
-        Just managed -> do
+        Just managed -> mask \restore -> do
             let lockPath = worktreeLeasePath root managed
-            result <- tryAny do
-                createDirectoryIfMissing True (takeDirectory lockPath)
-                FileLock.tryLockFile
-                    (unsafeToFilePath lockPath)
-                    FileLock.Shared
+            prepared <- tryAny $
+                restore (createDirectoryIfMissing True (takeDirectory lockPath))
+            result <- case prepared of
+                Left exception -> pure (Left exception)
+                Right () -> tryAny do
+                    -- Keep async exceptions masked from successful acquisition
+                    -- until the lock is wrapped in its owning lease.
+                    FileLock.tryLockFile
+                        (unsafeToFilePath lockPath)
+                        FileLock.Shared
             pure case result of
                 Left exception ->
                     Left
@@ -257,8 +262,8 @@ cleanupStaleWorktrees root requestedKeep protected = do
     exists <- doesDirectoryExist root
     if not exists
         then pure mempty
-        else do
-            today <- utctDay <$> getCurrentTime
+        else mask \restore -> do
+            today <- utctDay <$> restore getCurrentTime
             let cleanupLockPath =
                     root </> unsafeEncodeUtf ".cleanup.lock"
             lockResult <- tryAny $
@@ -272,7 +277,8 @@ cleanupStaleWorktrees root requestedKeep protected = do
                     -- Another process is already doing the same best-effort GC.
                     pure mempty
                 Right (Just lock) ->
-                    runCleanup today `finally` FileLock.unlockFile lock
+                    restore (runCleanup today)
+                        `finally` FileLock.unlockFile lock
   where
     keep = max 1 requestedKeep
     protectedManaged =
@@ -349,7 +355,7 @@ discoverStaleCandidates root keep today = do
                         pure (candidates <> stale, failures)
 
 cleanupCandidate :: OsPath -> OsPath -> IO WorktreeCleanupReport
-cleanupCandidate root candidate = do
+cleanupCandidate root candidate = mask \restore -> do
     leaseResult <- tryExclusiveWorktreeLease root candidate
     case leaseResult of
         Left err ->
@@ -359,7 +365,7 @@ cleanupCandidate root candidate = do
         Right Nothing ->
             pure mempty
         Right (Just lease) ->
-            cleanupWithLease `finally` releaseWorktreeLease lease
+            restore cleanupWithLease `finally` releaseWorktreeLease lease
   where
     cleanupWithLease = do
         hasGitMetadata <-
