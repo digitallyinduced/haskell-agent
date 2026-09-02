@@ -10,6 +10,22 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "tool presentation" do
+    it "separates only real filesystem paths from tool actions" do
+        let readFile =
+                functionToolCall
+                    "read-file"
+                    "read_file"
+                    "{\"target_file\":\"src/Main.hs\"}"
+            readSession =
+                functionToolCall
+                    "read-session"
+                    "read_agent_session"
+                    "{\"session_id\":\"session-1\"}"
+        toolCallHeaderRelative "/workspace" readFile
+            `shouldBe` ("Read", Just "src/Main.hs")
+        toolCallHeaderRelative "/workspace" readSession
+            `shouldBe` ("Read agent session session-1", Nothing)
+
     it "distinguishes inspection tools from actions after canonicalization" do
         map isInspectionTool
             [ "read_file"

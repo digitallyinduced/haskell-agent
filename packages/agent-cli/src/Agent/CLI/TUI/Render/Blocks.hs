@@ -147,6 +147,7 @@ import qualified Data.Set as Set ()
 import qualified Data.Text as Text
     ( dropWhile,
       isPrefixOf,
+      length,
       lines,
       null,
       strip,
@@ -180,6 +181,7 @@ import qualified Agent.TUI.Theme as Theme
       todoInProgressAttr,
       todoPendingAttr,
       toolAttr,
+      toolPathAttr,
       userAttr,
       userMutedAttr,
       waitingDimAttr,
@@ -267,16 +269,16 @@ drawBlock state target ui block =
                         (visibleBody block)
                         <> toolImageSections state target block)
             BlockInspect ->
-                accentBlockWithSections
+                accentFileBlockWithSections
                     state
                     target
                     ui
                     block
                     waveElapsed
                     (inspectionStatusAttr block)
-                    (blockStateGlyph state target block
-                        <> block.blockTitle
-                        <> detailSuffix block)
+                    (blockStateGlyph state target block)
+                    block.blockTitle
+                    block.blockDetail
                     (toolBodySections
                         state.appSyntaxHighlighter
                         block.blockBody
@@ -309,16 +311,16 @@ drawBlock state target ui block =
                         then toolImageSections state target block
                         else [])
             BlockEdit ->
-                accentBlockWithSections
+                accentFileBlockWithSections
                     state
                     target
                     ui
                     block
                     waveElapsed
                     (statusAttr state target block)
-                    (blockStateGlyph state target block
-                        <> block.blockTitle
-                        <> detailSuffix block)
+                    (blockStateGlyph state target block)
+                    block.blockTitle
+                    block.blockDetail
                     (editBodyWidgets (visibleBody block))
             BlockSystem ->
                 withAttr Theme.mutedAttr
@@ -758,6 +760,57 @@ accentBlockWithSections
     accent
     title
     sections =
+    accentBlockWithHeader
+        state target ui block waveElapsed accent title Nothing sections
+
+-- File-oriented calls keep the action animated/status-colored while the path
+-- has its own stable semantic color, matching first-party tool-call chrome.
+accentFileBlockWithSections
+    :: AppState
+    -> AgentTarget
+    -> UiState
+    -> UiBlock
+    -> Maybe Int
+    -> AttrName
+    -> Text
+    -> Text
+    -> Text
+    -> [Widget Name]
+    -> Widget Name
+accentFileBlockWithSections
+    state target ui block waveElapsed accent glyph verb path sections =
+    accentBlockWithHeader
+        state
+        target
+        ui
+        block
+        waveElapsed
+        accent
+        (glyph <> verb)
+        (if Text.null path then Nothing else Just path)
+        sections
+
+accentBlockWithHeader
+    :: AppState
+    -> AgentTarget
+    -> UiState
+    -> UiBlock
+    -> Maybe Int
+    -> AttrName
+    -> Text
+    -> Maybe Text
+    -> [Widget Name]
+    -> Widget Name
+accentBlockWithHeader
+    state
+    target
+    ui
+    block
+    waveElapsed
+    accent
+    title
+    path
+    sections =
     accentRail
         motionGlyphSet
         accent
@@ -778,7 +831,17 @@ accentBlockWithSections
         , not block.blockExpanded =
             singleLineTitle renderTitle title
         | otherwise = renderTitle title
-    renderTitle fittedTitle = case waveElapsed of
+    renderTitle fittedTitle = case path of
+        Nothing -> animatedTitle fittedTitle
+        Just value ->
+            hBox
+                [ hLimit
+                    (Text.length fittedTitle)
+                    (animatedTitle fittedTitle)
+                , withAttr Theme.toolPathAttr
+                    (terminalTxtWrap (" " <> value))
+                ]
+    animatedTitle fittedTitle = case waveElapsed of
         Nothing ->
             withAttr accent (terminalTxtWrap fittedTitle)
         Just elapsedMillis ->

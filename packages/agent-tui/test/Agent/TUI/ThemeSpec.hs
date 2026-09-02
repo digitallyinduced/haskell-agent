@@ -27,6 +27,7 @@ spec = do
                 , Theme.selectedAttr
                 , Theme.selectedMutedAttr
                 , Theme.todoPendingAttr
+                , Theme.toolPathAttr
                 ]
                 `shouldBe`
                     [ V.SetTo V.brightBlack
@@ -40,6 +41,7 @@ spec = do
                     , V.SetTo V.brightWhite
                     , V.SetTo V.white
                     , V.Default
+                    , V.SetTo V.brightYellow
                     ]
 
     describe "syntax theme attributes" do
@@ -60,6 +62,13 @@ spec = do
                     (Theme.themeAttrMap Theme.Daylight))
                 `shouldBe` V.SetTo (RGBColor 255 255 255)
 
+        it "uses the readable daylight accent for tool paths" do
+            V.attrForeColor
+                (attrMapLookup
+                    Theme.toolPathAttr
+                    (Theme.themeAttrMap Theme.Daylight))
+                `shouldBe` V.SetTo (RGBColor 144 80 150)
+
         it "sets a daylight background on semantic text attributes" do
             map
                 ( V.attrBackColor
@@ -76,6 +85,7 @@ spec = do
                 , Theme.thinkingAttr
                 , Theme.toolAttr
                 , Theme.inspectAttr
+                , Theme.toolPathAttr
                 , Theme.errorAttr
                 , Theme.successAttr
                 , Theme.codeAttr

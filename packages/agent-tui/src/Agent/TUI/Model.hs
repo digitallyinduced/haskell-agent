@@ -48,6 +48,7 @@ import Agent.TUI.Presentation
     , isInspectionTool
     , todoListFromToolArguments
     , todoListFromToolOutput
+    , toolCallHeaderRelative
     , toolCallInput
     , toolCallTitleRelative
     )
@@ -538,17 +539,19 @@ startToolCall call state
     | otherwise =
         let
             kind = toolBlockKind call.name
-            title = toolCallTitleRelative state.uiWorkspaceRoot call
+            activity = toolCallTitleRelative state.uiWorkspaceRoot call
+            (title, headerDetail) =
+                toolCallHeaderRelative state.uiWorkspaceRoot call
             blockIndex = Seq.length state.uiBlocks
             body = formatToolDiffRelative state.uiWorkspaceRoot call
-            detail = toolCallInput call
+            detail = fromMaybe (toolCallInput call) headerDetail
         in appendBlock kind title body detail
             BlockRunning (Just call.callId)
             state
                 { uiRunning = True
                 , uiGenerating = False
                 , uiAwaitingInput = False
-                , uiActivity = title
+                , uiActivity = activity
                 , uiToolCalls =
                     Map.insert
                         call.callId
@@ -932,8 +935,10 @@ updateVisibleToolCall call state =
     case Map.lookup call.callId state.uiToolCalls of
         Nothing -> state
         Just (blockIndex, previous) ->
-            let title =
+            let activity =
                     toolCallTitleRelative state.uiWorkspaceRoot call
+                (title, headerDetail) =
+                    toolCallHeaderRelative state.uiWorkspaceRoot call
                 body = formatToolDiffRelative state.uiWorkspaceRoot call
                 blocks
                     | isTodoTool previous.name = state.uiBlocks
@@ -948,14 +953,17 @@ updateVisibleToolCall call state =
                                             if Text.null body
                                                 then block.blockBody
                                                 else body
-                                        , blockDetail = toolCallInput call
+                                        , blockDetail =
+                                            fromMaybe
+                                                (toolCallInput call)
+                                                headerDetail
                                         }
                                     else block)
                             blockIndex
                             state.uiBlocks
             in state
                 { uiBlocks = blocks
-                , uiActivity = title
+                , uiActivity = activity
                 , uiToolCalls =
                     Map.insert
                         call.callId

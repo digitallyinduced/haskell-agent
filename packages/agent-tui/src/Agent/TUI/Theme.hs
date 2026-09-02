@@ -51,6 +51,7 @@ module Agent.TUI.Theme
     , todoInProgressAttr
     , todoPendingAttr
     , toolAttr
+    , toolPathAttr
     , userAttr
     , userMutedAttr
     , waitingDimAttr
@@ -181,7 +182,7 @@ fixedThemePalette = \case
         (RGBColor 65 210 190) (RGBColor 80 170 255))
 
 baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
-userAttr, userMutedAttr, assistantAttr, thinkingAttr, thinkingBodyAttr, toolAttr :: AttrName
+userAttr, userMutedAttr, assistantAttr, thinkingAttr, thinkingBodyAttr, toolAttr, toolPathAttr :: AttrName
 inspectAttr :: AttrName
 todoPendingAttr, todoInProgressAttr, todoCompletedAttr, todoCancelledAttr :: AttrName
 errorAttr, successAttr, selectedAttr, selectedMutedAttr, borderAttr, borderActiveAttr :: AttrName
@@ -207,6 +208,7 @@ thinkingAttr = attrName "thinking"
 thinkingBodyAttr = attrName "thinking-body"
 toolAttr = attrName "tool"
 inspectAttr = attrName "inspect"
+toolPathAttr = attrName "tool-path"
 todoPendingAttr = attrName "todo-pending"
 todoInProgressAttr = attrName "todo-in-progress"
 todoCompletedAttr = attrName "todo-completed"
@@ -288,6 +290,7 @@ terminalDefault =
         , (waitingMidAttr, palette V.yellow)
         , (toolAttr, palette V.cyan)
         , (inspectAttr, palette V.brightBlack `V.withStyle` V.bold)
+        , (toolPathAttr, palette V.brightYellow)
         , (todoPendingAttr, V.defAttr)
         , (todoInProgressAttr, palette V.yellow `V.withStyle` V.bold)
         , (todoCompletedAttr, palette V.brightBlack)
@@ -356,6 +359,7 @@ monochrome =
         , (waitingMidAttr, V.defAttr)
         , (toolAttr, V.defAttr)
         , (inspectAttr, V.defAttr `V.withStyle` V.bold)
+        , (toolPathAttr, V.defAttr `V.withStyle` V.underline)
         , (todoPendingAttr, V.defAttr)
         , (todoInProgressAttr, V.defAttr `V.withStyle` V.bold)
         , (todoCompletedAttr, V.defAttr)
@@ -441,6 +445,7 @@ mkTheme background foreground muted accent link =
         , (waitingMidAttr, accentA)
         , (toolAttr, linkA)
         , (inspectAttr, mutedA `V.withStyle` V.bold)
+        , (toolPathAttr, accentA)
         , (todoPendingAttr, base)
         , (todoInProgressAttr, accentA `V.withStyle` V.bold)
         , (todoCompletedAttr, mutedA)

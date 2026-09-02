@@ -307,7 +307,9 @@ spec = do
                             (Just ItemCompleted)
                         ]
             map (.blockTitle) (toList ui.uiBlocks)
-                `shouldBe` ["Read nix/modules/telegram.nix"]
+                `shouldBe` ["Read"]
+            map (.blockDetail) (toList ui.uiBlocks)
+                `shouldBe` ["nix/modules/telegram.nix"]
             map (.agentStepTitle)
                 (responseItemStepPreviewsRelative workspace 1
                     [ functionCallItem
