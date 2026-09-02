@@ -928,6 +928,9 @@ def codex_turn(
         return turn, role not in {"user", "assistant"}, omissions
     if kind == "local_shell_call":
         call = {
+            "call_id": safe_string(
+                payload.get("call_id") or payload.get("id")
+            ),
             "name": "local_shell",
             "arguments": json_preview(payload.get("action"), max_tool_chars),
         }
@@ -938,6 +941,9 @@ def codex_turn(
         )
     if kind in {"function_call", "custom_tool_call"}:
         call = {
+            "call_id": safe_string(
+                payload.get("call_id") or payload.get("id")
+            ),
             "name": safe_string(payload.get("name") or kind),
             "arguments": json_preview(
                 payload.get("arguments", payload.get("input")), max_tool_chars
@@ -950,6 +956,9 @@ def codex_turn(
         )
     if kind == "computer_call":
         call = {
+            "call_id": safe_string(
+                payload.get("call_id") or payload.get("id")
+            ),
             "name": "computer",
             "arguments": json_preview(
                 payload.get("actions", payload.get("action")),
@@ -1445,6 +1454,9 @@ def claude_turn(
             if kind == "tool_use":
                 calls.append(
                     {
+                        "call_id": safe_string(
+                            block.get("id") or block.get("tool_use_id")
+                        ),
                         "name": safe_string(block.get("name")),
                         "arguments": json_preview(
                             block.get("input"), max_tool_chars
@@ -1593,6 +1605,9 @@ def grok_turn(
         )
     if kind in {"tool_call", "backend_tool_call"}:
         call = {
+            "call_id": safe_string(
+                record.get("call_id") or record.get("id")
+            ),
             "name": safe_string(
                 record.get("name") or record.get("tool_name") or kind
             ),

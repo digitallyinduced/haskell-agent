@@ -209,6 +209,65 @@ class SessionReaderTest(unittest.TestCase):
             {item["code"] for item in resumed["warnings"]},
         )
 
+    def test_codex_preserves_call_ids_for_out_of_order_results(self):
+        rollout = self.root / "codex-call-ids.jsonl"
+        write_jsonl(
+            rollout,
+            [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "call_id": "call-a",
+                        "name": "read",
+                        "arguments": {"path": "a"},
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "call_id": "call-b",
+                        "name": "read",
+                        "arguments": {"path": "b"},
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-b",
+                        "output": "result b",
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-a",
+                        "output": "result a",
+                    },
+                },
+            ],
+        )
+        item = reader.candidate(
+            "codex",
+            "codex-cli",
+            "codex-call-ids",
+            rollout,
+            "Call IDs",
+            str(self.cwd),
+        )
+        turns = reader.read_codex(item, 100)["turns"]
+        self.assertEqual(
+            [turn["tool_calls"][0]["call_id"] for turn in turns[:2]],
+            ["call-a", "call-b"],
+        )
+        self.assertEqual(
+            [turn["tool_results"][0]["call_id"] for turn in turns[2:]],
+            ["call-b", "call-a"],
+        )
+
     def test_arbitrary_typed_tool_json_is_not_treated_as_content_parts(self):
         output = [
             {"type": "text", "value": "required state"},
