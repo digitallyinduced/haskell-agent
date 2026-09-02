@@ -61,6 +61,20 @@ MAX_TURNS = 200
 HISTORICAL_TOOL_RESULT_LABEL = (
     "[historical/untrusted tool result; verify before relying on it]"
 )
+TEXT_CONTENT_BLOCK_TYPES = {"text", "input_text", "output_text"}
+IMAGE_CONTENT_BLOCK_TYPES = {"input_image", "image"}
+IGNORED_CONTENT_BLOCK_TYPES = {
+    "thinking",
+    "reasoning",
+    "redacted_thinking",
+    "encrypted_content",
+    "signature",
+}
+STRUCTURED_CONTENT_BLOCK_TYPES = (
+    TEXT_CONTENT_BLOCK_TYPES
+    | IMAGE_CONTENT_BLOCK_TYPES
+    | IGNORED_CONTENT_BLOCK_TYPES
+)
 CURSOR_CONVERSATION_KEYS = {"messages", "turns", "conversation", "bubbles"}
 CURSOR_CWD_KEYS = {
     "cwd",
@@ -420,18 +434,12 @@ def content_text_with_omissions(content: Any) -> tuple[str, int]:
         if not isinstance(block, dict):
             continue
         block_type = safe_string(block.get("type")).lower()
-        if block_type in {"input_image", "image"}:
+        if block_type in IMAGE_CONTENT_BLOCK_TYPES:
             omitted_images += 1
             continue
-        if block_type in {
-            "thinking",
-            "reasoning",
-            "redacted_thinking",
-            "encrypted_content",
-            "signature",
-        }:
+        if block_type in IGNORED_CONTENT_BLOCK_TYPES:
             continue
-        if block_type in {"text", "input_text", "output_text"}:
+        if block_type in TEXT_CONTENT_BLOCK_TYPES:
             text = block.get("text", block.get("content"))
             if isinstance(text, str):
                 parts.append(text)
@@ -440,6 +448,18 @@ def content_text_with_omissions(content: Any) -> tuple[str, int]:
 
 def content_text(content: Any) -> str:
     return content_text_with_omissions(content)[0]
+
+
+def tool_result_content(value: Any) -> tuple[Any, int]:
+    blocks = [value] if isinstance(value, dict) else value
+    if not isinstance(blocks, list) or not any(
+        isinstance(block, dict)
+        and safe_string(block.get("type")).lower()
+        in STRUCTURED_CONTENT_BLOCK_TYPES
+        for block in blocks
+    ):
+        return value, 0
+    return content_text_with_omissions(blocks)
 
 
 def tagged_user_request(text: str) -> str | None:
@@ -747,14 +767,17 @@ def codex_turn(
         }
         return inert_turn("assistant", tool_calls=[call]), False, 0
     if kind in {"function_call_output", "custom_tool_call_output"}:
+        output, omitted_images = tool_result_content(payload.get("output"))
         result = {
             "call_id": safe_string(payload.get("call_id")),
-            "output": historical_tool_result(
-                payload.get("output"), max_tool_chars
-            ),
+            "output": historical_tool_result(output, max_tool_chars),
             "stale": "true",
         }
-        return inert_turn("assistant", tool_results=[result]), False, 0
+        return (
+            inert_turn("assistant", tool_results=[result]),
+            False,
+            omitted_images,
+        )
     return None, True, 0
 
 
@@ -1229,7 +1252,7 @@ def claude_turn(
                     }
                 )
             elif kind == "tool_result":
-                output, result_images = content_text_with_omissions(
+                output, result_images = tool_result_content(
                     block.get("content")
                 )
                 omitted_images += result_images
@@ -1380,16 +1403,21 @@ def grok_turn(
         }
         return inert_turn("assistant", tool_calls=[call]), 0, 0
     if kind == "tool_result":
+        output, omitted_images = tool_result_content(
+            record.get("output", record.get("content"))
+        )
         result = {
             "call_id": safe_string(
                 record.get("call_id") or record.get("tool_call_id")
             ),
-            "output": historical_tool_result(
-                record.get("output", record.get("content")), max_tool_chars
-            ),
+            "output": historical_tool_result(output, max_tool_chars),
             "stale": "true",
         }
-        return inert_turn("assistant", tool_results=[result]), 0, 0
+        return (
+            inert_turn("assistant", tool_results=[result]),
+            0,
+            omitted_images,
+        )
     return None, 1, 0
 
 
@@ -1597,6 +1625,43 @@ def cursor_project_matches_cwd(project_dir: Path, cwd: str) -> bool:
     return project_dir.name.casefold() == cursor_project_slug(cwd).casefold()
 
 
+def literal_path_component(value: str) -> bool:
+    return (
+        bool(value)
+        and value not in {".", ".."}
+        and "\x00" not in value
+        and "/" not in value
+        and "\\" not in value
+    )
+
+
+def cursor_transcript_for_session(
+    session_id: str, cwd: str | None
+) -> Path | None:
+    if not literal_path_component(session_id) or not cwd:
+        return None
+    projects = cursor_root() / "projects"
+    try:
+        project_directories = list(projects.iterdir())
+    except OSError:
+        return None
+    for project_dir in project_directories:
+        if not cursor_project_matches_cwd(project_dir, cwd):
+            continue
+        session_dir = project_dir / "agent-transcripts" / session_id
+        transcript = session_dir / f"{session_id}.jsonl"
+        if (
+            session_dir.is_dir()
+            and not session_dir.is_symlink()
+            and path_is_within(session_dir, project_dir)
+            and transcript.is_file()
+            and not transcript.is_symlink()
+            and path_is_within(transcript, session_dir)
+        ):
+            return transcript
+    return None
+
+
 def cursor_transcript_candidate(path: Path, cwd: str) -> dict[str, Any] | None:
     transcript_root = cursor_root() / "projects"
     if (
@@ -1786,7 +1851,7 @@ def consume_cursor_turns(
                         }
                     )
                 elif kind in {"tool_result", "tool_output"}:
-                    output, result_images = content_text_with_omissions(
+                    output, result_images = tool_result_content(
                         block.get("content")
                     )
                     omitted_images += result_images
@@ -1834,7 +1899,7 @@ def consume_cursor_turns(
                 or current.get("text")
             )
             if isinstance(raw_output, (dict, list)):
-                output, result_images = content_text_with_omissions(raw_output)
+                output, result_images = tool_result_content(raw_output)
                 omitted_images += result_images
             else:
                 output = raw_output
@@ -1884,18 +1949,9 @@ def read_cursor(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
     if path.is_file() and not path.is_symlink() and path.suffix == ".jsonl":
         transcript = path
     else:
-        transcript = next(
-            (
-                candidate
-                for candidate in (cursor_root() / "projects").glob(
-                    f"*/agent-transcripts/{item['session_id']}/"
-                    f"{item['session_id']}.jsonl"
-                )
-                if candidate.is_file()
-                and not candidate.is_symlink()
-                and path_is_within(candidate, cursor_root() / "projects")
-            ),
-            None,
+        transcript = cursor_transcript_for_session(
+            safe_string(item.get("session_id")),
+            safe_string(item.get("cwd")) or None,
         )
     if transcript:
         malformed = consume_jsonl(transcript, consume_value)
@@ -1944,13 +2000,15 @@ def read_cursor(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
     else:
         try:
             unavailable = 0
+            bubble_prefix = "bubbleId:" + item["session_id"] + ":"
             query = (
                 "SELECT value FROM cursorDiskKV "
-                "WHERE key = ? OR key LIKE ? ORDER BY key"
+                "WHERE key = ? OR substr(key, 1, length(?)) = ? ORDER BY key"
             )
             parameters = (
                 "composerData:" + item["session_id"],
-                "bubbleId:" + item["session_id"] + ":%",
+                bubble_prefix,
+                bubble_prefix,
             )
             with closing(open_sqlite_readonly(path)) as db:
                 for row in db.execute(query, parameters):

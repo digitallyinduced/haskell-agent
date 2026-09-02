@@ -163,17 +163,38 @@ class SessionReaderTest(unittest.TestCase):
         )
 
     def test_codex_tool_results_are_visibly_historical(self):
-        turn, skipped, omitted_images = reader.codex_turn(
-            {
-                "type": "function_call_output",
-                "call_id": "old-call",
-                "output": "the branch is clean",
-            },
-            100,
+        rollout = self.root / "codex-tool-output.jsonl"
+        write_jsonl(
+            rollout,
+            [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "old-call",
+                        "output": [
+                            {"type": "input_text", "text": "the branch is clean"},
+                            {
+                                "type": "input_image",
+                                "image_url": (
+                                    "data:image/png;base64,tool-image-secret"
+                                ),
+                            },
+                        ],
+                    },
+                }
+            ],
         )
-        self.assertFalse(skipped)
-        self.assertEqual(omitted_images, 0)
-        self.assertIsNotNone(turn)
+        item = reader.candidate(
+            "codex",
+            "codex-cli",
+            "codex-tool-output",
+            rollout,
+            "Tool output",
+            str(self.cwd),
+        )
+        resumed = reader.read_codex(item, 100)
+        turn = resumed["turns"][0]
         result = turn["tool_results"][0]
         self.assertEqual(result["stale"], "true")
         self.assertTrue(
@@ -182,6 +203,11 @@ class SessionReaderTest(unittest.TestCase):
             )
         )
         self.assertIn("the branch is clean", result["output"])
+        self.assertNotIn("tool-image-secret", json.dumps(turn))
+        self.assertIn(
+            "image_content_omitted",
+            {item["code"] for item in resumed["warnings"]},
+        )
 
     def test_codex_database_compares_working_directories_canonically(self):
         home = self.root / "codex-case-insensitive"
@@ -852,6 +878,99 @@ class SessionReaderTest(unittest.TestCase):
             "image_content_omitted",
             {item["code"] for item in result["warnings"]},
         )
+
+    def test_cursor_session_ids_are_literal_when_finding_transcripts(self):
+        home = self.root / "cursor-literal-session"
+        session = home / "chats" / "project" / "selected"
+        session.mkdir(parents=True)
+        store = sqlite3.connect(session / "store.db")
+        store.execute("CREATE TABLE blobs (key TEXT, value TEXT)")
+        store.execute(
+            "INSERT INTO blobs VALUES (?, ?)",
+            (
+                "conversation",
+                json.dumps(
+                    {"messages": [{"role": "user", "text": "Local store work"}]}
+                ),
+            ),
+        )
+        store.commit()
+        store.close()
+
+        project = home / "projects" / "project"
+        project.mkdir(parents=True)
+        (project / ".workspace-trusted").write_text(
+            json.dumps({"workspacePath": str(self.cwd)}),
+            encoding="utf-8",
+        )
+        transcript = (
+            project
+            / "agent-transcripts"
+            / "literal-session"
+            / "literal-session.jsonl"
+        )
+        write_jsonl(
+            transcript,
+            [{"role": "user", "text": "Unrelated transcript work"}],
+        )
+        item = reader.candidate(
+            "cursor",
+            "cursor-cli",
+            "*",
+            session,
+            "Selected Cursor work",
+            str(self.cwd),
+        )
+        with patch.dict(os.environ, {"CURSOR_HOME": str(home)}):
+            self.assertEqual(
+                reader.cursor_transcript_for_session(
+                    "literal-session", str(self.cwd)
+                ),
+                transcript,
+            )
+            result = reader.read_cursor(item, 100)
+        rendered = json.dumps(result)
+        self.assertIn("Local store work", rendered)
+        self.assertNotIn("Unrelated transcript work", rendered)
+
+    def test_cursor_session_ids_are_literal_in_desktop_queries(self):
+        database = self.root / "cursor-literal-id.vscdb"
+        db = sqlite3.connect(database)
+        db.execute("CREATE TABLE cursorDiskKV (key TEXT, value TEXT)")
+        db.executemany(
+            "INSERT INTO cursorDiskKV VALUES (?, ?)",
+            [
+                (
+                    "composerData:%",
+                    json.dumps(
+                        {"messages": [{"role": "user", "text": "Selected work"}]}
+                    ),
+                ),
+                (
+                    "bubbleId:another-session:1",
+                    json.dumps(
+                        {"role": "assistant", "text": "Unrelated wildcard match"}
+                    ),
+                ),
+            ],
+        )
+        db.commit()
+        db.close()
+        item = reader.candidate(
+            "cursor",
+            "cursor-desktop",
+            "%",
+            database,
+            "Selected desktop work",
+            str(self.cwd),
+        )
+        with patch.dict(
+            os.environ, {"CURSOR_HOME": str(self.root / "cursor-desktop")}
+        ):
+            result = reader.read_cursor(item, 100)
+        rendered = json.dumps(result)
+        self.assertIn("Selected work", rendered)
+        self.assertNotIn("Unrelated wildcard match", rendered)
 
     def test_cursor_desktop_warns_about_partially_unavailable_rows(self):
         home = self.root / "cursor-desktop"
