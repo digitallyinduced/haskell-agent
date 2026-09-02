@@ -717,10 +717,6 @@ spec = do
                     , xaiCompactionCheckpointOriginItem
                     , userTextItem "post-checkpoint context"
                     ]
-                preparedHistory =
-                    [ checkpoint
-                    , userTextItem "post-checkpoint context"
-                    ]
             requests <- newIORef []
             let makeBackend summaryParams =
                     Backend \snapshot previous inputs _onEvent -> do
@@ -745,7 +741,7 @@ spec = do
             result `shouldSatisfy` either (const False) (const True)
             readIORef requests >>= \case
                 [(_summaryParams, snapshot, previous, _inputs)] -> do
-                    snapshot.backendItems `shouldBe` preparedHistory
+                    snapshot.backendItems `shouldBe` history
                     snapshot.backendContinuation `shouldBe` Nothing
                     previous `shouldBe` Nothing
                 _ -> expectationFailure "expected one xAI summary request"

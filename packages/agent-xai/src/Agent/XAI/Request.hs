@@ -6,7 +6,8 @@ module Agent.XAI.Request
     ) where
 
 import Agent.Responses.Request
-    ( forceStatelessStreaming
+    ( filterRequestCompactionCheckpointsByOrigin
+    , forceStatelessStreaming
     , mapResponseTools
     , selectConfiguredModel
     , stripLocalCompactionMarker
@@ -44,28 +45,38 @@ mapModel options model =
 buildRequest :: ClientOptions -> ResponseCreateParams -> ResponseCreateParams
 buildRequest options request =
     stripLocalCompactionMarker $
-        withHostedXSearch $
-            mapResponseTools xaiTool $
-                forceStatelessStreaming defaultResponseCreateParams
-                { model = Just $
-                    selectConfiguredModel
-                        options.modelOverrides
-                        (Text.isPrefixOf "grok")
-                        options.defaultModel
-                        request.model
-                , input = Just (ResponseInputItems (systemItems <> requestInputItems request))
-                , tools = request.tools
-                , reasoning = Just ReasoningConfig
-                    { context = Nothing
-                    , effort = Just (xaiReasoningEffort (request.reasoning >>= (.effort)))
-                    , generateSummary = Nothing
-                    , reasoningMode = Nothing
-                    , summary = Just "concise"
+        filterRequestCompactionCheckpointsByOrigin
+            keepXaiOrLegacyCheckpoint $
+            withHostedXSearch $
+                mapResponseTools xaiTool $
+                    forceStatelessStreaming defaultResponseCreateParams
+                    { model = Just $
+                        selectConfiguredModel
+                            options.modelOverrides
+                            (Text.isPrefixOf "grok")
+                            options.defaultModel
+                            request.model
+                    , input = Just
+                        (ResponseInputItems
+                            (systemItems <> requestInputItems request))
+                    , tools = request.tools
+                    , reasoning = Just ReasoningConfig
+                        { context = Nothing
+                        , effort = Just
+                            (xaiReasoningEffort
+                                (request.reasoning >>= (.effort)))
+                        , generateSummary = Nothing
+                        , reasoningMode = Nothing
+                        , summary = Just "concise"
+                        }
+                    , include = request.include
+                    , promptCacheKey = request.promptCacheKey
                     }
-                , include = request.include
-                , promptCacheKey = request.promptCacheKey
-                }
   where
+    keepXaiOrLegacyCheckpoint = \case
+        Nothing -> True
+        Just origin -> origin == "xai"
+
     systemItems = case request.instructions of
         Just instructions
             | not (Text.null (Text.strip instructions)) ->

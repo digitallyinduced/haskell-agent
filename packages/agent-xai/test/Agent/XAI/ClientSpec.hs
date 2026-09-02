@@ -331,6 +331,51 @@ spec = do
                         , xaiCompactionCheckpointOriginItem
                         ]
 
+        it "replays marked xAI checkpoints without leaking provenance" do
+            let checkpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "xai-context"
+                        , encryptedContent = Just "opaque-xai"
+                        }
+                snapshot =
+                    advanceBackendSnapshot
+                        emptyBackendSnapshot
+                        [ checkpoint
+                        , xaiCompactionCheckpointOriginItem
+                        ]
+                        Nothing
+            requests <- newIORef []
+            let backend =
+                    xaiBackendWith
+                        (\request _onEvent -> do
+                            modifyIORef' requests (<> [request])
+                            pure
+                                (Right
+                                    (responseWithTypedOutput
+                                        [assistantResponseItem "continued"])))
+                        (pure defaultResponseCreateParams)
+            result <- backend.submitTurn
+                snapshot
+                Nothing
+                [UserMessage "continue"]
+                (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef requests >>= \case
+                [request] ->
+                    case request.input of
+                        Just (ResponseInputItems items) -> do
+                            items `shouldSatisfy` elem checkpoint
+                            items `shouldSatisfy`
+                                not
+                                    . any
+                                        isXaiCompactionCheckpointOriginItem
+                        other ->
+                            expectationFailure
+                                ("expected typed input, got " <> show other)
+                other ->
+                    expectationFailure
+                        ("expected one request, got " <> show other)
+
         it "does not claim provenance for checkpoints retained from a request" do
             let foreignCheckpoint =
                     CompactionItemValue CompactionItem
@@ -346,9 +391,12 @@ spec = do
                     , phase = Nothing
                     , passthrough = Nothing
                     }
+            requests <- newIORef []
+            let
                 backend =
                     xaiBackendWith
-                        (\_request _onEvent ->
+                        (\request _onEvent -> do
+                            modifyIORef' requests (<> [request])
                             pure
                                 (Right
                                     (responseWithTypedOutput [answer])))
@@ -375,6 +423,17 @@ spec = do
                             not
                                 . any
                                     isXaiCompactionCheckpointOriginItem
+            readIORef requests >>= \case
+                [request] ->
+                    case request.input of
+                        Just (ResponseInputItems items) ->
+                            items `shouldSatisfy` not . elem foreignCheckpoint
+                        other ->
+                            expectationFailure
+                                ("expected typed input, got " <> show other)
+                other ->
+                    expectationFailure
+                        ("expected one request, got " <> show other)
 
     describe "retry boundaries" do
         it "reports a terminal stream failure after one request" do
@@ -742,6 +801,18 @@ expectRight :: Show e => Either e a -> IO a
 expectRight = \case
     Left err -> expectationFailure ("expected Right, got Left " <> show err) >> fail "unreachable"
     Right value -> pure value
+
+assistantResponseItem :: Text -> ResponseItem
+assistantResponseItem text =
+    MessageItem ResponseMessage
+        { messageId = Just "answer"
+        , content = MessageContentParts
+            [OutputTextPart text Nothing Nothing]
+        , role = RoleAssistant
+        , status = Nothing
+        , phase = Nothing
+        , passthrough = Nothing
+        }
 
 responseWithTypedOutput :: [ResponseItem] -> Response
 responseWithTypedOutput output =

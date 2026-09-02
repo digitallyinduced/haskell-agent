@@ -54,6 +54,9 @@ import Agent.Loop
     , turnInputImages
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Responses.Request
+    ( filterCompactionCheckpointsByOrigin
+    )
 import Agent.Telemetry
     ( ModelTelemetry(..)
     , TurnTelemetry(..)
@@ -71,7 +74,6 @@ import Agent.Responses.Types
     , ResponseMessage(..)
     , ResponseRole(..)
     , TaggedObject
-    , responseItemCompactionCheckpointOrigin
     )
 import qualified Agent.ToolDispatch as ToolDispatch
 import Agent.Json (RawJson, rawJsonBytes)
@@ -627,14 +629,10 @@ renderPriorConversation =
     Text.intercalate "\n\n"
         . catMaybes
         . map renderResponseItem
+        . filterCompactionCheckpointsByOrigin (const False)
 
 renderResponseItem :: ResponseItem -> Maybe Text
-renderResponseItem item
-    | Just _ <- responseItemCompactionCheckpointOrigin item = Nothing
-    | otherwise = renderResponseItemContent item
-
-renderResponseItemContent :: ResponseItem -> Maybe Text
-renderResponseItemContent = \case
+renderResponseItem = \case
     MessageItem message ->
         labelled (roleLabel message.role) (messageContentText message.content)
     FunctionCallItem call ->

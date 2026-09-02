@@ -65,6 +65,7 @@ spec = do
                 encoded
                 `shouldBe` False
             BS.isInfixOf checkpointOrigin encoded `shouldBe` False
+            BS.isInfixOf "opaque-xai-checkpoint" encoded `shouldBe` False
             BS.isInfixOf "preserved.kind" encoded `shouldBe` True
 
         it "preserves custom grammar and namespace tool fields" do
@@ -303,6 +304,10 @@ markedSummaryRequest = defaultResponseCreateParams
                     ]
                 , executedToolCalls = Nothing
                 }
+            }
+        , CompactionItemValue CompactionItem
+            { itemId = Just "cmp-xai"
+            , encryptedContent = Just "opaque-xai-checkpoint"
             }
         , compactionCheckpointOriginItem "xai"
         ])

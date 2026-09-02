@@ -6,7 +6,8 @@ module Agent.OpenRouter.Request
     ) where
 
 import Agent.Responses.Request
-    ( forceStatelessStreaming
+    ( filterRequestCompactionCheckpointsByOrigin
+    , forceStatelessStreaming
     , mapResponseTools
     , selectConfiguredModel
     , setResponseModel
@@ -36,14 +37,15 @@ mapModel options model =
 buildRequest :: ClientOptions -> ResponseCreateParams -> ResponseCreateParams
 buildRequest options request =
     stripLocalCompactionMarker $
-        mapResponseTools openRouterTool $
-            setResponseModel
-                (selectConfiguredModel
-                    options.modelOverrides
-                    (Text.isInfixOf "/")
-                    options.defaultModel
-                    request.model)
-                (forceStatelessStreaming request)
+        filterRequestCompactionCheckpointsByOrigin (const False) $
+            mapResponseTools openRouterTool $
+                setResponseModel
+                    (selectConfiguredModel
+                        options.modelOverrides
+                        (Text.isInfixOf "/")
+                        options.defaultModel
+                        request.model)
+                    (forceStatelessStreaming request)
 
 openRouterTool :: ResponseTool -> Maybe ResponseTool
 openRouterTool tool = case tool of

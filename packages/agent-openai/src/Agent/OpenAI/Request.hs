@@ -5,7 +5,8 @@ module Agent.OpenAI.Request
 
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.Responses.Request
-    ( stripLocalCompactionMarker
+    ( filterRequestCompactionCheckpointsByOrigin
+    , stripLocalCompactionMarker
     , stripReplayedInputStatus
     )
 import Agent.Responses.Types
@@ -39,18 +40,24 @@ sanitizeCodexRequest ResponseCreateParams
         , ..
         } =
     stripLocalCompactionMarker $
-        ResponseCreateParams
-            { promptCacheRetention = Nothing
-            , input =
-                fmap
-                    (stripReplayedInputStatus . stripContentItemKindsInput)
-                    input
-            , parallelToolCalls =
-                if maybe False isCodexResponsesLiteModel model
-                    then Just False
-                    else parallelToolCalls
-            , ..
-            }
+        filterRequestCompactionCheckpointsByOrigin
+            keepOpenAiOrLegacyCheckpoint $
+            ResponseCreateParams
+                { promptCacheRetention = Nothing
+                , input =
+                    fmap
+                        (stripReplayedInputStatus . stripContentItemKindsInput)
+                        input
+                , parallelToolCalls =
+                    if maybe False isCodexResponsesLiteModel model
+                        then Just False
+                        else parallelToolCalls
+                , ..
+                }
+  where
+    keepOpenAiOrLegacyCheckpoint = \case
+        Nothing -> True
+        Just origin -> origin == "openai"
 
 stripContentItemKindsInput :: ResponseInput -> ResponseInput
 stripContentItemKindsInput = \case

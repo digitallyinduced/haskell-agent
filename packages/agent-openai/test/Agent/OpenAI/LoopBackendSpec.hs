@@ -704,6 +704,30 @@ spec = do
                 , seed <> turnInputsToItems [UserMessage "new"]
                 ]
 
+        it "drops xAI checkpoints when replaying after a provider switch" do
+            seen <- newIORef []
+            let xaiCheckpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "xai-context"
+                        , encryptedContent = Just "opaque-xai"
+                        }
+                retained = turnInputsToItems [UserMessage "old"]
+                seed =
+                    [ xaiCheckpoint
+                    , compactionCheckpointOriginItem "xai"
+                    ]
+                        <> retained
+            transcript <- newIORef seed
+            let backend =
+                    openAiBackendWith (recordingSend seen) (pure baseParams)
+            _ <- submitWithState transcript backend Nothing
+                [UserMessage "new"]
+                (const (pure ()))
+            [(request, previous)] <- readIORef seen
+            previous `shouldBe` Nothing
+            inputItems request `shouldBe`
+                retained <> turnInputsToItems [UserMessage "new"]
+
         it "starts a fresh chain when inherited cache retention is rejected" do
             seen <- newIORef []
             let seed = turnInputsToItems [UserMessage "old"]

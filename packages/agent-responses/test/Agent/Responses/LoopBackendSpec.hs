@@ -89,15 +89,15 @@ spec = do
 
 backendSpec :: Spec
 backendSpec = describe "tokenProviderStatelessResponsesBackend" do
-    it "removes checkpoint provenance from rebuilt request input" do
+    it "preserves checkpoint provenance for provider-aware projection" do
         let request =
                 withRequestInput
                     defaultResponseCreateParams
-                    [ compactionCheckpointOriginItem "xai"
-                    , CompactionItemValue CompactionItem
+                    [ CompactionItemValue CompactionItem
                         { itemId = Just "cmp-1"
                         , encryptedContent = Just "opaque"
                         }
+                    , compactionCheckpointOriginItem "xai"
                     ]
         request.input `shouldBe` Just
             (ResponseInputItems
@@ -105,6 +105,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     { itemId = Just "cmp-1"
                     , encryptedContent = Just "opaque"
                     }
+                , compactionCheckpointOriginItem "xai"
                 ])
 
     it "rejects computer coordinates outside the platform Int range" do

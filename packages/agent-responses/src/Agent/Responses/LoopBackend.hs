@@ -51,7 +51,10 @@ import Agent.Provider
     , TokenProvider
     , runWithTokenProvider
     )
-import Agent.Responses.Request (stripReplayedItemStatus)
+import Agent.Responses.Request
+    ( isServerCompactionCheckpoint
+    , stripReplayedItemStatus
+    )
 import Agent.Responses.Types
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -138,15 +141,6 @@ latestServerCheckpointSuffix = go [] . reverse
         | isServerCompactionCheckpoint item = Just (item : after)
         | otherwise = go (item : after) before
 
--- | Whether an item replaces the provider transcript that preceded it.
-isServerCompactionCheckpoint :: ResponseItem -> Bool
-isServerCompactionCheckpoint = \case
-    CompactionItemValue{} -> True
-    ContextCompactionItemValue{} -> True
-    KnownResponseItem ItemCompaction _ -> True
-    KnownResponseItem ItemContextCompaction _ -> True
-    _ -> False
-
 -- | Adapt a credentialed stateless Responses transport to the loop.
 --
 -- Credential acquisition and account failover are shared across providers;
@@ -169,16 +163,13 @@ tokenProviderStatelessResponsesBackend provider send =
 withRequestInput :: ResponseCreateParams -> [ResponseItem] -> ResponseCreateParams
 withRequestInput ResponseCreateParams{..} items =
     let prefix = requestInputPrefix input
-        -- Replayed transcript items are provider output. Drop host-only
-        -- checkpoint provenance and provider lifecycle status before they
-        -- become request input (see 'stripReplayedItemStatus').
+        -- Replayed transcript items are provider output. Keep checkpoint
+        -- provenance intact until the target provider can decide whether the
+        -- adjacent opaque checkpoint is compatible, then drop provider
+        -- lifecycle status (see 'stripReplayedItemStatus').
         normalizedItems =
             map stripReplayedItemStatus
-                (normalizeResponseInputItems
-                    (filter
-                        ((== Nothing)
-                            . responseItemCompactionCheckpointOrigin)
-                        items))
+                (normalizeResponseInputItems items)
         requestItems
             | any isAdditionalTools prefix =
                 ensureReasoningHasFollowingItem

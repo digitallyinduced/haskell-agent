@@ -20,6 +20,9 @@ import Agent.Responses.LoopBackend
     , statelessResponsesBackend
     , tokenProviderStatelessResponsesBackend
     )
+import Agent.Responses.Request
+    ( filterRequestCompactionCheckpointsByOrigin
+    )
 import Agent.Responses.Types
 import Agent.Provider (TokenProvider)
 import Agent.XAI.Client (createResponseWithEvents)
@@ -48,12 +51,13 @@ xaiBackendWithClientOptions
     -> Backend
 xaiBackendWithClientOptions optionsForRequest provider =
     tokenProviderStatelessResponsesBackend provider
-        (\credential request onEvent ->
+        (\credential request onEvent -> do
+            let projectedRequest = projectXaiCheckpoints request
             fmap (fmap markXaiServerCompactionCheckpoint) $
                 createResponseWithEvents
-                    (optionsForRequest request)
+                    (optionsForRequest projectedRequest)
                     credential
-                    request
+                    projectedRequest
                     onEvent)
 
 -- | Same mapping as 'xaiBackend', with an injectable transport for tests and
@@ -67,7 +71,7 @@ xaiBackendWith
 xaiBackendWith send =
     statelessResponsesBackend \request onEvent ->
         fmap (fmap markXaiServerCompactionCheckpoint)
-            (send request onEvent)
+            (send (projectXaiCheckpoints request) onEvent)
 
 -- | Local-only marker kept immediately after xAI's opaque checkpoint.
 xaiCompactionCheckpointOriginItem :: ResponseItem
@@ -77,6 +81,12 @@ xaiCompactionCheckpointOriginItem =
 isXaiCompactionCheckpointOriginItem :: ResponseItem -> Bool
 isXaiCompactionCheckpointOriginItem item =
     responseItemCompactionCheckpointOrigin item == Just "xai"
+
+-- Ordinary backend requests may contain history from a previous provider.
+-- Require explicit xAI provenance before replaying an opaque checkpoint.
+projectXaiCheckpoints :: ResponseCreateParams -> ResponseCreateParams
+projectXaiCheckpoints =
+    filterRequestCompactionCheckpointsByOrigin (== Just "xai")
 
 -- Mark only a checkpoint emitted by this xAI response. Existing request
 -- history may contain an indistinguishable checkpoint from another provider.

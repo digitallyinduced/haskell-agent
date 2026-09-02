@@ -303,7 +303,7 @@ runXaiBackendCompactHistoryWithContextWindow
     -> IO (Either ApiError CompactOutcome)
 runXaiBackendCompactHistoryWithContextWindow =
     runBackendCompactHistoryPreparedWithContextWindow
-        prepareXaiLocalSummaryHistory
+        prepareXaiBackendSummaryHistory
 
 runBackendCompactHistoryPreparedWithContextWindow
     :: ([ResponseItem] -> [ResponseItem])
@@ -881,12 +881,24 @@ isPortableLocalSummaryItem item
 -- they were emitted by xAI. The marker itself is never part of a summary
 -- request.
 prepareXaiLocalSummaryHistory :: [ResponseItem] -> [ResponseItem]
-prepareXaiLocalSummaryHistory = go
+prepareXaiLocalSummaryHistory = prepareXaiSummaryHistory False
+
+prepareXaiBackendSummaryHistory :: [ResponseItem] -> [ResponseItem]
+prepareXaiBackendSummaryHistory = prepareXaiSummaryHistory True
+
+-- Backend-driven xAI summaries retain the proof until the xAI backend's
+-- provider-aware request boundary. Direct response senders have already
+-- selected the compatible checkpoint and receive it without host metadata.
+prepareXaiSummaryHistory :: Bool -> [ResponseItem] -> [ResponseItem]
+prepareXaiSummaryHistory keepOriginMarker = go
   where
     go (checkpoint : marker : rest)
         | isServerCompactionCheckpoint checkpoint
         , isXaiCompactionCheckpointOriginItem marker =
-            checkpoint : go rest
+            checkpoint
+                : if keepOriginMarker
+                    then marker : go rest
+                    else go rest
     go (item : rest)
         | isXaiCompactionCheckpointOriginItem item = go rest
         | isPortableLocalSummaryItem item = item : go rest

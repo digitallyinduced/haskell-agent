@@ -108,6 +108,7 @@ spec = do
                 "haskell-agent.local-compaction-summary"
                 encoded
                 `shouldBe` False
+            BS.isInfixOf "opaque-xai-checkpoint" encoded `shouldBe` False
             BS.isInfixOf "preserved.kind" encoded `shouldBe` True
 
     describe "SSE assembly" do
@@ -224,6 +225,11 @@ markedSummaryRequest = sampleRequest
                 , executedToolCalls = Nothing
                 }
             }
+        , CompactionItemValue CompactionItem
+            { itemId = Just "cmp-xai"
+            , encryptedContent = Just "opaque-xai-checkpoint"
+            }
+        , compactionCheckpointOriginItem "xai"
         ])
     }
 

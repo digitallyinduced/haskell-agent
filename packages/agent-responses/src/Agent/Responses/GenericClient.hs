@@ -32,7 +32,8 @@ import Agent.Responses.Error
     )
 import qualified Agent.Responses.HttpSSE as HttpSSE
 import Agent.Responses.Request
-    ( forceStatelessStreaming
+    ( filterRequestCompactionCheckpointsByOrigin
+    , forceStatelessStreaming
     , setResponseModel
     , stripLocalCompactionMarker
     )
@@ -88,7 +89,8 @@ data ProviderClientConfig = ProviderClientConfig
 buildRequest :: GenericClientOptions -> ResponseCreateParams -> ResponseCreateParams
 buildRequest options request =
     stripLocalCompactionMarker $
-        setResponseModel options.model (forceStatelessStreaming request)
+        filterRequestCompactionCheckpointsByOrigin (const False) $
+            setResponseModel options.model (forceStatelessStreaming request)
 
 createResponseWith
     :: GenericClientOptions

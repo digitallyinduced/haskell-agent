@@ -223,7 +223,7 @@ spec = do
                 expectationFailure
                     ("expected input array, got " <> show other)
 
-    it "strips checkpoint provenance from the Codex wire payload" do
+    it "drops xAI checkpoint pairs from the Codex wire payload" do
         let checkpoint = CompactionItemValue CompactionItem
                 { itemId = Just "cmp-xai"
                 , encryptedContent = Just "opaque"
@@ -233,6 +233,21 @@ spec = do
                 , compactionCheckpointOriginItem "xai"
                 ]
                 sampleRequest
+            payload = buildWsPayloadWithOptions
+                defaultCodexWsOptions request Nothing
+        case field "input" payload of
+            Just (Aeson.Array items) ->
+                length items `shouldBe` 0
+            other ->
+                expectationFailure
+                    ("expected input array, got " <> show other)
+
+    it "keeps legacy unmarked OpenAI checkpoints in the Codex wire payload" do
+        let checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "cmp-openai"
+                , encryptedContent = Just "opaque"
+                }
+            request = withInputItems [checkpoint] sampleRequest
             payload = buildWsPayloadWithOptions
                 defaultCodexWsOptions request Nothing
         case field "input" payload of
