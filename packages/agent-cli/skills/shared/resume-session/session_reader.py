@@ -19,9 +19,10 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import unquote
 
 TOOLS = ("claude", "codex", "cursor", "grok")
@@ -178,7 +179,7 @@ def parse_jsonl_lines(
             continue
         try:
             value = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, RecursionError, ValueError):
             malformed += 1
             continue
         if isinstance(value, dict):
@@ -190,38 +191,84 @@ def parse_jsonl_lines(
     return records, malformed, False
 
 
+def consume_jsonl(
+    path: str | Path, consume: Callable[[dict[str, Any]], None]
+) -> int:
+    path = Path(path)
+
+    def consume_lines(lines: Iterable[str]) -> int:
+        malformed = 0
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except (json.JSONDecodeError, RecursionError, ValueError):
+                malformed += 1
+                continue
+            if isinstance(value, dict):
+                consume(value)
+            else:
+                malformed += 1
+        return malformed
+
+    if not path.name.endswith(".jsonl.zst"):
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return consume_lines(handle)
+
+    executable = shutil.which("zstd")
+    if executable is None:
+        raise ReaderError(f"zstd is required to read compressed Codex rollout {path}")
+    with tempfile.TemporaryFile() as errors:
+        try:
+            process = subprocess.Popen(
+                [executable, "-dc", str(path)],
+                stdout=subprocess.PIPE,
+                stderr=errors,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError as exc:
+            raise ReaderError(f"failed to run zstd for {path}: {exc}") from exc
+        if process.stdout is None:
+            process.kill()
+            process.wait()
+            raise ReaderError(f"failed to capture zstd output for {path}")
+        try:
+            malformed = consume_lines(process.stdout)
+            process.stdout.close()
+            process.wait()
+            errors.seek(0)
+            detail = one_line(
+                errors.read(1000).decode("utf-8", errors="replace"), 300
+            )
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            process.stdout.close()
+        if process.returncode != 0:
+            raise ReaderError(
+                f"zstd failed to decompress {path}: {detail or 'unknown error'}"
+            )
+        return malformed
+
+
 def read_jsonl(
     path: str | Path, max_records: int | None = None
 ) -> tuple[list[dict[str, Any]], int]:
     path = Path(path)
+    if max_records is None:
+        records: list[dict[str, Any]] = []
+        malformed = consume_jsonl(path, records.append)
+        return records, malformed
     if path.name.endswith(".jsonl.zst"):
         executable = shutil.which("zstd")
         if executable is None:
             raise ReaderError(
                 f"zstd is required to read compressed Codex rollout {path}"
             )
-        if max_records is None:
-            try:
-                completed = subprocess.run(
-                    [executable, "-dc", str(path)],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=False,
-                )
-            except OSError as exc:
-                raise ReaderError(f"failed to run zstd for {path}: {exc}") from exc
-            if completed.returncode != 0:
-                detail = one_line(
-                    completed.stderr.decode("utf-8", errors="replace"), 300
-                )
-                raise ReaderError(
-                    f"zstd failed to decompress {path}: {detail or 'unknown error'}"
-                )
-            records, malformed, _ = parse_jsonl_lines(
-                completed.stdout.decode("utf-8", errors="replace").splitlines(),
-                None,
-            )
-            return records, malformed
         try:
             process = subprocess.Popen(
                 [executable, "-dc", str(path)],
@@ -657,43 +704,155 @@ def codex_turn(
     return None, True
 
 
-def drop_last_user_turns(turns: list[dict[str, Any]], number: int) -> None:
-    if number <= 0:
-        return
-    positions = [
-        index for index, turn in enumerate(turns) if turn.get("role") == "user"
-    ]
-    if not positions:
-        return
-    cut = positions[max(0, len(positions) - number)]
-    del turns[cut:]
+class BoundedCodexTurns:
+    def __init__(self):
+        self.turns: list[dict[str, Any]] = []
+        self.prefix_last_text: dict[str, str] = {}
+        self.truncated = False
 
+    def clear(self) -> None:
+        self.turns.clear()
+        self.prefix_last_text.clear()
+        self.truncated = False
 
-def read_codex(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
-    records, malformed = read_jsonl(item["path"])
-    base_items: list[Any] = []
-    start_index = 0
-    for index, record in enumerate(records):
-        if record.get("type") != "compacted":
-            continue
-        payload = record.get("payload")
-        replacement = (
-            payload.get("replacement_history") if isinstance(payload, dict) else None
+    def append(self, turn: dict[str, Any]) -> None:
+        self.turns.append(turn)
+        if len(self.turns) <= MAX_TURNS + 1:
+            return
+        removed = self.turns.pop(0)
+        role = safe_string(removed.get("role"))
+        text = safe_string(removed.get("text"))
+        if role in {"user", "assistant"} and text:
+            self.prefix_last_text[role] = text
+        self.truncated = True
+
+    def drop_last_user_turns(self, number: int) -> bool:
+        if number <= 0:
+            return True
+        if self.truncated:
+            return False
+        positions = [
+            index
+            for index, turn in enumerate(self.turns)
+            if turn.get("role") == "user"
+        ]
+        if positions:
+            cut = positions[max(0, len(positions) - number)]
+            del self.turns[cut:]
+        return True
+
+    def recent(self) -> list[dict[str, Any]]:
+        return list(self.turns)
+
+    def last_text(self, role: str) -> str | None:
+        return next(
+            (
+                safe_string(turn.get("text"))
+                for turn in reversed(self.turns)
+                if turn.get("role") == role and turn.get("text")
+            ),
+            self.prefix_last_text.get(role),
         )
-        if isinstance(replacement, list):
-            base_items = replacement
-            start_index = index + 1
 
-    turns: list[dict[str, Any]] = []
+
+class CodexTurnJournal:
+    def __init__(self, database: sqlite3.Connection):
+        self.database = database
+        self.database.execute("PRAGMA journal_mode = OFF")
+        self.database.execute("PRAGMA synchronous = OFF")
+        self.database.execute(
+            "CREATE TABLE turns ("
+            "sequence INTEGER PRIMARY KEY, "
+            "role TEXT NOT NULL, "
+            "text TEXT NOT NULL, "
+            "payload TEXT NOT NULL)"
+        )
+        self.database.execute(
+            "CREATE INDEX turns_role_sequence ON turns (role, sequence)"
+        )
+
+    def clear(self) -> None:
+        self.database.execute("DELETE FROM turns")
+
+    def append(self, turn: dict[str, Any]) -> None:
+        self.database.execute(
+            "INSERT INTO turns (role, text, payload) VALUES (?, ?, ?)",
+            (
+                safe_string(turn.get("role")),
+                safe_string(turn.get("text")),
+                json.dumps(turn, ensure_ascii=False, separators=(",", ":")),
+            ),
+        )
+
+    def drop_last_user_turns(self, number: int) -> bool:
+        if number <= 0:
+            return True
+        row = self.database.execute(
+            "SELECT COUNT(*) FROM turns WHERE role = 'user'"
+        ).fetchone()
+        user_count = int(row[0]) if row else 0
+        if user_count <= 0:
+            return True
+        offset = min(number, user_count) - 1
+        row = self.database.execute(
+            "SELECT sequence FROM turns WHERE role = 'user' "
+            "ORDER BY sequence DESC LIMIT 1 OFFSET ?",
+            (offset,),
+        ).fetchone()
+        if row:
+            self.database.execute(
+                "DELETE FROM turns WHERE sequence >= ?", (row[0],)
+            )
+        return True
+
+    def recent(self) -> list[dict[str, Any]]:
+        rows = self.database.execute(
+            "SELECT payload FROM ("
+            "SELECT sequence, payload FROM turns ORDER BY sequence DESC LIMIT ?"
+            ") ORDER BY sequence ASC",
+            (MAX_TURNS + 1,),
+        ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def last_text(self, role: str) -> str | None:
+        row = self.database.execute(
+            "SELECT text FROM turns WHERE role = ? AND text <> '' "
+            "ORDER BY sequence DESC LIMIT 1",
+            (role,),
+        ).fetchone()
+        return safe_string(row[0]) if row else None
+
+
+def process_codex_stream(
+    path: str | Path, max_tool_chars: int, turns: Any
+) -> tuple[int, int, bool]:
     skipped = 0
-    for payload in base_items:
-        turn, unsafe = codex_turn(payload, max_tool_chars)
-        skipped += int(unsafe)
-        if turn:
-            turns.append(turn)
-    for record in records[start_index:]:
+    requires_journal = False
+
+    def consume_record(record: dict[str, Any]) -> None:
+        nonlocal requires_journal, skipped
         record_type = record.get("type")
         payload = record.get("payload")
+        if record_type == "compacted":
+            replacement = (
+                payload.get("replacement_history")
+                if isinstance(payload, dict)
+                else None
+            )
+            if isinstance(replacement, list):
+                turns.clear()
+                skipped = 0
+                requires_journal = False
+                for replacement_payload in replacement:
+                    turn, unsafe = codex_turn(
+                        replacement_payload, max_tool_chars
+                    )
+                    skipped += int(unsafe)
+                    if turn:
+                        turns.append(turn)
+            return
+        if requires_journal:
+            return
         if record_type == "response_item":
             turn, unsafe = codex_turn(payload, max_tool_chars)
             skipped += int(unsafe)
@@ -705,14 +864,51 @@ def read_codex(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
             and payload.get("type") == "thread_rolled_back"
         ):
             number = payload.get("num_turns")
-            drop_last_user_turns(
-                turns,
+            applied = turns.drop_last_user_turns(
                 number
                 if isinstance(number, int) and not isinstance(number, bool)
-                else 0,
+                else 0
             )
-        elif record_type not in {"session_meta", "compacted", "event_msg"}:
+            requires_journal = not applied
+        elif record_type not in {"session_meta", "event_msg"}:
             skipped += 1
+
+    malformed = consume_jsonl(path, consume_record)
+    return malformed, skipped, requires_journal
+
+
+def read_codex(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
+    bounded = BoundedCodexTurns()
+    malformed, skipped, requires_journal = process_codex_stream(
+        item["path"], max_tool_chars, bounded
+    )
+    if requires_journal:
+        with tempfile.TemporaryDirectory(
+            prefix="resume-codex-turns-"
+        ) as temporary:
+            turns_database: sqlite3.Connection | None = None
+            try:
+                turns_database = sqlite3.connect(
+                    str(Path(temporary) / "turns.sqlite")
+                )
+                journal = CodexTurnJournal(turns_database)
+                malformed, skipped, _ = process_codex_stream(
+                    item["path"], max_tool_chars, journal
+                )
+                turns = journal.recent()
+                last_user_request = journal.last_text("user")
+                last_assistant_action = journal.last_text("assistant")
+            except sqlite3.Error as exc:
+                raise ReaderError(
+                    f"temporary Codex turn journal failed: {exc}"
+                ) from exc
+            finally:
+                if turns_database is not None:
+                    turns_database.close()
+    else:
+        turns = bounded.recent()
+        last_user_request = bounded.last_text("user")
+        last_assistant_action = bounded.last_text("assistant")
     warnings: list[dict[str, str]] = []
     if malformed:
         warnings.append(warning("malformed_records", f"Skipped {malformed} malformed record(s)."))
@@ -724,7 +920,10 @@ def read_codex(item: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
             )
         )
     result = {**public_candidate(item), "turns": turns}
-    return finalise(result, warnings)
+    result = finalise(result, warnings)
+    result["last_user_request"] = last_user_request
+    result["last_assistant_action"] = last_assistant_action
+    return result
 
 
 def claude_home() -> Path:
@@ -1053,15 +1252,21 @@ def cursor_desktop_databases() -> list[Path]:
 
 def nested_strings(value: Any, wanted: set[str]) -> list[str]:
     found: list[str] = []
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if key.lower() in wanted and isinstance(child, str):
-                found.append(child)
-            elif isinstance(child, (dict, list)):
-                found.extend(nested_strings(child, wanted))
-    elif isinstance(value, list):
-        for child in value:
-            found.extend(nested_strings(child, wanted))
+    pending: list[tuple[bool, Any]] = [(False, value)]
+    while pending:
+        emit, current = pending.pop()
+        if emit:
+            found.append(current)
+        elif isinstance(current, dict):
+            actions: list[tuple[bool, Any]] = []
+            for key, child in current.items():
+                if key.lower() in wanted and isinstance(child, str):
+                    actions.append((True, child))
+                elif isinstance(child, (dict, list)):
+                    actions.append((False, child))
+            pending.extend(reversed(actions))
+        elif isinstance(current, list):
+            pending.extend((False, child) for child in reversed(current))
     return found
 
 
@@ -1102,65 +1307,70 @@ def cursor_header_values(database: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def cursor_first_user_title(value: Any) -> str | None:
-    if isinstance(value, list):
-        for child in value:
-            if title := cursor_first_user_title(child):
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, list):
+            pending.extend(reversed(current))
+            continue
+        if not isinstance(current, dict):
+            continue
+        role = safe_string(current.get("role") or current.get("type")).lower()
+        if role in {
+            "system",
+            "developer",
+            "instruction",
+            "instructions",
+            "thinking",
+            "reasoning",
+            "redacted_thinking",
+            "signature",
+            "encrypted_content",
+        }:
+            continue
+        if role in {"human", "user"}:
+            text = current.get(
+                "text", current.get("content", current.get("message"))
+            )
+            if isinstance(text, dict):
+                text = text.get("text", text.get("content"))
+            rendered = (
+                content_text(text)
+                if isinstance(text, list)
+                else text
+                if isinstance(text, str)
+                else ""
+            )
+            if title := user_text(rendered.strip()):
                 return title
-        return None
-    if not isinstance(value, dict):
-        return None
-    role = safe_string(value.get("role") or value.get("type")).lower()
-    if role in {
-        "system",
-        "developer",
-        "instruction",
-        "instructions",
-        "thinking",
-        "reasoning",
-        "redacted_thinking",
-        "signature",
-        "encrypted_content",
-    }:
-        return None
-    if role in {"human", "user"}:
-        text = value.get("text", value.get("content", value.get("message")))
-        if isinstance(text, dict):
-            text = text.get("text", text.get("content"))
-        rendered = (
-            content_text(text)
-            if isinstance(text, list)
-            else text
-            if isinstance(text, str)
-            else ""
-        )
-        if title := user_text(rendered.strip()):
-            return title
-    for key, child in value.items():
-        if (
-            key.lower() in CURSOR_CONVERSATION_KEYS
+        children = [
+            child
+            for key, child in current.items()
+            if key.lower() in CURSOR_CONVERSATION_KEYS
             and isinstance(child, (dict, list))
-            and (title := cursor_first_user_title(child))
-        ):
-            return title
+        ]
+        pending.extend(reversed(children))
     return None
 
 
 def cursor_record_matches_cwd(value: Any, cwd: str) -> bool:
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if (
-                key.lower() in CURSOR_CWD_KEYS
-                and isinstance(child, str)
-                and same_cwd(child, cwd)
-            ):
-                return True
-            if (
-                isinstance(child, (dict, list))
-                and cursor_record_matches_cwd(child, cwd)
-            ):
-                return True
-    elif isinstance(value, list):
-        return any(cursor_record_matches_cwd(child, cwd) for child in value)
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, dict):
+            children: list[Any] = []
+            for key, child in current.items():
+                if (
+                    key.lower() in CURSOR_CWD_KEYS
+                    and isinstance(child, str)
+                    and same_cwd(child, cwd)
+                ):
+                    return True
+                if isinstance(child, (dict, list)):
+                    children.append(child)
+            pending.extend(reversed(children))
+        elif isinstance(current, list):
+            pending.extend(reversed(current))
     return False
 
 
@@ -1181,7 +1391,7 @@ def cursor_transcript_candidate(path: Path, cwd: str) -> dict[str, Any] | None:
                     continue
                 try:
                     record = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
+                except (json.JSONDecodeError, RecursionError, ValueError):
                     continue
                 if not isinstance(record, dict):
                     continue
@@ -1285,119 +1495,127 @@ def discover_cursor(cwd: str) -> list[dict[str, Any]]:
 
 def generic_cursor_turns(value: Any, max_tool_chars: int) -> list[dict[str, Any]]:
     turns: list[dict[str, Any]] = []
-    if isinstance(value, list):
-        for child in value:
-            turns.extend(generic_cursor_turns(child, max_tool_chars))
-        return turns
-    if not isinstance(value, dict):
-        return turns
-    role = safe_string(value.get("role") or value.get("type")).lower()
-    if role in {
-        "system",
-        "developer",
-        "instruction",
-        "instructions",
-        "thinking",
-        "reasoning",
-        "redacted_thinking",
-        "signature",
-        "encrypted_content",
-    }:
-        return turns
-    if role in {"human", "user"}:
-        role = "user"
-    elif role in {"ai", "assistant"}:
-        role = "assistant"
-    if role in {"user", "assistant"}:
-        text = value.get("text", value.get("content", value.get("message")))
-        if isinstance(text, dict):
-            text = text.get("text", text.get("content"))
-        rendered = (
-            content_text(text)
-            if isinstance(text, list)
-            else text
-            if isinstance(text, str)
-            else ""
-        )
-        calls: list[dict[str, str]] = []
-        results: list[dict[str, str]] = []
-        content = value.get("content")
-        blocks = content if isinstance(content, list) else []
-        for block in blocks:
-            if not isinstance(block, dict):
-                continue
-            kind = safe_string(block.get("type")).lower()
-            if kind in {"tool_use", "tool_call"}:
-                calls.append(
-                    {
-                        "call_id": safe_string(
-                            block.get("id") or block.get("call_id")
-                        ),
-                        "name": safe_string(block.get("name") or "tool"),
-                        "arguments": json_preview(
-                            block.get("input", block.get("arguments")),
-                            max_tool_chars,
-                        ),
-                    }
-                )
-            elif kind in {"tool_result", "tool_output"}:
-                results.append(
-                    {
-                        "call_id": safe_string(
-                            block.get("tool_use_id") or block.get("call_id")
-                        ),
-                        "output": one_line(
-                            content_text(block.get("content")), max_tool_chars
-                        ),
-                        "stale": "true",
-                    }
-                )
-        top_calls = value.get("tool_calls")
-        if isinstance(top_calls, list):
-            for raw_call in top_calls:
-                if not isinstance(raw_call, dict):
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, list):
+            pending.extend(reversed(current))
+            continue
+        if not isinstance(current, dict):
+            continue
+        role = safe_string(current.get("role") or current.get("type")).lower()
+        if role in {
+            "system",
+            "developer",
+            "instruction",
+            "instructions",
+            "thinking",
+            "reasoning",
+            "redacted_thinking",
+            "signature",
+            "encrypted_content",
+        }:
+            continue
+        if role in {"human", "user"}:
+            role = "user"
+        elif role in {"ai", "assistant"}:
+            role = "assistant"
+        if role in {"user", "assistant"}:
+            text = current.get(
+                "text", current.get("content", current.get("message"))
+            )
+            if isinstance(text, dict):
+                text = text.get("text", text.get("content"))
+            rendered = (
+                content_text(text)
+                if isinstance(text, list)
+                else text
+                if isinstance(text, str)
+                else ""
+            )
+            calls: list[dict[str, str]] = []
+            results: list[dict[str, str]] = []
+            content = current.get("content")
+            blocks = content if isinstance(content, list) else []
+            for block in blocks:
+                if not isinstance(block, dict):
                     continue
-                call = (
-                    raw_call["function"]
-                    if isinstance(raw_call.get("function"), dict)
-                    else raw_call
-                )
-                calls.append(
-                    {
-                        "call_id": safe_string(
-                            raw_call.get("id") or call.get("call_id")
-                        ),
-                        "name": safe_string(call.get("name") or "tool"),
-                        "arguments": json_preview(
-                            call.get("arguments", call.get("input")),
-                            max_tool_chars,
-                        ),
-                    }
-                )
-        turn = inert_turn(role, rendered, calls, results)
-        if turn:
-            turns.append(turn)
-            return turns
-    elif role in {"tool", "tool_result", "tool_output"}:
-        result = {
-            "call_id": safe_string(value.get("tool_call_id") or value.get("call_id")),
-            "output": one_line(
-                content_text(value.get("content"))
-                or value.get("output")
-                or value.get("text"),
-                max_tool_chars,
-            ),
-            "stale": "true",
-        }
-        turn = inert_turn("assistant", tool_results=[result])
-        if turn:
-            return [turn]
-    for key, child in value.items():
-        if (
-            key.lower() in CURSOR_CONVERSATION_KEYS
+                kind = safe_string(block.get("type")).lower()
+                if kind in {"tool_use", "tool_call"}:
+                    calls.append(
+                        {
+                            "call_id": safe_string(
+                                block.get("id") or block.get("call_id")
+                            ),
+                            "name": safe_string(block.get("name") or "tool"),
+                            "arguments": json_preview(
+                                block.get("input", block.get("arguments")),
+                                max_tool_chars,
+                            ),
+                        }
+                    )
+                elif kind in {"tool_result", "tool_output"}:
+                    results.append(
+                        {
+                            "call_id": safe_string(
+                                block.get("tool_use_id") or block.get("call_id")
+                            ),
+                            "output": one_line(
+                                content_text(block.get("content")), max_tool_chars
+                            ),
+                            "stale": "true",
+                        }
+                    )
+            top_calls = current.get("tool_calls")
+            if isinstance(top_calls, list):
+                for raw_call in top_calls:
+                    if not isinstance(raw_call, dict):
+                        continue
+                    call = (
+                        raw_call["function"]
+                        if isinstance(raw_call.get("function"), dict)
+                        else raw_call
+                    )
+                    calls.append(
+                        {
+                            "call_id": safe_string(
+                                raw_call.get("id") or call.get("call_id")
+                            ),
+                            "name": safe_string(call.get("name") or "tool"),
+                            "arguments": json_preview(
+                                call.get("arguments", call.get("input")),
+                                max_tool_chars,
+                            ),
+                        }
+                    )
+            turn = inert_turn(role, rendered, calls, results)
+            if turn:
+                turns.append(turn)
+                continue
+        elif role in {"tool", "tool_result", "tool_output"}:
+            result = {
+                "call_id": safe_string(
+                    current.get("tool_call_id") or current.get("call_id")
+                ),
+                "output": one_line(
+                    content_text(current.get("content"))
+                    or current.get("output")
+                    or current.get("text"),
+                    max_tool_chars,
+                ),
+                "stale": "true",
+            }
+            turn = inert_turn("assistant", tool_results=[result])
+            if turn:
+                turns.append(turn)
+                continue
+        children = [
+            child
+            for key, child in current.items()
+            if key.lower() in CURSOR_CONVERSATION_KEYS
             and isinstance(child, (dict, list))
-        ):
-            turns.extend(generic_cursor_turns(child, max_tool_chars))
+        ]
+        pending.extend(reversed(children))
     return turns
 
 

@@ -398,6 +398,49 @@ class SessionReaderTest(unittest.TestCase):
         self.assertNotIn("Rolled-back answer", rendered)
         self.assertEqual(result["last_user_request"], "Active follow-up")
 
+    def test_codex_rollbacks_can_restore_turns_older_than_output_window(self):
+        rollout = self.root / "codex-large-rollback.jsonl"
+        records = []
+        for index in range(250):
+            records.extend(
+                [
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": f"Request {index}"}
+                            ],
+                        },
+                    },
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {"type": "output_text", "text": f"Answer {index}"}
+                            ],
+                        },
+                    },
+                ]
+            )
+        records.append(
+            {
+                "type": "event_msg",
+                "payload": {"type": "thread_rolled_back", "num_turns": 240},
+            }
+        )
+        write_jsonl(rollout, records)
+        item = reader.candidate(
+            "codex", "codex-cli", "codex-rollback", rollout, None, str(self.cwd)
+        )
+        result = reader.read_codex(item, 100)
+        self.assertEqual(len(result["turns"]), 20)
+        self.assertEqual(result["last_user_request"], "Request 9")
+        self.assertEqual(result["last_assistant_action"], "Answer 9")
+
     def test_claude_follows_active_parent_chain_and_bounds_tools(self):
         home = self.root / "claude"
         slug = reader.claude_project_slug(str(self.cwd))
@@ -706,6 +749,53 @@ class SessionReaderTest(unittest.TestCase):
         self.assertEqual(item["title"], "Resume Cursor work")
         self.assertEqual(stream.records_read, 2)
 
+    def test_cursor_metadata_traversal_is_iterative(self):
+        nested_cwd = {"workspacePath": str(self.cwd)}
+        nested_title = {"role": "user", "text": "Deep Cursor work"}
+        for _ in range(1_200):
+            nested_cwd = {"nested": nested_cwd}
+            nested_title = {"messages": [nested_title]}
+        self.assertTrue(reader.cursor_record_matches_cwd(nested_cwd, str(self.cwd)))
+        self.assertEqual(
+            reader.nested_strings(nested_cwd, reader.CURSOR_CWD_KEYS),
+            [str(self.cwd)],
+        )
+        self.assertEqual(
+            reader.cursor_first_user_title(nested_title), "Deep Cursor work"
+        )
+        self.assertEqual(
+            reader.generic_cursor_turns(nested_title, 100)[0]["text"],
+            "Deep Cursor work",
+        )
+
+    def test_cursor_transcript_skips_json_recursion_errors(self):
+        home = self.root / "cursor-recursion"
+        transcript = (
+            home
+            / "projects"
+            / "project"
+            / "agent-transcripts"
+            / "cursor-session"
+            / "cursor-session.jsonl"
+        )
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text("deep\nmetadata\ntitle\n", encoding="utf-8")
+        with (
+            patch.dict(os.environ, {"CURSOR_HOME": str(home)}),
+            patch.object(
+                reader.json,
+                "loads",
+                side_effect=[
+                    RecursionError("too deeply nested"),
+                    {"workspacePath": str(self.cwd)},
+                    {"role": "user", "text": "Recovered Cursor work"},
+                ],
+            ),
+        ):
+            item = reader.cursor_transcript_candidate(transcript, str(self.cwd))
+        self.assertIsNotNone(item)
+        self.assertEqual(item["title"], "Recovered Cursor work")
+
     def test_finalise_preserves_last_request_when_old_turns_are_truncated(self):
         turns = [reader.inert_turn("user", "Original goal")]
         turns.extend(
@@ -753,7 +843,12 @@ class SessionReaderTest(unittest.TestCase):
         )
         item = reader.codex_metadata_from_file(compressed)
         self.assertIsNotNone(item)
-        result = reader.read_codex(item, 100)
+        with patch.object(
+            reader.subprocess,
+            "run",
+            side_effect=AssertionError("selected rollout was fully buffered"),
+        ):
+            result = reader.read_codex(item, 100)
         self.assertEqual(result["last_user_request"], "Resume compressed work")
 
     def test_codex_metadata_stops_after_300_compressed_records(self):
