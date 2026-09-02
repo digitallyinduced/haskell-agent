@@ -115,7 +115,7 @@ import Control.Exception.Safe ()
 import Control.Monad ()
 import Control.Monad.IO.Class ()
 import Control.Monad.State.Strict ()
-import Data.Char ()
+import Data.Char ( isDigit )
 import Data.Foldable ()
 import Data.IORef ()
 import Data.List ()
@@ -144,10 +144,12 @@ import qualified Agent.CLI.TUI.Scroll as Scroll ()
 import qualified Data.Sequence as Seq ()
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text
-    ( isPrefixOf,
+    ( dropWhile,
+      isPrefixOf,
       lines,
       null,
       strip,
+      uncons,
       unlines,
       pack )
 import qualified Data.Text.Encoding as TextEncoding ()
@@ -614,14 +616,24 @@ editBodyWidgets body
     | otherwise = [vBox (map editLineWidget (Text.lines body))]
   where
     editLineWidget line
-        | "  -" `Text.isPrefixOf` line =
+        | isEditLine '-' line =
             withAttr Theme.errorAttr (terminalTxtWrap line)
-        | "  +" `Text.isPrefixOf` line =
+        | isEditLine '+' line =
             withAttr Theme.successAttr (terminalTxtWrap line)
         | "  …" `Text.isPrefixOf` line
             || "… +" `Text.isPrefixOf` line =
                 withAttr Theme.mutedAttr (terminalTxtWrap line)
         | otherwise = terminalTxtWrap line
+
+    isEditLine marker line =
+        case Text.uncons (Text.dropWhile (== ' ') line) of
+            Just (first, rest)
+                | first == marker -> True
+                | first >= '0' && first <= '9' ->
+                    case Text.uncons (Text.dropWhile (== ' ') (Text.dropWhile isDigit rest)) of
+                        Just (actual, _) -> actual == marker
+                        Nothing -> False
+            _ -> False
 
 accentMarkdownBlock
     :: AppState
