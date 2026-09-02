@@ -28,7 +28,7 @@ import Agent.CLI.Options
 import Agent.CLI.Render
     ( RenderConfig(..)
     , putTextLn
-    , renderAssistantText
+    , renderAssistantTextForHandle
     )
 import Agent.CLI.ReplMode
     ( replModeFromState
@@ -228,5 +228,8 @@ runBtwQuestion registerCancel env question = do
             case fullscreen of
                 Just runtime ->
                     emitUiEvent runtime (UiAssistantHistory answer)
-                Nothing ->
-                    putTextLn stdoutHandle (renderAssistantText color answer)
+                Nothing -> do
+                    rendered <-
+                        renderAssistantTextForHandle
+                            stdoutHandle color answer
+                    putTextLn stdoutHandle rendered

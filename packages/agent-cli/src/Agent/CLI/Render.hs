@@ -39,6 +39,7 @@ module Agent.CLI.Render
     , formatTurnStatus
     , putTextLn
     , renderAssistantText
+    , renderAssistantTextForHandle
     , renderEvent
     , renderPrintedText
     , resetRenderPrintedText
@@ -571,6 +572,14 @@ renderAssistantTextAtWidth :: Bool -> Int -> Text -> Text
 renderAssistantTextAtWidth color width text =
     paintBackgroundLines color agentBackground
         (renderMarkdownAtWidth color width text)
+
+renderAssistantTextForHandle :: Handle -> Bool -> Text -> IO Text
+renderAssistantTextForHandle handle color text = do
+    availableWidth <- terminalColumns handle
+    pure $
+        case availableWidth of
+            Nothing -> renderAssistantText color text
+            Just width -> renderAssistantTextAtWidth color width text
 
 -- | Stream assistant text append-only. Ordinary prose is emitted as soon as
 -- incomplete inline constructs permit, while line prefixes that may introduce

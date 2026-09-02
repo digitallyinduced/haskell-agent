@@ -41,7 +41,7 @@ import Agent.CLI.Render
     , formatLoopErrorPersistedAt
     , formatTurnStatus
     , putTextLn
-    , renderAssistantText
+    , renderAssistantTextForHandle
     , renderPrintedText
     , resetRenderPrintedText
     , stateLastTokensPerSecond
@@ -672,7 +672,10 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                 (Just _, _, _) -> pure ()
                 (Nothing, False, Just text) | not (Text.null (Text.strip text)) -> do
                     useColor <- resolveColor stdoutHandle
-                    putTextLn stdoutHandle (renderAssistantText useColor text)
+                    rendered <-
+                        renderAssistantTextForHandle
+                            stdoutHandle useColor text
+                    putTextLn stdoutHandle rendered
                 _ -> pure ()
             let newItems =
                     turnNewItems
