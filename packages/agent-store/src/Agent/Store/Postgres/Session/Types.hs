@@ -17,6 +17,9 @@ module Agent.Store.Postgres.Session.Types
     , SessionTurnPage(..)
     , SessionHistorySnapshot(..)
     , SessionResumeStats(..)
+    , SessionTaskPlanStatus(..)
+    , SessionTaskPlanItem(..)
+    , SessionTaskPlan(..)
     ) where
 
 import Data.Int (Int32, Int64)
@@ -25,6 +28,26 @@ import Data.Time.Clock (UTCTime)
 import Data.Vector (Vector)
 
 import Agent.Store.SessionItem (StoredResponseItem)
+
+data SessionTaskPlanStatus
+    = SessionTaskPlanPending
+    | SessionTaskPlanInProgress
+    | SessionTaskPlanCompleted
+    deriving (Eq, Show)
+
+data SessionTaskPlanItem = SessionTaskPlanItem
+    { sessionTaskPlanItemStep :: !Text
+    , sessionTaskPlanItemStatus :: !SessionTaskPlanStatus
+    }
+    deriving (Eq, Show)
+
+-- | The current durable task plan for a session.
+data SessionTaskPlan = SessionTaskPlan
+    { sessionTaskPlanRevision :: !Int64
+    , sessionTaskPlanExplanation :: !(Maybe Text)
+    , sessionTaskPlanItems :: ![SessionTaskPlanItem]
+    }
+    deriving (Eq, Show)
 
 data SessionLegacyTarget = SessionLegacyTarget
     { sessionLegacyProvider :: !Text

@@ -16,6 +16,7 @@ module Agent.Store.Postgres.Session.Write
     , appendSessionTurnIndexed
     , appendSessionTurnIndexedWithPromptReset
     , appendSessionTurns
+    , appendSessionTurnsClearingTaskPlan
     , setSessionArchived
     , deleteSession
     , importLegacySession
@@ -324,17 +325,42 @@ appendSessionTurns
     -> SessionMetadata
     -> IO (Either StoreError Bool)
 appendSessionTurns pool turns metadata =
+    appendSessionTurnsWithTaskPlanClear False pool turns metadata
+
+-- | Append a transcript transition and clear its current task plan in the
+-- same serializable transaction.
+appendSessionTurnsClearingTaskPlan
+    :: StorePool
+    -> [SessionTurn]
+    -> SessionMetadata
+    -> IO (Either StoreError Bool)
+appendSessionTurnsClearingTaskPlan =
+    appendSessionTurnsWithTaskPlanClear True
+
+appendSessionTurnsWithTaskPlanClear
+    :: Bool
+    -> StorePool
+    -> [SessionTurn]
+    -> SessionMetadata
+    -> IO (Either StoreError Bool)
+appendSessionTurnsWithTaskPlanClear clearTaskPlan pool turns metadata =
     withSession pool $
         Transactions.transaction Transactions.Serializable Transactions.Write do
             _ <- Transaction.statement
                 metadata.sessionMetadataKey
                 blockingAdvisoryLockStatement
-            case turns of
+            appended <- case turns of
                 [] ->
                     Transaction.statement
                         metadata.sessionMetadataKey
                         sessionExistsStatement
                 _ -> appendAll turns
+            when (appended && clearTaskPlan) do
+                _ <- Transaction.statement
+                    metadata.sessionMetadataKey
+                    clearTaskPlanStatement
+                pure ()
+            pure appended
   where
     appendAll [] = pure True
     appendAll (turn : rest) = do
@@ -342,6 +368,15 @@ appendSessionTurns pool turns metadata =
         if appended
             then appendAll rest
             else Transaction.condemn >> pure False
+
+clearTaskPlanStatement :: Statement Text ()
+clearTaskPlanStatement = mkStatement
+    "DELETE FROM harness.session_task_plans p\
+    \ USING harness.sessions s\
+    \ WHERE p.session_id = s.session_id AND s.session_key = $1"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    Decoders.noResult
+    True
 
 setSessionArchived
     :: StorePool

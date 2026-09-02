@@ -74,6 +74,12 @@ spec = describe "PostgreSQL session schema" do
             "CREATE TABLE IF NOT EXISTS harness.session_prompt_epochs"
         ddl `shouldContainBytes` "is_active boolean NOT NULL DEFAULT TRUE"
         ddl `shouldContainBytes` "session_prompt_epochs_immutable"
+        ddl `shouldContainBytes`
+            "CREATE TABLE IF NOT EXISTS harness.session_task_plans"
+        ddl `shouldContainBytes`
+            "CREATE TABLE IF NOT EXISTS harness.session_task_plan_items"
+        ddl `shouldContainBytes`
+            "status IN ('pending', 'in_progress', 'completed')"
 
     it "tracks restart-safe legacy imports" do
         let ddl = ByteString.intercalate "\n" sessionSchemaStatements
@@ -206,6 +212,46 @@ spec = describe "PostgreSQL session schema" do
                                             })
                             createSession pool metadata
                                 `shouldReturn` Right True
+                            let initialPlanItems =
+                                    [ SessionTaskPlanItem
+                                        "inspect storage"
+                                        SessionTaskPlanCompleted
+                                    , SessionTaskPlanItem
+                                        "persist plan"
+                                        SessionTaskPlanInProgress
+                                    ]
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn` Right Nothing
+                            replaceSessionTaskPlan
+                                pool "session-1" (Just "first") initialPlanItems
+                                `shouldReturn` Right (Just 1)
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 1
+                                            , sessionTaskPlanExplanation =
+                                                Just "first"
+                                            , sessionTaskPlanItems =
+                                                initialPlanItems
+                                            })
+                            let replacementItems =
+                                    [ SessionTaskPlanItem
+                                        "finish"
+                                        SessionTaskPlanPending
+                                    ]
+                            replaceSessionTaskPlan
+                                pool "session-1" Nothing replacementItems
+                                `shouldReturn` Right (Just 2)
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 2
+                                            , sessionTaskPlanExplanation = Nothing
+                                            , sessionTaskPlanItems =
+                                                replacementItems
+                                            })
                             appendSessionTurn pool turn metadata
                                 `shouldReturn` Right True
                             loadSession pool "session-1" >>= \case
@@ -233,8 +279,28 @@ spec = describe "PostgreSQL session schema" do
                                     }
                             createSession pool metadata2
                                 `shouldReturn` Right True
-                            appendSessionTurns pool [turn2, turn3] metadata2
+                            copySessionTaskPlan pool "session-1" "session-2"
                                 `shouldReturn` Right True
+                            loadSessionTaskPlan pool "session-2"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 1
+                                            , sessionTaskPlanExplanation = Nothing
+                                            , sessionTaskPlanItems =
+                                                replacementItems
+                                            })
+                            clearSessionTaskPlan pool "session-1"
+                                `shouldReturn` Right True
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn` Right Nothing
+                            clearSessionTaskPlan pool "session-1"
+                                `shouldReturn` Right False
+                            appendSessionTurnsClearingTaskPlan
+                                pool [turn2, turn3] metadata2
+                                `shouldReturn` Right True
+                            loadSessionTaskPlan pool "session-2"
+                                `shouldReturn` Right Nothing
                             loadSessionMetadataMany
                                 pool
                                 ["session-2", "missing", "session-1"]

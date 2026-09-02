@@ -34,6 +34,7 @@ import Agent.Store.Postgres.Session
     ( sessionSchemaStatements
     , sessionSearchIndexStatements
     , sessionPromptEpochSchemaStatements
+    , sessionTaskPlanSchemaStatements
     )
 import Agent.Store.Postgres.Skill
     ( learnedSkillRuntimeGrantStatements
@@ -59,6 +60,17 @@ coreMigrations =
         , migrationStatements =
             customSchemaStatements
             <> sessionSchemaStatements
+        }
+    , Migration
+        { migrationVersion = 109
+        , migrationName = "durable session task plans"
+        , migrationStatements =
+            sessionTaskPlanSchemaStatements
+            <> [ "GRANT SELECT, INSERT, UPDATE, DELETE\
+                 \ ON harness.session_task_plans TO ha_runtime"
+               , "GRANT SELECT, INSERT, DELETE\
+                 \ ON harness.session_task_plan_items TO ha_runtime"
+               ]
         }
     , Migration
         { migrationVersion = 2
@@ -574,6 +586,10 @@ sessionRuntimeGrantStatements =
       \ ON harness.session_response_content_parts TO ha_runtime"
     , "GRANT SELECT, INSERT\
       \ ON harness.session_prompt_epochs TO ha_runtime"
+    , "GRANT SELECT, INSERT, UPDATE, DELETE\
+      \ ON harness.session_task_plans TO ha_runtime"
+    , "GRANT SELECT, INSERT, DELETE\
+      \ ON harness.session_task_plan_items TO ha_runtime"
     ]
 
 runCoreMigrations :: StorePool -> IO (Either StoreError ())

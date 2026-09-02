@@ -17,6 +17,7 @@ module Agent.Store.Postgres.Session
     , sessionSchemaStatements
     , sessionSearchIndexStatements
     , sessionPromptEpochSchemaStatements
+    , sessionTaskPlanSchemaStatements
     , createSession
     , createSessionWithInitialPromptEpoch
     , createSessionFromSnapshot
@@ -28,6 +29,7 @@ module Agent.Store.Postgres.Session
     , appendSessionTurnIndexed
     , appendSessionTurnIndexedWithPromptReset
     , appendSessionTurns
+    , appendSessionTurnsClearingTaskPlan
     , loadSession
     , loadSessionWithImplementation
     , loadSessions
@@ -39,6 +41,9 @@ module Agent.Store.Postgres.Session
     , SessionTurnPage(..)
     , SessionHistorySnapshot(..)
     , SessionResumeStats(..)
+    , SessionTaskPlanStatus(..)
+    , SessionTaskPlanItem(..)
+    , SessionTaskPlan(..)
     , loadRecentSessionTurns
     , loadRecentSessionHistoryTurns
     , loadSessionTurnsBefore
@@ -59,9 +64,14 @@ module Agent.Store.Postgres.Session
     , deleteSession
     , importLegacySession
     , withSessionAdvisoryLock
+    , loadSessionTaskPlan
+    , replaceSessionTaskPlan
+    , clearSessionTaskPlan
+    , copySessionTaskPlan
     ) where
 
 import Agent.Store.Postgres.Session.Read
 import Agent.Store.Postgres.Session.Schema
+import Agent.Store.Postgres.Session.TaskPlan
 import Agent.Store.Postgres.Session.Types
 import Agent.Store.Postgres.Session.Write
