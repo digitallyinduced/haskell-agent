@@ -21,8 +21,10 @@ module Agent.CLI.Compaction
     , runProviderCompactWithContextWindow
     , runResponsesCompactWith
     , runResponsesCompactWithContextWindow
+    , runXaiResponsesCompactWithContextWindow
     , runBackendCompactWithContextWindow
     , runBackendCompactHistoryWithContextWindow
+    , runXaiBackendCompactHistoryWithContextWindow
     , OccupancyKind(..)
     , OccupancySnapshot(..)
     , estimatedOccupancy
@@ -238,13 +240,18 @@ runProviderCompactWithContextWindow contextWindow openAiSender recordUsage
             Left message -> pure (compactTextFailure message)
             Right limit ->
                 mapCompactAttemptError formatApiError
-                    <$> summarizePortableLocalAttempt
+                    <$> summarizeLocalAttemptWith
                         limit
+                        summaryHistoryPreparation
                         sender
                         params
                         history
                         (estimateItemsTokens history)
                         focus
+
+    summaryHistoryPreparation
+        | provider == XAIProvider = filter isXaiLocalSummaryItem
+        | otherwise = filter isPortableLocalSummaryItem
 
 -- | Summarize a host transcript through any isolated provider backend. The
 -- backend receives a fresh snapshot and no continuation, so a persistent
@@ -275,21 +282,52 @@ runBackendCompactHistoryWithContextWindow
     -> [ResponseItem]
     -> Maybe Text
     -> IO (Either ApiError CompactOutcome)
-runBackendCompactHistoryWithContextWindow contextWindow makeBackend recordUsage
+runBackendCompactHistoryWithContextWindow =
+    runBackendCompactHistoryPreparedWithContextWindow
+        (filter isPortableLocalSummaryItem)
+
+-- | Summarize xAI history through xAI itself. Unlike portable summarization,
+-- this must replay opaque server checkpoints so the generated local summary
+-- includes the context encoded by them.
+runXaiBackendCompactHistoryWithContextWindow
+    :: Int
+    -> (ResponseCreateParams -> Backend)
+    -> (TokenUsage -> IO ())
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> Maybe Text
+    -> IO (Either ApiError CompactOutcome)
+runXaiBackendCompactHistoryWithContextWindow =
+    runBackendCompactHistoryPreparedWithContextWindow
+        (filter isXaiLocalSummaryItem)
+
+runBackendCompactHistoryPreparedWithContextWindow
+    :: ([ResponseItem] -> [ResponseItem])
+    -> Int
+    -> (ResponseCreateParams -> Backend)
+    -> (TokenUsage -> IO ())
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> Maybe Text
+    -> IO (Either ApiError CompactOutcome)
+runBackendCompactHistoryPreparedWithContextWindow
+        prepareHistory contextWindow makeBackend recordUsage
         params history focus = do
     attempt <- runAttemptAndRecord recordUsage $
         summarizeBackendLocalAttempt
-            contextWindow makeBackend params history focus
+            prepareHistory contextWindow makeBackend params history focus
     pure attempt.compactAttemptResult
 
 summarizeBackendLocalAttempt
-    :: Int
+    :: ([ResponseItem] -> [ResponseItem])
+    -> Int
     -> (ResponseCreateParams -> Backend)
     -> ResponseCreateParams
     -> [ResponseItem]
     -> Maybe Text
     -> IO (CompactAttempt ApiError)
-summarizeBackendLocalAttempt contextWindow makeBackend params history focus
+summarizeBackendLocalAttempt
+        prepareHistory contextWindow makeBackend params history focus
     | contextWindow <= 0 =
         pure $ compactApiFailure
             "model context_window must be positive"
@@ -384,7 +422,7 @@ summarizeBackendLocalAttempt contextWindow makeBackend params history focus
                                 , compactAttemptResult = outcome
                                 }
   where
-    summaryHistory = filter isPortableLocalSummaryItem history
+    summaryHistory = prepareHistory history
 
 compactApiFailure :: Text -> CompactAttempt ApiError
 compactApiFailure message =
@@ -411,7 +449,36 @@ runResponsesCompactWithContextWindow
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
-runResponsesCompactWithContextWindow contextWindow sender recordUsage
+runResponsesCompactWithContextWindow =
+    runResponsesCompactPreparedWithContextWindow
+        (filter isPortableLocalSummaryItem)
+
+-- | Local xAI compaction may replay xAI's own opaque checkpoint items. They
+-- are meaningful only to the transport that produced them, so the portable
+-- entry point above continues to strip them.
+runXaiResponsesCompactWithContextWindow
+    :: Maybe Int
+    -> (ResponseCreateParams -> IO (Either ApiError Response))
+    -> (TokenUsage -> IO ())
+    -> IORef ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Maybe Text
+    -> IO (Either Text CompactOutcome)
+runXaiResponsesCompactWithContextWindow =
+    runResponsesCompactPreparedWithContextWindow
+        (filter isXaiLocalSummaryItem)
+
+runResponsesCompactPreparedWithContextWindow
+    :: ([ResponseItem] -> [ResponseItem])
+    -> Maybe Int
+    -> (ResponseCreateParams -> IO (Either ApiError Response))
+    -> (TokenUsage -> IO ())
+    -> IORef ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Maybe Text
+    -> IO (Either Text CompactOutcome)
+runResponsesCompactPreparedWithContextWindow
+        prepareHistory contextWindow sender recordUsage
         paramsRef transcriptRef focus = do
     params <- readIORef paramsRef
     history <- readIORef transcriptRef
@@ -422,8 +489,9 @@ runResponsesCompactWithContextWindow contextWindow sender recordUsage
                 Left message -> pure (compactTextFailure message)
                 Right limit ->
                     mapCompactAttemptError formatApiError
-                        <$> summarizePortableLocalAttempt
+                        <$> summarizeLocalAttemptWith
                             limit
+                            prepareHistory
                             sender
                             params
                             history
@@ -677,19 +745,6 @@ summarizeLocalAttempt send params history before focus =
         before
         focus
 
-summarizePortableLocalAttempt
-    :: Int
-    -> OpenAiCompactionSender
-    -> ResponseCreateParams
-    -> [ResponseItem]
-    -> Int
-    -> Maybe Text
-    -> IO (CompactAttempt ApiError)
-summarizePortableLocalAttempt contextWindow =
-    summarizeLocalAttemptWith
-        contextWindow
-        (filter isPortableLocalSummaryItem)
-
 summarizeLocalAttemptWith
     :: Int
     -> ([ResponseItem] -> [ResponseItem])
@@ -796,9 +851,10 @@ summarizeLocalAttemptWith contextWindow prepareHistory send params history
 
 isPortableLocalSummaryItem :: ResponseItem -> Bool
 isPortableLocalSummaryItem = \case
-    -- OpenAI checkpoints are opaque provider protocol items. Preserve them
-    -- for focused OpenAI summaries, but never replay them through
-    -- xAI/OpenRouter/Gemini or user-configured Responses endpoints.
+    -- Checkpoints are opaque provider protocol items. The portable path
+    -- cannot prove their provenance, so it must not replay them across
+    -- providers. The same-transport xAI path explicitly re-enables the xAI
+    -- checkpoint shapes below.
     CompactionItemValue{} -> False
     ContextCompactionItemValue{} -> False
     CompactionTriggerItemValue{} -> False
@@ -814,6 +870,18 @@ isPortableLocalSummaryItem = \case
                 , "compaction_trigger"
                 ]
     _ -> True
+
+isXaiLocalSummaryItem :: ResponseItem -> Bool
+isXaiLocalSummaryItem item =
+    isXaiCompactionCheckpoint item
+        || isPortableLocalSummaryItem item
+  where
+    isXaiCompactionCheckpoint = \case
+        CompactionItemValue{} -> True
+        ContextCompactionItemValue{} -> True
+        KnownResponseItem ItemCompaction _ -> True
+        KnownResponseItem ItemContextCompaction _ -> True
+        _ -> False
 
 autoCompactOpenAiBackend
     :: TokenProvider

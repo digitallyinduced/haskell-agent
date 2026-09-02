@@ -17,7 +17,7 @@ import Agent.CLI.Compaction
     , autoCompactBackendWith
     , autoCompactOpenAiBackendWithSender
     , boundCompletedToolContinuations
-    , runBackendCompactHistoryWithContextWindow
+    , runXaiBackendCompactHistoryWithContextWindow
     )
 import Agent.Connectivity (withConnectionRecoveryOn)
 import Agent.CLI.Options (CliOptions(..), defaultEffortFor)
@@ -522,7 +522,7 @@ compactXaiChildBackend contextWindowFor compactThresholdFor makeBackend
             requestBackend
 
     compactHistory history _inputs =
-        runBackendCompactHistoryWithContextWindow
+        runXaiBackendCompactHistoryWithContextWindow
             (contextWindowFor params)
             makeBackend
             (const (pure ()))

@@ -25,8 +25,10 @@ import Agent.CLI.Compaction
       installLiveCompactOutcome,
       runProviderCompactWith,
       runBackendCompactHistoryWithContextWindow,
+      runXaiBackendCompactHistoryWithContextWindow,
       runBackendCompactWithContextWindow,
-      runResponsesCompactWithContextWindow )
+      runResponsesCompactWithContextWindow,
+      runXaiResponsesCompactWithContextWindow )
 import Agent.CLI.Config ()
 import Agent.Connectivity ( withConnectionRecoveryOn )
 import Agent.CLI.Database ()
@@ -742,7 +744,7 @@ runAgentProviders
                                     (pure privateParams)
                             compactHistory history _inputs = do
                                 currentParams <- readIORef paramsRef
-                                runBackendCompactHistoryWithContextWindow
+                                runXaiBackendCompactHistoryWithContextWindow
                                     (xaiContextWindow currentParams)
                                     btwBackend
                                     recordCompactionUsage
@@ -785,7 +787,7 @@ runAgentProviders
                                 installLiveCompactOutcome
                                     conversationRef
                                     (Just contextTokensRef)
-                                    (runResponsesCompactWithContextWindow
+                                    (runXaiResponsesCompactWithContextWindow
                                         contextWindow
                                         (\request ->
                                             runWithTokenProvider tokenProvider

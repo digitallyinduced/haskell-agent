@@ -19,6 +19,8 @@ import Agent.CLI.Compaction
     , runBackendCompactWithContextWindow
     , runResponsesCompactWith
     , runResponsesCompactWithContextWindow
+    , runXaiBackendCompactHistoryWithContextWindow
+    , runXaiResponsesCompactWithContextWindow
     )
 import Agent.Connectivity (withConnectionRecoveryUsing)
 import Agent.Error (ApiError(..), ErrorType(..))
@@ -281,6 +283,41 @@ spec = do
                     expectationFailure
                         ("expected one portable summary request, got "
                             <> show (length seen))
+
+        it "replays xAI checkpoints to same-transport summarizers" do
+            let contextCheckpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "xai-context-compact"
+                        , encryptedContent = Just "opaque-context"
+                        }
+                trigger = CompactionTriggerItemValue CompactionTriggerItem
+                history =
+                    [ contextCheckpoint
+                    , userTextItem "post-checkpoint context"
+                    , trigger
+                    ]
+                prompt = userTextItem (summarizationPrompt (Just "focus"))
+            params <- newIORef defaultResponseCreateParams
+            transcript <- newIORef history
+            requests <- newIORef []
+            result <-
+                runXaiResponsesCompactWithContextWindow
+                    (Just 258_400)
+                    (\request -> do
+                        modifyIORef' requests (<> [request])
+                        pure (Right (summaryResponse "summary")))
+                    (const (pure ()))
+                    params
+                    transcript
+                    (Just "focus")
+            result `shouldSatisfy` either (const False) (const True)
+            map requestItems <$> readIORef requests
+                `shouldReturn`
+                    [ [ contextCheckpoint
+                      , userTextItem "post-checkpoint context"
+                      , prompt
+                      ]
+                    ]
 
         it "preserves OpenAI checkpoints for focused OpenAI summaries" do
             let remoteCheckpoint =
@@ -632,6 +669,45 @@ spec = do
                     inputs `shouldBe`
                         [UserMessage (summarizationPrompt (Just "focus"))]
                 _ -> expectationFailure "expected one isolated backend request"
+
+        it "replays xAI server checkpoints through backend summaries" do
+            let checkpoint =
+                    CompactionItemValue CompactionItem
+                        { itemId = Just "xai-compact"
+                        , encryptedContent = Just "opaque"
+                        }
+                history =
+                    [ checkpoint
+                    , userTextItem "post-checkpoint context"
+                    ]
+            requests <- newIORef []
+            let makeBackend summaryParams =
+                    Backend \snapshot previous inputs _onEvent -> do
+                        modifyIORef' requests
+                            (<> [(summaryParams, snapshot, previous, inputs)])
+                        pure $ successful snapshot TurnOutput
+                            { responseId = "xai-summary-session"
+                            , toolCalls = []
+                            , assistantText = Just "same-transport summary"
+                            , tokenUsage = compactionUsage
+                            , providerTelemetry = Nothing
+                            , completion = TurnCompleted
+                            }
+            result <-
+                runXaiBackendCompactHistoryWithContextWindow
+                    200_000
+                    makeBackend
+                    (const (pure ()))
+                    defaultResponseCreateParams
+                    history
+                    Nothing
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef requests >>= \case
+                [(_summaryParams, snapshot, previous, _inputs)] -> do
+                    snapshot.backendItems `shouldBe` history
+                    snapshot.backendContinuation `shouldBe` Nothing
+                    previous `shouldBe` Nothing
+                _ -> expectationFailure "expected one xAI summary request"
 
         it "clears a provider continuation before automatic continuation" do
             let oldHistory = [userTextItem "old context"]
