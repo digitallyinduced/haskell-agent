@@ -352,7 +352,8 @@ spec = do
             let editBlock =
                     (markerBlock (BlockId 1) "  update scripts/check.py")
                         { blockKind = BlockEdit
-                        , blockTitle = "Edited src/Agent/Syntax.hs"
+                        , blockTitle = "Edited"
+                        , blockDetail = "src/Agent/Syntax.hs"
                         }
             syntaxLanguagesForBlocks [editBlock]
                 `shouldBe` Set.fromList ["haskell", "python"]

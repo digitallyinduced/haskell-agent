@@ -1470,6 +1470,52 @@ spec = describe "fullscreen UI reducer" do
                 block.blockState `shouldBe` BlockComplete
             _ -> expectationFailure "expected one grouped inspection block"
 
+    it "retracts completed inspection-group calls independently" do
+        let readA =
+                functionToolCall
+                    "read-a"
+                    "read_file"
+                    "{\"target_file\":\"src/A.hs\"}"
+            readB =
+                functionToolCall
+                    "read-b"
+                    "read_file"
+                    "{\"target_file\":\"src/B.hs\"}"
+            finish callId output =
+                UiLoop
+                    (ToolFinished
+                        ToolCallResult
+                            { callId
+                            , output
+                            , callKind = FunctionCallKind
+                            })
+            completed =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted readA)
+                    , finish "read-a" "module A where"
+                    , UiLoop (ToolStarted readB)
+                    , finish "read-b" "module B where"
+                    , UiSystemMessage "Checking the result"
+                    ]
+            withoutB =
+                reduceUi (UiLoop (ToolRetracted "read-b")) completed
+            withoutEither =
+                reduceUi (UiLoop (ToolRetracted "read-a")) withoutB
+        completed.uiToolCalls `shouldBe` Map.empty
+        case Foldable.toList withoutB.uiBlocks of
+            [inspection, systemMessage] -> do
+                inspection.blockBody `shouldSatisfy`
+                    Text.isInfixOf "module A where"
+                inspection.blockBody `shouldNotSatisfy`
+                    Text.isInfixOf "module B where"
+                inspection.blockCallId `shouldBe` Just "read-a"
+                systemMessage.blockBody `shouldBe` "Checking the result"
+            _ -> expectationFailure "expected inspection and system blocks"
+        map (.blockBody) (Foldable.toList withoutEither.uiBlocks)
+            `shouldBe` ["Checking the result"]
+        withoutEither.uiInspectionGroups `shouldBe` Map.empty
+
     it "keeps a parallel inspection burst running and exposes failures" do
         let readCall =
                 functionToolCall

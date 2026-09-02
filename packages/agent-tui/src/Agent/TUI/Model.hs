@@ -657,20 +657,17 @@ startInspectionCall call state =
                     appended.uiToolCalls
             }
 
--- | Close a burst when another visible event intervenes. A closed burst stays
--- tracked only until all of its out-of-order results arrive.
+-- | Close a burst when another visible event intervenes. Keep its item
+-- metadata until the turn ends so a provider can still retract an individual
+-- completed call without removing the rest of the grouped block.
 closeInspectionGroups :: UiState -> UiState
 closeInspectionGroups state =
     state
         { uiInspectionGroups =
-            Map.mapMaybe close state.uiInspectionGroups
+            Map.map
+                (\group -> group { inspectionGroupOpen = False })
+                state.uiInspectionGroups
         }
-  where
-    close group
-        | any ((== BlockRunning) . (.inspectionState))
-            group.inspectionGroupItems =
-                Just group { inspectionGroupOpen = False }
-        | otherwise = Nothing
 
 renderInspectionGroup :: InspectionGroup -> UiBlock -> UiBlock
 renderInspectionGroup group block =
@@ -679,6 +676,7 @@ renderInspectionGroup group block =
         , blockBody = inspectionGroupBody items
         , blockState = inspectionGroupState items
         , blockDetail = inspectionGroupDetail items
+        , blockCallId = (.inspectionCallId) <$> listToMaybe items
         }
   where
     items = group.inspectionGroupItems
@@ -985,27 +983,17 @@ completeTool blockIndex call result state =
                                                 else item)
                                         group.inspectionGroupItems
                                 }
-                        groups
-                            | updatedGroup.inspectionGroupOpen
-                                || any
-                                    ((== BlockRunning)
-                                        . (.inspectionState))
-                                    updatedGroup.inspectionGroupItems =
-                                    Map.insert
-                                        block.blockId
-                                        updatedGroup
-                                        state.uiInspectionGroups
-                            | otherwise =
-                                Map.delete
-                                    block.blockId
-                                    state.uiInspectionGroups
                     in state
                         { uiBlocks =
                             Seq.adjust
                                 (renderInspectionGroup updatedGroup)
                                 blockIndex
                                 state.uiBlocks
-                        , uiInspectionGroups = groups
+                        , uiInspectionGroups =
+                            Map.insert
+                                block.blockId
+                                updatedGroup
+                                state.uiInspectionGroups
                         }
         _ ->
             state
@@ -1398,66 +1386,79 @@ retractVisibleToolCall :: Text -> UiState -> UiState
 retractVisibleToolCall callId state =
     case Map.lookup callId state.uiToolCalls of
         Nothing ->
-            case Seq.findIndexL
-                ((== Just callId) . (.blockCallId))
-                state.uiBlocks of
-                Just blockIndex -> removeBlockAt blockIndex state
-                Nothing -> state
+            case inspectionBlockIndexForCall callId state of
+                Just blockIndex ->
+                    fromMaybe state
+                        (retractInspectionItemAt callId blockIndex state)
+                Nothing ->
+                    case Seq.findIndexL
+                        ((== Just callId) . (.blockCallId))
+                        state.uiBlocks of
+                        Just blockIndex -> removeBlockAt blockIndex state
+                        Nothing -> state
         Just (_, call)
             | isTodoTool call.name ->
                 state
                     { uiToolCalls = Map.delete callId state.uiToolCalls }
         Just (blockIndex, _) ->
-            case Seq.lookup blockIndex state.uiBlocks of
-                Just block
-                    | Just group <-
-                        Map.lookup block.blockId state.uiInspectionGroups
-                    , let remaining =
-                            filter
-                                ((/= callId) . (.inspectionCallId))
-                                group.inspectionGroupItems
-                    , length remaining
-                        < length group.inspectionGroupItems ->
-                            if null remaining
-                                then
-                                    removeBlockAt
-                                        blockIndex
-                                        state
-                                            { uiToolCalls =
-                                                Map.delete
-                                                    callId
-                                                    state.uiToolCalls
-                                            }
-                                else
-                                    let updatedGroup =
-                                            group
-                                                { inspectionGroupItems =
-                                                    remaining
-                                                }
-                                    in state
-                                        { uiBlocks =
-                                            Seq.adjust
-                                                (renderInspectionGroup
-                                                    updatedGroup)
-                                                blockIndex
-                                                state.uiBlocks
-                                        , uiInspectionGroups =
-                                            Map.insert
-                                                block.blockId
-                                                updatedGroup
-                                                state.uiInspectionGroups
-                                        , uiToolCalls =
-                                            Map.delete
-                                                callId
-                                                state.uiToolCalls
-                                        }
-                Just block
-                    | block.blockCallId == Just callId ->
-                        removeBlockAt blockIndex state
-                _ ->
+            case retractInspectionItemAt callId blockIndex state of
+                Just retracted -> retracted
+                Nothing ->
+                    case Seq.lookup blockIndex state.uiBlocks of
+                        Just block
+                            | block.blockCallId == Just callId ->
+                                removeBlockAt blockIndex state
+                        _ ->
+                            state
+                                { uiToolCalls =
+                                    Map.delete callId state.uiToolCalls }
+
+inspectionBlockIndexForCall :: Text -> UiState -> Maybe Int
+inspectionBlockIndexForCall callId state =
+    listToMaybe
+        [ blockIndex
+        | (blockId, group) <- Map.toList state.uiInspectionGroups
+        , any
+            ((== callId) . (.inspectionCallId))
+            group.inspectionGroupItems
+        , Just blockIndex <- [Map.lookup blockId state.uiBlockIndices]
+        ]
+
+retractInspectionItemAt :: Text -> Int -> UiState -> Maybe UiState
+retractInspectionItemAt callId blockIndex state = do
+    block <- Seq.lookup blockIndex state.uiBlocks
+    group <- Map.lookup block.blockId state.uiInspectionGroups
+    let remaining =
+            filter
+                ((/= callId) . (.inspectionCallId))
+                group.inspectionGroupItems
+    guard (length remaining < length group.inspectionGroupItems)
+    pure $
+        if null remaining
+            then
+                removeBlockAt
+                    blockIndex
                     state
                         { uiToolCalls =
-                            Map.delete callId state.uiToolCalls }
+                            Map.delete callId state.uiToolCalls
+                        }
+            else
+                let updatedGroup =
+                        group { inspectionGroupItems = remaining }
+                in state
+                    { uiBlocks =
+                        Seq.adjust
+                            (renderInspectionGroup updatedGroup)
+                            blockIndex
+                            state.uiBlocks
+                    , uiInspectionGroups =
+                        Map.insert
+                            block.blockId
+                            updatedGroup
+                            state.uiInspectionGroups
+                    , uiToolCalls =
+                        Map.delete callId state.uiToolCalls
+                    }
 
 discardResponseAttempt :: UiState -> UiState
 discardResponseAttempt state =
