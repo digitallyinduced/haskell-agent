@@ -44,6 +44,7 @@ module Agent.CLI.Render
     , resetRenderPrintedText
     , setRenderActivity
     , streamMarkdown
+    , streamMarkdownAtWidth
     , summarizeToolCall
     , summarizeToolCallRelative
     , thinkingMaxWidth
@@ -53,12 +54,15 @@ module Agent.CLI.Render
 
 import Agent.CLI.Markdown
     ( renderMarkdown
+    , renderMarkdownAtWidth
     )
 import Agent.CLI.Render.MarkdownStream
     ( MarkdownStreamState
     , emptyMarkdownStreamState
     , feedMarkdownStream
+    , feedMarkdownStreamAtWidth
     , flushMarkdownStream
+    , flushMarkdownStreamAtWidth
     )
 import Agent.CLI.Render.Status
     ( formatActivityLine
@@ -162,8 +166,9 @@ import Agent.TUI.Motion
     , motionIntervalMicros
     , nativeProgressAnimationEnabled
     )
+import System.Console.ANSI (hGetTerminalSize)
 import System.Environment (lookupEnv)
-import System.IO (Handle, hFlush)
+import System.IO (Handle, hFlush, hIsTerminalDevice)
 
 summarizeToolCall :: ToolCall -> Text
 summarizeToolCall call =
@@ -340,6 +345,17 @@ streamMarkdown :: Text -> RenderState -> (RenderState, Text)
 streamMarkdown input state =
     let (markdown', output) =
             feedMarkdownStream state.stateMarkdownState input
+    in (state{stateMarkdownState = markdown'}, output)
+
+streamMarkdownAtWidth
+    :: Int
+    -> Text
+    -> RenderState
+    -> (RenderState, Text)
+streamMarkdownAtWidth width input state =
+    let (markdown', output) =
+            feedMarkdownStreamAtWidth
+                width state.stateMarkdownState input
     in (state{stateMarkdownState = markdown'}, output)
 
 renderEvent :: RenderConfig -> LoopEvent -> IO ()
@@ -551,6 +567,11 @@ renderAssistantText :: Bool -> Text -> Text
 renderAssistantText color text =
     paintBackgroundLines color agentBackground (renderMarkdown color text)
 
+renderAssistantTextAtWidth :: Bool -> Int -> Text -> Text
+renderAssistantTextAtWidth color width text =
+    paintBackgroundLines color agentBackground
+        (renderMarkdownAtWidth color width text)
+
 -- | Stream assistant text append-only. Ordinary prose is emitted as soon as
 -- incomplete inline constructs permit, while line prefixes that may introduce
 -- blocks are held until they can be classified. Fences and tables are buffered
@@ -565,8 +586,16 @@ streamAssistantDelta config delta
     | Text.null delta = pure ()
     | otherwise = do
         let safe = Text.filter (/= '\ESC') delta
+        availableWidth <-
+            if Text.any (== '\n') safe
+                then terminalColumns config.renderStdout
+                else pure Nothing
+        let transition =
+                case availableWidth of
+                    Nothing -> streamMarkdown safe
+                    Just width -> streamMarkdownAtWidth width safe
         ready <-
-            modifyRenderState config (streamMarkdown safe)
+            modifyRenderState config transition
         unless (Text.null ready) do
             modifyRenderState config \state ->
                 (state{statePrintedText = True, stateLiveActive = True}, ())
@@ -582,13 +611,19 @@ streamAssistantDelta config delta
 -- Returns whether anything was written.
 finalizeAssistantBuffer :: RenderConfig -> Maybe Text -> IO Bool
 finalizeAssistantBuffer config assistantText = do
+    availableWidth <- terminalColumns config.renderStdout
     (pendingOutput, live) <-
         modifyRenderState config \state ->
             ( state
                 { stateMarkdownState = emptyMarkdownStreamState
                 , stateLiveActive = False
                 }
-            , ( flushMarkdownStream state.stateMarkdownState
+            , ( case availableWidth of
+                    Nothing ->
+                        flushMarkdownStream state.stateMarkdownState
+                    Just width ->
+                        flushMarkdownStreamAtWidth
+                            width state.stateMarkdownState
               , state.stateLiveActive
               )
             )
@@ -614,11 +649,21 @@ finalizeAssistantBuffer config assistantText = do
                         (state{statePrintedText = True}, ())
                     Text.hPutStr config.renderStdout $
                         if Text.null pendingOutput
-                            then renderAssistantText True raw
+                            then case availableWidth of
+                                Nothing -> renderAssistantText True raw
+                                Just width ->
+                                    renderAssistantTextAtWidth True width raw
                             else paintBackgroundLines
                                 True agentBackground pendingOutput
                     hFlush config.renderStdout
                     pure True
+
+terminalColumns :: Handle -> IO (Maybe Int)
+terminalColumns handle = do
+    isTerminal <- hIsTerminalDevice handle
+    if isTerminal
+        then fmap (max 1 . snd) <$> hGetTerminalSize handle
+        else pure Nothing
 
 -- | Clear a leftover thinking status line. Safe to call when none is visible.
 -- Commits a streamed reasoning block first so cancel/error still leave the

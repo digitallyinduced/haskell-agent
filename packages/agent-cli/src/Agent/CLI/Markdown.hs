@@ -2,6 +2,7 @@
 module Agent.CLI.Markdown
     ( MarkdownFragmentSplit(..)
     , renderMarkdown
+    , renderMarkdownAtWidth
     , renderMarkdownFragment
     , splitMarkdownFragment
     ) where
@@ -36,6 +37,7 @@ import Agent.TUI.TextWidth
     )
 import Data.Char (isAlphaNum, isAscii, isSpace)
 import Data.List (intersperse, transpose)
+import qualified Data.List as List
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Console.ANSI
@@ -48,23 +50,33 @@ import System.Console.ANSI
 -- When 'False', return @text@ unchanged (pipes, redirects, tests).
 -- Nested spans restore the terminal-owned 'agentBackground' after each 'Reset'.
 renderMarkdown :: Bool -> Text -> Text
-renderMarkdown color text
+renderMarkdown color = renderMarkdownWithin color Nothing
+
+-- | Render Markdown while constraining table rows to a terminal width.
+renderMarkdownAtWidth :: Bool -> Int -> Text -> Text
+renderMarkdownAtWidth color width =
+    renderMarkdownWithin color (Just (max 1 width))
+
+renderMarkdownWithin :: Bool -> Maybe Int -> Text -> Text
+renderMarkdownWithin color availableWidth text
     | not color = text
     | otherwise = Text.concat (map renderChunk (fenceChunks cleaned))
   where
     cleaned = displayTerminalText text
-    renderChunk (FenceText prose) = renderProse prose
+    renderChunk (FenceText prose) = renderProse availableWidth prose
     renderChunk (FenceBlock block) =
         renderFenceBody block.fencedBody
 
-renderProse :: Text -> Text
-renderProse text =
+renderProse :: Maybe Int -> Text -> Text
+renderProse availableWidth text =
     let endsWithNewline = Text.isSuffixOf "\n" text
         lines_ = Text.splitOn "\n" text
         linesForParse
             | endsWithNewline && not (null lines_) = init lines_
             | otherwise = lines_
-        rendered = Text.intercalate "\n" (renderBlocks linesForParse)
+        rendered =
+            Text.intercalate "\n"
+                (renderBlocks availableWidth linesForParse)
     in if endsWithNewline then rendered <> "\n" else rendered
 
 renderFenceBody :: Text -> Text
@@ -83,13 +95,13 @@ renderFenceBody body =
 md :: [SGR] -> Text -> Text
 md = styleBase True agentBackground
 
-renderBlocks :: [Text] -> [Text]
-renderBlocks = go
+renderBlocks :: Maybe Int -> [Text] -> [Text]
+renderBlocks availableWidth = go
   where
     go [] = []
     go (line : rest)
         | Just (table, after) <- Block.takeTableRows (line : rest) =
-            renderTable table ++ go after
+            renderTable availableWidth table ++ go after
         | Just (level, title) <- Block.headingParts line =
             -- Hide the markdown `#` markers (grok pretty mode); color the title.
             renderInlineWith (headingPrefixStyle level) (parseInline title)
@@ -142,8 +154,34 @@ listMarkerStyle =
 quoteStyle :: [SGR]
 quoteStyle = [terminalMuted]
 
-renderTable :: Block.MarkdownTable -> [Text]
-renderTable table = case table.tableRows of
+inlineCodeStyle :: [SGR]
+inlineCodeStyle =
+    [ SetConsoleIntensity BoldIntensity
+    , terminalCyan
+    ]
+
+inlineLinkStyle :: [SGR]
+inlineLinkStyle =
+    [ terminalBlue
+    , SetUnderlining SingleUnderline
+    ]
+
+inlineUrlStyle :: [SGR]
+inlineUrlStyle = [terminalMuted]
+
+safeInlineUrl :: Text -> Bool
+safeInlineUrl url =
+    not (Text.null url)
+        && displayTerminalText url == url
+
+data TableFragment = TableFragment
+    { tableFragmentStyles :: ![SGR]
+    , tableFragmentUrl :: !(Maybe Text)
+    , tableFragmentText :: !Text
+    }
+
+renderTable :: Maybe Int -> Block.MarkdownTable -> [Text]
+renderTable availableWidth table = case table.tableRows of
     [] -> []
     (headerCells : bodyCells) ->
         let columnCount = length headerCells
@@ -151,60 +189,321 @@ renderTable table = case table.tableRows of
             normalizedHeader = normalize headerCells
             normalizedBody = map normalize bodyCells
             normalizedRows = normalizedHeader : normalizedBody
-            widths = columnWidths normalizedRows
+            styledRows =
+                [ [ tableCellFragments
+                        (if rowIndex == 0
+                            then [SetConsoleIntensity BoldIntensity]
+                            else [])
+                        cell
+                  | cell <- row
+                  ]
+                | (rowIndex, row) <-
+                    zip [0 :: Int ..] normalizedRows
+                ]
+            naturalWidths =
+                map
+                    (maximum . (1 :) . map tableFragmentsWidth)
+                    (transpose styledRows)
+            minimumWidths =
+                map
+                    (maximum . (1 :) . map tableFragmentsMinimumWidth)
+                    (transpose styledRows)
             alignments = table.tableAlignments
-            top = md [terminalMuted] (tableBorder '┌' '┬' '┐' widths)
-            divider = md [terminalMuted] (tableBorder '├' '┼' '┤' widths)
-            bottom = md [terminalMuted] (tableBorder '└' '┴' '┘' widths)
-            headerRow = styleTableRow True alignments widths normalizedHeader
-            bodyRows = map (styleTableRow False alignments widths) normalizedBody
-            logicalRows = headerRow : bodyRows
-        in top : (intersperse divider logicalRows <> [bottom])
+            borderWidth = columnCount + 1
+            gridMinimumWidth = borderWidth + sum minimumWidths
+            paddedGridMinimumWidth =
+                gridMinimumWidth + 2 * columnCount
+            renderGrid horizontalPadding widths =
+                let top =
+                        md [terminalMuted] $
+                            tableBorder
+                                horizontalPadding '┌' '┬' '┐' widths
+                    divider =
+                        md [terminalMuted] $
+                            tableBorder
+                                horizontalPadding '├' '┼' '┤' widths
+                    bottom =
+                        md [terminalMuted] $
+                            tableBorder
+                                horizontalPadding '└' '┴' '┘' widths
+                    logicalRows =
+                        map
+                            (renderTableLogicalRow
+                                alignments horizontalPadding widths)
+                            styledRows
+                in top
+                    : (concat (intersperse [divider] logicalRows)
+                        <> [bottom])
+        in case availableWidth of
+            Nothing -> renderGrid 1 naturalWidths
+            Just requestedWidth
+                | available < gridMinimumWidth ->
+                    renderCompactTable available styledRows
+                | otherwise ->
+                    let horizontalPadding =
+                            if available >= paddedGridMinimumWidth
+                                then 1
+                                else 0
+                        chromeWidth =
+                            borderWidth
+                                + 2 * horizontalPadding * columnCount
+                        contentBudget =
+                            max 0 (available - chromeWidth)
+                        widths =
+                            fitTableColumnWidths
+                                contentBudget minimumWidths naturalWidths
+                    in renderGrid horizontalPadding widths
+              where
+                available = max 1 requestedWidth
 
-tableBorder :: Char -> Char -> Char -> [Int] -> Text
-tableBorder left middle right widths =
+tableBorder :: Int -> Char -> Char -> Char -> [Int] -> Text
+tableBorder horizontalPadding left middle right widths =
     Text.singleton left
         <> Text.intercalate
             (Text.singleton middle)
-            [ Text.replicate (width + 2) "─"
+            [ Text.replicate
+                (width + 2 * horizontalPadding)
+                "─"
             | width <- widths
             ]
         <> Text.singleton right
 
-columnWidths :: [[Text]] -> [Int]
-columnWidths rows =
-    let cols = transpose rows
-    in map (maximum . (0 :) . map renderedWidth) cols
+fitTableColumnWidths :: Int -> [Int] -> [Int] -> [Int]
+fitTableColumnWidths budget minimumWidths naturalWidths
+    | null preferred = []
+    | sum preferred <= budget = preferred
+    | otherwise =
+        grow minimum (max 0 (budget - sum minimum))
   where
-    renderedWidth =
-        terminalDisplayWidth
-            . inlinePlainText
-            . parseInline
+    minimum = map (max 1) minimumWidths
+    preferred =
+        zipWith max
+            (minimum <> repeat 1)
+            (map (max 1) naturalWidths)
 
-styleTableRow :: Bool -> [Block.TableAlignment] -> [Int] -> [Text] -> Text
-styleTableRow isHeader alignments widths cells =
-    let cellText alignment w c =
-            let inlines = parseInline c
-                visible = inlinePlainText inlines
-                width' = terminalDisplayWidth visible
-                padding = max 0 (w - width')
-                (leftPadding, rightPadding) = alignmentPadding alignment padding
-                base
-                    | isHeader = [SetConsoleIntensity BoldIntensity]
-                    | otherwise = []
-            in " "
-                <> Text.replicate leftPadding " "
-                <> renderInlineWith base inlines
-                <> Text.replicate rightPadding " "
-                <> " "
-        parts = zipWith3 cellText
-            (alignments <> repeat Block.AlignDefault)
+    grow widths remaining
+        | remaining <= 0 = widths
+        | otherwise =
+            let (remaining', widths') =
+                    List.mapAccumL grant remaining (zip preferred widths)
+            in if remaining' == remaining
+                then widths
+                else grow widths' remaining'
+
+    grant remaining (wanted, current)
+        | remaining > 0
+        , current < wanted =
+            (remaining - 1, current + 1)
+        | otherwise =
+            (remaining, current)
+
+renderCompactTable :: Int -> [[[TableFragment]]] -> [Text]
+renderCompactTable width =
+    concatMap $
+        map renderTableFragments
+            . wrapTableFragments width
+            . List.intercalate [tableSeparator]
+  where
+    tableSeparator =
+        TableFragment [terminalMuted] Nothing " │ "
+
+renderTableLogicalRow
+    :: [Block.TableAlignment]
+    -> Int
+    -> [Int]
+    -> [[TableFragment]]
+    -> [Text]
+renderTableLogicalRow alignments horizontalPadding widths cells =
+    map renderPhysicalRow physicalRows
+  where
+    border = md [terminalMuted] "│"
+    normalizedAlignments = alignments <> repeat Block.AlignDefault
+    wrappedCells =
+        zipWith
+            (\width fragments ->
+                wrapTableFragments (max 1 width) fragments)
             widths
-            (cells <> repeat "")
-        border = md [terminalMuted] "│"
-    in border
-        <> Text.intercalate border (take (length widths) parts)
-        <> border
+            (cells <> repeat [])
+    rowHeight = maximum (1 : map length wrappedCells)
+    physicalRows =
+        transpose
+            [ take rowHeight (wrapped <> repeat [])
+            | wrapped <- wrappedCells
+            ]
+    renderPhysicalRow fragments =
+        border
+            <> Text.intercalate
+                border
+                [ renderTableCell
+                    alignment horizontalPadding width cellFragments
+                | (alignment, width, cellFragments) <-
+                    zip3 normalizedAlignments widths fragments
+                ]
+            <> border
+
+renderTableCell
+    :: Block.TableAlignment
+    -> Int
+    -> Int
+    -> [TableFragment]
+    -> Text
+renderTableCell alignment horizontalPadding width fragments =
+    Text.replicate (horizontalPadding + leftPadding) " "
+        <> renderTableFragments fragments
+        <> Text.replicate (rightPadding + horizontalPadding) " "
+  where
+    padding = max 0 (width - tableFragmentsWidth fragments)
+    (leftPadding, rightPadding) =
+        alignmentPadding alignment padding
+
+tableCellFragments :: [SGR] -> Text -> [TableFragment]
+tableCellFragments base = concatMap (go base Nothing) . parseInline
+  where
+    go context link = \case
+        InlineText text -> one context link text
+        InlineCode text -> one (context <> inlineCodeStyle) link text
+        InlineStrong children ->
+            concatMap
+                (go (context <> [SetConsoleIntensity BoldIntensity]) link)
+                children
+        InlineEmphasis children ->
+            concatMap
+                (go (context <> [SetItalicized True]) link)
+                children
+        InlineLink url children ->
+            let linkTarget
+                    | safeInlineUrl url = Just url
+                    | otherwise = link
+                label =
+                    concatMap
+                        (go (context <> inlineLinkStyle) linkTarget)
+                        children
+                suffix
+                    | Text.null url || inlinePlainText children == url = []
+                    | otherwise =
+                        one
+                            (context <> inlineUrlStyle)
+                            linkTarget
+                            (" (" <> url <> ")")
+            in label <> suffix
+
+    one styles link text =
+        [TableFragment styles link text]
+
+renderTableFragments :: [TableFragment] -> Text
+renderTableFragments = go
+  where
+    go [] = ""
+    go (fragment : rest) =
+        case fragment.tableFragmentUrl of
+            Nothing -> renderFragment fragment <> go rest
+            Just url ->
+                let (linked, after) =
+                        span
+                            (\next ->
+                                next.tableFragmentUrl == Just url)
+                            rest
+                in osc8Link True url
+                    (Text.concat (map renderFragment (fragment : linked)))
+                        <> go after
+
+    renderFragment fragment
+        | null fragment.tableFragmentStyles =
+            fragment.tableFragmentText
+        | otherwise =
+            md
+                fragment.tableFragmentStyles
+                fragment.tableFragmentText
+
+tableFragmentsWidth :: [TableFragment] -> Int
+tableFragmentsWidth =
+    sum . map (terminalDisplayWidth . (.tableFragmentText))
+
+tableFragmentsMinimumWidth :: [TableFragment] -> Int
+tableFragmentsMinimumWidth fragments =
+    maximum
+        (1
+            : [ graphemeCellWidth cluster
+              | fragment <- fragments
+              , cluster <- graphemeClusters fragment.tableFragmentText
+              ])
+
+type StyledTableCell = ([SGR], Maybe Text, Text, Int)
+
+wrapTableFragments :: Int -> [TableFragment] -> [[TableFragment]]
+wrapTableFragments width fragments =
+    map groupStyledTableCells (wrapCells (styledTableCells fragments))
+  where
+    width' = max 1 width
+
+    wrapCells [] = [[]]
+    wrapCells remaining =
+        let (fitting, overflow) = takeFitting remaining
+        in case overflow of
+            [] -> [dropTrailingSpace fitting]
+            _ ->
+                case lastSpaceIndex fitting of
+                    Just index
+                        | index > 0 ->
+                            let (line, carried) = splitAt index fitting
+                                next =
+                                    dropWhile styledTableCellIsSpace
+                                        (carried <> overflow)
+                            in dropTrailingSpace line : wrapCells next
+                    _ -> fitting : wrapCells overflow
+
+    takeFitting = go 0 []
+      where
+        go _ taken [] = (reverse taken, [])
+        go used taken allCells@(cell@(_, _, _, cellWidth) : rest)
+            | used > 0
+            , used + cellWidth > width' =
+                (reverse taken, allCells)
+            | otherwise =
+                go (used + cellWidth) (cell : taken) rest
+
+    lastSpaceIndex =
+        List.foldl'
+            (\found (index, cell) ->
+                if styledTableCellIsSpace cell
+                    then Just index
+                    else found)
+            Nothing
+            . zip [0 :: Int ..]
+
+    dropTrailingSpace =
+        reverse . dropWhile styledTableCellIsSpace . reverse
+
+styledTableCells :: [TableFragment] -> [StyledTableCell]
+styledTableCells fragments =
+    [ ( fragment.tableFragmentStyles
+      , fragment.tableFragmentUrl
+      , cluster
+      , graphemeCellWidth cluster
+      )
+    | fragment <- fragments
+    , cluster <- graphemeClusters fragment.tableFragmentText
+    ]
+
+styledTableCellIsSpace :: StyledTableCell -> Bool
+styledTableCellIsSpace (_, _, cluster, _) =
+    not (Text.null cluster) && Text.all isSpace cluster
+
+groupStyledTableCells :: [StyledTableCell] -> [TableFragment]
+groupStyledTableCells =
+    reverse . List.foldl' appendCell []
+  where
+    appendCell grouped (styles, url, cluster, _) =
+        case grouped of
+            previous : rest
+                | previous.tableFragmentStyles == styles
+                , previous.tableFragmentUrl == url ->
+                    previous
+                        { tableFragmentText =
+                            previous.tableFragmentText <> cluster
+                        }
+                        : rest
+            _ -> TableFragment styles url cluster : grouped
 
 alignmentPadding :: Block.TableAlignment -> Int -> (Int, Int)
 alignmentPadding alignment padding = case alignment of
@@ -244,7 +543,7 @@ renderInlineWith base = Text.concat . map (go base)
   where
     go context = \case
         InlineText text -> styled context text
-        InlineCode text -> styled (context <> codeStyle) text
+        InlineCode text -> styled (context <> inlineCodeStyle) text
         InlineStrong children ->
             renderInlineWith
                 (context <> [SetConsoleIntensity BoldIntensity])
@@ -253,32 +552,20 @@ renderInlineWith base = Text.concat . map (go base)
             renderInlineWith (context <> [SetItalicized True]) children
         InlineLink url children ->
             let label =
-                    renderInlineWith (context <> linkStyle) children
+                    renderInlineWith (context <> inlineLinkStyle) children
                 suffix
                     | Text.null url || inlinePlainText children == url = ""
                     | otherwise =
-                        styled (context <> urlStyle) (" (" <> url <> ")")
+                        styled
+                            (context <> inlineUrlStyle)
+                            (" (" <> url <> ")")
                 displayedLink = label <> suffix
-            in if safeUrl url
+            in if safeInlineUrl url
                 then osc8Link True url displayedLink
                 else displayedLink
 
     styled [] value = value
     styled styles value = md styles value
-
-    safeUrl url =
-        not (Text.null url)
-            && displayTerminalText url == url
-
-    codeStyle =
-        [ SetConsoleIntensity BoldIntensity
-        , terminalCyan
-        ]
-    linkStyle =
-        [ terminalBlue
-        , SetUnderlining SingleUnderline
-        ]
-    urlStyle = [terminalMuted]
 
 -- | Split an inline markdown stream into a prefix that can be rendered without
 -- future input and a suffix beginning at a possibly incomplete construct.
