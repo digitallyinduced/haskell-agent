@@ -3,7 +3,7 @@
 -- Recovery wraps one 'Backend' submission rather than an entire agent turn.
 -- If a connection drops after tools have run, the loop can therefore retry
 -- the exact model continuation without executing those tools again.
-module Agent.CLI.Connectivity
+module Agent.Connectivity
     ( RecoveryWatcher(..)
     , reconnectDelayMicros
     , transientRetryDelayMicros
@@ -13,7 +13,7 @@ module Agent.CLI.Connectivity
     , withConnectionRecoveryUsingWatcher
     ) where
 
-import Agent.CLI.NetworkPath
+import Agent.Connectivity.NetworkPath
     ( NetworkRecovery
     , armNetworkRecovery
     )

@@ -1,4 +1,5 @@
 packages:
+    packages/agent-connectivity
     packages/agent-process
     packages/agent-cli-runtime
     packages/agent-cli

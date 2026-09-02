@@ -9,7 +9,7 @@ module Agent.CLI.Subagents.Runtime.Types
 
 import Agent.CLI.Compaction (OccupancySnapshot)
 import Agent.CLI.Options (ApprovalPolicy, CliOptions)
-import Agent.CLI.NetworkPath (NetworkRecovery)
+import Agent.Connectivity.NetworkPath (NetworkRecovery)
 import Agent.CLI.Session (LegacySubagentTarget)
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Loop (BackendSnapshot)

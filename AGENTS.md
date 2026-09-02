@@ -43,6 +43,7 @@ cabal repl \
   agent-cli-runtime:lib:agent-cli-runtime \
   agent-telegram:lib:agent-telegram \
   agent-core:lib:agent-core \
+  agent-connectivity:lib:agent-connectivity \
   agent-process:lib:agent-process \
   agent-codex-dialect:lib:agent-codex-dialect \
   agent-grok-build-dialect:lib:agent-grok-build-dialect \

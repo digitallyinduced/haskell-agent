@@ -14,7 +14,7 @@ import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.CLI.Compaction
     ( autoCompactOpenAiBackendWithSender )
-import Agent.CLI.Connectivity (withConnectionRecoveryOn)
+import Agent.Connectivity (withConnectionRecoveryOn)
 import Agent.CLI.Options (CliOptions(..), defaultEffortFor)
 import Agent.CLI.Prompt (sessionTempGuidance, systemPrompt, systemPromptForTools)
 import Agent.CLI.Request (requestParams)

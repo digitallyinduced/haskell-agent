@@ -28,7 +28,7 @@ import Agent.CLI.Compaction
       runBackendCompactWithContextWindow,
       runResponsesCompactWithContextWindow )
 import Agent.CLI.Config ()
-import Agent.CLI.Connectivity ( withConnectionRecoveryOn )
+import Agent.Connectivity ( withConnectionRecoveryOn )
 import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()

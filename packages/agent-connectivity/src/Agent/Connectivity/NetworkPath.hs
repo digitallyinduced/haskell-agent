@@ -4,7 +4,7 @@
 --
 -- On macOS this uses @NWPathMonitor@ to notice an unavailable-to-satisfied
 -- path transition. Other platforms retain the polling-only recovery path.
-module Agent.CLI.NetworkPath
+module Agent.Connectivity.NetworkPath
     ( NetworkRecovery
     , NetworkRecoveryMonitor
     , armNetworkRecovery

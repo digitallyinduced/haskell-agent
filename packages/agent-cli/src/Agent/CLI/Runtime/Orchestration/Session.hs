@@ -23,7 +23,7 @@ import Agent.CLI.Command ()
 import Agent.CLI.Compaction
     ( CompactionInstall(CompactionNotInstalled) )
 import Agent.CLI.Config ()
-import Agent.CLI.Connectivity ()
+import Agent.Connectivity ()
 import Agent.CLI.Database ()
 import Agent.CLI.Database.Store (DatabaseScopes)
 import Agent.CLI.Dialects (CodingTools(..))

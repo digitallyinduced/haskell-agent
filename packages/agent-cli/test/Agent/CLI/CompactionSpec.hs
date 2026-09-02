@@ -20,7 +20,7 @@ import Agent.CLI.Compaction
     , runResponsesCompactWith
     , runResponsesCompactWithContextWindow
     )
-import Agent.CLI.Connectivity (withConnectionRecoveryUsing)
+import Agent.Connectivity (withConnectionRecoveryUsing)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Json.Decode qualified as Hermes
 import Agent.Loop

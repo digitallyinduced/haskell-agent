@@ -29,7 +29,7 @@ import Agent.CLI.GatewayClient (GatewayModelAccess)
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.ManagedTurn (ManagedTurnRequest)
 import Agent.CLI.ModelConfig (ModelCatalog)
-import Agent.CLI.NetworkPath (NetworkRecovery)
+import Agent.Connectivity.NetworkPath (NetworkRecovery)
 import Agent.OpenAI.Models.Types (ModelInfo)
 import Agent.CLI.Options
     ( ApprovalPolicy

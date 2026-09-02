@@ -19,7 +19,7 @@ import Agent.CLI.Config
     ( HarnessConfig(configTheme)
     , loadHarnessConfig
     )
-import Agent.CLI.Connectivity ()
+import Agent.Connectivity ()
 import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()

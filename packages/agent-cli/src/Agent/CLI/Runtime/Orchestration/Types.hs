@@ -13,7 +13,7 @@ module Agent.CLI.Runtime.Orchestration.Types
 
 import Agent.CLI.AgentSessions ( SessionThreadManager )
 import Agent.CLI.AgentViewport ( AgentEntry )
-import Agent.CLI.NetworkPath ( NetworkRecovery )
+import Agent.Connectivity.NetworkPath ( NetworkRecovery )
 import Agent.CLI.Permission ( PermissionChoice )
 import Agent.Error ( ApiError )
 import Agent.Loop ( LoopEvent )

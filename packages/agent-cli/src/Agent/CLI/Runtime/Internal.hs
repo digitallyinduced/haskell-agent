@@ -43,7 +43,7 @@ import Agent.CLI.McpStatus
     , formatMcpModelNoticeFor
     , formatMcpProgress
     )
-import Agent.CLI.NetworkPath (withNetworkRecovery)
+import Agent.Connectivity.NetworkPath (withNetworkRecovery)
 import Agent.CLI.Options
     ( CliOptions
     , Command(..)

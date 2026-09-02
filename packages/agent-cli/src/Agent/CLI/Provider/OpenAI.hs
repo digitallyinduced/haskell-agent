@@ -11,8 +11,8 @@ import Agent.CLI.Compaction
     , OpenAiCompactionSender
     , autoCompactOpenAiBackendWithSenderAndHook
     )
-import Agent.CLI.Connectivity (withConnectionRecoveryOn)
-import Agent.CLI.NetworkPath (NetworkRecovery)
+import Agent.Connectivity (withConnectionRecoveryOn)
+import Agent.Connectivity.NetworkPath (NetworkRecovery)
 import Agent.Loop
     ( Backend(..)
     , TokenUsage

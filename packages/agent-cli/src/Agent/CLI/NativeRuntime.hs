@@ -20,7 +20,7 @@ import Agent.CLI.Options
     , CliOptions(..)
     , parseArgs
     )
-import Agent.CLI.NetworkPath
+import Agent.Connectivity.NetworkPath
     ( NetworkRecoveryMonitor
     , closeNetworkRecoveryMonitor
     , networkRecovery
