@@ -87,6 +87,7 @@ library
                     , Agent.Tools.MultiAgents
                     , Agent.Tools.OutputArtifact
                     , Agent.Tools.PlanMode
+                    , Agent.Tools.TaskPlan
                     , Agent.Tools.Secret
                     , Agent.Tools.Scheduling
                     , Agent.Tools.ShowImage
@@ -268,6 +269,7 @@ test-suite agent-core-test
                     , Agent.Tools.MultiAgentsSpec
                     , Agent.Tools.OutputArtifactSpec
                     , Agent.Tools.PlanModeSpec
+                    , Agent.Tools.TaskPlanSpec
                     , Agent.Tools.SecretSpec
                     , Agent.Tools.ShowImageSpec
                     , Agent.Tools.ViewImageSpec

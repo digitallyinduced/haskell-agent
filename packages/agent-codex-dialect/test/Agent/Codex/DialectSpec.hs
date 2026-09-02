@@ -9,6 +9,7 @@ import Agent.Codex.Dialect.Prompt
 import Agent.Codex.Dialect.Runtime
     ( CodexCodingTools(..)
     , newCodexCodingTools
+    , newCodexCodingToolsWithTaskPlan
     )
 import Agent.Codex.Dialect.Shell
     ( CodexShellResult(..)
@@ -30,6 +31,15 @@ import Agent.ToolDispatch
     , functionToolCall
     )
 import Agent.Tools.Scheduling (schedulingPlansConflict)
+import Agent.Tools.TaskPlan
+    ( CurrentTaskPlan(..)
+    , TaskPlan(..)
+    , TaskPlanHooks(..)
+    , TaskPlanItem(..)
+    , TaskPlanStatus(..)
+    , newTaskPlanEnv
+    , readTaskPlan
+    )
 import Agent.Tools.Types
     ( AppTool(..)
     , BackgroundTaskHooks(..)
@@ -108,6 +118,49 @@ spec = describe "Codex dialect" do
                 `shouldBe` replicate 5 True
             names `shouldNotContain` ["run_terminal_cmd", "search_replace"]
             coding.codexClose
+
+    it "persists update_plan before reporting success" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            taskPlan <- newTaskPlanEnv Nothing $ Just TaskPlanHooks
+                { taskPlanPersistReplace = \_ -> pure (Right 9)
+                , taskPlanPersistClear = pure (Right ())
+                }
+            bracket
+                (newCodexCodingToolsWithTaskPlan env Nothing taskPlan Nothing)
+                (.codexClose)
+                \coding -> do
+                    result <- dispatchToolCall
+                        testDispatchConfig
+                        (appToolHandlers coding.codexAppTools)
+                        (functionToolCall "plan-1" "update_plan"
+                            "{\"explanation\":\"Next\",\"plan\":[{\"step\":\"Implement\",\"status\":\"in_progress\"}]}")
+                    result.output `shouldBe`
+                        "Next\nPlan updated:\n- [in_progress] Implement\n"
+                    readTaskPlan taskPlan `shouldReturn` Just
+                        (CurrentTaskPlan 9
+                            (TaskPlan (Just "Next")
+                                [TaskPlanItem "Implement" TaskPlanInProgress]))
+
+    it "does not publish update_plan when persistence fails" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            taskPlan <- newTaskPlanEnv Nothing $ Just TaskPlanHooks
+                { taskPlanPersistReplace = \_ -> pure (Left "database unavailable")
+                , taskPlanPersistClear = pure (Right ())
+                }
+            bracket
+                (newCodexCodingToolsWithTaskPlan env Nothing taskPlan Nothing)
+                (.codexClose)
+                \coding -> do
+                    result <- dispatchToolCall
+                        testDispatchConfig
+                        (appToolHandlers coding.codexAppTools)
+                        (functionToolCall "plan-2" "update_plan"
+                            "{\"plan\":[{\"step\":\"Implement\",\"status\":\"pending\"}]}")
+                    result.output `shouldSatisfy`
+                        Text.isInfixOf "database unavailable"
+                    readTaskPlan taskPlan `shouldReturn` Nothing
 
     it "defaults shell_command to the turn cwd when workdir is omitted" do
         withTempDir \dir -> do

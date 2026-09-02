@@ -55,6 +55,14 @@ import Agent.Tools.PlanMode
     , isPlanModeActive
     , writePlanTool
     )
+import Agent.Tools.TaskPlan
+    ( TaskPlanEnv
+    , TaskPlanUpdate
+    , renderTaskPlanUpdate
+    , replaceTaskPlan
+    , taskPlanUpdateDecoder
+    , validateTaskPlanUpdate
+    )
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
     , ToolResource(..)
@@ -83,9 +91,10 @@ codexTools
     -> CodexShellSession
     -> GhciSession
     -> PlanModeEnv
+    -> TaskPlanEnv
     -> Maybe MultiAgentContext
     -> IO [AppTool]
-codexTools env shellSession ghci planMode multi =
+codexTools env shellSession ghci planMode taskPlan multi =
     pure $
         [ runGhciTool ghci
         , viewImageTool env
@@ -93,7 +102,7 @@ codexTools env shellSession ghci planMode multi =
         , grepTool env
         , listDirTool env
         , applyPatchTool env
-        , updatePlanTool planMode
+        , updatePlanTool planMode taskPlan
         , enterCodexPlanModeTool planMode
         , writePlanTool planMode
         , askUserQuestionTool planMode
@@ -418,30 +427,8 @@ decodeApplyPatchArguments call = case call.callKind of
 -- update_plan
 --------------------------------------------------------------------------------
 
-data PlanItem = PlanItem
-    { step :: Text
-    , status :: Text
-    } deriving (Eq, Show)
-
-planItemDecoder :: Json.Decoder PlanItem
-planItemDecoder = Json.object $
-    PlanItem
-        <$> Json.atKey "step" Json.text
-        <*> Json.atKey "status" Json.text
-
-data UpdatePlanArgs = UpdatePlanArgs
-    { explanation :: Maybe Text
-    , plan :: [PlanItem]
-    }
-
-updatePlanArgsDecoder :: Json.Decoder UpdatePlanArgs
-updatePlanArgsDecoder = Json.object $
-    UpdatePlanArgs
-        <$> optionalText "explanation"
-        <*> Json.atKey "plan" (Json.list planItemDecoder)
-
-updatePlanTool :: PlanModeEnv -> AppTool
-updatePlanTool planMode = jsonTool "update_plan" updatePlanDescription
+updatePlanTool :: PlanModeEnv -> TaskPlanEnv -> AppTool
+updatePlanTool planMode taskPlan = jsonTool "update_plan" updatePlanDescription
     [ PropertySchema "explanation" PropertyString False $ Just
         "Optional explanation for this plan update."
     , PropertySchema "plan" (PropertyArray (PropertyObject
@@ -452,7 +439,7 @@ updatePlanTool planMode = jsonTool "update_plan" updatePlanDescription
     ]
     True
     TurnSequential
-    (typedTool "update_plan" updatePlanArgsDecoder (runUpdatePlan planMode))
+    (typedTool "update_plan" taskPlanUpdateDecoder (runUpdatePlan planMode taskPlan))
 
 updatePlanDescription :: Text
 updatePlanDescription =
@@ -461,30 +448,19 @@ updatePlanDescription =
     \At most one step can be in_progress at a time.\n\
     \This is a progress checklist, not Plan Mode. It errors while Plan Mode is active."
 
-runUpdatePlan :: PlanModeEnv -> UpdatePlanArgs -> IO (Either Text Text)
-runUpdatePlan planMode args = do
+runUpdatePlan :: PlanModeEnv -> TaskPlanEnv -> TaskPlanUpdate -> IO (Either Text Text)
+runUpdatePlan planMode taskPlan update = do
     active <- isPlanModeActive planMode
     if active
         then pure $ Left
             "update_plan is unavailable in Plan Mode. Write the design to plan.md \
             \and present it with a <proposed_plan> block when ready."
-        else pure (runUpdatePlanBody args)
-
-runUpdatePlanBody :: UpdatePlanArgs -> Either Text Text
-runUpdatePlanBody args
-    | any (\item -> item.status `notElem` ["pending", "in_progress", "completed"]) args.plan =
-        Left "Each plan status must be pending, in_progress, or completed."
-    | length (filter (\item -> item.status == "in_progress") args.plan) > 1 =
-        Left "At most one step can be in_progress at a time."
-    | otherwise =
-        let rendered = Text.unlines (map renderItem args.plan)
-            header = case args.explanation of
-                Nothing -> "Plan updated:\n"
-                Just explanation -> explanation <> "\nPlan updated:\n"
-        in Right (header <> rendered)
-  where
-    renderItem :: PlanItem -> Text
-    renderItem item = "- [" <> item.status <> "] " <> item.step
+        else case validateTaskPlanUpdate update of
+            Left err -> pure (Left err)
+            Right plan ->
+                replaceTaskPlan taskPlan plan >>= \case
+                    Left err -> pure (Left err)
+                    Right _ -> pure (Right (renderTaskPlanUpdate plan))
 
 optionalText :: Text -> Json.FieldsDecoder (Maybe Text)
 optionalText key =
