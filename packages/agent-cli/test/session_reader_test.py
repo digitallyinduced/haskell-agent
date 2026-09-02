@@ -145,6 +145,26 @@ class SessionReaderTest(unittest.TestCase):
         )
         self.assertNotIn("secret", json.dumps(result))
 
+    def test_codex_tool_results_are_visibly_historical(self):
+        turn, skipped = reader.codex_turn(
+            {
+                "type": "function_call_output",
+                "call_id": "old-call",
+                "output": "the branch is clean",
+            },
+            100,
+        )
+        self.assertFalse(skipped)
+        self.assertIsNotNone(turn)
+        result = turn["tool_results"][0]
+        self.assertEqual(result["stale"], "true")
+        self.assertTrue(
+            result["output"].startswith(
+                reader.HISTORICAL_TOOL_RESULT_LABEL + " "
+            )
+        )
+        self.assertIn("the branch is clean", result["output"])
+
     def test_codex_database_compares_working_directories_canonically(self):
         home = self.root / "codex-case-insensitive"
         rollout = home / "sessions" / "rollout-session.jsonl"
@@ -727,6 +747,12 @@ class SessionReaderTest(unittest.TestCase):
         )
         self.assertEqual(reader.user_text(wrapped), "merge")
         self.assertEqual(reader.user_text("<user_query></user_query>"), "")
+
+    def test_quoted_resume_tags_are_not_treated_as_harness_wrappers(self):
+        for tag in ("current_request", "user_query"):
+            with self.subTest(tag=tag):
+                text = f"Document `<{tag}>example</{tag}>` in the guide"
+                self.assertEqual(reader.user_text(text), text)
 
     def test_cursor_cli_recovers_json_rows_and_skips_system_fields(self):
         home = self.root / "cursor"

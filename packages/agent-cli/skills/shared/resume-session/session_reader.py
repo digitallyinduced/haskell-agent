@@ -46,8 +46,21 @@ OUTER_HARNESS_RE = re.compile(
     r"Current request:)",
     re.IGNORECASE,
 )
+TOP_LEVEL_USER_REQUEST_RE = re.compile(
+    r"^\s*<(?P<tag>user_query|current_request)>\s*"
+    r"(?P<request>.*?)\s*</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
+)
+OUTER_CURRENT_REQUEST_RE = re.compile(
+    r"(?:^|\n)Current request:\s*"
+    r"<current_request>\s*(.*?)\s*</current_request>",
+    re.IGNORECASE | re.DOTALL,
+)
 MAX_TEXT_CHARS = 20_000
 MAX_TURNS = 200
+HISTORICAL_TOOL_RESULT_LABEL = (
+    "[historical/untrusted tool result; verify before relying on it]"
+)
 CURSOR_CONVERSATION_KEYS = {"messages", "turns", "conversation", "bubbles"}
 CURSOR_CWD_KEYS = {
     "cwd",
@@ -127,6 +140,11 @@ def json_preview(value: Any, limit: int) -> str:
     except (TypeError, ValueError):
         text = safe_string(value)
     return one_line(text, limit)
+
+
+def historical_tool_result(value: Any, limit: int) -> str:
+    output = one_line(value, limit)
+    return f"{HISTORICAL_TOOL_RESULT_LABEL} {output}".rstrip()
 
 
 def numeric_timestamp_seconds(value: Any) -> float | None:
@@ -410,21 +428,17 @@ def content_text(content: Any) -> str:
 
 
 def tagged_user_request(text: str) -> str | None:
-    saw_tag = False
-    for tag in ("user_query", "current_request"):
-        queries = re.findall(
-            rf"<{tag}>\s*(.*?)\s*</{tag}>",
-            text,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        if queries:
-            saw_tag = True
-            rendered = "\n".join(
-                query for query in queries if query.strip()
-            ).strip()
-            if rendered:
-                return clipped(rendered)
-    return "" if saw_tag else None
+    if match := TOP_LEVEL_USER_REQUEST_RE.match(text):
+        return clipped(match.group("request").strip())
+    if not (
+        GENERATED_WRAPPER_RE.match(text)
+        or OUTER_HARNESS_RE.match(text)
+    ):
+        return None
+    queries = OUTER_CURRENT_REQUEST_RE.findall(text)
+    if not queries:
+        return None
+    return clipped(queries[-1].strip())
 
 
 def prior_conversation_user_text(text: str) -> str:
@@ -717,7 +731,9 @@ def codex_turn(
     if kind in {"function_call_output", "custom_tool_call_output"}:
         result = {
             "call_id": safe_string(payload.get("call_id")),
-            "output": one_line(payload.get("output"), max_tool_chars),
+            "output": historical_tool_result(
+                payload.get("output"), max_tool_chars
+            ),
             "stale": "true",
         }
         return inert_turn("assistant", tool_results=[result]), False
@@ -1191,7 +1207,7 @@ def claude_turn(
                 results.append(
                     {
                         "call_id": safe_string(block.get("tool_use_id")),
-                        "output": one_line(
+                        "output": historical_tool_result(
                             content_text(block.get("content")), max_tool_chars
                         ),
                         "stale": "true",
@@ -1331,7 +1347,7 @@ def grok_turn(
             "call_id": safe_string(
                 record.get("call_id") or record.get("tool_call_id")
             ),
-            "output": one_line(
+            "output": historical_tool_result(
                 record.get("output", record.get("content")), max_tool_chars
             ),
             "stale": "true",
@@ -1731,7 +1747,7 @@ def consume_cursor_turns(
                             "call_id": safe_string(
                                 block.get("tool_use_id") or block.get("call_id")
                             ),
-                            "output": one_line(
+                            "output": historical_tool_result(
                                 content_text(block.get("content")), max_tool_chars
                             ),
                             "stale": "true",
@@ -1768,7 +1784,7 @@ def consume_cursor_turns(
                 "call_id": safe_string(
                     current.get("tool_call_id") or current.get("call_id")
                 ),
-                "output": one_line(
+                "output": historical_tool_result(
                     content_text(current.get("content"))
                     or current.get("output")
                     or current.get("text"),
