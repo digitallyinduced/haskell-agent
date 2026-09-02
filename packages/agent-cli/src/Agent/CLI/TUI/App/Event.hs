@@ -1091,7 +1091,12 @@ handleCommandPaletteSelection = \case
                 applyLocalUiEvent $
                     UiSetNotice (Just (warningNotice message))
             Right ()
-                | queued -> pure ()
+                | queued -> do
+                    applyLocalUiEvent (UiInputQueued command)
+                    applyLocalUiEvent
+                        (UiSetDraft
+                            state.appUi.uiDraft
+                            state.appUi.uiCursor)
                 | otherwise ->
                     applyLocalUiEvent (UiSetAwaitingInput False)
 

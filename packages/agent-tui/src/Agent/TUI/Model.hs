@@ -688,17 +688,25 @@ inspectionGroupTitle [] = "Inspected"
 inspectionGroupTitle [item] = item.inspectionTitle
 inspectionGroupTitle items =
     Text.intercalate ", " (inspectionSummaries items)
-        <> failureSuffix
+        <> statusSuffix
   where
     failed =
         length
             (filter
-                ((`elem` [BlockFailed, BlockDenied]) . (.inspectionState))
+                ((== BlockFailed) . (.inspectionState))
                 items)
-    failureSuffix
-        | failed == 0 = ""
-        | otherwise =
-            " · " <> Text.pack (show failed) <> " failed"
+    denied =
+        length
+            (filter
+                ((== BlockDenied) . (.inspectionState))
+                items)
+    suffixes =
+        [ Text.pack (show failed) <> " failed" | failed > 0 ]
+            <> [ Text.pack (show denied) <> " denied" | denied > 0 ]
+    statusSuffix =
+        case suffixes of
+            [] -> ""
+            _ -> " · " <> Text.intercalate ", " suffixes
 
 inspectionGroupDetail :: [InspectionItem] -> Text
 inspectionGroupDetail [item] = item.inspectionDetail
@@ -808,8 +816,8 @@ inspectionStateGlyph = \case
 inspectionGroupState :: [InspectionItem] -> BlockState
 inspectionGroupState items
     | any ((== BlockRunning) . (.inspectionState)) items = BlockRunning
-    | any ((`elem` [BlockFailed, BlockDenied]) . (.inspectionState)) items =
-        BlockFailed
+    | any ((== BlockFailed) . (.inspectionState)) items = BlockFailed
+    | any ((== BlockDenied) . (.inspectionState)) items = BlockDenied
     | any ((== BlockCancelled) . (.inspectionState)) items = BlockCancelled
     | otherwise = BlockComplete
 

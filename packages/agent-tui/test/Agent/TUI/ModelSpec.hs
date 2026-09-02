@@ -1518,6 +1518,44 @@ spec = describe "fullscreen UI reducer" do
                     Text.isInfixOf "Error: search failed"
             _ -> expectationFailure "expected one failed inspection burst"
 
+    it "preserves denied inspection state separately from failures" do
+        let readA =
+                functionToolCall
+                    "read-a"
+                    "read_file"
+                    "{\"target_file\":\"src/A.hs\"}"
+            readB =
+                functionToolCall
+                    "read-b"
+                    "read_file"
+                    "{\"target_file\":\"src/B.hs\"}"
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted readA)
+                    , UiLoop
+                        (ToolFinished
+                            (ToolCallResult
+                                "read-a"
+                                "module A where"
+                                FunctionCallKind))
+                    , UiLoop (ToolStarted readB)
+                    , UiLoop
+                        (ToolFinished
+                            (ToolCallResult
+                                "read-b"
+                                "Tool call rejected by user"
+                                FunctionCallKind))
+                    ]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockState `shouldBe` BlockDenied
+                block.blockTitle `shouldSatisfy`
+                    Text.isSuffixOf "· 1 denied"
+                block.blockTitle `shouldNotSatisfy`
+                    Text.isInfixOf "failed"
+            _ -> expectationFailure "expected one denied inspection burst"
+
     it "does not group inspections across an intervening visible event" do
         let first =
                 functionToolCall

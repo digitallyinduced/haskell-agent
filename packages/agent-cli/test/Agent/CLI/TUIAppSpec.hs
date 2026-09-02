@@ -810,7 +810,7 @@ spec = do
             runtime <- newScriptRuntime ui
             let initialState =
                     initialFullscreenAppState runtime [] AgentRoot [] 0
-            _ <-
+            (rendered, finalState) <-
                 runFullscreenScriptWithState
                     initialState
                     [ FullscreenScriptApp
@@ -822,6 +822,10 @@ spec = do
                 Composer.readFullscreenInputs runtime.runtimeInput
             (.fullscreenInputDisplay) <$> toList inputs
                 `shouldBe` [Just "/clear"]
+            finalState.appUi.uiQueuedInputs
+                `shouldBe` Seq.singleton "/clear"
+            rendered `shouldSatisfy`
+                ByteString.isInfixOf (encoded "/clear")
 
         it "renders and dismisses changelog release notes without choice rows" do
             runtime <- newScriptRuntime initialUiState

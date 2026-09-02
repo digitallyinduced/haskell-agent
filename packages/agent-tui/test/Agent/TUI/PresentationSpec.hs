@@ -427,6 +427,32 @@ spec = describe "tool presentation" do
                 \          │ +after\n\
                 \  delete src/C.hs"
 
+    it "keeps changed rows inside capped apply_patch previews" do
+        let contexts =
+                [ " context-" <> Text.pack (show number)
+                | number <- [1 :: Int .. 25]
+                ]
+            patch =
+                Text.unlines $
+                    [ "*** Begin Patch"
+                    , "*** Update File: src/Main.hs"
+                    , "@@"
+                    ]
+                        <> contexts
+                        <> [ "-old"
+                           , "+new"
+                           , "*** End Patch"
+                           ]
+        case parseApplyPatchDiffs patch of
+            [parsed] -> do
+                length parsed.diffLines `shouldBe` 20
+                parsed.diffHiddenLines `shouldBe` 7
+                parsed.diffLines `shouldSatisfy`
+                    elem (SearchReplaceRemoved "old")
+                parsed.diffLines `shouldSatisfy`
+                    elem (SearchReplaceAdded "new")
+            _ -> expectationFailure "expected one parsed patch"
+
     it "decodes semantic diff headers and numbered rows for rich rendering" do
         diffHeaderParts "  update src/Main.hs"
             `shouldBe` Just ("update", "src/Main.hs")

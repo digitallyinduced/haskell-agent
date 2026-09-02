@@ -60,6 +60,7 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Char (isDigit, isSpace)
 import qualified Data.Foldable as Foldable
+import Data.List (sortOn)
 import Data.Maybe (fromMaybe, mapMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -273,13 +274,48 @@ parseApplyPatchDiffs patch =
         diffs -> diffs
 
     makeDiff path action raw =
-        let shown = take 20 raw
+        let shown = cappedPatchPreview 20 raw
         in SearchReplaceDiff
             { diffPath = path
             , diffAction = action
             , diffLines = shown
             , diffHiddenLines = length raw - length shown
             }
+
+    -- Prefer actual changes when long context runs exceed the preview budget.
+    -- Remaining slots show the context closest to those changes, in source
+    -- order, so an approval preview cannot consist entirely of unchanged rows.
+    cappedPatchPreview limit raw
+        | length raw <= limit = raw
+        | null changed = take limit raw
+        | otherwise =
+            [ line
+            | (index, line) <- indexed
+            , index `elem` selectedIndices
+            ]
+      where
+        indexed = zip [0 :: Int ..] raw
+        changed =
+            filter (isChanged . snd) indexed
+        shownChanges = take limit changed
+        changedIndices = map fst shownChanges
+        contextBudget = limit - length shownChanges
+        contextByProximity =
+            sortOn
+                (\(index, _) ->
+                    ( minimum
+                        (map (abs . (index -)) changedIndices)
+                    , index
+                    ))
+                (filter (not . isChanged . snd) indexed)
+        selectedIndices =
+            changedIndices
+                <> map fst (take contextBudget contextByProximity)
+
+    isChanged = \case
+        SearchReplaceContext _ -> False
+        SearchReplaceRemoved _ -> True
+        SearchReplaceAdded _ -> True
 
     patchBoundary line =
         any (`Text.isPrefixOf` line)
