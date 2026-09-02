@@ -12,6 +12,7 @@ import argparse
 import glob
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -104,34 +105,50 @@ def json_preview(value: Any, limit: int) -> str:
     return one_line(text, limit)
 
 
+def numeric_timestamp_seconds(value: Any) -> float | None:
+    if not isinstance(value, (int, float)):
+        return None
+    try:
+        seconds = float(value)
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(seconds):
+        return None
+    if seconds > 10_000_000_000:
+        seconds /= 1000
+    try:
+        datetime.fromtimestamp(seconds, timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
+    return seconds
+
+
 def iso_time(value: Any, fallback_path: str | Path | None = None) -> str | None:
     if isinstance(value, str) and value:
         return value
-    if isinstance(value, (int, float)):
-        seconds = float(value)
-        if seconds > 10_000_000_000:
-            seconds /= 1000
+    if (seconds := numeric_timestamp_seconds(value)) is not None:
         return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
     if fallback_path:
         try:
             return datetime.fromtimestamp(
                 os.path.getmtime(fallback_path), timezone.utc
             ).isoformat()
-        except OSError:
+        except (OSError, OverflowError, ValueError):
             pass
     return None
 
 
 def timestamp_value(value: Any, fallback_path: str | Path | None = None) -> float:
-    if isinstance(value, (int, float)):
-        return float(value) / (1000 if value > 10_000_000_000 else 1)
+    if (seconds := numeric_timestamp_seconds(value)) is not None:
+        return seconds
     if isinstance(value, str):
         try:
             return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-        except ValueError:
+        except (OSError, OverflowError, ValueError):
             pass
     try:
-        return os.path.getmtime(fallback_path) if fallback_path else 0
+        fallback = os.path.getmtime(fallback_path) if fallback_path else 0
+        return fallback if math.isfinite(fallback) else 0
     except OSError:
         return 0
 
@@ -141,38 +158,13 @@ def read_json(path: str | Path) -> Any:
         return json.load(handle)
 
 
-def read_jsonl(path: str | Path) -> tuple[list[dict[str, Any]], int]:
-    path = Path(path)
-    if path.name.endswith(".jsonl.zst"):
-        executable = shutil.which("zstd")
-        if executable is None:
-            raise ReaderError(
-                f"zstd is required to read compressed Codex rollout {path}"
-            )
-        try:
-            completed = subprocess.run(
-                [executable, "-dc", str(path)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-        except OSError as exc:
-            raise ReaderError(f"failed to run zstd for {path}: {exc}") from exc
-        if completed.returncode != 0:
-            detail = one_line(
-                completed.stderr.decode("utf-8", errors="replace"), 300
-            )
-            raise ReaderError(
-                f"zstd failed to decompress {path}: {detail or 'unknown error'}"
-            )
-        lines = completed.stdout.decode("utf-8", errors="replace").splitlines()
-    else:
-        try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            raise
+def parse_jsonl_lines(
+    lines: Iterable[str], max_records: int | None
+) -> tuple[list[dict[str, Any]], int, bool]:
     records: list[dict[str, Any]] = []
     malformed = 0
+    if max_records is not None and max_records <= 0:
+        return records, malformed, True
     for line in lines:
         if not line.strip():
             continue
@@ -183,9 +175,92 @@ def read_jsonl(path: str | Path) -> tuple[list[dict[str, Any]], int]:
             continue
         if isinstance(value, dict):
             records.append(value)
+            if max_records is not None and len(records) >= max_records:
+                return records, malformed, True
         else:
             malformed += 1
-    return records, malformed
+    return records, malformed, False
+
+
+def read_jsonl(
+    path: str | Path, max_records: int | None = None
+) -> tuple[list[dict[str, Any]], int]:
+    path = Path(path)
+    if path.name.endswith(".jsonl.zst"):
+        executable = shutil.which("zstd")
+        if executable is None:
+            raise ReaderError(
+                f"zstd is required to read compressed Codex rollout {path}"
+            )
+        if max_records is None:
+            try:
+                completed = subprocess.run(
+                    [executable, "-dc", str(path)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+            except OSError as exc:
+                raise ReaderError(f"failed to run zstd for {path}: {exc}") from exc
+            if completed.returncode != 0:
+                detail = one_line(
+                    completed.stderr.decode("utf-8", errors="replace"), 300
+                )
+                raise ReaderError(
+                    f"zstd failed to decompress {path}: {detail or 'unknown error'}"
+                )
+            records, malformed, _ = parse_jsonl_lines(
+                completed.stdout.decode("utf-8", errors="replace").splitlines(),
+                None,
+            )
+            return records, malformed
+        try:
+            process = subprocess.Popen(
+                [executable, "-dc", str(path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError as exc:
+            raise ReaderError(f"failed to run zstd for {path}: {exc}") from exc
+        if process.stdout is None:
+            process.kill()
+            process.wait()
+            raise ReaderError(f"failed to capture zstd output for {path}")
+        try:
+            records, malformed, stopped_early = parse_jsonl_lines(
+                process.stdout, max_records
+            )
+            if stopped_early:
+                # Close the stream before terminating so the decompressor cannot
+                # remain blocked while writing output that we no longer need.
+                process.stdout.close()
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+            else:
+                process.wait()
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            process.stdout.close()
+        if not stopped_early and process.returncode != 0:
+            raise ReaderError(f"zstd failed to decompress {path}: unknown error")
+        return records, malformed
+    else:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                records, malformed, _ = parse_jsonl_lines(handle, max_records)
+            return records, malformed
+        except OSError:
+            raise
 
 
 def open_sqlite_readonly(path: str | Path) -> sqlite3.Connection:
@@ -419,20 +494,7 @@ def codex_metadata_from_file(path: Path) -> dict[str, Any] | None:
     meta: dict[str, Any] = {}
     first_user = ""
     try:
-        if path.name.endswith(".jsonl.zst"):
-            records = read_jsonl(path)[0][:300]
-        else:
-            records = []
-            with open(path, encoding="utf-8", errors="replace") as handle:
-                for index, line in enumerate(handle):
-                    if index >= 300:
-                        break
-                    try:
-                        record = json.loads(line)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-                    if isinstance(record, dict):
-                        records.append(record)
+        records = read_jsonl(path, max_records=300)[0]
     except (OSError, ReaderError):
         return None
     for record in records:

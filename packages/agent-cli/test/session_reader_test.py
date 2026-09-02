@@ -198,6 +198,31 @@ class SessionReaderTest(unittest.TestCase):
         with patch.dict(os.environ, {"CODEX_HOME": str(home)}):
             self.assertEqual(reader.discover("codex", str(self.cwd), 0), [])
 
+    def test_codex_discovery_rejects_out_of_range_timestamps(self):
+        home = self.root / "codex-invalid-timestamp"
+        rollout = home / "sessions" / "rollout-session.jsonl"
+        rollout.parent.mkdir(parents=True)
+        record = {
+            "type": "session_meta",
+            "payload": {
+                "id": "66666666-6666-6666-6666-666666666666",
+                "cwd": str(self.cwd),
+                "source": "cli",
+                "timestamp": 0,
+            },
+        }
+        encoded = json.dumps(record).replace('"timestamp": 0', '"timestamp": 1e999')
+        rollout.write_text(encoded + "\n", encoding="utf-8")
+        with patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            items = reader.discover("codex", str(self.cwd), 0)
+        self.assertEqual(len(items), 1)
+        self.assertIsNone(items[0]["created_at"])
+        self.assertAlmostEqual(
+            reader.timestamp_value(float("inf"), rollout),
+            os.path.getmtime(rollout),
+        )
+        self.assertIsNone(reader.iso_time(10**1000))
+
     def test_codex_uses_compacted_history_and_applies_rollbacks(self):
         rollout = self.root / "codex-compacted.jsonl"
         write_jsonl(
@@ -593,6 +618,43 @@ class SessionReaderTest(unittest.TestCase):
         self.assertIsNotNone(item)
         result = reader.read_codex(item, 100)
         self.assertEqual(result["last_user_request"], "Resume compressed work")
+
+    def test_codex_metadata_stops_after_300_compressed_records(self):
+        compressed = self.root / "rollout.jsonl.zst"
+        compressed.touch()
+        fully_consumed = self.root / "fully-consumed"
+        fake_zstd = self.root / "fake-zstd"
+        records = [
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "77777777-7777-7777-7777-777777777777",
+                    "cwd": str(self.cwd),
+                    "source": "cli",
+                },
+            }
+        ]
+        records.extend({"type": "ignored"} for _ in range(299))
+        fake_zstd.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            "from pathlib import Path\n"
+            f"records = {records!r}\n"
+            "for record in records:\n"
+            "    print(json.dumps(record))\n"
+            "for index in range(1_000_000):\n"
+            "    print(json.dumps({'type': 'tail', 'index': index}))\n"
+            f"Path({str(fully_consumed)!r}).write_text('done')\n",
+            encoding="utf-8",
+        )
+        fake_zstd.chmod(0o755)
+        with patch.object(reader.shutil, "which", return_value=str(fake_zstd)):
+            item = reader.codex_metadata_from_file(compressed)
+        self.assertIsNotNone(item)
+        self.assertEqual(
+            item["session_id"], "77777777-7777-7777-7777-777777777777"
+        )
+        self.assertFalse(fully_consumed.exists())
 
     def test_all_recovered_turns_are_explicitly_inert(self):
         turns = [
