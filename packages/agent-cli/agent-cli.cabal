@@ -11,10 +11,17 @@ maintainer:         marc@digitallyinduced.com
 copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
+extra-source-files: test/session_reader_test.py
 data-files:         data/CHANGELOG.md
                   , skills/add-model/SKILL.md
                   , skills/learn-about-user/SKILL.md
                   , skills/post-task-learning-review/SKILL.md
+                  , skills/resume-claude/SKILL.md
+                  , skills/resume-codex/SKILL.md
+                  , skills/resume-cursor/SKILL.md
+                  , skills/resume-grok/SKILL.md
+                  , skills/shared/resume-session/CORE.md
+                  , skills/shared/resume-session/session_reader.py
                   , skills/telegram-agent/SKILL.md
 
 common common-options

@@ -3,13 +3,18 @@ module Agent.CLI.SkillsSpec (spec) where
 import Agent.CLI.Command (SkillCommand(..))
 import Agent.CLI.Options (CliOptions(..), defaultCliOptions)
 import Agent.CLI.Skills
-import System.OsPath (takeDirectory, unsafeEncodeUtf)
 import Agent.Skills
-import Data.IORef (newIORef, readIORef)
-import qualified Data.Text as Text
 import Agent.Tools.IO (resolveForRead, resolveUnderCwd)
 import Agent.Tools.Types (defaultToolEnv)
 import Data.Either (isLeft, isRight)
+import Data.IORef (newIORef, readIORef)
+import qualified Data.Text as Text
+import System.Directory (doesFileExist, findExecutable, getCurrentDirectory)
+import System.Environment (getExecutablePath)
+import System.Exit (ExitCode(..))
+import qualified System.FilePath as FilePath
+import System.OsPath (takeDirectory, unsafeEncodeUtf, (</>))
+import System.Process (readProcessWithExitCode)
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -38,7 +43,7 @@ spec = describe "Agent.CLI.Skills" do
         map (.skillScope) matching `shouldBe` [BuiltinSkill]
         map (.skillModelInvocable) matching `shouldBe` [True]
 
-    it "allows file tools to read packaged skills but not their parent directory" do
+    it "allows packaged skills and their shared resume reader but not the parent directory" do
         catalog <- loadSkillsCatalog
             defaultCliOptions
             (fromFilePath "/tmp")
@@ -62,6 +67,15 @@ spec = describe "Agent.CLI.Skills" do
             >>= (`shouldSatisfy` isLeft)
         resolveUnderCwd env telegram.skillPath
             >>= (`shouldSatisfy` isLeft)
+        let sharedResumeDirectory =
+                takeDirectory telegram.skillDirectory
+                    </> fromFilePath "shared/resume-session"
+        resolveForRead env (sharedResumeDirectory </> fromFilePath "CORE.md")
+            >>= (`shouldSatisfy` isRight)
+        resolveForRead
+            env
+            (sharedResumeDirectory </> fromFilePath "session_reader.py")
+            >>= (`shouldSatisfy` isRight)
 
     it "loads the packaged add-model skill" do
         catalog <- loadSkillsCatalog
@@ -89,6 +103,53 @@ spec = describe "Agent.CLI.Skills" do
         map (.skillScope) matching `shouldBe` [BuiltinSkill]
         map (.skillModelInvocable) matching `shouldBe` [True]
         map (.skillUserInvocable) matching `shouldBe` [True]
+
+    it "loads the packaged external session resume skills" do
+        catalog <- loadSkillsCatalog
+            defaultCliOptions
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            False
+        let resumeNames =
+                [ "resume-claude"
+                , "resume-codex"
+                , "resume-cursor"
+                , "resume-grok"
+                ]
+            matching =
+                filter ((`elem` resumeNames) . (.skillName))
+                    catalog.catalogSkills
+        map (.skillName) matching `shouldMatchList` resumeNames
+        map (.skillScope) matching `shouldBe` replicate 4 BuiltinSkill
+        map (.skillModelInvocable) matching `shouldBe` replicate 4 True
+        map (.skillUserInvocable) matching `shouldBe` replicate 4 True
+        let commands =
+                filter
+                    ((`elem` resumeNames) . (.skillCommandName))
+                    ( map skillInvocationCommand
+                        (buildSkillInvocations reservedSlashNames catalog)
+                    )
+        map (.skillCommandName) commands `shouldMatchList` resumeNames
+
+    it "passes the external session reader regression suite" do
+        python <- findExecutable "python3" >>= \case
+            Nothing -> expectationFailure "python3 is required by resume skills"
+                >> fail "unreachable"
+            Just executable -> pure executable
+        testPath <- findSessionReaderTest
+        (exitCode, output, errors) <-
+            readProcessWithExitCode python ["-B", testPath] ""
+        case exitCode of
+            ExitSuccess -> pure ()
+            ExitFailure code ->
+                expectationFailure
+                    ( "session reader regression suite failed with exit code "
+                        <> show code
+                        <> "\n"
+                        <> output
+                        <> errors
+                    )
 
     it "loads the packaged post-task review as always-active context" do
         catalog <- loadSkillsCatalog
@@ -194,3 +255,31 @@ fakeSkill = Skill
     , skillScope = UserSkill
     , skillOrigin = AgentSkills
     }
+
+findSessionReaderTest :: IO FilePath
+findSessionReaderTest = do
+    cwd <- getCurrentDirectory
+    executable <- getExecutablePath
+    firstExisting
+        [ candidate
+        | root <- ancestors cwd <> ancestors (FilePath.takeDirectory executable)
+        , candidate <-
+            [ root FilePath.</> "test" FilePath.</> "session_reader_test.py"
+            , root
+                FilePath.</> "packages"
+                FilePath.</> "agent-cli"
+                FilePath.</> "test"
+                FilePath.</> "session_reader_test.py"
+            ]
+        ]
+  where
+    ancestors path =
+        let parent = FilePath.takeDirectory path
+        in path : if parent == path then [] else ancestors parent
+    firstExisting [] =
+        expectationFailure "could not locate test/session_reader_test.py"
+            >> fail "unreachable"
+    firstExisting (path : paths) =
+        doesFileExist path >>= \case
+            True -> pure path
+            False -> firstExisting paths
