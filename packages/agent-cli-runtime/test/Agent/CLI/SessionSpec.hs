@@ -614,8 +614,8 @@ spec = describe "Agent.CLI.Session" do
             traverse fromStoredResponseItem (map toStoredResponseItem items)
                 `shouldBe` Right items
 
-        it "persists the local compaction checkpoint marker" do
-            let item = MessageItem ResponseMessage
+        it "persists local summary and checkpoint provenance markers" do
+            let summaryItem = MessageItem ResponseMessage
                     { messageId = Nothing
                     , content = MessageContentParts
                         [OutputTextPart "summary" Nothing Nothing]
@@ -630,8 +630,12 @@ spec = describe "Agent.CLI.Session" do
                         , executedToolCalls = Nothing
                         }
                     }
-            fromStoredResponseItem (toStoredResponseItem item)
-                `shouldBe` Right item
+                items =
+                    [ summaryItem
+                    , compactionCheckpointOriginItem "xai"
+                    ]
+            traverse fromStoredResponseItem (map toStoredResponseItem items)
+                `shouldBe` Right items
 
         it "stores inline image and file payloads as binary data" do
             let imageUrl = "data:image/png;base64,cG5nLWJ5dGVz"

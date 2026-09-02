@@ -2,7 +2,17 @@
 module Agent.XAI.ClientSpec (spec) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Loop
+    ( Backend(..)
+    , BackendResult(..)
+    , BackendSnapshot(..)
+    , TurnInput(..)
+    , advanceBackendSnapshot
+    , emptyBackendSnapshot
+    )
+import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.XAI.Client
+import Agent.XAI.LoopBackend
 import Agent.XAI.Options
 import Agent.XAI.TestSupport (withLoopbackApplication)
 import Agent.Provider (Credential(..), Provider(..))
@@ -182,6 +192,44 @@ spec = do
             lookup "x-compaction-at" sent.headers `shouldBe` Just "400000"
             lookup "x-compactions-remaining" sent.headers `shouldBe` Just "1"
 
+        it "strips checkpoint provenance before sending the request" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "continued")
+                    , completedEvent "resp-origin-stripped" []
+                    ]
+                checkpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "xai-context"
+                        , encryptedContent = Just "opaque"
+                        }
+                request = (helloRequest "continue")
+                    { model = Just "grok-4.6"
+                    , input = Just
+                        (ResponseInputItems
+                            [ checkpoint
+                            , xaiCompactionCheckpointOriginItem
+                            ])
+                    }
+                markerEncoding =
+                    LBS.toStrict
+                        (Aeson.encode
+                            xaiCompactionCheckpointOriginItem)
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith
+                    options
+                    (xaiCredential "token-a")
+                    request
+                void (expectRight result)
+
+            [sent] <- readIORef recorded
+            BS.isInfixOf markerEncoding (LBS.toStrict sent.body)
+                `shouldBe` False
+            BS.isInfixOf
+                "\"type\":\"context_compaction\""
+                (LBS.toStrict sent.body)
+                `shouldBe` True
+
         it "does not invent server compaction metadata for unknown Grok models" do
             recorded <- newIORef []
             let handler _request = pure $ sseResponse
@@ -256,6 +304,77 @@ spec = do
                         expectationFailure
                             ("expected a ConnectionError, got " <> show other))
                 `finally` putMVar serverRelease ()
+
+    describe "xaiBackendWith" do
+        it "marks newly emitted server checkpoints with xAI provenance" do
+            let checkpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "xai-context"
+                        , encryptedContent = Just "opaque"
+                        }
+                backend =
+                    xaiBackendWith
+                        (\_request _onEvent ->
+                            pure
+                                (Right
+                                    (responseWithTypedOutput [checkpoint])))
+                        (pure defaultResponseCreateParams)
+            result <- backend.submitTurn
+                emptyBackendSnapshot
+                Nothing
+                [UserMessage "continue"]
+                (const (pure ()))
+            fmap (.backendState.backendItems) result
+                `shouldBe`
+                    Right
+                        [ checkpoint
+                        , xaiCompactionCheckpointOriginItem
+                        ]
+
+        it "does not claim provenance for checkpoints retained from a request" do
+            let foreignCheckpoint =
+                    CompactionItemValue CompactionItem
+                        { itemId = Just "openai-checkpoint"
+                        , encryptedContent = Just "opaque-openai"
+                        }
+                answer = MessageItem ResponseMessage
+                    { messageId = Just "answer"
+                    , content = MessageContentParts
+                        [OutputTextPart "continued" Nothing Nothing]
+                    , role = RoleAssistant
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+                backend =
+                    xaiBackendWith
+                        (\_request _onEvent ->
+                            pure
+                                (Right
+                                    (responseWithTypedOutput [answer])))
+                        (pure defaultResponseCreateParams)
+                snapshot =
+                    advanceBackendSnapshot
+                        emptyBackendSnapshot
+                        [foreignCheckpoint]
+                        Nothing
+            result <- backend.submitTurn
+                snapshot
+                Nothing
+                [UserMessage "continue"]
+                (const (pure ()))
+            case result of
+                Left err ->
+                    expectationFailure
+                        ("expected Right, got Left " <> show err)
+                Right completed -> do
+                    completed.backendState.backendItems
+                        `shouldSatisfy` elem foreignCheckpoint
+                    completed.backendState.backendItems
+                        `shouldSatisfy`
+                            not
+                                . any
+                                    isXaiCompactionCheckpointOriginItem
 
     describe "retry boundaries" do
         it "reports a terminal stream failure after one request" do
@@ -623,3 +742,17 @@ expectRight :: Show e => Either e a -> IO a
 expectRight = \case
     Left err -> expectationFailure ("expected Right, got Left " <> show err) >> fail "unreachable"
     Right value -> pure value
+
+responseWithTypedOutput :: [ResponseItem] -> Response
+responseWithTypedOutput output =
+    either error id
+        . ResponsesCodec.decodeResponse
+        . LBS.toStrict
+        . Aeson.encode
+        $ Aeson.object
+            [ "id" Aeson..= ("resp-backend" :: Text)
+            , "created_at" Aeson..= (0 :: Int)
+            , "model" Aeson..= ("grok-4.6" :: Text)
+            , "status" Aeson..= ("completed" :: Text)
+            , "output" Aeson..= output
+            ]

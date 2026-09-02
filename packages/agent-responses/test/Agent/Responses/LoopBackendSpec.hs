@@ -61,6 +61,7 @@ import Agent.Responses.Types
     , TaggedObject(..)
     , computerFunctionNamespace
     , computerFunctionName
+    , compactionCheckpointOriginItem
     , defaultResponseCreateParams
     , legacyComputerFunctionName
     )
@@ -88,6 +89,24 @@ spec = do
 
 backendSpec :: Spec
 backendSpec = describe "tokenProviderStatelessResponsesBackend" do
+    it "removes checkpoint provenance from rebuilt request input" do
+        let request =
+                withRequestInput
+                    defaultResponseCreateParams
+                    [ compactionCheckpointOriginItem "xai"
+                    , CompactionItemValue CompactionItem
+                        { itemId = Just "cmp-1"
+                        , encryptedContent = Just "opaque"
+                        }
+                    ]
+        request.input `shouldBe` Just
+            (ResponseInputItems
+                [ CompactionItemValue CompactionItem
+                    { itemId = Just "cmp-1"
+                    , encryptedContent = Just "opaque"
+                    }
+                ])
+
     it "rejects computer coordinates outside the platform Int range" do
         let tooLarge = toInteger (maxBound :: Int) + 1
             payload = LBS.toStrict $ Aeson.encode $ Aeson.object

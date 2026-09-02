@@ -63,10 +63,10 @@ selectConfiguredModel overrides isNative defaultModel = \case
             | isNative model -> model
             | otherwise -> defaultModel
 
--- | Remove the host-only marker that identifies a locally generated
--- compaction summary. The marker remains in persisted state so compaction
--- policy can recognize the checkpoint, but Responses-compatible providers
--- must never receive it.
+-- | Remove host-only compaction metadata. These markers remain in persisted
+-- state so compaction policy can recognize local summaries and the provider
+-- that created an opaque checkpoint, but Responses-compatible providers must
+-- never receive them.
 stripLocalCompactionMarker
     :: ResponseCreateParams
     -> ResponseCreateParams
@@ -78,10 +78,15 @@ stripLocalCompactionMarker ResponseCreateParams { input, .. } =
   where
     stripInput = \case
         ResponseInputItems items ->
-            ResponseInputItems (map stripItem items)
+            ResponseInputItems (Maybe.mapMaybe stripItem items)
         other -> other
 
-    stripItem = \case
+    stripItem item
+        | Just _ <- responseItemCompactionCheckpointOrigin item =
+            Nothing
+        | otherwise = Just (stripItemMetadata item)
+
+    stripItemMetadata = \case
         MessageItem ResponseMessage { passthrough, .. } ->
             MessageItem ResponseMessage
                 { passthrough = stripMetadata passthrough

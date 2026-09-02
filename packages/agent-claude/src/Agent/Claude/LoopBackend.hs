@@ -71,6 +71,7 @@ import Agent.Responses.Types
     , ResponseMessage(..)
     , ResponseRole(..)
     , TaggedObject
+    , responseItemCompactionCheckpointOrigin
     )
 import qualified Agent.ToolDispatch as ToolDispatch
 import Agent.Json (RawJson, rawJsonBytes)
@@ -628,7 +629,12 @@ renderPriorConversation =
         . map renderResponseItem
 
 renderResponseItem :: ResponseItem -> Maybe Text
-renderResponseItem = \case
+renderResponseItem item
+    | Just _ <- responseItemCompactionCheckpointOrigin item = Nothing
+    | otherwise = renderResponseItemContent item
+
+renderResponseItemContent :: ResponseItem -> Maybe Text
+renderResponseItemContent = \case
     MessageItem message ->
         labelled (roleLabel message.role) (messageContentText message.content)
     FunctionCallItem call ->

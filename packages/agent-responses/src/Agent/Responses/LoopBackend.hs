@@ -19,6 +19,7 @@ module Agent.Responses.LoopBackend
     , toolResultToItem
     , withRequestInput
     , normalizeResponseInputItems
+    , isServerCompactionCheckpoint
     ) where
 
 import Agent.Error (ApiError)
@@ -133,12 +134,18 @@ latestServerCheckpointSuffix
 latestServerCheckpointSuffix = go [] . reverse
   where
     go _ [] = Nothing
-    go after (item : before) = case item of
-        CompactionItemValue{} -> Just (item : after)
-        ContextCompactionItemValue{} -> Just (item : after)
-        KnownResponseItem ItemCompaction _ -> Just (item : after)
-        KnownResponseItem ItemContextCompaction _ -> Just (item : after)
-        _ -> go (item : after) before
+    go after (item : before)
+        | isServerCompactionCheckpoint item = Just (item : after)
+        | otherwise = go (item : after) before
+
+-- | Whether an item replaces the provider transcript that preceded it.
+isServerCompactionCheckpoint :: ResponseItem -> Bool
+isServerCompactionCheckpoint = \case
+    CompactionItemValue{} -> True
+    ContextCompactionItemValue{} -> True
+    KnownResponseItem ItemCompaction _ -> True
+    KnownResponseItem ItemContextCompaction _ -> True
+    _ -> False
 
 -- | Adapt a credentialed stateless Responses transport to the loop.
 --
@@ -162,11 +169,16 @@ tokenProviderStatelessResponsesBackend provider send =
 withRequestInput :: ResponseCreateParams -> [ResponseItem] -> ResponseCreateParams
 withRequestInput ResponseCreateParams{..} items =
     let prefix = requestInputPrefix input
-        -- Replayed transcript items are provider output; drop their lifecycle
-        -- status before they become input (see 'stripReplayedItemStatus').
+        -- Replayed transcript items are provider output. Drop host-only
+        -- checkpoint provenance and provider lifecycle status before they
+        -- become request input (see 'stripReplayedItemStatus').
         normalizedItems =
             map stripReplayedItemStatus
-                (normalizeResponseInputItems items)
+                (normalizeResponseInputItems
+                    (filter
+                        ((== Nothing)
+                            . responseItemCompactionCheckpointOrigin)
+                        items))
         requestItems
             | any isAdditionalTools prefix =
                 ensureReasoningHasFollowingItem

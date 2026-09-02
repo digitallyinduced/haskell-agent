@@ -48,6 +48,7 @@ import Agent.Responses.Types
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
+    , compactionCheckpointOriginItem
     , defaultResponseCreateParams
     )
 import Agent.ToolDispatch
@@ -1008,6 +1009,7 @@ spec = do
             withFakeClaude \fake -> do
                 let initialHistory =
                         turnInputsToItems [UserMessage "older context"]
+                            <> [compactionCheckpointOriginItem "xai"]
                 transcript <- newIORef initialHistory
                 state <- newIORef (initialBackendSnapshot initialHistory)
                 result <- timeout 5_000_000 $
@@ -1031,6 +1033,8 @@ spec = do
                     "Prior conversation imported from the outer agent harness"
                 submitted `shouldContain` "older context"
                 submitted `shouldContain` "continued request"
+                submitted `shouldNotContain`
+                    "haskell-agent.compaction-checkpoint-origin.xai"
 
         it "resumes a Claude UUID without re-injecting host history" $
             withFakeClaude \fake -> do

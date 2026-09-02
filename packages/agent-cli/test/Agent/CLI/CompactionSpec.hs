@@ -42,6 +42,7 @@ import Agent.ToolDispatch
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
+import Agent.XAI.LoopBackend (xaiCompactionCheckpointOriginItem)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import Agent.Provider
@@ -243,6 +244,7 @@ spec = do
                     [ userTextItem "old context"
                     , remoteCheckpoint
                     , contextCheckpoint
+                    , xaiCompactionCheckpointOriginItem
                     , knownContextCheckpoint
                     , remoteTrigger
                     ]
@@ -262,23 +264,31 @@ spec = do
             result `shouldSatisfy` either (const False) (const True)
             readIORef requests >>= \case
                 [request] ->
-                    requestItems request `shouldSatisfy`
-                        all \case
-                            CompactionItemValue{} -> False
-                            ContextCompactionItemValue{} -> False
-                            CompactionTriggerItemValue{} -> False
-                            KnownResponseItem ItemCompaction _ -> False
-                            KnownResponseItem ItemContextCompaction _ -> False
-                            KnownResponseItem ItemCompactionTrigger _ -> False
-                            UnknownResponseItem tagged ->
-                                Text.toLower (Text.strip tagged.tag)
-                                    `notElem`
-                                        [ "compaction"
-                                        , "compaction_summary"
-                                        , "context_compaction"
-                                        , "compaction_trigger"
-                                        ]
-                            _ -> True
+                    requestItems request `shouldSatisfy` \items ->
+                        all
+                            ((== Nothing)
+                                . responseItemCompactionCheckpointOrigin)
+                            items
+                            && all
+                                (\case
+                                    CompactionItemValue{} -> False
+                                    ContextCompactionItemValue{} -> False
+                                    CompactionTriggerItemValue{} -> False
+                                    KnownResponseItem ItemCompaction _ -> False
+                                    KnownResponseItem
+                                        ItemContextCompaction _ -> False
+                                    KnownResponseItem
+                                        ItemCompactionTrigger _ -> False
+                                    UnknownResponseItem tagged ->
+                                        Text.toLower (Text.strip tagged.tag)
+                                            `notElem`
+                                                [ "compaction"
+                                                , "compaction_summary"
+                                                , "context_compaction"
+                                                , "compaction_trigger"
+                                                ]
+                                    _ -> True)
+                                items
                 seen ->
                     expectationFailure
                         ("expected one portable summary request, got "
@@ -293,6 +303,7 @@ spec = do
                 trigger = CompactionTriggerItemValue CompactionTriggerItem
                 history =
                     [ contextCheckpoint
+                    , xaiCompactionCheckpointOriginItem
                     , userTextItem "post-checkpoint context"
                     , trigger
                     ]
@@ -318,6 +329,31 @@ spec = do
                       , prompt
                       ]
                     ]
+
+        it "does not claim unmarked OpenAI checkpoints as xAI provenance" do
+            let foreignCheckpoint =
+                    CompactionItemValue CompactionItem
+                        { itemId = Just "openai-compact"
+                        , encryptedContent = Just "opaque-openai"
+                        }
+                retained = userTextItem "portable context"
+                prompt = userTextItem (summarizationPrompt Nothing)
+            params <- newIORef defaultResponseCreateParams
+            transcript <- newIORef [foreignCheckpoint, retained]
+            requests <- newIORef []
+            result <-
+                runXaiResponsesCompactWithContextWindow
+                    (Just 258_400)
+                    (\request -> do
+                        modifyIORef' requests (<> [request])
+                        pure (Right (summaryResponse "summary")))
+                    (const (pure ()))
+                    params
+                    transcript
+                    Nothing
+            result `shouldSatisfy` either (const False) (const True)
+            map requestItems <$> readIORef requests
+                `shouldReturn` [[retained, prompt]]
 
         it "preserves OpenAI checkpoints for focused OpenAI summaries" do
             let remoteCheckpoint =
@@ -678,6 +714,11 @@ spec = do
                         }
                 history =
                     [ checkpoint
+                    , xaiCompactionCheckpointOriginItem
+                    , userTextItem "post-checkpoint context"
+                    ]
+                preparedHistory =
+                    [ checkpoint
                     , userTextItem "post-checkpoint context"
                     ]
             requests <- newIORef []
@@ -704,7 +745,7 @@ spec = do
             result `shouldSatisfy` either (const False) (const True)
             readIORef requests >>= \case
                 [(_summaryParams, snapshot, previous, _inputs)] -> do
-                    snapshot.backendItems `shouldBe` history
+                    snapshot.backendItems `shouldBe` preparedHistory
                     snapshot.backendContinuation `shouldBe` Nothing
                     previous `shouldBe` Nothing
                 _ -> expectationFailure "expected one xAI summary request"

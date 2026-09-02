@@ -56,10 +56,15 @@ spec = do
         it "strips local compaction metadata from serialized input" do
             let projected = buildRequest options markedSummaryRequest
                 encoded = LBS.toStrict (Aeson.encode projected)
+                checkpointOrigin =
+                    LBS.toStrict
+                        (Aeson.encode
+                            (compactionCheckpointOriginItem "xai"))
             BS.isInfixOf
                 "haskell-agent.local-compaction-summary"
                 encoded
                 `shouldBe` False
+            BS.isInfixOf checkpointOrigin encoded `shouldBe` False
             BS.isInfixOf "preserved.kind" encoded `shouldBe` True
 
         it "preserves custom grammar and namespace tool fields" do
@@ -232,7 +237,7 @@ providerHookApp
                 == Just "enabled"
         hasLocalMarker =
             BS.isInfixOf
-                "haskell-agent.local-compaction-summary"
+                "haskell-agent."
                 (LBS.toStrict body)
     modifyIORef' recordedModels (<> [requestModel])
     modifyIORef' recordedHeaders (<> [hasProviderHeader])
@@ -299,6 +304,7 @@ markedSummaryRequest = defaultResponseCreateParams
                 , executedToolCalls = Nothing
                 }
             }
+        , compactionCheckpointOriginItem "xai"
         ])
     }
 

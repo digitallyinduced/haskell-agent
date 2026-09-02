@@ -80,6 +80,7 @@ import Agent.OpenAI.ModelMetadata
     )
 import Agent.Responses.LoopBackend
     ( assistantTextFromResponse
+    , isServerCompactionCheckpoint
     , responseTokenUsage
     , turnInputsToItems
     , withRequestInput
@@ -93,6 +94,9 @@ import Agent.Provider
 import qualified Agent.OpenRouter.Client as OpenRouter
 import qualified Agent.OpenRouter.Options as OpenRouter
 import qualified Agent.XAI.Client as XAI
+import Agent.XAI.LoopBackend
+    ( isXaiCompactionCheckpointOriginItem
+    )
 import qualified Agent.XAI.Options as XAI
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
@@ -250,7 +254,7 @@ runProviderCompactWithContextWindow contextWindow openAiSender recordUsage
                         focus
 
     summaryHistoryPreparation
-        | provider == XAIProvider = filter isXaiLocalSummaryItem
+        | provider == XAIProvider = prepareXaiLocalSummaryHistory
         | otherwise = filter isPortableLocalSummaryItem
 
 -- | Summarize a host transcript through any isolated provider backend. The
@@ -299,7 +303,7 @@ runXaiBackendCompactHistoryWithContextWindow
     -> IO (Either ApiError CompactOutcome)
 runXaiBackendCompactHistoryWithContextWindow =
     runBackendCompactHistoryPreparedWithContextWindow
-        (filter isXaiLocalSummaryItem)
+        prepareXaiLocalSummaryHistory
 
 runBackendCompactHistoryPreparedWithContextWindow
     :: ([ResponseItem] -> [ResponseItem])
@@ -466,7 +470,7 @@ runXaiResponsesCompactWithContextWindow
     -> IO (Either Text CompactOutcome)
 runXaiResponsesCompactWithContextWindow =
     runResponsesCompactPreparedWithContextWindow
-        (filter isXaiLocalSummaryItem)
+        prepareXaiLocalSummaryHistory
 
 runResponsesCompactPreparedWithContextWindow
     :: ([ResponseItem] -> [ResponseItem])
@@ -850,38 +854,44 @@ summarizeLocalAttemptWith contextWindow prepareHistory send params history
     summaryHistory = prepareHistory history
 
 isPortableLocalSummaryItem :: ResponseItem -> Bool
-isPortableLocalSummaryItem = \case
-    -- Checkpoints are opaque provider protocol items. The portable path
-    -- cannot prove their provenance, so it must not replay them across
-    -- providers. The same-transport xAI path explicitly re-enables the xAI
-    -- checkpoint shapes below.
-    CompactionItemValue{} -> False
-    ContextCompactionItemValue{} -> False
-    CompactionTriggerItemValue{} -> False
-    KnownResponseItem ItemCompaction _ -> False
-    KnownResponseItem ItemContextCompaction _ -> False
-    KnownResponseItem ItemCompactionTrigger _ -> False
-    UnknownResponseItem tagged ->
-        Text.toLower (Text.strip tagged.tag)
-            `notElem`
-                [ "compaction"
-                , "compaction_summary"
-                , "context_compaction"
-                , "compaction_trigger"
-                ]
-    _ -> True
+isPortableLocalSummaryItem item
+    | Just _ <- responseItemCompactionCheckpointOrigin item = False
+    | otherwise =
+        case item of
+            -- Checkpoints are opaque provider protocol items. The portable
+            -- path cannot prove their provenance, so it must not replay them
+            -- across providers.
+            CompactionItemValue{} -> False
+            ContextCompactionItemValue{} -> False
+            CompactionTriggerItemValue{} -> False
+            KnownResponseItem ItemCompaction _ -> False
+            KnownResponseItem ItemContextCompaction _ -> False
+            KnownResponseItem ItemCompactionTrigger _ -> False
+            UnknownResponseItem tagged ->
+                Text.toLower (Text.strip tagged.tag)
+                    `notElem`
+                        [ "compaction"
+                        , "compaction_summary"
+                        , "context_compaction"
+                        , "compaction_trigger"
+                        ]
+            _ -> True
 
-isXaiLocalSummaryItem :: ResponseItem -> Bool
-isXaiLocalSummaryItem item =
-    isXaiCompactionCheckpoint item
-        || isPortableLocalSummaryItem item
+-- Preserve opaque checkpoints only when the adjacent host-only marker proves
+-- they were emitted by xAI. The marker itself is never part of a summary
+-- request.
+prepareXaiLocalSummaryHistory :: [ResponseItem] -> [ResponseItem]
+prepareXaiLocalSummaryHistory = go
   where
-    isXaiCompactionCheckpoint = \case
-        CompactionItemValue{} -> True
-        ContextCompactionItemValue{} -> True
-        KnownResponseItem ItemCompaction _ -> True
-        KnownResponseItem ItemContextCompaction _ -> True
-        _ -> False
+    go (checkpoint : marker : rest)
+        | isServerCompactionCheckpoint checkpoint
+        , isXaiCompactionCheckpointOriginItem marker =
+            checkpoint : go rest
+    go (item : rest)
+        | isXaiCompactionCheckpointOriginItem item = go rest
+        | isPortableLocalSummaryItem item = item : go rest
+        | otherwise = go rest
+    go [] = []
 
 autoCompactOpenAiBackend
     :: TokenProvider

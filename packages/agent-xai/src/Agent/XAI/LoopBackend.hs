@@ -9,12 +9,15 @@ module Agent.XAI.LoopBackend
     ( xaiBackend
     , xaiBackendWithClientOptions
     , xaiBackendWith
+    , xaiCompactionCheckpointOriginItem
+    , isXaiCompactionCheckpointOriginItem
     ) where
 
 import Agent.Error (ApiError)
 import Agent.Loop (Backend)
 import Agent.Responses.LoopBackend
-    ( statelessResponsesBackend
+    ( isServerCompactionCheckpoint
+    , statelessResponsesBackend
     , tokenProviderStatelessResponsesBackend
     )
 import Agent.Responses.Types
@@ -46,11 +49,12 @@ xaiBackendWithClientOptions
 xaiBackendWithClientOptions optionsForRequest provider =
     tokenProviderStatelessResponsesBackend provider
         (\credential request onEvent ->
-            createResponseWithEvents
-                (optionsForRequest request)
-                credential
-                request
-                onEvent)
+            fmap (fmap markXaiServerCompactionCheckpoint) $
+                createResponseWithEvents
+                    (optionsForRequest request)
+                    credential
+                    request
+                    onEvent)
 
 -- | Same mapping as 'xaiBackend', with an injectable transport for tests and
 -- downstream integrations.
@@ -60,4 +64,36 @@ xaiBackendWith
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
     -> Backend
-xaiBackendWith = statelessResponsesBackend
+xaiBackendWith send =
+    statelessResponsesBackend \request onEvent ->
+        fmap (fmap markXaiServerCompactionCheckpoint)
+            (send request onEvent)
+
+-- | Local-only marker kept immediately after xAI's opaque checkpoint.
+xaiCompactionCheckpointOriginItem :: ResponseItem
+xaiCompactionCheckpointOriginItem =
+    compactionCheckpointOriginItem "xai"
+
+isXaiCompactionCheckpointOriginItem :: ResponseItem -> Bool
+isXaiCompactionCheckpointOriginItem item =
+    responseItemCompactionCheckpointOrigin item == Just "xai"
+
+-- Mark only a checkpoint emitted by this xAI response. Existing request
+-- history may contain an indistinguishable checkpoint from another provider.
+markXaiServerCompactionCheckpoint :: Response -> Response
+markXaiServerCompactionCheckpoint response =
+    let Response{..} = response
+    in Response
+        { output = markLatestCheckpoint output
+        , ..
+        }
+  where
+    markLatestCheckpoint items =
+        case break isServerCompactionCheckpoint (reverse items) of
+            (_, []) -> items
+            (after, checkpoint : before) ->
+                reverse before
+                    <> ( checkpoint
+                        : xaiCompactionCheckpointOriginItem
+                        : reverse after
+                       )

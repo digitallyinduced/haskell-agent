@@ -4,7 +4,10 @@ module Agent.OpenAI.Request
     ) where
 
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
-import Agent.Responses.Request (stripReplayedInputStatus)
+import Agent.Responses.Request
+    ( stripLocalCompactionMarker
+    , stripReplayedInputStatus
+    )
 import Agent.Responses.Types
 
 -- | Keep Codex-incompatible fields out of the serialized request.
@@ -35,16 +38,19 @@ sanitizeCodexRequest ResponseCreateParams
         , parallelToolCalls
         , ..
         } =
-    ResponseCreateParams
-        { promptCacheRetention = Nothing
-        , input =
-            fmap (stripReplayedInputStatus . stripContentItemKindsInput) input
-        , parallelToolCalls =
-            if maybe False isCodexResponsesLiteModel model
-                then Just False
-                else parallelToolCalls
-        , ..
-        }
+    stripLocalCompactionMarker $
+        ResponseCreateParams
+            { promptCacheRetention = Nothing
+            , input =
+                fmap
+                    (stripReplayedInputStatus . stripContentItemKindsInput)
+                    input
+            , parallelToolCalls =
+                if maybe False isCodexResponsesLiteModel model
+                    then Just False
+                    else parallelToolCalls
+            , ..
+            }
 
 stripContentItemKindsInput :: ResponseInput -> ResponseInput
 stripContentItemKindsInput = \case

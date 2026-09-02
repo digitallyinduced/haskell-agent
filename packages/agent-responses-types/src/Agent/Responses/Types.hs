@@ -25,6 +25,8 @@ module Agent.Responses.Types
     , ResponseMessage(..)
     , localCompactionSummaryContentItemKind
     , responseMessageHasContentItemKind
+    , compactionCheckpointOriginItem
+    , responseItemCompactionCheckpointOrigin
     , ResponseAgentMessage(..)
     , InternalChatMetadata(..)
     , AdditionalToolsItem(..)
