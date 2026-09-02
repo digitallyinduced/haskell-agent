@@ -727,14 +727,13 @@ runAgentProviders
                                         subagentRuntime
                                         dialect
                                         ctx.multiSendToRoot
+                                        xaiContextWindow
+                                        xaiCompactThresholdFor
                                         (\childParams ->
-                                            protectXaiOverflow
-                                                contextTokensRef
-                                                (pure childParams)
-                                                (xaiBackendWithClientOptions
-                                                    xaiOptionsFor
-                                                    tokenProvider
-                                                    (pure childParams)))
+                                            xaiBackendWithClientOptions
+                                                xaiOptionsFor
+                                                tokenProvider
+                                                (pure childParams))
                             Nothing -> pure ()
                         let btwBackend privateParams =
                                 xaiBackendWithClientOptions
@@ -783,7 +782,9 @@ runAgentProviders
                                         (XAIRequest.mapModel xaiOptions)
                                 historyRef <-
                                     newIORef =<< readLiveTranscript conversationRef
-                                installLiveCompactOutcome conversationRef Nothing
+                                installLiveCompactOutcome
+                                    conversationRef
+                                    (Just contextTokensRef)
                                     (runResponsesCompactWithContextWindow
                                         contextWindow
                                         (\request ->
