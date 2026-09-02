@@ -1131,10 +1131,27 @@ spec = do
             (_, hovered) <-
                 runFullscreenScriptWithState
                     initialState
-                    [ FullscreenScriptMouseUp name
+                    [ FullscreenScriptMouseUp name (B.Location (0, 0))
                     , FullscreenScriptHalt
                     ]
             hovered.appHoveredControl `shouldBe` Just name
+            hovered.appHoveredLine `shouldBe` Just 0
+            hovered.appUi.uiSelectedBlock `shouldBe` Nothing
+
+        it "tracks the hovered transcript line inside a multi-line item" do
+            runtime <- newScriptRuntime initialUiState
+            let blockId = BlockId 42
+                name = ConversationBlock AgentRoot blockId
+                initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, hovered) <-
+                runFullscreenScriptWithState
+                    initialState
+                    [ FullscreenScriptMouseUp name (B.Location (4, 2))
+                    , FullscreenScriptHalt
+                    ]
+            hovered.appHoveredControl `shouldBe` Just name
+            hovered.appHoveredLine `shouldBe` Just 2
             hovered.appUi.uiSelectedBlock `shouldBe` Nothing
 
         it "clears the hovered transcript row after the pointer leaves" do
@@ -1145,11 +1162,12 @@ spec = do
             (_, finalState) <-
                 runFullscreenScriptWithState
                     initialState
-                    [ FullscreenScriptMouseUp name
-                    , FullscreenScriptMouseUp ConversationViewport
+                    [ FullscreenScriptMouseUp name (B.Location (0, 1))
+                    , FullscreenScriptMouseUp ConversationViewport (B.Location (0, 0))
                     , FullscreenScriptHalt
                     ]
             finalState.appHoveredControl `shouldBe` Nothing
+            finalState.appHoveredLine `shouldBe` Nothing
 
         it "clears the hovered transcript row when terminal focus is lost" do
             runtime <- newScriptRuntime initialUiState
@@ -1159,11 +1177,12 @@ spec = do
             (_, finalState) <-
                 runFullscreenScriptWithState
                     initialState
-                    [ FullscreenScriptMouseUp name
+                    [ FullscreenScriptMouseUp name (B.Location (0, 0))
                     , FullscreenScriptVty V.EvLostFocus
                     , FullscreenScriptHalt
                     ]
             finalState.appHoveredControl `shouldBe` Nothing
+            finalState.appHoveredLine `shouldBe` Nothing
 
     describe "fullscreen window title" do
         it "replays the stored session title as UTF-8 OSC bytes" do
@@ -2137,7 +2156,7 @@ spec = do
 data FullscreenScriptEvent
     = FullscreenScriptApp !AppEvent
     | FullscreenScriptVty !V.Event
-    | FullscreenScriptMouseUp !Name
+    | FullscreenScriptMouseUp !Name !B.Location
     | FullscreenScriptHalt
 
 data ReplacementScenario
@@ -2712,9 +2731,9 @@ runFullscreenScriptWithState initialState script = do
                     fullscreenApp.appHandleEvent (AppEvent event)
                 AppEvent (FullscreenScriptVty event) ->
                     fullscreenApp.appHandleEvent (VtyEvent event)
-                AppEvent (FullscreenScriptMouseUp name) ->
+                AppEvent (FullscreenScriptMouseUp name location) ->
                     fullscreenApp.appHandleEvent
-                        (MouseUp name Nothing (B.Location (0, 0)))
+                        (MouseUp name Nothing location)
                 AppEvent FullscreenScriptHalt ->
                     halt
                 VtyEvent event ->

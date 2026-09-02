@@ -69,14 +69,17 @@ spec = do
             V.attrForeColor activeBorder
                 `shouldBe` V.SetTo (RGBColor 60 60 65)
 
-        it "gives fixed-theme hover attributes explicit surfaces" do
+        it "gives fixed-theme hover attributes a weaker surface than selection" do
             let theme = Theme.themeAttrMap Theme.Midnight
                 hover = attrMapLookup Theme.transcriptHoverAttr theme
                 hoverMuted =
                     attrMapLookup Theme.transcriptHoverMutedAttr theme
-            V.attrBackColor hover `shouldBe` V.SetTo (RGBColor 44 44 44)
+                selected = attrMapLookup Theme.selectedAttr theme
+            V.attrBackColor hover `shouldBe` V.SetTo (RGBColor 28 28 28)
             V.attrBackColor hoverMuted
-                `shouldBe` V.SetTo (RGBColor 44 44 44)
+                `shouldBe` V.SetTo (RGBColor 28 28 28)
+            V.attrForeColor hover `shouldBe` V.Default
+            V.attrBackColor hover `shouldNotBe` V.attrBackColor selected
 
         it "keeps the daylight page background while dimming overlays" do
             V.attrBackColor
@@ -264,18 +267,15 @@ spec = do
                     attrMapLookup
                         Theme.transcriptHoverAttr
                         theme
-                hoveredTheme =
-                    mapAttrName
+                hoverMuted =
+                    attrMapLookup
                         Theme.transcriptHoverMutedAttr
-                        Theme.mutedAttr
-                        (setDefaultAttr hover theme)
-                hoveredMuted =
-                    attrMapLookup Theme.mutedAttr hoveredTheme
+                        theme
             V.attrBackColor hover `shouldBe` V.SetTo V.brightBlack
-            V.attrForeColor hover `shouldBe` V.SetTo V.white
-            V.attrForeColor hoveredMuted `shouldBe` V.SetTo V.white
-            V.attrBackColor hoveredMuted `shouldBe` V.SetTo V.brightBlack
-            V.attrStyle hoveredMuted `shouldBe` V.SetTo V.dim
+            V.attrForeColor hover `shouldBe` V.Default
+            V.attrForeColor hoverMuted `shouldBe` V.SetTo V.white
+            V.attrBackColor hoverMuted `shouldBe` V.SetTo V.brightBlack
+            V.attrStyle hoverMuted `shouldBe` V.SetTo V.dim
 
         it "does not introduce colors in monochrome mode" do
             map

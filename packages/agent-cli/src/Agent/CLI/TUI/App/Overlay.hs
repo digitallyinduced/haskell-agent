@@ -997,6 +997,7 @@ openMetaConsole = do
                     }
             , appAgentHover = Nothing
             , appHoveredControl = Nothing
+            , appHoveredLine = Nothing
             , appPressedControl = Nothing
             }
 

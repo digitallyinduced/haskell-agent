@@ -116,6 +116,7 @@ data ThemeKind
 data ThemePalette = ThemePalette
     { themePaletteBackground :: !V.Color
     , themePaletteRaised :: !V.Color
+    , themePaletteHover :: !V.Color
     , themePaletteFocused :: !V.Color
     , themePaletteForeground :: !V.Color
     , themePaletteStrong :: !V.Color
@@ -185,6 +186,7 @@ fixedThemePalette = \case
     Midnight -> Just ThemePalette
         { themePaletteBackground = RGBColor 20 20 20
         , themePaletteRaised = RGBColor 36 36 36
+        , themePaletteHover = RGBColor 28 28 28
         , themePaletteFocused = RGBColor 44 44 44
         , themePaletteForeground = RGBColor 200 200 200
         , themePaletteStrong = RGBColor 225 225 225
@@ -202,6 +204,7 @@ fixedThemePalette = \case
     Daylight -> Just ThemePalette
         { themePaletteBackground = RGBColor 250 247 242
         , themePaletteRaised = RGBColor 255 255 255
+        , themePaletteHover = RGBColor 228 223 216
         , themePaletteFocused = RGBColor 242 237 230
         , themePaletteForeground = RGBColor 45 42 46
         , themePaletteStrong = RGBColor 30 28 31
@@ -219,6 +222,7 @@ fixedThemePalette = \case
     TokyoNight -> Just ThemePalette
         { themePaletteBackground = RGBColor 26 27 38
         , themePaletteRaised = RGBColor 36 40 59
+        , themePaletteHover = RGBColor 34 36 50
         , themePaletteFocused = RGBColor 47 53 73
         , themePaletteForeground = RGBColor 192 202 245
         , themePaletteStrong = RGBColor 218 224 255
@@ -236,6 +240,7 @@ fixedThemePalette = \case
     RosePineMoon -> Just ThemePalette
         { themePaletteBackground = RGBColor 25 23 36
         , themePaletteRaised = RGBColor 38 35 58
+        , themePaletteHover = RGBColor 33 31 48
         , themePaletteFocused = RGBColor 49 46 69
         , themePaletteForeground = RGBColor 224 222 244
         , themePaletteStrong = RGBColor 240 238 255
@@ -253,6 +258,7 @@ fixedThemePalette = \case
     OscuraMidnight -> Just ThemePalette
         { themePaletteBackground = RGBColor 8 12 18
         , themePaletteRaised = RGBColor 20 27 35
+        , themePaletteHover = RGBColor 16 20 26
         , themePaletteFocused = RGBColor 28 37 46
         , themePaletteForeground = RGBColor 220 235 245
         , themePaletteStrong = RGBColor 238 247 252
@@ -403,12 +409,24 @@ terminalDefault =
             palette V.brightGreen `V.withStyle` V.bold)
         , (selectedAttr, raisedPanelAttr `V.withStyle` V.bold)
         , (selectedMutedAttr, raisedPanelMutedAttr)
-        , (transcriptHoverAttr, raisedPanelMutedAttr)
-        , (transcriptHoverMutedAttr, V.defAttr `V.withStyle` V.dim)
+        -- Background-only: keep semantic foregrounds and avoid the strong
+        -- white-on-bright-black panel used for selection.
+        , (transcriptHoverAttr, V.defAttr `V.withBackColor` V.brightBlack)
+        , (transcriptHoverMutedAttr,
+            V.defAttr
+                `V.withForeColor` V.white
+                `V.withBackColor` V.brightBlack
+                `V.withStyle` V.dim)
         , (transcriptHoverMutedItalicAttr,
-            V.defAttr `V.withStyle` (V.dim .|. V.italic))
+            V.defAttr
+                `V.withForeColor` V.white
+                `V.withBackColor` V.brightBlack
+                `V.withStyle` (V.dim .|. V.italic))
         , (transcriptHoverMutedCancelledAttr,
-            V.defAttr `V.withStyle` (V.dim .|. V.strikethrough))
+            V.defAttr
+                `V.withForeColor` V.white
+                `V.withBackColor` V.brightBlack
+                `V.withStyle` (V.dim .|. V.strikethrough))
         , (borderAttr, palette V.brightBlack `V.withStyle` V.dim)
         , (borderActiveAttr, palette V.brightBlack)
         , (headingAttr, palette V.magenta `V.withStyle` V.bold)
@@ -575,13 +593,12 @@ mkTheme palette =
         , (completionFlashAttr, greenA `V.withStyle` V.bold)
         , (selectedAttr, focusedStrong `V.withStyle` V.bold)
         , (selectedMutedAttr, focusedMuted)
-        , (transcriptHoverAttr, focused)
-        , (transcriptHoverMutedAttr,
-            focusedMuted `V.withStyle` V.dim)
+        , (transcriptHoverAttr, hoverA)
+        , (transcriptHoverMutedAttr, hoverMuted `V.withStyle` V.dim)
         , (transcriptHoverMutedItalicAttr,
-            focusedMuted `V.withStyle` (V.dim .|. V.italic))
+            hoverMuted `V.withStyle` (V.dim .|. V.italic))
         , (transcriptHoverMutedCancelledAttr,
-            focusedMuted `V.withStyle` (V.dim .|. V.strikethrough))
+            hoverMuted `V.withStyle` (V.dim .|. V.strikethrough))
         , (borderAttr, borderA `V.withStyle` V.dim)
         , (borderActiveAttr, borderActiveA)
         , (headingAttr, accentA `V.withStyle` V.bold)
@@ -618,6 +635,7 @@ mkTheme palette =
   where
     background = palette.themePaletteBackground
     raised = palette.themePaletteRaised
+    hoverBackground = palette.themePaletteHover
     focusedBackground = palette.themePaletteFocused
     foreground = palette.themePaletteForeground
     strong = palette.themePaletteStrong
@@ -655,10 +673,12 @@ mkTheme palette =
         V.defAttr
             `V.withForeColor` secondary
             `V.withBackColor` raised
-    focused =
+    hoverA =
+        V.defAttr `V.withBackColor` hoverBackground
+    hoverMuted =
         V.defAttr
-            `V.withForeColor` foreground
-            `V.withBackColor` focusedBackground
+            `V.withForeColor` muted
+            `V.withBackColor` hoverBackground
     focusedStrong =
         V.defAttr
             `V.withForeColor` strong
