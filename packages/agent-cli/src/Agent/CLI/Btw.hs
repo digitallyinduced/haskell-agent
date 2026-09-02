@@ -19,7 +19,9 @@ import Agent.Loop
     , initialBackendSnapshot
     )
 import Agent.Responses.Types
-    ( CustomToolCall(..)
+    ( ComputerCall(..)
+    , ComputerCallOutput(..)
+    , CustomToolCall(..)
     , CustomToolCallOutput(..)
     , FunctionCall(..)
     , FunctionCallOutput(..)
@@ -82,6 +84,7 @@ trimDanglingToolSuffix items =
 data ToolCallKey
     = FunctionCallKey !Text
     | CustomToolCallKey !Text
+    | ComputerCallKey !Text
     deriving (Eq, Ord)
 
 -- A fresh request cannot rely on provider-side continuation state. Keep only
@@ -110,6 +113,10 @@ retainCompleteToolPairs items =
         CustomToolCallItem call -> Just (True, CustomToolCallKey call.callId)
         CustomToolCallOutputItem output ->
             Just (False, CustomToolCallKey output.callId)
+        ComputerCallItem call ->
+            Just (True, ComputerCallKey call.computerCallId)
+        ComputerCallOutputItem output ->
+            Just (False, ComputerCallKey output.computerOutputCallId)
         _ -> Nothing
 
 splitAfterLastMessage :: [ResponseItem] -> ([ResponseItem], [ResponseItem])
@@ -130,12 +137,14 @@ outputCallIds :: [ResponseItem] -> Set Text
 outputCallIds = Set.fromList . foldMap \case
     FunctionCallOutputItem output -> [output.callId]
     CustomToolCallOutputItem output -> [output.callId]
+    ComputerCallOutputItem output -> [output.computerOutputCallId]
     _ -> []
 
 isUnmatchedCall :: Set Text -> ResponseItem -> Bool
 isUnmatchedCall completed = \case
     FunctionCallItem call -> Set.notMember call.callId completed
     CustomToolCallItem call -> Set.notMember call.callId completed
+    ComputerCallItem call -> Set.notMember call.computerCallId completed
     _ -> False
 
 dropTrailingReasoning :: [ResponseItem] -> [ResponseItem]

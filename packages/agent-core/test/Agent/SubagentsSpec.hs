@@ -832,7 +832,9 @@ spec = describe "Agent.Subagents" do
 
     it "releases nested subagent resources before their parent's resources" do
         released <- newIORef ([] :: [Text])
-        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+        registry <- newSubagentRegistry
+            (defaultSubagentConfig { maxDepth = Just 2 })
+            (fromFilePath "/tmp")
             (\_ _ prompt _ -> pure (completedResult (messagePayload prompt)))
             (\_ _ -> pure ())
         Right parent <- spawnSubagentWithCwdPrepared registry (fromFilePath "/tmp")

@@ -62,6 +62,26 @@ spec = do
                     ]
             trimDanglingToolSuffix items `shouldBe` [userItem "continued later"]
 
+        it "keeps complete native computer-call pairs" do
+            let items =
+                    [ userItem "before"
+                    , computerCallItem "computer-1"
+                    , computerOutputItem "computer-1"
+                    ]
+            trimDanglingToolSuffix items `shouldBe` items
+
+        it "drops reasoning and an unmatched native computer call" do
+            let prefix = [userItem "before"]
+                items = prefix <> [reasoningItem, computerCallItem "computer-live"]
+            trimDanglingToolSuffix items `shouldBe` prefix
+
+        it "removes an orphan native computer output" do
+            let items =
+                    [ computerOutputItem "computer-orphan"
+                    , userItem "continued later"
+                    ]
+            trimDanglingToolSuffix items `shouldBe` [userItem "continued later"]
+
         it "does not pair an output that precedes its call" do
             let items =
                     [ functionOutputItem "torn"
@@ -188,6 +208,27 @@ functionCallItem callId = FunctionCallItem FunctionCall
     , encryptedFunctionArgs = Nothing
     , status = Nothing
     }
+
+computerCallItem :: Text.Text -> ResponseItem
+computerCallItem computerCallId = ComputerCallItem ComputerCall
+    { computerCallItemId = Nothing
+    , computerCallId
+    , computerActions = []
+    , pendingSafetyChecks = []
+    , computerCallStatus = Nothing
+    , computerCallExtra = mempty
+    }
+
+computerOutputItem :: Text.Text -> ResponseItem
+computerOutputItem computerOutputCallId =
+    ComputerCallOutputItem ComputerCallOutput
+        { computerOutputItemId = Nothing
+        , computerOutputCallId
+        , screenshotDataUrl = ""
+        , acknowledgedChecks = []
+        , computerOutputStatus = Nothing
+        , computerOutputExtra = mempty
+        }
 
 functionOutputItem :: Text.Text -> ResponseItem
 functionOutputItem callId = FunctionCallOutputItem FunctionCallOutput
