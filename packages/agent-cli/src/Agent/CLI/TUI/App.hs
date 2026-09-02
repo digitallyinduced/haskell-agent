@@ -27,6 +27,7 @@ module Agent.CLI.TUI.App
     , launchExternalUrlCommand
     , hasQueuedFullscreenInput
     , initialFullscreenAppState
+    , isCommandPaletteKey
     , mergeConversationView
     , motionDemandFor
     , motionDemandForTerminalFocus

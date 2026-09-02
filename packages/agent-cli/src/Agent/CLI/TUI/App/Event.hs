@@ -416,6 +416,8 @@ handleEventInner' event = case event of
                     , appSlashIndex = 0
                     , appSlashDismissed = False
                     }
+    AppEvent (AppCommandPaletteSelected action) ->
+        handleCommandPaletteSelection action
     AppEvent (AppSetModelIds modelIds) -> do
         state <- get
         if state.appSlashCatalog.slashCatalogModelIds == modelIds
@@ -1006,7 +1008,11 @@ handleEventInner' event = case event of
     VtyEvent vtyEvent -> do
         clearAgentHover
         state <- get
-        if isMetaConsoleToggle vtyEvent && metaConsoleToggleAvailable state
+        if isCommandPaletteKey vtyEvent
+                && commandPaletteAvailable state
+            then openCommandPalette
+            else if isMetaConsoleToggle vtyEvent
+                && metaConsoleToggleAvailable state
             then
                 case state.appMetaConsole of
                     Just _ -> closeMetaConsole
@@ -1031,6 +1037,62 @@ handleEventInner' event = case event of
                             (Nothing, Nothing, Nothing, Nothing) ->
                                 handleNormalKey vtyEvent
     _ -> pure ()
+
+-- | Ctrl-P is deliberately accepted in both Vty's modified-key form and the
+-- legacy C0 control-character form. The latter still occurs in terminals
+-- without keyboard disambiguation support.
+isCommandPaletteKey :: V.Event -> Bool
+isCommandPaletteKey = \case
+    V.EvKey (V.KChar 'p') modifiers ->
+        V.MCtrl `elem` modifiers
+            && V.MMeta `notElem` modifiers
+            && V.MAlt `notElem` modifiers
+    V.EvKey (V.KChar '\DLE') [] -> True
+    _ -> False
+
+commandPaletteAvailable :: AppState -> Bool
+commandPaletteAvailable state =
+    isNothing state.appResume
+        && isNothing state.appTextPrompt
+        && isNothing state.appChoice
+        && isNothing state.appUi.uiPermission
+        && isNothing state.appMetaConsole
+        && isNothing state.appDictation
+
+handleCommandPaletteSelection
+    :: CommandPaletteAction
+    -> EventM Name AppState ()
+handleCommandPaletteSelection = \case
+    CommandPaletteDismiss -> pure ()
+    CommandPaletteInsert inserted -> do
+        state <- get
+        let ui = state.appUi
+            before = Text.take ui.uiCursor ui.uiDraft
+            after = Text.drop ui.uiCursor ui.uiDraft
+        applyLocalUiEvent
+            (UiSetDraft
+                (before <> inserted <> after)
+                (ui.uiCursor + Text.length inserted))
+        applyLocalUiEvent (UiFocusChanged FocusComposer)
+    CommandPaletteSubmit command -> do
+        state <- get
+        let queued = not state.appUi.uiAwaitingInput
+        result <- liftIO $ atomically $
+            Composer.appendFullscreenInput
+                state.appRuntime.runtimeInput
+                FullscreenInput
+                    { fullscreenInputLine = ReplText command
+                    , fullscreenInputQueued = queued
+                    , fullscreenInputDisplay = Nothing
+                    }
+        case result of
+            Left message ->
+                applyLocalUiEvent $
+                    UiSetNotice (Just (warningNotice message))
+            Right ()
+                | queued -> pure ()
+                | otherwise ->
+                    applyLocalUiEvent (UiSetAwaitingInput False)
 
 eventClearsMarkdownLinkCursor :: BrickEvent Name AppEvent -> Bool
 eventClearsMarkdownLinkCursor = \case

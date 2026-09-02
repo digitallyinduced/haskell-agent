@@ -684,6 +684,13 @@ appEventLogicalBytes = \case
                 skills)
     AppSetModelIds modelIds ->
         saturatingAdd 256 (logicalTextsBytes modelIds)
+    AppCommandPaletteSelected action ->
+        case action of
+            CommandPaletteSubmit text ->
+                saturatingAdd 128 (logicalTextBytes text)
+            CommandPaletteInsert text ->
+                saturatingAdd 128 (logicalTextBytes text)
+            CommandPaletteDismiss -> 128
     AppSetTheme{} ->
         256
     AppAgentSnapshot target entries ->

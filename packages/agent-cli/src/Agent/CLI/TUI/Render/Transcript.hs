@@ -411,7 +411,7 @@ quickStartRows :: [(Name, Text, Text)]
 quickStartRows =
     [ (QuickStartWorktree, "New worktree", "/worktree")
     , (QuickStartResume, "Resume session", "/resume")
-    , (QuickStartCommands, "Browse commands", "/")
+    , (QuickStartCommands, "Browse commands", "Ctrl-P")
     , (QuickStartModel, "Manage models", "/model")
     , (QuickStartChangelog, "View changelog", "/changelog")
     ]

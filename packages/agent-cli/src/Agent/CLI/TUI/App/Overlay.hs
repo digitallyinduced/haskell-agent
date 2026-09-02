@@ -384,6 +384,43 @@ resolveResume confirmed = do
             }
     resumeNativeProgressIfRunning
 
+openCommandPalette :: EventM Name AppState ()
+openCommandPalette = do
+    state <- get
+    let catalog = state.appSlashCatalog
+        rows = commandPaletteRows catalog
+        reply = \case
+            Just selection ->
+                case commandPaletteActionAt
+                        selection.choiceSelectionIndex
+                        catalog of
+                    Just CommandPaletteDismiss -> pure ()
+                    Just action ->
+                        enqueueAppEvent
+                            state.appRuntime
+                            (AppCommandPaletteSelected action)
+                    Nothing -> pure ()
+            Nothing -> pure ()
+    liftIO (state.appRuntime.runtimeNativeProgress False)
+    modify' \current ->
+        current
+            { appChoice = Just ChoiceOverlay
+                { choicePresentation = ChoiceDialog
+                , choiceTitle = "Commands & shortcuts"
+                , choiceBody = ""
+                , choiceIndex = 0
+                , choiceRows = rows
+                , choiceSearch = True
+                , choiceQuery = ""
+                , choiceAdjustments = Nothing
+                , choiceAdjustmentIndices = []
+                , choiceCloseOnTurnEnd = False
+                }
+            , appChoiceReply = Just reply
+            , appAgentHover = Nothing
+            }
+    vScrollToBeginning (viewportScroll OverlayViewport)
+
 -- | Move the selected source row's adjustable value without disturbing its
 -- search query or list selection. Values clamp at their endpoints.
 adjustChoiceValue :: Int -> ChoiceOverlay -> ChoiceOverlay
@@ -528,7 +565,13 @@ handleFilterChoiceKey event = case event of
     V.EvMouseDown _ _ V.BScrollDown _ ->
         vScrollBy (viewportScroll OverlayViewport) mouseScrollLines
     V.EvKey V.KEnter [] -> resolveChoice True
-    V.EvKey V.KEsc [] -> resolveChoice False
+    V.EvKey V.KEsc [] -> do
+        state <- get
+        case state.appChoice of
+            Just choice
+                | not (Text.null choice.choiceQuery) ->
+                    updateChoiceQuery (const "")
+            _ -> resolveChoice False
     V.EvKey V.KBS [] -> updateChoiceQuery (Text.dropEnd 1)
     V.EvKey (V.KChar char) []
         | isPrint char ->
@@ -636,10 +679,7 @@ activateControl = \case
         activateQuickStartCommand "/worktree"
     QuickStartResume ->
         activateQuickStartCommand "/resume"
-    QuickStartCommands ->
-        applyLocalUiEventWith
-            (UiSetDraft "/" 1)
-            (applyUiEvent (UiFocusChanged FocusComposer))
+    QuickStartCommands -> openCommandPalette
     QuickStartModel ->
         Composer.handlePromptControlClick
             applyLocalUiEventWith

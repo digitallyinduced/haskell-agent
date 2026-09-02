@@ -9,7 +9,7 @@ import Agent.CLI.AgentViewport
 import Agent.CLI.Input (ReplLine(..), terminalTextWidth)
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.Command
-    ( SlashCatalog(slashCatalogToolNames)
+    ( SlashCatalog(..)
     , defaultSlashCatalog
     )
 import Agent.CLI.Resume
@@ -41,6 +41,7 @@ import Agent.CLI.TUI.App
     , fullscreenSurface
     , fullscreenApp
     , initialFullscreenAppState
+    , isCommandPaletteKey
     , isMetaConsoleToggle
     , mergeConversationView
     , newFullscreenInputBuffer
@@ -81,7 +82,12 @@ import Agent.CLI.TUI.Types
     , ChoiceOverlay(..)
     , ChoicePresentation(..)
     , ChoiceSelection(..)
+    , CommandPaletteAction(..)
+    , CommandPaletteEntry(..)
     , FullscreenInput(..)
+    , commandPaletteActionAt
+    , commandPaletteEntries
+    , commandPaletteRows
     , choiceVisibleRows
     , selectedChoiceIndex
     , selectedChoice
@@ -603,6 +609,141 @@ spec = do
                 `shouldBe` Composer.fullscreenInputCountLimit
 
     describe "choice overlay lifecycle" do
+        it "derives searchable command rows and aliases from the slash catalog" do
+            let entries = commandPaletteEntries defaultSlashCatalog
+                commandEntries =
+                    filter
+                        (Text.isPrefixOf "Command · "
+                            . (.commandPaletteLabel))
+                        entries
+                modelEntry =
+                    find
+                        (Text.isPrefixOf "/model"
+                            . (.commandPaletteDetail))
+                        entries
+                diffEntry =
+                    find
+                        (Text.isPrefixOf "/diff"
+                            . (.commandPaletteDetail))
+                        entries
+                searchEntry =
+                    find
+                        (Text.isPrefixOf "/search"
+                            . (.commandPaletteDetail))
+                        entries
+            length commandEntries
+                `shouldBe`
+                    length defaultSlashCatalog.slashCatalogCommands
+            (.commandPaletteDetail) <$> modelEntry
+                `shouldSatisfy`
+                    maybe False (Text.isInfixOf "aliases /m")
+            (.commandPaletteAction) <$> modelEntry
+                `shouldBe` Just (CommandPaletteSubmit "/model")
+            (.commandPaletteAction) <$> diffEntry
+                `shouldBe` Just (CommandPaletteSubmit "/diff")
+            (.commandPaletteAction) <$> searchEntry
+                `shouldBe` Just (CommandPaletteInsert "/search ")
+            commandPaletteRows defaultSlashCatalog
+                `shouldSatisfy`
+                    any
+                        ((== "Ctrl-P") . snd)
+
+        it "maps a filtered palette selection back to its source command" do
+            let catalog = defaultSlashCatalog
+                rows = commandPaletteRows catalog
+                query = "Open the model picker"
+                sourceIndex =
+                    fst <$> find
+                        (Text.isInfixOf query . fst . snd)
+                        (zip [0 ..] rows)
+                filtered =
+                    (choiceOverlay False)
+                        { choiceSearch = True
+                        , choiceQuery = query
+                        , choiceRows = rows
+                        , choiceIndex = 0
+                        }
+            selectedChoiceIndex filtered `shouldBe` sourceIndex
+            (sourceIndex >>= (`commandPaletteActionAt` catalog))
+                `shouldBe` Just (CommandPaletteSubmit "/model")
+
+        it "recognizes Ctrl-P in modified and legacy terminal encodings" do
+            isCommandPaletteKey
+                (V.EvKey (V.KChar 'p') [V.MCtrl])
+                `shouldBe` True
+            isCommandPaletteKey
+                (V.EvKey (V.KChar '\DLE') [])
+                `shouldBe` True
+            isCommandPaletteKey
+                (V.EvKey (V.KChar 'p') [V.MAlt])
+                `shouldBe` False
+
+        it "clears palette search on the first Escape, then closes it" do
+            runtime <- newScriptRuntime initialUiState
+            let initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+                openAndSearch =
+                    [ FullscreenScriptVty
+                        (V.EvKey (V.KChar 'p') [V.MCtrl])
+                    , FullscreenScriptVty
+                        (V.EvKey (V.KChar 'm') [])
+                    , FullscreenScriptVty (V.EvKey V.KEsc [])
+                    ]
+            (_, searchedState) <-
+                runFullscreenScriptWithState
+                    initialState
+                    (openAndSearch <> [FullscreenScriptHalt])
+            (.choiceQuery) <$> searchedState.appChoice
+                `shouldBe` Just ""
+            (_, closedState) <-
+                runFullscreenScriptWithState
+                    initialState
+                    (openAndSearch
+                        <> [ FullscreenScriptVty (V.EvKey V.KEsc [])
+                           , FullscreenScriptHalt
+                           ])
+            closedState.appChoice `shouldBe` Nothing
+
+        it "inserts required command prefixes at the composer cursor" do
+            let ui =
+                    reduceUi (UiSetDraft "ask later" 4) initialUiState
+            runtime <- newScriptRuntime ui
+            let initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, finalState) <-
+                runFullscreenScriptWithState
+                    initialState
+                    [ FullscreenScriptApp
+                        (AppCommandPaletteSelected
+                            (CommandPaletteInsert "/search "))
+                    , FullscreenScriptHalt
+                    ]
+            finalState.appUi.uiDraft `shouldBe` "ask /search later"
+            finalState.appUi.uiCursor `shouldBe` 12
+
+        it "dispatches complete commands while preserving a draft" do
+            let draft = "? unfinished prompt"
+                ui =
+                    reduceUi
+                        (UiSetDraft draft (Text.length draft))
+                        initialUiState
+            runtime <- newScriptRuntime ui
+            let initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, finalState) <-
+                runFullscreenScriptWithState
+                    initialState
+                    [ FullscreenScriptApp
+                        (AppCommandPaletteSelected
+                            (CommandPaletteSubmit "/diff"))
+                    , FullscreenScriptHalt
+                    ]
+            inputs <- atomically $
+                Composer.readFullscreenInputs runtime.runtimeInput
+            (.fullscreenInputLine) <$> toList inputs
+                `shouldBe` [ReplText "/diff"]
+            finalState.appUi.uiDraft `shouldBe` draft
+
         it "renders and dismisses changelog release notes without choice rows" do
             runtime <- newScriptRuntime initialUiState
             reply <- newEmptyTMVarIO
@@ -1075,7 +1216,7 @@ spec = do
                 `shouldBe`
                     [ (QuickStartWorktree, "New worktree", "/worktree")
                     , (QuickStartResume, "Resume session", "/resume")
-                    , (QuickStartCommands, "Browse commands", "/")
+                    , (QuickStartCommands, "Browse commands", "Ctrl-P")
                     , (QuickStartModel, "Manage models", "/model")
                     , (QuickStartChangelog, "View changelog", "/changelog")
                     ]
