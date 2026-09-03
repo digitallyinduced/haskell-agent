@@ -28,6 +28,7 @@ import qualified Agent.CLI.DialectsSpec as DialectsSpec
 import qualified Agent.CLI.DatabaseSpec as DatabaseSpec
 import qualified Agent.CLI.DesktopSpec as DesktopSpec
 import qualified Agent.CLI.ExternalProgramSpec as ExternalProgramSpec
+import qualified Agent.CLI.ExternalSessionSpec as ExternalSessionSpec
 import qualified Agent.CLI.FileUriSpec as FileUriSpec
 import qualified Agent.CLI.GatewayModelsSpec as GatewayModelsSpec
 import qualified Agent.CLI.GitDiffSpec as GitDiffSpec
@@ -132,6 +133,7 @@ main = hspec do
     DatabaseSpec.spec
     DesktopSpec.spec
     ExternalProgramSpec.spec
+    ExternalSessionSpec.spec
     FileUriSpec.spec
     GatewayModelsSpec.spec
     GitDiffSpec.spec

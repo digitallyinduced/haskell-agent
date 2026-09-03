@@ -22,12 +22,14 @@ import Agent.CLI.Compaction
       OccupancySnapshot,
       autoCompactBackendWith,
       boundCompletedToolContinuations,
+      claudeAutoCompactTokenLimit,
+      claudeCompactionInputLimit,
       decorateCompactOutcomeWithTaskPlan,
       decorateCompactOutcomeWithTaskPlanWithin,
       installLiveCompactOutcome,
       runProviderCompactWith,
-      runBackendCompactHistoryWithContextWindow,
-      runBackendCompactWithContextWindow,
+      runBackendCompactHistoryWithLimits,
+      runBackendCompactWithLimits,
       runResponsesCompactWithContextWindow )
 import Agent.CLI.Config ()
 import Agent.Connectivity ( withConnectionRecoveryOn )
@@ -911,12 +913,18 @@ runAgentProviders
                                         currentParams
                             claudeCompactThreshold = do
                                 contextWindow <- claudeContextWindow
+                                let hardLimit =
+                                        claudeCompactionInputLimit contextWindow
                                 pure $
                                     max 1 $
-                                        min contextWindow $
+                                        min hardLimit $
                                             fromMaybe
-                                                (contextWindow * 4 `div` 5)
+                                                (claudeAutoCompactTokenLimit
+                                                    contextWindow)
                                                 options.optCompactThreshold
+                            claudeSummaryInputLimit =
+                                claudeCompactionInputLimit
+                                    <$> claudeContextWindow
                             btwBackend privateParams =
                                 Backend \state previous inputs onEvent -> do
                                     privateTranscript <-
@@ -936,6 +944,7 @@ runAgentProviders
                                         onEvent
                             compactRunner focus = do
                                 contextWindow <- claudeContextWindow
+                                inputLimit <- claudeSummaryInputLimit
                                 historyRef <-
                                     newIORef =<< readLiveTranscript
                                         conversationRef
@@ -943,8 +952,9 @@ runAgentProviders
                                     conversationRef
                                     (Just contextTokensRef)
                                     (\requestedFocus ->
-                                        runBackendCompactWithContextWindow
+                                        runBackendCompactWithLimits
                                             contextWindow
+                                            inputLimit
                                             btwBackend
                                             recordCompactionUsage
                                             paramsRef
@@ -1026,9 +1036,11 @@ runAgentProviders
                             \handle -> do
                                 let compactHistory history _inputs = do
                                         contextWindow <- claudeContextWindow
+                                        inputLimit <- claudeSummaryInputLimit
                                         currentParams <- readIORef paramsRef
-                                        runBackendCompactHistoryWithContextWindow
+                                        runBackendCompactHistoryWithLimits
                                             contextWindow
+                                            inputLimit
                                             btwBackend
                                             recordCompactionUsage
                                             currentParams

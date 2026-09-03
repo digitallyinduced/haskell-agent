@@ -15,6 +15,7 @@ spec = describe "syntax highlighting" do
             resolveFenceLanguage "py linenums" `shouldBe` Just "python"
             resolveFenceLanguage "c++" `shouldBe` Just "cpp"
             resolveFenceLanguage "PATCH" `shouldBe` Just "diff"
+            resolveFenceLanguage "udiff" `shouldBe` Just "diff"
 
         it "resolves Grok line-range file paths by extension" do
             resolveFenceLanguage "12:40:src/Agent/TUI/Markdown.hs"

@@ -6,8 +6,9 @@ import Agent.CLI.AgentViewport
     , AgentStepState(..)
     , AgentTarget(..)
     )
-import Agent.CLI.Interrupt (CtrlCDecision(..))
+import Agent.CLI.Command (ReplAction(ReplCopyPath))
 import Agent.CLI.Dictation (DictationTarget(..))
+import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
     ( appEventLogicalBytes
     , emitUiEvent
@@ -355,6 +356,7 @@ spec = describe "fullscreen TUI bridge" do
                 pasted `shouldBe` True
                 pure (Right ()))
             (const (modifyIORef' calls (<> ["new btw"])))
+            (const (modifyIORef' calls (<> ["new immediate command"])))
             (modifyIORef' calls (<> ["new recap"]))
             (const (modifyIORef' calls (<> ["new effort"])))
             (pure SoftCancel)
@@ -363,6 +365,7 @@ spec = describe "fullscreen TUI bridge" do
         runtime.runtimeCancel
         _ <- runtime.runtimeSteer True "guidance"
         runtime.runtimeBtw "question"
+        runtime.runtimeImmediateCommand ReplCopyPath
         runtime.runtimeRecap
         runtime.runtimeRestartEffort "high"
         runtime.runtimeAgentSelect AgentRoot
@@ -375,7 +378,15 @@ spec = describe "fullscreen TUI bridge" do
                 expectationFailure
                     "expected direct xAI dictation target"
         readIORef calls `shouldReturn`
-            ["old cancel", "new cancel", "new steer", "new btw", "new recap", "new effort", "new agent"]
+            [ "old cancel"
+            , "new cancel"
+            , "new steer"
+            , "new btw"
+            , "new immediate command"
+            , "new recap"
+            , "new effort"
+            , "new agent"
+            ]
         decision `shouldBe` SoftCancel
 
     it "defers syntax loading until the runtime starts it" do

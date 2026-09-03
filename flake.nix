@@ -658,6 +658,7 @@
                                 bun_1_4
                                 pkgs.postgresql_18
                                 pkgs.python3
+                                pkgs.zstd
                             ]);
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
@@ -730,6 +731,7 @@
                     bun_1_4
                     pkgs.postgresql_18
                     pkgs.ripgrep
+                    pkgs.zstd
                 ];
                 wrapAgentCli = package:
                     package.overrideAttrs
@@ -1147,7 +1149,9 @@
                             ffmpeg
                             bun_1_4
                             postgresql_18
+                            python3
                             ripgrep
+                            zstd
                         ])
                         ++ [ agentRepl ];
                 };

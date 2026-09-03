@@ -628,8 +628,9 @@ withDeliveryRepositoryWithFormat objectFormat action =
             (["init", "-q", "--bare"] <> formatArguments <> [remote])
         _ <- git root
             (["init", "-q", "-b", "main"] <> formatArguments)
-        _ <- git root ["config", "user.name", "Repository Delivery Test"]
-        _ <- git root ["config", "user.email", "delivery@example.test"]
+        appendFile
+            (root <> "/.git/config")
+            "\n[user]\n\tname = Repository Delivery Test\n\temail = delivery@example.test\n"
         writeFile (root <> "/tracked.txt") "first\n"
         _ <- git root ["add", "tracked.txt"]
         _ <- git root ["commit", "-q", "-m", "initial"]

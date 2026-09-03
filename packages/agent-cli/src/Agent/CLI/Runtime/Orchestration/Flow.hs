@@ -1010,6 +1010,7 @@ prepareAgentIterationTracked
                         (requestCancel toolEnv.toolCancel)
                         (\_ _ -> pure (Right ()))
                         (const (pure ()))
+                        (const (pure ()))
                         (pure ())
                         (\level ->
                             readIORef restartEffortActionRef >>= ($ level))
@@ -1102,6 +1103,7 @@ resetFullscreenSessionActions runtime =
         Nothing
         (pure ())
         (\_ _ -> pure (Right ()))
+        (const (pure ()))
         (const (pure ()))
         (pure ())
         (const (pure ()))

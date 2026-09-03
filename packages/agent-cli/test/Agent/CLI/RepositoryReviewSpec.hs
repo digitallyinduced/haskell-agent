@@ -41,7 +41,6 @@ import System.Process
     , createProcess
     , proc
     , readCreateProcessWithExitCode
-    , terminateProcess
     , waitForProcess
     )
 import System.Timeout (timeout)
@@ -284,12 +283,15 @@ spec = describe "repository review service" do
                     root
                         <> "/.git/haskell-agent-worktree.lock"
                 readyPath = root <> "/advisory-lock-ready"
+                releasePath = root <> "/advisory-lock-release"
                 script =
-                    "import fcntl,time;"
-                        <> "f=open(" <> show lockPath <> ",'w');"
-                        <> "fcntl.flock(f,fcntl.LOCK_EX);"
-                        <> "open(" <> show readyPath <> ",'w').close();"
-                        <> "time.sleep(30)"
+                    "import fcntl,os,time\n"
+                        <> "f=open(" <> show lockPath <> ",'w')\n"
+                        <> "fcntl.flock(f,fcntl.LOCK_EX)\n"
+                        <> "open(" <> show readyPath <> ",'w').close()\n"
+                        <> "while not os.path.exists("
+                        <> show releasePath
+                        <> "):\n time.sleep(0.01)\n"
             (_, _, _, locker) <-
                 createProcess (proc pythonExecutable ["-c", script])
             _ <- awaitFileContents readyPath 200
@@ -298,7 +300,7 @@ spec = describe "repository review service" do
             blocked `shouldSatisfy` \case
                 Nothing -> True
                 Just _ -> False
-            terminateProcess locker
+            writeFile releasePath ""
             _ <- waitForProcess locker
             waitCatch pending `shouldReturnSatisfying` \case
                 Right (Right _) -> True
@@ -737,8 +739,9 @@ spec = describe "repository review service" do
 withRepository :: (FilePath -> IO value) -> IO value
 withRepository action = withTempDirectory "repository-review" \root -> do
     _ <- git root ["init", "-q"]
-    _ <- git root ["config", "user.name", "Repository Review Test"]
-    _ <- git root ["config", "user.email", "review@example.test"]
+    appendFile
+        (root <> "/.git/config")
+        "\n[user]\n\tname = Repository Review Test\n\temail = review@example.test\n"
     writeFile (root <> "/tracked.txt") "first\n"
     _ <- git root ["add", "tracked.txt"]
     _ <- git root ["commit", "-q", "-m", "initial"]

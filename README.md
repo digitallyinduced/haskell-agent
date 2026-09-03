@@ -275,7 +275,9 @@ Press `Ctrl+R` in the prompt composer, speak, and press `Enter` to stop
 (or `Esc` to cancel). Recording stays in the TUI; it does not suspend or close
 the session. On macOS, the resulting transcript is inserted at the cursor.
 Dictation follows the active model provider: OpenAI models use OpenAI and Grok
-models use xAI. ChatGPT/Codex OAuth uses the subscription-backed streaming
+models use xAI. Claude models have no transcription API, so they borrow a
+locally configured OpenAI account and fall back to an xAI account when no
+OpenAI credential exists. ChatGPT/Codex OAuth uses the subscription-backed streaming
 protocol used by the official desktop app and falls back to its buffered
 ChatGPT transcription route with the same recording if streaming fails. API
 keys use the public OpenAI Realtime API. Both OpenAI paths can update the
@@ -290,8 +292,7 @@ When an organization gateway is connected, the recording is sent only to the
 gateway's authenticated `/v1/audio/transcriptions` endpoint. The gateway uses
 its organization-managed transcription pool and returns a final transcript
 after recording stops; it never falls back to local provider credentials.
-Dictation is currently unavailable for providers without a speech-to-text
-integration.
+Dictation is currently unavailable for OpenRouter and Gemini models.
 
 ### Claude Code subscription
 

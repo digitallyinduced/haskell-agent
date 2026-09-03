@@ -41,6 +41,10 @@ import Agent.CLI.Dialects
       filterBashTools,
       filterGhciTools )
 import Agent.CLI.Error ( formatException )
+import Agent.CLI.ExternalSession
+    ( defaultExternalSessionEnv
+    , externalSessionTool
+    )
 import Agent.CLI.GatewayClient
     ( GatewayCredential
     , GatewayModelAccess
@@ -87,7 +91,7 @@ import Agent.CLI.Options
       normalizeReasoningEffortForDialect,
       resolveApprovalPolicy,
       CliOptions(optYolo, optModel, optEffort, optMaxConcurrentAgents,
-                 optGhci, optBash, optComputerUse, optNoYolo) )
+                 optGhci, optBash, optComputerUse, optNoYolo, optSkills) )
 import Agent.CLI.PendingInputs
     ( PendingNoticeKind(..)
     , enqueuePendingInput
@@ -889,6 +893,18 @@ runAgentTools
         recordImageGenerationResponseItems
             imageGenerationHistory
             (foldSessionItems turns)
+    externalSessionAppTools <-
+        if options.optSkills
+            && nativeCapabilities.nativeHostExtensions
+            then do
+                env <-
+                    defaultExternalSessionEnv
+                        baseToolEnv
+                        (unsafeToFilePath cwd)
+                        (unsafeToFilePath sessionTmp)
+                        (unsafeToFilePath home)
+                pure [externalSessionTool env]
+            else pure []
     let cleanupAllocatedScratch = do
             cleanupPendingPersistence persist
             forM_ ephemeralSessionId \sessionId -> do
@@ -1260,6 +1276,7 @@ runAgentTools
             , HostToolGroup gatewayTools
             , HostToolGroup databaseAppTools
             , HostToolGroup learnedSkillAppTools
+            , HostToolGroup externalSessionAppTools
             ]
                 <> nativeToolGroups
                 <> [ HostToolGroup imageGenerationTools

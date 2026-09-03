@@ -201,8 +201,25 @@ installSkillCatalogWithOmissions reservedNames queueContext contextRef catalogRe
 -- models read SKILL.md and skill-relative resources even when packaged skills
 -- live outside the worktree (for example under /nix/store).
 installSkillToolRoots :: ToolEnv -> SkillCatalog -> IO ()
-installSkillToolRoots env catalog =
-    setToolSkillRoots env (map (.skillDirectory) catalog.catalogSkills)
+installSkillToolRoots env catalog = do
+    sharedRoots <-
+        if any isBuiltinExternalResume catalog.catalogSkills
+            then do
+                core <- getDataFileName "skills/shared/resume-session/CORE.md"
+                pure [unsafeEncodeUtf (FilePath.takeDirectory core)]
+            else pure []
+    setToolSkillRoots
+        env
+        (map (.skillDirectory) catalog.catalogSkills <> sharedRoots)
+  where
+    isBuiltinExternalResume skill =
+        skill.skillScope == BuiltinSkill
+            && skill.skillName `elem`
+                [ "resume-claude"
+                , "resume-codex"
+                , "resume-cursor"
+                , "resume-grok"
+                ]
 
 skillInvocationCommand :: SkillInvocation -> SkillCommand
 skillInvocationCommand invocation =

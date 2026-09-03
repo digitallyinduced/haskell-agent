@@ -16,8 +16,10 @@ import Agent.CLI.Compaction
     , reportedOccupancy
     )
 import Agent.CLI.Compaction.Projection (reportedContextTokens)
-import Agent.CLI.Context (contextUsageTokens)
+import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
+import Agent.CLI.Context (contextUsageTokens, formatContextReport)
 import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Responses.Types (ResponseCreateParams(model))
 import Agent.CLI.Session.Runner.Types
     ( SessionRunnerContinuation(..) )
 import Agent.CLI.AgentViewport.Runtime
@@ -65,6 +67,7 @@ import Agent.CLI.SessionLock
     , releaseSessionLock
     )
 import Agent.CLI.Session.Interaction
+import Agent.CLI.Session.Selection (currentSessionId)
 import Agent.CLI.Skills
 import Agent.CLI.StartupContext
 import Agent.CLI.Startup.Auth
@@ -77,6 +80,7 @@ import Agent.CLI.Error
 import Agent.CLI.Dialects
 import Agent.CLI.Dictation (dictationTargetForSession)
 import Agent.CLI.TUI.App
+import Agent.CLI.TUI.Types (FullscreenRuntime(..))
 import Agent.TUI.Model
 import Agent.TUI.Motion
 import Agent.CLI.WindowTitle
@@ -103,11 +107,26 @@ import Control.Exception.Safe
     )
 import Control.Monad (forM_, unless, void, when)
 import Data.IORef
+import Data.Foldable (toList)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust, isNothing)
 import qualified Data.Text as Text
 import qualified Data.Set as Set
 import Data.Time.Clock (getCurrentTime, utctDay)
+
+formatQueuedPrompts :: [Text.Text] -> Text.Text
+formatQueuedPrompts [] = "No prompts are queued."
+formatQueuedPrompts prompts =
+    "Queued prompts (" <> Text.pack (show (length prompts)) <> "):\n"
+        <> Text.intercalate
+            "\n"
+            (zipWith formatPrompt [1 :: Int ..] prompts)
+  where
+    formatPrompt index prompt =
+        Text.pack (show index)
+            <> ". "
+            <> Text.replace "\n" "\n   " prompt
+
 runSession
     :: SessionRunnerContinuation
     -> SessionRequest
@@ -1049,6 +1068,70 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                     emitUiEvent runtime (UiInputSteered text)
                                     pure (Right ()))
             (writeChan btwRequests)
+            (\command -> do
+                let copyImmediate label missing payload =
+                        case payload of
+                            Nothing -> emitUiEvent runtime (UiErrorMessage missing)
+                            Just value -> do
+                                copied <- runtime.runtimeCopy value
+                                emitUiEvent runtime $
+                                    if copied
+                                        then UiSystemMessage ("copied " <> label)
+                                        else UiErrorMessage
+                                            "terminal clipboard is unavailable"
+                    showImmediate message =
+                        emitUiEvent runtime (UiSystemMessage message)
+                case command of
+                    ReplCopy request
+                        | request.copyResponseIndex == 1
+                        , Nothing <- request.copyDestination ->
+                        readIORef lastAssistantRef >>= copyImmediate
+                            "last response"
+                            "no assistant response to copy"
+                    ReplCopyCode index -> do
+                        answer <- readIORef lastAssistantRef
+                        let label =
+                                "code block " <> Text.pack (show index)
+                        copyImmediate
+                            label
+                            (label <> " was not found")
+                            (answer >>= fencedCodeBlock index)
+                    ReplCopyDiff -> do
+                        answer <- readIORef lastAssistantRef
+                        copyImmediate
+                            "diff block"
+                            "no diff block was found"
+                            (answer >>= lastDiffBlock)
+                    ReplCopyPath ->
+                        copyImmediate
+                            "worktree path"
+                            "worktree path is unavailable"
+                            (Just (toText cwd))
+                    ReplCopySession ->
+                        currentSessionId persist >>= copyImmediate
+                            "session id"
+                            "this session has no persisted id yet"
+                    ReplQueue -> do
+                        prompts <-
+                            toList
+                                <$> queuedFullscreenInputDisplays
+                                    runtime.runtimeInput
+                        showImmediate (formatQueuedPrompts prompts)
+                    ReplContext -> do
+                        currentParams <- readIORef env.sessionParams
+                        history <- readLiveTranscript conversationRef
+                        occupancy <- readIORef contextOccupancyRef
+                        contextWindow <- currentContextWindow
+                        activeTools <- env.sessionActiveToolNames
+                        showImmediate $
+                            formatContextReport
+                                (maybe "<unknown>" id currentParams.model)
+                                contextWindow
+                                occupancy
+                                currentParams
+                                history
+                                activeTools
+                    _ -> pure ())
             (writeChan recapRequests (RecapSession RecapAuto))
             (\level ->
                 readIORef startup.startupRestartEffort >>= ($ level))
