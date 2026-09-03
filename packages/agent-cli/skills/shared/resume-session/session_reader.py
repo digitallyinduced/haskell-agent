@@ -78,7 +78,12 @@ OMITTED_ATTACHMENT_MARKER = "[historical attachment content omitted]"
 OMITTED_HIDDEN_CONTENT_MARKER = "[hidden content omitted]"
 TEXT_CONTENT_BLOCK_TYPES = {"text", "input_text", "output_text"}
 IMAGE_CONTENT_BLOCK_TYPES = {"input_image", "image", "computer_screenshot"}
-ATTACHMENT_CONTENT_BLOCK_TYPES = {"input_file", "input_audio"}
+ATTACHMENT_CONTENT_BLOCK_TYPES = {
+    "input_file",
+    "input_audio",
+    "audio",
+    "resource",
+}
 IGNORED_CONTENT_BLOCK_TYPES = {
     "thinking",
     "reasoning",
@@ -157,7 +162,7 @@ def image_omission_warning(count: int) -> dict[str, str]:
 def attachment_omission_warning(count: int) -> dict[str, str]:
     return warning(
         "attachment_content_omitted",
-        f"Omitted {count} file/audio attachment block(s); "
+        f"Omitted {count} file/audio/resource attachment block(s); "
         "attachment content is unavailable.",
     )
 
@@ -513,7 +518,7 @@ def content_text_with_omissions(
         if block_type in IMAGE_CONTENT_BLOCK_TYPES:
             omitted_images += 1
             continue
-        if block_type in ATTACHMENT_CONTENT_BLOCK_TYPES:
+        if valid_attachment_content_block(block):
             omitted_attachments += 1
             continue
         if block_type in IGNORED_CONTENT_BLOCK_TYPES:
@@ -567,6 +572,13 @@ def valid_attachment_content_block(block: Any) -> bool:
         )
     if block_type == "input_audio":
         return isinstance(block.get("input_audio"), (str, dict))
+    if block_type == "audio":
+        return isinstance(block.get("data"), str)
+    if block_type == "resource":
+        resource = block.get("resource")
+        return isinstance(resource, dict) and isinstance(
+            resource.get("blob"), str
+        )
     return False
 
 

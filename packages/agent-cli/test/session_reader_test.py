@@ -346,20 +346,44 @@ class SessionReaderTest(unittest.TestCase):
         self.assertIn("'approve': True", results[4]["output"])
 
     def test_codex_recovers_inline_mcp_call_results(self):
-        completed, skipped, omissions = reader.codex_turn(
-            {
-                "type": "mcp_call",
-                "id": "mcp-1",
-                "server_label": "docs",
-                "name": "search",
-                "arguments": '{"query":"parser"}',
-                "status": "completed",
-                "result": "matching documentation",
+        completed_payload = {
+            "type": "mcp_call",
+            "id": "mcp-1",
+            "server_label": "docs",
+            "name": "search",
+            "arguments": '{"query":"parser"}',
+            "status": "completed",
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "matching documentation",
+                    },
+                    {
+                        "type": "audio",
+                        "mimeType": "audio/wav",
+                        "data": "mcp-audio-secret",
+                    },
+                    {
+                        "type": "resource",
+                        "resource": {
+                            "uri": "file:///binary-result",
+                            "mimeType": "application/octet-stream",
+                            "blob": "mcp-resource-secret",
+                        },
+                    },
+                ]
             },
+        }
+        completed, skipped, omissions = reader.codex_turn(
+            completed_payload,
             500,
         )
         self.assertFalse(skipped)
-        self.assertEqual(omissions, reader.ContentOmissions())
+        self.assertEqual(
+            omissions,
+            reader.ContentOmissions(attachments=2),
+        )
         self.assertIsNotNone(completed)
         self.assertEqual(completed["tool_calls"][0]["call_id"], "mcp-1")
         self.assertEqual(completed["tool_calls"][0]["name"], "mcp_call")
@@ -377,6 +401,13 @@ class SessionReaderTest(unittest.TestCase):
             "matching documentation",
             completed["tool_results"][0]["output"],
         )
+        self.assertIn(
+            reader.OMITTED_ATTACHMENT_MARKER,
+            completed["tool_results"][0]["output"],
+        )
+        completed_json = json.dumps(completed)
+        self.assertNotIn("mcp-audio-secret", completed_json)
+        self.assertNotIn("mcp-resource-secret", completed_json)
 
         pending, pending_skipped, pending_omissions = reader.codex_turn(
             {
@@ -394,6 +425,27 @@ class SessionReaderTest(unittest.TestCase):
         self.assertIsNotNone(pending)
         self.assertEqual(pending["tool_calls"][0]["call_id"], "mcp-2")
         self.assertEqual(pending["tool_results"], [])
+
+        rollout = self.root / "codex-inline-mcp-binary.jsonl"
+        write_jsonl(
+            rollout,
+            [{"type": "response_item", "payload": completed_payload}],
+        )
+        item = reader.candidate(
+            "codex",
+            "codex-cli",
+            "codex-inline-mcp-binary",
+            rollout,
+            "Inline MCP binary",
+            str(self.cwd),
+        )
+        resumed = reader.read_codex(item, 500)
+        self.assertIn(
+            "attachment_content_omitted",
+            {warning["code"] for warning in resumed["warnings"]},
+        )
+        self.assertNotIn("mcp-audio-secret", json.dumps(resumed))
+        self.assertNotIn("mcp-resource-secret", json.dumps(resumed))
 
     def test_arbitrary_typed_tool_json_is_not_treated_as_content_parts(self):
         output = [
@@ -558,7 +610,10 @@ class SessionReaderTest(unittest.TestCase):
             item["code"]: item["message"] for item in result["warnings"]
         }
         self.assertIn("attachment_content_omitted", warnings)
-        self.assertIn("2 file/audio attachment", warnings["attachment_content_omitted"])
+        self.assertIn(
+            "2 file/audio/resource attachment",
+            warnings["attachment_content_omitted"],
+        )
 
     def test_codex_counts_native_computer_screenshots_as_omitted_images(self):
         rollout = self.root / "codex-computer-output.jsonl"
