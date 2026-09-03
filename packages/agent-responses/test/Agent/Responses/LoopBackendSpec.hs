@@ -813,8 +813,8 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
         map encodedField (requestInputItems request) !! 1
             `shouldBe` Just (Aeson.String "opaque")
 
--- | Streamed tool calls are announced immediately. Selected argument deltas
--- repaint the call, while other tools retain coarse activity updates.
+-- | Streamed tool calls are announced immediately. Safe argument deltas
+-- repaint the call, while sensitive tools retain coarse activity updates.
 streamProjectionSpec :: Spec
 streamProjectionSpec = describe "newStreamEventToLoopEvents" do
     it "publishes Codex weekly capacity updates for retained prompt chrome" do
@@ -862,6 +862,75 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                     "call-1"
                     "shell_command"
                     "{\"command\":\"git status\"}")
+            ]
+
+    it "repaints an ordinary JSON tool call as its arguments arrive" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "read_file")
+        first <- projectEvent
+            (argumentsDelta "fc-1" "{\"target_file\":\"src/Ma")
+        first `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "read_file"
+                    "{\"target_file\":\"src/Ma")
+            ]
+        second <- projectEvent (argumentsDelta "fc-1" "in.hs\"}")
+        second `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "read_file"
+                    "{\"target_file\":\"src/Main.hs\"}")
+            ]
+
+    it "routes parallel argument streams by output index" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (functionCallAddedAt 0 "fc-read" "call-read" "read_file")
+        _ <- projectEvent
+            (functionCallAddedAt 1 "fc-grep" "call-grep" "grep")
+        events <- projectEvent
+            (argumentsDeltaAt
+                Nothing
+                (Just 0)
+                "{\"target_file\":\"src/Main.hs\"}")
+        events `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-read"
+                    "read_file"
+                    "{\"target_file\":\"src/Main.hs\"}")
+            ]
+
+    it "publishes a structured prefix eagerly, then batches tiny deltas" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "read_file")
+        batches <- mapM
+            (\_ -> projectEvent (argumentsDelta "fc-1" "x"))
+            [1 :: Int .. 8064]
+        let previews =
+                [ call.arguments
+                | ToolArgumentsUpdated call <- concat batches
+                ]
+        take 3 previews `shouldBe` ["x", "xx", "xxx"]
+        length previews `shouldSatisfy` (< 170)
+        last previews `shouldBe` Text.replicate 8064 "x"
+
+    it "flushes a pending function argument tail on arguments done" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "read_file")
+        let prefix = Text.replicate 128 "p"
+            complete = prefix <> "canonical"
+        _ <- projectEvent (argumentsDelta "fc-1" prefix)
+        quiet <- projectEvent (argumentsDelta "fc-1" "tail")
+        quiet `shouldBe` []
+        flushed <- projectEvent
+            (functionArgumentsDone (Just "fc-1") (Just 0) (Just complete))
+        flushed `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall "call-1" "read_file" complete)
             ]
 
     it "replaces streamed tool metadata with the canonical done item" do
@@ -946,6 +1015,30 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
             (customInputDelta "ct-1" "call-9" "still not retained")
         second `shouldBe` []
 
+    it "flushes accumulated custom input when input done omits it" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        let prefix = "*** Begin Patch\n"
+            tailText = "*** End Patch\n"
+        _ <- projectEvent (customInputDelta "ct-1" "call-9" prefix)
+        quiet <- projectEvent
+            (customInputDelta "ct-1" "call-9" tailText)
+        quiet `shouldBe` []
+        flushed <- projectEvent
+            (customInputStreamDone
+                (Just "ct-1")
+                (Just "call-9")
+                (Just 0)
+                Nothing)
+        flushed `shouldBe`
+            [ ToolArgumentsUpdated
+                (customToolCall
+                    "call-9"
+                    "apply_patch"
+                    (prefix <> tailText))
+            ]
+
     it "updates a streamed custom tool from its done item" do
         projectEvent <- newStreamEventToLoopEvents False
         _ <- projectEvent
@@ -987,14 +1080,41 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
         third <- projectEvent (argumentsDelta "fc-1" bigDelta)
         third `shouldBe` []
 
-    it "counts custom tool input as argument streaming" do
+    it "repaints streamed custom tool input" do
         projectEvent <- newStreamEventToLoopEvents False
         _ <- projectEvent
             (customToolCallAdded "ct-1" "call-9" "large_custom_tool")
+        let arguments = Text.replicate 10000 "p"
         loud <- projectEvent
-            (customInputDelta "ct-1" "call-9" (Text.replicate 10000 "p"))
+            (customInputDelta "ct-1" "call-9" arguments)
         loud `shouldBe`
-            [ActivityUpdated "Writing large_custom_tool call… (10k chars)"]
+            [ ToolArgumentsUpdated
+                (customToolCall
+                    "call-9"
+                    "large_custom_tool"
+                    arguments)
+            ]
+
+    it "keeps sensitive computer arguments out of live previews" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (functionCallAdded "fc-1" "call-1" computerFunctionName)
+        loud <- projectEvent
+            (argumentsDelta "fc-1" (Text.replicate 10000 "s"))
+        loud `shouldBe`
+            [ ActivityUpdated
+                ("Writing " <> computerFunctionName <> " call… (10k chars)")
+            ]
+
+    it "keeps encrypted collaboration arguments out of live previews" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent encryptedCollaborationCallAdded
+        loud <- projectEvent
+            (argumentsDelta "fc-secret" (Text.replicate 10000 "s"))
+        loud `shouldBe`
+            [ ActivityUpdated
+                "Writing collaboration.spawn_agent call… (10k chars)"
+            ]
 
     it "keeps plain deltas mapped through the pure projection" do
         projectEvent <- newStreamEventToLoopEvents False
@@ -1029,6 +1149,15 @@ customToolCall customCallId customName customInput = ToolCall
 
 functionCallAdded :: Text.Text -> Text.Text -> Text.Text -> ResponseStreamEvent
 functionCallAdded functionItemId functionCallId functionName =
+    functionCallAddedAt 0 functionItemId functionCallId functionName
+
+functionCallAddedAt
+    :: Int
+    -> Text.Text
+    -> Text.Text
+    -> Text.Text
+    -> ResponseStreamEvent
+functionCallAddedAt index functionItemId functionCallId functionName =
     ResponseOutputItemAddedEvent
         { item = FunctionCallItem FunctionCall
             { itemId = Just functionItemId
@@ -1041,10 +1170,30 @@ functionCallAdded functionItemId functionCallId functionName =
             , status = Nothing
 
             }
+        , outputIndex = Just index
+        , sequenceNumber = Just 1
+
+        }
+
+encryptedCollaborationCallAdded :: ResponseStreamEvent
+encryptedCollaborationCallAdded =
+    ResponseOutputItemAddedEvent
+        { item = FunctionCallItem FunctionCall
+            { itemId = Just "fc-secret"
+            , callId = "call-secret"
+            , name = "spawn_agent"
+            , namespace = Just "collaboration"
+            , provider = Nothing
+            , arguments = ""
+            , encryptedFunctionArgs = Just ["message"]
+            , status = Nothing
+
+            }
         , outputIndex = Just 0
         , sequenceNumber = Just 1
 
         }
+
 functionCallDone
     :: Text.Text
     -> Text.Text
@@ -1110,10 +1259,33 @@ customToolCallDone customItemId customCallId customName customInput =
 
 argumentsDelta :: Text.Text -> Text.Text -> ResponseStreamEvent
 argumentsDelta deltaItemId deltaText =
+    argumentsDeltaAt (Just deltaItemId) (Just 0) deltaText
+
+argumentsDeltaAt
+    :: Maybe Text.Text
+    -> Maybe Int
+    -> Text.Text
+    -> ResponseStreamEvent
+argumentsDeltaAt deltaItemId outputIndex deltaText =
     ResponseFunctionCallArgumentsDeltaEvent
         { delta = Just deltaText
-        , streamItemId = Just deltaItemId
-        , streamOutputIndex = Just 0
+        , streamItemId = deltaItemId
+        , streamOutputIndex = outputIndex
+        , sequenceNumber = Nothing
+
+        }
+
+functionArgumentsDone
+    :: Maybe Text.Text
+    -> Maybe Int
+    -> Maybe Text.Text
+    -> ResponseStreamEvent
+functionArgumentsDone deltaItemId outputIndex functionArguments =
+    ResponseFunctionCallArgumentsDoneEvent
+        { arguments = functionArguments
+        , functionName = Nothing
+        , streamItemId = deltaItemId
+        , streamOutputIndex = outputIndex
         , sequenceNumber = Nothing
 
         }
@@ -1125,6 +1297,22 @@ customInputDelta deltaItemId deltaCallId deltaText =
         , streamItemId = Just deltaItemId
         , streamCallId = Just deltaCallId
         , streamOutputIndex = Just 0
+        , sequenceNumber = Nothing
+
+        }
+
+customInputStreamDone
+    :: Maybe Text.Text
+    -> Maybe Text.Text
+    -> Maybe Int
+    -> Maybe Text.Text
+    -> ResponseStreamEvent
+customInputStreamDone deltaItemId deltaCallId outputIndex completeInput =
+    ResponseCustomToolInputDoneEvent
+        { inputText = completeInput
+        , streamItemId = deltaItemId
+        , streamCallId = deltaCallId
+        , streamOutputIndex = outputIndex
         , sequenceNumber = Nothing
 
         }
