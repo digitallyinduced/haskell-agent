@@ -21,7 +21,6 @@ module Agent.CLI.Dictation
 
 import Agent.CLI.Auth
     ( LoadedAuth(..)
-    , authErrorNeedsOnboarding
     , loadAuth
     , loadOpenAiDictationAuth
     )
@@ -163,25 +162,44 @@ loadDictationBackendAuth
     -> IO (Either DictationAuthError LoadedAuth)
 loadDictationBackendAuth = \case
     OpenAIDictation ->
-        loadOpenAiDictationAuth >>= \case
-            Nothing ->
-                pure $ Left $ DictationCredentialMissing
-                    "No OpenAI credential found for OpenAI dictation"
-            Just loaded ->
-                pure (Right loaded)
+        classifyOpenAiDictationAuth <$> loadOpenAiDictationAuth
     XAIDictation ->
         loadAuth (Just XAIProvider) >>= \case
-            Left err
-                | authErrorNeedsOnboarding err ->
-                    pure (Left (DictationCredentialMissing err))
-                | otherwise ->
-                    pure (Left (DictationCredentialInvalid err))
+            Left err ->
+                pure (Left (classifyDictationLookupError err))
             Right loaded
                 | loaded.loadedProvider /= XAIProvider ->
                     pure $ Left $ DictationCredentialInvalid
                         "xAI dictation requires direct xAI credentials"
                 | otherwise ->
                     pure (Right loaded)
+
+classifyOpenAiDictationAuth
+    :: Either Text LoadedAuth
+    -> Either DictationAuthError LoadedAuth
+classifyOpenAiDictationAuth = \case
+    Right loaded ->
+        Right loaded
+    Left err ->
+        Left $ case classifyDictationLookupError err of
+            DictationCredentialMissing _ ->
+                DictationCredentialMissing
+                    "No OpenAI credential found for OpenAI dictation"
+            invalid ->
+                invalid
+
+-- | Treat only a true absence as missing. Errors such as
+-- @no valid OpenAI credentials found@ are broken configuration, even when
+-- first-start onboarding would offer a fresh login.
+classifyDictationLookupError :: Text -> DictationAuthError
+classifyDictationLookupError err
+    | dictationCredentialAbsent err = DictationCredentialMissing err
+    | otherwise = DictationCredentialInvalid err
+
+dictationCredentialAbsent :: Text -> Bool
+dictationCredentialAbsent message =
+    "no credentials found." `Text.isPrefixOf` message
+        || message == "No OpenAI credential found for OpenAI dictation"
 
 -- | Pick the first allowed backend that has a usable credential. Only the
 -- credential lookup participates in the fallback; once a backend is chosen,

@@ -314,6 +314,19 @@ spec = describe "fullscreen composer" do
         fmap fst selected `shouldBe` Right XAIDictation
         readIORef attempted `shouldReturn` [OpenAIDictation, XAIDictation]
 
+    it "falls back to xAI when Claude's OpenAI credential is invalid" do
+        attempted <- newIORef []
+        let loadBackend backend = do
+                modifyIORef' attempted (<> [backend])
+                pure case backend of
+                    OpenAIDictation ->
+                        Left (DictationCredentialInvalid "invalid auth JSON")
+                    XAIDictation ->
+                        Right (fakeLoadedAuth backend)
+        selected <- selectDictationBackend ClaudeCodeProvider loadBackend
+        fmap fst selected `shouldBe` Right XAIDictation
+        readIORef attempted `shouldReturn` [OpenAIDictation, XAIDictation]
+
     it "never borrows another provider's account for native dictation" do
         attempted <- newIORef []
         let loadBackend backend = do
@@ -345,9 +358,39 @@ spec = describe "fullscreen composer" do
                 "Dictation for claude-code models requires an OpenAI or xAI \
                 \account; connect one with /login (xai: invalid auth JSON)"
         dictationBackendUnavailable
+            ClaudeCodeProvider
+            [ ( OpenAIDictation
+              , DictationCredentialInvalid
+                    "no valid OpenAI credentials found: \
+                    \credential store is unreadable"
+              )
+            , (XAIDictation, DictationCredentialMissing "no credentials found.")
+            ]
+            `shouldBe`
+                "Dictation for claude-code models requires an OpenAI or xAI \
+                \account; connect one with /login (openai: no valid OpenAI \
+                \credentials found: credential store is unreadable)"
+        dictationBackendUnavailable
             XAIProvider
             [(XAIDictation, DictationCredentialInvalid "invalid auth JSON")]
             `shouldBe` "invalid auth JSON"
+
+    it "keeps invalid OpenAI lookup errors when Claude has no xAI account" do
+        selected <-
+            selectDictationBackend ClaudeCodeProvider \case
+                OpenAIDictation ->
+                    pure $ Left $ DictationCredentialInvalid
+                        "no valid OpenAI credentials found: \
+                        \credential store is unreadable"
+                XAIDictation ->
+                    pure $ Left $ DictationCredentialMissing
+                        "no credentials found."
+        fmap fst selected
+            `shouldBe`
+                Left
+                    "Dictation for claude-code models requires an OpenAI or xAI \
+                    \account; connect one with /login (openai: no valid OpenAI \
+                    \credentials found: credential store is unreadable)"
 
     it "keeps organization-gateway dictation inside the gateway boundary" do
         case dictationTargetForSession XAIProvider Nothing of
