@@ -30,7 +30,6 @@ import Data.Scientific (fromFloatDigits)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Vector as Vector
 import Database.SQLite3 (Database, SQLData(..))
 import Data.Scientific (floatingOrInteger)
 import qualified Data.Text.Encoding

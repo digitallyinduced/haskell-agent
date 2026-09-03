@@ -12,7 +12,7 @@ import Agent.CLI.ExternalSession.SQLite
 import Agent.CLI.ExternalSession.Types
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
-import Control.Monad (filterM, when)
+import Control.Monad (filterM)
 import Data.Aeson (Value(..), decodeStrict', encode)
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
@@ -183,8 +183,9 @@ readClaude env candidate maxToolChars =
         "resume-claude-chain.sqlite"
         \database -> do
             initializeClaudeIndex database
-            ((_, unindexable), counters) <-
-                foldJsonl env candidate.candidatePath Nothing (0, 0)
+            (indexState, counters) <-
+                foldJsonl env candidate.candidatePath Nothing
+                    (ClaudeIndexState 0 0)
                     \indexState record -> do
                         nextState <-
                             indexClaudeRecord
@@ -198,7 +199,7 @@ readClaude env candidate maxToolChars =
                 { claudeTurnsFromLeaf = []
                 , claudeLastUser = Nothing
                 , claudeLastAssistant = Nothing
-                , claudeSkipped = unindexable
+                , claudeSkipped = indexState.claudeIndexUnindexable
                 , claudeOmissions = mempty
                 }
             mapM_ (walkClaudeChain database maxToolChars stateRef) leaf
@@ -236,19 +237,24 @@ initializeClaudeIndex database = do
         "CREATE TABLE claude_visited (uuid TEXT PRIMARY KEY)"
         []
 
+data ClaudeIndexState = ClaudeIndexState
+    { claudeIndexSequence :: !Int
+    , claudeIndexUnindexable :: !Int
+    }
+
 indexClaudeRecord
     :: Database
     -> ExternalCandidate
-    -> (Int, Int)
+    -> ClaudeIndexState
     -> Value
-    -> IO (Int, Int)
-indexClaudeRecord database candidate (sequenceNumber, unindexable) record =
+    -> IO ClaudeIndexState
+indexClaudeRecord database candidate state record =
     case externalTextValue "uuid" record of
         Just uuid
             | externalTextValue "type" record
                 `elem` map Just ["user", "assistant", "system", "attachment"]
             , not (truthy (externalObjectValue "isSidechain" record)) -> do
-                let nextSequence = sequenceNumber + 1
+                let nextSequence = state.claudeIndexSequence + 1
                     parent =
                         firstNonEmptyText
                             [ externalTextValue "parentUuid" record
@@ -273,10 +279,16 @@ indexClaudeRecord database candidate (sequenceNumber, unindexable) record =
                     , SQLFloat sortTime
                     , SQLBlob (LBS.toStrict (encode record))
                     ]
-                pure (nextSequence, unindexable)
-        _ -> pure (sequenceNumber, unindexable)
+                pure state
+                    { claudeIndexSequence = nextSequence
+                    }
+        _ -> pure state
   `catchAnyIndex` \_ ->
-        pure (sequenceNumber + 1, unindexable + 1)
+        pure ClaudeIndexState
+            { claudeIndexSequence = state.claudeIndexSequence + 1
+            , claudeIndexUnindexable =
+                state.claudeIndexUnindexable + 1
+            }
 
 catchAnyIndex :: IO value -> (Text -> IO value) -> IO value
 catchAnyIndex action handle =
