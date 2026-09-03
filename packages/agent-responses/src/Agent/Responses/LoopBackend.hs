@@ -9,6 +9,9 @@ module Agent.Responses.LoopBackend
     , responseTokenUsage
     , streamEventToLoopEvent
     , streamEventToLoopEventWithRawReasoning
+    , StreamProjectionState
+    , emptyStreamProjectionState
+    , streamEventToLoopEventsStep
     , newStreamEventToLoopEvents
     , toolArgumentActivityChunkChars
     , runawayToolArgumentWarningChars
@@ -949,15 +952,41 @@ newStreamEventToLoopEvents
     :: Bool
     -> IO (ResponseStreamEvent -> IO [LoopEvent])
 newStreamEventToLoopEvents showRawReasoning = do
-    stateRef <- newIORef emptyToolArgumentStreamState
-    pure \event -> do
-        argumentEvents <- atomicModifyIORef' stateRef \state ->
-            toolArgumentStreamStep event state
-        pure $
-            maybeToList
-                (streamEventToLoopEventWithRawReasoning showRawReasoning event)
-                <> maybeToList (codexRateLimitsUpdate event)
-                <> argumentEvents
+    stateRef <- newIORef emptyStreamProjectionState
+    pure \event ->
+        atomicModifyIORef' stateRef \state ->
+            streamEventToLoopEventsStep showRawReasoning state event
+
+-- | Immutable state for projecting one response attempt.
+--
+-- The constructor is intentionally private so callers cannot accidentally
+-- carry only part of the projection state across an attempt boundary.
+data StreamProjectionState = StreamProjectionState
+    { streamToolArguments :: !ToolArgumentStreamState
+    }
+
+emptyStreamProjectionState :: StreamProjectionState
+emptyStreamProjectionState =
+    StreamProjectionState emptyToolArgumentStreamState
+
+-- | Pure projection of one provider event. The returned state belongs to the
+-- same response attempt; start from 'emptyStreamProjectionState' when a retry
+-- or reconnect begins a new sample.
+streamEventToLoopEventsStep
+    :: Bool
+    -> StreamProjectionState
+    -> ResponseStreamEvent
+    -> (StreamProjectionState, [LoopEvent])
+streamEventToLoopEventsStep showRawReasoning state event =
+    ( StreamProjectionState nextArguments
+    , maybeToList
+        (streamEventToLoopEventWithRawReasoning showRawReasoning event)
+        <> maybeToList (codexRateLimitsUpdate event)
+        <> argumentEvents
+    )
+  where
+    (nextArguments, argumentEvents) =
+        toolArgumentStreamStep event state.streamToolArguments
 
 codexRateLimitsUpdate :: ResponseStreamEvent -> Maybe LoopEvent
 codexRateLimitsUpdate = \case
