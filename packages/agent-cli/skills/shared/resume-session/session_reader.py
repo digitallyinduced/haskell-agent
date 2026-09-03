@@ -971,11 +971,59 @@ def codex_turn(
             ContentOmissions(),
         )
     if kind in {
+        "shell_call",
+        "apply_patch_call",
+        "tool_search_call",
+        "mcp_approval_request",
+        "program",
+    }:
+        arguments = next(
+            (
+                payload[key]
+                for key in (
+                    "action",
+                    "arguments",
+                    "input",
+                    "command",
+                    "patch",
+                    "request",
+                )
+                if key in payload
+            ),
+            payload,
+        )
+        call = {
+            "call_id": safe_string(
+                payload.get("call_id") or payload.get("id")
+            ),
+            "name": kind,
+            "arguments": json_preview(arguments, max_tool_chars),
+        }
+        return (
+            inert_turn("assistant", tool_calls=[call]),
+            False,
+            ContentOmissions(),
+        )
+    if kind in {
         "function_call_output",
         "custom_tool_call_output",
         "computer_call_output",
+        "local_shell_call_output",
+        "shell_call_output",
+        "apply_patch_call_output",
+        "tool_search_output",
+        "mcp_approval_response",
+        "program_output",
     }:
-        output, omissions = tool_result_content(payload.get("output"))
+        raw_output = next(
+            (
+                payload[key]
+                for key in ("output", "result", "tools", "response", "content")
+                if key in payload
+            ),
+            payload,
+        )
+        output, omissions = tool_result_content(raw_output)
         result = {
             "call_id": safe_string(payload.get("call_id")),
             "output": historical_tool_result(output, max_tool_chars),

@@ -209,7 +209,7 @@ class SessionReaderTest(unittest.TestCase):
             {item["code"] for item in resumed["warnings"]},
         )
 
-    def test_codex_preserves_call_ids_for_out_of_order_results(self):
+    def test_codex_preserves_call_ids_and_local_shell_outputs(self):
         rollout = self.root / "codex-call-ids.jsonl"
         write_jsonl(
             rollout,
@@ -248,6 +248,22 @@ class SessionReaderTest(unittest.TestCase):
                         "output": "result a",
                     },
                 },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "local_shell_call",
+                        "call_id": "shell-call",
+                        "action": {"type": "exec", "command": ["pwd"]},
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "local_shell_call_output",
+                        "call_id": "shell-call",
+                        "output": "shell result",
+                    },
+                },
             ],
         )
         item = reader.candidate(
@@ -259,14 +275,25 @@ class SessionReaderTest(unittest.TestCase):
             str(self.cwd),
         )
         turns = reader.read_codex(item, 100)["turns"]
+        calls = [
+            turn["tool_calls"][0]
+            for turn in turns
+            if turn["tool_calls"]
+        ]
+        results = [
+            turn["tool_results"][0]
+            for turn in turns
+            if turn["tool_results"]
+        ]
         self.assertEqual(
-            [turn["tool_calls"][0]["call_id"] for turn in turns[:2]],
-            ["call-a", "call-b"],
+            [call["call_id"] for call in calls],
+            ["call-a", "call-b", "shell-call"],
         )
         self.assertEqual(
-            [turn["tool_results"][0]["call_id"] for turn in turns[2:]],
-            ["call-b", "call-a"],
+            [result["call_id"] for result in results],
+            ["call-b", "call-a", "shell-call"],
         )
+        self.assertIn("shell result", results[-1]["output"])
 
     def test_arbitrary_typed_tool_json_is_not_treated_as_content_parts(self):
         output = [
