@@ -22,6 +22,7 @@ import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types (ResponseCreateParams(model))
 import Agent.CLI.Session.Runner.Types
     ( SessionRunnerContinuation(..) )
+import Agent.CLI.AgentViewport (AgentViewportEnv)
 import Agent.CLI.AgentViewport.Runtime
 import Agent.Tools.OutputArtifact
 import Agent.Tools.Background
@@ -35,6 +36,7 @@ import Agent.CLI.Notification
     )
 import Agent.CLI.Approval
 import Agent.CLI.Permission (promptRootAccess)
+import Agent.CLI.ProviderTransition (PendingTurn)
 import Agent.CLI.Recap
 import Agent.CLI.CancelWatch
 import Agent.CLI.Clipboard
@@ -88,7 +90,10 @@ import Agent.CLI.Turn
 import Agent.Cancel
 import Agent.Loop
 import Agent.Dialect
+import Agent.Error (ApiError)
+import Agent.Provider (Provider)
 import Agent.Skills
+import Agent.Store.Postgres.Skill (LearnedSkill)
 import Agent.Subagents
 import Agent.Subagents.TaskPath
 import Agent.ToolDispatch
@@ -96,9 +101,11 @@ import Agent.Tools.MultiAgents
 import Agent.Tools.PlanMode
 import Agent.Tools.Types
 import Agent.OsPath
+import Control.Concurrent (ThreadId)
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.Chan (newChan, readChan, writeChan)
-import Control.Concurrent.MVar (newMVar, withMVar)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Control.Concurrent.STM (STM)
 import Control.Exception.Safe
     ( catchAny
     , mask_
@@ -113,6 +120,7 @@ import Data.Maybe (isJust, isNothing)
 import qualified Data.Text as Text
 import qualified Data.Set as Set
 import Data.Time.Clock (getCurrentTime, utctDay)
+import System.IO (Handle)
 
 formatQueuedPrompts :: [Text.Text] -> Text.Text
 formatQueuedPrompts [] = "No prompts are queued."
@@ -127,121 +135,195 @@ formatQueuedPrompts prompts =
             <> ". "
             <> Text.replace "\n" "\n   " prompt
 
-runSession
-    :: SessionRunnerContinuation
+-- | Host-facing session resources that are established before the title and
+-- turn runtimes. Keeping these together makes the outer session runner a
+-- lifecycle coordinator instead of a second implementation of each host
+-- concern.
+data SessionHostRuntime = SessionHostRuntime
+    { hostInitialPrevious :: !(Maybe Text.Text)
+    , hostGrokFirstTurnContextRef :: !(IORef (Maybe Text.Text))
+    , hostIoLock :: !(MVar ())
+    , hostNativeCapabilities :: !NativeRunCapabilities
+    , hostLoadsWorkspaceContext :: !Bool
+    , hostPreparedWorkspaceEnvironment
+        :: !(Maybe PreparedWorkspaceEnvironment)
+    , hostTerminal :: !TerminalCapabilities
+    , hostStdoutHandle :: !Handle
+    , hostStderrHandle :: !Handle
+    , hostUseColor :: !Bool
+    , hostStderrTty :: !Bool
+    , hostReportSessionError :: !(Text.Text -> IO ())
+    , hostWindowTitle :: !WindowTitleController
+    , hostTitleEvent :: !(SessionTitleEvent -> IO ())
+    , hostFullscreen :: !(Maybe FullscreenRuntime)
+    }
+
+newSessionHostRuntime :: SessionRequest -> IO SessionHostRuntime
+newSessionHostRuntime SessionRequest{..} = do
+    initialPrevious <- readLivePreviousResponseId conversationRef
+    grokFirstTurnContextRef <- newIORef initialGrokContext
+    ioLock <- newMVar ()
+    let fullscreen = startup.startupFullscreen
+        nativeCapabilities =
+            maybe
+                fullNativeRunCapabilities
+                (.nativeCapabilities)
+                startup.startupNativeHooks
+        preparedDiscovery =
+            startup.startupNativeHooks
+                >>= nativePreparedDiscovery . (.nativeWorkspaceDiscovery)
+        loadsHostWorkspaceContext = isNothing preparedDiscovery
+        preparedWorkspaceEnvironment =
+            (\context ->
+                PreparedWorkspaceEnvironment
+                    context.nativeDiscoveryOperatingSystem
+                    context.nativeDiscoveryShell)
+                <$> preparedDiscovery
+        terminal = startup.startupTerminal
+        stdoutHandle = startup.startupStdout
+        stderrHandle = startup.startupStderr
+        useColor = startup.startupUseColor
+        stderrTty = startup.startupStderrTty
+        stdoutTty = startup.startupStdoutTty
+        writeWindowTitle title =
+            case fullscreen of
+                Just runtime -> setFullscreenWindowTitle runtime title
+                Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
+        withIoLock action = withMVar ioLock (const action)
+        requestRootAccess root =
+            approveFilesystemRootAccess policyRef $
+                case startup.startupNativeHooks of
+                    Just hooks -> hooks.nativeRequestRootAccess root
+                    Nothing -> withMVar ioLock \_ ->
+                        case promptRequest of
+                            Just request
+                                | isJust request.managedTurnBridgeDirectory ->
+                                    requestManagedRootAccess request root
+                            _ -> case fullscreen of
+                                Just runtime -> do
+                                    notifyAttention
+                                        stderrHandle
+                                        PermissionRequested
+                                    maybe False (== 0)
+                                        <$> requestFullscreenChoiceWithBody
+                                            runtime
+                                            "Filesystem access requested"
+                                            ("Allow access to " <> toText root
+                                                <> " for this session?")
+                                            0
+                                            [ ( "Allow directory for this session"
+                                              , ""
+                                              )
+                                            , ("Deny", "")
+                                            ]
+                                Nothing ->
+                                    withStdinPaused escPaused
+                                        (promptRootAccess useColor root)
+        reportSessionError message =
+            case fullscreen of
+                Just runtime ->
+                    emitUiEvent runtime (UiErrorMessage message)
+                Nothing -> do
+                    color <- resolveColor stderrHandle
+                    putTextLn stderrHandle
+                        (roleWarn color (glyphWarn <> message))
+    windowTitle <- newWindowTitleController
+        options.optMotionMode
+        startupWindowTitle
+        withIoLock
+        writeWindowTitle
+    setToolRootAccessRequest toolEnv (Just requestRootAccess)
+    let showTitleEvent = \case
+            SessionTitleGenerated SessionTitleResult{..} ->
+                case persist of
+                    PersistenceDisabled -> pure ()
+                    PersistenceEnabled slotRef ->
+                        readIORef slotRef >>= \case
+                            PersistenceActive handle
+                                | handle.sessionMeta.metaId == resultSessionId
+                                , not handle.sessionMeta.metaTitleIsManual ->
+                                    windowTitle.windowTitleSet
+                                        (cliWindowTitle
+                                            handle.sessionMeta.metaCwd
+                                            (Just resultTitle))
+                            _ -> pure ()
+            SessionTitleFailed SessionTitleFailure{..} ->
+                case persist of
+                    PersistenceDisabled -> pure ()
+                    PersistenceEnabled slotRef ->
+                        readIORef slotRef >>= \case
+                            PersistenceActive handle
+                                | handle.sessionMeta.metaId == failureSessionId
+                                , not handle.sessionMeta.metaTitleIsManual ->
+                                    withMVar ioLock \_ -> do
+                                        let message =
+                                                "session title generation failed: "
+                                                    <> failureMessage
+                                        case fullscreen of
+                                            Just runtime ->
+                                                emitUiEvent runtime
+                                                    (UiErrorMessage message)
+                                            Nothing -> do
+                                                color <-
+                                                    resolveColor stderrHandle
+                                                putTextLn stderrHandle
+                                                    (roleWarn color
+                                                        (glyphWarn <> message))
+                            _ -> pure ()
+    pure SessionHostRuntime
+        { hostInitialPrevious = initialPrevious
+        , hostGrokFirstTurnContextRef = grokFirstTurnContextRef
+        , hostIoLock = ioLock
+        , hostNativeCapabilities = nativeCapabilities
+        , hostLoadsWorkspaceContext = loadsHostWorkspaceContext
+        , hostPreparedWorkspaceEnvironment = preparedWorkspaceEnvironment
+        , hostTerminal = terminal
+        , hostStdoutHandle = stdoutHandle
+        , hostStderrHandle = stderrHandle
+        , hostUseColor = useColor
+        , hostStderrTty = stderrTty
+        , hostReportSessionError = reportSessionError
+        , hostWindowTitle = windowTitle
+        , hostTitleEvent = showTitleEvent
+        , hostFullscreen = fullscreen
+        }
+
+withSessionTitleRuntime
+    :: SessionHostRuntime
     -> SessionRequest
     -> SessionBackend
-    -> IO RunResult
-runSession callbacks SessionRequest{..} SessionBackend{..} = do
-  initialPrevious <- readLivePreviousResponseId conversationRef
-  grokFirstTurnContextRef <- newIORef initialGrokContext
-  ioLock <- newMVar ()
-  let fullscreen = startup.startupFullscreen
-      nativeCapabilities =
-          maybe
-              fullNativeRunCapabilities
-              (.nativeCapabilities)
-              startup.startupNativeHooks
-      preparedDiscovery =
-          startup.startupNativeHooks
-              >>= nativePreparedDiscovery . (.nativeWorkspaceDiscovery)
-      loadsHostWorkspaceContext = isNothing preparedDiscovery
-      preparedWorkspaceEnvironment =
-          (\context ->
-              PreparedWorkspaceEnvironment
-                  context.nativeDiscoveryOperatingSystem
-                  context.nativeDiscoveryShell)
-              <$> preparedDiscovery
-      terminal = startup.startupTerminal
-      stdoutHandle = startup.startupStdout
-      stderrHandle = startup.startupStderr
-      useColor = startup.startupUseColor
-      stderrTty = startup.startupStderrTty
-      stdoutTty = startup.startupStdoutTty
-      writeWindowTitle title =
-          case fullscreen of
-              Just runtime -> setFullscreenWindowTitle runtime title
-              Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
-      withIoLock action = withMVar ioLock (const action)
-      requestRootAccess root =
-          approveFilesystemRootAccess policyRef $
-              case startup.startupNativeHooks of
-                Just hooks -> hooks.nativeRequestRootAccess root
-                Nothing -> withMVar ioLock \_ ->
-                  case promptRequest of
-                      Just request
-                          | isJust request.managedTurnBridgeDirectory ->
-                              requestManagedRootAccess request root
-                      _ -> case fullscreen of
-                          Just runtime -> do
-                              notifyAttention stderrHandle PermissionRequested
-                              maybe False (== 0)
-                                  <$> requestFullscreenChoiceWithBody
-                                      runtime
-                                      "Filesystem access requested"
-                                      ("Allow access to " <> toText root
-                                          <> " for this session?")
-                                      0
-                                      [ ("Allow directory for this session", "")
-                                      , ("Deny", "")
-                                      ]
-                          Nothing ->
-                              withStdinPaused escPaused
-                                  (promptRootAccess useColor root)
-      reportSessionError message =
-          case fullscreen of
-              Just runtime ->
-                  emitUiEvent runtime (UiErrorMessage message)
-              Nothing -> do
-                  color <- resolveColor stderrHandle
-                  putTextLn stderrHandle
-                      (roleWarn color (glyphWarn <> message))
-  windowTitle <- newWindowTitleController
-      options.optMotionMode
-      startupWindowTitle
-      withIoLock
-      writeWindowTitle
-  setToolRootAccessRequest toolEnv (Just requestRootAccess)
-  let setWindowTitle = windowTitle.windowTitleSet
-      beginWindowTitleBusy = windowTitle.windowTitleBeginBusy
-      endWindowTitleBusy = windowTitle.windowTitleEndBusy
-      windowTitleWorker = windowTitle.windowTitleWorker
-      showTitleEvent = \case
-        SessionTitleGenerated SessionTitleResult{..} ->
-          case persist of
-              PersistenceDisabled -> pure ()
-              PersistenceEnabled slotRef ->
-                  readIORef slotRef >>= \case
-                      PersistenceActive handle
-                          | handle.sessionMeta.metaId == resultSessionId
-                          , not handle.sessionMeta.metaTitleIsManual ->
-                              setWindowTitle
-                                  (cliWindowTitle handle.sessionMeta.metaCwd
-                                      (Just resultTitle))
-                      _ -> pure ()
-        SessionTitleFailed SessionTitleFailure{..} ->
-          case persist of
-              PersistenceDisabled -> pure ()
-              PersistenceEnabled slotRef ->
-                  readIORef slotRef >>= \case
-                      PersistenceActive handle
-                          | handle.sessionMeta.metaId == failureSessionId
-                          , not handle.sessionMeta.metaTitleIsManual ->
-                              withMVar ioLock \_ -> do
-                                  let message =
-                                          "session title generation failed: "
-                                              <> failureMessage
-                                  case fullscreen of
-                                      Just runtime ->
-                                          emitUiEvent runtime
-                                              (UiErrorMessage message)
-                                      Nothing -> do
-                                          color <- resolveColor stderrHandle
-                                          putTextLn stderrHandle
-                                              (roleWarn color
-                                                  (glyphWarn <> message))
-                      _ -> pure ()
-  withSessionTitleManager btwBackend (readIORef paramsRef) showTitleEvent \titleManager -> do
+    -> (SessionTitleManager -> IO a)
+    -> IO a
+withSessionTitleRuntime host SessionRequest{..} SessionBackend{..} =
+    withSessionTitleManager
+        btwBackend
+        (readIORef paramsRef)
+        host.hostTitleEvent
+
+-- | Mutable controls shared by rendering, tools, persistence, and the agent
+-- viewport. Allocation and viewport registration form one startup phase.
+data SessionControlRuntime = SessionControlRuntime
+    { controlToolRegistry :: !ToolRegistry
+    , controlSteeringInputs :: !SteeringInputs
+    , controlSpinnerRef :: !(IORef (Maybe ThreadId))
+    , controlRenderStateRef :: !(IORef RenderState)
+    , controlAllowedToolsRef :: !(IORef (Set.Set Text.Text))
+    , controlLastAssistantRef :: !(IORef (Maybe Text.Text))
+    , controlModelRef :: !(IORef Text.Text)
+    , controlUnavailableProvidersRef :: !(IORef (Set.Set Provider))
+    , controlStartupUnavailableRef :: !(IORef (Maybe (STM ApiError)))
+    , controlRestartEffortRef :: !(IORef (Maybe Text.Text))
+    , controlLastFailedTurnRef :: !(IORef (Maybe PendingTurn))
+    , controlTitleTurnCount :: !(IORef Int)
+    , controlAgentViewportRuntime :: !AgentViewportRuntime
+    , controlAgentViewport :: !AgentViewportEnv
+    }
+
+newSessionControlRuntime
+    :: SessionHostRuntime
+    -> SessionRequest
+    -> IO SessionControlRuntime
+newSessionControlRuntime host SessionRequest{..} = do
     toolRegistry <- requireToolRegistry allTools
     steeringInputs <- newSteeringInputs
     setBackgroundTaskHooks toolEnv BackgroundTaskHooks
@@ -258,7 +340,6 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
         , backgroundTaskDismissed =
             dismissBackgroundCompletion steeringInputs
         }
-    let previewIdRef = startup.startupSessionState.sessionPreviewId
     spinnerRef <- newIORef Nothing
     renderStateRef <- newIORef emptyRenderState
     allowedToolsRef <- newIORef Set.empty
@@ -287,7 +368,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 pinSubagentSession
                     storeRoot agentTypes legacyTarget agentId session)
                 `catchAny` \err ->
-                    reportSessionError
+                    host.hostReportSessionError
                         ("failed to select agent: "
                             <> formatException err)
         releaseChild agentId = do
@@ -344,161 +425,278 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             (snd <$> loadAgentSnapshot agentViewportRuntime False)
     writeIORef startup.startupAgentSelect
         (selectAgentViewport agentViewportRuntime)
-    let installSkills context queueContext skills = do
-            before <- readIORef context
-            installSkillToolRoots toolEnv skills
-            omitted <- installSkillCatalogWithOmissions
-                reservedSlashNames queueContext context
-                skillsRef skillInvocationsRef skills
-            after <- readIORef context
-            pure
-                ( omitted
-                , max 0 (contextLength after - contextLength before)
-                )
-        installLearnedSkills context maximum queueContext =
-            loadApplicableLearnedSkillsForStore
-                startup.startupDatabaseStore
-                databaseScopes >>= \case
-                    Left err -> do
+    pure SessionControlRuntime
+        { controlToolRegistry = toolRegistry
+        , controlSteeringInputs = steeringInputs
+        , controlSpinnerRef = spinnerRef
+        , controlRenderStateRef = renderStateRef
+        , controlAllowedToolsRef = allowedToolsRef
+        , controlLastAssistantRef = lastAssistantRef
+        , controlModelRef = modelRef
+        , controlUnavailableProvidersRef = unavailableProvidersRef
+        , controlStartupUnavailableRef = startupUnavailableRef
+        , controlRestartEffortRef = restartEffortRef
+        , controlLastFailedTurnRef = lastFailedTurnRef
+        , controlTitleTurnCount = titleTurnCount
+        , controlAgentViewportRuntime = agentViewportRuntime
+        , controlAgentViewport = agentViewport
+        }
+
+data SkillContextRuntime = SkillContextRuntime
+    { skillReloadGeneratedContext :: !(IO ())
+    , skillResetSession :: !(IO ())
+    , skillRefresh :: !(Bool -> IO ())
+    , skillInitialize :: !(IO [LearnedSkill])
+    }
+
+buildSkillContextRuntime
+    :: SessionRunnerContinuation
+    -> SessionHostRuntime
+    -> SessionControlRuntime
+    -> SessionRequest
+    -> SessionBackend
+    -> SkillContextRuntime
+buildSkillContextRuntime
+        callbacks host controls SessionRequest{..} SessionBackend{..} =
+    SkillContextRuntime
+        { skillReloadGeneratedContext = reloadGeneratedContext
+        , skillResetSession = sessionReset
+        , skillRefresh = refreshSkills
+        , skillInitialize = initializeSkills
+        }
+  where
+    fullscreen = host.hostFullscreen
+    stderrHandle = host.hostStderrHandle
+    loadsHostWorkspaceContext = host.hostLoadsWorkspaceContext
+    renderStateRef = controls.controlRenderStateRef
+    lastAssistantRef = controls.controlLastAssistantRef
+    steeringInputs = controls.controlSteeringInputs
+    agentViewportRuntime = controls.controlAgentViewportRuntime
+    installSkills context queueContext skills = do
+        before <- readIORef context
+        installSkillToolRoots toolEnv skills
+        omitted <- installSkillCatalogWithOmissions
+            reservedSlashNames queueContext context
+            skillsRef skillInvocationsRef skills
+        after <- readIORef context
+        pure
+            ( omitted
+            , max 0 (contextLength after - contextLength before)
+            )
+    installLearnedSkills context maximum queueContext =
+        loadApplicableLearnedSkillsForStore
+            startup.startupDatabaseStore
+            databaseScopes >>= \case
+                Left err -> do
+                    reportLearnedSkillWarning
+                        ("learned skills unavailable: " <> err)
+                    pure []
+                Right learnedSkills -> do
+                    omitted <-
+                        if queueContext
+                            then queueLearnedSkillContextWithOmissions
+                                maximum
+                                context
+                                learnedSkills
+                            else pure 0
+                    when (omitted > 0) $
                         reportLearnedSkillWarning
-                            ("learned skills unavailable: " <> err)
-                        pure []
-                    Right learnedSkills -> do
-                        omitted <-
-                            if queueContext
-                                then queueLearnedSkillContextWithOmissions
-                                    maximum
-                                    context
-                                    learnedSkills
-                                else pure 0
-                        when (omitted > 0) $
-                            reportLearnedSkillWarning
-                                ("learned skills: "
-                                    <> Text.pack (show omitted)
-                                    <> " omitted from model context due to the context budget")
-                        pure learnedSkills
-        reloadGeneratedContext = do
-            freshAgents <-
-                if loadsHostWorkspaceContext
-                    then
-                        loadAgentsContext
-                            stderrHandle
-                            fullscreen
-                            SuppressAgentsContextLoaded
-                            options
-                            dialect
-                            home
-                            cwd
-                            []
-                            Nothing
-                            ((.catalogEnvironmentContext)
-                                <$> codexCatalogSession)
-                    else
-                        newIORef
-                            ((.catalogEnvironmentContext)
-                                <$> codexCatalogSession)
-            freshSkills <-
-                if loadsHostWorkspaceContext
-                    then loadSkillsCatalogQuiet options home projectRoot cwd
-                    else pure (SkillCatalog [] [])
-            (omitted, _) <-
-                installSkills freshAgents True freshSkills
-            reportSkillCatalog True freshSkills omitted
-            void $ installLearnedSkills
-                freshAgents
-                defaultLearnedSkillContextMaxChars
-                True
-            fresh <- readIORef freshAgents
-            writeIORef startupContext fresh
-        sessionReset = do
-            resetLiveConversationWith
-                resetBackendState
-                conversationRef
-                planMode
-            clearImageGenerationHistory
-            writeIORef usageRef emptyTokenUsage
-            writeIORef contextOccupancyRef Nothing
-            modifyIORef' renderStateRef clearRenderTokenRate
-            writeIORef lastAssistantRef Nothing
-            writeIORef subagentSessions Map.empty
-            writeIORef grokFirstTurnContextRef Nothing
-            resetAgentViewport agentViewportRuntime
-            case multiCtx of
-                Just ctx -> resetSubagentRegistry ctx.multiRegistry
-                Nothing -> pure ()
-            clearPendingInputs pendingNotices
-            clearSteeringInputs steeringInputs
-            readIORef toolEnv.toolSessionTmp >>= mapM_ resetToolSessionTemp
-            reloadGeneratedContext
-        refreshSkills queueContext = do
-            refreshed <-
-                if loadsHostWorkspaceContext
-                    then loadSkillsCatalogQuiet options home projectRoot cwd
-                    else pure (SkillCatalog [] [])
-            (omitted, _) <-
-                installSkills startupContext queueContext refreshed
-            when queueContext $
-                reportSkillCatalog True refreshed omitted
-        contextLength = maybe 0 Text.length
-        formatSkillWarning warning =
-            "skill ignored: "
-                <> toText warning.skillWarningPath
-                <> ": "
-                <> warning.skillWarningMessage
-        formatSkillOmission omitted =
-            "skills: "
-                <> Text.pack (show omitted)
-                <> " omitted from model context due to the catalog budget"
-        reportLearnedSkillWarning message =
-            case fullscreen of
-                Nothing -> do
-                    color <- resolveColor stderrHandle
+                            ("learned skills: "
+                                <> Text.pack (show omitted)
+                                <> " omitted from model context due to the context budget")
+                    pure learnedSkills
+    reloadGeneratedContext = do
+        freshAgents <-
+            if loadsHostWorkspaceContext
+                then
+                    loadAgentsContext
+                        stderrHandle
+                        fullscreen
+                        SuppressAgentsContextLoaded
+                        options
+                        dialect
+                        home
+                        cwd
+                        []
+                        Nothing
+                        ((.catalogEnvironmentContext)
+                            <$> codexCatalogSession)
+                else
+                    newIORef
+                        ((.catalogEnvironmentContext)
+                            <$> codexCatalogSession)
+        freshSkills <-
+            if loadsHostWorkspaceContext
+                then loadSkillsCatalogQuiet options home projectRoot cwd
+                else pure (SkillCatalog [] [])
+        (omitted, _) <-
+            installSkills freshAgents True freshSkills
+        reportSkillCatalog True freshSkills omitted
+        void $ installLearnedSkills
+            freshAgents
+            defaultLearnedSkillContextMaxChars
+            True
+        fresh <- readIORef freshAgents
+        writeIORef startupContext fresh
+    sessionReset = do
+        resetLiveConversationWith
+            resetBackendState
+            conversationRef
+            planMode
+        clearImageGenerationHistory
+        writeIORef usageRef emptyTokenUsage
+        writeIORef contextOccupancyRef Nothing
+        modifyIORef' renderStateRef clearRenderTokenRate
+        writeIORef lastAssistantRef Nothing
+        writeIORef subagentSessions Map.empty
+        writeIORef host.hostGrokFirstTurnContextRef Nothing
+        resetAgentViewport agentViewportRuntime
+        case multiCtx of
+            Just ctx -> resetSubagentRegistry ctx.multiRegistry
+            Nothing -> pure ()
+        clearPendingInputs pendingNotices
+        clearSteeringInputs steeringInputs
+        readIORef toolEnv.toolSessionTmp >>= mapM_ resetToolSessionTemp
+        reloadGeneratedContext
+    refreshSkills queueContext = do
+        refreshed <-
+            if loadsHostWorkspaceContext
+                then loadSkillsCatalogQuiet options home projectRoot cwd
+                else pure (SkillCatalog [] [])
+        (omitted, _) <-
+            installSkills startupContext queueContext refreshed
+        when queueContext $
+            reportSkillCatalog True refreshed omitted
+    contextLength = maybe 0 Text.length
+    formatSkillWarning warning =
+        "skill ignored: "
+            <> toText warning.skillWarningPath
+            <> ": "
+            <> warning.skillWarningMessage
+    formatSkillOmission omitted =
+        "skills: "
+            <> Text.pack (show omitted)
+            <> " omitted from model context due to the catalog budget"
+    reportLearnedSkillWarning message =
+        case fullscreen of
+            Nothing -> do
+                color <- resolveColor stderrHandle
+                putTextLn stderrHandle $
+                    roleWarn color (glyphWarn <> message)
+            Just runtime ->
+                emitUiEvent runtime (UiSystemMessage message)
+    reportSkillCatalog includeSummary catalog omitted =
+        case fullscreen of
+            Nothing -> do
+                color <- resolveColor stderrHandle
+                when includeSummary do
+                    let count = length catalog.catalogSkills
                     putTextLn stderrHandle $
-                        roleWarn color (glyphWarn <> message)
-                Just runtime ->
-                    emitUiEvent runtime (UiSystemMessage message)
-        reportSkillCatalog includeSummary catalog omitted =
-            case fullscreen of
-                Nothing -> do
-                    color <- resolveColor stderrHandle
-                    when includeSummary do
-                        let count = length catalog.catalogSkills
-                        putTextLn stderrHandle $
-                            roleMuted color
-                                (glyphSession
-                                    <> "skills: loaded "
-                                    <> Text.pack (show count)
-                                    <> if count == 1
-                                        then " skill"
-                                        else " skills")
-                    mapM_
-                        (putTextLn stderrHandle
-                            . roleWarn color
-                            . (glyphWarn <>)
-                            . formatSkillWarning)
-                        catalog.catalogWarnings
-                    when (omitted > 0) $
-                        putTextLn stderrHandle $
-                            roleWarn color
-                                (glyphWarn <> formatSkillOmission omitted)
-                Just runtime -> do
-                    when includeSummary do
-                        let count = length catalog.catalogSkills
-                        emitUiEvent runtime $
-                            UiSystemMessage
-                                ("skills: loaded "
-                                    <> Text.pack (show count)
-                                    <> if count == 1
-                                        then " skill"
-                                        else " skills")
-                    mapM_
-                        (emitUiEvent runtime
-                            . UiSystemMessage
-                            . formatSkillWarning)
-                        catalog.catalogWarnings
-                    when (omitted > 0) $
-                        emitUiEvent runtime
-                            (UiSystemMessage (formatSkillOmission omitted))
+                        roleMuted color
+                            (glyphSession
+                                <> "skills: loaded "
+                                <> Text.pack (show count)
+                                <> if count == 1
+                                    then " skill"
+                                    else " skills")
+                mapM_
+                    (putTextLn stderrHandle
+                        . roleWarn color
+                        . (glyphWarn <>)
+                        . formatSkillWarning)
+                    catalog.catalogWarnings
+                when (omitted > 0) $
+                    putTextLn stderrHandle $
+                        roleWarn color
+                            (glyphWarn <> formatSkillOmission omitted)
+            Just runtime -> do
+                when includeSummary do
+                    let count = length catalog.catalogSkills
+                    emitUiEvent runtime $
+                        UiSystemMessage
+                            ("skills: loaded "
+                                <> Text.pack (show count)
+                                <> if count == 1
+                                    then " skill"
+                                    else " skills")
+                mapM_
+                    (emitUiEvent runtime
+                        . UiSystemMessage
+                        . formatSkillWarning)
+                    catalog.catalogWarnings
+                when (omitted > 0) $
+                    emitUiEvent runtime
+                        (UiSystemMessage (formatSkillOmission omitted))
+    initializeSkills = do
+        markStartupStage startup "Loading skills…"
+        skills <-
+            if loadsHostWorkspaceContext
+                then loadSkillsCatalogQuiet options home projectRoot cwd
+                else pure (SkillCatalog [] [])
+        (omitted, _) <- installSkills startupContext
+            queueInitialContext
+            skills
+        reportSkillCatalog (isNothing fullscreen) skills omitted
+        learnedSkills <-
+            if needsInitialContext
+                then installLearnedSkills
+                    startupContext
+                    defaultLearnedSkillContextMaxChars
+                    queueInitialContext
+                else pure []
+        callbacks.runnerFinishStartup startup
+        pure learnedSkills
+
+runSession
+    :: SessionRunnerContinuation
+    -> SessionRequest
+    -> SessionBackend
+    -> IO RunResult
+runSession
+        callbacks
+        request@SessionRequest{..}
+        sessionBackend@SessionBackend{..} = do
+  host <- newSessionHostRuntime request
+  let initialPrevious = host.hostInitialPrevious
+      grokFirstTurnContextRef = host.hostGrokFirstTurnContextRef
+      ioLock = host.hostIoLock
+      fullscreen = host.hostFullscreen
+      nativeCapabilities = host.hostNativeCapabilities
+      preparedWorkspaceEnvironment = host.hostPreparedWorkspaceEnvironment
+      terminal = host.hostTerminal
+      stdoutHandle = host.hostStdoutHandle
+      stderrHandle = host.hostStderrHandle
+      useColor = host.hostUseColor
+      stderrTty = host.hostStderrTty
+      reportSessionError = host.hostReportSessionError
+      setWindowTitle = host.hostWindowTitle.windowTitleSet
+      beginWindowTitleBusy = host.hostWindowTitle.windowTitleBeginBusy
+      endWindowTitleBusy = host.hostWindowTitle.windowTitleEndBusy
+      windowTitleWorker = host.hostWindowTitle.windowTitleWorker
+  withSessionTitleRuntime host request sessionBackend \titleManager -> do
+    controls <- newSessionControlRuntime host request
+    let previewIdRef = startup.startupSessionState.sessionPreviewId
+        toolRegistry = controls.controlToolRegistry
+        steeringInputs = controls.controlSteeringInputs
+        spinnerRef = controls.controlSpinnerRef
+        renderStateRef = controls.controlRenderStateRef
+        allowedToolsRef = controls.controlAllowedToolsRef
+        lastAssistantRef = controls.controlLastAssistantRef
+        modelRef = controls.controlModelRef
+        unavailableProvidersRef = controls.controlUnavailableProvidersRef
+        startupUnavailableRef = controls.controlStartupUnavailableRef
+        restartEffortRef = controls.controlRestartEffortRef
+        lastFailedTurnRef = controls.controlLastFailedTurnRef
+        titleTurnCount = controls.controlTitleTurnCount
+        agentViewportRuntime = controls.controlAgentViewportRuntime
+        agentViewport = controls.controlAgentViewport
+        skillsRuntime =
+            buildSkillContextRuntime
+                callbacks host controls request sessionBackend
+        reloadGeneratedContext =
+            skillsRuntime.skillReloadGeneratedContext
+        sessionReset = skillsRuntime.skillResetSession
+        refreshSkills = skillsRuntime.skillRefresh
     managedLoopPublisher <-
         maybe
             (pure (const (pure ())))
@@ -1139,27 +1337,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             (readIORef startup.startupAgentSnapshot >>= id)
             (\target ->
                 readIORef startup.startupAgentSelect >>= ($ target))
-    let initializeSkills = do
-            markStartupStage startup "Loading skills…"
-            skills <-
-                if loadsHostWorkspaceContext
-                    then loadSkillsCatalogQuiet options home projectRoot cwd
-                    else pure (SkillCatalog [] [])
-            (omitted, _) <- installSkills startupContext
-                queueInitialContext
-                skills
-            reportSkillCatalog (isNothing fullscreen) skills omitted
-            learnedSkills <-
-                if needsInitialContext
-                    then installLearnedSkills
-                        startupContext
-                        defaultLearnedSkillContextMaxChars
-                        queueInitialContext
-                    else pure []
-            callbacks.runnerFinishStartup startup
-            pure learnedSkills
-        sessionAction = do
-            learnedSkills <- initializeSkills
+    let sessionAction = do
+            learnedSkills <- skillsRuntime.skillInitialize
             case pendingTurn of
                 Just pending ->
                     callbacks.runnerRunPendingTurn
