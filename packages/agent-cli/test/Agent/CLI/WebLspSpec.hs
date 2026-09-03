@@ -3,6 +3,7 @@ module Agent.CLI.WebLspSpec (spec) where
 import Agent.CLI.Config
 import Agent.CLI.Lsp
 import Agent.CLI.WebFetch
+import Agent.Json (rawJsonFromEncoding)
 import Agent.Loop (defaultLoopDispatch)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.ToolDispatch
@@ -161,8 +162,10 @@ spec = describe "web_fetch and LSP runtime support" do
                 script = directory FilePath.</> "mock-lsp.sh"
                 trace = directory FilePath.</> "mock-lsp-requests.log"
                 source = directory FilePath.</> "Test.hs"
+                unsupportedSource = directory FilePath.</> "Test.txt"
             writeFile script mockLspScript
             writeFile source "module Test where\nmain = pure ()\n"
+            writeFile unsupportedSource "not handled by the mock server\n"
             env <- defaultToolEnv root
             setToolSessionTmp env (Just root)
             let server = LspServerConfig
@@ -171,8 +174,17 @@ spec = describe "web_fetch and LSP runtime support" do
                     , lspEnv = Map.empty
                     , lspExtensionToLanguage =
                         Map.singleton ".hs" "haskell"
-                    , lspInitializationOptions = Nothing
-                    , lspSettings = Nothing
+                    , lspInitializationOptions =
+                        Just . rawJsonFromEncoding . Aeson.toEncoding $
+                            object ["feature" .= True]
+                    , lspSettings =
+                        Just . rawJsonFromEncoding . Aeson.toEncoding $
+                            object
+                                [ "haskell" .= object
+                                    [ "formattingProvider"
+                                        .= ("ormolu" :: Text.Text)
+                                    ]
+                                ]
                     , lspWorkspaceFolder = Nothing
                     , lspStartupTimeoutMilliseconds = 3000
                     , lspShutdownTimeoutMilliseconds = 3000
@@ -187,14 +199,31 @@ spec = describe "web_fetch and LSP runtime support" do
                 Nothing -> expectationFailure "expected initialized LSP runtime"
                 Just runtime -> do
                     let tool = lspRuntimeTool runtime
-                        fileRequest operation =
+                        fileRequestFor operation file =
                             object
                                 [ "operation" .= (operation :: Text.Text)
-                                , "file_path" .= Text.pack source
+                                , "file_path" .= Text.pack file
                                 , "line" .= (0 :: Int)
                                 , "character" .= (1 :: Int)
                                 ]
+                        fileRequest operation =
+                            fileRequestFor operation source
                     tool.appToolName `shouldBe` "lsp"
+                    relative <- callLsp tool
+                        (fileRequestFor "hover" "Test.hs")
+                    relative.output `shouldSatisfy`
+                        Text.isInfixOf
+                            "lsp file_path must be absolute"
+                    outside <- callLsp tool
+                        (fileRequestFor "hover" "/etc/hosts")
+                    outside.output `shouldSatisfy`
+                        Text.isInfixOf
+                            "lsp file_path must be inside the active workspace"
+                    unsupported <- callLsp tool
+                        (fileRequestFor "hover" unsupportedSource)
+                    unsupported.output `shouldSatisfy`
+                        Text.isInfixOf
+                            "No initialized LSP server is configured for .txt"
                     definition <- callLsp tool
                         (fileRequest "goToDefinition")
                     definition.output `shouldSatisfy`
@@ -233,6 +262,7 @@ spec = describe "web_fetch and LSP runtime support" do
                                     ("\"method\":\"" <> method <> "\""))
                         [ "textDocument/didOpen"
                         , "textDocument/didChange"
+                        , "workspace/didChangeConfiguration"
                         , "textDocument/definition"
                         , "textDocument/references"
                         , "textDocument/hover"
@@ -242,6 +272,13 @@ spec = describe "web_fetch and LSP runtime support" do
                         , "shutdown"
                         , "exit"
                         ]
+                    take 4 (Text.lines requests)
+                        `shouldSatisfy` initializationOrder
+                    requests `shouldSatisfy`
+                        Text.isInfixOf "\"feature\":true"
+                    requests `shouldSatisfy`
+                        Text.isInfixOf
+                            "\"formattingProvider\":\"ormolu\""
                     requests `shouldSatisfy`
                         Text.isInfixOf
                             "\"id\":\"configuration-1\""
@@ -371,6 +408,7 @@ mockLspScript =
         , "read_frame"
         , "read_frame"
         , "read_frame"
+        , "read_frame"
         , "send_frame '{\"jsonrpc\":\"2.0\",\"id\":\"configuration-1\",\"method\":\"workspace/configuration\",\"params\":{\"items\":[{},{}]}}'"
         , "read_frame"
         , "send_frame '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"uri\":\"file:///mock/Test.hs\",\"range\":{\"start\":{\"line\":0,\"character\":1}}}}'"
@@ -391,6 +429,25 @@ mockLspScript =
         , "read_frame"
         , "send_frame '{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":null}'"
         , "read_frame"
+        ]
+
+initializationOrder :: [Text.Text] -> Bool
+initializationOrder requests =
+    length requests == length methods
+        && and
+            (zipWith
+                (\request method ->
+                    ("\"method\":\"" <> method <> "\"")
+                        `Text.isInfixOf`
+                            request)
+                requests
+                methods)
+  where
+    methods =
+        [ "initialize"
+        , "initialized"
+        , "workspace/didChangeConfiguration"
+        , "textDocument/didOpen"
         ]
 
 blockingLspScript :: FilePath -> FilePath -> String
