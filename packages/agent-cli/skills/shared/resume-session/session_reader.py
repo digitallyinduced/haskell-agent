@@ -32,11 +32,21 @@ UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
+# Keep concrete user-context prefixes aligned with
+# Agent.OpenAI.Compaction.isGeneratedContextUserText.
 GENERATED_WRAPPER_RE = re.compile(
-    r"^\s*(?:#\s*AGENTS\.md instructions for(?:\s|$)|"
+    r"^\s*(?:"
+    r"#\s*AGENTS\.md instructions for(?:\s|$)|"
+    r"#\s*Skill instructions:(?:\s|$)|"
+    r"##\s*Skills\r?\n"
+    r"The following reusable skills are available in this session\.(?:\s|$)|"
+    r"Plan mode is active\. Do not make any edits or writes to the system "
+    r"except for the plan file\.(?:\s|$)|"
+    r"The user approved the plan\. Plan mode is now off\.(?:\s|$)|"
     r"<(?:system-reminder|environment_context|system|developer|instructions|"
     r"user_instructions|manually_attached_skills|timestamp|local-command-caveat|"
-    r"harness_instructions|prior_conversation|current_request|user_query)"
+    r"harness_instructions|prior_conversation|current_request|user_query|"
+    r"learned-skills|subagent_notification)"
     r"(?:\s|>))",
     re.IGNORECASE,
 )

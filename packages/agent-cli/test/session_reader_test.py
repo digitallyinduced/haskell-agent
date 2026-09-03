@@ -1155,6 +1155,52 @@ class SessionReaderTest(unittest.TestCase):
         self.assertEqual(reader.user_text(wrapped), "merge")
         self.assertEqual(reader.user_text("<user_query></user_query>"), "")
 
+    def test_generated_context_wrappers_are_not_user_requests(self):
+        wrappers = [
+            (
+                "# AGENTS.md instructions for /tmp/project\n\n"
+                "<INSTRUCTIONS>generated</INSTRUCTIONS>"
+            ),
+            (
+                "# Skill instructions: example\n\n"
+                "<SKILL_INSTRUCTIONS>generated</SKILL_INSTRUCTIONS>"
+            ),
+            (
+                "## Skills\n"
+                "The following reusable skills are available in this session.\n"
+                "Always-active skills follow."
+            ),
+            (
+                "<learned-skills>\n"
+                "These are durable, reusable instructions learned from earlier "
+                "sessions.\n"
+                "</learned-skills>"
+            ),
+            (
+                "<system-reminder>\n"
+                "As you answer the user's questions, you can use the following "
+                "context\n"
+                "</system-reminder>"
+            ),
+            (
+                "Plan mode is active. Do not make any edits or writes to the "
+                "system except for the plan file.\n"
+                "Use plan.md."
+            ),
+            (
+                "The user approved the plan. Plan mode is now off. "
+                "Begin implementing."
+            ),
+            (
+                "<subagent_notification>\n"
+                "status: completed\n"
+                "</subagent_notification>"
+            ),
+        ]
+        for wrapper in wrappers:
+            with self.subTest(wrapper=wrapper.splitlines()[0]):
+                self.assertEqual(reader.user_text(wrapper), "")
+
     def test_quoted_resume_tags_are_not_treated_as_harness_wrappers(self):
         for tag in ("current_request", "user_query"):
             with self.subTest(tag=tag):
