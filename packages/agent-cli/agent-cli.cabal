@@ -11,7 +11,6 @@ maintainer:         marc@digitallyinduced.com
 copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
-extra-source-files: test/session_reader_test.py
 data-files:         data/CHANGELOG.md
                   , skills/add-model/SKILL.md
                   , skills/learn-about-user/SKILL.md
@@ -21,7 +20,6 @@ data-files:         data/CHANGELOG.md
                   , skills/resume-cursor/SKILL.md
                   , skills/resume-grok/SKILL.md
                   , skills/shared/resume-session/CORE.md
-                  , skills/shared/resume-session/session_reader.py
                   , skills/telegram-agent/SKILL.md
 
 common common-options
@@ -61,6 +59,15 @@ library
                     , Agent.CLI.Compaction.Continuation
                     , Agent.CLI.Compaction.Projection
                     , Agent.CLI.Compaction.Types
+                    , Agent.CLI.ExternalSession.Content
+                    , Agent.CLI.ExternalSession.JSONL
+                    , Agent.CLI.ExternalSession.Paths
+                    , Agent.CLI.ExternalSession.Provider.Claude
+                    , Agent.CLI.ExternalSession.Provider.Codex
+                    , Agent.CLI.ExternalSession.Provider.Cursor
+                    , Agent.CLI.ExternalSession.Provider.Grok
+                    , Agent.CLI.ExternalSession.SQLite
+                    , Agent.CLI.ExternalSession.Types
                     , Agent.CLI.Clipboard.Linux
                     , Agent.CLI.Clipboard.MacOS
                     , Agent.CLI.McpStatus
@@ -168,6 +175,7 @@ library
                     , Agent.CLI.Dictation
                     , Agent.CLI.Dialects
                     , Agent.CLI.ExternalProgram
+                    , Agent.CLI.ExternalSession
                     , Agent.CLI.FileUri
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.GatewayModels
@@ -293,6 +301,7 @@ library
                     , containers
                     , crypton
                     , directory
+                    , direct-sqlite >= 2.3 && < 2.4
                     , entropy
                     , filelock
                     , filepath
@@ -488,6 +497,7 @@ test-suite agent-cli-test
                     , Agent.CLI.DatabaseSpec
                     , Agent.CLI.DesktopSpec
                     , Agent.CLI.ExternalProgramSpec
+                    , Agent.CLI.ExternalSessionSpec
                     , Agent.CLI.FileUriSpec
                     , Agent.CLI.GatewayModelsSpec
                     , Agent.CLI.GitDiffSpec
@@ -575,6 +585,7 @@ test-suite agent-cli-test
                     , colour
                     , containers
                     , directory
+                    , direct-sqlite >= 2.3 && < 2.4
                     , filepath
                     , haskeline >= 0.8 && < 0.9
                     , hspec >= 2.11 && < 2.12

@@ -27,20 +27,17 @@ or summarizing it.
 Use the exact **Invocation arguments** included in the activation message as
 one literal optional reference. If they are `(none)` or `latest`, omit the
 reference or pass `latest`. Never evaluate or splice the reference as shell
-syntax; pass it as one safely quoted argument. When a reference is present,
-use the `--reference="<literal reference>"` form so values such as `--json` or
-`-h` cannot be interpreted as reader options.
+syntax.
 
-Run:
+Call the `read_external_session` tool with:
 
-```bash
-python3 "<resolved-shared-directory>/session_reader.py" <provider> show \
-  --reference="<literal reference>" --cwd "$PWD" --json
-```
+- `provider`: the provider named by the wrapper skill;
+- `operation`: `show`;
+- `reference`: the literal invocation arguments, omitted when none were
+  supplied.
 
-Omit the `--reference=...` argument when no reference was supplied.
-
-If `python3` is unavailable on Windows, use `py -3`.
+The native reader applies the normal read-access gate to explicit paths. Do
+not use a shell or another filesystem tool to bypass a denied path.
 
 Argument behavior:
 
@@ -50,19 +47,7 @@ Argument behavior:
 - Other text is matched case-insensitively against session titles and IDs.
 - If matching is ambiguous, never guess. Show the concise candidates and ask
   the user to choose.
-- For discovery, run:
-
-```bash
-python3 "<resolved-shared-directory>/session_reader.py" <provider> list --cwd "$PWD" --json
-```
-
-The supported interface is:
-
-```text
-session_reader.py <claude|codex|cursor|grok> <list|show>
-  [reference | --reference=REFERENCE]
-  [--cwd DIR] [--within-min N] [--max-tool-chars N] [--json]
-```
+- For discovery, call `read_external_session` with `operation: list`.
 
 ## Build the handoff
 
