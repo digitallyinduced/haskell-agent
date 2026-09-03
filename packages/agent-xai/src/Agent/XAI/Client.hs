@@ -28,8 +28,8 @@ import Agent.XAI.Error
 import Agent.XAI.Options
 import Agent.XAI.Request
     ( buildRequest
-    , filterXaiOrLegacyCompactionCheckpoints
     , mapModel
+    , projectXaiOrLegacyCompactionHistory
     )
 import Agent.XAI.Stream (streamAssemblyConfig)
 import Control.Retry
@@ -141,7 +141,7 @@ xaiProviderConfig options credential request = ProviderClientConfig
     , providerConfigureRequest =
         configureCompactionHeaders
             options
-            (filterXaiOrLegacyCompactionCheckpoints request)
+            (projectXaiOrLegacyCompactionHistory request)
             . setRequestHeader "Authorization"
             ["Bearer " <> Text.encodeUtf8 credential.accessToken]
             . setRequestHeader "X-XAI-Token-Auth"

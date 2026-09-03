@@ -11,6 +11,7 @@ import Agent.Loop
     , emptyBackendSnapshot
     )
 import qualified Agent.Responses.Codec as ResponsesCodec
+import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.XAI.Client
 import Agent.XAI.LoopBackend
 import Agent.XAI.Options
@@ -203,13 +204,20 @@ spec = do
                         { itemId = Just "xai-context"
                         , encryptedContent = Just "opaque"
                         }
+                obsolete =
+                    turnInputsToItems [UserMessage "obsolete history"]
+                retained =
+                    turnInputsToItems [UserMessage "post-checkpoint context"]
                 request = (helloRequest "continue")
                     { model = Just "grok-4.6"
                     , input = Just
                         (ResponseInputItems
-                            [ checkpoint
-                            , xaiCompactionCheckpointOriginItem
-                            ])
+                            ( obsolete
+                                <> [ checkpoint
+                                   , xaiCompactionCheckpointOriginItem
+                                   ]
+                                <> retained
+                            ))
                     }
                 markerEncoding =
                     LBS.toStrict
@@ -228,6 +236,12 @@ spec = do
             BS.isInfixOf
                 "\"type\":\"context_compaction\""
                 (LBS.toStrict sent.body)
+                `shouldBe` True
+            BS.isInfixOf "obsolete history" (LBS.toStrict sent.body)
+                `shouldBe` False
+            BS.isInfixOf "post-checkpoint context" (LBS.toStrict sent.body)
+                `shouldBe` True
+            BS.isInfixOf "You are a test agent." (LBS.toStrict sent.body)
                 `shouldBe` True
             lookup "x-compaction-at" sent.headers `shouldBe` Nothing
 
@@ -361,22 +375,28 @@ spec = do
             fmap (.backendState.backendItems) result
                 `shouldBe`
                     Right
-                        [ checkpoint
-                        , xaiCompactionCheckpointOriginItem
-                        ]
+                        ( turnInputsToItems [UserMessage "continue"]
+                            <> [ checkpoint
+                               , xaiCompactionCheckpointOriginItem
+                               ]
+                        )
 
-        it "replays marked xAI checkpoints without leaking provenance" do
+        it "keeps portable history in state but sends only the xAI checkpoint suffix" do
             let checkpoint =
                     ContextCompactionItemValue ContextCompactionItem
                         { itemId = Just "xai-context"
                         , encryptedContent = Just "opaque-xai"
                         }
+                portableHistory =
+                    turnInputsToItems [UserMessage "portable history"]
                 snapshot =
                     advanceBackendSnapshot
                         emptyBackendSnapshot
-                        [ checkpoint
-                        , xaiCompactionCheckpointOriginItem
-                        ]
+                        ( portableHistory
+                            <> [ checkpoint
+                               , xaiCompactionCheckpointOriginItem
+                               ]
+                        )
                         Nothing
             requests <- newIORef []
             let backend =
@@ -393,12 +413,22 @@ spec = do
                 Nothing
                 [UserMessage "continue"]
                 (const (pure ()))
-            result `shouldSatisfy` either (const False) (const True)
+            case result of
+                Left err ->
+                    expectationFailure
+                        ("expected Right, got Left " <> show err)
+                Right completed ->
+                    completed.backendState.backendItems
+                        `shouldSatisfy`
+                            \items -> all (`elem` items) portableHistory
             readIORef requests >>= \case
                 [request] ->
                     case request.input of
                         Just (ResponseInputItems items) -> do
                             items `shouldSatisfy` elem checkpoint
+                            items `shouldSatisfy`
+                                \sent ->
+                                    all (`notElem` sent) portableHistory
                             items `shouldSatisfy`
                                 not
                                     . any

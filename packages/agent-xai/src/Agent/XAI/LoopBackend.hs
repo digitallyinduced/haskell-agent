@@ -17,16 +17,14 @@ import Agent.Error (ApiError)
 import Agent.Loop (Backend)
 import Agent.Responses.LoopBackend
     ( isServerCompactionCheckpoint
-    , statelessResponsesBackend
-    , tokenProviderStatelessResponsesBackend
-    )
-import Agent.Responses.Request
-    ( filterRequestCompactionCheckpointsByOrigin
+    , statelessResponsesBackendPreservingCheckpointHistory
+    , tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
     )
 import Agent.Responses.Types
 import Agent.Provider (TokenProvider)
 import Agent.XAI.Client (createResponseWithEvents)
 import Agent.XAI.Options (ClientOptions)
+import Agent.XAI.Request (projectMarkedXaiCompactionHistory)
 
 -- | Close over xAI options, a token provider, and the request fields the loop
 -- does not own (model, instructions, tools, reasoning). Credentials stay
@@ -50,7 +48,7 @@ xaiBackendWithClientOptions
     -> IO ResponseCreateParams
     -> Backend
 xaiBackendWithClientOptions optionsForRequest provider =
-    tokenProviderStatelessResponsesBackend provider
+    tokenProviderStatelessResponsesBackendPreservingCheckpointHistory provider
         (\credential request onEvent -> do
             let projectedRequest = projectXaiCheckpoints request
             fmap (fmap markXaiServerCompactionCheckpoint) $
@@ -69,7 +67,7 @@ xaiBackendWith
     -> IO ResponseCreateParams
     -> Backend
 xaiBackendWith send =
-    statelessResponsesBackend \request onEvent ->
+    statelessResponsesBackendPreservingCheckpointHistory \request onEvent ->
         fmap (fmap markXaiServerCompactionCheckpoint)
             (send (projectXaiCheckpoints request) onEvent)
 
@@ -85,8 +83,7 @@ isXaiCompactionCheckpointOriginItem item =
 -- Ordinary backend requests may contain history from a previous provider.
 -- Require explicit xAI provenance before replaying an opaque checkpoint.
 projectXaiCheckpoints :: ResponseCreateParams -> ResponseCreateParams
-projectXaiCheckpoints =
-    filterRequestCompactionCheckpointsByOrigin (== Just "xai")
+projectXaiCheckpoints = projectMarkedXaiCompactionHistory
 
 -- Mark only a checkpoint emitted by this xAI response. Existing request
 -- history may contain an indistinguishable checkpoint from another provider.

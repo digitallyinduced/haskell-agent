@@ -3,12 +3,14 @@
 module Agent.XAI.Request
     ( mapModel
     , buildRequest
-    , filterXaiOrLegacyCompactionCheckpoints
+    , projectMarkedXaiCompactionHistory
+    , projectXaiOrLegacyCompactionHistory
     ) where
 
 import Agent.Responses.Request
     ( filterRequestCompactionCheckpointsByOrigin
     , forceStatelessStreaming
+    , isServerCompactionCheckpoint
     , mapResponseTools
     , selectConfiguredModel
     , stripLocalCompactionMarker
@@ -45,11 +47,12 @@ mapModel options model =
 -- never stored server-side.
 buildRequest :: ClientOptions -> ResponseCreateParams -> ResponseCreateParams
 buildRequest options request =
-    stripLocalCompactionMarker $
-        filterXaiOrLegacyCompactionCheckpoints $
-            (if options.hostedXSearchEnabled then withHostedXSearch else id) $
-                mapResponseTools xaiTool $
-                    forceStatelessStreaming defaultResponseCreateParams
+    let projectedHistory =
+            projectXaiOrLegacyCompactionHistory request
+    in stripLocalCompactionMarker $
+        (if options.hostedXSearchEnabled then withHostedXSearch else id) $
+            mapResponseTools xaiTool $
+                forceStatelessStreaming defaultResponseCreateParams
                     { model = Just $
                         selectConfiguredModel
                             options.modelOverrides
@@ -58,7 +61,7 @@ buildRequest options request =
                             request.model
                     , input = Just
                         (ResponseInputItems
-                            (systemItems <> requestInputItems request))
+                            (systemItems <> requestInputItems projectedHistory))
                     , tools = request.tools
                     , reasoning = Just ReasoningConfig
                         { context = Nothing
@@ -95,16 +98,56 @@ buildRequest options request =
         KnownResponseTool ToolComputer -> Nothing
         _ -> Just tool
 
--- | Keep xAI checkpoints and legacy checkpoints without provenance. This
--- projection intentionally leaves local-summary metadata intact so callers
--- can make compaction-policy decisions before the wire sanitizer removes it.
-filterXaiOrLegacyCompactionCheckpoints
+-- | Project host history for an ordinary xAI backend request. Require explicit
+-- xAI provenance before replaying a checkpoint.
+projectMarkedXaiCompactionHistory
     :: ResponseCreateParams
     -> ResponseCreateParams
-filterXaiOrLegacyCompactionCheckpoints =
-    filterRequestCompactionCheckpointsByOrigin \case
+projectMarkedXaiCompactionHistory =
+    projectXaiCompactionHistory (== Just "xai")
+
+-- Keep compatible checkpoints, remove their host-only provenance markers,
+-- and trim the portable history prefix only for the provider request. Host
+-- state retains that prefix so another provider can still reconstruct the
+-- conversation after a switch.
+projectXaiCompactionHistory
+    :: (Maybe Text -> Bool)
+    -> ResponseCreateParams
+    -> ResponseCreateParams
+projectXaiCompactionHistory keepOrigin request =
+    trimBeforeLatestCheckpoint
+        (filterRequestCompactionCheckpointsByOrigin keepOrigin request)
+
+-- | Direct client calls accept xAI checkpoints and legacy checkpoints without
+-- provenance. Local-summary metadata remains intact so header policy can run
+-- before the wire sanitizer removes it.
+projectXaiOrLegacyCompactionHistory
+    :: ResponseCreateParams
+    -> ResponseCreateParams
+projectXaiOrLegacyCompactionHistory =
+    projectXaiCompactionHistory \case
         Nothing -> True
         Just origin -> origin == "xai"
+
+trimBeforeLatestCheckpoint
+    :: ResponseCreateParams
+    -> ResponseCreateParams
+trimBeforeLatestCheckpoint ResponseCreateParams { input, .. } =
+    ResponseCreateParams
+        { input = trimInput <$> input
+        , ..
+        }
+  where
+    trimInput = \case
+        ResponseInputItems items ->
+            ResponseInputItems (checkpointSuffix items)
+        other -> other
+
+    checkpointSuffix items =
+        case break isServerCompactionCheckpoint (reverse items) of
+            (after, checkpoint : _) ->
+                checkpoint : reverse after
+            _ -> items
 
 -- | Grok Build always splices hosted @x_search@ onto grok-4.6 Responses
 -- requests. Keep a single empty-fields entry even when the caller omitted

@@ -782,6 +782,8 @@ runAgentProviders
                                     currentParams
                                     history
                                     Nothing
+                                    >>= decorateAutomaticCompact
+                                        xaiContextWindow
                             -- Reconnection wraps only the continuation. Keeping
                             -- automatic compaction outside it prevents a
                             -- failed continuation from rerunning the summary.

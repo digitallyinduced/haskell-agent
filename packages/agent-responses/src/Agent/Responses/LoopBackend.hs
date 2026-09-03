@@ -1,9 +1,11 @@
 -- | Provider-neutral loop adapters for Responses-compatible transports.
 module Agent.Responses.LoopBackend
     ( statelessResponsesBackend
+    , statelessResponsesBackendPreservingCheckpointHistory
     , statelessResponsesBackendPreservingHistory
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
+    , tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
     , tokenProviderStatelessResponsesBackendPreservingHistory
     , turnInputsToItems
     , responseToTurnOutput
@@ -95,6 +97,23 @@ statelessResponsesBackend
 statelessResponsesBackend send getParams =
     statelessResponsesBackendWithRawReasoning True send getParams
 
+-- | Adapt a stateless transport whose opaque checkpoints are replayable, but
+-- only by that same provider. Keep the complete pre-checkpoint history in host
+-- state for later provider switches; the provider's wire projection must trim
+-- that portable prefix when it replays its checkpoint.
+statelessResponsesBackendPreservingCheckpointHistory
+    :: (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+statelessResponsesBackendPreservingCheckpointHistory send getParams =
+    statelessResponsesBackendWithMode
+        PreservePreCheckpointHistoryAndCheckpoint
+        True
+        send
+        getParams
+
 -- | Adapt a stateless transport that cannot safely replay opaque server
 -- checkpoints. Keep the complete request history even when a response
 -- contains a checkpoint, and omit the unusable checkpoint itself from the
@@ -131,6 +150,7 @@ statelessResponsesBackendWithRawReasoning showRawReasoning send getParams =
 data ServerCheckpointMode
     = ReplacePreCheckpointHistory
     | PreservePreCheckpointHistory
+    | PreservePreCheckpointHistoryAndCheckpoint
 
 statelessResponsesBackendWithMode
     :: ServerCheckpointMode
@@ -169,6 +189,8 @@ statelessResponsesBackendWithMode
                                     <> filterCompactionCheckpointsByOrigin
                                         (const False)
                                         response.output
+                            PreservePreCheckpointHistoryAndCheckpoint ->
+                                normalizedRequestItems <> response.output
                 in
                 pure $ Right BackendResult
                     { backendOutput = responseToTurnOutput response
@@ -205,6 +227,23 @@ tokenProviderStatelessResponsesBackend
     -> Backend
 tokenProviderStatelessResponsesBackend provider send =
     statelessResponsesBackend \params onEvent ->
+        runWithTokenProvider provider \credential ->
+            send credential params onEvent
+
+-- | Credentialed counterpart to
+-- 'statelessResponsesBackendPreservingCheckpointHistory'.
+tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
+    :: TokenProvider
+    -> (Credential
+        -> ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
+        provider
+        send =
+    statelessResponsesBackendPreservingCheckpointHistory \params onEvent ->
         runWithTokenProvider provider \credential ->
             send credential params onEvent
 
