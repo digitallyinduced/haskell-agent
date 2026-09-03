@@ -101,6 +101,7 @@ library
                     , Agent.CLI.Runtime.Repl.Attachments
                     , Agent.CLI.Runtime.Repl.Commands
                     , Agent.CLI.Runtime.Repl.Context
+                    , Agent.CLI.Runtime.Repl.MetaConsole
                     , Agent.CLI.Runtime.Repl.Selection
                     , Agent.CLI.Runtime.Repl.Session
                     , Agent.CLI.Runtime.Repl.Transcript
