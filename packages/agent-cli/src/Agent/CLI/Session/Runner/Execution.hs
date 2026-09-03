@@ -103,7 +103,7 @@ import Agent.Tools.Types
 import Agent.OsPath
 import Control.Concurrent (ThreadId)
 import Control.Concurrent.Async (withAsync)
-import Control.Concurrent.Chan (newChan, readChan, writeChan)
+import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM (STM)
 import Control.Exception.Safe
@@ -1125,67 +1125,27 @@ newSessionLoopRuntime host controls request@SessionRequest{..} sessionBackend = 
         , loopRuntimeSubagents = subagentRuntime
         }
 
-runSession
-    :: SessionRunnerContinuation
+data SessionPersistenceRuntime = SessionPersistenceRuntime
+    { persistenceBeginTurnActivity :: !(IO ())
+    , persistenceEndTurnActivity :: !(IO ())
+    , persistenceOnPersisted :: !(SessionHandle -> IO ())
+    , persistenceCommitAutomaticCompaction
+        :: !(CompactOutcome -> [TurnInput] -> IO CompactionInstall)
+    , persistenceCompact
+        :: !(Maybe Text.Text -> IO (Either Text.Text CompactOutcome))
+    }
+
+newSessionPersistenceRuntime
+    :: SessionHostRuntime
+    -> SkillContextRuntime
     -> SessionRequest
-    -> SessionBackend
-    -> IO RunResult
-runSession
-        callbacks
-        request@SessionRequest{..}
-        sessionBackend@SessionBackend{..} = do
-  host <- newSessionHostRuntime request
-  let initialPrevious = host.hostInitialPrevious
-      grokFirstTurnContextRef = host.hostGrokFirstTurnContextRef
-      fullscreen = host.hostFullscreen
-      nativeCapabilities = host.hostNativeCapabilities
-      preparedWorkspaceEnvironment = host.hostPreparedWorkspaceEnvironment
-      terminal = host.hostTerminal
-      reportSessionError = host.hostReportSessionError
-      setWindowTitle = host.hostWindowTitle.windowTitleSet
-      beginWindowTitleBusy = host.hostWindowTitle.windowTitleBeginBusy
-      endWindowTitleBusy = host.hostWindowTitle.windowTitleEndBusy
-      windowTitleWorker = host.hostWindowTitle.windowTitleWorker
-  withSessionTitleRuntime host request sessionBackend \titleManager -> do
-    controls <- newSessionControlRuntime host request
-    let previewIdRef = startup.startupSessionState.sessionPreviewId
-        steeringInputs = controls.controlSteeringInputs
-        lastAssistantRef = controls.controlLastAssistantRef
-        unavailableProvidersRef = controls.controlUnavailableProvidersRef
-        startupUnavailableRef = controls.controlStartupUnavailableRef
-        restartEffortRef = controls.controlRestartEffortRef
-        lastFailedTurnRef = controls.controlLastFailedTurnRef
-        titleTurnCount = controls.controlTitleTurnCount
-        agentViewport = controls.controlAgentViewport
-        skillsRuntime =
-            buildSkillContextRuntime
-                callbacks host controls request sessionBackend
-        reloadGeneratedContext =
-            skillsRuntime.skillReloadGeneratedContext
-        sessionReset = skillsRuntime.skillResetSession
-        refreshSkills = skillsRuntime.skillRefresh
-    loopRuntime <-
-        newSessionLoopRuntime host controls request sessionBackend
-    let config = loopRuntime.loopRuntimeConfig
-        render = loopRuntime.loopRuntimeRender
-        shellRuntime = loopRuntime.loopRuntimeShell
-        subagentRuntime = loopRuntime.loopRuntimeSubagents
-        setSessionTempDir = shellRuntime.shellSetTempDir
-        currentActiveToolNames = shellRuntime.shellActiveToolNames
-        currentShellMode = shellRuntime.shellCurrentMode
-        setShellMode = shellRuntime.shellSetMode
-        beginSubagentTurn = subagentRuntime.subagentBeginTurn
-        finishSubagentTurn = subagentRuntime.subagentFinishTurn
-        abortSubagentTurn = subagentRuntime.subagentAbortTurn
-        currentConcurrentLimit = subagentRuntime.subagentConcurrentLimit
-        setConcurrentLimit = subagentRuntime.subagentSetConcurrentLimit
-    btwRequests <- newChan
-    recapRequests <- newChan
+    -> IO SessionPersistenceRuntime
+newSessionPersistenceRuntime
+        host skillsRuntime SessionRequest{..} = do
     turnActivityRef <- newIORef Nothing
     turnIsActiveRef <- newIORef False
     nativeSessionIdRef <- newIORef Nothing
-    let
-        acquireTurnActivity handle = mask_ do
+    let acquireTurnActivity handle = mask_ do
             current <- readIORef turnActivityRef
             if isNothing current
                 then
@@ -1208,7 +1168,8 @@ runSession
                 PersistenceEnabled slotRef ->
                     readIORef slotRef >>= \case
                         PersistencePending{} -> pure ()
-                        PersistenceActive handle -> void (acquireTurnActivity handle)
+                        PersistenceActive handle ->
+                            void (acquireTurnActivity handle)
         endTurnActivity = do
             writeIORef turnIsActiveRef False
             atomicModifyIORef' turnActivityRef
@@ -1242,8 +1203,8 @@ runSession
                 `onException`
                     when acquired endTurnActivity
         reloadGeneratedContextSafely =
-            reloadGeneratedContext `catchAny` \err ->
-                reportSessionError
+            skillsRuntime.skillReloadGeneratedContext `catchAny` \err ->
+                host.hostReportSessionError
                     ("failed to reload generated context: "
                         <> formatException err)
         -- The durable replace, pending input, and in-memory publication form
@@ -1301,97 +1262,168 @@ runSession
                 Left _ -> pure ()
                 Right _ -> reloadGeneratedContextSafely
             pure result
-        env = SessionEnv
-            { sessionLoop = config
-            , sessionSteeringInputs = steeringInputs
-            , sessionModelInfo = modelInfo
-            , sessionBtwBackend = btwBackend
-            , sessionQueueRecap = writeChan recapRequests
-            , sessionCompact = compactRunnerWithContext
-            , sessionRender = render
-            , sessionProvider = provider
-            , sessionConnection = connectionId
-            , sessionGatewayIdentity = gatewayIdentity
-            , sessionModelCatalog = catalog
-            , sessionGatewayModels = gatewayModelsRef
-            , sessionDialect = dialect
-            , sessionRecordImageGenerationInputs =
-                recordImageGenerationInputs
-            , sessionUnavailableProviders = unavailableProvidersRef
-            , sessionStartupUnavailable = startupUnavailableRef
-            , sessionConversation = conversationRef
-            , sessionAutomaticCompaction = automaticCompactionRef
-            , sessionParams = paramsRef
-            , sessionContextOccupancy = contextOccupancyRef
-            , sessionContextWindow = currentContextWindow
-            , sessionPolicy = policyRef
-            , sessionPersist = persist
-            , sessionDatabasePool =
-                trustedPool startup.startupDatabaseStore
-            , sessionTitleManager = titleManager
-            , sessionTitleTurnCount = titleTurnCount
-            , sessionPlanMode = planMode
-            , sessionTaskPlan = taskPlan
-            , sessionProjectRoot = projectRoot
-            , sessionCwd = cwd
-            , sessionProviderFallback =
-                nativeCapabilities.nativeProviderFallback
-            , sessionPreparedWorkspaceEnvironment =
-                preparedWorkspaceEnvironment
-            , sessionHome = home
-            , sessionMcpRegistrations = mcpRegistrations
-            , sessionMcpWarnings = mcpWarnings
-            , sessionMcpFleet = mcpFleet
-            , sessionSetTempDir = setSessionTempDir
-            , sessionTokenProvider = tokenProvider
-            , sessionOpenAiPool = openAiPool
-            , sessionStartupContext = startupContext
-            , sessionGrokFirstTurnContext = grokFirstTurnContextRef
-            , sessionSkills = skillsRef
-            , sessionSkillInvocations = skillInvocationsRef
-            , sessionRefreshSkills = refreshSkills
-            , sessionActiveToolNames = currentActiveToolNames
-            , sessionGrokRuntime = grokRuntime
-            , sessionShellMode = currentShellMode
-            , sessionSetShellMode = setShellMode
-            , sessionBackground = startup.startupBackground
-            , sessionEscPaused = escPaused
-            , sessionDraft = startup.startupSessionState.sessionDraft
-            , sessionPreviewId = previewIdRef
-            , sessionInterrupt = interrupt
-            , sessionRestartEffort = restartEffortRef
-            , sessionLastFailedTurn = lastFailedTurnRef
-            , sessionStoreRoot = storeRoot
-            , sessionUsage = usageRef
-            , sessionAccount = accountRef
-            , sessionAccountId = accountIdRef
-            , sessionAccountSelectionId = selectionRef
-            , sessionAccountLabel = accountLabel
-            , sessionSelectAccount = selectAccount
-            , sessionLastAssistant = lastAssistantRef
-            , sessionTerminal = terminal
-            , sessionFullscreen = fullscreen
-            , sessionSetWindowTitle = setWindowTitle
-            , sessionBeginWindowTitleBusy = beginWindowTitleBusy
-            , sessionEndWindowTitleBusy = endWindowTitleBusy
-            , sessionBeginTurnActivity = beginTurnActivity
-            , sessionEndTurnActivity = endTurnActivity
-            , sessionAgentViewport = Just agentViewport
-            , sessionBeginSubagentTurn = beginSubagentTurn
-            , sessionFinishSubagentTurn = finishSubagentTurn
-            , sessionAbortSubagentTurn = abortSubagentTurn
-            , sessionConcurrentLimit = currentConcurrentLimit
-            , sessionSetConcurrentLimit = setConcurrentLimit
-            , sessionOnPersisted = onPersistedWithActivity
-            , sessionReset = sessionReset
-            }
-    writeIORef automaticCompactionHookRef commitAutomaticCompaction
+    pure SessionPersistenceRuntime
+        { persistenceBeginTurnActivity = beginTurnActivity
+        , persistenceEndTurnActivity = endTurnActivity
+        , persistenceOnPersisted = onPersistedWithActivity
+        , persistenceCommitAutomaticCompaction =
+            commitAutomaticCompaction
+        , persistenceCompact = compactRunnerWithContext
+        }
+
+buildSessionEnv
+    :: SessionHostRuntime
+    -> SessionControlRuntime
+    -> SkillContextRuntime
+    -> SessionLoopRuntime
+    -> SessionPersistenceRuntime
+    -> SessionRequest
+    -> SessionBackend
+    -> SessionTitleManager
+    -> Chan RecapRequest
+    -> SessionEnv
+buildSessionEnv
+        host
+        controls
+        skillsRuntime
+        loopRuntime
+        persistenceRuntime
+        SessionRequest{..}
+        SessionBackend{..}
+        titleManager
+        recapRequests =
+    SessionEnv
+        { sessionLoop = loopRuntime.loopRuntimeConfig
+        , sessionSteeringInputs = controls.controlSteeringInputs
+        , sessionModelInfo = modelInfo
+        , sessionBtwBackend = btwBackend
+        , sessionQueueRecap = writeChan recapRequests
+        , sessionCompact = persistenceRuntime.persistenceCompact
+        , sessionRender = loopRuntime.loopRuntimeRender
+        , sessionProvider = provider
+        , sessionConnection = connectionId
+        , sessionGatewayIdentity = gatewayIdentity
+        , sessionModelCatalog = catalog
+        , sessionGatewayModels = gatewayModelsRef
+        , sessionDialect = dialect
+        , sessionRecordImageGenerationInputs =
+            recordImageGenerationInputs
+        , sessionUnavailableProviders =
+            controls.controlUnavailableProvidersRef
+        , sessionStartupUnavailable =
+            controls.controlStartupUnavailableRef
+        , sessionConversation = conversationRef
+        , sessionAutomaticCompaction = automaticCompactionRef
+        , sessionParams = paramsRef
+        , sessionContextOccupancy = contextOccupancyRef
+        , sessionContextWindow = currentContextWindow
+        , sessionPolicy = policyRef
+        , sessionPersist = persist
+        , sessionDatabasePool =
+            trustedPool startup.startupDatabaseStore
+        , sessionTitleManager = titleManager
+        , sessionTitleTurnCount = controls.controlTitleTurnCount
+        , sessionPlanMode = planMode
+        , sessionTaskPlan = taskPlan
+        , sessionProjectRoot = projectRoot
+        , sessionCwd = cwd
+        , sessionProviderFallback =
+            host.hostNativeCapabilities.nativeProviderFallback
+        , sessionPreparedWorkspaceEnvironment =
+            host.hostPreparedWorkspaceEnvironment
+        , sessionHome = home
+        , sessionMcpRegistrations = mcpRegistrations
+        , sessionMcpWarnings = mcpWarnings
+        , sessionMcpFleet = mcpFleet
+        , sessionSetTempDir =
+            loopRuntime.loopRuntimeShell.shellSetTempDir
+        , sessionTokenProvider = tokenProvider
+        , sessionOpenAiPool = openAiPool
+        , sessionStartupContext = startupContext
+        , sessionGrokFirstTurnContext =
+            host.hostGrokFirstTurnContextRef
+        , sessionSkills = skillsRef
+        , sessionSkillInvocations = skillInvocationsRef
+        , sessionRefreshSkills = skillsRuntime.skillRefresh
+        , sessionActiveToolNames =
+            loopRuntime.loopRuntimeShell.shellActiveToolNames
+        , sessionGrokRuntime = grokRuntime
+        , sessionShellMode =
+            loopRuntime.loopRuntimeShell.shellCurrentMode
+        , sessionSetShellMode =
+            loopRuntime.loopRuntimeShell.shellSetMode
+        , sessionBackground = startup.startupBackground
+        , sessionEscPaused = escPaused
+        , sessionDraft = startup.startupSessionState.sessionDraft
+        , sessionPreviewId =
+            startup.startupSessionState.sessionPreviewId
+        , sessionInterrupt = interrupt
+        , sessionRestartEffort = controls.controlRestartEffortRef
+        , sessionLastFailedTurn = controls.controlLastFailedTurnRef
+        , sessionStoreRoot = storeRoot
+        , sessionUsage = usageRef
+        , sessionAccount = accountRef
+        , sessionAccountId = accountIdRef
+        , sessionAccountSelectionId = selectionRef
+        , sessionAccountLabel = accountLabel
+        , sessionSelectAccount = selectAccount
+        , sessionLastAssistant = controls.controlLastAssistantRef
+        , sessionTerminal = host.hostTerminal
+        , sessionFullscreen = host.hostFullscreen
+        , sessionSetWindowTitle =
+            host.hostWindowTitle.windowTitleSet
+        , sessionBeginWindowTitleBusy =
+            host.hostWindowTitle.windowTitleBeginBusy
+        , sessionEndWindowTitleBusy =
+            host.hostWindowTitle.windowTitleEndBusy
+        , sessionBeginTurnActivity =
+            persistenceRuntime.persistenceBeginTurnActivity
+        , sessionEndTurnActivity =
+            persistenceRuntime.persistenceEndTurnActivity
+        , sessionAgentViewport = Just controls.controlAgentViewport
+        , sessionBeginSubagentTurn =
+            loopRuntime.loopRuntimeSubagents.subagentBeginTurn
+        , sessionFinishSubagentTurn =
+            loopRuntime.loopRuntimeSubagents.subagentFinishTurn
+        , sessionAbortSubagentTurn =
+            loopRuntime.loopRuntimeSubagents.subagentAbortTurn
+        , sessionConcurrentLimit =
+            loopRuntime.loopRuntimeSubagents.subagentConcurrentLimit
+        , sessionSetConcurrentLimit =
+            loopRuntime.loopRuntimeSubagents.subagentSetConcurrentLimit
+        , sessionOnPersisted =
+            persistenceRuntime.persistenceOnPersisted
+        , sessionReset = skillsRuntime.skillResetSession
+        }
+
+installSessionActions
+    :: SessionRunnerContinuation
+    -> SessionHostRuntime
+    -> SessionControlRuntime
+    -> SessionPersistenceRuntime
+    -> SessionRequest
+    -> SessionEnv
+    -> Chan Text.Text
+    -> Chan RecapRequest
+    -> IO ()
+installSessionActions
+        callbacks
+        host
+        controls
+        persistenceRuntime
+        SessionRequest{..}
+        env
+        btwRequests
+        recapRequests = do
+    writeIORef
+        automaticCompactionHookRef
+        persistenceRuntime.persistenceCommitAutomaticCompaction
     writeIORef startup.startupRestartEffort \level -> do
         setSessionEffortText env level
-        writeIORef restartEffortRef (Just level)
+        writeIORef controls.controlRestartEffortRef (Just level)
         requestCancel toolEnv.toolCancel
     gatewayAccess <- readIORef gatewayModelsRef
-    forM_ fullscreen \runtime ->
+    forM_ host.hostFullscreen \runtime ->
         setFullscreenSessionActions
             runtime
             (Just (dictationTargetForSession provider gatewayAccess))
@@ -1410,16 +1442,21 @@ runSession
                             emitUiEvent runtime (UiErrorMessage err)
                                 >> pure (Left err)
                         Right inputs ->
-                            enqueueSteeringInputs steeringInputs inputs >>= \case
-                                Left err -> pure (Left err)
-                                Right () -> do
-                                    emitUiEvent runtime (UiInputSteered text)
-                                    pure (Right ()))
+                            enqueueSteeringInputs
+                                controls.controlSteeringInputs
+                                inputs >>= \case
+                                    Left err -> pure (Left err)
+                                    Right () -> do
+                                        emitUiEvent
+                                            runtime
+                                            (UiInputSteered text)
+                                        pure (Right ()))
             (writeChan btwRequests)
             (\command -> do
                 let copyImmediate label missing payload =
                         case payload of
-                            Nothing -> emitUiEvent runtime (UiErrorMessage missing)
+                            Nothing ->
+                                emitUiEvent runtime (UiErrorMessage missing)
                             Just value -> do
                                 copied <- runtime.runtimeCopy value
                                 emitUiEvent runtime $
@@ -1433,11 +1470,13 @@ runSession
                     ReplCopy request
                         | request.copyResponseIndex == 1
                         , Nothing <- request.copyDestination ->
-                        readIORef lastAssistantRef >>= copyImmediate
-                            "last response"
-                            "no assistant response to copy"
+                        readIORef controls.controlLastAssistantRef
+                            >>= copyImmediate
+                                "last response"
+                                "no assistant response to copy"
                     ReplCopyCode index -> do
-                        answer <- readIORef lastAssistantRef
+                        answer <-
+                            readIORef controls.controlLastAssistantRef
                         let label =
                                 "code block " <> Text.pack (show index)
                         copyImmediate
@@ -1445,7 +1484,8 @@ runSession
                             (label <> " was not found")
                             (answer >>= fencedCodeBlock index)
                     ReplCopyDiff -> do
-                        answer <- readIORef lastAssistantRef
+                        answer <-
+                            readIORef controls.controlLastAssistantRef
                         copyImmediate
                             "diff block"
                             "no diff block was found"
@@ -1487,75 +1527,99 @@ runSession
             (readIORef startup.startupAgentSnapshot >>= id)
             (\target ->
                 readIORef startup.startupAgentSelect >>= ($ target))
-    let sessionAction = do
-            learnedSkills <- skillsRuntime.skillInitialize
-            case pendingTurn of
-                Just pending ->
-                    callbacks.runnerRunPendingTurn
-                        (if startup.startupFullscreenReused
-                            then ContinuePendingTurn
-                            else SubmitPendingTurn)
+
+runSessionInteraction
+    :: SessionRunnerContinuation
+    -> SessionHostRuntime
+    -> SkillContextRuntime
+    -> SessionRequest
+    -> SessionEnv
+    -> IO RunResult
+runSessionInteraction
+        callbacks host skillsRuntime SessionRequest{..} env = do
+    learnedSkills <- skillsRuntime.skillInitialize
+    case pendingTurn of
+        Just pending ->
+            callbacks.runnerRunPendingTurn
+                (if startup.startupFullscreenReused
+                    then ContinuePendingTurn
+                    else SubmitPendingTurn)
+                env
+                pending
+        Nothing -> case promptRequest of
+            Just request -> do
+                inputs <- managedTurnInputs cwd request
+                skillInputs <-
+                    callbacks.runnerPreparePromptSkillInputs
                         env
-                        pending
-                Nothing -> case promptRequest of
-                    Just request -> do
-                        inputs <- managedTurnInputs cwd request
-                        skillInputs <-
-                            callbacks.runnerPreparePromptSkillInputs
-                                env
-                                False
-                                request.managedTurnText
-                                inputs
-                                >>= either
-                                    (startupDie startup . Text.unpack)
-                                    pure
-                        result <- runOneTurn env request.managedTurnText skillInputs
-                        callbacks.runnerFinishTurn env True result
-                    Nothing -> do
-                        initialPrompt <-
-                            atomicModifyIORef'
-                                startup.startupSessionState.sessionInitialPrompt
-                                (\pending -> (Nothing, pending))
-                        case initialPrompt of
-                            Just text -> runInteractiveInitialPrompt env text
-                            Nothing ->
-                                case learnAboutUserOnboardingPrompt learnedSkills of
-                                    Just onboardingPrompt
-                                        | learnAboutUserRequested
-                                        , isNothing initialPrevious ->
-                                            runInteractiveInitialPrompt
-                                                env
-                                                onboardingPrompt
-                                    _ ->
-                                        readIORef
-                                            startup.startupSessionState.sessionDraft
-                                            >>= callbacks.runnerReplWithDraft env
-        runInteractiveInitialPrompt env text = do
-            skillInputs <-
-                callbacks.runnerPreparePromptSkillInputs
-                    env
-                    False
-                    text
-                    [UserMessage text]
-                    >>= either
-                        (startupDie startup . Text.unpack)
-                        pure
-            forM_ fullscreen \runtime ->
-                emitUiEvent runtime (UiUserSubmitted text)
-            result <- runOneTurn env text skillInputs
-            callbacks.runnerFinishTurn env False result
-        btwWorker = do
+                        False
+                        request.managedTurnText
+                        inputs
+                        >>= either
+                            (startupDie startup . Text.unpack)
+                            pure
+                result <- runOneTurn env request.managedTurnText skillInputs
+                callbacks.runnerFinishTurn env True result
+            Nothing -> do
+                initialPrompt <-
+                    atomicModifyIORef'
+                        startup.startupSessionState.sessionInitialPrompt
+                        (\pending -> (Nothing, pending))
+                case initialPrompt of
+                    Just text -> runInteractiveInitialPrompt text
+                    Nothing ->
+                        case learnAboutUserOnboardingPrompt learnedSkills of
+                            Just onboardingPrompt
+                                | learnAboutUserRequested
+                                , isNothing host.hostInitialPrevious ->
+                                    runInteractiveInitialPrompt
+                                        onboardingPrompt
+                            _ ->
+                                readIORef
+                                    startup.startupSessionState.sessionDraft
+                                    >>= callbacks.runnerReplWithDraft env
+  where
+    runInteractiveInitialPrompt text = do
+        skillInputs <-
+            callbacks.runnerPreparePromptSkillInputs
+                env
+                False
+                text
+                [UserMessage text]
+                >>= either
+                    (startupDie startup . Text.unpack)
+                    pure
+        forM_ host.hostFullscreen \runtime ->
+            emitUiEvent runtime (UiUserSubmitted text)
+        result <- runOneTurn env text skillInputs
+        callbacks.runnerFinishTurn env False result
+
+runSessionWorkers
+    :: SessionRunnerContinuation
+    -> SessionHostRuntime
+    -> SessionTitleManager
+    -> SessionEnv
+    -> Chan Text.Text
+    -> Chan RecapRequest
+    -> IO RunResult
+    -> IO RunResult
+runSessionWorkers
+        callbacks host titleManager env
+        btwRequests recapRequests sessionAction = do
+    let btwWorker = do
             question <- readChan btwRequests
             runBtwQuestion False env question
             btwWorker
         recapWorker = do
             request <- readChan recapRequests
             case request of
-                RecapSession kind -> callbacks.runnerRunSessionRecap False env kind
-                RecapTurnSummary -> callbacks.runnerRunSessionTurnSummary env
+                RecapSession kind ->
+                    callbacks.runnerRunSessionRecap False env kind
+                RecapTurnSummary ->
+                    callbacks.runnerRunSessionTurnSummary env
             recapWorker
-    result <- withAsync windowTitleWorker \_ ->
-        case fullscreen of
+    result <- withAsync host.hostWindowTitle.windowTitleWorker \_ ->
+        case host.hostFullscreen of
             Just _ ->
                 withAsync btwWorker \_ ->
                     withAsync recapWorker (const sessionAction)
@@ -1564,3 +1628,51 @@ runSession
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
     pure result
+
+runSession
+    :: SessionRunnerContinuation
+    -> SessionRequest
+    -> SessionBackend
+    -> IO RunResult
+runSession callbacks request sessionBackend = do
+    host <- newSessionHostRuntime request
+    withSessionTitleRuntime host request sessionBackend \titleManager -> do
+        controls <- newSessionControlRuntime host request
+        let skillsRuntime =
+                buildSkillContextRuntime
+                    callbacks host controls request sessionBackend
+        loopRuntime <-
+            newSessionLoopRuntime host controls request sessionBackend
+        btwRequests <- newChan
+        recapRequests <- newChan
+        persistenceRuntime <-
+            newSessionPersistenceRuntime host skillsRuntime request
+        let env =
+                buildSessionEnv
+                    host
+                    controls
+                    skillsRuntime
+                    loopRuntime
+                    persistenceRuntime
+                    request
+                    sessionBackend
+                    titleManager
+                    recapRequests
+        installSessionActions
+            callbacks
+            host
+            controls
+            persistenceRuntime
+            request
+            env
+            btwRequests
+            recapRequests
+        runSessionWorkers
+            callbacks
+            host
+            titleManager
+            env
+            btwRequests
+            recapRequests
+            (runSessionInteraction
+                callbacks host skillsRuntime request env)
