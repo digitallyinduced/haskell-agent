@@ -140,11 +140,11 @@ import Control.Applicative ((<|>))
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forever, unless, void, when, (>=>))
-import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
+import Control.Concurrent.STM ( STM , TMVar , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Control.Exception.Safe (finally, mask, onException, throwIO, tryAny)
+import Control.Exception.Safe (SomeException, finally, mask, onException, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
@@ -373,437 +373,615 @@ handleEventInner event = do
     handleEventInner' event
 
 handleEventInner' :: BrickEvent Name AppEvent -> EventM Name AppState ()
-handleEventInner' event = case event of
-    AppEvent AppMotionTick -> do
-        state <- get
-        liftIO $
-            atomically $
-                writeTVar
-                    state.appRuntime.runtimeMotionTickQueued
-                    False
-    AppEvent AppRecapPoll ->
+handleEventInner' = \case
+    AppEvent event ->
+        handleAppEvent event
+    MouseDown name button _ _ ->
+        handleMouseDownEvent name button
+    MouseUp name button location ->
+        handleMouseUpEvent name button location
+    VtyEvent event ->
+        handleVtyEvent event
+
+handleAppEvent :: AppEvent -> EventM Name AppState ()
+handleAppEvent = \case
+    AppMotionTick ->
+        handleMotionTickEvent
+    AppRecapPoll ->
         maybeRequestAutoRecap
-    AppEvent AppStop -> do
-        state <- get
-        liftIO $
-            mapM_
-                (`Composer.requestDictationStop` True)
-                state.appDictation
-        modify' \current ->
-            current
-                { appWorkerStopped = True
-                , appDictation = Nothing
-                }
-        halt
-    AppEvent (AppSetSlashCatalog catalog) -> do
-        state <- get
-        if state.appSlashCatalog == catalog
-            then pure ()
-            else modify' \current -> current
+    AppStop ->
+        handleStopEvent
+    AppSetSlashCatalog catalog ->
+        handleSetSlashCatalogEvent catalog
+    AppSetSkillCommands skills ->
+        handleSetSkillCommandsEvent skills
+    AppCommandPaletteSelected action ->
+        handleCommandPaletteSelection action
+    AppSetModelIds modelIds ->
+        handleSetModelIdsEvent modelIds
+    AppSetImagePreviews prepared ->
+        handleSetImagePreviewsEvent prepared
+    AppCommitImagePreviews prepared ->
+        handleCommitImagePreviewsEvent prepared
+    AppToolImage callId preview ->
+        handleToolImageEvent callId preview
+    AppDictationPartial text ->
+        handleDictationPartialEvent text
+    AppDictationFinished result ->
+        handleDictationFinishedEvent result
+    AppSetWindowTitle title ->
+        handleSetWindowTitleEvent title
+    AppSyntaxHighlighterChanged ->
+        handleSyntaxHighlighterChangedEvent
+    AppHistoryReset page ->
+        handleHistoryResetEvent page
+    AppHistoryLoaded request result ->
+        handleHistoryLoadedEvent request result
+    AppHistoryLiveStarted ->
+        handleHistoryLiveStartedEvent
+    AppHistoryCommitted generation turn commit ->
+        handleHistoryCommittedEvent generation turn commit
+    AppAgentSnapshot selected entries ->
+        handleAgentSnapshotEvent selected entries
+    AppUi uiEvent ->
+        handleUiEvents (uiEvent :| [])
+    AppUiBatch uiEvents ->
+        handleUiEvents uiEvents
+    AppConversationReflow ->
+        handleConversationReflowEvent
+    AppSyncSubmittedImagePlacements ->
+        syncSubmittedImagePlacements
+    AppSetTheme theme ->
+        handleSetThemeEvent theme
+    AppAskPermission summary reply ->
+        handleAskPermissionEvent summary reply
+    AppAskChoice presentation title body initial rows reply ->
+        handleAskChoiceEvent presentation title body initial rows reply
+    AppAskFilterChoice title initial rows reply ->
+        handleAskFilterChoiceEvent title initial rows reply
+    AppAskAdjustableFilterChoice title initial rows reply ->
+        handleAskAdjustableFilterChoiceEvent title initial rows reply
+    AppAskResume browser loadEntry deleteEntry searchEntries reply ->
+        handleAskResumeEvent
+            browser
+            loadEntry
+            deleteEntry
+            searchEntries
+            reply
+    AppAskText mode title body initial reply ->
+        handleAskTextEvent mode title body initial reply
+    AppSuspend action reply ->
+        handleSuspendEvent action reply
+
+handleMotionTickEvent :: EventM Name AppState ()
+handleMotionTickEvent = do
+    state <- get
+    liftIO $
+        atomically $
+            writeTVar
+                state.appRuntime.runtimeMotionTickQueued
+                False
+
+handleStopEvent :: EventM Name AppState ()
+handleStopEvent = do
+    state <- get
+    liftIO $
+        mapM_
+            (`Composer.requestDictationStop` True)
+            state.appDictation
+    modify' \current ->
+        current
+            { appWorkerStopped = True
+            , appDictation = Nothing
+            }
+    halt
+
+handleSetSlashCatalogEvent
+    :: SlashCatalog
+    -> EventM Name AppState ()
+handleSetSlashCatalogEvent catalog = do
+    state <- get
+    if state.appSlashCatalog == catalog
+        then pure ()
+        else modify' \current -> current
+            { appSlashCatalog = catalog
+            , appSlashIndex = 0
+            , appSlashDismissed = False
+            }
+
+handleSetSkillCommandsEvent
+    :: [SkillCommand]
+    -> EventM Name AppState ()
+handleSetSkillCommandsEvent skills = do
+    state <- get
+    if state.appSlashCatalog.slashCatalogSkills == skills
+        then pure ()
+        else
+            let catalog =
+                    slashCatalogWithSkills skills state.appSlashCatalog
+            in modify' \current -> current
                 { appSlashCatalog = catalog
                 , appSlashIndex = 0
                 , appSlashDismissed = False
                 }
-    AppEvent (AppSetSkillCommands skills) -> do
-        state <- get
-        if state.appSlashCatalog.slashCatalogSkills == skills
-            then pure ()
-            else
-                let catalog =
-                        slashCatalogWithSkills skills state.appSlashCatalog
-                in modify' \current -> current
-                    { appSlashCatalog = catalog
-                    , appSlashIndex = 0
-                    , appSlashDismissed = False
-                    }
-    AppEvent (AppCommandPaletteSelected action) ->
-        handleCommandPaletteSelection action
-    AppEvent (AppSetModelIds modelIds) -> do
-        state <- get
-        if state.appSlashCatalog.slashCatalogModelIds == modelIds
-            then pure ()
-            else
-                let catalog =
-                        state.appSlashCatalog
-                            { slashCatalogModelIds = modelIds
-                            }
-                in modify' \current -> current
-                    { appSlashCatalog = catalog
-                    , appSlashIndex = 0
-                    , appSlashDismissed = False
-                    }
-    AppEvent (AppSetImagePreviews prepared) ->
-        do
-            state <- get
-            previous <-
-                liftIO $
-                    readIORef state.appRuntime.runtimeImagePreviews
-            let unchanged = map fst previous == map fst prepared
-            liftIO do
-                when (not unchanged) do
-                    writeIORef
-                        state.appRuntime.runtimeImagePreviews
-                        prepared
-                    modifyIORef'
-                        state.appRuntime.runtimeImagePreviewRevision
-                        (+ 1)
-            modify' \current ->
-                current
-                    { appImagePreviews = map snd prepared
-                    }
-    AppEvent (AppCommitImagePreviews prepared) -> do
-        state <- get
-        let previews = map snd prepared
-            nextBlockId = BlockId state.appUi.uiNextBlockId
-            submitted =
-                if null previews
-                    then Map.delete
-                        nextBlockId
-                        state.appSubmittedImagePreviews
-                    else Map.insert
-                        nextBlockId
-                        previews
-                        state.appSubmittedImagePreviews
-            retained =
-                retainSubmittedImagePreviewsForBlocks
-                    (nub (conversationBlockIds state <> [nextBlockId]))
-                    submitted
-        liftIO do
-            writeIORef state.appRuntime.runtimeImagePreviews []
+
+handleSetModelIdsEvent
+    :: [Text]
+    -> EventM Name AppState ()
+handleSetModelIdsEvent modelIds = do
+    state <- get
+    if state.appSlashCatalog.slashCatalogModelIds == modelIds
+        then pure ()
+        else
+            let catalog =
+                    state.appSlashCatalog
+                        { slashCatalogModelIds = modelIds
+                        }
+            in modify' \current -> current
+                { appSlashCatalog = catalog
+                , appSlashIndex = 0
+                , appSlashDismissed = False
+                }
+
+handleSetImagePreviewsEvent
+    :: [(ImageAttachment, TuiImagePreview)]
+    -> EventM Name AppState ()
+handleSetImagePreviewsEvent prepared = do
+    state <- get
+    previous <-
+        liftIO $
+            readIORef state.appRuntime.runtimeImagePreviews
+    let unchanged = map fst previous == map fst prepared
+    liftIO do
+        when (not unchanged) do
+            writeIORef
+                state.appRuntime.runtimeImagePreviews
+                prepared
             modifyIORef'
                 state.appRuntime.runtimeImagePreviewRevision
                 (+ 1)
-        clearSubmittedImagePlacements state.appRuntime
+    modify' \current ->
+        current
+            { appImagePreviews = map snd prepared
+            }
+
+handleCommitImagePreviewsEvent
+    :: [(ImageAttachment, TuiImagePreview)]
+    -> EventM Name AppState ()
+handleCommitImagePreviewsEvent prepared = do
+    state <- get
+    let previews = map snd prepared
+        nextBlockId = BlockId state.appUi.uiNextBlockId
+        submitted =
+            if null previews
+                then Map.delete
+                    nextBlockId
+                    state.appSubmittedImagePreviews
+                else Map.insert
+                    nextBlockId
+                    previews
+                    state.appSubmittedImagePreviews
+        retained =
+            retainSubmittedImagePreviewsForBlocks
+                (nub (conversationBlockIds state <> [nextBlockId]))
+                submitted
+    liftIO do
+        writeIORef state.appRuntime.runtimeImagePreviews []
+        modifyIORef'
+            state.appRuntime.runtimeImagePreviewRevision
+            (+ 1)
+    clearSubmittedImagePlacements state.appRuntime
+    modify' \current ->
+        current
+            { appImagePreviews = []
+            , appSubmittedImagePreviews = retained
+            }
+    queueConversationReflow
+
+handleToolImageEvent
+    :: Text
+    -> TuiImagePreview
+    -> EventM Name AppState ()
+handleToolImageEvent callId preview = do
+    state <- get
+    case toolImageBlockId callId state.appUi of
+        Nothing -> pure ()
+        Just blockId -> do
+            clearSubmittedImagePlacements state.appRuntime
+            modify' \current ->
+                let inserted =
+                        Map.insertWith
+                            (flip (<>))
+                            blockId
+                            [preview]
+                            current.appSubmittedImagePreviews
+                in current
+                    { appSubmittedImagePreviews =
+                        retainSubmittedImagePreviews current inserted
+                    }
+            -- Running tool bodies are cached while empty; the new image
+            -- section must not be served from that entry.
+            invalidateCache
+            queueConversationReflow
+
+handleDictationPartialEvent
+    :: Text
+    -> EventM Name AppState ()
+handleDictationPartialEvent text = do
+    state <- get
+    when (isJust state.appDictation) $
+        applyLocalUiEvent
+            (UiSetNotice (Just (Composer.dictationProgressNotice text)))
+
+handleDictationFinishedEvent
+    :: Either Text Text
+    -> EventM Name AppState ()
+handleDictationFinishedEvent result = do
+    state <- get
+    aborted <-
+        case state.appDictation of
+            Just session ->
+                liftIO (readIORef session.dictationAbort)
+            Nothing ->
+                pure False
+    modify' \current -> current { appDictation = Nothing }
+    if aborted
+        then applyLocalUiEvent $
+            UiSetNotice $
+                Just (infoNotice "Dictation cancelled.")
+        else case result of
+            Left message ->
+                applyLocalUiEvent $
+                    UiSetNotice $
+                        Just $
+                            warningNotice ("Dictation failed: " <> message)
+            Right transcript -> do
+                let ui = state.appUi
+                    (draft, cursor) =
+                        insertDictation ui.uiDraft ui.uiCursor transcript
+                applyLocalUiEvent (UiSetDraft draft cursor)
+                applyLocalUiEvent $
+                    UiSetNotice $
+                        Just $
+                            successNotice "Dictation inserted."
+
+handleSetWindowTitleEvent
+    :: Text
+    -> EventM Name AppState ()
+handleSetWindowTitleEvent title = do
+    vty <- getVtyHandle
+    liftIO (writeOutputWindowTitle (V.outputIface vty) title)
+    modify' \current -> current { appWindowTitle = Just title }
+
+handleSyntaxHighlighterChangedEvent
+    :: EventM Name AppState ()
+handleSyntaxHighlighterChangedEvent = do
+    state <- get
+    when (state.appTerminalFocus /= TerminalUnfocused) do
+        highlighter <-
+            liftIO $
+                readIORef state.appRuntime.runtimeSyntaxHighlighter
         modify' \current ->
             current
-                { appImagePreviews = []
-                , appSubmittedImagePreviews = retained
+                { appSyntaxHighlighter =
+                    case highlighter of
+                        SyntaxHighlighterActive _ loaded -> loaded
+                        SyntaxHighlighterUnloaded _ -> Nothing
+                        SyntaxHighlighterInactive _ -> Nothing
                 }
-        queueConversationReflow
-    AppEvent (AppToolImage callId preview) -> do
-        state <- get
-        case toolImageBlockId callId state.appUi of
-            Nothing -> pure ()
-            Just blockId -> do
-                clearSubmittedImagePlacements state.appRuntime
-                modify' \current ->
-                    let inserted =
-                            Map.insertWith
-                                (flip (<>))
-                                blockId
-                                [preview]
-                                current.appSubmittedImagePreviews
-                    in current
-                        { appSubmittedImagePreviews =
-                            retainSubmittedImagePreviews current inserted
-                        }
-                -- Running tool bodies are cached while empty; the new image
-                -- section must not be served from that entry.
-                invalidateCache
-                queueConversationReflow
-    AppEvent (AppDictationPartial text) -> do
-        state <- get
-        when (isJust state.appDictation) $
-            applyLocalUiEvent
-                (UiSetNotice (Just (Composer.dictationProgressNotice text)))
-    AppEvent (AppDictationFinished result) -> do
-        state <- get
-        aborted <-
-            case state.appDictation of
-                Just session ->
-                    liftIO (readIORef session.dictationAbort)
-                Nothing ->
-                    pure False
-        modify' \current -> current { appDictation = Nothing }
-        if aborted
-            then applyLocalUiEvent $
-                UiSetNotice $
-                    Just (infoNotice "Dictation cancelled.")
-            else case result of
-                Left message ->
-                    applyLocalUiEvent $
-                        UiSetNotice $
-                            Just $
-                                warningNotice ("Dictation failed: " <> message)
-                Right transcript -> do
-                    let ui = state.appUi
-                        (draft, cursor) =
-                            insertDictation ui.uiDraft ui.uiCursor transcript
-                    applyLocalUiEvent (UiSetDraft draft cursor)
-                    applyLocalUiEvent $
-                        UiSetNotice $
-                            Just $
-                                successNotice "Dictation inserted."
-    AppEvent (AppSetWindowTitle title) -> do
-        vty <- getVtyHandle
-        liftIO (writeOutputWindowTitle (V.outputIface vty) title)
-        modify' \current -> current { appWindowTitle = Just title }
-    AppEvent AppSyntaxHighlighterChanged -> do
-        state <- get
-        when (state.appTerminalFocus /= TerminalUnfocused) do
-            highlighter <-
-                liftIO $
-                    readIORef state.appRuntime.runtimeSyntaxHighlighter
-            modify' \current ->
-                current
-                    { appSyntaxHighlighter =
-                        case highlighter of
-                            SyntaxHighlighterActive _ loaded -> loaded
-                            SyntaxHighlighterUnloaded _ -> Nothing
-                            SyntaxHighlighterInactive _ -> Nothing
-                    }
+        invalidateCache
+
+handleHistoryResetEvent
+    :: HistoryPage
+    -> EventM Name AppState ()
+handleHistoryResetEvent page = do
+    state <- get
+    clearSubmittedImagePlacements state.appRuntime
+    modify' (resetHistoryPage page)
+    invalidateCache
+    resolveConversationFollow
+    queueConversationReflow
+
+handleHistoryLoadedEvent
+    :: HistoryRequest
+    -> Either Text HistoryPage
+    -> EventM Name AppState ()
+handleHistoryLoadedEvent request result = do
+    state <- get
+    when
+        (request.historyRequestGeneration
+            == state.appHistoryWindow.historyWindowGeneration)
+        do
+            let anchorBlock =
+                    historyPageAnchorBlock
+                        request.historyRequestDirection
+                        state.appHistoryWindow
+            case result of
+                Left err ->
+                    modify' \current ->
+                        applyUiEvent
+                            (UiSetNotice
+                                (Just (warningNotice
+                                    ("Could not load session history: "
+                                        <> err))))
+                            (clearHistoryPending request current)
+                Right page ->
+                    do
+                        clearSubmittedImagePlacements state.appRuntime
+                        modify' (applyLoadedHistoryPage page)
             invalidateCache
-    AppEvent (AppHistoryReset page) -> do
-        state <- get
+            case anchorBlock of
+                Nothing -> pure ()
+                Just blockId ->
+                    makeVisible
+                        (ConversationBlock AgentRoot blockId)
+            queueConversationReflow
+
+handleHistoryLiveStartedEvent :: EventM Name AppState ()
+handleHistoryLiveStartedEvent =
+    modify' \state ->
+        state
+            { appHistoryLiveStart =
+                case state.appHistoryLiveStart of
+                    Just start -> Just start
+                    Nothing ->
+                        Just (Seq.length state.appUi.uiBlocks)
+            }
+
+handleHistoryCommittedEvent
+    :: HistoryGeneration
+    -> HistoryTurn
+    -> HistoryCommit
+    -> EventM Name AppState ()
+handleHistoryCommittedEvent generation turn commit = do
+    state <- get
+    let currentGeneration =
+            state.appHistoryWindow.historyWindowGeneration
+        applicable = case commit of
+            HistoryCommitAppend ->
+                currentGeneration == generation
+            _ ->
+                currentGeneration < generation
+    when applicable do
         clearSubmittedImagePlacements state.appRuntime
-        modify' (resetHistoryPage page)
+        modify'
+            (commitLiveHistoryTurn turn commit
+                . setHistoryGeneration generation)
         invalidateCache
         resolveConversationFollow
         queueConversationReflow
-    AppEvent (AppHistoryLoaded request result) -> do
-        state <- get
-        when
-            (request.historyRequestGeneration
-                == state.appHistoryWindow.historyWindowGeneration)
-            do
-                let anchorBlock =
-                        historyPageAnchorBlock
-                            request.historyRequestDirection
-                            state.appHistoryWindow
-                case result of
-                    Left err ->
-                        modify' \current ->
-                            applyUiEvent
-                                (UiSetNotice
-                                    (Just (warningNotice
-                                        ("Could not load session history: "
-                                            <> err))))
-                                (clearHistoryPending request current)
-                    Right page ->
-                        do
-                            clearSubmittedImagePlacements state.appRuntime
-                            modify' (applyLoadedHistoryPage page)
-                invalidateCache
-                case anchorBlock of
-                    Nothing -> pure ()
-                    Just blockId ->
-                        makeVisible
-                            (ConversationBlock AgentRoot blockId)
-                queueConversationReflow
-    AppEvent AppHistoryLiveStarted ->
-        modify' \state ->
-            state
-                { appHistoryLiveStart =
-                    case state.appHistoryLiveStart of
-                        Just start -> Just start
-                        Nothing ->
-                            Just (Seq.length state.appUi.uiBlocks)
-                }
-    AppEvent (AppHistoryCommitted generation turn commit) -> do
-        state <- get
-        let currentGeneration =
-                state.appHistoryWindow.historyWindowGeneration
-            applicable = case commit of
-                HistoryCommitAppend ->
-                    currentGeneration == generation
-                _ ->
-                    currentGeneration < generation
-        when applicable do
-            clearSubmittedImagePlacements state.appRuntime
-            modify'
-                (commitLiveHistoryTurn turn commit
-                    . setHistoryGeneration generation)
-            invalidateCache
-            resolveConversationFollow
-            queueConversationReflow
-    AppEvent (AppAgentSnapshot selected entries) -> do
-        state <- get
-        let normalized =
-                Bridge.normalizeAgentSelection selected entries
-            mergedEntries =
-                preserveAgentConversationView
-                    normalized
-                    state.appAgentEntries
-                    entries
-            selectionChanged =
-                state.appAgentSelected /= normalized
-            selectedConversationChanged =
-                case normalized of
-                    AgentRoot -> False
-                    target ->
-                        fmap (.agentConversation)
-                            (lookupAgentEntry target state.appAgentEntries)
-                            /= fmap (.agentConversation)
-                                (lookupAgentEntry target mergedEntries)
-        if state.appAgentSelected == normalized
-            && state.appAgentEntries == mergedEntries
-            then pure ()
-            else do
-                modify' \current ->
-                    current
-                        { appAgentSelected = normalized
-                        , appAgentEntries = mergedEntries
-                        , appAgentHover =
-                            if normalized /= current.appAgentSelected
-                                || length entries <= 1
-                                || agentLayoutTargets mergedEntries
-                                    /= agentLayoutTargets
-                                        current.appAgentEntries
-                                then Nothing
-                                else
-                                    current.appAgentHover >>= \hover ->
-                                        hover <$
-                                            lookupAgentEntry
-                                                hover.agentHoverTarget
-                                                mergedEntries
-                        }
-                when selectedConversationChanged invalidateCache
-                if selectionChanged
-                    then resumeConversationFollow
-                    else when
-                        (selectedConversationChanged
-                            && state.appUi.uiFollow)
-                        do
-                            vScrollToEnd
-                                (viewportScroll ConversationViewport)
-                            queueConversationReflow
-                when
-                    ((length state.appAgentEntries > 1)
-                        /= (length mergedEntries > 1))
-                    do
-                        invalidateCache
-                        queueConversationReflow
-    AppEvent (AppUi uiEvent) ->
-        handleUiEvents (uiEvent :| [])
-    AppEvent (AppUiBatch uiEvents) ->
-        handleUiEvents uiEvents
-    AppEvent AppConversationReflow -> do
-        modify' \state ->
-            state { appConversationReflowQueued = False }
-        reflowConversation
-        state <- get
-        liftIO $
-            enqueueAppEvent
-                state.appRuntime
-                AppSyncSubmittedImagePlacements
-    AppEvent AppSyncSubmittedImagePlacements ->
-        syncSubmittedImagePlacements
-    AppEvent (AppSetTheme theme) -> do
-        state <- get
-        liftIO (writeIORef state.appRuntime.runtimeThemeRef theme)
-        modify' \current -> current { appTheme = theme }
-        invalidateCache
-    AppEvent (AppAskPermission summary reply) -> do
-        state <- get
-        liftIO (state.appRuntime.runtimeNativeProgress False)
-        applyLocalUiEventWith
-            (UiPermissionShown summary)
-            \current ->
+
+handleAgentSnapshotEvent
+    :: AgentTarget
+    -> [AgentEntry]
+    -> EventM Name AppState ()
+handleAgentSnapshotEvent selected entries = do
+    state <- get
+    let normalized =
+            Bridge.normalizeAgentSelection selected entries
+        mergedEntries =
+            preserveAgentConversationView
+                normalized
+                state.appAgentEntries
+                entries
+        selectionChanged =
+            state.appAgentSelected /= normalized
+        selectedConversationChanged =
+            case normalized of
+                AgentRoot -> False
+                target ->
+                    fmap (.agentConversation)
+                        (lookupAgentEntry target state.appAgentEntries)
+                        /= fmap (.agentConversation)
+                            (lookupAgentEntry target mergedEntries)
+    if state.appAgentSelected == normalized
+        && state.appAgentEntries == mergedEntries
+        then pure ()
+        else do
+            modify' \current ->
                 current
-                    { appPermissionReply = Just reply
-                    , appAgentHover = Nothing
+                    { appAgentSelected = normalized
+                    , appAgentEntries = mergedEntries
+                    , appAgentHover =
+                        if normalized /= current.appAgentSelected
+                            || length entries <= 1
+                            || agentLayoutTargets mergedEntries
+                                /= agentLayoutTargets
+                                    current.appAgentEntries
+                            then Nothing
+                            else
+                                current.appAgentHover >>= \hover ->
+                                    hover <$
+                                        lookupAgentEntry
+                                            hover.agentHoverTarget
+                                            mergedEntries
                     }
-    AppEvent (AppAskChoice presentation title body initial rows reply) -> do
-        state <- get
-        liftIO (state.appRuntime.runtimeNativeProgress False)
-        modify' \state ->
-            state
-                { appChoice = Just ChoiceOverlay
-                    { choicePresentation = presentation
-                    , choiceTitle = title
-                    , choiceBody = body
-                    , choiceIndex =
-                        max 0 (min (max 0 (length rows - 1)) initial)
-                    , choiceRows = rows
-                    , choiceSearch = False
-                    , choiceQuery = ""
-                    , choiceAdjustments = Nothing
-                    , choiceAdjustmentIndices = []
-                    , choiceCloseOnTurnEnd = False
-                    }
-                , appChoiceReply =
-                    Just
-                        (atomically
-                            . putTMVar reply
-                            . fmap (.choiceSelectionIndex))
+            when selectedConversationChanged invalidateCache
+            if selectionChanged
+                then resumeConversationFollow
+                else when
+                    (selectedConversationChanged
+                        && state.appUi.uiFollow)
+                    do
+                        vScrollToEnd
+                            (viewportScroll ConversationViewport)
+                        queueConversationReflow
+            when
+                ((length state.appAgentEntries > 1)
+                    /= (length mergedEntries > 1))
+                do
+                    invalidateCache
+                    queueConversationReflow
+
+handleConversationReflowEvent :: EventM Name AppState ()
+handleConversationReflowEvent = do
+    modify' \state ->
+        state { appConversationReflowQueued = False }
+    reflowConversation
+    state <- get
+    liftIO $
+        enqueueAppEvent
+            state.appRuntime
+            AppSyncSubmittedImagePlacements
+
+handleSetThemeEvent
+    :: Theme.ThemeKind
+    -> EventM Name AppState ()
+handleSetThemeEvent theme = do
+    state <- get
+    liftIO (writeIORef state.appRuntime.runtimeThemeRef theme)
+    modify' \current -> current { appTheme = theme }
+    invalidateCache
+
+handleAskPermissionEvent
+    :: Text
+    -> TMVar (Maybe PermissionChoice)
+    -> EventM Name AppState ()
+handleAskPermissionEvent summary reply = do
+    state <- get
+    liftIO (state.appRuntime.runtimeNativeProgress False)
+    applyLocalUiEventWith
+        (UiPermissionShown summary)
+        \current ->
+            current
+                { appPermissionReply = Just reply
                 , appAgentHover = Nothing
                 }
-        vScrollToBeginning (viewportScroll OverlayViewport)
-    AppEvent (AppAskFilterChoice title initial rows reply) -> do
-        state <- get
-        liftIO (state.appRuntime.runtimeNativeProgress False)
-        modify' \state ->
-            state
-                { appChoice = Just ChoiceOverlay
-                    { choicePresentation = ChoiceDialog
-                    , choiceTitle = title
-                    , choiceBody = ""
-                    , choiceIndex =
-                        max 0 (min (max 0 (length rows - 1)) initial)
-                    , choiceRows = rows
-                    , choiceSearch = True
-                    , choiceQuery = ""
-                    , choiceAdjustments = Nothing
-                    , choiceAdjustmentIndices = []
-                    , choiceCloseOnTurnEnd = False
-                    }
-                , appChoiceReply =
-                    Just
-                        (atomically
-                            . putTMVar reply
-                            . fmap (.choiceSelectionIndex))
-                , appAgentHover = Nothing
+
+handleAskChoiceEvent
+    :: ChoicePresentation
+    -> Text
+    -> Text
+    -> Int
+    -> [(Text, Text)]
+    -> TMVar (Maybe Int)
+    -> EventM Name AppState ()
+handleAskChoiceEvent presentation title body initial rows reply = do
+    state <- get
+    liftIO (state.appRuntime.runtimeNativeProgress False)
+    modify' \current ->
+        current
+            { appChoice = Just ChoiceOverlay
+                { choicePresentation = presentation
+                , choiceTitle = title
+                , choiceBody = body
+                , choiceIndex =
+                    max 0 (min (max 0 (length rows - 1)) initial)
+                , choiceRows = rows
+                , choiceSearch = False
+                , choiceQuery = ""
+                , choiceAdjustments = Nothing
+                , choiceAdjustmentIndices = []
+                , choiceCloseOnTurnEnd = False
                 }
-        vScrollToBeginning (viewportScroll OverlayViewport)
-    AppEvent
-        (AppAskAdjustableFilterChoice title initial adjustableRows reply) -> do
+            , appChoiceReply =
+                Just
+                    (atomically
+                        . putTMVar reply
+                        . fmap (.choiceSelectionIndex))
+            , appAgentHover = Nothing
+            }
+    vScrollToBeginning (viewportScroll OverlayViewport)
+
+handleAskFilterChoiceEvent
+    :: Text
+    -> Int
+    -> [(Text, Text)]
+    -> TMVar (Maybe Int)
+    -> EventM Name AppState ()
+handleAskFilterChoiceEvent title initial rows reply = do
+    state <- get
+    liftIO (state.appRuntime.runtimeNativeProgress False)
+    modify' \current ->
+        current
+            { appChoice = Just ChoiceOverlay
+                { choicePresentation = ChoiceDialog
+                , choiceTitle = title
+                , choiceBody = ""
+                , choiceIndex =
+                    max 0 (min (max 0 (length rows - 1)) initial)
+                , choiceRows = rows
+                , choiceSearch = True
+                , choiceQuery = ""
+                , choiceAdjustments = Nothing
+                , choiceAdjustmentIndices = []
+                , choiceCloseOnTurnEnd = False
+                }
+            , appChoiceReply =
+                Just
+                    (atomically
+                        . putTMVar reply
+                        . fmap (.choiceSelectionIndex))
+            , appAgentHover = Nothing
+            }
+    vScrollToBeginning (viewportScroll OverlayViewport)
+
+handleAskAdjustableFilterChoiceEvent
+    :: Text
+    -> Int
+    -> [(Text, Text, [Text], Int)]
+    -> TMVar (Maybe (Int, Int))
+    -> EventM Name AppState ()
+handleAskAdjustableFilterChoiceEvent title initial adjustableRows reply = do
+    state <- get
+    liftIO (state.appRuntime.runtimeNativeProgress False)
+    let rows =
+            [ (label, detail)
+            | (label, detail, _, _) <- adjustableRows
+            ]
+        adjustments =
+            [ values
+            | (_, _, values, _) <- adjustableRows
+            ]
+        adjustmentIndices =
+            [ max 0 (min (max 0 (length values - 1)) valueIndex)
+            | (_, _, values, valueIndex) <- adjustableRows
+            ]
+        replySelection = fmap \selection ->
+            ( selection.choiceSelectionIndex
+            , fromMaybe 0 selection.choiceSelectionAdjustment
+            )
+    modify' \current ->
+        current
+            { appChoice = Just ChoiceOverlay
+                { choicePresentation = ChoiceDialog
+                , choiceTitle = title
+                , choiceBody = ""
+                , choiceIndex =
+                    max 0 (min (max 0 (length rows - 1)) initial)
+                , choiceRows = rows
+                , choiceSearch = True
+                , choiceQuery = ""
+                , choiceAdjustments = Just adjustments
+                , choiceAdjustmentIndices = adjustmentIndices
+                , choiceCloseOnTurnEnd = False
+                }
+            , appChoiceReply =
+                Just
+                    (atomically
+                        . putTMVar reply
+                        . replySelection)
+            , appAgentHover = Nothing
+            }
+    vScrollToBeginning (viewportScroll OverlayViewport)
+
+handleAskResumeEvent
+    :: ResumeBrowser
+    -> (Text -> IO (Either Text ResumeEntry))
+    -> (Text -> IO (Either Text ()))
+    -> (Text -> IO (Either Text [ResumeEntry]))
+    -> TMVar (Maybe ResumeEntry)
+    -> EventM Name AppState ()
+handleAskResumeEvent
+    browser
+    loadEntry
+    deleteEntry
+    searchEntries
+    reply = do
         state <- get
         liftIO (state.appRuntime.runtimeNativeProgress False)
-        let rows =
-                [ (label, detail)
-                | (label, detail, _, _) <- adjustableRows
-                ]
-            adjustments =
-                [ values
-                | (_, _, values, _) <- adjustableRows
-                ]
-            adjustmentIndices =
-                [ max 0 (min (max 0 (length values - 1)) valueIndex)
-                | (_, _, values, valueIndex) <- adjustableRows
-                ]
-            replySelection = fmap \selection ->
-                ( selection.choiceSelectionIndex
-                , fromMaybe 0 selection.choiceSelectionAdjustment
-                )
         modify' \current ->
             current
-                { appChoice = Just ChoiceOverlay
-                    { choicePresentation = ChoiceDialog
-                    , choiceTitle = title
-                    , choiceBody = ""
-                    , choiceIndex =
-                        max 0 (min (max 0 (length rows - 1)) initial)
-                    , choiceRows = rows
-                    , choiceSearch = True
-                    , choiceQuery = ""
-                    , choiceAdjustments = Just adjustments
-                    , choiceAdjustmentIndices = adjustmentIndices
-                    , choiceCloseOnTurnEnd = False
-                    }
-                , appChoiceReply =
-                    Just
-                        (atomically
-                            . putTMVar reply
-                            . replySelection)
-                , appAgentHover = Nothing
-                }
-        vScrollToBeginning (viewportScroll OverlayViewport)
-    AppEvent
-        (AppAskResume browser loadEntry deleteEntry searchEntries reply) -> do
-        state <- get
-        liftIO (state.appRuntime.runtimeNativeProgress False)
-        modify' \state ->
-            state
                 { appResume = Just ResumeOverlay
                     { resumeOverlayBrowser = browser
                     }
@@ -814,177 +992,231 @@ handleEventInner' event = case event of
                 , appAgentHover = Nothing
                 }
         vScrollToBeginning (viewportScroll ResumeViewport)
-    AppEvent (AppAskText mode title body initial reply) -> do
-        state <- get
-        liftIO (state.appRuntime.runtimeNativeProgress False)
-        modify' \state ->
-            state
-                { appTextPrompt = Just TextOverlay
-                    { textTitle = title
-                    , textBody = body
-                    , textDraft = initial
-                    , textCursor = Text.length initial
-                    , textInputMode = mode
-                    }
-                , appTextReply = Just reply
-                , appAgentHover = Nothing
+
+handleAskTextEvent
+    :: TextInputMode
+    -> Text
+    -> Text
+    -> Text
+    -> TMVar (Maybe Text)
+    -> EventM Name AppState ()
+handleAskTextEvent mode title body initial reply = do
+    state <- get
+    liftIO (state.appRuntime.runtimeNativeProgress False)
+    modify' \current ->
+        current
+            { appTextPrompt = Just TextOverlay
+                { textTitle = title
+                , textBody = body
+                , textDraft = initial
+                , textCursor = Text.length initial
+                , textInputMode = mode
                 }
-        vScrollToBeginning (viewportScroll OverlayViewport)
-    AppEvent (AppSuspend action reply) -> do
-        state <- get
-        suspendAndResume do
-            result <- tryAny action
-            mapM_
-                (setFullscreenWindowTitle state.appRuntime)
-                state.appWindowTitle
-            atomically (putTMVar reply result)
-            pure state
-                { appAgentHover = Nothing
-                , appTerminalFocus = TerminalFocusUnknown
-                , appMotionScheduleReset = True
-                }
-    MouseDown name button _ _ -> do
-        unless (isAgentHoverSurface name) clearAgentHover
-        state <- get
-        case state.appResume of
-            Just _ ->
-                case (name, button) of
-                    (ResumeRow sessionId, V.BLeft) ->
-                        Composer.handleControlMouseDown
-                            (ResumeRow sessionId)
-                    (_, V.BScrollUp) ->
-                        handleResumeKey
-                            (V.EvMouseDown 0 0 V.BScrollUp [])
-                    (_, V.BScrollDown) ->
-                        handleResumeKey
-                            (V.EvMouseDown 0 0 V.BScrollDown [])
-                    _ -> pure ()
-            Nothing ->
-                case ( state.appTextPrompt
-                     , state.appChoice
-                     , state.appUi.uiPermission
-                     , state.appMetaConsole
-                     ) of
-                    (Just _, _, _, _) ->
-                        case button of
-                            V.BScrollUp ->
-                                vScrollBy
-                                    (viewportScroll OverlayViewport)
-                                    (-mouseScrollLines)
-                            V.BScrollDown ->
-                                vScrollBy
-                                    (viewportScroll OverlayViewport)
-                                    mouseScrollLines
-                            _ -> pure ()
-                    (Nothing, Nothing, Nothing, Just _) ->
-                        pure ()
-                    (Nothing, Nothing, Nothing, Nothing) ->
-                        case (name, button) of
-                            (ComposerModel, V.BLeft) ->
-                                Composer.handleControlMouseDown ComposerModel
-                            (ComposerEffort, V.BLeft) ->
-                                Composer.handleControlMouseDown ComposerEffort
-                            (ComposerMode, V.BLeft) ->
-                                Composer.handleControlMouseDown ComposerMode
-                            (ComposerAccount, V.BLeft) ->
-                                Composer.handleControlMouseDown ComposerAccount
-                            (name@ComposerImageRemove{}, V.BLeft) ->
-                                Composer.handleControlMouseDown name
-                            (name, V.BLeft)
-                                | isQuickStartControl name ->
-                                    Composer.handleControlMouseDown name
-                            (CodeCopy target blockId codeIndex, V.BLeft) ->
-                                Composer.handleControlMouseDown
-                                    (CodeCopy target blockId codeIndex)
-                            (SlashRow index, V.BLeft) ->
-                                Composer.activateSlashAt
-                                    applyLocalUiEventWith
-                                    handleCtrlC
-                                    scrollConversationPage
-                                    index
-                            (SlashRow _, V.BScrollUp) ->
-                                Composer.handleComposerKey
-                                    applyLocalUiEventWith
-                                    handleCtrlC
-                                    scrollConversationPage
-                                    (V.EvKey V.KUp [])
-                            (SlashRow _, V.BScrollDown) ->
-                                Composer.handleComposerKey
-                                    applyLocalUiEventWith
-                                    handleCtrlC
-                                    scrollConversationPage
-                                    (V.EvKey V.KDown [])
-                            (AgentRow target, V.BLeft) -> do
-                                clearAgentHover
-                                selectAgentView target
-                            (AgentPopover target, V.BLeft) -> do
-                                keepAgentHover target
-                                selectAgentView target
-                            (link@MarkdownLink{}, V.BLeft) ->
-                                Composer.handleControlMouseDown link
-                            _ -> handleMouseDown name button
-                    (Nothing, Just _, _, _) ->
-                        case (name, button) of
-                            (ChoiceRow index, V.BLeft) ->
-                                Composer.handleControlMouseDown (ChoiceRow index)
-                            (ChoiceRow _, V.BScrollUp) ->
-                                handleChoiceKey (V.EvKey V.KUp [])
-                            (ChoiceRow _, V.BScrollDown) ->
-                                handleChoiceKey (V.EvKey V.KDown [])
-                            (_, V.BScrollUp) ->
-                                vScrollBy
-                                    (viewportScroll OverlayViewport)
-                                    (-mouseScrollLines)
-                            (_, V.BScrollDown) ->
-                                vScrollBy
-                                    (viewportScroll OverlayViewport)
-                                    mouseScrollLines
-                            _ -> pure ()
-                    (Nothing, Nothing, Just _, _) ->
-                        case (name, button) of
-                            (PermissionRow index, V.BLeft) ->
-                                resolvePermission (permissionChoiceAt index)
-                            _ -> pure ()
-    -- The patched vty-unix backend represents no-button pointer motion as
-    -- MouseUp Nothing so Brick can route it through clickable extents.
-    MouseUp (AgentRow target) Nothing _ -> do
-        setHoveredControl Nothing
-        rememberAgentHover target
-    MouseUp (AgentPopover target) Nothing _ -> do
-        setHoveredControl Nothing
-        keepAgentHover target
-    MouseUp AgentPane Nothing _ ->
-        setHoveredControl Nothing
-    MouseUp name@(ConversationBlock _ _) Nothing (Location (_, row)) -> do
-        clearAgentHover
-        setHoveredTranscriptLine name row
-    MouseUp MarkdownLink{} Nothing _ -> do
-        clearAgentHover
-        setHoveredControl Nothing
-        setMarkdownLinkCursor True
-    MouseUp link@MarkdownLink{} (Just V.BLeft) _ -> do
-        clearAgentHover
-        Composer.handleControlMouseUp link (activateControl link)
-    MouseUp name button _
-        | isInteractiveControl name
-        , button == Just V.BLeft || button == Nothing -> do
+            , appTextReply = Just reply
+            , appAgentHover = Nothing
+            }
+    vScrollToBeginning (viewportScroll OverlayViewport)
+
+handleSuspendEvent
+    :: IO a
+    -> TMVar (Either SomeException a)
+    -> EventM Name AppState ()
+handleSuspendEvent action reply = do
+    state <- get
+    suspendAndResume do
+        result <- tryAny action
+        mapM_
+            (setFullscreenWindowTitle state.appRuntime)
+            state.appWindowTitle
+        atomically (putTMVar reply result)
+        pure state
+            { appAgentHover = Nothing
+            , appTerminalFocus = TerminalFocusUnknown
+            , appMotionScheduleReset = True
+            }
+
+handleMouseDownEvent
+    :: Name
+    -> V.Button
+    -> EventM Name AppState ()
+handleMouseDownEvent name button = do
+    unless (isAgentHoverSurface name) clearAgentHover
+    state <- get
+    case state.appResume of
+        Just _ ->
+            case (name, button) of
+                (ResumeRow sessionId, V.BLeft) ->
+                    Composer.handleControlMouseDown
+                        (ResumeRow sessionId)
+                (_, V.BScrollUp) ->
+                    handleResumeKey
+                        (V.EvMouseDown 0 0 V.BScrollUp [])
+                (_, V.BScrollDown) ->
+                    handleResumeKey
+                        (V.EvMouseDown 0 0 V.BScrollDown [])
+                _ -> pure ()
+        Nothing ->
+            handleOverlayMouseDown state name button
+
+handleOverlayMouseDown
+    :: AppState
+    -> Name
+    -> V.Button
+    -> EventM Name AppState ()
+handleOverlayMouseDown state name button =
+    case ( state.appTextPrompt
+         , state.appChoice
+         , state.appUi.uiPermission
+         , state.appMetaConsole
+         ) of
+        (Just _, _, _, _) ->
+            case button of
+                V.BScrollUp ->
+                    vScrollBy
+                        (viewportScroll OverlayViewport)
+                        (-mouseScrollLines)
+                V.BScrollDown ->
+                    vScrollBy
+                        (viewportScroll OverlayViewport)
+                        mouseScrollLines
+                _ -> pure ()
+        (Nothing, Nothing, Nothing, Just _) ->
+            pure ()
+        (Nothing, Nothing, Nothing, Nothing) ->
+            handleNormalMouseDown name button
+        (Nothing, Just _, _, _) ->
+            handleChoiceMouseDown name button
+        (Nothing, Nothing, Just _, _) ->
+            case (name, button) of
+                (PermissionRow index, V.BLeft) ->
+                    resolvePermission (permissionChoiceAt index)
+                _ -> pure ()
+
+handleNormalMouseDown
+    :: Name
+    -> V.Button
+    -> EventM Name AppState ()
+handleNormalMouseDown name button =
+    case (name, button) of
+        (ComposerModel, V.BLeft) ->
+            Composer.handleControlMouseDown ComposerModel
+        (ComposerEffort, V.BLeft) ->
+            Composer.handleControlMouseDown ComposerEffort
+        (ComposerMode, V.BLeft) ->
+            Composer.handleControlMouseDown ComposerMode
+        (ComposerAccount, V.BLeft) ->
+            Composer.handleControlMouseDown ComposerAccount
+        (name'@ComposerImageRemove{}, V.BLeft) ->
+            Composer.handleControlMouseDown name'
+        (name', V.BLeft)
+            | isQuickStartControl name' ->
+                Composer.handleControlMouseDown name'
+        (CodeCopy target blockId codeIndex, V.BLeft) ->
+            Composer.handleControlMouseDown
+                (CodeCopy target blockId codeIndex)
+        (SlashRow index, V.BLeft) ->
+            Composer.activateSlashAt
+                applyLocalUiEventWith
+                handleCtrlC
+                scrollConversationPage
+                index
+        (SlashRow _, V.BScrollUp) ->
+            Composer.handleComposerKey
+                applyLocalUiEventWith
+                handleCtrlC
+                scrollConversationPage
+                (V.EvKey V.KUp [])
+        (SlashRow _, V.BScrollDown) ->
+            Composer.handleComposerKey
+                applyLocalUiEventWith
+                handleCtrlC
+                scrollConversationPage
+                (V.EvKey V.KDown [])
+        (AgentRow target, V.BLeft) -> do
             clearAgentHover
-            Composer.handleControlMouseUp name (activateControl name)
-    MouseUp _ Nothing _ ->
+            selectAgentView target
+        (AgentPopover target, V.BLeft) -> do
+            keepAgentHover target
+            selectAgentView target
+        (link@MarkdownLink{}, V.BLeft) ->
+            Composer.handleControlMouseDown link
+        _ -> handleMouseDown name button
+
+handleChoiceMouseDown
+    :: Name
+    -> V.Button
+    -> EventM Name AppState ()
+handleChoiceMouseDown name button =
+    case (name, button) of
+        (ChoiceRow index, V.BLeft) ->
+            Composer.handleControlMouseDown (ChoiceRow index)
+        (ChoiceRow _, V.BScrollUp) ->
+            handleChoiceKey (V.EvKey V.KUp [])
+        (ChoiceRow _, V.BScrollDown) ->
+            handleChoiceKey (V.EvKey V.KDown [])
+        (_, V.BScrollUp) ->
+            vScrollBy
+                (viewportScroll OverlayViewport)
+                (-mouseScrollLines)
+        (_, V.BScrollDown) ->
+            vScrollBy
+                (viewportScroll OverlayViewport)
+                mouseScrollLines
+        _ -> pure ()
+
+handleMouseUpEvent
+    :: Name
+    -> Maybe V.Button
+    -> Location
+    -> EventM Name AppState ()
+handleMouseUpEvent name button location =
+    case (name, button, location) of
+        -- The patched vty-unix backend represents no-button pointer motion as
+        -- MouseUp Nothing so Brick can route it through clickable extents.
+        (AgentRow target, Nothing, _) -> do
+            setHoveredControl Nothing
+            rememberAgentHover target
+        (AgentPopover target, Nothing, _) -> do
+            setHoveredControl Nothing
+            keepAgentHover target
+        (AgentPane, Nothing, _) ->
+            setHoveredControl Nothing
+        (blockName@(ConversationBlock _ _), Nothing, Location (_, row)) -> do
+            clearAgentHover
+            setHoveredTranscriptLine blockName row
+        (MarkdownLink{}, Nothing, _) -> do
+            clearAgentHover
+            setHoveredControl Nothing
+            setMarkdownLinkCursor True
+        (link@MarkdownLink{}, Just V.BLeft, _) -> do
+            clearAgentHover
+            Composer.handleControlMouseUp link (activateControl link)
+        (controlName, controlButton, _)
+            | isInteractiveControl controlName
+            , controlButton == Just V.BLeft || controlButton == Nothing -> do
+                clearAgentHover
+                Composer.handleControlMouseUp
+                    controlName
+                    (activateControl controlName)
+        (_, Nothing, _) ->
+            modify' \state ->
+                state
+                    { appHoveredControl = Nothing
+                    , appHoveredLine = Nothing
+                    , appAgentHover = Nothing
+                    }
+        _ -> pure ()
+
+handleVtyEvent :: V.Event -> EventM Name AppState ()
+handleVtyEvent = \case
+    V.EvMouseDown _ _ V.BLeft _ ->
         modify' \state ->
             state
                 { appHoveredControl = Nothing
                 , appHoveredLine = Nothing
                 , appAgentHover = Nothing
                 }
-    VtyEvent (V.EvMouseDown _ _ V.BLeft _) ->
-        modify' \state ->
-            state
-                { appHoveredControl = Nothing
-                , appHoveredLine = Nothing
-                , appAgentHover = Nothing
-                }
-    VtyEvent (V.EvMouseUp _ _ _) ->
+    V.EvMouseUp _ _ _ ->
         modify' \state ->
             state
                 { appHoveredControl = Nothing
@@ -992,54 +1224,68 @@ handleEventInner' event = case event of
                 , appPressedControl = Nothing
                 , appAgentHover = Nothing
                 }
-    VtyEvent V.EvLostFocus ->
+    V.EvLostFocus ->
         noteTerminalFocusLost
-    VtyEvent V.EvGainedFocus ->
+    V.EvGainedFocus ->
         noteTerminalFocusGained
             >> resolveConversationFollow
             >> queueConversationReflow
-    VtyEvent V.EvResize{} -> do
-        clearAgentHover
-        setHoveredControl Nothing
-        invalidateCache
-        -- A focused resize can leave cells from the previous geometry. Hidden
-        -- terminals defer the reset until their focus-gained refresh.
-        state <- get
-        when (state.appTerminalFocus /= TerminalUnfocused) $
-            getVtyHandle >>= liftIO . V.refresh
-        queueConversationReflow
-    VtyEvent vtyEvent -> do
-        clearAgentHover
-        state <- get
-        if isCommandPaletteKey vtyEvent
-                && commandPaletteAvailable state
-            then openCommandPalette
-            else if isMetaConsoleToggle vtyEvent
-                && metaConsoleToggleAvailable state
-            then
-                case state.appMetaConsole of
-                    Just _ -> closeMetaConsole
-                    Nothing -> openMetaConsole
-            else
-                case state.appResume of
-                    Just _ -> handleResumeKey vtyEvent
-                    Nothing ->
-                        case
-                            ( state.appTextPrompt
-                            , state.appChoice
-                            , state.appUi.uiPermission
-                            , state.appMetaConsole
-                            )
-                        of
-                            (Just _, _, _, _) -> handleTextPromptKey vtyEvent
-                            (Nothing, Just _, _, _) -> handleChoiceKey vtyEvent
-                            (Nothing, Nothing, Just _, _) ->
-                                handlePermissionKey vtyEvent
-                            (Nothing, Nothing, Nothing, Just _) ->
-                                handleMetaConsoleKey vtyEvent
-                            (Nothing, Nothing, Nothing, Nothing) ->
-                                handleNormalKey vtyEvent
-    _ -> pure ()
+    V.EvResize{} ->
+        handleResizeEvent
+    event ->
+        handleInputEvent event
+
+handleResizeEvent :: EventM Name AppState ()
+handleResizeEvent = do
+    clearAgentHover
+    setHoveredControl Nothing
+    invalidateCache
+    -- A focused resize can leave cells from the previous geometry. Hidden
+    -- terminals defer the reset until their focus-gained refresh.
+    state <- get
+    when (state.appTerminalFocus /= TerminalUnfocused) $
+        getVtyHandle >>= liftIO . V.refresh
+    queueConversationReflow
+
+handleInputEvent :: V.Event -> EventM Name AppState ()
+handleInputEvent event = do
+    clearAgentHover
+    state <- get
+    if isCommandPaletteKey event
+            && commandPaletteAvailable state
+        then openCommandPalette
+        else if isMetaConsoleToggle event
+            && metaConsoleToggleAvailable state
+        then
+            case state.appMetaConsole of
+                Just _ -> closeMetaConsole
+                Nothing -> openMetaConsole
+        else
+            case state.appResume of
+                Just _ -> handleResumeKey event
+                Nothing ->
+                    handleOverlayInputEvent state event
+
+handleOverlayInputEvent
+    :: AppState
+    -> V.Event
+    -> EventM Name AppState ()
+handleOverlayInputEvent state event =
+    case
+        ( state.appTextPrompt
+        , state.appChoice
+        , state.appUi.uiPermission
+        , state.appMetaConsole
+        )
+    of
+        (Just _, _, _, _) -> handleTextPromptKey event
+        (Nothing, Just _, _, _) -> handleChoiceKey event
+        (Nothing, Nothing, Just _, _) ->
+            handlePermissionKey event
+        (Nothing, Nothing, Nothing, Just _) ->
+            handleMetaConsoleKey event
+        (Nothing, Nothing, Nothing, Nothing) ->
+            handleNormalKey event
 
 -- | Ctrl-P is deliberately accepted in both Vty's modified-key form and the
 -- legacy C0 control-character form. The latter still occurs in terminals
