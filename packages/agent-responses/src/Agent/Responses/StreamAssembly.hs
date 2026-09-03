@@ -109,111 +109,192 @@ emptyOutputItemStore = OutputItemStore
 
 applyStreamEvent :: StreamAssemblyState -> ResponseStreamEvent -> StreamAssemblyState
 applyStreamEvent state = \case
-    ResponseCreatedEvent { responseValue } -> lifecycle responseValue
-    ResponseInProgressEvent { responseValue } -> lifecycle responseValue
-    ResponseQueuedEvent { responseValue } -> lifecycle responseValue
-    ResponseCompletedEvent { responseValue } -> lifecycle responseValue
-    ResponseDoneEvent { responseValue } -> lifecycle responseValue
-    ResponseFailedEvent { responseValue } -> lifecycle responseValue
-    ResponseIncompleteEvent { responseValue } -> lifecycle responseValue
+    ResponseCreatedEvent { responseValue } ->
+        mergeLifecycleResponse responseValue state
+    ResponseInProgressEvent { responseValue } ->
+        mergeLifecycleResponse responseValue state
+    ResponseQueuedEvent { responseValue } ->
+        mergeLifecycleResponse responseValue state
+    ResponseCompletedEvent { responseValue } ->
+        mergeLifecycleResponse responseValue state
+    ResponseDoneEvent { responseValue } ->
+        mergeLifecycleResponse responseValue state
+    ResponseFailedEvent { responseValue } ->
+        mergeLifecycleResponse responseValue state
+    ResponseIncompleteEvent { responseValue } ->
+        mergeLifecycleResponse responseValue state
     ResponseOutputItemAddedEvent { item, outputIndex } ->
         updateItem outputIndex False item state
     ResponseOutputItemDoneEvent { item, outputIndex } ->
         updateItem outputIndex True item state
     ResponseFunctionCallArgumentsDeltaEvent
         { delta = Just value, streamItemId, streamOutputIndex } ->
-            updateResolvedProgress streamOutputIndex
-                [streamItemIdentity "function_call" streamItemId]
-                (\progress -> progress
-                    { functionArgumentChunks = Just
-                        (appendTextBuffer value
-                            (fromMaybe emptyTextBuffer
-                                progress.functionArgumentChunks))
-                    })
-                state
+            applyFunctionArgumentDelta
+                value streamItemId streamOutputIndex state
     ResponseFunctionCallArgumentsDoneEvent
         { arguments, functionName, streamItemId, streamOutputIndex } ->
-            updateResolvedProgress streamOutputIndex
-                [streamItemIdentity "function_call" streamItemId]
-                (\progress -> progress
-                    { itemValue = mapFunctionCall streamItemId
-                        (\call -> call
-                            { arguments =
-                                fromMaybe
-                                    (materializedFunctionArguments progress)
-                                    arguments
-                            , name = fromMaybe call.name functionName
-                            })
-                        progress.itemValue
-                    , functionArgumentChunks = Nothing
-                    })
-                state
+            applyFunctionArgumentDone
+                arguments functionName streamItemId streamOutputIndex state
     ResponseCustomToolInputDeltaEvent
         { delta = Just value, streamItemId, streamCallId
         , streamOutputIndex } ->
-            updateResolvedProgress streamOutputIndex
-                [ streamItemIdentity "custom_tool_call" streamItemId
-                , streamCallIdentity "custom_tool_call" streamCallId
-                ]
-                (\progress -> progress
-                    { customInputChunks = Just
-                        (appendTextBuffer value
-                            (fromMaybe emptyTextBuffer
-                                progress.customInputChunks))
-                    })
+            applyCustomToolInputDelta
+                value
+                streamItemId
+                streamCallId
+                streamOutputIndex
                 state
     ResponseCustomToolInputDoneEvent
         { inputText, streamItemId, streamCallId, streamOutputIndex } ->
-            updateResolvedProgress streamOutputIndex
-                [ streamItemIdentity "custom_tool_call" streamItemId
-                , streamCallIdentity "custom_tool_call" streamCallId
-                ]
-                (\progress -> progress
-                    { itemValue = mapCustomCall streamItemId streamCallId
-                        (setCustomToolInput
-                            (fromMaybe
-                                (materializedCustomInput progress)
-                                inputText))
-                        progress.itemValue
-                    , customInputChunks = Nothing
-                    })
+            applyCustomToolInputDone
+                inputText
+                streamItemId
+                streamCallId
+                streamOutputIndex
                 state
     ResponseReasoningSummaryTextDoneEvent
         { text = Just value, streamItemId, streamOutputIndex
         , summaryIndex = Just index } ->
-            updateResolvedProgress streamOutputIndex
-                [streamItemIdentity "reasoning" streamItemId]
-                (\progress -> progress
-                    { itemValue = mapReasoning streamItemId index
-                        (setReasoningPartText (Just value))
-                        progress.itemValue
-                    , reasoningTextChunks =
-                        IntMap.delete index progress.reasoningTextChunks
-                    })
-                state
+            applyReasoningSummaryDone
+                value streamItemId streamOutputIndex index state
     OtherResponseStreamEvent
         { otherEventType = EventReasoningSummaryTextDelta
         , eventDelta = Just value, streamItemId, streamOutputIndex
         , summaryIndex = Just index } ->
-            updateResolvedProgress streamOutputIndex
-                [streamItemIdentity "reasoning" streamItemId]
-                (\progress -> progress
-                    { reasoningTextChunks = IntMap.alter
-                        (Just . appendTextBuffer value
-                            . fromMaybe emptyTextBuffer)
-                        index
-                        progress.reasoningTextChunks
-                    })
-                state
+            applyReasoningSummaryDelta
+                value streamItemId streamOutputIndex index state
     _ -> state
+
+mergeLifecycleResponse
+    :: Response
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+mergeLifecycleResponse response state =
+    merged `seq` state { lifecycleResponse = Just merged }
   where
-    lifecycle response =
-        merged `seq` state { lifecycleResponse = Just merged }
-      where
-        merged =
-            maybe response
-                (`mergeResponseFragment` response)
-                state.lifecycleResponse
+    merged =
+        maybe response
+            (`mergeResponseFragment` response)
+            state.lifecycleResponse
+
+applyFunctionArgumentDelta
+    :: Text
+    -> Maybe Text
+    -> Maybe Int
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+applyFunctionArgumentDelta value streamItemId streamOutputIndex =
+    updateResolvedProgress streamOutputIndex
+        [streamItemIdentity "function_call" streamItemId]
+        (\progress -> progress
+            { functionArgumentChunks = Just
+                (appendTextBuffer value
+                    (fromMaybe emptyTextBuffer
+                        progress.functionArgumentChunks))
+            })
+
+applyFunctionArgumentDone
+    :: Maybe Text
+    -> Maybe Text
+    -> Maybe Text
+    -> Maybe Int
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+applyFunctionArgumentDone
+        arguments functionName streamItemId streamOutputIndex =
+    updateResolvedProgress streamOutputIndex
+        [streamItemIdentity "function_call" streamItemId]
+        (\progress -> progress
+            { itemValue = mapFunctionCall streamItemId
+                (\call -> call
+                    { arguments =
+                        fromMaybe
+                            (materializedFunctionArguments progress)
+                            arguments
+                    , name = fromMaybe call.name functionName
+                    })
+                progress.itemValue
+            , functionArgumentChunks = Nothing
+            })
+
+applyCustomToolInputDelta
+    :: Text
+    -> Maybe Text
+    -> Maybe Text
+    -> Maybe Int
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+applyCustomToolInputDelta
+        value streamItemId streamCallId streamOutputIndex =
+    updateResolvedProgress streamOutputIndex
+        [ streamItemIdentity "custom_tool_call" streamItemId
+        , streamCallIdentity "custom_tool_call" streamCallId
+        ]
+        (\progress -> progress
+            { customInputChunks = Just
+                (appendTextBuffer value
+                    (fromMaybe emptyTextBuffer progress.customInputChunks))
+            })
+
+applyCustomToolInputDone
+    :: Maybe Text
+    -> Maybe Text
+    -> Maybe Text
+    -> Maybe Int
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+applyCustomToolInputDone
+        inputText streamItemId streamCallId streamOutputIndex =
+    updateResolvedProgress streamOutputIndex
+        [ streamItemIdentity "custom_tool_call" streamItemId
+        , streamCallIdentity "custom_tool_call" streamCallId
+        ]
+        (\progress -> progress
+            { itemValue = mapCustomCall streamItemId streamCallId
+                (setCustomToolInput
+                    (fromMaybe
+                        (materializedCustomInput progress)
+                        inputText))
+                progress.itemValue
+            , customInputChunks = Nothing
+            })
+
+applyReasoningSummaryDone
+    :: Text
+    -> Maybe Text
+    -> Maybe Int
+    -> Int
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+applyReasoningSummaryDone
+        value streamItemId streamOutputIndex summaryIndex =
+    updateResolvedProgress streamOutputIndex
+        [streamItemIdentity "reasoning" streamItemId]
+        (\progress -> progress
+            { itemValue = mapReasoning streamItemId summaryIndex
+                (setReasoningPartText (Just value))
+                progress.itemValue
+            , reasoningTextChunks =
+                IntMap.delete summaryIndex progress.reasoningTextChunks
+            })
+
+applyReasoningSummaryDelta
+    :: Text
+    -> Maybe Text
+    -> Maybe Int
+    -> Int
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+applyReasoningSummaryDelta
+        value streamItemId streamOutputIndex summaryIndex =
+    updateResolvedProgress streamOutputIndex
+        [streamItemIdentity "reasoning" streamItemId]
+        (\progress -> progress
+            { reasoningTextChunks = IntMap.alter
+                (Just . appendTextBuffer value . fromMaybe emptyTextBuffer)
+                summaryIndex
+                progress.reasoningTextChunks
+            })
 
 stepStreamResponse
     :: StreamAssemblyConfig

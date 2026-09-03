@@ -238,244 +238,166 @@ parseSlash catalog raw line = case Text.words line of
             Just skill ->
                 ReplInvokeSkill
                     skill.skillCommandName
-                    (Text.strip (Text.drop (Text.length command) line))
+                    (slashCommandTail command line)
             Nothing -> unknownCommand command
-        Just spec -> case spec.slashName of
-            "help" -> parseHelpCommand catalog args
-            "init" ->
-                if null args
-                    then ReplInit
-                    else ReplCommandError "usage: /init"
-            "review" ->
-                let instructions =
-                        Text.strip (Text.drop (Text.length command) line)
-                in ReplReview
-                    (if Text.null instructions then Nothing else Just instructions)
-            "diff" ->
-                if null args
-                    then ReplDiff
-                    else ReplCommandError "usage: /diff"
-            "fork" ->
-                parseForkCommand
-                    (Text.strip (Text.drop (Text.length command) line))
-            "export" ->
-                let path = Text.strip (Text.drop (Text.length command) line)
-                in ReplExport
-                    (if Text.null path then Nothing else Just path)
-            "history" ->
-                if null args
-                    then ReplHistory
-                    else ReplCommandError "usage: /history"
-            "find" ->
-                ReplFind
-                    (nonEmptyText
-                        (Text.strip (Text.drop (Text.length command) line)))
-            "permissions" ->
-                if null args
-                    then ReplPermissions
-                    else ReplCommandError "usage: /permissions"
-            "effort" -> parseEffortCommand args
-            "fast" ->
-                if null args
-                    then ReplToggleFast
-                    else ReplCommandError "usage: /fast"
-            "model" -> parseModelCommand args
-            "theme" -> parseThemeCommand args
-            "plan" ->
-                let description =
-                        Text.strip (Text.drop (Text.length command) line)
-                in ReplPlan
-                    (if Text.null description then Nothing else Just description)
-            "view-plan" ->
-                if null args
-                    then ReplViewPlan
-                    else ReplCommandError "usage: /view-plan"
-            "queue" ->
-                if null args
-                    then ReplQueue
-                    else ReplCommandError "usage: /queue"
-            "transcript" ->
-                if null args
-                    then ReplTranscript
-                    else ReplCommandError "usage: /transcript"
-            "edit-prompt" ->
-                if null args
-                    then ReplEditPrompt
-                    else ReplCommandError "usage: /edit-prompt"
-            "context" ->
-                if null args
-                    then ReplContext
-                    else ReplCommandError "usage: /context"
-            "btw" ->
-                let question =
-                        Text.strip (Text.drop (Text.length command) line)
-                in if Text.null question
-                    then ReplCommandError "usage: /btw <QUESTION>"
-                    else ReplBtw question
-            "meta" ->
-                let request =
-                        Text.strip (Text.drop (Text.length command) line)
-                in if Text.null request
-                    then ReplCommandError "usage: /meta <REQUEST>"
-                    else ReplMetaConsole request
-            "recap" ->
-                if null args
-                    then ReplRecap
-                    else ReplCommandError "usage: /recap"
-            "retry" ->
-                if null args
-                    then ReplRetry
-                    else ReplCommandError "usage: /retry"
-            "session" ->
-                if null args
-                    then ReplShowSession
-                    else ReplCommandError "usage: /session"
-            "session-info" ->
-                if null args
-                    then ReplShowSessionInfo
-                    else ReplCommandError "usage: /session-info"
-            "desktop" ->
-                if null args
-                    then ReplDesktop
-                    else ReplCommandError "usage: /desktop"
-            "afk" -> case args of
-                [] -> ReplAfk Nothing
-                [target] -> ReplAfk (Just target)
-                _ -> ReplCommandError "usage: /afk [HOST:PATH]"
-            "worktree" ->
-                if null args
-                    then ReplWorktree
-                    else ReplCommandError "usage: /worktree"
-            "rename" ->
-                let title = Text.strip (Text.drop (Text.length command) line)
-                in if title == "--auto"
-                    then ReplRenameAuto
-                    else if Text.null title
-                        then ReplCommandError "usage: /rename <TITLE>|--auto"
-                        else if Text.length title > 100
-                            then ReplCommandError
-                                "session titles must be at most 100 characters"
-                            else ReplRename title
-            "login" ->
-                if null args
-                    then ReplLogin
-                    else ReplCommandError "usage: /login"
-            "resume" -> parseResumeCommand args
-            "home" ->
-                if null args
-                    then ReplHome
-                    else ReplCommandError "usage: /home"
-            "search" ->
-                let query =
-                        Text.strip (Text.drop (Text.length command) line)
-                in if Text.null query
-                    then ReplCommandError "usage: /search <QUERY>"
-                    else ReplSearch query
-            "compact" ->
-                let focus =
-                        Text.strip (Text.drop (Text.length command) line)
-                in ReplCompact
-                    (if Text.null focus then Nothing else Just focus)
-            "rewind" ->
-                if null args
-                    then ReplRewind
-                    else ReplCommandError "usage: /rewind"
-            "clear" ->
-                if null args
-                    then ReplClear
-                    else ReplCommandError "usage: /clear"
-            "new" ->
-                if null args
-                    then ReplNew
-                    else ReplCommandError "usage: /new"
-            "delete" ->
-                if null args
-                    then ReplDelete
-                    else ReplCommandError "usage: /delete"
-            "usage" ->
-                if null args
-                    then ReplUsage
-                    else ReplCommandError "usage: /usage"
-            "reload-auth" ->
-                if null args
-                    then ReplReloadAuth
-                    else ReplCommandError "usage: /reload-auth"
-            "paste" ->
-                parsePasteCommand (Text.strip (Text.drop (Text.length command) line))
-            "attachments" ->
-                if null args
-                    then ReplShowAttachments
-                    else ReplCommandError "usage: /attachments"
-            "clear-attachments" ->
-                if null args
-                    then ReplClearAttachments
-                    else ReplCommandError "usage: /clear-attachments"
-            "copy" ->
-                parseCopyCommand
-                    (Text.strip (Text.drop (Text.length command) line))
-            "copy-code" -> parseCopyCodeCommand args
-            "copy-diff" ->
-                if null args
-                    then ReplCopyDiff
-                    else ReplCommandError "usage: /copy-diff"
-            "copy-path" ->
-                if null args
-                    then ReplCopyPath
-                    else ReplCommandError "usage: /copy-path"
-            "copy-session" ->
-                if null args
-                    then ReplCopySession
-                    else ReplCommandError "usage: /copy-session"
-            "terminal" ->
-                if null args
-                    then ReplShowTerminal
-                    else ReplCommandError "usage: /terminal"
-            "changelog" ->
-                if null args
-                    then ReplChangelog
-                    else ReplCommandError "usage: /changelog"
-            "agents" -> parseAgentsCommand args
-            "mcp" -> case args of
-                [] -> ReplMcp
-                ("prompt" : server : name : rest) ->
-                    ReplMcpPrompt server name (map parsePromptArgument rest)
-                _ ->
-                    ReplCommandError
-                        "usage: /mcp [prompt <server> <prompt> [key=value ...]]"
-            "loop" ->
-                parseLoopCommand raw
-                    (Text.strip (Text.drop (Text.length command) line))
-            "goal" ->
-                parseGoalCommand raw
-                    (Text.strip (Text.drop (Text.length command) line))
-            "workflow" ->
-                parseWorkflowCommand raw
-                    (Text.strip (Text.drop (Text.length command) line))
-            "deep-research" ->
-                parseDeepResearchCommand raw
-                    (Text.strip (Text.drop (Text.length command) line))
-            "skills" -> case args of
-                [] -> ReplSkills False
-                ["reload"] -> ReplSkills True
-                _ -> ReplCommandError "usage: /skills [reload]"
-            "shell" -> parseShellCommand args
-            "codemod" ->
-                if null args
-                    then ReplEnableCodeMode
-                    else ReplCommandError "usage: /codemod"
-            "always-approve" ->
-                if null args
-                    then ReplToggleAlwaysApprove
-                    else ReplCommandError "usage: /always-approve"
-            "update-and-restart" ->
-                if null args
-                    then ReplUpdateAndRestart
-                    else ReplCommandError "usage: /update-and-restart"
-            "quit" ->
-                if null args
-                    then ReplQuit
-                    else ReplCommandError "usage: /quit"
-            other -> unknownCommand ("/" <> other)
+        Just spec ->
+            case Map.lookup spec.slashName simpleSlashCommands of
+                Just action ->
+                    parseNoArgumentCommand spec action args
+                Nothing ->
+                    parseSpecializedSlashCommand
+                        catalog
+                        raw
+                        spec
+                        args
+                        (slashCommandTail command line)
+
+simpleSlashCommands :: Map Text ReplAction
+simpleSlashCommands =
+    Map.fromList
+        [ ("init", ReplInit)
+        , ("diff", ReplDiff)
+        , ("history", ReplHistory)
+        , ("permissions", ReplPermissions)
+        , ("fast", ReplToggleFast)
+        , ("view-plan", ReplViewPlan)
+        , ("queue", ReplQueue)
+        , ("transcript", ReplTranscript)
+        , ("edit-prompt", ReplEditPrompt)
+        , ("context", ReplContext)
+        , ("recap", ReplRecap)
+        , ("retry", ReplRetry)
+        , ("session", ReplShowSession)
+        , ("session-info", ReplShowSessionInfo)
+        , ("desktop", ReplDesktop)
+        , ("worktree", ReplWorktree)
+        , ("login", ReplLogin)
+        , ("home", ReplHome)
+        , ("rewind", ReplRewind)
+        , ("clear", ReplClear)
+        , ("new", ReplNew)
+        , ("delete", ReplDelete)
+        , ("usage", ReplUsage)
+        , ("reload-auth", ReplReloadAuth)
+        , ("attachments", ReplShowAttachments)
+        , ("clear-attachments", ReplClearAttachments)
+        , ("copy-diff", ReplCopyDiff)
+        , ("copy-path", ReplCopyPath)
+        , ("copy-session", ReplCopySession)
+        , ("terminal", ReplShowTerminal)
+        , ("changelog", ReplChangelog)
+        , ("codemod", ReplEnableCodeMode)
+        , ("always-approve", ReplToggleAlwaysApprove)
+        , ("update-and-restart", ReplUpdateAndRestart)
+        , ("quit", ReplQuit)
+        ]
+
+parseNoArgumentCommand :: SlashCommand -> ReplAction -> [Text] -> ReplAction
+parseNoArgumentCommand spec action args
+    | null args = action
+    | otherwise = slashUsageError spec
+
+slashUsageError :: SlashCommand -> ReplAction
+slashUsageError spec =
+    ReplCommandError ("usage: " <> usage)
+  where
+    -- Parsing has historically used the built-in command's canonical usage
+    -- text, even when callers supply a catalog with different display text.
+    usage =
+        maybe spec.slashUsage
+            (.slashUsage)
+            (lookupSlashCommand spec.slashName)
+
+slashCommandTail :: Text -> Text -> Text
+slashCommandTail command =
+    Text.strip . Text.drop (Text.length command)
+
+parseSpecializedSlashCommand
+    :: SlashCatalog
+    -> Text
+    -> SlashCommand
+    -> [Text]
+    -> Text
+    -> ReplAction
+parseSpecializedSlashCommand catalog raw spec args commandTail =
+    case spec.slashName of
+        "help" -> parseHelpCommand catalog args
+        "review" -> parseOptionalTextCommand ReplReview commandTail
+        "fork" -> parseForkCommand commandTail
+        "export" -> parseOptionalTextCommand ReplExport commandTail
+        "find" -> ReplFind (nonEmptyText commandTail)
+        "effort" -> parseEffortCommand args
+        "model" -> parseModelCommand args
+        "theme" -> parseThemeCommand args
+        "plan" -> parseOptionalTextCommand ReplPlan commandTail
+        "btw" ->
+            parseRequiredTextCommand
+                ReplBtw
+                spec
+                commandTail
+        "meta" ->
+            parseRequiredTextCommand
+                ReplMetaConsole
+                spec
+                commandTail
+        "afk" -> case args of
+            [] -> ReplAfk Nothing
+            [target] -> ReplAfk (Just target)
+            _ -> slashUsageError spec
+        "rename" ->
+            if commandTail == "--auto"
+                then ReplRenameAuto
+                else if Text.null commandTail
+                    then slashUsageError spec
+                    else if Text.length commandTail > 100
+                        then ReplCommandError
+                            "session titles must be at most 100 characters"
+                        else ReplRename commandTail
+        "resume" -> parseResumeCommand args
+        "search" ->
+            parseRequiredTextCommand
+                ReplSearch
+                spec
+                commandTail
+        "compact" -> parseOptionalTextCommand ReplCompact commandTail
+        "paste" -> parsePasteCommand commandTail
+        "copy" -> parseCopyCommand commandTail
+        "copy-code" -> parseCopyCodeCommand args
+        "agents" -> parseAgentsCommand args
+        "mcp" -> case args of
+            [] -> ReplMcp
+            ("prompt" : server : name : rest) ->
+                ReplMcpPrompt server name (map parsePromptArgument rest)
+            _ ->
+                ReplCommandError
+                    "usage: /mcp [prompt <server> <prompt> [key=value ...]]"
+        "loop" ->
+            parseLoopCommand raw commandTail
+        "goal" ->
+            parseGoalCommand raw commandTail
+        "workflow" ->
+            parseWorkflowCommand raw commandTail
+        "deep-research" ->
+            parseDeepResearchCommand raw commandTail
+        "skills" -> case args of
+            [] -> ReplSkills False
+            ["reload"] -> ReplSkills True
+            _ -> slashUsageError spec
+        "shell" -> parseShellCommand args
+        other -> unknownCommand ("/" <> other)
+
+parseOptionalTextCommand :: (Maybe Text -> ReplAction) -> Text -> ReplAction
+parseOptionalTextCommand action =
+    action . nonEmptyText
+
+parseRequiredTextCommand
+    :: (Text -> ReplAction)
+    -> SlashCommand
+    -> Text
+    -> ReplAction
+parseRequiredTextCommand action spec value
+    | Text.null value = slashUsageError spec
+    | otherwise = action value
 
 unknownCommand :: Text -> ReplAction
 unknownCommand command =
