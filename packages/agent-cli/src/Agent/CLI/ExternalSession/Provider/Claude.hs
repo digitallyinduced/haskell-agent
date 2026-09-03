@@ -78,25 +78,29 @@ claudeMetadata
 claudeMetadata env path
     | not (isClaudeTranscript path) = pure Nothing
     | otherwise = do
-        stateRef <- newIORef ClaudeMetadataState
-            { metadataCwd = Nothing
-            , metadataSessionId = Text.pack (dropJsonl path)
-            , metadataFirstUser = ""
-            , metadataCustomTitle = ""
-            , metadataAiTitle = ""
-            , metadataSummary = ""
-            , metadataCreated = Nothing
-            , metadataUpdated = Nothing
-            }
         result <- tryAny $
-            consumeJsonl env path Nothing \record -> do
-                when (not (truthy (externalObjectValue "isSidechain" record))) $
-                    modifyIORef' stateRef (consumeClaudeMetadata record)
-                pure JsonlContinue
+            foldJsonl env path Nothing
+                ClaudeMetadataState
+                    { metadataCwd = Nothing
+                    , metadataSessionId = Text.pack (dropJsonl path)
+                    , metadataFirstUser = ""
+                    , metadataCustomTitle = ""
+                    , metadataAiTitle = ""
+                    , metadataSummary = ""
+                    , metadataCreated = Nothing
+                    , metadataUpdated = Nothing
+                    }
+                \state record ->
+                    pure
+                        ( if truthy
+                                (externalObjectValue "isSidechain" record)
+                            then state
+                            else consumeClaudeMetadata record state
+                        , JsonlContinue
+                        )
         case result of
             Left _ -> pure Nothing
-            Right _ -> do
-                state <- readIORef stateRef
+            Right (state, _) -> do
                 let title =
                         firstNonEmptyText
                             [ nonEmptyText state.metadataCustomTitle
@@ -179,14 +183,16 @@ readClaude env candidate maxToolChars =
         "resume-claude-chain.sqlite"
         \database -> do
             initializeClaudeIndex database
-            sequenceRef <- newIORef (0 :: Int)
-            unindexableRef <- newIORef (0 :: Int)
-            counters <- consumeJsonl env candidate.candidatePath Nothing
-                \record -> do
-                    indexClaudeRecord database candidate sequenceRef
-                        unindexableRef record
-                    pure JsonlContinue
-            unindexable <- readIORef unindexableRef
+            ((_, unindexable), counters) <-
+                foldJsonl env candidate.candidatePath Nothing (0, 0)
+                    \indexState record -> do
+                        nextState <-
+                            indexClaudeRecord
+                                database
+                                candidate
+                                indexState
+                                record
+                        pure (nextState, JsonlContinue)
             leaf <- claudeLeaf database
             stateRef <- newIORef ClaudeReadState
                 { claudeTurnsFromLeaf = []
@@ -233,19 +239,17 @@ initializeClaudeIndex database = do
 indexClaudeRecord
     :: Database
     -> ExternalCandidate
-    -> IORef Int
-    -> IORef Int
+    -> (Int, Int)
     -> Value
-    -> IO ()
-indexClaudeRecord database candidate sequenceRef unindexableRef record =
+    -> IO (Int, Int)
+indexClaudeRecord database candidate (sequenceNumber, unindexable) record =
     case externalTextValue "uuid" record of
         Just uuid
             | externalTextValue "type" record
                 `elem` map Just ["user", "assistant", "system", "attachment"]
             , not (truthy (externalObjectValue "isSidechain" record)) -> do
-                modifyIORef' sequenceRef (+ 1)
-                sequenceNumber <- readIORef sequenceRef
-                let parent =
+                let nextSequence = sequenceNumber + 1
+                    parent =
                         firstNonEmptyText
                             [ externalTextValue "parentUuid" record
                             , externalTextValue "logicalParentUuid" record
@@ -264,13 +268,15 @@ indexClaudeRecord database candidate sequenceRef unindexableRef record =
                     \sort_time = excluded.sort_time, \
                     \payload = excluded.payload"
                     [ SQLText uuid
-                    , SQLInteger (fromIntegral sequenceNumber)
+                    , SQLInteger (fromIntegral nextSequence)
                     , SQLText parent
                     , SQLFloat sortTime
                     , SQLBlob (LBS.toStrict (encode record))
                     ]
-        _ -> pure ()
-  `catchAnyIndex` \_ -> modifyIORef' unindexableRef (+ 1)
+                pure (nextSequence, unindexable)
+        _ -> pure (sequenceNumber, unindexable)
+  `catchAnyIndex` \_ ->
+        pure (sequenceNumber + 1, unindexable + 1)
 
 catchAnyIndex :: IO value -> (Text -> IO value) -> IO value
 catchAnyIndex action handle =
