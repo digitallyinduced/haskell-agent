@@ -42,7 +42,7 @@ mapModel options model =
 -- never stored server-side.
 buildRequest :: ClientOptions -> ResponseCreateParams -> ResponseCreateParams
 buildRequest options request =
-    withHostedXSearch $
+    (if options.hostedXSearchEnabled then withHostedXSearch else id) $
         mapResponseTools xaiTool $
             forceStatelessStreaming defaultResponseCreateParams
             { model = Just $

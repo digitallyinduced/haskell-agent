@@ -248,7 +248,10 @@ import qualified Agent.CLI.Session.Runner as SessionRunner
     ( runSession, SessionRunnerContinuation(..) )
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text ( null, unpack )
-import qualified Agent.XAI.Options as XAI ( clientOptionsFromEnv )
+import qualified Agent.XAI.Options as XAI
+    ( ClientOptions(hostedXSearchEnabled)
+    , clientOptionsFromEnv
+    )
 import qualified Agent.XAI.Client as XAIClient
     ( createResponseWith )
 import qualified Agent.XAI.Request as XAIRequest ( mapModel )
@@ -703,7 +706,12 @@ runAgentProviders
                                             startupFailure err
                                 Right result -> pure result
                     XAIProvider -> do
-                        xaiOptions <- XAI.clientOptionsFromEnv
+                        xaiOptions0 <- XAI.clientOptionsFromEnv
+                        let xaiOptions =
+                                xaiOptions0
+                                    { XAI.hostedXSearchEnabled =
+                                        not sandboxedNative
+                                    }
                         let xaiContextWindow =
                                 contextWindowForParams
                                     (XAIRequest.mapModel xaiOptions)

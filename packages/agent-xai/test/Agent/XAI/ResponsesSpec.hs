@@ -181,6 +181,15 @@ spec = do
             map (KeyMap.lookup "type") toolObjects `shouldBe`
                 [Just (Aeson.String "x_search")]
 
+        it "does not inject hosted x_search when the boundary disables it" do
+            let options =
+                    defaultClientOptions { hostedXSearchEnabled = False }
+                value = requestValue options
+                    (setTools (Just []) sampleRequest)
+            object <- expectObject value
+            KeyMap.lookup "tools" object
+                `shouldBe` Just (Aeson.toJSON ([] :: [Aeson.Value]))
+
         it "maps OpenAI-only efforts down and passes grok-4.6 xhigh through" do
             let effortOf request = do
                     object <- expectObject (requestValue defaultClientOptions request)
