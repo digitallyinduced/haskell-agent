@@ -116,6 +116,12 @@ import Agent.CLI.TUI.ImagePreview
     ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
     )
+import Agent.CLI.TUI.Scroll
+    ( ConversationAnchor(..)
+    , ConversationPhase(..)
+    , conversationAnchorSticky
+    , startConversationAnchor
+    )
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , TerminalKind(..)
@@ -1717,6 +1723,11 @@ spec = do
                 (conversationScrollbarRenderer @()).renderVScrollbar
                 `shouldBe` V.char V.defAttr '┃'
 
+    describe "conversation prompt anchor" do
+        it "does not stick a stale prompt that is visible at the tail" do
+            timeout 2_000_000 visiblePromptRepairsStaleAnchor
+                `shouldReturn` Just True
+
     describe "history replacement viewport" do
         it "keeps startup system messages ahead of the first committed turn" do
             timeout 2_000_000 startupMessagesPrecedeFirstCommittedTurn
@@ -2802,6 +2813,41 @@ markerBlock blockId body = UiBlock
     , blockCallId = Nothing
     , blockInspectionGroupable = False
     }
+
+visiblePromptRepairsStaleAnchor :: IO Bool
+visiblePromptRepairsStaleAnchor = do
+    let prompt = "latest prompt"
+        ui =
+            reduceUi (UiUserSubmitted prompt) $
+                reduceUi
+                    (UiAssistantHistory
+                        (Text.unlines
+                            (replicate 30 "earlier transcript row")))
+                    initialUiState
+        promptBlockId = BlockId (ui.uiNextBlockId - 1)
+        staleAnchor =
+            (startConversationAnchor promptBlockId prompt 0)
+                { anchorViewportTop = 1
+                , anchorPhase = ConversationFollowingTail
+                }
+    runtime <- newScriptRuntime ui
+    let initialState =
+            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                { appUi = ui
+                , appConversationAnchor = Just staleAnchor
+                }
+    (_, finalState) <-
+        runFullscreenScriptWithState
+            initialState
+            [ FullscreenScriptVty (V.EvKey V.KEnd [])
+            , FullscreenScriptApp AppConversationReflow
+            , FullscreenScriptHalt
+            ]
+    pure $
+        maybe
+            False
+            (not . conversationAnchorSticky)
+            finalState.appConversationAnchor
 
 renderedAppText :: (Int, Int) -> AppState -> Text
 renderedAppText size state =
