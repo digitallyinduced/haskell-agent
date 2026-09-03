@@ -253,24 +253,26 @@ spec = do
                     (Just "gateway-a")
                     `shouldBe` Right ()
 
-            it "rejects local and legacy sessions entering a gateway" do
+            it "rejects local sessions entering a gateway" do
                 validateResumedGatewayBoundary
                     (Just "gateway-a")
                     "local-openai"
                     Nothing
                     `shouldSatisfy` isLeft
+
+            it "allows gateway sessions across credentials and legacy metadata" do
                 validateResumedGatewayBoundary
                     (Just "gateway-a")
                     organizationGatewayConnectionId
                     Nothing
-                    `shouldSatisfy` isLeft
-
-            it "rejects sessions crossing gateway credentials or disconnecting" do
+                    `shouldBe` Right ()
                 validateResumedGatewayBoundary
                     (Just "gateway-b")
                     organizationGatewayConnectionId
                     (Just "gateway-a")
-                    `shouldSatisfy` isLeft
+                    `shouldBe` Right ()
+
+            it "rejects gateway sessions while disconnected" do
                 validateResumedGatewayBoundary
                     Nothing
                     organizationGatewayConnectionId

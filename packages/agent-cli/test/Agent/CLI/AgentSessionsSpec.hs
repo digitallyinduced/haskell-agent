@@ -251,7 +251,7 @@ spec = describe "Agent.CLI.AgentSessions" do
             selfResult `shouldSatisfy`
                 Text.isInfixOf "cannot message the current agent session"
 
-    it "does not expose or continue sessions across gateway boundaries" $
+    it "keeps gateway sessions private from direct mode but portable across gateways" $
         withTempEnv \env launched -> do
             let gatewayCreate =
                     (testCreate env.toolsPool env.toolsRoot)
@@ -302,12 +302,15 @@ spec = describe "Agent.CLI.AgentSessions" do
                 Text.isInfixOf "Reconnect the same gateway"
             otherRead <- runTool otherGateway "read_agent_session" payload
             otherRead `shouldSatisfy`
-                Text.isInfixOf "different organization gateway"
+                Text.isInfixOf "tenant A secret"
             otherSend <-
                 runTool otherGateway "send_agent_session_message" messagePayload
             otherSend `shouldSatisfy`
-                Text.isInfixOf "different organization gateway"
-            (null <$> readIORef launched) `shouldReturn` True
+                Text.isInfixOf "Status: running"
+            [(launchedHandle, message)] <- readIORef launched
+            launchedHandle.sessionMeta.metaId
+                `shouldBe` handle.sessionMeta.metaId
+            message `shouldBe` "continue"
             sameRead <- runTool sameGateway "read_agent_session" payload
             sameRead `shouldSatisfy` Text.isInfixOf "tenant A secret"
 

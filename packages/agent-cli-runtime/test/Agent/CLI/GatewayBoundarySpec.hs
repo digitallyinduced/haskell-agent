@@ -48,14 +48,22 @@ spec = describe "GatewayBoundary" do
         firstBoundary `shouldNotBe` replacementBoundary
         gatewayBoundariesMatch firstBoundary firstBoundary `shouldBe` True
 
-    it "validates persisted sessions against the exact current route" do
+    it "keeps persisted sessions route-bound across gateway credentials" do
         let credential = testCredential "secret"
+            replacement = testCredential "replacement-secret"
             boundary = gatewayBoundaryFromCredential (Just credential)
+            replacementBoundary =
+                gatewayBoundaryFromCredential (Just replacement)
             identity = boundary.gatewayBoundaryIdentity
         validateGatewaySessionBoundary
-            boundary
+            replacementBoundary
             organizationGatewayConnectionId
             identity
+            `shouldBe` Right ()
+        validateGatewaySessionBoundary
+            replacementBoundary
+            organizationGatewayConnectionId
+            Nothing
             `shouldBe` Right ()
         validateGatewaySessionBoundary
             (gatewayBoundaryFromCredential Nothing)
