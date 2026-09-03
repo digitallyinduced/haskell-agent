@@ -609,7 +609,8 @@ refreshServerTools fleet client =
   where
     serverName = client.clientConfig.mcpServerName
     sameClient :: McpClient -> McpClient -> Bool
-    sameClient left right = left.clientNextId == right.clientNextId
+    sameClient left right =
+        left.clientRequestRegistry == right.clientRequestRegistry
 
 -- * Meta-tools
 

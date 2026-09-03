@@ -8,8 +8,10 @@ import Agent.MCP.Client
     , closeMcpClient
     , classifyProbe
     , encodeHeaderValue
+    , emptyRequestRegistry
     , headerParamValues
     , readBounded
+    , registerPending
     , spawnClientWorker
     , splitSseChunk
     , splitLines
@@ -22,6 +24,8 @@ import Agent.MCP.Types
     , McpHttpTransport(..)
     , McpStdioTransport(..)
     , McpTool(..)
+    , PendingRequest(..)
+    , RequestRegistry(..)
     )
 import Agent.Json (RawJson, rawJsonBytes, rawJsonDecoder, rawJsonFromEncoding)
 import qualified Agent.Json.Decode as Json
@@ -29,6 +33,7 @@ import Control.Concurrent.STM
     ( TMVar
     , atomically
     , newEmptyTMVarIO
+    , newTVarIO
     , readTMVar
     , readTVarIO
     , tryPutTMVar
@@ -64,6 +69,7 @@ import Data.IORef
     , readIORef
     )
 import Data.List (find)
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
@@ -89,6 +95,16 @@ import Test.QuickCheck
     , (===)
     )
 
+testPendingRequest :: IO PendingRequest
+testPendingRequest = do
+    response <- newEmptyTMVarIO
+    activity <- newTVarIO 0
+    pure PendingRequest
+        { pendingResponse = response
+        , pendingActivity = activity
+        , pendingOnProgress = const (pure ())
+        }
+
 spec :: Spec
 spec = describe "Agent.MCP" do
     it "redacts configured environment values from Show" do
@@ -106,6 +122,30 @@ spec = describe "Agent.MCP" do
         rendered `shouldContain` "API_TOKEN"
         rendered `shouldContain` "<redacted>"
         rendered `shouldNotContain` "super-secret"
+
+    describe "request registry" do
+        it "allocates sequential ids while installing each waiter" do
+            first <- testPendingRequest
+            second <- testPendingRequest
+            let (afterFirst, firstId) =
+                    registerPending first emptyRequestRegistry
+                (afterSecond, secondId) =
+                    registerPending second afterFirst
+            firstId `shouldBe` 1
+            secondId `shouldBe` 2
+            afterSecond.requestRegistryNextId `shouldBe` 3
+            IntMap.keys afterSecond.requestRegistryPending
+                `shouldBe` [1, 2]
+            case IntMap.lookup firstId afterSecond.requestRegistryPending of
+                Nothing -> expectationFailure "first waiter was not registered"
+                Just registered ->
+                    registered.pendingResponse == first.pendingResponse
+                        `shouldBe` True
+            case IntMap.lookup secondId afterSecond.requestRegistryPending of
+                Nothing -> expectationFailure "second waiter was not registered"
+                Just registered ->
+                    registered.pendingResponse == second.pendingResponse
+                        `shouldBe` True
 
     describe "client transport" do
         it "stores only HTTP state for an HTTP client" $

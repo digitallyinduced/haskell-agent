@@ -251,8 +251,7 @@ newClientRecord
     -> McpClientTransport
     -> IO McpClient
 newClientRecord hooks eraHint config transport = do
-    nextId <- newIORef 1
-    pending <- newTVarIO IntMap.empty
+    requestRegistry <- newTVarIO emptyRequestRegistry
     failure <- newTVarIO Nothing
     closed <- newMVar False
     lifecycle <- newTVarIO ClientPending
@@ -264,8 +263,7 @@ newClientRecord hooks eraHint config transport = do
         { clientConfig = config
         , clientHooks = hooks
         , clientTransport = transport
-        , clientNextId = nextId
-        , clientPending = pending
+        , clientRequestRegistry = requestRegistry
         , clientFailure = failure
         , clientWorkers = workers
         , clientClosed = closed
@@ -1211,18 +1209,23 @@ requestMcp client timeoutMicros method parameters =
 
 requestMcpFull :: McpClient -> McpRequest -> IO (Either McpError RawJson)
 requestMcpFull client request = do
-    failed <- readTVarIO client.clientFailure
-    case failed of
-        Just err -> pure (Left (McpTransportError err))
-        Nothing -> do
-            era <- case request.requestEra of
-                Just era -> pure (Just era)
-                Nothing -> mcpClientEra client
-            requestId <- atomicModifyIORef' client.clientNextId \current ->
-                (current + 1, current)
-            pending <- newPendingRequest request
-            atomically $
-                modifyTVar' client.clientPending (IntMap.insert requestId pending)
+    era <- case request.requestEra of
+        Just era -> pure (Just era)
+        Nothing -> mcpClientEra client
+    pending <- newPendingRequest request
+    registration <- atomically do
+        failed <- readTVar client.clientFailure
+        case failed of
+            Just err -> pure (Left err)
+            Nothing -> do
+                registry <- readTVar client.clientRequestRegistry
+                let (nextRegistry, requestId) =
+                        registerPending pending registry
+                writeTVar client.clientRequestRegistry nextRegistry
+                pure (Right requestId)
+    case registration of
+        Left err -> pure (Left (McpTransportError err))
+        Right requestId -> do
             elicitEnabled <-
                 if request.requestMeta && era == Just McpEraModern
                     then isJust <$> client.clientHooks.mcpHostElicit
@@ -1245,7 +1248,36 @@ requestMcpFull client request = do
                                 `finally` unregister requestId
   where
     unregister requestId =
-        atomically $ modifyTVar' client.clientPending (IntMap.delete requestId)
+        atomically do
+            registry <- readTVar client.clientRequestRegistry
+            writeTVar client.clientRequestRegistry
+                (registry
+                    { requestRegistryPending =
+                        IntMap.delete requestId registry.requestRegistryPending
+                    })
+
+emptyRequestRegistry :: RequestRegistry
+emptyRequestRegistry = RequestRegistry
+    { requestRegistryNextId = 1
+    , requestRegistryPending = IntMap.empty
+    }
+
+-- | Allocate an id and install its response destination as one pure state
+-- transition. The caller applies it to 'clientRequestRegistry' atomically.
+registerPending
+    :: PendingRequest
+    -> RequestRegistry
+    -> (RequestRegistry, Int)
+registerPending pending registry =
+    ( registry
+        { requestRegistryNextId = requestId + 1
+        , requestRegistryPending =
+            IntMap.insert requestId pending registry.requestRegistryPending
+        }
+    , requestId
+    )
+  where
+    requestId = registry.requestRegistryNextId
 
 newPendingRequest :: McpRequest -> IO PendingRequest
 newPendingRequest request = do
@@ -1651,14 +1683,14 @@ sendMessage client transport message =
         >>= \case
             Left exception -> do
                 let err = "MCP write failed: " <> exceptionSummary exception
-                failPending client.clientPending client.clientFailure err
+                failPending client.clientRequestRegistry client.clientFailure err
                 pure (Left err)
             Right () -> pure (Right ())
 
 readerLoop :: McpClient -> Handle -> IO ()
 readerLoop client output =
     loop `finally`
-        failPending client.clientPending client.clientFailure
+        failPending client.clientRequestRegistry client.clientFailure
             "MCP server stdout closed"
   where
     loop = do
@@ -1666,7 +1698,7 @@ readerLoop client output =
         unless (BS.null (BS8.strip line)) $
             case Json.decodeEither inboundDecoder line of
                 Left err ->
-                    failPending client.clientPending client.clientFailure
+                    failPending client.clientRequestRegistry client.clientFailure
                         ("Invalid MCP JSON message: " <> err.jsonErrorMessage)
                 Right inbound ->
                     handleInbound client inbound
@@ -1705,9 +1737,14 @@ routeResponse client inbound =
         Nothing -> pure ()
         Just ident -> do
             destination <- atomically do
-                current <- readTVar client.clientPending
-                writeTVar client.clientPending (IntMap.delete ident current)
-                pure (IntMap.lookup ident current)
+                registry <- readTVar client.clientRequestRegistry
+                let pending = registry.requestRegistryPending
+                writeTVar client.clientRequestRegistry
+                    (registry
+                        { requestRegistryPending =
+                            IntMap.delete ident pending
+                        })
+                pure (IntMap.lookup ident pending)
             forM_ destination \pending ->
                 atomically . void . tryPutTMVar pending.pendingResponse $
                     case inbound.inboundError of
@@ -1765,7 +1802,9 @@ handleNotification client method params =
     case method of
         "notifications/progress" ->
             forM_ (params >>= decodeProgress) \(token, progress) -> do
-                pending <- IntMap.lookup token <$> readTVarIO client.clientPending
+                registry <- readTVarIO client.clientRequestRegistry
+                let pending =
+                        IntMap.lookup token registry.requestRegistryPending
                 forM_ pending \entry -> do
                     atomically $ modifyTVar' entry.pendingActivity (+ 1)
                     void (tryAny (entry.pendingOnProgress progress))
@@ -2235,14 +2274,14 @@ capturedStderrText captured =
 -- * Failure and shutdown
 
 failClient
-    :: TVar (IntMap.IntMap PendingRequest)
+    :: TVar RequestRegistry
     -> TVar (Maybe Text)
     -> Text
     -> IO ()
 failClient = failPending
 
 failPending
-    :: TVar (IntMap.IntMap PendingRequest)
+    :: TVar RequestRegistry
     -> TVar (Maybe Text)
     -> Text
     -> IO ()
@@ -2250,8 +2289,10 @@ failPending pending failure err =
     atomically do
         existing <- readTVar failure
         when (existing == Nothing) (writeTVar failure (Just err))
-        requests <- readTVar pending
-        writeTVar pending IntMap.empty
+        registry <- readTVar pending
+        let requests = registry.requestRegistryPending
+        writeTVar pending
+            (registry { requestRegistryPending = IntMap.empty })
         mapM_ (\entry -> void (tryPutTMVar entry.pendingResponse (Left (McpTransportError err))))
             (IntMap.elems requests)
 
@@ -2285,7 +2326,7 @@ closeMcpClient client =
                         readIORef transport.stdioStderrReader >>= mapM_ stopWorker
                     McpClientHttp transport ->
                         closeHttpSession client transport
-                failClient client.clientPending client.clientFailure
+                failClient client.clientRequestRegistry client.clientFailure
                     "MCP server closed"
                 pure True
 
