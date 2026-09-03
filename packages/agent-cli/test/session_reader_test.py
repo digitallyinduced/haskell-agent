@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -2036,7 +2037,7 @@ class SessionReaderTest(unittest.TestCase):
         ]
         records.extend({"type": "ignored"} for _ in range(299))
         fake_zstd.write_text(
-            "#!/usr/bin/env python3\n"
+            f"#!{sys.executable}\n"
             "import json\n"
             "from pathlib import Path\n"
             f"records = {records!r}\n"
