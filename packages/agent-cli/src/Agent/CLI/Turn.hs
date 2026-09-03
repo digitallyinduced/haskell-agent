@@ -65,7 +65,10 @@ import Agent.CLI.Session
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
     )
-import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.SessionEnv
+    ( PreparedWorkspaceEnvironment(..)
+    , SessionEnv(..)
+    )
 import Agent.CLI.Session.History
     ( currentLiveTranscriptGeneration
     , durableTranscriptCheckpoint
@@ -338,7 +341,9 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         prefix <-
                             takeGrokFirstTurnContext
                                 grokFirstTurnContext
-                                (loadGrokFirstTurnPrefix env.sessionCwd)
+                                (loadGrokFirstTurnPrefix
+                                    env.sessionPreparedWorkspaceEnvironment
+                                    env.sessionCwd)
                         pure (UserMessage prefix : framed, Just prefix)
                     else pure (framed, Nothing)
             else pure (stampedInputs, Nothing)
@@ -842,13 +847,26 @@ grokFirstTurnPrefix osName shell cwd today gitStatus =
             <> status
             <> "\n</git_status>"
 
-loadGrokFirstTurnPrefix :: System.OsPath.OsPath -> IO Text
-loadGrokFirstTurnPrefix cwd = do
-    shell <- maybe "/bin/sh" Text.pack <$> lookupEnv "SHELL"
-    osVersion <- loadOperatingSystem
+loadGrokFirstTurnPrefix
+    :: Maybe PreparedWorkspaceEnvironment
+    -> System.OsPath.OsPath
+    -> IO Text
+loadGrokFirstTurnPrefix preparedEnvironment cwd = do
     today <- localDay . zonedTimeToLocalTime <$> getZonedTime
-    status <- loadGitStatus cwd
-    pure (grokFirstTurnPrefix osVersion shell cwd today status)
+    case preparedEnvironment of
+        Nothing -> do
+            shell <- maybe "/bin/sh" Text.pack <$> lookupEnv "SHELL"
+            osVersion <- loadOperatingSystem
+            status <- loadGitStatus cwd
+            pure (grokFirstTurnPrefix osVersion shell cwd today status)
+        Just environment ->
+            pure
+                (grokFirstTurnPrefix
+                    environment.preparedOperatingSystem
+                    environment.preparedShell
+                    cwd
+                    today
+                    Nothing)
 
 -- | Consume a persisted first-turn prefix before consulting the live
 -- environment. The persisted value keeps a resumed request byte-for-byte

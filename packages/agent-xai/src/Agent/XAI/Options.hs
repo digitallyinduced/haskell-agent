@@ -73,6 +73,8 @@ data ClientOptions = ClientOptions
       -- ^ Full-response timeout. Reasoning turns can stream for minutes.
     , clientVersion :: !Text
       -- ^ Value for @x-grok-client-version@.
+    , hostedXSearchEnabled :: !Bool
+      -- ^ Whether the wire adapter may inject provider-hosted @x_search@.
     } deriving (Eq, Show)
 
 defaultClientOptions :: ClientOptions
@@ -82,6 +84,7 @@ defaultClientOptions = ClientOptions
     , defaultModel = "grok-4.6"
     , requestTimeoutSeconds = 600
     , clientVersion = defaultGrokClientVersion
+    , hostedXSearchEnabled = True
     }
 
 -- | Load optional transport overrides from the environment.
@@ -99,4 +102,5 @@ clientOptionsFromEnv = do
         , requestTimeoutSeconds = Maybe.fromMaybe defaultClientOptions.requestTimeoutSeconds
             timeoutSeconds
         , clientVersion = maybe defaultClientOptions.clientVersion Text.pack clientVersion
+        , hostedXSearchEnabled = defaultClientOptions.hostedXSearchEnabled
         }

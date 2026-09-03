@@ -51,6 +51,7 @@ library
                     , Agent.CLI.Duration
                     , Agent.CLI.Environment
                     , Agent.CLI.Error
+                    , Agent.CLI.GatewayBoundary
                     , Agent.CLI.GatewayBridge
                     , Agent.CLI.GatewayClient
                     , Agent.CLI.Json
@@ -115,6 +116,7 @@ test-suite agent-cli-runtime-test
                     , Agent.CLI.EnvironmentSpec
                     , Agent.CLI.ErrorSpec
                     , Agent.CLI.GatewayBridgeSpec
+                    , Agent.CLI.GatewayBoundarySpec
                     , Agent.CLI.GatewayClientSpec
                     , Agent.CLI.ManagedTurnSpec
                     , Agent.CLI.ModelConfigSpec

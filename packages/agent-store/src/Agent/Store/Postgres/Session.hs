@@ -36,6 +36,7 @@ module Agent.Store.Postgres.Session
     , loadSessions
     , loadSessionMetadataMany
     , loadSessionMetadata
+    , loadSessionMetadataForBoundary
     , loadLatestSessionPromptEpoch
     , loadActiveSession
     , loadActiveSessionWithImplementation
@@ -57,6 +58,11 @@ module Agent.Store.Postgres.Session
     , loadSessionResumeStats
     , loadSessionEvents
     , listSessionMetadata
+    , SessionListCursor(..)
+    , SessionListEntry(..)
+    , SessionListPage(..)
+    , SessionArchiveFilter(..)
+    , listSessionMetadataForBoundary
     , listSessionArchiveKeys
     , setSessionArchived
     , searchConversationTurns

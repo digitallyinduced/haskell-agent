@@ -44,6 +44,7 @@ import qualified Agent.CLI.MetaConsoleRuntimeSpec as MetaConsoleRuntimeSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
 import qualified Agent.CLI.McpAdminSpec as McpAdminSpec
 import qualified Agent.CLI.NativeAgentsSpec as NativeAgentsSpec
+import qualified Agent.CLI.NativeRuntimeSpec as NativeRuntimeSpec
 import qualified Agent.CLI.NotificationSpec as NotificationSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
 import qualified Agent.CLI.PendingInputsSpec as PendingInputsSpec
@@ -148,6 +149,7 @@ main = hspec do
     MetaConsoleRuntimeSpec.spec
     ModelPickerSpec.spec
     NativeAgentsSpec.spec
+    NativeRuntimeSpec.spec
     NotificationSpec.spec
     OptionsSpec.spec
     PendingInputsSpec.spec

@@ -77,7 +77,11 @@ import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Startup
     ( finishStartup )
 import Agent.CLI.Runtime.Orchestration.Types
-    ( AccountSwitchRequest(..) )
+    ( AccountSwitchRequest(..)
+    , NativeRunCapabilities(..)
+    , NativeRunHooks(..)
+    , fullNativeRunCapabilities
+    )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap
     ( runSessionRecap, runSessionTurnSummary )
@@ -247,7 +251,10 @@ import qualified Agent.CLI.Session.Runner as SessionRunner
     ( runSession, SessionRunnerContinuation(..) )
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text ( null, unpack )
-import qualified Agent.XAI.Options as XAI ( clientOptionsFromEnv )
+import qualified Agent.XAI.Options as XAI
+    ( ClientOptions(hostedXSearchEnabled)
+    , clientOptionsFromEnv
+    )
 import qualified Agent.XAI.Client as XAIClient
     ( createResponseWith )
 import qualified Agent.XAI.Request as XAIRequest ( mapModel )
@@ -356,7 +363,13 @@ runAgentProviders
     transition
     transportModel
     unavailableProviders
-    = case provider of
+    =
+        let nativeCapabilities =
+                maybe
+                    fullNativeRunCapabilities
+                    (.nativeCapabilities)
+                    startup.startupNativeHooks
+        in case provider of
                     OpenAIProvider ->
                         try @_ @CodexAuthFailed
                             (withCodexWsWithProviderOrHttpFallback tokenProvider \conn credential -> do
@@ -675,8 +688,9 @@ runAgentProviders
                                             , not (isGatewayLoadedAuth loaded)
                                             , isProviderUnavailable err ->
                                                 chooseStartupProviderTransition
+                                                    nativeCapabilities.nativeProviderFallback
                                                     catalog
-                                                    cwd
+                                                    projectRoot
                                                     fullscreen
                                                     (tokenProviderBillingMode
                                                         tokenProvider)
@@ -695,7 +709,12 @@ runAgentProviders
                                             startupFailure err
                                 Right result -> pure result
                     XAIProvider -> do
-                        xaiOptions <- XAI.clientOptionsFromEnv
+                        xaiOptions0 <- XAI.clientOptionsFromEnv
+                        let xaiOptions =
+                                xaiOptions0
+                                    { XAI.hostedXSearchEnabled =
+                                        nativeCapabilities.nativeProviderHostedTools
+                                    }
                         let xaiContextWindow =
                                 contextWindowForParams
                                     (XAIRequest.mapModel xaiOptions)
@@ -865,8 +884,12 @@ runAgentProviders
                                 , interruptBackend = pure ()
                                 , resetBackendState = pure ()
                                 }
-                    ClaudeCodeProvider ->
-                        withSelectedClaudeAuth
+                    ClaudeCodeProvider
+                        | not
+                            nativeCapabilities.nativeProviderNativeTools ->
+                            startupDie startup
+                                "Claude Code is unavailable in this runtime"
+                        | otherwise -> withSelectedClaudeAuth
                             connectedGateway
                             loaded
                             (startupDie startup . Text.unpack)
@@ -986,6 +1009,8 @@ runAgentProviders
                                     , mcpToolNames =
                                         MCP.inProcessMcpToolNames
                                             claudeMcpServer
+                                    , nativeToolsEnabled =
+                                        nativeCapabilities.nativeProviderNativeTools
                                     }
                         when claudeBypassEnabled $
                             case fullscreen of

@@ -263,6 +263,7 @@ library
                     , agent-cli-runtime:Agent.CLI.Duration as Agent.CLI.Duration
                     , agent-cli-runtime:Agent.CLI.Environment as Agent.CLI.Environment
                     , agent-cli-runtime:Agent.CLI.Error as Agent.CLI.Error
+                    , agent-cli-runtime:Agent.CLI.GatewayBoundary as Agent.CLI.GatewayBoundary
                     , agent-cli-runtime:Agent.CLI.GatewayBridge as Agent.CLI.GatewayBridge
                     , agent-cli-runtime:Agent.CLI.GatewayClient as Agent.CLI.GatewayClient
                     , agent-cli-runtime:Agent.CLI.ManagedTurn as Agent.CLI.ManagedTurn
@@ -513,6 +514,7 @@ test-suite agent-cli-test
                     , Agent.CLI.MetaConsoleRuntimeSpec
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.NativeAgentsSpec
+                    , Agent.CLI.NativeRuntimeSpec
                     , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PlanSpec

@@ -1,5 +1,9 @@
 module Agent.Tools.Types
     ( AppTool(..)
+    , AppToolGroup(..)
+    , appToolsFromGroups
+    , executionToolsFromGroups
+    , hostToolsFromGroups
     , BackgroundTaskHooks(..)
     , BackgroundTaskNotice(..)
     , ToolSchema(..)
@@ -114,6 +118,29 @@ data AppTool = AppTool
     , appToolExecution :: !ToolExecutionPolicy
     , appToolResourceClaims :: !(Maybe ToolResourceResolver)
     }
+
+-- | A construction-time partition between ambient execution handlers and
+-- explicit host services. The generic tool registry only receives the
+-- flattened tools; embeddings may replace an entire execution group before
+-- constructing that registry.
+data AppToolGroup
+    = ExecutionToolGroup ![AppTool]
+    | HostToolGroup ![AppTool]
+
+appToolsFromGroups :: [AppToolGroup] -> [AppTool]
+appToolsFromGroups = concatMap \case
+    ExecutionToolGroup tools -> tools
+    HostToolGroup tools -> tools
+
+executionToolsFromGroups :: [AppToolGroup] -> [AppTool]
+executionToolsFromGroups = concatMap \case
+    ExecutionToolGroup tools -> tools
+    HostToolGroup _ -> []
+
+hostToolsFromGroups :: [AppToolGroup] -> [AppTool]
+hostToolsFromGroups = concatMap \case
+    ExecutionToolGroup _ -> []
+    HostToolGroup tools -> tools
 
 -- | Registration order is retained for stable provider schemas while lookup is
 -- canonical and validated once at construction.

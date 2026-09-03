@@ -350,6 +350,29 @@
                     ];
                 };
 
+                agentServerProductionSource = nix-filter.lib {
+                    root = ./packages/agent-server;
+                    include = [
+                        "app"
+                        "openapi.json"
+                        "src"
+                        "agent-server.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentServerCheckSource = nix-filter.lib {
+                    root = ./packages/agent-server;
+                    include = [
+                        "app"
+                        "openapi.json"
+                        "src"
+                        "test"
+                        "agent-server.cabal"
+                        "LICENSE"
+                    ];
+                };
+
                 agentXaiSource = nix-filter.lib {
                     root = ./packages/agent-xai;
                     include = [
@@ -645,6 +668,17 @@
                                         else agentTelegramProductionSource;
                             })
                             [ pkgs.postgresql_18 ]);
+                        agent-server = localPackage
+                            (pkgs.haskell.lib.overrideSrc
+                                (final.callPackage
+                                    ./packages/agent-server/package.nix
+                                    { })
+                                {
+                                    src =
+                                        if checkLocalPackages
+                                            then agentServerCheckSource
+                                            else agentServerProductionSource;
+                                });
                     }
                 );
 
@@ -681,6 +715,15 @@
                     productionHaskellPackages.agent-cli-runtime;
                 agentCliPackage = productionHaskellPackages.agent-cli;
                 agentTelegramPackage = productionHaskellPackages.agent-telegram;
+                agentServerPackage = productionHaskellPackages.agent-server;
+                # Exercise the server's own test suite against the production
+                # dependency graph. Referencing the all-check package set here
+                # would also rerun every transitive local package test suite,
+                # making this focused check fail for unrelated dependencies.
+                agentServerCheckPackage = pkgs.haskell.lib.doCheck
+                    (pkgs.haskell.lib.overrideSrc agentServerPackage {
+                        src = agentServerCheckSource;
+                    });
                 # Both installable CLI variants expose the same advertised
                 # runtime capabilities; only the harness linkage differs.
                 agentCliRuntimeTools = [
@@ -804,6 +847,49 @@
                                             ]}"
                                 '';
                         });
+                agentServerExecutable =
+                    (pkgs.haskell.lib.justStaticExecutables
+                        agentServerPackage).overrideAttrs
+                        (old: {
+                            nativeBuildInputs =
+                                (old.nativeBuildInputs or [ ])
+                                ++ [ pkgs.makeWrapper ];
+                            postInstall =
+                                (old.postInstall or "")
+                                + ''
+                                    wrapProgram "$out/bin/agent-server" \
+                                        --set-default AGENT_SYNTAX_DIR \
+                                            "${skylightingSyntaxDirectory}" \
+                                        --set-default AGENT_POSTGRES_BIN \
+                                            "${pkgs.postgresql_18}/bin" \
+                                        --prefix PATH : \
+                                            "${pkgs.lib.makeBinPath agentCliRuntimeTools}"
+                                '';
+                        } // pkgs.lib.optionalAttrs
+                            pkgs.stdenv.hostPlatform.isDarwin {
+                                disallowedRequisites = pkgs.lib.remove
+                                    haskellPackages.ghc
+                                    (old.disallowedRequisites or [ ]);
+                            });
+                agentSandboxVm =
+                    if pkgs.stdenv.hostPlatform.isLinux then
+                        (nixpkgs.lib.nixosSystem {
+                            inherit system;
+                            specialArgs = {
+                                agentServer = agentServerExecutable;
+                            };
+                            modules = [ ./nix/sandbox-vm.nix ];
+                        }).config.system.build.vm
+                    else
+                        null;
+                agentSandboxRunner =
+                    if pkgs.stdenv.hostPlatform.isLinux then
+                        import ./nix/sandbox-runner.nix {
+                            inherit pkgs;
+                            vm = agentSandboxVm;
+                        }
+                    else
+                        null;
                 agentNativeBridgePackage = pkgs.runCommand
                     "haskell-agent-native-bridge-0.1.0"
                     {
@@ -956,6 +1042,9 @@
                 packages.agent-cli-static = agentCliStaticExecutable;
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;
+                packages.agent-server = agentServerExecutable;
+                packages.${if pkgs.stdenv.hostPlatform.isLinux
+                    then "agent-sandbox-runner" else null} = agentSandboxRunner;
                 packages.${if pkgs.stdenv.hostPlatform.isDarwin
                     then "agent-native-bridge" else null} = agentNativeBridgePackage;
                 packages.agent-cli-runtime = agentCliRuntimePackage;
@@ -989,6 +1078,16 @@
                     drv = self.packages.${system}.agent-telegram;
                     exePath = "/bin/agent-telegram";
                 };
+                apps.agent-server = flake-utils.lib.mkApp {
+                    drv = self.packages.${system}.agent-server;
+                    exePath = "/bin/agent-server";
+                };
+                apps.${if pkgs.stdenv.hostPlatform.isLinux
+                    then "agent-sandbox-runner" else null} =
+                    flake-utils.lib.mkApp {
+                        drv = self.packages.${system}.agent-sandbox-runner;
+                        exePath = "/bin/agent-sandbox-runner";
+                    };
                 apps.agent-runtime-daemon = flake-utils.lib.mkApp {
                     drv = self.packages.${system}.agent-runtime-daemon;
                     exePath = "/bin/agent-runtime-daemon";
@@ -1003,6 +1102,7 @@
                         packages.agent-cli
                         packages.agent-cli-runtime
                         packages.agent-telegram
+                        packages.agent-server
                         packages.agent-core
                         packages.agent-mcp
                         packages.agent-json
@@ -1063,6 +1163,7 @@
                     agent-cli-runtime = haskellPackages.agent-cli-runtime;
                     agent-cli = haskellPackages.agent-cli;
                     agent-telegram = haskellPackages.agent-telegram;
+                    agent-server = agentServerCheckPackage;
                     agent-core = haskellPackages.agent-core;
                     agent-mcp = haskellPackages.agent-mcp;
                     agent-json = haskellPackages.agent-json;
@@ -1086,6 +1187,7 @@
                     agent-claude = haskellPackages.agent-claude;
                 } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
                     agent-cli-static-runtime = agentCliStaticRuntimeCheck;
+                    agent-sandbox-runner = agentSandboxRunner;
                     nixos-module = import ./nix/tests/telegram-module.nix {
                         inherit self nixpkgs pkgs system;
                     };

@@ -1,6 +1,7 @@
 -- | Mutable session state shared by the REPL, one-shot turns, and plan mode.
 module Agent.CLI.SessionEnv
-    ( SessionEnv(..)
+    ( PreparedWorkspaceEnvironment(..)
+    , SessionEnv(..)
     ) where
 
 import Agent.CLI.Interrupt (InterruptState)
@@ -44,6 +45,11 @@ import Data.Set (Set)
 import Data.Text (Text)
 import Control.Concurrent.STM (STM)
 
+data PreparedWorkspaceEnvironment = PreparedWorkspaceEnvironment
+    { preparedOperatingSystem :: !Text
+    , preparedShell :: !Text
+    }
+
 data SessionEnv = SessionEnv
     { sessionLoop :: !LoopConfig
     , sessionSteeringInputs :: !SteeringInputs
@@ -76,6 +82,11 @@ data SessionEnv = SessionEnv
     , sessionTaskPlan :: !(Maybe TaskPlanEnv)
     , sessionProjectRoot :: !OsPath
     , sessionCwd :: !OsPath
+    , sessionProviderFallback :: !Bool
+    -- | Prepared environment facts avoid inspecting the host workspace.
+    -- 'Nothing' requests ordinary local discovery.
+    , sessionPreparedWorkspaceEnvironment
+        :: !(Maybe PreparedWorkspaceEnvironment)
     , sessionHome :: !OsPath
     , sessionMcpRegistrations :: ![McpToolRegistration]
     , sessionMcpWarnings :: ![Text]

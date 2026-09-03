@@ -145,6 +145,11 @@ Start an interactive session:
 agent-cli
 ```
 
+To embed the runtime through a local REST and Server-Sent Events API, run
+`nix run .#agent-server`. It provides durable session management, concurrent
+turn supervision, approvals, cancellation, and an OpenAPI 3.1 document. See
+the [agent server guide](docs/agent-server.md).
+
 The provider's Bash/shell execution tool is enabled by default. Enable the
 persistent `run_ghci` tool when needed:
 
