@@ -1,5 +1,6 @@
 module Agent.Gemini.RequestSpec (spec) where
 
+import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Gemini.Request
 import Agent.Responses.Types
 import Data.Aeson (Value(..), object, (.=))
@@ -78,6 +79,47 @@ spec = describe "Gemini request projection" do
             `shouldBe`
                 Right (object ["contents" .= ([] :: [Value])])
 
+    it "projects valid JSON arguments for ordinary function calls" do
+        let params :: ResponseCreateParams
+            params = withInput
+                (Just (ResponseInputItems
+                    [functionCall "lookup" "{\"query\":\"weather\"}"]))
+                defaultResponseCreateParams
+        fmap (.requestBody) (buildRequest "gemini-test" params)
+            `shouldBe`
+                Right
+                    (object
+                        [ "contents" .=
+                            [ object
+                                [ "role" .= ("model" :: Text)
+                                , "parts" .=
+                                    [ object
+                                        [ "functionCall" .= object
+                                            [ "id" .= ("call-1" :: Text)
+                                            , "name" .= ("lookup" :: Text)
+                                            , "args" .= object
+                                                [ "query" .= ("weather" :: Text)
+                                                ]
+                                            ]
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ])
+
+    it "rejects malformed JSON arguments for ordinary function calls" do
+        let params :: ResponseCreateParams
+            params = withInput
+                (Just (ResponseInputItems
+                    [functionCall "lookup" "{not json"]))
+                defaultResponseCreateParams
+        buildRequest "gemini-test" params
+            `shouldBe`
+                Left
+                    (ProviderError InvalidRequestError
+                        "Gemini function call `lookup` arguments must be valid JSON"
+                        Nothing)
+
     it "adapts freeform custom tools and preserves raw replay input" do
         let patch = "*** Begin Patch\n*** End Patch"
             custom = CustomToolValue CustomTool
@@ -85,16 +127,7 @@ spec = describe "Gemini request projection" do
                 , description = Just "Apply a patch."
                 , format = Nothing
                 }
-            call = FunctionCallItem FunctionCall
-                { itemId = Just "item-1"
-                , callId = "call-1"
-                , name = "apply_patch"
-                , namespace = Nothing
-                , provider = Just "gemini"
-                , arguments = patch
-                , encryptedFunctionArgs = Nothing
-                , status = Just ItemCompleted
-                }
+            call = functionCall "apply_patch" patch
             params = defaultResponseCreateParams
                 { tools = Just [custom]
                 , input = Just (ResponseInputItems [call])
@@ -189,10 +222,23 @@ spec = describe "Gemini request projection" do
         , content = MessageContentText text, status = Nothing
         , phase = Nothing, passthrough = Nothing
         }
+    functionCall callName callArguments = FunctionCallItem FunctionCall
+        { itemId = Just "item-1"
+        , callId = "call-1"
+        , name = callName
+        , namespace = Nothing
+        , provider = Just "gemini"
+        , arguments = callArguments
+        , encryptedFunctionArgs = Nothing
+        , status = Just ItemCompleted
+        }
     member key objectValue = KeyMap.member (Key.fromText key) objectValue
 
     withTools value ResponseCreateParams{..} =
         ResponseCreateParams { tools = value, .. }
+
+    withInput value ResponseCreateParams{..} =
+        ResponseCreateParams { input = value, .. }
 
     withToolChoice value ResponseCreateParams{..} =
         ResponseCreateParams { toolChoice = value, .. }
