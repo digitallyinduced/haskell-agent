@@ -236,6 +236,7 @@ handleControlMouseDown name =
     modify' \state ->
         state
             { appHoveredControl = Just name
+            , appHoveredLine = Nothing
             , appPressedControl = case state.appPressedControl of
                 Nothing -> Just name
                 pressed -> pressed
@@ -252,6 +253,7 @@ handleControlMouseUp name action = do
         current
             { appHoveredControl =
                 if activate then Nothing else Just name
+            , appHoveredLine = Nothing
             , appPressedControl = Nothing
             }
     when activate action

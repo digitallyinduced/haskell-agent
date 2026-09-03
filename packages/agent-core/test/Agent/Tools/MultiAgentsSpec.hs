@@ -150,27 +150,18 @@ spec = describe "Agent.Tools.MultiAgents" do
             }
         closeSubagentRegistry registry
 
-    it "spawns canonical paths through depth four and rejects depth five" do
+    it "spawns one delegated level and rejects nested delegation" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))
             (\_ _ -> pure ())
         level1 <- spawnFrom (rootContext registry Nothing) "level1"
         level1Context <- childContext registry level1 1
-        level2 <- spawnFrom level1Context "level2"
-        level2Context <- childContext registry level2 2
-        level3 <- spawnFrom level2Context "level3"
-        level3Context <- childContext registry level3 3
-        level4 <- spawnFrom level3Context "level4"
-        level4Path <- fromMaybe taskPathRoot <$> getTaskPath registry level4
-        taskPathText level4Path
-            `shouldBe` "/root/level1/level2/level3/level4"
-        level4Context <- childContext registry level4 4
         rejected <- dispatchToolCall defaultLoopDispatch
             (appToolHandlers
-                (multiAgentTools level4Context))
-            (spawnCall "level5")
+                (multiAgentTools level1Context))
+            (spawnCall "level2")
         rejected.output `shouldSatisfy`
-            Text.isInfixOf "maximum depth 4"
+            Text.isInfixOf "maximum depth 1"
         closeSubagentRegistry registry
 
     it "adds host-provided model guidance to spawn_agent" do
@@ -586,7 +577,9 @@ spec = describe "Agent.Tools.MultiAgents" do
 
     it "wait_agent excludes the calling child" do
         parentGate <- newTVarIO False
-        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+        registry <- newSubagentRegistry
+            (defaultSubagentConfig { maxDepth = Just 2 })
+            (fromFilePath "/tmp")
             (\_ _ message _ ->
                 if message.messageRecipient == "/root/parent"
                     then do

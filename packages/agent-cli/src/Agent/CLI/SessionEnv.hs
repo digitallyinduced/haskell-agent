@@ -37,6 +37,7 @@ import Agent.CLI.ProviderTransition (PendingTurn)
 import Agent.Skills (SkillCatalog, SkillInvocation)
 import Agent.Subagents (RootTurnId)
 import Agent.Tools.PlanMode (PlanModeEnv)
+import Agent.Tools.TaskPlan (TaskPlanEnv)
 import Agent.Store.Postgres.Connection (StorePool)
 import Data.IORef (IORef)
 import Data.Set (Set)
@@ -72,6 +73,7 @@ data SessionEnv = SessionEnv
     , sessionTitleManager :: !SessionTitleManager
     , sessionTitleTurnCount :: !(IORef Int)
     , sessionPlanMode :: !PlanModeEnv
+    , sessionTaskPlan :: !(Maybe TaskPlanEnv)
     , sessionProjectRoot :: !OsPath
     , sessionCwd :: !OsPath
     -- | Sandboxed native sessions treat the workspace as guest-only input;

@@ -21,6 +21,10 @@ module Agent.Store.Postgres.Session.Types
     , SessionArchiveFilter(..)
     , SessionHistorySnapshot(..)
     , SessionResumeStats(..)
+    , SessionTaskPlanStatus(..)
+    , SessionTaskPlanItem(..)
+    , SessionTaskPlan(..)
+    , SessionTaskPlanSnapshot(..)
     ) where
 
 import Data.Int (Int32, Int64)
@@ -29,6 +33,33 @@ import Data.Time.Clock (UTCTime)
 import Data.Vector (Vector)
 
 import Agent.Store.SessionItem (StoredResponseItem)
+
+data SessionTaskPlanStatus
+    = SessionTaskPlanPending
+    | SessionTaskPlanInProgress
+    | SessionTaskPlanCompleted
+    deriving (Eq, Show)
+
+data SessionTaskPlanItem = SessionTaskPlanItem
+    { sessionTaskPlanItemStep :: !Text
+    , sessionTaskPlanItemStatus :: !SessionTaskPlanStatus
+    }
+    deriving (Eq, Show)
+
+-- | The current durable task plan for a session.
+data SessionTaskPlan = SessionTaskPlan
+    { sessionTaskPlanRevision :: !Int64
+    , sessionTaskPlanExplanation :: !(Maybe Text)
+    , sessionTaskPlanItems :: ![SessionTaskPlanItem]
+    }
+    deriving (Eq, Show)
+
+-- | An unversioned task plan imported together with a session snapshot.
+data SessionTaskPlanSnapshot = SessionTaskPlanSnapshot
+    { sessionTaskPlanSnapshotExplanation :: !(Maybe Text)
+    , sessionTaskPlanSnapshotItems :: ![SessionTaskPlanItem]
+    }
+    deriving (Eq, Show)
 
 data SessionLegacyTarget = SessionLegacyTarget
     { sessionLegacyProvider :: !Text
@@ -238,5 +269,6 @@ data LegacySession = LegacySession
     , legacyMetadata :: !SessionMetadata
     , legacyTurns :: ![SessionTurn]
     , legacyPromptSnapshot :: !(Maybe SessionPromptSnapshot)
+    , legacyTaskPlan :: !(Maybe SessionTaskPlanSnapshot)
     }
     deriving (Eq, Show)

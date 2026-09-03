@@ -4,6 +4,7 @@ module Agent.Store.Postgres.Session.Schema
     ( sessionSchemaStatements
     , sessionSearchIndexStatements
     , sessionPromptEpochSchemaStatements
+    , sessionTaskPlanSchemaStatements
     ) where
 
 import Data.ByteString (ByteString)
@@ -160,6 +161,30 @@ sessionSchemaStatements =
        \ FOR EACH ROW EXECUTE FUNCTION harness.reject_session_fact_mutation()"
        ]
     <> sessionPromptEpochSchemaStatements
+    <> sessionTaskPlanSchemaStatements
+
+sessionTaskPlanSchemaStatements :: [ByteString]
+sessionTaskPlanSchemaStatements =
+    [ "CREATE TABLE IF NOT EXISTS harness.session_task_plans (\
+      \ session_id uuid PRIMARY KEY\
+      \   REFERENCES harness.sessions(session_id) ON DELETE CASCADE,\
+      \ revision bigint NOT NULL CHECK (revision > 0),\
+      \ updated_at timestamptz NOT NULL,\
+      \ explanation text\
+      \ )"
+    , "CREATE TABLE IF NOT EXISTS harness.session_task_plan_items (\
+      \ session_id uuid NOT NULL\
+      \   REFERENCES harness.session_task_plans(session_id) ON DELETE CASCADE,\
+      \ item_index bigint NOT NULL CHECK (item_index >= 0),\
+      \ step_text text NOT NULL,\
+      \ status text NOT NULL\
+      \   CHECK (status IN ('pending', 'in_progress', 'completed')),\
+      \ PRIMARY KEY (session_id, item_index)\
+      \ )"
+    , "CREATE UNIQUE INDEX IF NOT EXISTS session_task_plan_one_active_idx\
+      \ ON harness.session_task_plan_items (session_id)\
+      \ WHERE status = 'in_progress'"
+    ]
 
 sessionPromptEpochSchemaStatements :: [ByteString]
 sessionPromptEpochSchemaStatements =

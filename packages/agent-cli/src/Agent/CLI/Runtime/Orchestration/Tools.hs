@@ -149,7 +149,9 @@ import Agent.CLI.Session
       persistenceTempDir,
       releaseSessionTempLease,
       removeSessionTemp,
+      loadCurrentTaskPlan,
       sessionLegacySubagentTarget,
+      taskPlanHooksForPersistence,
       SessionTempCleanupReport(..),
       Persistence(PersistenceDisabled),
       SessionHandle(sessionDir, sessionMeta),
@@ -278,6 +280,7 @@ import Agent.Tools.Secret
     ( SecretPrompt(..), SecretPromptHooks(..) )
 import Agent.Tools.ShowImage
     ( ImageDisplayHooks(..), ImageDisplayRequest(..) )
+import Agent.Tools.TaskPlan (newTaskPlanEnv)
 import Agent.Tools.Types
     ( ToolEnv(..)
     , ToolPlacement(..)
@@ -847,6 +850,16 @@ runAgentTools
                 gatewayIdentity
                 (isNothing transition) cwd effortText promptText resumed
     writeIORef persistSlotRef persist
+    initialTaskPlan <-
+        loadCurrentTaskPlan persist >>= \case
+            Left err ->
+                startupDie startup
+                    ("Failed to load current task plan: " <> Text.unpack err)
+            Right plan -> pure plan
+    taskPlan <-
+        newTaskPlanEnv
+            initialTaskPlan
+            (taskPlanHooksForPersistence persist)
     forM_ fullscreen \runtime ->
         reservedSessionId persist >>= \case
             Nothing ->
@@ -1058,6 +1071,7 @@ runAgentTools
             dialect
             codingToolEnv
             (Just planHooks)
+            (Just taskPlan)
             secretHooks
             imageHooks
             multiCtx

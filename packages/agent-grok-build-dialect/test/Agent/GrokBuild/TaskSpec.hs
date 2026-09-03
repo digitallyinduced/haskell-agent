@@ -67,7 +67,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         tool.appToolDescription `shouldSatisfy`
             Text.isInfixOf "subagent_type defaults to general-purpose"
         tool.appToolDescription `shouldSatisfy`
-            Text.isInfixOf "limited to 4 levels"
+            Text.isInfixOf "limited to 1 level"
         tool.appToolDescription `shouldNotSatisfy`
             Text.isInfixOf "must specify a subagent_type"
         expectAlwaysPrompt tool.appToolApproval

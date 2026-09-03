@@ -99,6 +99,7 @@ data SubagentRegistry = SubagentRegistry
     { registryAgents :: !(TVar (Map SubagentId SubagentRecord))
     , registryPaths :: !(TVar (Map TaskPath SubagentId))
     , registryLiveCount :: !(TVar Int)
+    , registryRootTurnSpawnCounts :: !(TVar (Map RootTurnId Int))
     , registryNextUpdateSeq :: !(TVar Int)
     , registryWaitCursors :: !(TVar (Map (Maybe SubagentId) Int))
     , registryActiveWaits :: !(TVar (Map (Maybe SubagentId) [SubagentId]))

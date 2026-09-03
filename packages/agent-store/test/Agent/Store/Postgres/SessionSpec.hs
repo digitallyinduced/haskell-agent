@@ -74,6 +74,13 @@ spec = describe "PostgreSQL session schema" do
             "CREATE TABLE IF NOT EXISTS harness.session_prompt_epochs"
         ddl `shouldContainBytes` "is_active boolean NOT NULL DEFAULT TRUE"
         ddl `shouldContainBytes` "session_prompt_epochs_immutable"
+        ddl `shouldContainBytes`
+            "CREATE TABLE IF NOT EXISTS harness.session_task_plans"
+        ddl `shouldContainBytes`
+            "CREATE TABLE IF NOT EXISTS harness.session_task_plan_items"
+        ddl `shouldContainBytes`
+            "status IN ('pending', 'in_progress', 'completed')"
+        ddl `shouldContainBytes` "session_task_plan_one_active_idx"
 
     it "tracks restart-safe legacy imports" do
         let ddl = ByteString.intercalate "\n" sessionSchemaStatements
@@ -192,6 +199,7 @@ spec = describe "PostgreSQL session schema" do
                                     , legacyTurns = []
                                     , legacyPromptSnapshot =
                                         Just importedPrompt
+                                    , legacyTaskPlan = Nothing
                                     }
                             importLegacySession pool legacy
                                 `shouldReturn` Right True
@@ -204,8 +212,132 @@ spec = describe "PostgreSQL session schema" do
                                             , sessionPromptEpochSnapshot =
                                                 importedPrompt
                                             })
+                            let atomicImportKey = "session-atomic-import"
+                                atomicMetadata = promptMetadata
+                                    { sessionMetadataKey = atomicImportKey
+                                    }
+                                invalidPlanItems =
+                                    [ SessionTaskPlanItem
+                                        "first active step"
+                                        SessionTaskPlanInProgress
+                                    , SessionTaskPlanItem
+                                        "second active step"
+                                        SessionTaskPlanInProgress
+                                    ]
+                                invalidLegacy = LegacySession
+                                    { legacySourcePath =
+                                        "afk:session-atomic-import"
+                                    , legacyContentHash = "invalid-plan"
+                                    , legacyMetadata = atomicMetadata
+                                    , legacyTurns = []
+                                    , legacyPromptSnapshot = Nothing
+                                    , legacyTaskPlan =
+                                        Just SessionTaskPlanSnapshot
+                                            { sessionTaskPlanSnapshotExplanation =
+                                                Nothing
+                                            , sessionTaskPlanSnapshotItems =
+                                                invalidPlanItems
+                                            }
+                                    }
+                            importLegacySession pool invalidLegacy
+                                >>= (`shouldSatisfy`
+                                    either (const True) (const False))
+                            loadSession pool atomicImportKey
+                                `shouldReturn` Right Nothing
+                            let validPlanItems =
+                                    [ SessionTaskPlanItem
+                                        "retry safely"
+                                        SessionTaskPlanInProgress
+                                    ]
+                                validLegacy = invalidLegacy
+                                    { legacyContentHash = "valid-plan"
+                                    , legacyTaskPlan =
+                                        Just SessionTaskPlanSnapshot
+                                            { sessionTaskPlanSnapshotExplanation =
+                                                Just "atomic import"
+                                            , sessionTaskPlanSnapshotItems =
+                                                validPlanItems
+                                            }
+                                    }
+                            importLegacySession pool validLegacy
+                                `shouldReturn` Right True
+                            loadSessionTaskPlan pool atomicImportKey
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 1
+                                            , sessionTaskPlanExplanation =
+                                                Just "atomic import"
+                                            , sessionTaskPlanItems =
+                                                validPlanItems
+                                            })
                             createSession pool metadata
                                 `shouldReturn` Right True
+                            let initialPlanItems =
+                                    [ SessionTaskPlanItem
+                                        "inspect storage"
+                                        SessionTaskPlanCompleted
+                                    , SessionTaskPlanItem
+                                        "persist plan"
+                                        SessionTaskPlanInProgress
+                                    ]
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn` Right Nothing
+                            replaceSessionTaskPlan
+                                pool "session-1" (Just "first") initialPlanItems
+                                `shouldReturn` Right (Just 1)
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 1
+                                            , sessionTaskPlanExplanation =
+                                                Just "first"
+                                            , sessionTaskPlanItems =
+                                                initialPlanItems
+                                            })
+                            let replacementItems =
+                                    [ SessionTaskPlanItem
+                                        "finish"
+                                        SessionTaskPlanPending
+                                    ]
+                            replaceSessionTaskPlan
+                                pool "session-1" Nothing replacementItems
+                                `shouldReturn` Right (Just 2)
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 2
+                                            , sessionTaskPlanExplanation = Nothing
+                                            , sessionTaskPlanItems =
+                                                replacementItems
+                                            })
+                            replaceSessionTaskPlan
+                                pool
+                                "session-1"
+                                Nothing
+                                [ SessionTaskPlanItem
+                                    "one"
+                                    SessionTaskPlanInProgress
+                                , SessionTaskPlanItem
+                                    "two"
+                                    SessionTaskPlanInProgress
+                                ] >>= \case
+                                    Left _ -> pure ()
+                                    Right value ->
+                                        expectationFailure
+                                            ("accepted invalid task plan: "
+                                                <> show value)
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 2
+                                            , sessionTaskPlanExplanation = Nothing
+                                            , sessionTaskPlanItems =
+                                                replacementItems
+                                            })
                             appendSessionTurn pool turn metadata
                                 `shouldReturn` Right True
                             loadSession pool "session-1" >>= \case
@@ -233,8 +365,46 @@ spec = describe "PostgreSQL session schema" do
                                     }
                             createSession pool metadata2
                                 `shouldReturn` Right True
-                            appendSessionTurns pool [turn2, turn3] metadata2
+                            copySessionTaskPlan pool "session-1" "session-2"
                                 `shouldReturn` Right True
+                            loadSessionTaskPlan pool "session-2"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 1
+                                            , sessionTaskPlanExplanation = Nothing
+                                            , sessionTaskPlanItems =
+                                                replacementItems
+                                            })
+                            let clearMetadata = metadata
+                                    { sessionMetadataKey = "session-clear"
+                                    , sessionMetadataTitle = "clear"
+                                    }
+                                clearTurn = turn
+                                    { sessionTurnEffect = TranscriptReset
+                                    , sessionTurnUserText = "/clear"
+                                    }
+                            createSession pool clearMetadata
+                                `shouldReturn` Right True
+                            copySessionTaskPlan
+                                pool "session-1" "session-clear"
+                                `shouldReturn` Right True
+                            appendSessionTurnIndexedWithPromptResetAndTaskPlanClear
+                                pool clearTurn clearMetadata
+                                `shouldReturn` Right (Just 0)
+                            loadSessionTaskPlan pool "session-clear"
+                                `shouldReturn` Right Nothing
+                            clearSessionTaskPlan pool "session-1"
+                                `shouldReturn` Right True
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn` Right Nothing
+                            clearSessionTaskPlan pool "session-1"
+                                `shouldReturn` Right False
+                            appendSessionTurnsClearingTaskPlan
+                                pool [turn2, turn3] metadata2
+                                `shouldReturn` Right True
+                            loadSessionTaskPlan pool "session-2"
+                                `shouldReturn` Right Nothing
                             loadSessionMetadataMany
                                 pool
                                 ["session-2", "missing", "session-1"]

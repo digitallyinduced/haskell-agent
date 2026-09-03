@@ -487,6 +487,8 @@ data AppState = AppState
     , appAgentHover :: !(Maybe AgentHover)
     , appMarkdownLinkHovered :: !Bool
     , appHoveredControl :: !(Maybe Name)
+      -- | Local row inside `appHoveredControl` for line-level transcript hover.
+    , appHoveredLine :: !(Maybe Int)
     , appPressedControl :: !(Maybe Name)
     , appWorkerStopped :: !Bool
     , appConversationAnchor :: !(Maybe Scroll.ConversationAnchor)

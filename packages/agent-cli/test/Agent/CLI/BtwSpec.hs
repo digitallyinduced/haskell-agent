@@ -46,13 +46,49 @@ spec = do
                            ]
             trimDanglingToolSuffix items `shouldBe` prefix
 
-        it "does not truncate an old unmatched call before a later message" do
+        it "removes an old unmatched call before a later message" do
             let items =
                     [ userItem "before"
                     , functionCallItem "old-call"
                     , userItem "continued later"
                     ]
+            trimDanglingToolSuffix items
+                `shouldBe` [userItem "before", userItem "continued later"]
+
+        it "removes an orphan output without a preceding call" do
+            let items =
+                    [ functionOutputItem "orphan"
+                    , userItem "continued later"
+                    ]
+            trimDanglingToolSuffix items `shouldBe` [userItem "continued later"]
+
+        it "keeps complete native computer-call pairs" do
+            let items =
+                    [ userItem "before"
+                    , computerCallItem "computer-1"
+                    , computerOutputItem "computer-1"
+                    ]
             trimDanglingToolSuffix items `shouldBe` items
+
+        it "drops reasoning and an unmatched native computer call" do
+            let prefix = [userItem "before"]
+                items = prefix <> [reasoningItem, computerCallItem "computer-live"]
+            trimDanglingToolSuffix items `shouldBe` prefix
+
+        it "removes an orphan native computer output" do
+            let items =
+                    [ computerOutputItem "computer-orphan"
+                    , userItem "continued later"
+                    ]
+            trimDanglingToolSuffix items `shouldBe` [userItem "continued later"]
+
+        it "does not pair an output that precedes its call" do
+            let items =
+                    [ functionOutputItem "torn"
+                    , functionCallItem "torn"
+                    , userItem "continued later"
+                    ]
+            trimDanglingToolSuffix items `shouldBe` [userItem "continued later"]
 
     describe "runBtwWithCancel" do
         it "uses private state and preserves parent params including tools" do
@@ -172,6 +208,27 @@ functionCallItem callId = FunctionCallItem FunctionCall
     , encryptedFunctionArgs = Nothing
     , status = Nothing
     }
+
+computerCallItem :: Text.Text -> ResponseItem
+computerCallItem computerCallId = ComputerCallItem ComputerCall
+    { computerCallItemId = Nothing
+    , computerCallId
+    , computerActions = []
+    , pendingSafetyChecks = []
+    , computerCallStatus = Nothing
+    , computerCallExtra = mempty
+    }
+
+computerOutputItem :: Text.Text -> ResponseItem
+computerOutputItem computerOutputCallId =
+    ComputerCallOutputItem ComputerCallOutput
+        { computerOutputItemId = Nothing
+        , computerOutputCallId
+        , screenshotDataUrl = ""
+        , acknowledgedChecks = []
+        , computerOutputStatus = Nothing
+        , computerOutputExtra = mempty
+        }
 
 functionOutputItem :: Text.Text -> ResponseItem
 functionOutputItem callId = FunctionCallOutputItem FunctionCallOutput

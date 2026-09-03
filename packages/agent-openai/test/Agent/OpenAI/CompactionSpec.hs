@@ -10,6 +10,13 @@ import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import Agent.Provider
 import Agent.Responses.Types
+import Agent.Tools.TaskPlan
+    ( CurrentTaskPlan(..)
+    , TaskPlan(..)
+    , TaskPlanItem(..)
+    , TaskPlanStatus(..)
+    , taskPlanContextText
+    )
 import qualified Agent.Responses.Codec as ResponsesCodec
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
@@ -555,6 +562,7 @@ spec = do
                     , user "<learned-skills>\nThese are durable, reusable instructions learned from earlier sessions.\n"
                     , user "<system-reminder>\nAs you answer the user's questions, you can use the following context\n"
                     , user "<subagent_notification>\nstatus: completed\n</subagent_notification>"
+                    , user generatedTaskPlanContext
                     , user "real user request"
                     ]
             buildRemoteCompactedHistory 64_000 history opaque
@@ -1090,6 +1098,7 @@ spec = do
                     , user "## Skills\nThe following reusable skills are available in this session.\nrules"
                     , user "<learned-skills>\nThese are durable, reusable instructions learned from earlier sessions.\nrules"
                     , user "<system-reminder>\nAs you answer the user's questions, you can use the following context\nrules"
+                    , user generatedTaskPlanContext
                     , user "old request"
                     , user "new request"
                     ]
@@ -1227,6 +1236,11 @@ spec = do
                     "Codex compaction requires an OpenAI credential" Nothing)
 
   where
+    generatedTaskPlanContext =
+        taskPlanContextText $
+            CurrentTaskPlan 3 $
+                TaskPlan Nothing
+                    [TaskPlanItem "keep working" TaskPlanInProgress]
     naiveEncodedTokens :: Aeson.ToJSON a => a -> Int
     naiveEncodedTokens value =
         Text.length
