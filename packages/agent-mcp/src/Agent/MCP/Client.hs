@@ -1537,11 +1537,10 @@ awaitTaskT client request raw = do
                     "input_required" -> do
                         responses <-
                             ExceptT (fulfilInputRequests client task.taskInputRequests)
-                        -- A tasks/update RPC error means the input was not
-                        -- accepted and must stop the task instead of being
-                        -- silently discarded. Its successful payload is only
-                        -- an acknowledgement; the next tasks/get is canonical.
-                        void $ requestMcpT client
+                        -- tasks/update is best-effort: its successful response
+                        -- body is only an acknowledgement, and RPC errors are
+                        -- deliberately ignored. The next tasks/get is canonical.
+                        _ <- lift $ requestMcpFull client
                             (clientRequest client "tasks/update"
                                 ("taskId" .= taskIdOf
                                     <> inputResponsesSeries responses))

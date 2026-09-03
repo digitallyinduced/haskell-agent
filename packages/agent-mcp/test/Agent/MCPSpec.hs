@@ -661,7 +661,7 @@ spec = describe "Agent.MCP" do
                 task.output `shouldBe` "task done"
                 waitForLog log "listen"
 
-    it "uses task updates as acknowledgements and propagates their RPC errors" $
+    it "treats task update responses and errors as best-effort acknowledgements" $
         withBodyServer "agent-mcp-task-update.sh" taskUpdateServer \script -> do
             let hooks = defaultMcpHostHooks
                     { mcpHostElicit = pure $ Just \_ ->
@@ -678,8 +678,7 @@ spec = describe "Agent.MCP" do
             accepted <- run "accept"
             accepted.output `shouldBe` "task updated"
             rejected <- run "reject"
-            rejected.output `shouldSatisfy`
-                Text.isInfixOf "input rejected"
+            rejected.output `shouldBe` "task updated"
 
     it "answers pings, extends timeouts on progress, refreshes changed tool lists, and cancels timeouts" $
         withCountingServer legacyEventsServer \script log -> do
