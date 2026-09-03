@@ -19,6 +19,13 @@ The optional `request` mode measures the production Aeson request encoder. Its
 input starts from `defaultResponseCreateParams` and contains typed custom,
 function, and namespace tools with realistic JSON schemas and a custom grammar.
 
+The `tool-shell` and `tool-json` modes measure the production live tool-argument
+projector. They split a fixed-size argument into configurable deltas and replay
+the complete added/delta/done sequence through a fresh
+`newStreamEventToLoopEvents` projector for every repetition. `tool-shell`
+exercises semantic shell-command previews; `tool-json` is the generic safe JSON
+control workload.
+
 Build with optimisation and enable allocation statistics:
 
 ```console
@@ -30,17 +37,22 @@ bin=$(nix develop -c cabal list-bin -O2 \
 "$bin" stream 1000 16 9 +RTS -T
 "$bin" stream 1000 1024 9 +RTS -T
 "$bin" request 10000 9 +RTS -T
+"$bin" tool-shell 4096 1 3 9 +RTS -T
+"$bin" tool-json 65536 1 3 9 +RTS -T
 ```
 
 Each CSV row is:
 
 ```text
-mode,count,delta-bytes,samples,median-wall-ms,median-cpu-ms,median-Haskell-allocated-bytes,checksum
+mode,count,delta-bytes,samples,median-wall-ms,median-cpu-ms,median-Haskell-allocated-bytes,median-maximum-live-bytes,checksum
 ```
 
 Inputs are built and forced before stream timing. Every sample performs a GC
 before timing, then another after the clocks stop so that sub-nursery workloads
 are reflected in RTS `allocated_bytes`.
+
+For the tool modes, `count` is the argument-body size and the mode suffix records
+the number of complete projector repetitions (for example, `tool-shell-x3`).
 
 ## Representative result
 

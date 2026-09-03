@@ -1203,6 +1203,12 @@ liveRawArgumentPrefixChars = 64 * 1024
 liveStructuredArgumentEagerChars :: Int
 liveStructuredArgumentEagerChars = 128
 
+-- Shell commands remain eager while their useful prefix is forming, then use
+-- smaller batches than source-shaped arguments so the command still feels
+-- live without reparsing and repainting a long prefix for every tiny delta.
+liveShellArgumentPublishChunkChars :: Int
+liveShellArgumentPublishChunkChars = 64
+
 liveRawArgumentPublishChunkChars :: Int
 liveRawArgumentPublishChunkChars = 256
 
@@ -1260,44 +1266,49 @@ updateLiveShellCall
     -> ToolArgumentStreamState
     -> (ToolArgumentStreamState, [LoopEvent])
 updateLiveShellCall call delta state =
-    let rawArguments =
-            appendArgumentPrefix
-                liveShellArgumentPrefixChars
-                call.arguments
-                delta
-    in publishLiveShellCall call rawArguments state
+    case updateBufferedLiveCall
+            liveStructuredArgumentEagerChars
+            liveShellArgumentPublishChunkChars
+            liveShellArgumentPrefixChars
+            call
+            delta
+            state of
+        (next, Nothing) -> (next, [])
+        (next, Just updatedCall) ->
+            publishLiveShellPreview updatedCall next
 
 finishLiveShellCall
     :: ToolCall
     -> Maybe Text
     -> ToolArgumentStreamState
     -> (ToolArgumentStreamState, [LoopEvent])
-finishLiveShellCall call completeArguments =
-    publishLiveShellCall call $
-        Text.copy
-            (Text.take liveShellArgumentPrefixChars
-                (fromMaybe call.arguments completeArguments))
+finishLiveShellCall call completeArguments state =
+    let (next, updatedCall, _) =
+            finishBufferedLiveCall
+                liveShellArgumentPrefixChars
+                call
+                completeArguments
+                state
+    in publishLiveShellPreview updatedCall next
 
-publishLiveShellCall
+publishLiveShellPreview
     :: ToolCall
-    -> Text
     -> ToolArgumentStreamState
     -> (ToolArgumentStreamState, [LoopEvent])
-publishLiveShellCall call rawArguments state =
+publishLiveShellPreview call state =
     let key = toolPreviewKey call
-        updatedCall = withToolArguments call rawArguments
-        maybeCommand = jsonTextFieldPartial "command" rawArguments
+        maybeCommand = jsonTextFieldPartial "command" call.arguments
         preview = Text.takeWhile (/= '\n') <$> maybeCommand
         previousPreview = Map.lookup key state.shellPreviewsByCallId
         changed = maybe False
             (\value -> not (Text.null value) && Just value /= previousPreview)
             preview
         displayCall command =
-            withToolArguments updatedCall $
+            withToolArguments call $
                 Text.decodeUtf8
                     (LBS.toStrict
                         (Aeson.encode (Aeson.object ["command" Aeson..= command])))
-        next = (trackUpdatedToolCall updatedCall state)
+        next = state
             { shellPreviewsByCallId =
                 maybe state.shellPreviewsByCallId
                     (\value -> Map.insert key value
@@ -1319,21 +1330,67 @@ updateLiveRawCall
     -> ToolArgumentStreamState
     -> (ToolArgumentStreamState, [LoopEvent])
 updateLiveRawCall eagerChars call delta state =
+    case updateBufferedLiveCall
+            eagerChars
+            liveRawArgumentPublishChunkChars
+            liveRawArgumentPrefixChars
+            call
+            delta
+            state of
+        (next, Nothing) -> (next, [])
+        (next, Just updatedCall) ->
+            (next, [ToolArgumentsUpdated updatedCall])
+
+finishLiveRawCall
+    :: ToolCall
+    -> Maybe Text
+    -> ToolArgumentStreamState
+    -> (ToolArgumentStreamState, [LoopEvent])
+finishLiveRawCall call completeArguments state =
+    let (next, updatedCall, changed) =
+            finishBufferedLiveCall
+                liveRawArgumentPrefixChars
+                call
+                completeArguments
+                state
+    in
+    ( next
+    , [ToolArgumentsUpdated updatedCall | changed]
+    )
+
+updateBufferedLiveCall
+    :: Int
+    -> Int
+    -> Int
+    -> ToolCall
+    -> Text
+    -> ToolArgumentStreamState
+    -> (ToolArgumentStreamState, Maybe ToolCall)
+updateBufferedLiveCall
+    eagerChars
+    publishChunkChars
+    prefixChars
+    call
+    delta
+    state =
     let key = toolPreviewKey call
         preview = Map.findWithDefault
-            (initialRawArgumentPreview call)
+            (initialRawArgumentPreview prefixChars call)
             key
             state.rawPreviewsByCallId
-        room =
-            liveRawArgumentPrefixChars - preview.retainedRawArgumentChars
-        retainedDelta = Text.copy (Text.take room delta)
+        room = prefixChars - preview.retainedRawArgumentChars
+        retainedDelta
+            | room <= 0 = ""
+            | Text.length delta <= room = delta
+            | otherwise = Text.copy (Text.take room delta)
         retainedDeltaChars = Text.length retainedDelta
         pendingChars =
             preview.pendingRawArgumentChars + retainedDeltaChars
         withDelta = preview
             { pendingRawArgumentChunks =
-                [retainedDelta | retainedDeltaChars > 0]
-                    <> preview.pendingRawArgumentChunks
+                if retainedDeltaChars > 0
+                    then retainedDelta : preview.pendingRawArgumentChunks
+                    else preview.pendingRawArgumentChunks
             , pendingRawArgumentChars = pendingChars
             , retainedRawArgumentChars =
                 preview.retainedRawArgumentChars + retainedDeltaChars
@@ -1345,9 +1402,8 @@ updateLiveRawCall eagerChars call delta state =
                     || ( preview.retainedRawArgumentChars < eagerChars
                         && withDelta.retainedRawArgumentChars > eagerChars
                        )
-                    || pendingChars >= liveRawArgumentPublishChunkChars
-                    || withDelta.retainedRawArgumentChars
-                        == liveRawArgumentPrefixChars
+                    || pendingChars >= publishChunkChars
+                    || withDelta.retainedRawArgumentChars == prefixChars
                    )
         rawArguments =
             preview.publishedRawArguments
@@ -1366,19 +1422,20 @@ updateLiveRawCall eagerChars call delta state =
     in if shouldPublish
         then
             ( trackUpdatedToolCall updatedCall withPreview
-            , [ToolArgumentsUpdated updatedCall]
+            , Just updatedCall
             )
-        else (withPreview, [])
+        else (withPreview, Nothing)
 
-finishLiveRawCall
-    :: ToolCall
+finishBufferedLiveCall
+    :: Int
+    -> ToolCall
     -> Maybe Text
     -> ToolArgumentStreamState
-    -> (ToolArgumentStreamState, [LoopEvent])
-finishLiveRawCall call completeArguments state =
+    -> (ToolArgumentStreamState, ToolCall, Bool)
+finishBufferedLiveCall prefixChars call completeArguments state =
     let key = toolPreviewKey call
         preview = Map.findWithDefault
-            (initialRawArgumentPreview call)
+            (initialRawArgumentPreview prefixChars call)
             key
             state.rawPreviewsByCallId
         accumulated =
@@ -1386,7 +1443,7 @@ finishLiveRawCall call completeArguments state =
                 <> Text.concat (reverse preview.pendingRawArgumentChunks)
         rawArguments =
             Text.copy
-                (Text.take liveRawArgumentPrefixChars
+                (Text.take prefixChars
                     (fromMaybe accumulated completeArguments))
         finalPreview = RawArgumentPreview
             { publishedRawArguments = rawArguments
@@ -1400,16 +1457,13 @@ finishLiveRawCall call completeArguments state =
                 { rawPreviewsByCallId =
                     Map.insert key finalPreview state.rawPreviewsByCallId
                 }
-    in
-    ( next
-    , [ToolArgumentsUpdated updatedCall | rawArguments /= call.arguments]
-    )
+    in (next, updatedCall, rawArguments /= call.arguments)
 
-initialRawArgumentPreview :: ToolCall -> RawArgumentPreview
-initialRawArgumentPreview call =
+initialRawArgumentPreview :: Int -> ToolCall -> RawArgumentPreview
+initialRawArgumentPreview prefixChars call =
     let initial =
             Text.copy
-                (Text.take liveRawArgumentPrefixChars call.arguments)
+                (Text.take prefixChars call.arguments)
     in RawArgumentPreview
         { publishedRawArguments = initial
         , pendingRawArgumentChunks = []
@@ -1458,15 +1512,6 @@ toolStreamKind :: ToolCall -> ToolStreamKind
 toolStreamKind call = case call.callKind of
     CustomCallKind -> CustomToolStream
     _ -> FunctionToolStream
-
-appendArgumentPrefix :: Int -> Text -> Text -> Text
-appendArgumentPrefix limit previous delta
-    | room <= 0 = previous
-    | Text.null previous = retainedDelta
-    | otherwise = previous <> retainedDelta
-  where
-    room = limit - Text.length previous
-    retainedDelta = Text.copy (Text.take room delta)
 
 isApplyPatchTool :: Text -> Bool
 isApplyPatchTool name =

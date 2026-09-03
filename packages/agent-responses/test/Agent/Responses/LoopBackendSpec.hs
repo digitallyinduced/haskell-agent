@@ -864,6 +864,55 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                     "{\"command\":\"git status\"}")
             ]
 
+    it "batches a long shell tail and flushes it when arguments finish" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
+        let firstCommand = Text.replicate 116 "a"
+            firstArguments = "{\"command\":\"" <> firstCommand
+            batchedSuffix = Text.replicate 63 "b" <> "c"
+            tailSuffix = "tail"
+            completeCommand = firstCommand <> batchedSuffix <> tailSuffix
+            completeArguments =
+                "{\"command\":\"" <> completeCommand <> "\"}"
+        first <- projectEvent (argumentsDelta "fc-1" firstArguments)
+        first `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    ("{\"command\":\"" <> firstCommand <> "\"}"))
+            ]
+        quiet <- projectEvent
+            (argumentsDelta "fc-1" (Text.replicate 63 "b"))
+        quiet `shouldBe` []
+        batched <- projectEvent (argumentsDelta "fc-1" "c")
+        batched `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    ( "{\"command\":\""
+                        <> firstCommand
+                        <> batchedSuffix
+                        <> "\"}"
+                    ))
+            ]
+        tailEvents <- projectEvent
+            (argumentsDelta "fc-1" (tailSuffix <> "\"}"))
+        tailEvents `shouldBe` []
+        flushed <- projectEvent
+            (functionArgumentsDone
+                (Just "fc-1")
+                (Just 0)
+                (Just completeArguments))
+        flushed `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    completeArguments)
+            ]
+
     it "repaints an ordinary JSON tool call as its arguments arrive" do
         projectEvent <- newStreamEventToLoopEvents False
         _ <- projectEvent (functionCallAdded "fc-1" "call-1" "read_file")
