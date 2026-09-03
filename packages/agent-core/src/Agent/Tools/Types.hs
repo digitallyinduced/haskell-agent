@@ -1,6 +1,9 @@
 module Agent.Tools.Types
     ( AppTool(..)
-    , ToolPlacement(..)
+    , AppToolGroup(..)
+    , appToolsFromGroups
+    , executionToolsFromGroups
+    , hostToolsFromGroups
     , BackgroundTaskHooks(..)
     , BackgroundTaskNotice(..)
     , ToolSchema(..)
@@ -22,7 +25,6 @@ module Agent.Tools.Types
     , freeformApplyPatchAppToolWithExecution
     , freeformGrammarAppToolWithExecution
     , withToolResourceClaims
-    , withToolPlacement
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
@@ -85,17 +87,6 @@ data ToolSchema
     | HostedComputerSchema
     deriving (Eq, Show)
 
--- | The trust boundary in which a tool handler is allowed to execute.
---
--- Ordinary constructors deliberately leave placement unclassified. A runtime
--- which crosses a trust boundary must classify every tool explicitly and
--- reject any remaining 'UnclassifiedTool' before exposing it to a model.
-data ToolPlacement
-    = HostTool
-    | SandboxTool
-    | UnclassifiedTool
-    deriving (Eq, Show)
-
 -- | Whether a call may run without generic user approval.
 data ApprovalRule
     = AlwaysReadOnly
@@ -126,8 +117,30 @@ data AppTool = AppTool
     , appToolApproval :: !ApprovalRule
     , appToolExecution :: !ToolExecutionPolicy
     , appToolResourceClaims :: !(Maybe ToolResourceResolver)
-    , appToolPlacement :: !ToolPlacement
     }
+
+-- | A construction-time partition between ambient execution handlers and
+-- explicit host services. The generic tool registry only receives the
+-- flattened tools; embeddings may replace an entire execution group before
+-- constructing that registry.
+data AppToolGroup
+    = ExecutionToolGroup ![AppTool]
+    | HostToolGroup ![AppTool]
+
+appToolsFromGroups :: [AppToolGroup] -> [AppTool]
+appToolsFromGroups = concatMap \case
+    ExecutionToolGroup tools -> tools
+    HostToolGroup tools -> tools
+
+executionToolsFromGroups :: [AppToolGroup] -> [AppTool]
+executionToolsFromGroups = concatMap \case
+    ExecutionToolGroup tools -> tools
+    HostToolGroup _ -> []
+
+hostToolsFromGroups :: [AppToolGroup] -> [AppTool]
+hostToolsFromGroups = concatMap \case
+    ExecutionToolGroup _ -> []
+    HostToolGroup tools -> tools
 
 -- | Registration order is retained for stable provider schemas while lookup is
 -- canonical and validated once at construction.
@@ -269,7 +282,6 @@ jsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
-    , appToolPlacement = UnclassifiedTool
     }
 
 -- | Construct a JSON tool from an already-built JSON Schema value. Dynamic
@@ -302,7 +314,6 @@ rawJsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
-    , appToolPlacement = UnclassifiedTool
     }
 
 withToolResourceClaims
@@ -311,11 +322,6 @@ withToolResourceClaims
     -> AppTool
 withToolResourceClaims resolver tool =
     tool { appToolResourceClaims = Just resolver }
-
--- | Assign a tool to an execution trust boundary.
-withToolPlacement :: ToolPlacement -> AppTool -> AppTool
-withToolPlacement placement tool =
-    tool { appToolPlacement = placement }
 
 -- | Construct a freeform tool with the conservative turn-sequential default.
 freeformApplyPatchAppTool
@@ -344,7 +350,6 @@ freeformApplyPatchAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
-    , appToolPlacement = UnclassifiedTool
     }
 
 -- | Construct a freeform tool that advertises an explicit grammar.
@@ -366,7 +371,6 @@ freeformGrammarAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
-    , appToolPlacement = UnclassifiedTool
     }
 
 mkToolRegistry :: [AppTool] -> Either Text ToolRegistry

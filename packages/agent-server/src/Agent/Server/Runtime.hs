@@ -16,6 +16,7 @@ import Agent.CLI.GatewayBoundary
     , withExpectedGatewayBoundaryAt
     , withGatewayTurnBoundaryAt
     )
+import Agent.Tools.Types (appToolsFromGroups)
 import Agent.CLI.GatewayModels
     ( loadGatewayModelOptionsWithCredentialAt )
 import Agent.CLI.ModelConfig
@@ -30,16 +31,21 @@ import Agent.CLI.Models
     )
 import Agent.CLI.NativeRuntime
     ( NativeInteractionMode(..)
-    , NativeIsolationMode(..)
+    , NativeDiscoveryContext(..)
+    , NativeWorkspaceDiscovery(..)
+    , NativeRunCapabilities(..)
     , NativeProcessRuntime
     , NativeRunHooks(..)
     , NativeSessionTarget(..)
     , NativeShellMode(..)
     , NativeTurnRequest(..)
     , closeNativeProcessRuntime
+    , fullNativeRunCapabilities
     , newNativeProcessRuntime
     , runNativeTurn
     )
+import Agent.CLI.Options (CliOptions(..))
+import Agent.CLI.Project (defaultProjectSettings)
 import Agent.CLI.Permission.Types (PermissionChoice(..))
 import Agent.CLI.Runtime.Options (defaultEffortFor)
 import Agent.CLI.Session
@@ -90,7 +96,7 @@ import Agent.Server.Sandbox
     ( TenantSandbox
     , closeTenantSandbox
     , openTenantSandbox
-    , routeSandboxTool
+    , composeSandboxTools
     )
 import Agent.Server.Tenant
     ( ResolvedTenant(..) )
@@ -1028,27 +1034,70 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
                     environment.environmentConfig
                     environment.environmentTenantId
                     control
-    , nativeTools = []
+    , nativeToolGroups = []
+    , nativeComposeTools =
+        case environment.environmentSandbox of
+            Nothing -> appToolsFromGroups
+            Just sandbox ->
+                composeSandboxTools sandbox sessionId cwd dialect
     , nativePlanHooks = planHooks control
     , nativeInteractionMode = NativeAsk
     , nativeShellMode = tenantShellMode environment
     , nativeHome =
-        Just (unsafeEncodeUtf environment.environmentHome)
+        case environment.environmentSandbox of
+            Nothing -> Just (unsafeEncodeUtf environment.environmentHome)
+            Just _ -> Nothing
     , nativeDatabaseStore = Just environment.environmentStore
     , nativeDatabaseScopeNamespace =
         renderTenantId environment.environmentTenantId
             <$ environment.environmentSandbox
-    , nativeIsolationMode =
-        maybe
-            NativeUnrestricted
-            (const NativeSandboxed)
-            environment.environmentSandbox
-    , nativeRouteTool =
+    , nativeWorkspaceDiscovery =
+        case environment.environmentSandbox of
+            Nothing -> DiscoverHostWorkspace
+            Just _ ->
+                UsePreparedWorkspace NativeDiscoveryContext
+                    { nativeDiscoveryHome =
+                        unsafeEncodeUtf environment.environmentHome
+                    , nativeDiscoveryProjectRoot =
+                        unsafeEncodeUtf environment.environmentHome
+                    , nativeDiscoveryCatalogRoot =
+                        unsafeEncodeUtf environment.environmentHome
+                    , nativeDiscoveryProjectSettings =
+                        defaultProjectSettings
+                    , nativeDiscoveryGitBranch = ""
+                    , nativeDiscoveryOperatingSystem = "Linux"
+                    , nativeDiscoveryShell = "/bin/bash"
+                    }
+    , nativeCapabilities =
+        case environment.environmentSandbox of
+            Nothing -> fullNativeRunCapabilities
+            Just _ -> NativeRunCapabilities
+                { nativeProviderFallback = False
+                , nativeProviderHostedTools = False
+                , nativeHostExtensions = False
+                , nativeCollaboration = False
+                , nativeProviderNativeTools = False
+                }
+    , nativePrepareOptions =
         case environment.environmentSandbox of
             Nothing -> Right
-            Just sandbox ->
-                routeSandboxTool sandbox sessionId cwd dialect
+            Just _ -> Right . restrictSandboxOptions cwd
     }
+
+restrictSandboxOptions :: FilePath -> CliOptions -> CliOptions
+restrictSandboxOptions cwd options =
+    options
+        { optCwd = Just (unsafeEncodeUtf cwd)
+        , optWorktree = False
+        , optYolo = False
+        , optNoYolo = True
+        , optPromptFile = Nothing
+        , optManagedTurnFile = Nothing
+        , optAgentsMd = False
+        , optSkills = False
+        , optComputerUse = False
+        , optCodeMode = False
+        }
 
 tenantShellMode :: RuntimeEnvironment -> NativeShellMode
 tenantShellMode environment =

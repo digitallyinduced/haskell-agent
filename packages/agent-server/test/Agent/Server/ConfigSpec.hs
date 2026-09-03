@@ -2,6 +2,10 @@ module Agent.Server.ConfigSpec (spec) where
 
 import Agent.Server.Auth (AuthConfig(..), AuthMode(..))
 import Agent.Server.Config
+import Agent.Server.PrivateFile
+    ( trustedPathPolicyWithin
+    , validateTrustedPathWithPolicy
+    )
 import Control.Exception.Safe
     ( bracket
     , finally
@@ -25,11 +29,12 @@ import System.Environment
     , setEnv
     , unsetEnv
     )
+import System.FilePath ((</>))
 import System.IO
     ( hClose
     , openBinaryTempFile
     )
-import System.IO.Temp (withTempDirectory)
+import System.IO.Temp (withSystemTempDirectory)
 import System.Posix.Files (setFileMode)
 import Test.Hspec
 
@@ -77,7 +82,7 @@ spec = describe "server configuration" do
 
     it "rejects a sandbox runner inside a tenant-writable root" do
         withTokenEnvironmentUnset $
-            withTempDirectory "." "agent-server-config" \root -> do
+            withSystemTempDirectory "agent-server-config" \root -> do
                 let workspace = root <> "/workspace"
                     stateRoot = root <> "/state"
                     tokenPath = root <> "/token"
@@ -111,8 +116,12 @@ spec = describe "server configuration" do
                                 ]
                             ]
                 setFileMode registryPath 0o600
+                trustPolicy <-
+                    trustedPathPolicyWithin root
+                        >>= either (fail . Text.unpack) pure
                 resolved <-
-                    resolveServerConfig
+                    resolveServerConfigWithTrustPolicy
+                        trustPolicy
                         defaultServerConfig
                             { serverTenantRegistry = Just registryPath
                             , serverTenantStateRoot = Just stateRoot
@@ -125,6 +134,30 @@ spec = describe "server configuration" do
                     Right _ ->
                         expectationFailure
                             "accepted a tenant-writable sandbox runner"
+
+    it "confines an explicit build trust policy to its declared root" do
+        withSystemTempDirectory "agent-server-trust" \outer -> do
+            let trustedRoot = outer </> "trusted"
+                sibling = outer </> "sibling"
+            createDirectory trustedRoot
+            createDirectory sibling
+            trustPolicy <-
+                trustedPathPolicyWithin trustedRoot
+                    >>= either (fail . Text.unpack) pure
+            validateTrustedPathWithPolicy trustPolicy sibling
+                `shouldReturn`
+                    Left "trusted path escapes its declared root"
+
+    it "requires an explicit build trust boundary to be a directory" do
+        withPrivateTokenFile "not-a-directory" \path -> do
+            result <- trustedPathPolicyWithin path
+            case result of
+                Left err ->
+                    err `shouldBe`
+                        "trusted path boundary must be a directory"
+                Right _ ->
+                    expectationFailure
+                        "accepted a regular file as a trust boundary"
 
 withPrivateTokenFile
     :: ByteString.ByteString

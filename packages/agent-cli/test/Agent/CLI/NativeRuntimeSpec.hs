@@ -1,10 +1,14 @@
 module Agent.CLI.NativeRuntimeSpec (spec) where
 
 import Agent.CLI.NativeRuntime
-    ( NativeInteractionMode(..)
+    ( NativeDiscoveryContext(..)
+    , NativeInteractionMode(..)
     , NativeSessionTarget(..)
     , NativeShellMode(..)
     , NativeTurnRequest(..)
+    , NativeWorkspaceDiscovery(..)
+    , nativeLoadsHostWorkspaceContext
+    , nativePreparedDiscovery
     , nativeTurnOptions
     )
 import Agent.CLI.Options
@@ -12,6 +16,7 @@ import Agent.CLI.Options
     , ScreenMode(..)
     )
 import Agent.Provider (Provider(..))
+import Agent.CLI.Project (defaultProjectSettings)
 import Agent.ReasoningEffort (ReasoningEffort(..))
 import Agent.TUI.Motion (MotionMode(..))
 import System.OsPath (unsafeEncodeUtf)
@@ -71,6 +76,39 @@ spec = describe "nativeTurnOptions" do
                 { nativeTurnInteractionMode = NativeYolo }
             )
             `shouldBe` Left "typed native turns do not support auto-approval"
+
+    it "requires prepared discovery whenever host discovery is disabled" do
+        let root = unsafeEncodeUtf "/prepared/root"
+            prepared = NativeDiscoveryContext
+                { nativeDiscoveryHome = root
+                , nativeDiscoveryProjectRoot = root
+                , nativeDiscoveryCatalogRoot = root
+                , nativeDiscoveryProjectSettings = defaultProjectSettings
+                , nativeDiscoveryGitBranch = ""
+                , nativeDiscoveryOperatingSystem = "TestOS"
+                , nativeDiscoveryShell = "/bin/test-shell"
+                }
+        nativeLoadsHostWorkspaceContext DiscoverHostWorkspace
+            `shouldBe` True
+        case nativePreparedDiscovery DiscoverHostWorkspace of
+            Nothing -> pure ()
+            Just _ ->
+                expectationFailure
+                    "host discovery unexpectedly carried prepared context"
+        let discovery = UsePreparedWorkspace prepared
+        nativeLoadsHostWorkspaceContext discovery `shouldBe` False
+        (.nativeDiscoveryProjectRoot)
+            <$> nativePreparedDiscovery discovery
+            `shouldBe` Just root
+        (.nativeDiscoveryHome)
+            <$> nativePreparedDiscovery discovery
+            `shouldBe` Just root
+        (.nativeDiscoveryOperatingSystem)
+            <$> nativePreparedDiscovery discovery
+            `shouldBe` Just "TestOS"
+        (.nativeDiscoveryShell)
+            <$> nativePreparedDiscovery discovery
+            `shouldBe` Just "/bin/test-shell"
 
 baseRequest :: NativeTurnRequest
 baseRequest = NativeTurnRequest

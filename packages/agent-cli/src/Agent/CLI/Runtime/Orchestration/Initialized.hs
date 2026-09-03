@@ -75,8 +75,7 @@ import Agent.CLI.Options ( CliOptions(optModel, optProvider, optYolo) )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
 import Agent.CLI.Project
-    ( defaultProjectSettings,
-      loadProjectSettings,
+    ( loadProjectSettings,
       loadUserSettings,
       projectAccountFor,
       projectModelProvider,
@@ -115,8 +114,9 @@ import Agent.CLI.Runtime.Orchestration.Types
                      activeHttpAccountId, activeHttpProvider, activeHttpResolveLabel),
       AgentProcessRuntime(processMcpSupervisor),
       AgentRunMode,
-      NativeIsolationMode(NativeSandboxed),
-      NativeRunHooks(nativeDatabaseScopeNamespace, nativeIsolationMode) )
+      NativeDiscoveryContext(..),
+      NativeRunHooks(nativeDatabaseScopeNamespace, nativeWorkspaceDiscovery),
+      nativePreparedDiscovery )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Repl ()
@@ -365,18 +365,14 @@ runAgentInitializedWithLock
             case fullscreen of
                 Just runtime -> setFullscreenWindowTitle runtime title
                 Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
-    let sandboxedNative =
-            maybe
-                False
-                ((== NativeSandboxed) . (.nativeIsolationMode))
-                startup.startupNativeHooks
+    let preparedDiscovery =
+            nativePreparedDiscovery . (.nativeWorkspaceDiscovery)
+                =<< startup.startupNativeHooks
     projectRoot <-
-        if sandboxedNative
-            -- The tenant workspace is mounted only into the guest. Host-side
-            -- settings and plan persistence stay below the server-owned
-            -- per-tenant home instead of following workspace symlinks.
-            then pure home
-            else resolveProjectRoot cwd
+        maybe
+            (resolveProjectRoot cwd)
+            (pure . (.nativeDiscoveryProjectRoot))
+            preparedDiscovery
     stateDirectory <- decodeFS (home </> unsafeEncodeUtf ".haskell-agent")
     projectRootPath <- decodeFS projectRoot
     let scopeNamespace =
@@ -391,16 +387,21 @@ runAgentInitializedWithLock
     ((projectSettings0, userSettings), (catalogResult, branch)) <-
         concurrently
             (concurrently
-                (if sandboxedNative
-                    then pure defaultProjectSettings
-                    else loadProjectSettings projectRoot)
+                (maybe
+                    (loadProjectSettings projectRoot)
+                    (pure . (.nativeDiscoveryProjectSettings))
+                    preparedDiscovery)
                 (loadUserSettings home))
             (concurrently
                 (loadModelCatalogAt home
-                    (if sandboxedNative then home else cwd))
-                (if sandboxedNative
-                    then pure ""
-                    else detectGitBranch cwd))
+                    (maybe
+                        cwd
+                        (.nativeDiscoveryCatalogRoot)
+                        preparedDiscovery))
+                (maybe
+                    (detectGitBranch cwd)
+                    (pure . (.nativeDiscoveryGitBranch))
+                    preparedDiscovery))
     let projectSettings =
             withInheritedLastModel projectSettings0 userSettings
     catalog <- either

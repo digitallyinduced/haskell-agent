@@ -110,7 +110,7 @@ systemPromptForTools =
     systemPromptForToolsWithHostedSearch True
 
 -- | Render a prompt while explicitly controlling provider-hosted search.
--- Sandboxed native sessions disable it because hosted tools bypass the
+-- Embeddings without that capability omit it because hosted tools bypass the
 -- application-tool execution boundary.
 systemPromptForToolsWithHostedSearch
     :: Bool

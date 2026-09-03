@@ -1,8 +1,12 @@
 -- | Bounded reads of owner-only configuration and credential files.
 module Agent.Server.PrivateFile
-    ( readPrivateFile
+    ( TrustedPathPolicy
+    , fullTrustedPathPolicy
+    , trustedPathPolicyWithin
+    , readPrivateFile
     , readPrivateTokenFile
     , validateTrustedPathAncestry
+    , validateTrustedPathWithPolicy
     , validateToken
     ) where
 
@@ -16,13 +20,21 @@ import Data.ByteString (ByteString)
 import Data.ByteString qualified as ByteString
 import Data.ByteString.Char8 qualified as ByteString8
 import Data.Text (Text)
-import System.FilePath (normalise, takeDirectory)
+import System.Directory (canonicalizePath)
+import System.FilePath
+    ( isAbsolute
+    , makeRelative
+    , normalise
+    , splitDirectories
+    , takeDirectory
+    )
 import System.IO.Error (isEOFError)
 import System.Posix.Files
     ( fileMode
     , fileOwner
     , getFdStatus
     , getFileStatus
+    , isDirectory
     , isRegularFile
     )
 import System.Posix.IO
@@ -93,15 +105,73 @@ validateToken raw =
         then Left "the bearer token must not be empty"
         else Right token
 
+-- | An ancestry-validation boundary. Its constructors stay private so callers
+-- cannot replace validation with an arbitrary predicate.
+data TrustedPathPolicy
+    = TrustAncestryToFilesystemRoot
+    | TrustAncestryWithin !FilePath
+
+fullTrustedPathPolicy :: TrustedPathPolicy
+fullTrustedPathPolicy = TrustAncestryToFilesystemRoot
+
 -- | Require every component of a canonical path to be controlled by either
 -- root or the server account, and never writable by group or other users.
 -- Callers may pass a directory's parent when the directory itself is an
 -- intentionally writable tenant export.
 validateTrustedPathAncestry :: FilePath -> IO (Either Text ())
-validateTrustedPathAncestry rawPath = do
+validateTrustedPathAncestry rawPath =
+    validateTrustedPathWithPolicy fullTrustedPathPolicy rawPath
+
+-- | Declare an existing directory as an outer trust boundary after validating
+-- that directory itself. The caller owns the trust decision for its parents.
+-- This is intended for hermetic build roots whose outer ownership belongs to
+-- the build runner rather than the test process.
+trustedPathPolicyWithin
+    :: FilePath
+    -> IO (Either Text TrustedPathPolicy)
+trustedPathPolicyWithin rawRoot = do
+    resolved <- tryIO (canonicalizePath rawRoot)
+    case resolved of
+        Left _ ->
+            pure (Left "could not inspect trusted path ancestry")
+        Right root -> do
+            inspected <- tryIO (getFileStatus root)
+            case inspected of
+                Left _ ->
+                    pure (Left "could not inspect trusted path ancestry")
+                Right status
+                    | not (isDirectory status) ->
+                        pure (Left "trusted path boundary must be a directory")
+                    | otherwise ->
+                        validateTrustedPaths [root] >>= \case
+                            Left err -> pure (Left err)
+                            Right () ->
+                                pure (Right (TrustAncestryWithin root))
+
+validateTrustedPathWithPolicy
+    :: TrustedPathPolicy
+    -> FilePath
+    -> IO (Either Text ())
+validateTrustedPathWithPolicy policy rawPath =
+    case policy of
+        TrustAncestryToFilesystemRoot ->
+            validateTrustedPaths
+                (pathAndAncestors (normalise rawPath))
+        TrustAncestryWithin root -> do
+            resolved <- tryIO (canonicalizePath rawPath)
+            case resolved of
+                Left _ ->
+                    pure (Left "could not inspect trusted path ancestry")
+                Right path
+                    | not (containsPath root path) ->
+                        pure (Left "trusted path escapes its declared root")
+                    | otherwise ->
+                        validateTrustedPaths (pathThroughAncestor root path)
+
+validateTrustedPaths :: [FilePath] -> IO (Either Text ())
+validateTrustedPaths paths = do
     user <- getEffectiveUserID
-    inspected <-
-        tryIO (mapM getFileStatus (pathAndAncestors (normalise rawPath)))
+    inspected <- tryIO (mapM getFileStatus paths)
     pure case inspected of
         Left _ ->
             Left "could not inspect trusted path ancestry"
@@ -118,6 +188,11 @@ validateTrustedPathAncestry rawPath = do
                     "trusted path ancestry must not be writable by group or other users"
             | otherwise -> Right ()
 
+pathThroughAncestor :: FilePath -> FilePath -> [FilePath]
+pathThroughAncestor root path
+    | root == path = [path]
+    | otherwise = path : pathThroughAncestor root (takeDirectory path)
+
 pathAndAncestors :: FilePath -> [FilePath]
 pathAndAncestors path =
     path :
@@ -125,6 +200,14 @@ pathAndAncestors path =
         in if parent == path
             then []
             else pathAndAncestors parent
+
+containsPath :: FilePath -> FilePath -> Bool
+containsPath root candidate =
+    let relative = normalise (makeRelative root candidate)
+    in not (isAbsolute relative)
+        && case splitDirectories relative of
+            ".." : _ -> False
+            _ -> True
 
 readBytes :: Int -> Fd -> IO ByteString
 readBytes maximumBytes descriptor = go maximumBytes []

@@ -44,8 +44,11 @@ import Agent.CLI.PendingInputs
 import Agent.CLI.SteeringInputs
 import Agent.CLI.Runtime.Types
 import Agent.CLI.Runtime.Orchestration.Types
-    ( NativeIsolationMode(..)
+    ( NativeDiscoveryContext(..)
+    , NativeRunCapabilities(..)
     , NativeRunHooks(..)
+    , fullNativeRunCapabilities
+    , nativePreparedDiscovery
     )
 import Agent.CLI.Session.Runtime.Types
 import Agent.CLI.Interrupt
@@ -115,11 +118,21 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
   grokFirstTurnContextRef <- newIORef initialGrokContext
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
-      sandboxedNative =
+      nativeCapabilities =
           maybe
-              False
-              ((== NativeSandboxed) . (.nativeIsolationMode))
+              fullNativeRunCapabilities
+              (.nativeCapabilities)
               startup.startupNativeHooks
+      preparedDiscovery =
+          startup.startupNativeHooks
+              >>= nativePreparedDiscovery . (.nativeWorkspaceDiscovery)
+      loadsHostWorkspaceContext = isNothing preparedDiscovery
+      preparedWorkspaceEnvironment =
+          (\context ->
+              PreparedWorkspaceEnvironment
+                  context.nativeDiscoveryOperatingSystem
+                  context.nativeDiscoveryShell)
+              <$> preparedDiscovery
       terminal = startup.startupTerminal
       stdoutHandle = startup.startupStdout
       stderrHandle = startup.startupStderr
@@ -347,12 +360,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         pure learnedSkills
         reloadGeneratedContext = do
             freshAgents <-
-                if sandboxedNative
+                if loadsHostWorkspaceContext
                     then
-                        newIORef
-                            ((.catalogEnvironmentContext)
-                                <$> codexCatalogSession)
-                    else
                         loadAgentsContext
                             stderrHandle
                             fullscreen
@@ -365,10 +374,14 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                             Nothing
                             ((.catalogEnvironmentContext)
                                 <$> codexCatalogSession)
+                    else
+                        newIORef
+                            ((.catalogEnvironmentContext)
+                                <$> codexCatalogSession)
             freshSkills <-
-                if sandboxedNative
-                    then pure (SkillCatalog [] [])
-                    else loadSkillsCatalogQuiet options home projectRoot cwd
+                if loadsHostWorkspaceContext
+                    then loadSkillsCatalogQuiet options home projectRoot cwd
+                    else pure (SkillCatalog [] [])
             (omitted, _) <-
                 installSkills freshAgents True freshSkills
             reportSkillCatalog True freshSkills omitted
@@ -400,11 +413,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             reloadGeneratedContext
         refreshSkills queueContext = do
             refreshed <-
-                if sandboxedNative
-                    then pure (SkillCatalog [] [])
-                    else
-                        loadSkillsCatalogQuiet
-                            options home projectRoot cwd
+                if loadsHostWorkspaceContext
+                    then loadSkillsCatalogQuiet options home projectRoot cwd
+                    else pure (SkillCatalog [] [])
             (omitted, _) <-
                 installSkills startupContext queueContext refreshed
             when queueContext $
@@ -703,7 +714,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     NoHostToolLayout -> []
                     _ ->
                         hostedSearchToolNamesWhen
-                            (not sandboxedNative)
+                            nativeCapabilities.nativeProviderHostedTools
                             dialect
                             ++ projectedNames
         shellModeFlags = \case
@@ -730,7 +741,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                     enabledNames sessionTmp
                             Nothing ->
                                 systemPromptForToolsWithHostedSearch
-                                    (not sandboxedNative)
+                                    nativeCapabilities.nativeProviderHostedTools
                                     dialect
                                     enabledNames
                                     cwd
@@ -739,7 +750,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                     (isOneShot options)
                     toolSchemas =
                         schemasFromAppToolsWithHostedSearch
-                            (not sandboxedNative)
+                            nativeCapabilities.nativeProviderHostedTools
                             dialect
                             enabledTools
                 modifyIORef' paramsRef
@@ -780,10 +791,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
         , approveRegisteredTool
         , planMode
         , providerNativeToolsEnabled =
-            case startup.startupNativeHooks of
-                Just hooks ->
-                    hooks.nativeIsolationMode /= NativeSandboxed
-                Nothing -> True
+            nativeCapabilities.nativeProviderNativeTools
         }
     forM_ codeModeNestedSlot \slot ->
         setCodeModeNestedInvoke slot \call -> do
@@ -959,7 +967,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionTaskPlan = taskPlan
             , sessionProjectRoot = projectRoot
             , sessionCwd = cwd
-            , sessionSandboxedNative = sandboxedNative
+            , sessionProviderFallback =
+                nativeCapabilities.nativeProviderFallback
+            , sessionPreparedWorkspaceEnvironment =
+                preparedWorkspaceEnvironment
             , sessionHome = home
             , sessionMcpRegistrations = mcpRegistrations
             , sessionMcpWarnings = mcpWarnings
@@ -1048,11 +1059,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     let initializeSkills = do
             markStartupStage startup "Loading skills…"
             skills <-
-                if sandboxedNative
-                    then pure (SkillCatalog [] [])
-                    else
-                        loadSkillsCatalogQuiet
-                            options home projectRoot cwd
+                if loadsHostWorkspaceContext
+                    then loadSkillsCatalogQuiet options home projectRoot cwd
+                    else pure (SkillCatalog [] [])
             (omitted, _) <- installSkills startupContext
                 queueInitialContext
                 skills

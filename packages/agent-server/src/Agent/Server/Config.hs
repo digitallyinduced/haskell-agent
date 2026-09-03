@@ -7,6 +7,7 @@ module Agent.Server.Config
     , defaultServerConfig
     , parseServerConfig
     , resolveServerConfig
+    , resolveServerConfigWithTrustPolicy
     , resolveWorkspacePath
     , resolveTenantWorkspacePath
     , lookupResolvedTenant
@@ -17,13 +18,15 @@ import Agent.Server.Auth
     , AuthMode(..)
     )
 import Agent.Server.PrivateFile
-    ( readPrivateTokenFile
-    , validateTrustedPathAncestry
+    ( TrustedPathPolicy
+    , fullTrustedPathPolicy
+    , readPrivateTokenFile
+    , validateTrustedPathWithPolicy
     )
 import Agent.Server.Tenant
     ( ResolvedTenant(..)
     , TenantRegistry
-    , loadTenantRegistry
+    , loadTenantRegistryWithTrustPolicy
     , lookupTenant
     , tenantRegistryCredentials
     , tenantRegistryTenants
@@ -299,7 +302,17 @@ positiveOption name placeholder defaultValue description =
 resolveServerConfig
     :: ServerConfig
     -> IO (Either Text ResolvedServerConfig)
-resolveServerConfig config
+resolveServerConfig =
+    resolveServerConfigWithTrustPolicy fullTrustedPathPolicy
+
+-- | Resolve configuration with an explicit, structurally bounded ancestry
+-- policy. The executable uses 'resolveServerConfig', which always validates to
+-- the filesystem root.
+resolveServerConfigWithTrustPolicy
+    :: TrustedPathPolicy
+    -> ServerConfig
+    -> IO (Either Text ResolvedServerConfig)
+resolveServerConfigWithTrustPolicy trustPolicy config
     | config.serverPort < 1 || config.serverPort > 65535 =
         pure (Left "port must be between 1 and 65535")
     | any (< 1)
@@ -345,6 +358,7 @@ resolveServerConfig config
                     resolveLocalMode config cwd environmentToken
                 Just registryPath ->
                     resolveMultiTenantMode
+                        trustPolicy
                         config
                         home
                         environmentToken
@@ -412,7 +426,8 @@ resolveLocalMode config cwd environmentToken
                 )
 
 resolveMultiTenantMode
-    :: ServerConfig
+    :: TrustedPathPolicy
+    -> ServerConfig
     -> FilePath
     -> Maybe String
     -> FilePath
@@ -420,7 +435,8 @@ resolveMultiTenantMode
         (Either
             Text
             (AuthConfig, [FilePath], ResolvedServerMode))
-resolveMultiTenantMode config home environmentToken registryPath
+resolveMultiTenantMode
+        trustPolicy config home environmentToken registryPath
     | config.serverTokenFile /= Nothing || environmentToken /= Nothing =
         pure
             (Left
@@ -457,7 +473,7 @@ resolveMultiTenantMode config home environmentToken registryPath
                                     (Left
                                         "the configured sandbox runner is not an executable file")
                             else do
-                                validateTrustedPathAncestry
+                                validateTrustedPathWithPolicy trustPolicy
                                     canonicalRunner >>= \case
                                         Left err ->
                                             pure
@@ -472,7 +488,8 @@ resolveMultiTenantMode config home environmentToken registryPath
                                                             </> "server-tenants")
                                                         id
                                                         config.serverTenantStateRoot
-                                            loadTenantRegistry
+                                            loadTenantRegistryWithTrustPolicy
+                                                trustPolicy
                                                 stateRoot
                                                 registryPath >>= \case
                                                     Left err -> pure (Left err)

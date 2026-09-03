@@ -52,7 +52,6 @@ import Agent.CLI.Models
 import Agent.CLI.Project
     ( ModelSwitchScope(..)
     , ProjectAccount(..)
-    , defaultProjectSettings
     , loadProjectSettings
     , projectAccountFor
     , resolveProjectRoot
@@ -484,7 +483,7 @@ requestAutomaticProviderFallback env apiError pending = do
                 Nothing -> pure Nothing
                 Just tokenProvider ->
                     chooseAutomaticProviderTransition
-                        env.sessionSandboxedNative
+                        env.sessionProviderFallback
                         env.sessionModelCatalog
                         env.sessionProjectRoot
                         env.sessionRender.renderStderr
@@ -512,7 +511,7 @@ requestStartupProviderFallback env apiError = do
                 Nothing -> pure Nothing
                 Just tokenProvider ->
                     chooseStartupProviderTransition
-                        env.sessionSandboxedNative
+                        env.sessionProviderFallback
                         env.sessionModelCatalog
                         env.sessionProjectRoot
                         env.sessionFullscreen
@@ -533,20 +532,19 @@ continueAutomaticFallback
     -> ApiError
     -> IO (Maybe ProviderTransition)
 continueAutomaticFallback
-        sandboxedNative homeHint cwdHint stderrHandle fullscreen failed apiError =
-    case ( failed.transitionAutomaticBilling
-         , failed.transitionPendingTurn
-         ) of
+        fallbackEnabled homeHint cwdHint stderrHandle fullscreen failed apiError
+    | not fallbackEnabled = pure Nothing
+    | otherwise = case ( failed.transitionAutomaticBilling
+                       , failed.transitionPendingTurn
+                       ) of
         (Just billing, Just pending) -> do
             home <- maybe getHomeDirectory pure homeHint
             cwd <- maybe getCurrentDirectory pure cwdHint
-            loadModelCatalogAt
-                home
-                (if sandboxedNative then home else cwd) >>= \case
+            loadModelCatalogAt home cwd >>= \case
                 Left _ -> pure Nothing
                 Right catalog ->
                     chooseAutomaticProviderTransition
-                        sandboxedNative
+                        True
                         catalog
                         cwd
                         stderrHandle
@@ -575,9 +573,10 @@ chooseAutomaticProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
 chooseAutomaticProviderTransition
-    sandboxedNative catalog cwd stderrHandle fullscreen
-        sourceBilling current currentModel unavailable0 sessionId pending apiError =
-    tryCandidates unavailable0 candidates
+    fallbackEnabled catalog cwd stderrHandle fullscreen
+        sourceBilling current currentModel unavailable0 sessionId pending apiError
+    | not fallbackEnabled = pure Nothing
+    | otherwise = tryCandidates unavailable0 candidates
   where
     candidates =
         fallbackCandidates
@@ -588,7 +587,6 @@ chooseAutomaticProviderTransition
         rawChoice : rest -> do
             choice <- resolveModelOptionDialect rawChoice
             validateAutomaticProviderTarget
-                sandboxedNative
                 cwd
                 sourceBilling
                 choice >>= \case
@@ -665,9 +663,10 @@ chooseStartupProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
 chooseStartupProviderTransition
-    sandboxedNative catalog cwd fullscreen sourceBilling current currentModel
-        unavailable0 sessionId apiError =
-    tryCandidates unavailable0 candidates
+    fallbackEnabled catalog cwd fullscreen sourceBilling current currentModel
+        unavailable0 sessionId apiError
+    | not fallbackEnabled = pure Nothing
+    | otherwise = tryCandidates unavailable0 candidates
   where
     candidates =
         fallbackCandidates
@@ -678,7 +677,6 @@ chooseStartupProviderTransition
         rawChoice : rest -> do
             choice <- resolveModelOptionDialect rawChoice
             validateAutomaticProviderTarget
-                sandboxedNative
                 cwd
                 sourceBilling
                 choice >>= \case
@@ -768,12 +766,11 @@ validateProviderTarget choice =
         loadValidatedProviderTarget probeLoadedAvailability choice
 
 validateAutomaticProviderTarget
-    :: Bool
-    -> OsPath
+    :: OsPath
     -> BillingMode
     -> ModelOption
     -> IO (Either Text (Maybe SelectedAccount))
-validateAutomaticProviderTarget sandboxedNative cwd sourceBilling choice = do
+validateAutomaticProviderTarget cwd sourceBilling choice = do
     let provider = choice.modelTarget.targetProvider
     if not (providerSupportsUsageAccountSelection provider)
         then fmap (Nothing <$) $
@@ -781,10 +778,7 @@ validateAutomaticProviderTarget sandboxedNative cwd sourceBilling choice = do
                 probeLoadedAutomaticAvailability
                 choice
         else do
-            settings <-
-                if sandboxedNative
-                    then pure defaultProjectSettings
-                    else resolveProjectRoot cwd >>= loadProjectSettings
+            settings <- resolveProjectRoot cwd >>= loadProjectSettings
             let rememberedIds = fmap
                     (\account ->
                         ( account.projectAccountSelectionId

@@ -76,8 +76,9 @@ import Agent.CLI.Runtime.Orchestration.Startup
     ( finishStartup )
 import Agent.CLI.Runtime.Orchestration.Types
     ( AccountSwitchRequest(..)
-    , NativeIsolationMode(..)
+    , NativeRunCapabilities(..)
     , NativeRunHooks(..)
+    , fullNativeRunCapabilities
     )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap
@@ -361,10 +362,10 @@ runAgentProviders
     transportModel
     unavailableProviders
     =
-        let sandboxedNative =
+        let nativeCapabilities =
                 maybe
-                    False
-                    ((== NativeSandboxed) . (.nativeIsolationMode))
+                    fullNativeRunCapabilities
+                    (.nativeCapabilities)
                     startup.startupNativeHooks
         in case provider of
                     OpenAIProvider ->
@@ -685,7 +686,7 @@ runAgentProviders
                                             , not (isGatewayLoadedAuth loaded)
                                             , isProviderUnavailable err ->
                                                 chooseStartupProviderTransition
-                                                    sandboxedNative
+                                                    nativeCapabilities.nativeProviderFallback
                                                     catalog
                                                     projectRoot
                                                     fullscreen
@@ -710,7 +711,7 @@ runAgentProviders
                         let xaiOptions =
                                 xaiOptions0
                                     { XAI.hostedXSearchEnabled =
-                                        not sandboxedNative
+                                        nativeCapabilities.nativeProviderHostedTools
                                     }
                         let xaiContextWindow =
                                 contextWindowForParams
@@ -881,8 +882,12 @@ runAgentProviders
                                 , interruptBackend = pure ()
                                 , resetBackendState = pure ()
                                 }
-                    ClaudeCodeProvider ->
-                        withSelectedClaudeAuth
+                    ClaudeCodeProvider
+                        | not
+                            nativeCapabilities.nativeProviderNativeTools ->
+                            startupDie startup
+                                "Claude Code is unavailable in this runtime"
+                        | otherwise -> withSelectedClaudeAuth
                             connectedGateway
                             loaded
                             (startupDie startup . Text.unpack)
@@ -995,11 +1000,7 @@ runAgentProviders
                                         MCP.inProcessMcpToolNames
                                             claudeMcpServer
                                     , nativeToolsEnabled =
-                                        case startup.startupNativeHooks of
-                                            Just hooks ->
-                                                hooks.nativeIsolationMode
-                                                    /= NativeSandboxed
-                                            Nothing -> True
+                                        nativeCapabilities.nativeProviderNativeTools
                                     }
                         when claudeBypassEnabled $
                             case fullscreen of

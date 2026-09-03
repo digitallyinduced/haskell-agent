@@ -18,7 +18,6 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
-    , ToolPlacement(..)
     , ToolSchema(..)
     )
 import Agent.ToolDispatch (typedStreamingTool)
@@ -848,7 +847,6 @@ appToolFor client tool = AppTool
     , appToolExecution =
         if tool.discoveredReadOnly then ParallelSafe else TurnSequential
     , appToolResourceClaims = Nothing
-    , appToolPlacement = UnclassifiedTool
     }
   where
     qualifiedName = qualifiedMcpToolName

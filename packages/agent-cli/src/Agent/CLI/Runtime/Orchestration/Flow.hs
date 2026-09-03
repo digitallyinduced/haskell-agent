@@ -108,11 +108,18 @@ import Agent.CLI.Runtime.Orchestration.Types
         )
     , NativeRunHooks
         ( nativeDatabaseStore
+        , nativeCapabilities
         , nativeHome
-        , nativeIsolationMode
         , nativeRegisterCancel
+        , nativeWorkspaceDiscovery
         )
-    , NativeIsolationMode(NativeSandboxed)
+    , NativeDiscoveryContext
+        ( nativeDiscoveryCatalogRoot
+        , nativeDiscoveryHome
+        )
+    , NativeRunCapabilities(nativeProviderFallback)
+    , fullNativeRunCapabilities
+    , nativePreparedDiscovery
     )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
@@ -413,8 +420,8 @@ runAgentWithRuntime processRuntime runMode options = do
                     Just failed
                         | failed.transitionCause == AutomaticFallback ->
                             continueAutomaticFallback
-                                (nativeRunIsSandboxed runMode)
-                                (runMode.runNativeHooks >>= (.nativeHome))
+                                (nativeProviderFallbackEnabled runMode)
+                                (nativeRunHomeHint runMode)
                                 (nativeDiscoveryCwdHint runMode)
                                 runMode.runStderr
                                 Nothing
@@ -473,22 +480,26 @@ withRestoredCurrentDirectory action = do
     originalCwd <- getCurrentDirectory
     action `finally` setCurrentDirectory originalCwd
 
--- Host-side catalog and project discovery must never use the tenant
--- workspace. Sandboxed native callers provide a server-owned per-tenant home
--- which remains outside the guest's writable mounts.
 nativeDiscoveryCwdHint :: AgentRunMode -> Maybe OsPath
 nativeDiscoveryCwdHint runMode =
-    case runMode.runNativeHooks of
-        Just hooks
-            | hooks.nativeIsolationMode == NativeSandboxed ->
-                hooks.nativeHome
-        _ -> runMode.runCwdHint
+    (runMode.runNativeHooks
+        >>= nativePreparedDiscovery . (.nativeWorkspaceDiscovery)
+        >>= Just . (.nativeDiscoveryCatalogRoot))
+        <|> runMode.runCwdHint
 
-nativeRunIsSandboxed :: AgentRunMode -> Bool
-nativeRunIsSandboxed runMode =
+nativeRunHomeHint :: AgentRunMode -> Maybe OsPath
+nativeRunHomeHint runMode =
+    runMode.runNativeHooks >>= \hooks ->
+        ( (.nativeDiscoveryHome)
+            <$> nativePreparedDiscovery hooks.nativeWorkspaceDiscovery
+        )
+            <|> hooks.nativeHome
+
+nativeProviderFallbackEnabled :: AgentRunMode -> Bool
+nativeProviderFallbackEnabled runMode =
     maybe
-        False
-        ((== NativeSandboxed) . (.nativeIsolationMode))
+        fullNativeRunCapabilities.nativeProviderFallback
+        ((.nativeProviderFallback) . (.nativeCapabilities))
         runMode.runNativeHooks
 
 recoveryGatewayAccess
@@ -529,19 +540,18 @@ runAgent
                             maybe
                                 getHomeDirectory
                                 pure
-                                (runMode.runNativeHooks >>= (.nativeHome))
+                                (nativeRunHomeHint runMode)
                         cwd <- case nextOptions.optCwd <|> runMode.runCwdHint of
                             Nothing -> getCurrentDirectory
                             Just path -> makeAbsolute path
-                        let sandboxedNative =
-                                maybe
-                                    False
-                                    ((== NativeSandboxed)
-                                        . (.nativeIsolationMode))
-                                    runMode.runNativeHooks
                         loadModelCatalogAt
                             home
-                            (if sandboxedNative then home else cwd) >>= \case
+                            (fromMaybe cwd
+                                (runMode.runNativeHooks
+                                    >>= nativePreparedDiscovery
+                                        . (.nativeWorkspaceDiscovery)
+                                    >>= Just . (.nativeDiscoveryCatalogRoot)))
+                            >>= \case
                             Left err -> pure (Left err)
                             Right catalog -> do
                                 color <- resolveColor runMode.runStderr
@@ -640,8 +650,8 @@ runAgent
                         , restartFallback =
                             \failed apiError ->
                                 continueAutomaticFallback
-                                    (nativeRunIsSandboxed runMode)
-                                    (runMode.runNativeHooks >>= (.nativeHome))
+                                    (nativeProviderFallbackEnabled runMode)
+                                    (nativeRunHomeHint runMode)
                                     (nativeDiscoveryCwdHint runMode)
                                     runMode.runStderr
                                     (Just runtime)
@@ -756,7 +766,7 @@ prepareAgentIterationTracked
     startupTimingsRef <- newIORef []
     syntaxLoadDurationRef <- newIORef Nothing
     startupFinishedRef <- newIORef False
-    home <- case runMode.runNativeHooks >>= (.nativeHome) of
+    home <- case nativeRunHomeHint runMode of
         Nothing -> getHomeDirectory
         Just path -> pure path
     configuredTheme <-

@@ -65,7 +65,10 @@ import Agent.CLI.Session
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
     )
-import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.SessionEnv
+    ( PreparedWorkspaceEnvironment(..)
+    , SessionEnv(..)
+    )
 import Agent.CLI.Session.History
     ( currentLiveTranscriptGeneration
     , durableTranscriptCheckpoint
@@ -339,7 +342,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                             takeGrokFirstTurnContext
                                 grokFirstTurnContext
                                 (loadGrokFirstTurnPrefix
-                                    (not env.sessionSandboxedNative)
+                                    env.sessionPreparedWorkspaceEnvironment
                                     env.sessionCwd)
                         pure (UserMessage prefix : framed, Just prefix)
                     else pure (framed, Nothing)
@@ -844,20 +847,23 @@ grokFirstTurnPrefix osName shell cwd today gitStatus =
             <> status
             <> "\n</git_status>"
 
-loadGrokFirstTurnPrefix :: Bool -> System.OsPath.OsPath -> IO Text
-loadGrokFirstTurnPrefix allowHostWorkspaceDiscovery cwd = do
+loadGrokFirstTurnPrefix
+    :: Maybe PreparedWorkspaceEnvironment
+    -> System.OsPath.OsPath
+    -> IO Text
+loadGrokFirstTurnPrefix preparedEnvironment cwd = do
     today <- localDay . zonedTimeToLocalTime <$> getZonedTime
-    if allowHostWorkspaceDiscovery
-        then do
+    case preparedEnvironment of
+        Nothing -> do
             shell <- maybe "/bin/sh" Text.pack <$> lookupEnv "SHELL"
             osVersion <- loadOperatingSystem
             status <- loadGitStatus cwd
             pure (grokFirstTurnPrefix osVersion shell cwd today status)
-        else
+        Just environment ->
             pure
                 (grokFirstTurnPrefix
-                    "linux sandbox"
-                    "/bin/bash"
+                    environment.preparedOperatingSystem
+                    environment.preparedShell
                     cwd
                     today
                     Nothing)

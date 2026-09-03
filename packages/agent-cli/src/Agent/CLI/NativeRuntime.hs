@@ -1,9 +1,14 @@
 module Agent.CLI.NativeRuntime
     ( NativeProcessRuntime
     , NativeInteractionMode(..)
-    , NativeIsolationMode(..)
+    , NativeDiscoveryContext(..)
+    , NativeWorkspaceDiscovery(..)
+    , NativeRunCapabilities(..)
     , NativeShellMode(..)
     , NativeRunHooks(..)
+    , fullNativeRunCapabilities
+    , nativeLoadsHostWorkspaceContext
+    , nativePreparedDiscovery
     , NativeSessionTarget(..)
     , NativeTurnRequest(..)
     , StartupFailure(..)
@@ -37,9 +42,14 @@ import Agent.CLI.Runtime.Orchestration (runAgentWithRuntime)
 import Agent.CLI.Runtime.Orchestration.Types
     ( AgentProcessRuntime(..)
     , NativeInteractionMode(..)
-    , NativeIsolationMode(..)
+    , NativeDiscoveryContext(..)
+    , NativeWorkspaceDiscovery(..)
+    , NativeRunCapabilities(..)
     , NativeShellMode(..)
     , NativeRunHooks(..)
+    , fullNativeRunCapabilities
+    , nativeLoadsHostWorkspaceContext
+    , nativePreparedDiscovery
     , nativeRunMode
     )
 import Agent.CLI.Runtime.Types (DevResult(..), StartupFailure(..))
@@ -251,11 +261,9 @@ runNativeOptions
     -> CliOptions
     -> IO (Either Text ())
 runNativeOptions runtime output cwd hooks options =
-    case (hooks.nativeIsolationMode, hooks.nativeHome) of
-        (NativeSandboxed, Nothing) ->
-            pure (Left
-                "sandboxed native turns require a host-controlled home")
-        _ ->
+    case hooks.nativePrepareOptions options of
+        Left err -> pure (Left err)
+        Right preparedOptions ->
             runAgentWithRuntime
                 AgentProcessRuntime
                     { processMcpSupervisor = runtime.nativeMcpSupervisor
@@ -266,28 +274,14 @@ runNativeOptions runtime output cwd hooks options =
                         networkRecovery runtime.nativeNetworkRecovery
                     }
                 (nativeRunMode output cwd hooks)
-                isolatedOptions >>= \case
+                (shellOptions preparedOptions) >>= \case
                     DevQuit -> pure (Right ())
                     DevReload _ ->
                         pure (Left
                             "native turn unexpectedly requested a reload")
   where
-    isolatedOptions =
-        (case hooks.nativeIsolationMode of
-            NativeUnrestricted -> options
-            NativeSandboxed ->
-                options
-                    { optCwd = Just cwd
-                    , optWorktree = False
-                    , optYolo = False
-                    , optNoYolo = True
-                    , optPromptFile = Nothing
-                    , optManagedTurnFile = Nothing
-                    , optAgentsMd = False
-                    , optSkills = False
-                    , optComputerUse = False
-                    , optCodeMode = False
-                    })
+    shellOptions prepared =
+        prepared
             { optGhci = nativeGhciEnabled hooks.nativeShellMode
             , optBash = nativeBashEnabled hooks.nativeShellMode
             }

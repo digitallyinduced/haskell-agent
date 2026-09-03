@@ -2,7 +2,6 @@ module Agent.CLI.DialectsSpec (spec) where
 
 import Agent.CLI.Dialects
     ( CodingTools(..)
-    , classifyCodingTool
     , codingToolsFor
     , filterBashTools
     , filterGhciTools
@@ -22,9 +21,11 @@ import Agent.Tools.ShowImage (ImageDisplayHooks(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(AlwaysReadOnly)
-    , ToolPlacement(..)
     , ToolEnv
+    , appToolsFromGroups
     , defaultToolEnv
+    , executionToolsFromGroups
+    , hostToolsFromGroups
     , jsonAppTool
     )
 import Control.Exception.Safe (bracket, finally)
@@ -120,17 +121,46 @@ spec = describe "Agent.CLI.Dialects" do
                 names `shouldNotContain` ["analyze_tool_output"]
                 coding.codingClose
 
-    it "keeps model-controlled coding tools on the sandbox side" do
-        let placement name =
-                (classifyCodingTool (fakeTool name)).appToolPlacement
-        placement "update_plan" `shouldBe` HostTool
-        placement "read_tool_output" `shouldBe` SandboxTool
-        placement "search_tool_output" `shouldBe` SandboxTool
-        placement "analyze_tool_output" `shouldBe` SandboxTool
-        placement "shell_command" `shouldBe` SandboxTool
-        placement "read_file" `shouldBe` SandboxTool
-        placement "apply_patch" `shouldBe` SandboxTool
-        placement "new_unreviewed_tool" `shouldBe` SandboxTool
+    it "partitions execution tools from host services when constructed" do
+        withTempToolEnv \env ->
+            forM_
+                [ (codexDialect, "shell_command")
+                , (grokBuildDialect, "run_terminal_cmd")
+                ]
+                \(dialect, shellName) -> do
+                    coding <-
+                        codingToolsFor
+                            dialect env Nothing Nothing Nothing Nothing
+                    let names = map (.appToolName)
+                        executionNames =
+                            names
+                                (executionToolsFromGroups
+                                    coding.codingAppToolGroups)
+                        hostNames =
+                            names
+                                (hostToolsFromGroups
+                                    coding.codingAppToolGroups)
+                        assertions = do
+                            names
+                                (appToolsFromGroups
+                                    coding.codingAppToolGroups)
+                                `shouldBe` names coding.codingAppTools
+                            forM_
+                                [ "run_ghci"
+                                , "read_file"
+                                , shellName
+                                , "read_tool_output"
+                                , "search_tool_output"
+                                ]
+                                \name ->
+                                    executionNames `shouldContain` [name]
+                            executionNames
+                                `shouldNotContain` ["ask_user_question"]
+                            hostNames `shouldContain` ["ask_user_question"]
+                            forM_
+                                ["read_file", shellName, "read_tool_output"]
+                                \name -> hostNames `shouldNotContain` [name]
+                    assertions `finally` coding.codingClose
 
     it "filters shell and ghci tools independently" do
         let tools = map fakeTool

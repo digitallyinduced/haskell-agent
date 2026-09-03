@@ -65,7 +65,7 @@ spec =
             readIORef observed `shouldReturn` [("Read", Just True)]
             isPlanModeActive plan `shouldReturn` False
 
-        it "denies provider-native tools at the sandbox boundary" do
+        it "denies provider-native tools when the runtime omits them" do
             observed <- newIORef (0 :: Int)
             (slot, _) <- testRuntimeWithNativeTools False \_ _ -> do
                 modifyIORef' observed (+ 1)
@@ -76,7 +76,7 @@ spec =
                     `shouldReturn`
                         ClaudeCodePermissionDeny
                             { message =
-                                "Provider-native tools are disabled by the sandbox boundary."
+                                "Provider-native tools are unavailable in this runtime."
                             , interrupt = False
                             }
             handleClaudePermissionRequest slot

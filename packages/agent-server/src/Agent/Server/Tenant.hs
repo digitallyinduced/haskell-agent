@@ -11,6 +11,7 @@ module Agent.Server.Tenant
     , ResolvedTenant(..)
     , TenantRegistry
     , loadTenantRegistry
+    , loadTenantRegistryWithTrustPolicy
     , tenantRegistryCredentials
     , tenantRegistryTenants
     , lookupTenant
@@ -24,9 +25,11 @@ import Agent.Server.Auth
     , tenantCredential
     )
 import Agent.Server.PrivateFile
-    ( readPrivateFile
+    ( TrustedPathPolicy
+    , fullTrustedPathPolicy
+    , readPrivateFile
     , readPrivateTokenFile
-    , validateTrustedPathAncestry
+    , validateTrustedPathWithPolicy
     )
 import Agent.Server.Types
     ( AccessBoundary(..)
@@ -147,7 +150,16 @@ loadTenantRegistry
     -> FilePath
     -- ^ Owner-only JSON registry.
     -> IO (Either Text TenantRegistry)
-loadTenantRegistry rawStateBase registryPath = do
+loadTenantRegistry =
+    loadTenantRegistryWithTrustPolicy fullTrustedPathPolicy
+
+-- | Variant with an explicit, structurally bounded ancestry policy.
+loadTenantRegistryWithTrustPolicy
+    :: TrustedPathPolicy
+    -> FilePath
+    -> FilePath
+    -> IO (Either Text TenantRegistry)
+loadTenantRegistryWithTrustPolicy trustPolicy rawStateBase registryPath = do
     prepareStateBase rawStateBase >>= \case
         Left err -> pure (Left err)
         Right stateBase ->
@@ -162,16 +174,18 @@ loadTenantRegistry rawStateBase registryPath = do
                                     "the tenant registry is not valid versioned JSON")
                         Right registry ->
                             resolveRegistry
+                                trustPolicy
                                 stateBase
                                 registryPath
                                 registry
 
 resolveRegistry
-    :: FilePath
+    :: TrustedPathPolicy
+    -> FilePath
     -> FilePath
     -> RegistryFile
     -> IO (Either Text TenantRegistry)
-resolveRegistry stateBase registryPath registry
+resolveRegistry trustPolicy stateBase registryPath registry
     | registry.registryFileVersion /= 1 =
         pure (Left "the tenant registry version must be 1")
     | null specs =
@@ -184,7 +198,7 @@ resolveRegistry stateBase registryPath registry
         pure (Left "the local-mode tenant id is reserved")
     | otherwise = do
         registryCanonical <- canonicalizeExistingFile registryPath
-        resolved <- traverse (resolveTenant stateBase) specs
+        resolved <- traverse (resolveTenant trustPolicy stateBase) specs
         pure do
             canonicalRegistry <- registryCanonical
             tenantsWithSecrets <- sequence resolved
@@ -224,20 +238,21 @@ resolveRegistry stateBase registryPath registry
     specs = registry.registryFileTenants
 
 resolveTenant
-    :: FilePath
+    :: TrustedPathPolicy
+    -> FilePath
     -> TenantSpec
     -> IO
         (Either
             Text
             (ResolvedTenant, [(CredentialSpec, FilePath, ByteString)]))
-resolveTenant stateBase spec
+resolveTenant trustPolicy stateBase spec
     | null spec.tenantSpecCredentials =
         pure (Left "every tenant requires at least one credential")
     | length spec.tenantSpecCredentials > maximumCredentialsPerTenant =
         pure (Left "a tenant exceeds the credential limit")
     | otherwise = do
         workspace <-
-            canonicalWorkspace spec.tenantSpecWorkspaceRoot
+            canonicalWorkspace trustPolicy spec.tenantSpecWorkspaceRoot
         secrets <-
             traverse
                 loadCredential
@@ -424,9 +439,10 @@ prepareStateBase path = do
         Right canonical -> Right canonical
 
 canonicalWorkspace
-    :: FilePath
+    :: TrustedPathPolicy
+    -> FilePath
     -> IO (Either Text (FilePath, Integer, Integer))
-canonicalWorkspace path = do
+canonicalWorkspace trustPolicy path = do
     exists <- doesDirectoryExist path
     if not exists
         then pure (Left "a tenant workspace root is not an existing directory")
@@ -436,7 +452,7 @@ canonicalWorkspace path = do
                 Left _ ->
                     pure (Left "could not canonicalize a tenant workspace root")
                 Right result ->
-                    validateTrustedPathAncestry
+                    validateTrustedPathWithPolicy trustPolicy
                         (takeDirectory result) >>= \case
                             Left err ->
                                 pure

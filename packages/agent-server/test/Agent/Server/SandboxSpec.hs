@@ -6,8 +6,8 @@ module Agent.Server.SandboxSpec
 import Agent.Server.Sandbox
     ( TenantSandbox
     , closeTenantSandbox
+    , composeSandboxTools
     , openTenantSandbox
-    , routeSandboxTool
     )
 import Agent.Server.Sandbox.Worker
     ( SandboxWorkerConfig(..)
@@ -29,9 +29,8 @@ import Agent.ToolDispatch
 import Agent.Tools.Types
     ( ApprovalRule(..)
     , AppTool(..)
-    , ToolPlacement(..)
+    , AppToolGroup(..)
     , jsonAppTool
-    , withToolPlacement
     )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
@@ -103,13 +102,13 @@ spec = describe "tenant sandbox protocol" do
     it "routes structured workspace paths without rewriting command text" do
         withFakeSandbox "normal" \tenant sandbox _ -> do
             routed <-
-                either (fail . Text.unpack) pure $
-                    routeSandboxTool
+                composedTool
+                    (composeSandboxTools
                         sandbox
                         validSessionId
                         tenant.resolvedTenantWorkspaceRoot
                         CodexDialect
-                        testSandboxTool
+                        [ExecutionToolGroup [testSandboxTool]])
             let hostPath = Text.pack tenant.resolvedTenantWorkspaceRoot
                 arguments =
                     "{\"path\":\"" <> hostPath <> "/src\","
@@ -171,22 +170,27 @@ spec = describe "tenant sandbox protocol" do
                                     Text.isInfixOf "wrong tenant")
                         (closeTenantSandbox sandbox)
 
-    it "rejects tools without an explicit placement" do
+    it "keeps explicit host-service tools in the host process" do
         withFakeSandbox "normal" \tenant sandbox _ ->
-            case routeSandboxTool
-                sandbox
-                validSessionId
-                tenant.resolvedTenantWorkspaceRoot
-                CodexDialect
-                testSandboxTool
-                    { appToolPlacement = UnclassifiedTool }
-            of
-                Left _ -> pure ()
-                Right _ ->
-                    expectationFailure
-                        "accepted an unclassified tool for sandbox routing"
+            do
+                routed <-
+                    composedTool
+                        (composeSandboxTools
+                            sandbox
+                            validSessionId
+                            tenant.resolvedTenantWorkspaceRoot
+                            CodexDialect
+                            [HostToolGroup [testSandboxTool]])
+                outcome <-
+                    dispatchToolCallDetailed
+                        testDispatchConfig
+                        [routed.appToolHandler]
+                        (functionToolCall "host-call" "list_dir" "{}")
+                outcome.toolDispatchSucceeded `shouldBe` True
+                outcome.toolDispatchResult.output
+                    `shouldBe` "host handler ran"
 
-    it "dispatches the real guest filesystem tool set" do
+    it "uses the real guest filesystem tool set" do
         withSystemTempDirectory "agent-sandbox-worker" \root -> do
             let workspace = root </> "workspace"
                 stateRoot = root </> "state"
@@ -252,13 +256,13 @@ dispatchSandbox
     -> IO ToolDispatchOutcome
 dispatchSandbox tenant sandbox = do
     routed <-
-        either (fail . Text.unpack) pure $
-            routeSandboxTool
+        composedTool
+            (composeSandboxTools
                 sandbox
                 validSessionId
                 tenant.resolvedTenantWorkspaceRoot
                 CodexDialect
-                testSandboxTool
+                [ExecutionToolGroup [testSandboxTool]])
     dispatchToolCallDetailed
         testDispatchConfig
         [routed.appToolHandler]
@@ -269,13 +273,17 @@ dispatchSandbox tenant sandbox = do
 
 testSandboxTool :: AppTool
 testSandboxTool =
-    withToolPlacement SandboxTool $
-        jsonAppTool
-            "list_dir"
-            "test"
-            []
-            AlwaysReadOnly
-            (noArgsTool "list_dir" (pure (Right "host handler ran")))
+    jsonAppTool
+        "list_dir"
+        "test"
+        []
+        AlwaysReadOnly
+        (noArgsTool "list_dir" (pure (Right "host handler ran")))
+
+composedTool :: [AppTool] -> IO AppTool
+composedTool = \case
+    [tool] -> pure tool
+    tools -> fail ("expected one composed tool, got " <> show (length tools))
 
 testDispatchConfig :: ToolDispatchConfig
 testDispatchConfig = ToolDispatchConfig

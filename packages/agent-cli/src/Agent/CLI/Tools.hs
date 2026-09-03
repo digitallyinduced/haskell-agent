@@ -131,8 +131,8 @@ schemasFromAppTools :: Dialect -> [AppTool] -> [ResponseTool]
 schemasFromAppTools = schemasFromAppToolsWithHostedSearch True
 
 -- | Project application tools while explicitly controlling provider-hosted
--- search. Hosted search bypasses application-tool dispatch, so sandboxed
--- runtimes must pass 'False'.
+-- search. Hosted search bypasses application-tool dispatch, so embeddings
+-- without that capability must pass 'False'.
 schemasFromAppToolsWithHostedSearch
     :: Bool
     -> Dialect

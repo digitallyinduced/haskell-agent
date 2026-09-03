@@ -130,7 +130,7 @@ approveNative runtime _
     | not runtime.providerNativeToolsEnabled =
         pure $
             deny
-                "Provider-native tools are disabled by the sandbox boundary."
+                "Provider-native tools are unavailable in this runtime."
 approveNative runtime request = do
     let call =
             functionToolCall

@@ -2,11 +2,13 @@ module Agent.Server.TenantSpec (spec) where
 
 import Agent.Server.Tenant
     ( ResolvedTenant(..)
-    , loadTenantRegistry
+    , TenantRegistry
+    , loadTenantRegistryWithTrustPolicy
     , resolveTenantWorkspacePath
     , tenantRegistryCredentials
     , tenantRegistryTenants
     )
+import Agent.Server.PrivateFile (trustedPathPolicyWithin)
 import Agent.Server.Types (ApiError(..))
 import Data.Aeson
     ( Value
@@ -23,7 +25,7 @@ import System.Directory
     , makeAbsolute
     )
 import System.FilePath ((</>))
-import System.IO.Temp (withTempDirectory)
+import System.IO.Temp (withSystemTempDirectory)
 import System.Posix.Files (setFileMode)
 import Test.Hspec
 
@@ -32,7 +34,7 @@ spec = describe "tenant registry" do
     it "derives disjoint host resources for each tenant" do
         withRegistryFixture \root registryPath -> do
             result <-
-                loadTenantRegistry
+                loadFixtureRegistry root
                     (root </> "server-state")
                     registryPath
             registry <- either (fail . Text.unpack) pure result
@@ -47,7 +49,7 @@ spec = describe "tenant registry" do
                 `shouldSatisfy` allDistinct
 
     it "rejects credential material shared by two tenants" do
-        withTempDirectory "." "agent-tenant-registry" \root -> do
+        withSystemTempDirectory "agent-tenant-registry" \root -> do
             let workspaceA = root </> "workspace-a"
                 workspaceB = root </> "workspace-b"
                 token = root </> "shared-token"
@@ -60,7 +62,7 @@ spec = describe "tenant registry" do
                     [ tenantValue tenantA credentialA workspaceA token
                     , tenantValue tenantB credentialB workspaceB token
                     ]
-            loadTenantRegistry
+            loadFixtureRegistry root
                 (root </> "server-state")
                 registryPath >>= \case
                     Left err ->
@@ -71,7 +73,7 @@ spec = describe "tenant registry" do
                             "accepted a bearer shared by two tenants"
 
     it "rejects overlapping workspaces and workspace escape attempts" do
-        withTempDirectory "." "agent-tenant-registry" \root -> do
+        withSystemTempDirectory "agent-tenant-registry" \root -> do
             let workspaceA = root </> "workspace"
                 workspaceB = workspaceA </> "nested"
                 tokenA = root </> "token-a"
@@ -87,7 +89,7 @@ spec = describe "tenant registry" do
                     [ tenantValue tenantA credentialA workspaceA tokenA
                     , tenantValue tenantB credentialB workspaceB tokenB
                     ]
-            loadTenantRegistry
+            loadFixtureRegistry root
                 (root </> "server-state")
                 registryPath >>= \case
                     Left err ->
@@ -99,7 +101,7 @@ spec = describe "tenant registry" do
 
         withRegistryFixture \root registryPath -> do
             registry <-
-                loadTenantRegistry
+                loadFixtureRegistry root
                     (root </> "server-state")
                     registryPath
                     >>= either (fail . Text.unpack) pure
@@ -113,7 +115,7 @@ spec = describe "tenant registry" do
                                 "resolved a path outside the tenant workspace"
 
     it "rejects a workspace beneath replaceable ancestry" do
-        withTempDirectory "." "agent-tenant-registry" \root -> do
+        withSystemTempDirectory "agent-tenant-registry" \root -> do
             let writableParent = root </> "replaceable"
                 workspace = writableParent </> "workspace"
                 token = root </> "token"
@@ -127,7 +129,7 @@ spec = describe "tenant registry" do
                 registryValue
                     [ tenantValue tenantA credentialA workspace token
                     ]
-            loadTenantRegistry
+            loadFixtureRegistry root
                 (root </> "server-state")
                 registryPath >>= \case
                     Left err ->
@@ -141,7 +143,7 @@ withRegistryFixture
     :: (FilePath -> FilePath -> IO value)
     -> IO value
 withRegistryFixture action =
-    withTempDirectory "." "agent-tenant-registry" \temporaryRoot -> do
+    withSystemTempDirectory "agent-tenant-registry" \temporaryRoot -> do
         root <- makeAbsolute temporaryRoot
         let workspaceA = root </> "workspace-a"
             workspaceB = root </> "workspace-b"
@@ -159,6 +161,21 @@ withRegistryFixture action =
                 , tenantValue tenantB credentialB workspaceB tokenB
                 ]
         action root registryPath
+
+loadFixtureRegistry
+    :: FilePath
+    -> FilePath
+    -> FilePath
+    -> IO (Either Text.Text TenantRegistry)
+loadFixtureRegistry trustedRoot =
+    \stateRoot registryPath ->
+        trustedPathPolicyWithin trustedRoot >>= \case
+            Left err -> pure (Left err)
+            Right trustPolicy ->
+                loadTenantRegistryWithTrustPolicy
+                    trustPolicy
+                    stateRoot
+                    registryPath
 
 registryValue :: [Value] -> Value
 registryValue tenants =

@@ -11,7 +11,6 @@ module Agent.Server.Sandbox.Worker
 
 import Agent.CLI.Dialects
     ( CodingTools(..)
-    , classifyCodingTool
     , codingToolsFor
     )
 import Agent.CLI.Session (isValidSessionId)
@@ -39,10 +38,9 @@ import Agent.ToolDispatch
     , toolCallResultImages
     )
 import Agent.Tools.Types
-    ( AppTool(..)
-    , ToolPlacement(..)
-    , defaultToolEnv
+    ( defaultToolEnv
     , dispatchRegisteredToolCallDetailed
+    , executionToolsFromGroups
     , mkToolRegistry
     , setToolSessionTmp
     , ToolRegistry
@@ -355,11 +353,9 @@ acquireWorkerSession config stateRoot stateRef sessionId cwd dialect = do
                     Nothing
                     Nothing
                     Nothing
-            let guestTools =
-                    filter
-                        ((== SandboxTool) . (.appToolPlacement))
-                        (map classifyCodingTool coding.codingAppTools)
-            case mkToolRegistry guestTools of
+            let executionTools =
+                    executionToolsFromGroups coding.codingAppToolGroups
+            case mkToolRegistry executionTools of
                 Left err -> do
                     coding.codingClose
                     pure (Left err)

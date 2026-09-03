@@ -7,7 +7,7 @@ module Agent.Server.Sandbox
     ( TenantSandbox
     , openTenantSandbox
     , closeTenantSandbox
-    , routeSandboxTool
+    , composeSandboxTools
     ) where
 
 import Agent.Dialect (DialectId, dialectSlug)
@@ -25,7 +25,7 @@ import Agent.ToolDispatch
     )
 import Agent.Tools.Types
     ( AppTool(..)
-    , ToolPlacement(..)
+    , AppToolGroup(..)
     )
 import Control.Concurrent
     ( threadDelay )
@@ -188,33 +188,33 @@ closeTenantSandbox sandbox =
         modifyMVar_ sandbox.sandboxClosed (const (pure True))
         swapMVar sandbox.sandboxProcess Nothing >>= mapM_ stopSandbox
 
--- | Keep host tools in process, replace sandbox handlers with a protocol
--- proxy, and reject any tool which has not been explicitly classified.
-routeSandboxTool
+-- | Keep explicit host-service groups in process and replace every execution
+-- group with protocol-backed handlers before the generic runtime receives a
+-- flat tool list.
+composeSandboxTools
     :: TenantSandbox
     -> Text
     -- ^ Durable session id.
     -> FilePath
     -- ^ Canonical host cwd.
     -> DialectId
-    -> AppTool
-    -> Either Text AppTool
-routeSandboxTool sandbox sessionId cwd dialect tool =
-    case tool.appToolPlacement of
-        HostTool -> Right tool
-        SandboxTool ->
-            Right tool
-                { appToolHandler =
-                    passthroughTool tool.appToolName
-                        (invokeTenantTool sandbox sessionId cwd dialect)
-                -- Host resource resolvers must not inspect paths for a guest
-                -- operation. The tenant broker serializes calls itself.
-                , appToolResourceClaims = Nothing
-                }
-        UnclassifiedTool ->
-            Left
-                ("tool '" <> tool.appToolName
-                    <> "' has no execution-boundary classification")
+    -> [AppToolGroup]
+    -> [AppTool]
+composeSandboxTools sandbox sessionId cwd dialect =
+    concatMap composeGroup
+  where
+    composeGroup = \case
+        HostToolGroup tools -> tools
+        ExecutionToolGroup tools -> map proxy tools
+    proxy tool =
+        tool
+            { appToolHandler =
+                passthroughTool tool.appToolName
+                    (invokeTenantTool sandbox sessionId cwd dialect)
+            -- Host resource resolvers must not inspect paths for a guest
+            -- operation. The tenant broker serializes calls itself.
+            , appToolResourceClaims = Nothing
+            }
 
 invokeTenantTool
     :: TenantSandbox

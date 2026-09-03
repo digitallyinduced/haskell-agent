@@ -4,9 +4,14 @@ module Agent.CLI.Runtime.Orchestration.Types
     , AgentProcessRuntime(..)
     , AgentRunMode(..)
     , NativeInteractionMode(..)
-    , NativeIsolationMode(..)
+    , NativeDiscoveryContext(..)
+    , NativeWorkspaceDiscovery(..)
+    , NativeRunCapabilities(..)
     , NativeShellMode(..)
     , NativeRunHooks(..)
+    , fullNativeRunCapabilities
+    , nativeLoadsHostWorkspaceContext
+    , nativePreparedDiscovery
     , foregroundRunMode
     , backgroundRunMode
     , nativeRunMode
@@ -14,6 +19,8 @@ module Agent.CLI.Runtime.Orchestration.Types
 
 import Agent.CLI.AgentSessions ( SessionThreadManager )
 import Agent.CLI.AgentViewport ( AgentEntry )
+import Agent.CLI.Options ( CliOptions )
+import Agent.CLI.Project ( ProjectSettings )
 import Agent.Connectivity.NetworkPath ( NetworkRecovery )
 import Agent.CLI.Permission ( PermissionChoice )
 import Agent.Error ( ApiError )
@@ -22,7 +29,7 @@ import Agent.Provider ( Credential, TokenProvider )
 import Agent.Store.Postgres ( Store )
 import Agent.ToolDispatch ( ToolCall )
 import Agent.Tools.PlanMode ( PlanModeHooks )
-import Agent.Tools.Types ( AppTool )
+import Agent.Tools.Types ( AppTool, AppToolGroup )
 import Control.Concurrent.MVar ( MVar )
 import Data.IORef ( IORef )
 import Data.Text ( Text )
@@ -70,14 +77,58 @@ data NativeShellMode
     | NativeShellBoth
     deriving (Eq, Show)
 
--- | Whether a native embedding shares the host execution boundary.
---
--- Sandboxed embeddings must route every model-callable tool explicitly. The
--- CLI remains unrestricted so existing local behavior is unchanged.
-data NativeIsolationMode
-    = NativeUnrestricted
-    | NativeSandboxed
+-- | Host-side discovery results supplied by an embedding that does not want
+-- generic orchestration to inspect the turn workspace.
+data NativeDiscoveryContext = NativeDiscoveryContext
+    { nativeDiscoveryHome :: !OsPath
+    , nativeDiscoveryProjectRoot :: !OsPath
+    , nativeDiscoveryCatalogRoot :: !OsPath
+    , nativeDiscoveryProjectSettings :: !ProjectSettings
+    , nativeDiscoveryGitBranch :: !Text
+    , nativeDiscoveryOperatingSystem :: !Text
+    , nativeDiscoveryShell :: !Text
+    }
+
+-- | Choose whether orchestration performs normal host workspace discovery or
+-- consumes a context prepared by the embedding. The sum type makes the
+-- no-host-discovery case total: it cannot be requested without supplying the
+-- replacement context.
+data NativeWorkspaceDiscovery
+    = DiscoverHostWorkspace
+    | UsePreparedWorkspace !NativeDiscoveryContext
+
+nativePreparedDiscovery
+    :: NativeWorkspaceDiscovery
+    -> Maybe NativeDiscoveryContext
+nativePreparedDiscovery = \case
+    DiscoverHostWorkspace -> Nothing
+    UsePreparedWorkspace context -> Just context
+
+nativeLoadsHostWorkspaceContext :: NativeWorkspaceDiscovery -> Bool
+nativeLoadsHostWorkspaceContext = \case
+    DiscoverHostWorkspace -> True
+    UsePreparedWorkspace _ -> False
+
+-- | Independent optional facilities available to a native run. These are
+-- capabilities rather than an execution-mode identity: orchestration asks
+-- only whether a concrete facility was supplied.
+data NativeRunCapabilities = NativeRunCapabilities
+    { nativeProviderFallback :: !Bool
+    , nativeProviderHostedTools :: !Bool
+    , nativeHostExtensions :: !Bool
+    , nativeCollaboration :: !Bool
+    , nativeProviderNativeTools :: !Bool
+    }
     deriving (Eq, Show)
+
+fullNativeRunCapabilities :: NativeRunCapabilities
+fullNativeRunCapabilities = NativeRunCapabilities
+    { nativeProviderFallback = True
+    , nativeProviderHostedTools = True
+    , nativeHostExtensions = True
+    , nativeCollaboration = True
+    , nativeProviderNativeTools = True
+    }
 
 data NativeRunHooks = NativeRunHooks
     { nativeOnLoopEvent :: !(LoopEvent -> IO ())
@@ -86,10 +137,15 @@ data NativeRunHooks = NativeRunHooks
     , nativeRegisterAgentSnapshot :: !(IO [AgentEntry] -> IO ())
     , nativeRequestApproval :: !(ToolCall -> IO (Maybe PermissionChoice))
     , nativeRequestRootAccess :: !(OsPath -> IO Bool)
-    , nativeTools :: ![AppTool]
+    , nativeToolGroups :: ![AppToolGroup]
+    -- | Compose the final model-visible tool surface once, before the generic
+    -- registry is built. An embedding may replace execution groups here.
+    , nativeComposeTools :: !([AppToolGroup] -> [AppTool])
     , nativePlanHooks :: !PlanModeHooks
     , nativeInteractionMode :: !NativeInteractionMode
     , nativeShellMode :: !NativeShellMode
+    -- | Optional home override while performing ordinary host discovery.
+    -- Prepared discovery carries its required home in its context instead.
     , nativeHome :: !(Maybe OsPath)
     -- | A host-owned store borrowed for the duration of the turn. Native
     -- orchestration never closes a borrowed store.
@@ -98,11 +154,10 @@ data NativeRunHooks = NativeRunHooks
     -- scope. Multi-tenant callers use the tenant id here because PostgreSQL
     -- roles are cluster-global even when each tenant has its own database.
     , nativeDatabaseScopeNamespace :: !(Maybe Text)
-    , nativeIsolationMode :: !NativeIsolationMode
-    -- | Route one fully classified tool to its execution boundary. Sandboxed
-    -- embeddings reject unclassified tools and replace sandbox handlers with
-    -- broker-backed handlers.
-    , nativeRouteTool :: !(AppTool -> Either Text AppTool)
+    , nativeWorkspaceDiscovery :: !NativeWorkspaceDiscovery
+    , nativeCapabilities :: !NativeRunCapabilities
+    -- | Last-mile option policy owned by the embedding.
+    , nativePrepareOptions :: !(CliOptions -> Either Text CliOptions)
     }
 
 data AgentRunMode = AgentRunMode

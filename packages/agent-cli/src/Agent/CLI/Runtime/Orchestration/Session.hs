@@ -89,8 +89,10 @@ import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Startup
     ( clearNativeProgress, mcpToolCollision, reportStartupWarning )
 import Agent.CLI.Runtime.Orchestration.Types
-    ( NativeIsolationMode(..)
-    , NativeRunHooks(nativeIsolationMode)
+    ( NativeRunCapabilities(..)
+    , NativeRunHooks(nativeCapabilities, nativeWorkspaceDiscovery)
+    , fullNativeRunCapabilities
+    , nativeLoadsHostWorkspaceContext
     )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
@@ -482,14 +484,22 @@ runAgentSession
                     then Nothing
                     else Just selectableTokenProvider)
                 model
-        let sandboxedNative =
+        let nativeCapabilities =
                 maybe
-                    False
-                    ((== NativeSandboxed) . (.nativeIsolationMode))
+                    fullNativeRunCapabilities
+                    (.nativeCapabilities)
                     startup.startupNativeHooks
-            includeHostedSearch = not sandboxedNative
+            loadsHostWorkspaceContext =
+                maybe
+                    True
+                    (nativeLoadsHostWorkspaceContext
+                        . (.nativeWorkspaceDiscovery))
+                    startup.startupNativeHooks
+            includeHostedSearch =
+                nativeCapabilities.nativeProviderHostedTools
             initializeCodeMode
-                | sandboxedNative = pure (Right Nothing)
+                | not nativeCapabilities.nativeHostExtensions =
+                    pure (Right Nothing)
                 | options.optCodeMode =
                     codeModeSessionRuntimeFor codexModelInfo tools
                 | otherwise =
@@ -699,7 +709,7 @@ runAgentSession
             Just snapshot ->
                 newIORef snapshot.promptSnapshotGeneratedContext
             Nothing ->
-                if sandboxedNative
+                if not loadsHostWorkspaceContext
                     then newIORef environmentContextBlock
                     else
                         loadAgentsContext
@@ -881,7 +891,7 @@ runAgentSession
                         | otherwise = action Nothing
                 withStartupAvailability \startupUnavailable ->
                     runAgentProviders
-                        (if sandboxedNative || startup.startupBackground
+                        (if startup.startupBackground
                             then SessionLocalSwitch
                             else TopLevelSwitch)
                         loaded

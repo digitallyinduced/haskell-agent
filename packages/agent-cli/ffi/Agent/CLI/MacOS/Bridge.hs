@@ -40,12 +40,13 @@ import Agent.CLI.BrowserTools
 import Agent.CLI.Render (summarizeToolCall)
 import Agent.CLI.NativeRuntime
     ( NativeInteractionMode(..)
-    , NativeIsolationMode(..)
     , NativeProcessRuntime
     , NativeRunHooks(..)
     , NativeShellMode(..)
+    , NativeWorkspaceDiscovery(..)
     , StartupFailure(..)
     , closeNativeProcessRuntime
+    , fullNativeRunCapabilities
     , newNativeProcessRuntime
     , restartNativeMcpRuntime
     , runNativeAgent
@@ -235,7 +236,11 @@ import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanModeHooks(..)
     )
-import Agent.Tools.Types (AppTool)
+import Agent.Tools.Types
+    ( AppTool
+    , AppToolGroup(..)
+    , appToolsFromGroups
+    )
 import Control.Concurrent
     ( ThreadId
     , forkFinally
@@ -5438,7 +5443,8 @@ runNativeTurn
                 requestApproval callback context control
             , nativeRequestRootAccess =
                 requestRootAccessFromClient callback context control
-            , nativeTools = nativeBrowserTools
+            , nativeToolGroups = [HostToolGroup nativeBrowserTools]
+            , nativeComposeTools = appToolsFromGroups
             , nativePlanHooks =
                 nativePlanModeHooks control interactions
             , nativeInteractionMode =
@@ -5447,8 +5453,9 @@ runNativeTurn
             , nativeHome = Nothing
             , nativeDatabaseStore = Nothing
             , nativeDatabaseScopeNamespace = Nothing
-            , nativeIsolationMode = NativeUnrestricted
-            , nativeRouteTool = Right
+            , nativeWorkspaceDiscovery = DiscoverHostWorkspace
+            , nativeCapabilities = fullNativeRunCapabilities
+            , nativePrepareOptions = Right
             }
         args = nativeTurnArguments start
     result <- tryAny $

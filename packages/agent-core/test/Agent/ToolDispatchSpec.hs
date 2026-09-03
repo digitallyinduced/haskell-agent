@@ -7,7 +7,6 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
-    , ToolPlacement(..)
     , ToolSchema(..)
     , dispatchRegisteredToolCall
     , dispatchRegisteredToolCallDetailed
@@ -302,5 +301,4 @@ computerTool action = AppTool
     , appToolApproval = AlwaysPrompt
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
-    , appToolPlacement = UnclassifiedTool
     }
