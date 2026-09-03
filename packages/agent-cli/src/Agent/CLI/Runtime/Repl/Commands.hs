@@ -48,12 +48,6 @@ import Agent.CLI.Command.Instructions ( initInstruction )
 import Agent.CLI.Compaction
     ( CompactOutcome(compactSummary, compactBeforeTokens,
                      compactAfterTokens, compactHistory) )
-import Agent.CLI.Config
-    ( HarnessConfig(..)
-    , McpServerConfig(..)
-    , loadHarnessConfig
-    , updateHarnessConfig
-    )
 import Agent.CLI.Context ( formatContextReport )
 import Agent.Connectivity ()
 import Agent.CLI.Database ()
@@ -75,7 +69,6 @@ import Agent.CLI.GitDiff
     )
 import Agent.CLI.Input
     ( formatPasteChip,
-      readApprovalLine,
       readChoiceSelection,
       readReplHistory,
       submissionPromptText,
@@ -89,14 +82,12 @@ import Agent.CLI.GatewayClient ( loadGatewayCredential )
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
 import Agent.CLI.Login
-    ( connectProviderAccount
-    , runFullscreenLoginManager
+    ( runFullscreenLoginManager
     , runLoginManager
     )
 import Agent.CLI.Lsp ()
 import Agent.CLI.ManagedTurn ()
 import Agent.CLI.McpManager ( runMcpManager )
-import Agent.CLI.McpOAuth ( loginMcp )
 import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig ()
 import Agent.CLI.Models ()
@@ -142,14 +133,6 @@ import Agent.CLI.Review
     , reviewPrompt
     )
 import Agent.CLI.Runtime.HistorySource ()
-import Agent.CLI.Runtime.MetaConsole
-    ( MetaSecretValue(..)
-    , applyMetaConfigActions
-    , buildMetaContext
-    , isMetaConfigAction
-    , metaConfigRequiresRestart
-    , runMetaPlanner
-    )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ( runSessionRecap )
 import Agent.CLI.Runtime.Repl.Attachments
@@ -162,8 +145,9 @@ import Agent.CLI.Runtime.Repl.Context
     , requestReplText
     , withReplSuspended
     )
+import Agent.CLI.Runtime.Repl.MetaConsole ( handleMetaConsoleRequest )
 import Agent.CLI.Runtime.Repl.Selection
-    ( handleSelectionAction, handleSelectionInput, selectRequestedAccount )
+    ( handleSelectionAction, handleSelectionInput )
 import Agent.CLI.Runtime.Repl.Session ( handleSessionAction )
 import Agent.CLI.Runtime.Repl.Transcript
     ( TranscriptAction(..), handleTranscriptAction )
@@ -171,7 +155,6 @@ import Agent.CLI.Runtime.Repl.Workflow ( handleWorkflowAction )
 import Agent.CLI.Runtime.Types
     ( RunResult(RunEnableCodeMode, RunFreshSession, RunRestart, RunUpdateAndRestart,
                 RunSwitchProvider, RunReload, RunQuit) )
-import Agent.CLI.Secret ( promptSecretLine )
 import Agent.CLI.Session
     ( TranscriptEffect(TranscriptReplace),
       appendTurnWithMetaUpdateIndexed,
@@ -214,11 +197,8 @@ import Agent.CLI.TUI.App
       commitFullscreenImagePreviews,
       commitFullscreenHistoryTurn,
       emitUiEvent,
-      requestFullscreenChoiceWithBody,
       requestFullscreenDocument,
       requestFullscreenFilterChoice,
-      requestFullscreenSecret,
-      requestFullscreenText,
       queuedFullscreenInputDisplays,
       setFullscreenImagePreviews )
 import Agent.CLI.TUI.SessionHistory ( sessionHistoryTurn )
@@ -250,7 +230,7 @@ import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient ()
 import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ( toText, unsafeToFilePath )
-import Agent.Provider ( Provider(ClaudeCodeProvider), providerSlug )
+import Agent.Provider ( Provider(ClaudeCodeProvider) )
 import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient ()
 import Agent.Responses.Types ( ResponseCreateParams(model) )
@@ -288,7 +268,7 @@ import Control.Concurrent.STM ()
 import Control.Exception ( AsyncException(UserInterrupt) )
 import Control.Exception.Safe
     ( displayException, finally, throwIO, tryAny, tryIO )
-import Control.Monad ( foldM, forM_, when )
+import Control.Monad ( forM_, when )
 import Data.Foldable ( toList )
 import Data.IORef ( newIORef, readIORef, writeIORef )
 import Data.List ( findIndex )
@@ -306,14 +286,6 @@ import System.Posix.Files ( getSymbolicLinkStatus )
 import qualified Agent.Responses.GenericClient as GenericResponses
     ()
 import qualified Agent.MCP as MCP
-import qualified Agent.CLI.MetaConsole as Meta
-    ( MetaAction(..)
-    , MetaPlan(..)
-    , formatMetaError
-    , metaPlanMutates
-    , metaPlanPreviews
-    )
-import qualified Data.Map.Strict as Map
 import qualified Agent.OpenAI.Auth as OpenAI ()
 import qualified Agent.OpenRouter as OpenRouter ()
 import qualified Agent.OpenRouter.Usage as OpenRouterUsage ()
@@ -322,7 +294,7 @@ import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text
-    ( intercalate, map, null, pack, replace, strip, toCaseFold, toLower )
+    ( intercalate, null, pack, replace, strip, toCaseFold )
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn, readFile )
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Usage as XAIUsage ()
@@ -1107,338 +1079,17 @@ handleReplLine
                 fullscreenEvent (UiUserSubmitted original)
                 result <- runOneTurn env original skillInputs
                 finishTurn False result
-    runMetaConsoleRequest rawRequest
-        | Text.null request = do
-            displayError "Meta Console request must not be empty" do
-                color <- resolveColor stderr
-                Text.hPutStrLn stderr
-                    (roleError color
-                        "Meta Console request must not be empty")
-            continue
-        | otherwise =
-            loadHarnessConfig env.sessionHome >>= \case
-                Left err -> metaFailure err
-                Right config -> do
-                    context <- buildMetaContext env config
-                    obtainMetaPlan context request (0 :: Int) >>= \case
-                        Left err -> metaFailure err
-                        Right Nothing -> do
-                            displayInfo "Meta Console cancelled" do
-                                color <- resolveColor stderr
-                                Text.hPutStrLn stderr
-                                    (roleMuted color
-                                        "Meta Console cancelled")
-                            continue
-                        Right (Just plan) -> do
-                            approved <- approveMetaPlan plan
-                            if not approved
-                                then do
-                                    displayInfo
-                                        "Meta Console changes cancelled"
-                                        do
-                                            color <-
-                                                resolveColor stderr
-                                            Text.hPutStrLn stderr
-                                                (roleMuted color
-                                                    "Meta Console changes cancelled")
-                                    continue
-                                else
-                                    applyMetaPlan config plan
-      where
-        request = Text.strip rawRequest
-    obtainMetaPlan context original clarificationCount =
-        withReplActivity "Meta Console · interpreting…" $
-            runMetaPlanner env context original >>= \case
-                Left err ->
-                    pure (Left (Meta.formatMetaError err))
-                Right plan ->
-                    case plan.metaActions of
-                        [Meta.MetaClarify question]
-                            | clarificationCount >= 2 ->
-                                pure
-                                    (Left
-                                        "Meta Console still needs clarification after two replies")
-                            | otherwise ->
-                                askMetaClarification question >>= \case
-                                    Nothing -> pure (Right Nothing)
-                                    Just answer ->
-                                        obtainMetaPlan
-                                            context
-                                            (original
-                                                <> "\n\nClarification question: "
-                                                <> question
-                                                <> "\nClarification answer: "
-                                                <> answer)
-                                            (clarificationCount + 1)
-                        _ -> pure (Right (Just plan))
-    askMetaClarification question =
-        case fullscreen of
-            Just runtime ->
-                requestFullscreenText
-                    runtime
-                    "Meta Console clarification"
-                    question
-                    ""
-            Nothing ->
-                readApprovalLine
-                    ("\nMeta Console needs clarification:\n"
-                        <> safeMetaText question
-                        <> "\nanswer> ")
-    approveMetaPlan plan
-        | not (Meta.metaPlanMutates plan) = pure True
-        | otherwise =
-            readIORef policyRef >>= \case
-                ApproveAll -> do
-                    showMetaPreview "Meta Console will apply" plan
-                    pure True
-                DenyMutating -> do
-                    displayError
-                        "Meta Console changes are blocked by the current deny-mutations policy"
-                        do
-                            color <- resolveColor stderr
-                            Text.hPutStrLn stderr
-                                (roleError color
-                                    "Meta Console changes are blocked by the current deny-mutations policy")
-                    pure False
-                PromptMutating ->
-                    case fullscreen of
-                        Just runtime ->
-                            requestFullscreenChoiceWithBody
-                                runtime
-                                "Apply Meta Console changes?"
-                                (metaPreviewBody plan)
-                                0
-                                [ ( "Apply changes"
-                                  , "Execute only the typed actions shown above"
-                                  )
-                                , ( "Cancel"
-                                  , "Leave configuration unchanged"
-                                  )
-                                ]
-                                >>= pure . (== Just 0)
-                        Nothing -> do
-                            showMetaPreview "Meta Console proposes" plan
-                            readApprovalLine
-                                "Apply these changes? [y/N] "
-                                >>= pure . maybe False isYes
-    showMetaPreview heading plan =
-        displayInfo (heading <> "\n" <> metaPreviewBody plan) do
-            color <- resolveColor stderr
-            Text.hPutStrLn stderr
-                (roleMuted color
-                    (heading <> "\n" <> metaPreviewBody plan))
-    metaPreviewBody plan =
-        safeMetaText plan.metaSummary
-            <> "\n"
-            <> Text.intercalate
-                "\n"
-                [ Text.pack (show index)
-                    <> ". "
-                    <> safeMetaText preview
-                | (index, preview) <-
-                    zip [(1 :: Int) ..] (Meta.metaPlanPreviews plan)
-                ]
-    applyMetaPlan initial plan =
-        collectMetaSecrets plan.metaActions >>= \case
-            Left err -> metaFailure err
-            Right secrets -> do
-                configResult <-
-                    if any isMetaConfigAction plan.metaActions
-                        then
-                            updateHarnessConfig
-                                env.sessionHome
-                                (applyMetaConfigActions
-                                    secrets
-                                    plan.metaActions)
-                        else pure (Right initial)
-                case configResult of
-                    Left err -> metaFailure err
-                    Right appliedConfig ->
-                        executeMetaHostActions
-                            appliedConfig
-                            plan.metaActions
-                            >>= \case
-                                Left err -> metaFailure err
-                                Right terminalResult -> do
-                                    let success =
-                                            (if Meta.metaPlanMutates plan
-                                                then "Meta Console applied\n"
-                                                else "Meta Console\n")
-                                                <> metaPreviewBody plan
-                                    displayInfo success do
-                                        color <- resolveColor stderr
-                                        Text.hPutStrLn stderr
-                                            (roleSuccess color
-                                                (glyphOk <> success))
-                                    case terminalResult of
-                                        Just result -> pure result
-                                        Nothing
-                                            | metaPlanNeedsRestart
-                                                plan.metaActions ->
-                                                requestMetaRestart
-                                                    fullscreen
-                                                    persist
-                                            | otherwise -> continue
-    collectMetaSecrets =
-        foldM collectOneSecret (Right [])
-      where
-        collectOneSecret (Left err) _ = pure (Left err)
-        collectOneSecret (Right values) action = case action of
-            Meta.MetaSetMcpSecretEnv server key ->
-                promptMetaSecret
-                    ("MCP " <> server <> " · " <> key)
-                    ("Enter the value for environment variable "
-                        <> key
-                        <> " on MCP server "
-                        <> server
-                        <> ". It stays local and is never sent to the model.")
-                    >>= \case
-                        Nothing ->
-                            pure
-                                (Left
-                                    ("secret input for MCP server '"
-                                        <> server
-                                        <> "' was cancelled"))
-                        Just value ->
-                            pure
-                                (Right
-                                    (values
-                                        <> [ MetaMcpSecretValue
-                                                server key value
-                                           ]))
-            Meta.MetaSetLspSecretEnv server key ->
-                promptMetaSecret
-                    ("LSP " <> server <> " · " <> key)
-                    ("Enter the value for environment variable "
-                        <> key
-                        <> " on LSP server "
-                        <> server
-                        <> ". It stays local and is never sent to the model.")
-                    >>= \case
-                        Nothing ->
-                            pure
-                                (Left
-                                    ("secret input for LSP server '"
-                                        <> server
-                                        <> "' was cancelled"))
-                        Just value ->
-                            pure
-                                (Right
-                                    (values
-                                        <> [ MetaLspSecretValue
-                                                server key value
-                                           ]))
-            _ -> pure (Right values)
-    promptMetaSecret title body =
-        case fullscreen of
-            Just runtime ->
-                requestFullscreenSecret runtime title body
-            Nothing ->
-                promptSecretLine
-                    env.sessionEscPaused
-                    body
-                    (Just
-                        "Meta Console configuration; the value is written only to the local config file")
-    executeMetaHostActions config =
-        foldM (executeOneMetaHostAction config) (Right Nothing)
-    executeOneMetaHostAction _ (Left err) _ = pure (Left err)
-    executeOneMetaHostAction _ result@(Right (Just _)) _ = pure result
-    executeOneMetaHostAction config (Right Nothing) action = case action of
-        Meta.MetaConnectAccount requestedProvider -> do
-            color <- resolveColor stderr
-            tryAny
-                (legacy
-                    (connectProviderAccount color requestedProvider))
-                >>= \case
-                    Left err ->
-                        pure
-                            (Left
-                                ("Could not connect "
-                                    <> providerSlug requestedProvider
-                                    <> ": "
-                                    <> Text.pack (displayException err)))
-                    Right Nothing ->
-                        pure
-                            (Left
-                                ("Connecting "
-                                    <> providerSlug requestedProvider
-                                    <> " was cancelled or did not complete"))
-                    Right (Just _) -> pure (Right Nothing)
-        Meta.MetaSelectAccount requestedProvider selector ->
-            selectRequestedAccount env requestedProvider selector
-        Meta.MetaLoginMcpOAuth name ->
-            case Map.lookup name config.configMcpServers >>= (.mcpUrl) of
-                Nothing ->
-                    pure
-                        (Left
-                            ("Remote MCP server '"
-                                <> name
-                                <> "' is not configured"))
-                Just url ->
-                    tryAny (legacy (loginMcp url)) >>= \case
-                        Left _ ->
-                            pure
-                                (Left
-                                    "MCP OAuth login failed; the login flow did not complete")
-                        Right () -> pure (Right Nothing)
-        Meta.MetaSessionCommand command ->
-            runMetaSessionCommand command
-        Meta.MetaInform _ -> pure (Right Nothing)
-        _ -> pure (Right Nothing)
-    runMetaSessionCommand command =
-        case parseReplLineWithCatalog slashCatalog command of
-            action
-                | safeMetaSessionAction action -> do
-                    result <-
-                        submitLine
-                            slashCatalog
-                            skillInvocations
-                            (pure RunQuit)
-                            stdoutColor
-                            False
-                            command
-                    pure $
-                        Right case result of
-                            RunQuit -> Nothing
-                            terminalResult -> Just terminalResult
-            _ ->
-                pure
-                    (Left
-                        ("Meta Console rejected unsupported session command: "
-                            <> command))
-    safeMetaSessionAction = \case
-        ReplSetEffort{} -> True
-        ReplToggleFast -> True
-        ReplSetModel{} -> True
-        ReplSetShell{} -> True
-        ReplToggleAlwaysApprove -> True
-        ReplSetAgentLimit{} -> True
-        ReplEnableCodeMode -> True
-        ReplSkills True -> True
-        _ -> False
-    metaPlanNeedsRestart actions =
-        metaConfigRequiresRestart actions
-            || any
-                (\case
-                    Meta.MetaLoginMcpOAuth{} -> True
-                    _ -> False)
-                actions
-    metaFailure err = do
-        let safeError = safeMetaText err
-        displayError safeError do
-            color <- resolveColor stderr
-            Text.hPutStrLn stderr (roleError color safeError)
-        continue
-    isYes =
-        (`elem` ["y", "yes"])
-            . Text.toLower
-            . Text.strip
-    safeMetaText =
-        Text.map
-            (\character ->
-                if character < ' ' && character `notElem` ['\n', '\t']
-                    then ' '
-                    else character)
+    runMetaConsoleRequest =
+        handleMetaConsoleRequest
+            handlerContext
+            slashCatalog
+            (submitLine
+                slashCatalog
+                skillInvocations
+                (pure RunQuit)
+                stdoutColor
+                False)
+
     continue = continueWith ""
     chooseReviewTarget =
         requestChoice
@@ -1699,29 +1350,6 @@ requestMcpRestart fullscreen persist = do
         PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
             report "restarting MCP servers…"
-            pure (RunRestart handle.sessionMeta.metaId)
-
-requestMetaRestart
-    :: Maybe FullscreenRuntime
-    -> Persistence
-    -> IO RunResult
-requestMetaRestart fullscreen persist = do
-    color <- resolveColor stderr
-    let report message =
-            case fullscreen of
-                Nothing ->
-                    putTextLn stderr
-                        (roleMuted color (glyphSession <> message))
-                Just runtime ->
-                    emitUiEvent runtime (UiSystemMessage message)
-    case persist of
-        PersistenceDisabled -> do
-            report
-                "restart the agent to apply Meta Console changes"
-            pure RunQuit
-        PersistenceEnabled slotRef -> do
-            handle <- ensureSession slotRef
-            report "restarting to apply Meta Console changes…"
             pure (RunRestart handle.sessionMeta.metaId)
 
 requestGatewayRestart
