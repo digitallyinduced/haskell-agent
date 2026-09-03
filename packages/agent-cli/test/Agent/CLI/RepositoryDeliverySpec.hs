@@ -173,6 +173,20 @@ spec = describe "repository delivery service" do
             confirmRepositoryPush root preview.pushPreviewConfirmation
                 `shouldReturnSatisfying` isConfirmationRejection
 
+    it "rejects a push token for PR creation and still consumes it" $
+        withDeliveryRepository \root _ -> do
+            appendFile (root <> "/tracked.txt") "second\n"
+            _ <- git root ["add", "tracked.txt"]
+            _ <- git root ["commit", "-q", "-m", "second"]
+            snapshot <- expectRight =<< repositorySnapshot root
+            preview <- expectRight
+                =<< previewRepositoryPush root snapshot.snapshotId
+
+            createPullRequest root preview.pushPreviewConfirmation
+                `shouldReturnSatisfying` isConfirmationRejection
+            confirmRepositoryPush root preview.pushPreviewConfirmation
+                `shouldReturnSatisfying` isConfirmationRejection
+
     it "pushes SHA-256 repositories through an isolated matching object store" $
         withDeliveryRepositoryWithFormat (Just "sha256") \root remote -> do
             appendFile (root <> "/tracked.txt") "second\n"
@@ -472,6 +486,19 @@ spec = describe "repository delivery service" do
                     "https://github.com/owner/repository/pull/123"
                 readFile bodyCapture `shouldReturn` Text.unpack body
                 doesFileExist injectionMarker `shouldReturn` False
+                createPullRequest root preview.pullRequestConfirmation
+                    `shouldReturnSatisfying` isConfirmationRejection
+
+    it "rejects a PR token for pushing and still consumes it" $
+        withDeliveryRepository \root _ ->
+            withFakeGh root \_ _ -> do
+                snapshot <- expectRight =<< repositorySnapshot root
+                preview <- expectRight
+                    =<< previewPullRequest
+                        root snapshot.snapshotId "main" "Title" "Body"
+
+                confirmRepositoryPush root preview.pullRequestConfirmation
+                    `shouldReturnSatisfying` isConfirmationRejection
                 createPullRequest root preview.pullRequestConfirmation
                     `shouldReturnSatisfying` isConfirmationRejection
 
