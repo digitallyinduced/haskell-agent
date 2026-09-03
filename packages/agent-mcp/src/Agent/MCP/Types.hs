@@ -295,6 +295,13 @@ data PendingRequest = PendingRequest
     , pendingOnProgress :: !(McpProgress -> IO ())
     }
 
+-- | Request ids and their response destinations. Keeping both values in one
+-- STM cell makes id allocation and waiter registration one atomic transition.
+data RequestRegistry = RequestRegistry
+    { requestRegistryNextId :: !Int
+    , requestRegistryPending :: !(IntMap.IntMap PendingRequest)
+    }
+
 mcpSkillEntryDecoder :: Json.Decoder McpSkillEntry
 mcpSkillEntryDecoder = Json.object do
     mcpSkillUri <- Json.atKey "uri" Json.text
@@ -414,8 +421,7 @@ data McpClient = McpClient
     { clientConfig :: !McpServerConfig
     , clientHooks :: !McpHostHooks
     , clientTransport :: !McpClientTransport
-    , clientNextId :: !(IORef Int)
-    , clientPending :: !(TVar (IntMap.IntMap PendingRequest))
+    , clientRequestRegistry :: !(TVar RequestRegistry)
     , clientFailure :: !(TVar (Maybe Text))
     , clientWorkers :: !(TVar [Async ()])
     -- ^ Background work owned by the client: handlers for server-initiated
