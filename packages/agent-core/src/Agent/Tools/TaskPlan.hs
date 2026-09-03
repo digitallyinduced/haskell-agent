@@ -82,10 +82,13 @@ data TaskPlanReminderState
     | TaskPlanReminderConsumed
 
 data TaskPlanMemory
-    = TaskPlanEmpty
-    | TaskPlanPresent !CurrentTaskPlan !TaskPlanReminderState
+    = TaskPlanEmpty !Integer
+    | TaskPlanPresent
+        !Integer
+        !CurrentTaskPlan
+        !TaskPlanReminderState
 
-newtype TaskPlanReminder = TaskPlanReminder CurrentTaskPlan
+data TaskPlanReminder = TaskPlanReminder !Integer !CurrentTaskPlan
     deriving (Eq, Show)
 
 data TaskPlanEnv = TaskPlanEnv
@@ -149,7 +152,7 @@ newTaskPlanEnv
     -> Maybe TaskPlanHooks
     -> IO TaskPlanEnv
 newTaskPlanEnv initial hooks = do
-    memoryRef <- newIORef (resumeTaskPlanMemory initial)
+    memoryRef <- newIORef (initialTaskPlanMemory initial)
     mutationLock <- newMVar ()
     pure TaskPlanEnv
         { taskPlanMemoryRef = memoryRef
@@ -178,7 +181,7 @@ replaceTaskPlan env plan =
             Left err -> pure (lock, Left err)
             Right revision -> do
                 let current = CurrentTaskPlan revision plan
-                writeIORef env.taskPlanMemoryRef
+                modifyIORef' env.taskPlanMemoryRef
                     (publishTaskPlanMemory current)
                 pure (lock, Right current)
 
@@ -192,7 +195,7 @@ clearTaskPlan env =
         case persisted of
             Left err -> pure (lock, Left err)
             Right () -> do
-                writeIORef env.taskPlanMemoryRef TaskPlanEmpty
+                modifyIORef' env.taskPlanMemoryRef clearTaskPlanMemory
                 pure (lock, Right ())
 
 -- | Replace only the in-memory projection after the host switches the
@@ -204,7 +207,8 @@ resetTaskPlanState
     -> IO ()
 resetTaskPlanState env current =
     modifyMVar env.taskPlanMutationLock \lock -> do
-        writeIORef env.taskPlanMemoryRef (resumeTaskPlanMemory current)
+        modifyIORef' env.taskPlanMemoryRef
+            (resumeTaskPlanMemory current)
         pure (lock, ())
 
 taskPlanContextMarker :: Text
@@ -238,7 +242,7 @@ currentTaskPlanContextText env =
     fmap taskPlanContextText <$> readTaskPlan env
 
 taskPlanReminderText :: TaskPlanReminder -> Text
-taskPlanReminderText (TaskPlanReminder current) =
+taskPlanReminderText (TaskPlanReminder _ current) =
     taskPlanContextText current
 
 -- | Consume the one-shot reminder used when a runtime resumes persisted state.
@@ -248,34 +252,69 @@ takeTaskPlanReminder env =
 
 -- | Requeue a consumed resume reminder when prompt preparation fails before
 -- the corresponding input can become part of canonical history.  The token
--- identifies the plan that was consumed, so a delayed failure cannot requeue
--- a replacement plan.
+-- identifies both the plan and its installation generation, so a delayed
+-- failure cannot requeue a replacement plan or an identical plan from a
+-- different session.
 restoreTaskPlanReminder :: TaskPlanEnv -> TaskPlanReminder -> IO ()
 restoreTaskPlanReminder env reminder =
     atomicModifyIORef' env.taskPlanMemoryRef \memory ->
         (restoreTaskPlanReminderStep reminder memory, ())
 
-resumeTaskPlanMemory :: Maybe CurrentTaskPlan -> TaskPlanMemory
-resumeTaskPlanMemory = \case
-    Nothing -> TaskPlanEmpty
-    Just current -> TaskPlanPresent current TaskPlanReminderPending
+initialTaskPlanMemory :: Maybe CurrentTaskPlan -> TaskPlanMemory
+initialTaskPlanMemory = \case
+    Nothing -> TaskPlanEmpty 0
+    Just current ->
+        TaskPlanPresent 0 current TaskPlanReminderPending
 
-publishTaskPlanMemory :: CurrentTaskPlan -> TaskPlanMemory
-publishTaskPlanMemory current =
-    TaskPlanPresent current TaskPlanReminderInactive
+resumeTaskPlanMemory
+    :: Maybe CurrentTaskPlan
+    -> TaskPlanMemory
+    -> TaskPlanMemory
+resumeTaskPlanMemory current memory =
+    let generation = nextTaskPlanGeneration memory
+    in case current of
+        Nothing -> TaskPlanEmpty generation
+        Just value ->
+            TaskPlanPresent generation value TaskPlanReminderPending
+
+publishTaskPlanMemory
+    :: CurrentTaskPlan
+    -> TaskPlanMemory
+    -> TaskPlanMemory
+publishTaskPlanMemory current memory =
+    TaskPlanPresent
+        (nextTaskPlanGeneration memory)
+        current
+        TaskPlanReminderInactive
+
+clearTaskPlanMemory :: TaskPlanMemory -> TaskPlanMemory
+clearTaskPlanMemory memory =
+    TaskPlanEmpty (nextTaskPlanGeneration memory)
+
+nextTaskPlanGeneration :: TaskPlanMemory -> Integer
+nextTaskPlanGeneration memory =
+    taskPlanGeneration memory + 1
+
+taskPlanGeneration :: TaskPlanMemory -> Integer
+taskPlanGeneration = \case
+    TaskPlanEmpty generation -> generation
+    TaskPlanPresent generation _ _ -> generation
 
 currentTaskPlan :: TaskPlanMemory -> Maybe CurrentTaskPlan
 currentTaskPlan = \case
-    TaskPlanEmpty -> Nothing
-    TaskPlanPresent current _ -> Just current
+    TaskPlanEmpty _ -> Nothing
+    TaskPlanPresent _ current _ -> Just current
 
 takeTaskPlanReminderStep
     :: TaskPlanMemory
     -> (TaskPlanMemory, Maybe TaskPlanReminder)
 takeTaskPlanReminderStep = \case
-    TaskPlanPresent current TaskPlanReminderPending ->
-        ( TaskPlanPresent current TaskPlanReminderConsumed
-        , Just (TaskPlanReminder current)
+    TaskPlanPresent generation current TaskPlanReminderPending ->
+        ( TaskPlanPresent
+            generation
+            current
+            TaskPlanReminderConsumed
+        , Just (TaskPlanReminder generation current)
         )
     memory -> (memory, Nothing)
 
@@ -283,10 +322,15 @@ restoreTaskPlanReminderStep
     :: TaskPlanReminder
     -> TaskPlanMemory
     -> TaskPlanMemory
-restoreTaskPlanReminderStep (TaskPlanReminder consumed) = \case
-    TaskPlanPresent current TaskPlanReminderConsumed
-        | current == consumed ->
-            TaskPlanPresent current TaskPlanReminderPending
+restoreTaskPlanReminderStep
+        (TaskPlanReminder consumedGeneration consumed) = \case
+    TaskPlanPresent generation current TaskPlanReminderConsumed
+        | generation == consumedGeneration
+        , current == consumed ->
+            TaskPlanPresent
+                generation
+                current
+                TaskPlanReminderPending
     memory -> memory
 
 isTaskPlanContextText :: Text -> Bool

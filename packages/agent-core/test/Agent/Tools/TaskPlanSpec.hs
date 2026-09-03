@@ -82,6 +82,20 @@ spec = describe "task plans" do
         taskPlanReminderText <$> restored
             `shouldBe` Just (taskPlanContextText replacement)
 
+    it "rejects a reminder token from an identical prior session" do
+        let current = CurrentTaskPlan 1 $
+                TaskPlan Nothing [TaskPlanItem "same" TaskPlanPending]
+        env <- newTaskPlanEnv (Just current) Nothing
+        Just oldReminder <- takeTaskPlanReminder env
+        resetTaskPlanState env (Just current)
+        Just currentReminder <- takeTaskPlanReminder env
+        restoreTaskPlanReminder env oldReminder
+        takeTaskPlanReminder env `shouldReturn` Nothing
+        restoreTaskPlanReminder env currentReminder
+        restored <- takeTaskPlanReminder env
+        taskPlanReminderText <$> restored
+            `shouldBe` Just (taskPlanContextText current)
+
     it "does not make a freshly published plan into a resume reminder" do
         let resumed = CurrentTaskPlan 4 $
                 TaskPlan Nothing [TaskPlanItem "resumed" TaskPlanPending]
