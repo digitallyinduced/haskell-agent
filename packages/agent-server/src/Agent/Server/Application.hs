@@ -13,22 +13,24 @@ import Agent.Server.Auth
     , corsResponseHeaders
     , isCorsPreflight
     )
-import Agent.Server.Backend (Backend(..))
-import Agent.Server.Identifier (newUUIDv7Text)
+import Agent.Server.Backend (Backend(..), SessionMutationLease(..))
+import Agent.Server.Identifier (isUUIDText, newUUIDv7Text)
 import Agent.Server.Supervisor
     ( CheckedSubmitError(..)
     , EventSubscriptionError(..)
     , SubmitError(..)
     , SessionMutationError(..)
     , Supervisor
+    , TurnPersistence(..)
     , cancelTurn
     , listHumanRequests
     , listTurns
     , lookupTurn
     , lookupTurnAgents
     , resolveHumanRequest
-    , submitTurnChecked
+    , submitReservedTurnChecked
     , subscribeEvents
+    , trySubmitReservedTurnChecked
     , withSessionMutation
     )
 import Agent.Server.Types
@@ -41,6 +43,8 @@ import Control.Concurrent.STM
     )
 import Control.Exception.Safe
     ( finally
+    , mask
+    , onException
     , tryAny
     )
 import Control.Monad (foldM)
@@ -63,9 +67,14 @@ import Data.ByteString.Builder
     )
 import Data.ByteString.Char8 qualified as ByteString8
 import Data.ByteString.Lazy qualified as LazyByteString
+import Data.List (sortOn)
+import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
+import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
+import Data.Time.Clock (UTCTime, getCurrentTime)
 import Network.HTTP.Types
     ( Header
     , Status
@@ -255,16 +264,19 @@ dispatchBoundary
             createTurnResponse
                 config backend supervisor boundary sessionId headers request
         ("GET", ["v1", "turns"]) ->
-            listTurnsResponse supervisor boundary headers request
+            listTurnsResponse backend supervisor boundary headers request
         ("GET", ["v1", "turns", rawTurnId]) ->
-            findTurn supervisor boundary rawTurnId >>= pure
+            findTurn backend supervisor boundary rawTurnId >>= pure
+                . fmap (jsonResponse status200 headers . toJSONValue)
+        ("GET", ["v1", "turns", rawTurnId, "result"]) ->
+            findTurnResult backend boundary rawTurnId >>= pure
                 . fmap (jsonResponse status200 headers . toJSONValue)
         ("POST", ["v1", "turns", rawTurnId, "cancel"]) ->
-            cancelTurnResponse supervisor boundary rawTurnId headers
+            cancelTurnResponse backend supervisor boundary rawTurnId headers
         ("GET", ["v1", "turns", rawTurnId, "agents"]) ->
             turnAgentsResponse supervisor boundary rawTurnId headers
         ("GET", ["v1", "requests"]) ->
-            humanRequestsResponse supervisor boundary headers
+            humanRequestsResponse supervisor boundary headers request
         ("POST", ["v1", "requests", rawRequestId, "resolve"]) ->
             resolveHumanRequestResponse
                 config supervisor boundary rawRequestId headers request
@@ -358,6 +370,7 @@ patchSessionResponse
                             })
                 else
                     runSessionMutation
+                        backend
                         supervisor
                         boundary
                         sessionId
@@ -380,6 +393,7 @@ deleteSessionResponse
     -> IO (Either ApiError Response)
 deleteSessionResponse backend supervisor boundary sessionId headers =
     runSessionMutation
+        backend
         supervisor
         boundary
         sessionId
@@ -436,6 +450,7 @@ forkSessionResponse
         config backend supervisor boundary sessionId headers request =
     withJsonBody config request \body ->
         runSessionMutation
+            backend
             supervisor
             boundary
             sessionId
@@ -464,42 +479,47 @@ createTurnResponse
                 . fmap (jsonResponse status202 headers . toJSONValue)
 
 listTurnsResponse
-    :: Supervisor
+    :: Backend
+    -> Supervisor
     -> AccessBoundary
     -> [Header]
     -> Request
     -> IO (Either ApiError Response)
-listTurnsResponse supervisor boundary headers request =
+listTurnsResponse backend supervisor boundary headers request =
     case queryOptionalText "sessionId" request of
         Left err -> pure (Left err)
-        Right sessionId -> do
-            turns <- listTurns supervisor boundary sessionId
-            pure $
-                Right $
-                    jsonResponse
-                        status200
-                        headers
-                        (object ["data" .= turns])
+        Right sessionId ->
+            listKnownTurns
+                backend
+                supervisor
+                boundary
+                sessionId >>= pure
+                    . fmap
+                        (\turns ->
+                            jsonResponse
+                                status200
+                                headers
+                                (object ["data" .= turns]))
 
 cancelTurnResponse
-    :: Supervisor
+    :: Backend
+    -> Supervisor
     -> AccessBoundary
     -> Text
     -> [Header]
     -> IO (Either ApiError Response)
-cancelTurnResponse supervisor boundary rawTurnId headers =
-    cancelTurn
+cancelTurnResponse backend supervisor boundary rawTurnId headers =
+    cancelKnownTurn
+        backend
         supervisor
         boundary
-        (TurnId rawTurnId) >>= \case
-            Left _ -> pure (Left turnNotFound)
-            Right turn ->
-                pure $
-                    Right $
-                        jsonResponse
-                            status200
-                            headers
-                            (toJSONValue turn)
+        rawTurnId >>= pure
+            . fmap
+                (\(responseStatus, turn) ->
+                    jsonResponse
+                        responseStatus
+                        headers
+                        (toJSONValue turn))
 
 turnAgentsResponse
     :: Supervisor
@@ -525,15 +545,29 @@ humanRequestsResponse
     :: Supervisor
     -> AccessBoundary
     -> [Header]
+    -> Request
     -> IO (Either ApiError Response)
-humanRequestsResponse supervisor boundary headers = do
-    requests <- listHumanRequests supervisor boundary
-    pure $
-        Right $
-            jsonResponse
-                status200
-                headers
-                (object ["data" .= requests])
+humanRequestsResponse supervisor boundary headers request =
+    case queryOptionalTurnId request of
+        Left err -> pure (Left err)
+        Right turnId ->
+            listHumanRequests supervisor boundary turnId >>= \case
+                Left message ->
+                    pure $
+                        Left
+                            ApiError
+                                { apiErrorStatus = 503
+                                , apiErrorCode = "store_unavailable"
+                                , apiErrorMessage = message
+                                , apiErrorDetails = Nothing
+                                }
+                Right requests ->
+                    pure $
+                        Right $
+                            jsonResponse
+                                status200
+                                headers
+                                (object ["data" .= requests])
 
 resolveHumanRequestResponse
     :: ApplicationConfig
@@ -545,38 +579,41 @@ resolveHumanRequestResponse
     -> IO (Either ApiError Response)
 resolveHumanRequestResponse
         config supervisor boundary rawRequestId headers request =
-    withJsonBody config request \(body :: ResolveRequest) -> do
-        let response = HumanResponse
-                { humanResponseDecision =
-                    body.resolveRequestDecision
-                , humanResponseValue =
-                    body.resolveRequestValue
-                }
-        resolveHumanRequest
-            supervisor
-            boundary
-            (RequestId rawRequestId)
-            response >>= \case
-                Left message ->
-                    pure $
-                        Left ApiError
-                            { apiErrorStatus =
-                                if "not found"
-                                    `Text.isInfixOf`
-                                        Text.toLower message
-                                then 404
-                                else 409
-                            , apiErrorCode = "request_not_resolved"
-                            , apiErrorMessage = message
-                            , apiErrorDetails = Nothing
-                            }
-                Right resolved ->
-                    pure $
-                        Right $
-                            jsonResponse
-                                status200
-                                headers
-                                (toJSONValue resolved)
+    if not (isUUIDText rawRequestId)
+        then pure (Left humanRequestNotFound)
+        else
+            withJsonBody config request \(body :: ResolveRequest) -> do
+                let response = HumanResponse
+                        { humanResponseDecision =
+                            body.resolveRequestDecision
+                        , humanResponseValue =
+                            body.resolveRequestValue
+                        }
+                resolveHumanRequest
+                    supervisor
+                    boundary
+                    (RequestId rawRequestId)
+                    response >>= \case
+                        Left message ->
+                            pure $
+                                Left ApiError
+                                    { apiErrorStatus =
+                                        if "not found"
+                                            `Text.isInfixOf`
+                                                Text.toLower message
+                                        then 404
+                                        else 409
+                                    , apiErrorCode = "request_not_resolved"
+                                    , apiErrorMessage = message
+                                    , apiErrorDetails = Nothing
+                                    }
+                        Right resolved ->
+                            pure $
+                                Right $
+                                    jsonResponse
+                                        status200
+                                        headers
+                                        (toJSONValue resolved)
 
 createTurn
     :: Backend
@@ -594,20 +631,118 @@ createTurn backend supervisor boundary sessionId request
                 , apiErrorMessage = "turn input must not be empty"
                 , apiErrorDetails = Nothing
                 }
-    | otherwise =
-        let spec = TurnSpec
+    | otherwise = do
+        now <- getCurrentTime
+        turnId <- TurnId <$> newUUIDv7Text
+        let clientRequestId =
+                fromMaybe
+                    (ClientRequestId turnId.unTurnId)
+                    request.createTurnClientRequestId
+            spec = TurnSpec
                 { turnSpecSessionId = sessionId
+                , turnSpecClientRequestId = clientRequestId
                 , turnSpecPrompt = request.createTurnInput
                 , turnSpecBoundary = boundary
                 }
             validateSession =
                 fmap (fmap (const ())) $
                     backend.backendGetSession boundary sessionId
-        in
-            submitTurnChecked
-                supervisor
-                spec
-                validateSession >>= pure . firstCheckedSubmitError
+        validateSession >>= \case
+            Left err -> pure (Left err)
+            Right () ->
+                mask \restore -> do
+                    reservation <-
+                        restore $
+                            backend.backendReserveTurn
+                                boundary
+                                sessionId
+                                clientRequestId
+                                request.createTurnInput
+                                turnId
+                                now
+                    case reservation of
+                        Left err -> pure (Left err)
+                        Right (TurnReservationExisting existing) ->
+                            pure (Right existing)
+                        Right (TurnReservationExistingOwned existing)
+                            | existing.turnRecordStatus == TurnQueued ->
+                                restore $
+                                    lookupTurn
+                                        supervisor
+                                        boundary
+                                        existing.turnRecordId
+                                        >>= \case
+                                            Just admitted ->
+                                                pure (Right admitted)
+                                            Nothing ->
+                                                admitOwnedReservation
+                                                    existing
+                                                    spec
+                                                    validateSession
+                            | otherwise ->
+                                pure (Right existing)
+                        Right (TurnReservationCreated reserved) ->
+                            restore
+                                ( admitCreatedReservation
+                                    reserved
+                                    spec
+                                    validateSession
+                                )
+                                `onException`
+                                    abandonCreatedReservation reserved
+  where
+    admitOwnedReservation reserved spec validateSession =
+        trySubmitReservedTurnChecked
+            supervisor
+            spec
+            reserved
+            validateSession
+            >>= \case
+                Left (SubmitValidationRejected SubmitSessionBusy) ->
+                    lookupTurn
+                        supervisor
+                        boundary
+                        reserved.turnRecordId
+                        >>= pure . Right . fromMaybe reserved
+                result -> completeAdmission reserved result
+
+    admitCreatedReservation reserved spec validateSession =
+        submitReservedTurnChecked
+            supervisor
+            spec
+            reserved
+            validateSession
+            >>= completeAdmission reserved
+
+    abandonCreatedReservation reserved =
+        lookupTurn
+            supervisor
+            boundary
+            reserved.turnRecordId
+            >>= \case
+                Just _ -> pure ()
+                Nothing -> do
+                    cancelledAt <- getCurrentTime
+                    _ <-
+                        persistTurnTerminalEventually
+                            backend
+                            reserved
+                            cancelledAt
+                            TurnWasCancelled
+                    pure ()
+
+    completeAdmission reserved result =
+        case firstCheckedSubmitError result of
+            Right admitted ->
+                pure (Right admitted)
+            Left err -> do
+                rejectedAt <- getCurrentTime
+                Right
+                    <$> persistTurnTerminalEventually
+                        backend
+                        reserved
+                        rejectedAt
+                        (TurnErrored err.apiErrorMessage)
 
 firstCheckedSubmitError
     :: Either (CheckedSubmitError ApiError) TurnRecord
@@ -654,25 +789,201 @@ firstSubmitError = \case
             }
     Right turn -> Right turn
 
+persistTurnTerminalEventually
+    :: Backend
+    -> TurnRecord
+    -> UTCTime
+    -> TurnTerminalOutcome
+    -> IO TurnRecord
+persistTurnTerminalEventually backend record finishedAt outcome =
+    go 100_000
+  where
+    go retryDelay =
+        backend.backendTurnPersistence.turnPersistenceTerminal
+            record
+            finishedAt
+            outcome
+            >>= \case
+                Right canonical -> pure canonical
+                Left _ -> do
+                    threadDelay retryDelay
+                    go (min 2_000_000 (retryDelay * 2))
+
 findTurn
-    :: Supervisor
+    :: Backend
+    -> Supervisor
     -> AccessBoundary
     -> Text
     -> IO (Either ApiError TurnRecord)
-findTurn supervisor boundary rawTurnId =
-    lookupTurn supervisor boundary (TurnId rawTurnId) >>= \case
-        Nothing -> pure (Left turnNotFound)
-        Just turn -> pure (Right turn)
+findTurn backend supervisor boundary rawTurnId = do
+    if not (isUUIDText rawTurnId)
+        then pure (Left turnNotFound)
+        else do
+            let turnId = TurnId rawTurnId
+            backend.backendLookupTurn boundary turnId >>= \case
+                Left err -> pure (Left err)
+                Right Nothing -> pure (Left turnNotFound)
+                Right (Just durable)
+                    | isActiveTurn durable ->
+                        lookupTurn supervisor boundary turnId
+                            >>= pure . Right . maybe durable id
+                    | otherwise -> pure (Right durable)
+
+listKnownTurns
+    :: Backend
+    -> Supervisor
+    -> AccessBoundary
+    -> Maybe Text
+    -> IO (Either ApiError [TurnRecord])
+listKnownTurns backend supervisor boundary sessionId =
+    backend.backendListTurns boundary sessionId >>= \case
+        Left err -> pure (Left err)
+        Right durable -> do
+            active <- listTurns supervisor boundary sessionId
+            let activeById =
+                    Map.fromList
+                        [ (turn.turnRecordId, turn)
+                        | turn <- active
+                        ]
+                durableIds =
+                    Map.fromList
+                        [ (turn.turnRecordId, ())
+                        | turn <- durable
+                        ]
+                merged =
+                    [ if isActiveTurn turn
+                        then
+                            Map.findWithDefault
+                                turn
+                                turn.turnRecordId
+                                activeById
+                        else turn
+                    | turn <- durable
+                    ]
+                        <> [ turn
+                           | turn <- active
+                           , Map.notMember turn.turnRecordId durableIds
+                           ]
+            pure . Right $
+                sortOn (Down . (.turnRecordCreatedAt)) merged
+
+cancelKnownTurn
+    :: Backend
+    -> Supervisor
+    -> AccessBoundary
+    -> Text
+    -> IO (Either ApiError (Status, TurnRecord))
+cancelKnownTurn backend supervisor boundary rawTurnId
+    | not (isUUIDText rawTurnId) =
+        pure (Left turnNotFound)
+    | otherwise =
+        cancelTurn supervisor boundary turnId >>= \case
+            Right turn -> pure (Right (status200, turn))
+            Left "turn not found" ->
+                backend.backendLookupTurn boundary turnId >>= \case
+                    Left err -> pure (Left err)
+                    Right Nothing -> pure (Left turnNotFound)
+                    Right (Just turn)
+                        | not (isActiveTurn turn) ->
+                            pure (Right (status200, turn))
+                        | otherwise -> do
+                            requestedAt <- getCurrentTime
+                            backend.backendRequestTurnCancellation
+                                boundary
+                                turnId
+                                requestedAt
+                                >>= \case
+                                    Left err -> pure (Left err)
+                                    Right (Just (True, owned)) -> do
+                                        cancelledAt <- getCurrentTime
+                                        canonical <-
+                                            persistTurnTerminalEventually
+                                                backend
+                                                owned
+                                                cancelledAt
+                                                TurnWasCancelled
+                                        pure
+                                            (Right (status200, canonical))
+                                    Right (Just (False, requested)) ->
+                                        pure
+                                            (Right (status202, requested))
+                                    Right Nothing ->
+                                        backend.backendLookupTurn
+                                            boundary
+                                            turnId
+                                            >>= \case
+                                                Left err -> pure (Left err)
+                                                Right Nothing ->
+                                                    pure (Left turnNotFound)
+                                                Right (Just canonical) ->
+                                                    pure
+                                                        ( Right
+                                                            ( status200
+                                                            , canonical
+                                                            )
+                                                        )
+            Left message ->
+                pure (Left (cancellationError message))
+  where
+    turnId = TurnId rawTurnId
+    cancellationError message =
+        ApiError
+            { apiErrorStatus = 503
+            , apiErrorCode = "turn_cancellation_failed"
+            , apiErrorMessage = message
+            , apiErrorDetails = Nothing
+            }
+
+findTurnResult
+    :: Backend
+    -> AccessBoundary
+    -> Text
+    -> IO (Either ApiError TurnResult)
+findTurnResult backend boundary rawTurnId =
+    if not (isUUIDText rawTurnId)
+        then pure (Left turnNotFound)
+        else
+            backend.backendLookupTurnResult
+                boundary
+                (TurnId rawTurnId)
+                >>= \case
+                    Left err -> pure (Left err)
+                    Right Nothing -> pure (Left turnNotFound)
+                    Right (Just result)
+                        | isActiveTurn result.turnResultTurn ->
+                            pure . Left $
+                                ApiError
+                                    { apiErrorStatus = 409
+                                    , apiErrorCode = "turn_not_terminal"
+                                    , apiErrorMessage =
+                                        "the turn has not reached a terminal state"
+                                    , apiErrorDetails =
+                                        Just
+                                            ( toJSONValue
+                                                result.turnResultTurn
+                                            )
+                                    }
+                        | otherwise -> pure (Right result)
+
+isActiveTurn :: TurnRecord -> Bool
+isActiveTurn turn =
+    turn.turnRecordStatus
+        `elem` [TurnQueued, TurnRunning, TurnWaitingForInput]
 
 runSessionMutation
-    :: Supervisor
+    :: Backend
+    -> Supervisor
     -> AccessBoundary
     -> Text
     -> IO (Either ApiError value)
     -> IO (Either ApiError value)
-runSessionMutation supervisor boundary sessionId action =
+runSessionMutation backend supervisor boundary sessionId action =
     withSessionMutation
-        supervisor boundary sessionId action >>= \case
+        supervisor
+        boundary
+        sessionId
+        durableMutation
+        >>= \case
             Left SessionMutationBusy ->
                 pure $
                     Left ApiError
@@ -692,6 +1003,38 @@ runSessionMutation supervisor boundary sessionId action =
                         , apiErrorDetails = Nothing
                         }
             Right result -> pure result
+  where
+    durableMutation =
+        mask \restore -> do
+            now <- getCurrentTime
+            reservation <-
+                backend.backendReserveSessionMutation
+                    boundary
+                    sessionId
+                    now
+            case reservation of
+                Left err -> pure (Left err)
+                Right Nothing -> pure (Left sessionBusyError)
+                Right
+                    ( Just
+                            SessionMutationLease
+                                { runSessionMutationLease = runMutation
+                                , releaseSessionMutationLease = releaseMutation
+                                }
+                        ) -> do
+                        guarded <-
+                            restore (runMutation action)
+                                `finally` releaseMutation
+                        pure (guarded >>= id)
+
+    sessionBusyError =
+        ApiError
+            { apiErrorStatus = 409
+            , apiErrorCode = "session_busy"
+            , apiErrorMessage =
+                "the session has an active turn or mutation"
+            , apiErrorDetails = Nothing
+            }
 
 createEventResponse
     :: Backend
@@ -1067,6 +1410,20 @@ queryLimit name defaultValue maximum request =
                         , apiErrorDetails = Nothing
                         }
 
+queryOptionalTurnId :: Request -> Either ApiError (Maybe TurnId)
+queryOptionalTurnId request =
+    queryOptionalText "turnId" request >>= \case
+        Nothing -> Right Nothing
+        Just raw
+            | isUUIDText raw -> Right (Just (TurnId raw))
+            | otherwise ->
+                Left ApiError
+                    { apiErrorStatus = 400
+                    , apiErrorCode = "invalid_query"
+                    , apiErrorMessage = "turnId must be a UUID"
+                    , apiErrorDetails = Nothing
+                    }
+
 queryOptionalInteger
     :: ByteString
     -> Request
@@ -1182,6 +1539,14 @@ turnNotFound = ApiError
     { apiErrorStatus = 404
     , apiErrorCode = "turn_not_found"
     , apiErrorMessage = "turn not found"
+    , apiErrorDetails = Nothing
+    }
+
+humanRequestNotFound :: ApiError
+humanRequestNotFound = ApiError
+    { apiErrorStatus = 404
+    , apiErrorCode = "request_not_found"
+    , apiErrorMessage = "request not found"
     , apiErrorDetails = Nothing
     }
 

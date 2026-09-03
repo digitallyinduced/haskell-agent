@@ -7,12 +7,16 @@
 module Agent.Store.Postgres.Connection
     ( StorePool
     , storePool
+    , StoreConnection
     , PoolConfig(..)
     , defaultPoolConfig
     , connectionSettingsForRole
     , openStorePool
     , openRoleStorePool
     , closeStorePool
+    , openStoreConnection
+    , closeStoreConnection
+    , withConnectionSession
     , withStorePool
     , withSession
     , runSession
@@ -23,6 +27,7 @@ import Control.Exception.Safe (bracket, mask, onException)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (DiffTime)
+import qualified Hasql.Connection as Connection
 import qualified Hasql.Connection.Settings as ConnectionSettings
 import qualified Hasql.Pool as Pool
 import qualified Hasql.Pool.Config as PoolConfig
@@ -34,10 +39,15 @@ import qualified Pqi.Ffi as Pqi
 import Agent.Store.Postgres.Config
 import Agent.Store.Types
 
-newtype StorePool = StorePool Pool.Pool
+data StorePool = StorePool
+    { storePoolInternal :: !Pool.Pool
+    , storePoolConnectionSettings :: !ConnectionSettings.Settings
+    }
 
 storePool :: StorePool -> Pool.Pool
-storePool (StorePool pool) = pool
+storePool = (.storePoolInternal)
+
+newtype StoreConnection = StoreConnection Connection.Connection
 
 data PoolConfig = PoolConfig
     { poolSize :: !Int
@@ -81,13 +91,13 @@ openRoleStorePool
     -> PoolConfig
     -> IO (Either StoreError StorePool)
 openRoleStorePool config role options = mask \restore -> do
+    let settings = connectionSettingsForRole config role
     pool <- Pool.acquire Pqi.adapter $ PoolConfig.settings
         [ PoolConfig.size options.poolSize
         , PoolConfig.acquisitionTimeout options.poolAcquisitionTimeout
         , PoolConfig.agingTimeout options.poolAgingTimeout
         , PoolConfig.idlenessTimeout options.poolIdlenessTimeout
-        , PoolConfig.staticConnectionSettings
-            (connectionSettingsForRole config role)
+        , PoolConfig.staticConnectionSettings settings
         ]
     validationResult <-
         restore (Pool.use pool (pure ()))
@@ -98,10 +108,48 @@ openRoleStorePool config role options = mask \restore -> do
             pure $ Left $ StoreConnectionError $
                 "Could not connect to managed PostgreSQL: "
                     <> Text.pack (show err)
-        Right () -> pure (Right (StorePool pool))
+        Right () -> pure $ Right StorePool
+            { storePoolInternal = pool
+            , storePoolConnectionSettings = settings
+            }
 
 closeStorePool :: StorePool -> IO ()
 closeStorePool = Pool.release . storePool
+
+{- | Open a connection outside the reusable pool.
+
+This is reserved for connection-lifetime PostgreSQL leases. A session-level
+advisory lock must never be returned to the pool where another request
+could inherit it.
+-}
+openStoreConnection :: StorePool -> IO (Either StoreError StoreConnection)
+openStoreConnection pool =
+    Connection.acquire
+        Pqi.adapter
+        pool.storePoolConnectionSettings
+        >>= \case
+            Left err ->
+                pure . Left . StoreConnectionError $
+                    "Could not open dedicated PostgreSQL connection: "
+                        <> Text.pack (show err)
+            Right connection ->
+                pure (Right (StoreConnection connection))
+
+closeStoreConnection :: StoreConnection -> IO ()
+closeStoreConnection (StoreConnection connection) =
+    Connection.release connection
+
+withConnectionSession ::
+    StoreConnection ->
+    Session.Session a ->
+    IO (Either StoreError a)
+withConnectionSession (StoreConnection connection) session =
+    Connection.use connection session >>= \case
+        Left err ->
+            pure . Left . StoreConnectionError $
+                "Dedicated PostgreSQL session failed: "
+                    <> Text.pack (show err)
+        Right value -> pure (Right value)
 
 withStorePool
     :: ManagedPostgresConfig

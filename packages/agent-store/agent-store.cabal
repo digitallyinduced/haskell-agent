@@ -46,6 +46,8 @@ library
                     , Agent.Store.Postgres.Managed
                     , Agent.Store.Postgres.Migrations
                     , Agent.Store.Postgres.Scope
+                    , Agent.Store.Postgres.ServerTurn
+                    , Agent.Store.Postgres.ServerHumanRequest
                     , Agent.Store.Postgres.Session
                     , Agent.Store.Postgres.Skill
                     , Agent.Store.Postgres.Tenant
@@ -89,6 +91,7 @@ library
                     , Agent.Store.Postgres.Skill.Mapping.Statements.UpdateSkill
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
+                    , aeson
                     , async >= 2.2.6 && < 2.3
                     , bytestring
                     , containers
@@ -173,6 +176,7 @@ test-suite agent-store-test
                     , Agent.Store.Postgres.ManagedSpec
                     , Agent.Store.PoolCacheSpec
                     , Agent.Store.Postgres.ScopeSpec
+                    , Agent.Store.Postgres.ServerTurnSpec
                     , Agent.Store.Postgres.SessionSpec
                     , Agent.Store.Postgres.SkillSpec
                     , Agent.Store.Postgres.TenantSpec

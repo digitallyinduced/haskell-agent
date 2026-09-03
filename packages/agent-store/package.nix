@@ -1,4 +1,4 @@
-{ mkDerivation, async, base, bytestring, containers, contravariant
+{ mkDerivation, aeson, async, base, bytestring, containers, contravariant
 , directory, filelock, filepath, hasql, hasql-pool
 , hasql-transaction, hspec, lib, pqi-ffi, process, safe-exceptions
 , stm, temporary, text, time, unix, uuid-types, vector
@@ -8,7 +8,7 @@ mkDerivation {
   version = "0.1.0.0";
   src = ./.;
   libraryHaskellDepends = [
-    async base bytestring containers contravariant directory filelock
+    aeson async base bytestring containers contravariant directory filelock
     filepath hasql hasql-pool hasql-transaction pqi-ffi process
     safe-exceptions stm text time unix uuid-types vector
   ];

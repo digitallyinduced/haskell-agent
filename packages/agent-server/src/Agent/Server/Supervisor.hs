@@ -12,11 +12,17 @@ module Agent.Server.Supervisor
     , TurnControl(..)
     , TurnRunner
     , TurnBoundaryGuard
+    , HumanRequestPersistenceResolution(..)
+    , TurnPersistence(..)
+    , inMemoryTurnPersistence
     , newSupervisor
     , newSupervisorWithBoundaryGuard
+    , newSupervisorWithBoundaryGuardAndPersistence
     , closeSupervisor
     , submitTurn
     , submitTurnChecked
+    , submitReservedTurnChecked
+    , trySubmitReservedTurnChecked
     , cancelTurn
     , lookupTurn
     , listTurns
@@ -29,12 +35,14 @@ module Agent.Server.Supervisor
     , subscribeEvents
     ) where
 
-import Agent.Server.Types
 import Agent.Server.Identifier (newUUIDv7Text)
+import Agent.Server.Types
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( Async
     , async
     , cancel
+    , forConcurrently
     , mapConcurrently_
     , waitCatch
     )
@@ -68,11 +76,14 @@ import Control.Exception.Safe
     ( SomeException
     , finally
     , mask
+    , onException
     , tryAny
     )
 import Control.Monad (forM_, void, when)
-import Data.Aeson (Value, object, toJSON, (.=))
+import Data.Aeson (Value, encode, object, toJSON, (.=))
+import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Foldable (toList)
+import Data.Int (Int64)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -128,7 +139,8 @@ data TurnControl = TurnControl
     , turnControlSetAgents :: !(IO Value -> IO ())
     }
 
-type TurnRunner = TurnControl -> TurnSpec -> IO (Either Text ())
+type TurnRunner =
+    TurnControl -> TurnSpec -> IO (Either Text TurnExecutionOutput)
 
 -- | Run an action only while the exact admitted gateway boundary is leased.
 --
@@ -140,9 +152,66 @@ type TurnBoundaryGuard =
     IO value ->
     IO (Either Text value)
 
+data HumanRequestPersistenceResolution
+    = HumanRequestResolvedDurably !HumanRequest
+    | HumanRequestNotFoundDurably
+    | HumanRequestLocalOnly
+    deriving (Eq, Show)
+
+data TurnPersistence = TurnPersistence
+    { turnPersistenceStarted ::
+        !(TurnRecord -> UTCTime -> IO (Either Text ()))
+    , turnPersistenceTerminal ::
+        !( TurnRecord ->
+           UTCTime ->
+           TurnTerminalOutcome ->
+           IO (Either Text TurnRecord)
+         )
+    , turnPersistenceShouldCancel ::
+        !(TurnRecord -> IO (Either Text Bool))
+    , turnPersistenceCreateHumanRequest ::
+        !(TurnRecord -> HumanRequest -> IO (Either Text ()))
+    , turnPersistenceListHumanRequests ::
+        !(AccessBoundary -> Maybe TurnId -> IO (Either Text [HumanRequest]))
+    , turnPersistenceResolveHumanRequest ::
+        !( AccessBoundary ->
+           RequestId ->
+           HumanResponse ->
+           IO (Either Text HumanRequestPersistenceResolution)
+         )
+    , turnPersistenceLoadHumanResponse ::
+        !( TurnRecord ->
+           RequestId ->
+           IO (Either Text (Maybe HumanResponse))
+         )
+    , turnPersistenceDeleteHumanRequest ::
+        !(TurnRecord -> RequestId -> IO (Either Text ()))
+    }
+
+inMemoryTurnPersistence :: TurnPersistence
+inMemoryTurnPersistence =
+    TurnPersistence
+        { turnPersistenceStarted = \_ _ -> pure (Right ())
+        , turnPersistenceTerminal = \record finishedAt outcome ->
+            pure (Right (terminalRecord finishedAt outcome record))
+        , turnPersistenceShouldCancel = \_ ->
+            pure (Right False)
+        , turnPersistenceCreateHumanRequest = \_ _ ->
+            pure (Right ())
+        , turnPersistenceListHumanRequests = \_ _ ->
+            pure (Right [])
+        , turnPersistenceResolveHumanRequest = \_ _ _ ->
+            pure (Right HumanRequestLocalOnly)
+        , turnPersistenceLoadHumanResponse = \_ _ ->
+            pure (Right Nothing)
+        , turnPersistenceDeleteHumanRequest = \_ _ ->
+            pure (Right ())
+        }
+
 data TurnSlot = TurnSlot
     { turnSlotSpec :: !TurnSpec
     , turnSlotRecord :: !TurnRecord
+    , turnSlotCancelling :: !Bool
     , turnSlotCancel :: !(Maybe (IO ()))
     , turnSlotAgents :: !(IO Value)
     }
@@ -167,6 +236,7 @@ data SupervisorState = SupervisorState
     , stateTurns :: !(Map TurnId TurnSlot)
     , stateActiveSessions :: !(Set (AccessBoundary, Text))
     , stateWorkers :: !(Map TurnId (Async ()))
+    , stateCancellationTasks :: !(Map TurnId (Async ()))
     , statePendingInputs :: !(Map RequestId PendingInput)
     , stateEvents :: !(Map AccessBoundary EventBuffer)
     , stateNextSubscriberId :: !Integer
@@ -179,8 +249,10 @@ data Supervisor = Supervisor
     { supervisorConfig :: !SupervisorConfig
     , supervisorRunner :: !TurnRunner
     , supervisorBoundaryGuard :: !TurnBoundaryGuard
+    , supervisorPersistence :: !TurnPersistence
     , supervisorState :: !(TVar SupervisorState)
     , supervisorDispatcher :: !(MVar (Async ()))
+    , supervisorCancellationMonitor :: !(MVar (Async ()))
     }
 
 newSupervisor :: SupervisorConfig -> TurnRunner -> IO Supervisor
@@ -188,116 +260,133 @@ newSupervisor config =
     newSupervisorWithBoundaryGuard config
         (\_ action -> Right <$> action)
 
-newSupervisorWithBoundaryGuard
-    :: SupervisorConfig
-    -> TurnBoundaryGuard
-    -> TurnRunner
-    -> IO Supervisor
-newSupervisorWithBoundaryGuard config boundaryGuard runner
-    | config.supervisorMaxConcurrentTurns < 1 =
-        fail "supervisorMaxConcurrentTurns must be positive"
-    | config.supervisorMaxConcurrentTurnsPerTenant < 1 =
-        fail "supervisorMaxConcurrentTurnsPerTenant must be positive"
-    | config.supervisorMaxConcurrentTurnsPerTenant
-        > config.supervisorMaxConcurrentTurns =
-        fail
-            "supervisorMaxConcurrentTurnsPerTenant exceeds global concurrency"
-    | config.supervisorMaxQueuedTurns < 1 =
-        fail "supervisorMaxQueuedTurns must be positive"
-    | config.supervisorMaxQueuedTurnsPerTenant < 1 =
-        fail "supervisorMaxQueuedTurnsPerTenant must be positive"
-    | config.supervisorMaxQueuedTurnsPerTenant
-        > config.supervisorMaxQueuedTurns =
-        fail "supervisorMaxQueuedTurnsPerTenant exceeds global queue capacity"
-    | config.supervisorMaxEventSubscribers < 1 =
-        fail "supervisorMaxEventSubscribers must be positive"
-    | config.supervisorMaxEventSubscribersPerTenant < 1 =
-        fail "supervisorMaxEventSubscribersPerTenant must be positive"
-    | config.supervisorMaxEventSubscribersPerTenant
-        > config.supervisorMaxEventSubscribers =
-        fail
-            "supervisorMaxEventSubscribersPerTenant exceeds global capacity"
-    | config.supervisorEventReplayLimit < 1 =
-        fail "supervisorEventReplayLimit must be positive"
-    | otherwise = mask \restore -> do
-        state <- newTVarIO SupervisorState
-            { stateQueue = Seq.empty
-            , stateTurns = Map.empty
-            , stateActiveSessions = Set.empty
-            , stateWorkers = Map.empty
-            , statePendingInputs = Map.empty
-            , stateEvents = Map.empty
-            , stateNextSubscriberId = 1
-            , stateSubscribers = Map.empty
-            , stateLastScheduledTenant = Nothing
-            , stateClosed = False
-            }
-        dispatcherVar <- newEmptyMVar
-        let supervisor = Supervisor
-                { supervisorConfig = config
-                , supervisorRunner = runner
-                , supervisorBoundaryGuard = boundaryGuard
-                , supervisorState = state
-                , supervisorDispatcher = dispatcherVar
-                }
-        dispatcher <- async (restore (dispatcherLoop supervisor))
-        putMVar dispatcherVar dispatcher
-        pure supervisor
+newSupervisorWithBoundaryGuard ::
+    SupervisorConfig ->
+    TurnBoundaryGuard ->
+    TurnRunner ->
+    IO Supervisor
+newSupervisorWithBoundaryGuard config boundaryGuard runner =
+    newSupervisorWithBoundaryGuardAndPersistence
+        config
+        boundaryGuard
+        inMemoryTurnPersistence
+        runner
+
+newSupervisorWithBoundaryGuardAndPersistence ::
+    SupervisorConfig ->
+    TurnBoundaryGuard ->
+    TurnPersistence ->
+    TurnRunner ->
+    IO Supervisor
+newSupervisorWithBoundaryGuardAndPersistence
+    config
+    boundaryGuard
+    persistence
+    runner
+        | config.supervisorMaxConcurrentTurns < 1 =
+            fail "supervisorMaxConcurrentTurns must be positive"
+        | config.supervisorMaxConcurrentTurnsPerTenant < 1 =
+            fail "supervisorMaxConcurrentTurnsPerTenant must be positive"
+        | config.supervisorMaxConcurrentTurnsPerTenant
+            > config.supervisorMaxConcurrentTurns =
+            fail
+                "supervisorMaxConcurrentTurnsPerTenant exceeds global concurrency"
+        | config.supervisorMaxQueuedTurns < 1 =
+            fail "supervisorMaxQueuedTurns must be positive"
+        | config.supervisorMaxQueuedTurnsPerTenant < 1 =
+            fail "supervisorMaxQueuedTurnsPerTenant must be positive"
+        | config.supervisorMaxQueuedTurnsPerTenant
+            > config.supervisorMaxQueuedTurns =
+            fail "supervisorMaxQueuedTurnsPerTenant exceeds global queue capacity"
+        | config.supervisorMaxEventSubscribers < 1 =
+            fail "supervisorMaxEventSubscribers must be positive"
+        | config.supervisorMaxEventSubscribersPerTenant < 1 =
+            fail "supervisorMaxEventSubscribersPerTenant must be positive"
+        | config.supervisorMaxEventSubscribersPerTenant
+            > config.supervisorMaxEventSubscribers =
+            fail
+                "supervisorMaxEventSubscribersPerTenant exceeds global capacity"
+        | config.supervisorEventReplayLimit < 1 =
+            fail "supervisorEventReplayLimit must be positive"
+        | otherwise = mask \restore -> do
+            state <-
+                newTVarIO
+                    SupervisorState
+                        { stateQueue = Seq.empty
+                        , stateTurns = Map.empty
+                        , stateActiveSessions = Set.empty
+                        , stateWorkers = Map.empty
+                        , stateCancellationTasks = Map.empty
+                        , statePendingInputs = Map.empty
+                        , stateEvents = Map.empty
+                        , stateNextSubscriberId = 1
+                        , stateSubscribers = Map.empty
+                        , stateLastScheduledTenant = Nothing
+                        , stateClosed = False
+                        }
+            dispatcherVar <- newEmptyMVar
+            cancellationMonitorVar <- newEmptyMVar
+            let supervisor =
+                    Supervisor
+                        { supervisorConfig = config
+                        , supervisorRunner = runner
+                        , supervisorBoundaryGuard = boundaryGuard
+                        , supervisorPersistence = persistence
+                        , supervisorState = state
+                        , supervisorDispatcher = dispatcherVar
+                        , supervisorCancellationMonitor =
+                            cancellationMonitorVar
+                        }
+            dispatcher <- async (restore (dispatcherLoop supervisor))
+            cancellationMonitor <-
+                async (restore (cancellationMonitorLoop supervisor))
+                    `onException` do
+                        cancel dispatcher
+                        void (waitCatch dispatcher)
+            putMVar dispatcherVar dispatcher
+            putMVar cancellationMonitorVar cancellationMonitor
+            pure supervisor
 
 closeSupervisor :: Supervisor -> IO ()
 closeSupervisor supervisor = mask \restore -> do
     now <- getCurrentTime
-    (workers, cancellations, replies) <- atomically do
-        state <- readTVar supervisor.supervisorState
-        if state.stateClosed
-            then pure ([], [], [])
-            else do
-                let activeSlots =
-                        [ slot
-                        | slot <- Map.elems state.stateTurns
-                        , isActiveStatus slot.turnSlotRecord.turnRecordStatus
-                        ]
-                    cancellationActions =
-                        mapMaybe (.turnSlotCancel) activeSlots
-                    pendingReplies =
-                        map (.pendingInputReply)
-                            (Map.elems state.statePendingInputs)
-                    cancelledTurns =
-                        foldr
-                            (cancelSlot now)
-                            state.stateTurns
-                            activeSlots
-                    (events, state') = foldr
-                        (\slot (eventsAcc, stateAcc) ->
-                            let (event, nextState) =
-                                    appendEventToState
-                                        supervisor.supervisorConfig
-                                        now
-                                        slot.turnSlotRecord.turnRecordBoundary
-                                        "turn.cancelled"
-                                        (Just
-                                            slot.turnSlotRecord.turnRecordId)
-                                        (Just
-                                            slot.turnSlotRecord.turnRecordSessionId)
-                                        (object [])
-                                        stateAcc
-                            in (event : eventsAcc, nextState))
-                        ([], state
-                            { stateClosed = True
-                            , stateQueue = Seq.empty
-                            , stateTurns = cancelledTurns
-                            , statePendingInputs = Map.empty
-                            })
-                        activeSlots
-                writeTVar supervisor.supervisorState state'
-                forM_
-                    (sortOn (.serverEventId) events)
-                    (publishToSubscribers state')
-                pure
-                    ( Map.elems state.stateWorkers
-                    , cancellationActions
-                    , pendingReplies
-                    )
+    (workers, cancellationTasks, cancellations, replies, activeRecords) <-
+        atomically do
+            state <- readTVar supervisor.supervisorState
+            if state.stateClosed
+                then pure ([], [], [], [], [])
+                else do
+                    let activeSlots =
+                            [ slot
+                            | slot <- Map.elems state.stateTurns
+                            , isActiveStatus slot.turnSlotRecord.turnRecordStatus
+                            ]
+                        cancellationActions =
+                            mapMaybe (.turnSlotCancel) activeSlots
+                        pendingReplies =
+                            map (.pendingInputReply)
+                                (Map.elems state.statePendingInputs)
+                        cancelledTurns =
+                            foldr
+                                (cancelSlot now)
+                                state.stateTurns
+                                activeSlots
+                        state' =
+                            state
+                                { stateClosed = True
+                                , stateQueue = Seq.empty
+                                , stateTurns = cancelledTurns
+                                , stateCancellationTasks = Map.empty
+                                , statePendingInputs = Map.empty
+                                }
+                    writeTVar supervisor.supervisorState state'
+                    pure
+                        ( Map.elems state.stateWorkers
+                        , Map.elems state.stateCancellationTasks
+                        , cancellationActions
+                        , pendingReplies
+                        , map (.turnSlotRecord) activeSlots
+                        )
     forM_ replies \reply ->
         atomically (void (tryPutTMVar reply (Left "server is shutting down")))
     let interruptInBand =
@@ -307,19 +396,56 @@ closeSupervisor supervisor = mask \restore -> do
                         (void (tryAny (restore action)))
         stopWorkers =
             mapConcurrently_ cancel workers
-        stopDispatcher = do
+        stopBackground = do
             dispatcher <- readMVar supervisor.supervisorDispatcher
             cancel dispatcher
             void (waitCatch dispatcher)
+            cancellationMonitor <-
+                readMVar supervisor.supervisorCancellationMonitor
+            cancel cancellationMonitor
+            void (waitCatch cancellationMonitor)
+            forM_ cancellationTasks cancel
+            forM_ cancellationTasks (void . waitCatch)
     -- A stuck provider interrupt must not skip structured worker teardown.
     (interruptInBand `finally` stopWorkers)
-        `finally` stopDispatcher
+        `finally` stopBackground
+    persisted <-
+        timeout
+            terminalPersistenceShutdownTimeoutMicros
+            ( forConcurrently activeRecords \record ->
+                persistTerminalEventually
+                    supervisor
+                    record
+                    now
+                    TurnWasCancelled
+            )
+    forM_ persisted $
+        mapM_ \canonical ->
+            atomically $
+                publishTerminalRecord supervisor canonical
 
-submitTurn
-    :: Supervisor
-    -> TurnSpec
-    -> IO (Either SubmitError TurnRecord)
-submitTurn supervisor = enqueueTurn supervisor False
+submitTurn ::
+    Supervisor ->
+    TurnSpec ->
+    IO (Either SubmitError TurnRecord)
+submitTurn supervisor spec = do
+    now <- getCurrentTime
+    turnId <- TurnId <$> newUUIDv7Text
+    enqueueTurnRecord
+        supervisor
+        False
+        spec
+        TurnRecord
+            { turnRecordId = turnId
+            , turnRecordSessionId = spec.turnSpecSessionId
+            , turnRecordClientRequestId = spec.turnSpecClientRequestId
+            , turnRecordBoundary = spec.turnSpecBoundary
+            , turnRecordStatus = TurnQueued
+            , turnRecordCreatedAt = now
+            , turnRecordStartedAt = Nothing
+            , turnRecordFinishedAt = Nothing
+            , turnRecordError = Nothing
+            }
 
 -- | Validate a session while holding the same per-boundary reservation that
 -- is atomically converted into a queued turn. This prevents delete/patch/fork
@@ -351,83 +477,168 @@ submitTurnChecked supervisor spec validate = do
             Left (SubmitValidationRejected SubmitSupervisorClosed)
         Right result -> result
 
-enqueueTurn
-    :: Supervisor
-    -> Bool
+-- | Queue a newly reserved durable turn, waiting for an in-flight local
+-- mutation to release the session. The durable reservation makes that
+-- mutation unwind before the turn is admitted.
+submitReservedTurnChecked ::
+    Supervisor ->
+    TurnSpec ->
+    TurnRecord ->
+    IO (Either validationError ()) ->
+    IO (Either (CheckedSubmitError validationError) TurnRecord)
+submitReservedTurnChecked =
+    submitReservedTurnCheckedWith True
+
+-- | Try to admit an existing durable reservation without waiting for another
+-- process-local admission of the same session. The caller can return the
+-- durable reservation when an identical retry loses that race.
+trySubmitReservedTurnChecked ::
+    Supervisor ->
+    TurnSpec ->
+    TurnRecord ->
+    IO (Either validationError ()) ->
+    IO (Either (CheckedSubmitError validationError) TurnRecord)
+trySubmitReservedTurnChecked =
+    submitReservedTurnCheckedWith False
+
+submitReservedTurnCheckedWith
+    :: Bool
+    -> Supervisor
     -> TurnSpec
-    -> IO (Either SubmitError TurnRecord)
+    -> TurnRecord
+    -> IO (Either validationError ())
+    -> IO (Either (CheckedSubmitError validationError) TurnRecord)
+submitReservedTurnCheckedWith
+        waitForReservation supervisor spec record validate = do
+    reserved <-
+        withSessionReservation
+            waitForReservation
+            supervisor
+            spec.turnSpecBoundary
+            spec.turnSpecSessionId
+            ( validate >>= \case
+                Left err ->
+                    pure (Left (SubmitValidationFailed err))
+                Right () ->
+                    fmap
+                        ( either
+                            (Left . SubmitValidationRejected)
+                            Right
+                        )
+                        (enqueueTurnRecord supervisor True spec record)
+            )
+    pure case reserved of
+        Left SessionMutationBusy ->
+            Left (SubmitValidationRejected SubmitSessionBusy)
+        Left SessionMutationSupervisorClosed ->
+            Left (SubmitValidationRejected SubmitSupervisorClosed)
+        Right result -> result
+
+enqueueTurn ::
+    Supervisor ->
+    Bool ->
+    TurnSpec ->
+    IO (Either SubmitError TurnRecord)
 enqueueTurn supervisor reservationHeld spec = do
     now <- getCurrentTime
     turnId <- TurnId <$> newUUIDv7Text
-    atomically do
-        state <- readTVar supervisor.supervisorState
-        let key = (spec.turnSpecBoundary, spec.turnSpecSessionId)
-            reserved = Set.member key state.stateActiveSessions
-        if state.stateClosed
-            then pure (Left SubmitSupervisorClosed)
-            else if reservationHeld && not reserved
-                then pure (Left SubmitSessionBusy)
-            else if
-                (not reservationHeld && reserved)
-                    || sessionBusy
-                        spec.turnSpecBoundary
-                        spec.turnSpecSessionId
-                        state.stateTurns
-                then pure (Left SubmitSessionBusy)
-                else if Seq.length state.stateQueue
-                    >= supervisor.supervisorConfig.supervisorMaxQueuedTurns
-                    then pure (Left SubmitQueueFull)
-                else if
-                    queuedForTenant
-                        spec.turnSpecBoundary.accessTenantId
-                        state.stateTurns
-                        >= supervisor.supervisorConfig.supervisorMaxQueuedTurnsPerTenant
-                    then pure (Left SubmitTenantQueueFull)
-                    else do
-                        let record = TurnRecord
-                                { turnRecordId = turnId
-                                , turnRecordSessionId =
-                                    spec.turnSpecSessionId
-                                , turnRecordBoundary =
-                                    spec.turnSpecBoundary
-                                , turnRecordStatus = TurnQueued
-                                , turnRecordCreatedAt = now
-                                , turnRecordStartedAt = Nothing
-                                , turnRecordFinishedAt = Nothing
-                                , turnRecordError = Nothing
-                                }
-                            slot = TurnSlot
-                                { turnSlotSpec = spec
-                                , turnSlotRecord = record
-                                , turnSlotCancel = Nothing
-                                , turnSlotAgents = pure toJSONEmptyArray
-                                }
-                            withTurn = state
-                                { stateQueue = state.stateQueue |> turnId
-                                , stateTurns =
-                                    Map.insert
-                                        turnId
-                                        slot
-                                        (pruneTerminalTurns state.stateTurns)
-                                }
-                            (event, state') = appendEventToState
-                                supervisor.supervisorConfig
-                                now
-                                spec.turnSpecBoundary
-                                "turn.queued"
-                                (Just turnId)
-                                (Just spec.turnSpecSessionId)
-                                (object [])
-                                withTurn
-                        writeTVar supervisor.supervisorState state'
-                        publishToSubscribers state' event
-                        pure (Right record)
+    enqueueTurnRecord
+        supervisor
+        reservationHeld
+        spec
+        TurnRecord
+            { turnRecordId = turnId
+            , turnRecordSessionId = spec.turnSpecSessionId
+            , turnRecordClientRequestId = spec.turnSpecClientRequestId
+            , turnRecordBoundary = spec.turnSpecBoundary
+            , turnRecordStatus = TurnQueued
+            , turnRecordCreatedAt = now
+            , turnRecordStartedAt = Nothing
+            , turnRecordFinishedAt = Nothing
+            , turnRecordError = Nothing
+            }
 
-cancelTurn
-    :: Supervisor
-    -> AccessBoundary
-    -> TurnId
-    -> IO (Either Text TurnRecord)
+enqueueTurnRecord ::
+    Supervisor ->
+    Bool ->
+    TurnSpec ->
+    TurnRecord ->
+    IO (Either SubmitError TurnRecord)
+enqueueTurnRecord supervisor reservationHeld spec record
+    | record.turnRecordSessionId /= spec.turnSpecSessionId =
+        fail "reserved turn session does not match its specification"
+    | record.turnRecordClientRequestId /= spec.turnSpecClientRequestId =
+        fail "reserved turn client request does not match its specification"
+    | record.turnRecordBoundary /= spec.turnSpecBoundary =
+        fail "reserved turn boundary does not match its specification"
+    | record.turnRecordStatus /= TurnQueued =
+        fail "only a queued reserved turn can be admitted"
+    | otherwise =
+        atomically do
+            state <- readTVar supervisor.supervisorState
+            let now = record.turnRecordCreatedAt
+                key = (spec.turnSpecBoundary, spec.turnSpecSessionId)
+                reserved = Set.member key state.stateActiveSessions
+            if state.stateClosed
+                then pure (Left SubmitSupervisorClosed)
+                else
+                    if reservationHeld && not reserved
+                        then pure (Left SubmitSessionBusy)
+                        else
+                            if (not reservationHeld && reserved)
+                                || sessionBusy
+                                    spec.turnSpecBoundary
+                                    spec.turnSpecSessionId
+                                    state.stateTurns
+                                then pure (Left SubmitSessionBusy)
+                                else
+                                    if Seq.length state.stateQueue
+                                        >= supervisor.supervisorConfig.supervisorMaxQueuedTurns
+                                        then pure (Left SubmitQueueFull)
+                                        else
+                                            if queuedForTenant
+                                                spec.turnSpecBoundary.accessTenantId
+                                                state.stateTurns
+                                                >= supervisor.supervisorConfig.supervisorMaxQueuedTurnsPerTenant
+                                                then pure (Left SubmitTenantQueueFull)
+                                                else do
+                                                    let turnId = record.turnRecordId
+                                                        slot =
+                                                            TurnSlot
+                                                                { turnSlotSpec = spec
+                                                                , turnSlotRecord = record
+                                                                , turnSlotCancelling = False
+                                                                , turnSlotCancel = Nothing
+                                                                , turnSlotAgents = pure toJSONEmptyArray
+                                                                }
+                                                        withTurn =
+                                                            state
+                                                                { stateQueue = state.stateQueue |> turnId
+                                                                , stateTurns =
+                                                                    Map.insert
+                                                                        turnId
+                                                                        slot
+                                                                        (pruneTerminalTurns state.stateTurns)
+                                                                }
+                                                        (event, state') =
+                                                            appendEventToState
+                                                                supervisor.supervisorConfig
+                                                                now
+                                                                spec.turnSpecBoundary
+                                                                "turn.queued"
+                                                                (Just turnId)
+                                                                (Just spec.turnSpecSessionId)
+                                                                (object [])
+                                                                withTurn
+                                                    writeTVar supervisor.supervisorState state'
+                                                    publishToSubscribers state' event
+                                                    pure (Right record)
+
+cancelTurn ::
+    Supervisor ->
+    AccessBoundary ->
+    TurnId ->
+    IO (Either Text TurnRecord)
 cancelTurn supervisor boundary turnId = mask \restore -> do
     now <- getCurrentTime
     outcome <- atomically do
@@ -437,13 +648,23 @@ cancelTurn supervisor boundary turnId = mask \restore -> do
             Just slot
                 | slot.turnSlotRecord.turnRecordBoundary /= boundary ->
                     pure (Left "turn not found")
+                | slot.turnSlotCancelling ->
+                    pure (Left "turn cancellation is in progress")
                 | not
-                    (isActiveStatus
-                        slot.turnSlotRecord.turnRecordStatus) ->
-                    pure (Right (slot.turnSlotRecord, Nothing, Nothing))
+                    ( isActiveStatus
+                        slot.turnSlotRecord.turnRecordStatus
+                    ) ->
+                    pure
+                        ( Right
+                            ( slot.turnSlotRecord
+                            , Nothing
+                            , Nothing
+                            , False
+                            )
+                        )
                 | otherwise -> do
-                    let record = cancelledRecord now slot.turnSlotRecord
-                        slot' = slot { turnSlotRecord = record }
+                    let slot' =
+                            slot { turnSlotCancelling = True }
                         worker =
                             Map.lookup turnId state.stateWorkers
                         (inputs, retainedInputs) =
@@ -451,30 +672,13 @@ cancelTurn supervisor boundary turnId = mask \restore -> do
                                 ((== turnId)
                                     . (.pendingInputView.humanRequestTurnId))
                                 state.statePendingInputs
-                        (event, state') = appendEventToState
-                            supervisor.supervisorConfig
-                            now
-                            boundary
-                            "turn.cancelled"
-                            (Just turnId)
-                            (Just record.turnRecordSessionId)
-                            (object [])
+                        state' =
                             state
                                 { stateQueue =
                                     Seq.filter (/= turnId) state.stateQueue
                                 , stateTurns =
                                     Map.insert turnId slot' state.stateTurns
                                 , statePendingInputs = retainedInputs
-                                , stateActiveSessions =
-                                    case worker of
-                                        Nothing ->
-                                            Set.delete
-                                                ( boundary
-                                                , record.turnRecordSessionId
-                                                )
-                                                state.stateActiveSessions
-                                        Just _ ->
-                                            state.stateActiveSessions
                                 }
                     forM_ (Map.elems inputs) \input ->
                         void
@@ -482,16 +686,17 @@ cancelTurn supervisor boundary turnId = mask \restore -> do
                                 input.pendingInputReply
                                 (Left "turn cancelled"))
                     writeTVar supervisor.supervisorState state'
-                    publishToSubscribers state' event
                     pure
                         (Right
-                            ( record
+                            ( slot.turnSlotRecord
                             , slot.turnSlotCancel
                             , worker
-                            ))
+                            , True
+                            )
+                        )
     case outcome of
         Left err -> pure (Left err)
-        Right (record, cancellation, worker) -> do
+        Right (record, cancellation, worker, transitioned) -> do
             let stopWorker =
                     forM_ worker \running -> do
                         cancel running
@@ -504,7 +709,18 @@ cancelTurn supervisor boundary turnId = mask \restore -> do
             -- Preserve in-band cancellation when it is responsive, but always
             -- deliver and join the structured cancellation.
             interruptInBand `finally` stopWorker
-            pure (Right record)
+            if not transitioned
+                then pure (Right record)
+                else do
+                    canonical <-
+                        persistTerminalEventually
+                            supervisor
+                            record
+                            now
+                            TurnWasCancelled
+                    atomically $
+                        publishTerminalRecord supervisor canonical
+                    pure (Right canonical)
 
 lookupTurn
     :: Supervisor
@@ -567,17 +783,30 @@ withSessionMutation
     -> Text
     -> IO value
     -> IO (Either SessionMutationError value)
-withSessionMutation supervisor boundary sessionId action =
+withSessionMutation =
+    withSessionReservation False
+
+withSessionReservation
+    :: Bool
+    -> Supervisor
+    -> AccessBoundary
+    -> Text
+    -> IO value
+    -> IO (Either SessionMutationError value)
+withSessionReservation waitForReservation supervisor boundary sessionId action =
     mask \restore -> do
         acquired <- atomically do
             state <- readTVar supervisor.supervisorState
             let key = (boundary, sessionId)
             if state.stateClosed
                 then pure (Left SessionMutationSupervisorClosed)
-                else if
-                    Set.member key state.stateActiveSessions
-                        || sessionBusy boundary sessionId state.stateTurns
+                else if sessionBusy boundary sessionId state.stateTurns
                     then pure (Left SessionMutationBusy)
+                    else if Set.member key state.stateActiveSessions
+                        then
+                            if waitForReservation
+                                then retry
+                                else pure (Left SessionMutationBusy)
                     else do
                         writeTVar supervisor.supervisorState
                             state
@@ -604,17 +833,35 @@ withSessionMutation supervisor boundary sessionId action =
 listHumanRequests
     :: Supervisor
     -> AccessBoundary
-    -> IO [HumanRequest]
-listHumanRequests supervisor boundary =
-    atomically do
+    -> Maybe TurnId
+    -> IO (Either Text [HumanRequest])
+listHumanRequests supervisor boundary turnId = do
+    local <- atomically do
         state <- readTVar supervisor.supervisorState
+        pure
+            [ request
+            | pending <- Map.elems state.statePendingInputs
+            , let request = pending.pendingInputView
+            , request.humanRequestBoundary == boundary
+            , maybe
+                True
+                (== request.humanRequestTurnId)
+                turnId
+            ]
+    durable <-
+        supervisor.supervisorPersistence.turnPersistenceListHumanRequests
+            boundary
+            turnId
+    pure do
+        persisted <- durable
+        let combined = persisted <> local
         pure $
-            sortOn (Down . (.humanRequestCreatedAt))
-                [ request
-                | pending <- Map.elems state.statePendingInputs
-                , let request = pending.pendingInputView
-                , request.humanRequestBoundary == boundary
-                ]
+            sortOn (Down . (.humanRequestCreatedAt)) $
+                Map.elems $
+                    Map.fromList
+                        [ (request.humanRequestId, request)
+                        | request <- combined
+                        ]
 
 resolveHumanRequest
     :: Supervisor
@@ -623,51 +870,69 @@ resolveHumanRequest
     -> HumanResponse
     -> IO (Either Text HumanRequest)
 resolveHumanRequest supervisor boundary requestId response = do
-    now <- getCurrentTime
-    atomically do
-        state <- readTVar supervisor.supervisorState
-        case Map.lookup requestId state.statePendingInputs of
-            Nothing -> pure (Left "request not found")
-            Just pending
-                | pending.pendingInputView.humanRequestBoundary /= boundary ->
-                    pure (Left "request not found")
-                | not
-                    (validHumanAnswer
-                        pending.pendingInputView.humanRequestOptions
-                        response.humanResponseDecision) ->
-                    pure (Left "decision is not one of the allowed options")
-                | otherwise -> do
-                    accepted <-
-                        tryPutTMVar pending.pendingInputReply (Right response)
-                    if not accepted
-                        then pure (Left "request has already been resolved")
-                        else do
-                            let request = pending.pendingInputView
-                                turns' = Map.adjust
-                                    (resumeWaitingTurn now)
-                                    request.humanRequestTurnId
-                                    state.stateTurns
-                                (event, state') = appendEventToState
-                                    supervisor.supervisorConfig
-                                    now
-                                    boundary
-                                    "request.resolved"
-                                    (Just request.humanRequestTurnId)
-                                    (Just request.humanRequestSessionId)
-                                    (object
-                                        [ "requestId"
-                                            .= requestId.unRequestId
-                                        ])
-                                    state
-                                        { statePendingInputs =
-                                            Map.delete
-                                                requestId
-                                                state.statePendingInputs
-                                        , stateTurns = turns'
-                                        }
-                            writeTVar supervisor.supervisorState state'
-                            publishToSubscribers state' event
-                            pure (Right request)
+    durable <-
+        supervisor.supervisorPersistence.turnPersistenceResolveHumanRequest
+            boundary
+            requestId
+            response
+    case durable of
+        Left err -> pure (Left err)
+        Right HumanRequestNotFoundDurably ->
+            pure (Left "request not found")
+        Right (HumanRequestResolvedDurably request) ->
+            resolveLocal (Just request)
+        Right HumanRequestLocalOnly ->
+            resolveLocal Nothing
+  where
+    resolveLocal durableRequest = do
+        now <- getCurrentTime
+        atomically do
+            state <- readTVar supervisor.supervisorState
+            case Map.lookup requestId state.statePendingInputs of
+                Nothing ->
+                    pure $
+                        maybe
+                            (Left "request not found")
+                            Right
+                            durableRequest
+                Just pending
+                    | pending.pendingInputView.humanRequestBoundary /= boundary ->
+                        pure (Left "request not found")
+                    | durableRequest == Nothing
+                        && not
+                            ( validHumanAnswer
+                                pending.pendingInputView.humanRequestOptions
+                                response.humanResponseDecision
+                            ) ->
+                        pure
+                            ( Left
+                                "decision is not one of the allowed options"
+                            )
+                    | otherwise -> do
+                        accepted <-
+                            tryPutTMVar
+                                pending.pendingInputReply
+                                (Right response)
+                        if not accepted
+                            then
+                                pure
+                                    ( Left
+                                        "request has already been resolved"
+                                    )
+                            else
+                                case completePendingInputInState
+                                        supervisor.supervisorConfig
+                                        now
+                                        requestId
+                                        state of
+                                    Nothing ->
+                                        pure (Left "request not found")
+                                    Just (request, event, state') -> do
+                                        writeTVar
+                                            supervisor.supervisorState
+                                            state'
+                                        publishToSubscribers state' event
+                                        pure (Right request)
 
 lookupTurnAgents
     :: Supervisor
@@ -803,6 +1068,116 @@ dispatcherLoop supervisor = do
             spawnTrackedWorker supervisor turnId spec
             dispatcherLoop supervisor
 
+cancellationMonitorLoop :: Supervisor -> IO ()
+cancellationMonitorLoop supervisor = do
+    threadDelay cancellationPollIntervalMicros
+    pending <- atomically do
+        state <- readTVar supervisor.supervisorState
+        if state.stateClosed
+            then pure Nothing
+            else
+                pure . Just $
+                    [ slot.turnSlotRecord
+                    | slot <- Map.elems state.stateTurns
+                    , not slot.turnSlotCancelling
+                    , isActiveStatus
+                        slot.turnSlotRecord.turnRecordStatus
+                    ]
+    case pending of
+        Nothing -> pure ()
+        Just records -> do
+            checks <-
+                forConcurrentlyBatched
+                    cancellationCheckBatchSize
+                    records \record -> do
+                    result <-
+                        tryAny $
+                            timeout
+                                cancellationCheckTimeoutMicros
+                                (supervisor.supervisorPersistence.turnPersistenceShouldCancel record)
+                    pure (record, result)
+            forM_ checks \case
+                (_, Right (Just (Right False))) -> pure ()
+                (record, _) ->
+                    -- A process which cannot confirm its durable owner fence
+                    -- must stop local side effects before another instance can
+                    -- reclaim the expired turn. Terminal persistence continues
+                    -- independently so one unavailable tenant cannot stall
+                    -- ownership checks for every other tenant.
+                    spawnCancellationTask supervisor record
+            cancellationMonitorLoop supervisor
+
+forConcurrentlyBatched
+    :: Int
+    -> [input]
+    -> (input -> IO output)
+    -> IO [output]
+forConcurrentlyBatched batchSize values action
+    | batchSize <= 0 =
+        fail "concurrent batch size must be positive"
+    | otherwise =
+        go values
+  where
+    go [] = pure []
+    go remaining = do
+        let (batch, rest) = splitAt batchSize remaining
+        batchResults <- forConcurrently batch action
+        restResults <- go rest
+        pure (batchResults <> restResults)
+
+spawnCancellationTask :: Supervisor -> TurnRecord -> IO ()
+spawnCancellationTask supervisor record = mask \restore -> do
+    start <- newEmptyMVar
+    task <-
+        async $
+            (readMVar start >> restore cancelRecord)
+                `finally`
+                    atomically
+                        ( modifyTVar'
+                            supervisor.supervisorState
+                            ( \state ->
+                                state
+                                    { stateCancellationTasks =
+                                        Map.delete
+                                            record.turnRecordId
+                                            state.stateCancellationTasks
+                                    }
+                            )
+                        )
+    accepted <- atomically do
+        state <- readTVar supervisor.supervisorState
+        if
+            state.stateClosed
+                || Map.member
+                    record.turnRecordId
+                    state.stateCancellationTasks
+            then pure False
+            else do
+                writeTVar
+                    supervisor.supervisorState
+                    state
+                        { stateCancellationTasks =
+                            Map.insert
+                                record.turnRecordId
+                                task
+                                state.stateCancellationTasks
+                        }
+                pure True
+    if accepted
+        then putMVar start ()
+        else do
+            cancel task
+            void (waitCatch task)
+  where
+    cancelRecord =
+        void $
+            tryAny $
+                void $
+                    cancelTurn
+                        supervisor
+                        record.turnRecordBoundary
+                        record.turnRecordId
+
 reserveRunnable :: Supervisor -> STM (Maybe (TurnId, TurnSpec))
 reserveRunnable supervisor = do
     state <- readTVar supervisor.supervisorState
@@ -863,32 +1238,43 @@ markTurnStarted
     -> UTCTime
     -> TurnId
     -> TurnSpec
-    -> STM ()
-markTurnStarted supervisor now turnId spec =
-    do
-        state <- readTVar supervisor.supervisorState
-        let withStarted = state
-                { stateTurns = Map.adjust
-                    (\slot ->
-                        slot
-                            { turnSlotRecord =
-                                slot.turnSlotRecord
-                                    { turnRecordStartedAt = Just now }
-                            })
-                    turnId
-                    state.stateTurns
-                }
-            (event, state') = appendEventToState
-                supervisor.supervisorConfig
-                now
-                spec.turnSpecBoundary
-                "turn.started"
-                (Just turnId)
-                (Just spec.turnSpecSessionId)
-                (object [])
-                withStarted
-        writeTVar supervisor.supervisorState state'
-        publishToSubscribers state' event
+    -> STM Bool
+markTurnStarted supervisor now turnId spec = do
+    state <- readTVar supervisor.supervisorState
+    case Map.lookup turnId state.stateTurns of
+        Just slot
+            | slot.turnSlotRecord.turnRecordStatus == TurnRunning
+            , not slot.turnSlotCancelling
+            , slot.turnSlotRecord.turnRecordBoundary
+                == spec.turnSpecBoundary
+            , slot.turnSlotRecord.turnRecordSessionId
+                == spec.turnSpecSessionId -> do
+                let withStarted =
+                        state
+                            { stateTurns = Map.adjust
+                                (\slot ->
+                                    slot
+                                        { turnSlotRecord =
+                                            slot.turnSlotRecord
+                                                { turnRecordStartedAt = Just now
+                                                }
+                                        })
+                                turnId
+                                state.stateTurns
+                            }
+                    (event, state') = appendEventToState
+                        supervisor.supervisorConfig
+                        now
+                        spec.turnSpecBoundary
+                        "turn.started"
+                        (Just turnId)
+                        (Just spec.turnSpecSessionId)
+                        (object [])
+                        withStarted
+                writeTVar supervisor.supervisorState state'
+                publishToSubscribers state' event
+                pure True
+        _ -> pure False
 
 spawnTrackedWorker :: Supervisor -> TurnId -> TurnSpec -> IO ()
 spawnTrackedWorker supervisor turnId spec = mask \restore -> do
@@ -972,81 +1358,151 @@ executeTurn supervisor turnId spec =
 
     runAndFinalize = do
         startedAt <- getCurrentTime
-        atomically $
-            markTurnStarted supervisor startedAt turnId spec
-        outcome <-
-            tryAny (supervisor.supervisorRunner control spec)
-                :: IO (Either SomeException (Either Text ()))
-        let result = case outcome of
-                Left _ -> Left "agent turn terminated unexpectedly"
-                Right value -> value
-        finalizeTurn supervisor turnId spec result
+        current <- lookupTurn supervisor spec.turnSpecBoundary turnId
+        case current of
+            Nothing -> pure ()
+            Just record ->
+                supervisor.supervisorPersistence.turnPersistenceStarted
+                    record
+                    startedAt
+                    >>= \case
+                        Left err ->
+                            finalizeTurn
+                                supervisor
+                                turnId
+                                spec
+                                ( Left
+                                    ( "could not persist turn start: "
+                                        <> err
+                                    )
+                                )
+                        Right () -> do
+                            started <-
+                                atomically $
+                                    markTurnStarted
+                                        supervisor
+                                        startedAt
+                                        turnId
+                                        spec
+                            when started do
+                                outcome <-
+                                    tryAny
+                                        (supervisor.supervisorRunner control spec) ::
+                                        IO
+                                            ( Either
+                                                SomeException
+                                                (Either Text TurnExecutionOutput)
+                                            )
+                                let result = case outcome of
+                                        Left _ ->
+                                            Left
+                                                "agent turn terminated unexpectedly"
+                                        Right value -> value
+                                finalizeTurn supervisor turnId spec result
 
     finish =
         atomically $
             modifyTVar' supervisor.supervisorState \state ->
-                state
+                let cancellationOwnsTerminal =
+                        maybe
+                            False
+                            (.turnSlotCancelling)
+                            (Map.lookup turnId state.stateTurns)
+                 in state
                     { stateWorkers =
                         Map.delete turnId state.stateWorkers
                     , stateActiveSessions =
-                        Set.delete
-                            ( spec.turnSpecBoundary
-                            , spec.turnSpecSessionId
-                            )
-                            state.stateActiveSessions
+                        if cancellationOwnsTerminal
+                            then state.stateActiveSessions
+                            else
+                                Set.delete
+                                    ( spec.turnSpecBoundary
+                                    , spec.turnSpecSessionId
+                                    )
+                                    state.stateActiveSessions
                     }
 
-finalizeTurn
-    :: Supervisor
-    -> TurnId
-    -> TurnSpec
-    -> Either Text ()
-    -> IO ()
+finalizeTurn ::
+    Supervisor ->
+    TurnId ->
+    TurnSpec ->
+    Either Text TurnExecutionOutput ->
+    IO ()
 finalizeTurn supervisor turnId spec result = do
     now <- getCurrentTime
-    atomically do
+    current <- atomically do
         state <- readTVar supervisor.supervisorState
-        case Map.lookup turnId state.stateTurns of
-            Nothing -> pure ()
-            Just slot
-                | isTerminalStatus
-                    slot.turnSlotRecord.turnRecordStatus ->
-                    pure ()
-                | otherwise -> do
-                    let (status, eventType, turnError) = case result of
-                            Left err ->
-                                ( TurnFailed
-                                , "turn.failed"
-                                , Just (boundedSupervisorText err)
-                                )
-                            Right () ->
-                                (TurnCompleted, "turn.completed", Nothing)
-                        record =
-                            slot.turnSlotRecord
-                                { turnRecordStatus = status
-                                , turnRecordFinishedAt = Just now
-                                , turnRecordError = turnError
-                                }
-                        (event, state') = appendEventToState
-                            supervisor.supervisorConfig
-                            now
-                            spec.turnSpecBoundary
-                            eventType
-                            (Just turnId)
-                            (Just spec.turnSpecSessionId)
-                            (object ["error" .= turnError])
-                            state
-                                { stateTurns =
-                                    Map.insert
-                                        turnId
-                                        slot
-                                            { turnSlotRecord = record
-                                            , turnSlotCancel = Nothing
-                                            }
-                                        state.stateTurns
-                                }
-                    writeTVar supervisor.supervisorState state'
-                    publishToSubscribers state' event
+        pure do
+            slot <- Map.lookup turnId state.stateTurns
+            if slot.turnSlotRecord.turnRecordBoundary
+                == spec.turnSpecBoundary
+                && not slot.turnSlotCancelling
+                then Just slot.turnSlotRecord
+                else Nothing
+    case current of
+        Nothing -> pure ()
+        Just record
+            | isTerminalStatus record.turnRecordStatus ->
+                pure ()
+        Just record -> do
+            canonical <-
+                persistTerminalEventually
+                    supervisor
+                    record
+                    now
+                    (either TurnErrored TurnSucceeded result)
+            atomically $
+                publishTerminalRecord supervisor canonical
+
+publishTerminalRecord
+    :: Supervisor
+    -> TurnRecord
+    -> STM ()
+publishTerminalRecord supervisor canonical = do
+    state <- readTVar supervisor.supervisorState
+    case Map.lookup canonical.turnRecordId state.stateTurns of
+        Nothing -> pure ()
+        Just slot
+            | slot.turnSlotRecord == canonical ->
+                pure ()
+            | otherwise -> do
+                let eventType = case canonical.turnRecordStatus of
+                        TurnCompleted -> "turn.completed"
+                        TurnFailed -> "turn.failed"
+                        TurnCancelled -> "turn.cancelled"
+                        _ -> "turn.failed"
+                    eventAt =
+                        maybe
+                            canonical.turnRecordCreatedAt
+                            id
+                            canonical.turnRecordFinishedAt
+                    (event, state') = appendEventToState
+                        supervisor.supervisorConfig
+                        eventAt
+                        canonical.turnRecordBoundary
+                        eventType
+                        (Just canonical.turnRecordId)
+                        (Just canonical.turnRecordSessionId)
+                        (object ["error" .= canonical.turnRecordError])
+                        state
+                            { stateTurns =
+                                Map.insert
+                                    canonical.turnRecordId
+                                    slot
+                                        { turnSlotRecord = canonical
+                                        , turnSlotCancelling = False
+                                        , turnSlotCancel = Nothing
+                                        }
+                                    state.stateTurns
+                            , stateActiveSessions =
+                                Set.delete
+                                    ( canonical.turnRecordBoundary
+                                    , canonical.turnRecordSessionId
+                                    )
+                                    state.stateActiveSessions
+                            }
+                writeTVar supervisor.supervisorState state'
+                publishToSubscribers state' event
 
 -- A failed boundary guard must not invoke an event callback for the stale
 -- credential. Retain only a terminal in-memory state, still scoped to the
@@ -1058,107 +1514,241 @@ finalizeTurnStateOnly
     -> IO ()
 finalizeTurnStateOnly supervisor turnId err = do
     now <- getCurrentTime
-    atomically $
-        modifyTVar' supervisor.supervisorState \state ->
-            state
-                { stateTurns =
-                    Map.adjust
-                        (\slot ->
-                            if isTerminalStatus
-                                slot.turnSlotRecord.turnRecordStatus
-                                then slot
-                                else slot
-                                    { turnSlotRecord =
-                                        slot.turnSlotRecord
-                                            { turnRecordStatus = TurnFailed
-                                            , turnRecordFinishedAt = Just now
-                                            , turnRecordError =
-                                                Just
-                                                    (boundedSupervisorText err)
-                                            }
+    current <- atomically do
+        state <- readTVar supervisor.supervisorState
+        pure do
+            slot <- Map.lookup turnId state.stateTurns
+            if slot.turnSlotCancelling
+                then Nothing
+                else Just slot.turnSlotRecord
+    forM_ current \record -> do
+        canonical <-
+            persistTerminalEventually
+                supervisor
+                record
+                now
+                (TurnErrored err)
+        atomically $
+            modifyTVar' supervisor.supervisorState \state ->
+                state
+                    { stateTurns =
+                        Map.adjust
+                            (\slot ->
+                                slot
+                                    { turnSlotRecord = canonical
+                                    , turnSlotCancelling = False
                                     , turnSlotCancel = Nothing
                                     })
-                        turnId
-                        state.stateTurns
-                }
+                            turnId
+                            state.stateTurns
+                    }
 
-requestTurnInput
-    :: Supervisor
-    -> TurnId
-    -> TurnSpec
-    -> HumanRequestSpec
-    -> IO (Either Text HumanResponse)
-requestTurnInput supervisor turnId spec requestSpec = do
-    now <- getCurrentTime
-    requestId <- RequestId <$> newUUIDv7Text
-    reply <- atomically newEmptyTMVar
-    let boundedRequestSpec = HumanRequestSpec
-            { humanRequestSpecKind =
-                requestSpec.humanRequestSpecKind
-            , humanRequestSpecPrompt =
-                boundedSupervisorText
-                    requestSpec.humanRequestSpecPrompt
-            , humanRequestSpecOptions =
-                map boundedSupervisorText
-                    (take 100 requestSpec.humanRequestSpecOptions)
-            }
-    requestResult <- atomically do
-        state <- readTVar supervisor.supervisorState
-        case Map.lookup turnId state.stateTurns of
-            Nothing -> pure (Left "turn not found")
-            Just slot
-                | isTerminalStatus
-                    slot.turnSlotRecord.turnRecordStatus ->
-                    pure (Left "turn is no longer running")
-                | otherwise -> do
-                    let request = HumanRequest
-                            { humanRequestId = requestId
-                            , humanRequestTurnId = turnId
-                            , humanRequestSessionId =
-                                spec.turnSpecSessionId
-                            , humanRequestBoundary =
-                                spec.turnSpecBoundary
-                            , humanRequestKind =
-                                boundedRequestSpec.humanRequestSpecKind
-                            , humanRequestPrompt =
-                                boundedRequestSpec.humanRequestSpecPrompt
-                            , humanRequestOptions =
-                                boundedRequestSpec.humanRequestSpecOptions
-                            , humanRequestCreatedAt = now
-                            }
-                        pending = PendingInput
-                            { pendingInputView = request
-                            , pendingInputReply = reply
-                            }
-                        record =
-                            slot.turnSlotRecord
-                                { turnRecordStatus = TurnWaitingForInput }
-                        (event, state') = appendEventToState
-                            supervisor.supervisorConfig
-                            now
-                            spec.turnSpecBoundary
-                            "request.created"
-                            (Just turnId)
-                            (Just spec.turnSpecSessionId)
-                            (toJSONRequest request)
-                            state
-                                { statePendingInputs =
-                                    Map.insert
-                                        requestId
-                                        pending
-                                        state.statePendingInputs
-                                , stateTurns =
-                                    Map.insert
-                                        turnId
-                                        slot { turnSlotRecord = record }
-                                        state.stateTurns
+persistTerminalEventually ::
+    Supervisor ->
+    TurnRecord ->
+    UTCTime ->
+    TurnTerminalOutcome ->
+    IO TurnRecord
+persistTerminalEventually supervisor record finishedAt outcome =
+    go terminalPersistenceInitialRetryMicros
+  where
+    go retryDelay =
+        supervisor.supervisorPersistence.turnPersistenceTerminal
+            record
+            finishedAt
+            outcome
+            >>= \case
+                Right canonical -> pure canonical
+                Left _ -> do
+                    threadDelay retryDelay
+                    go
+                        ( min
+                            terminalPersistenceMaximumRetryMicros
+                            (retryDelay * 2)
+                        )
+
+requestTurnInput ::
+    Supervisor ->
+    TurnId ->
+    TurnSpec ->
+    HumanRequestSpec ->
+    IO (Either Text HumanResponse)
+requestTurnInput supervisor turnId spec requestSpec =
+    mask \restore -> do
+        now <- getCurrentTime
+        requestId <- RequestId <$> newUUIDv7Text
+        reply <- atomically newEmptyTMVar
+        let boundedRequestSpec = HumanRequestSpec
+                { humanRequestSpecKind =
+                    requestSpec.humanRequestSpecKind
+                , humanRequestSpecPrompt =
+                    boundedSupervisorText
+                        requestSpec.humanRequestSpecPrompt
+                , humanRequestSpecOptions =
+                    map boundedSupervisorText
+                        (take 100 requestSpec.humanRequestSpecOptions)
+                }
+            request = HumanRequest
+                { humanRequestId = requestId
+                , humanRequestTurnId = turnId
+                , humanRequestSessionId =
+                    spec.turnSpecSessionId
+                , humanRequestBoundary =
+                    spec.turnSpecBoundary
+                , humanRequestKind =
+                    boundedRequestSpec.humanRequestSpecKind
+                , humanRequestPrompt =
+                    boundedRequestSpec.humanRequestSpecPrompt
+                , humanRequestOptions =
+                    boundedRequestSpec.humanRequestSpecOptions
+                , humanRequestCreatedAt = now
+                }
+        if LazyByteString.length (encode request)
+            > maximumHumanRequestBytes
+            then
+                pure
+                    ( Left
+                        "human request exceeds the public size limit"
+                    )
+            else do
+                current <- atomically (currentTurnRecord supervisor turnId)
+                case current of
+                    Left err -> pure (Left err)
+                    Right record ->
+                        supervisor.supervisorPersistence.turnPersistenceCreateHumanRequest
+                            record
+                            request
+                            >>= \case
+                                Left err -> pure (Left err)
+                                Right () ->
+                                    restore
+                                        (installAndWait record request reply)
+                                        `finally` cleanup record requestId
+  where
+    cleanup record requestId =
+        void $
+            timeout humanRequestCleanupTimeoutMicros $
+                supervisor.supervisorPersistence.turnPersistenceDeleteHumanRequest
+                    record
+                    requestId
+
+    installAndWait record request reply = do
+        installed <- atomically do
+            state <- readTVar supervisor.supervisorState
+            case Map.lookup turnId state.stateTurns of
+                Nothing -> pure (Left "turn not found")
+                Just slot
+                    | slot.turnSlotCancelling
+                        || isTerminalStatus
+                            slot.turnSlotRecord.turnRecordStatus ->
+                        pure (Left "turn is no longer running")
+                    | otherwise -> do
+                        let pending = PendingInput
+                                { pendingInputView = request
+                                , pendingInputReply = reply
                                 }
-                    writeTVar supervisor.supervisorState state'
-                    publishToSubscribers state' event
-                    pure (Right ())
-    case requestResult of
-        Left err -> pure (Left err)
-        Right () -> atomically (takeTMVar reply)
+                            waitingRecord =
+                                slot.turnSlotRecord
+                                    { turnRecordStatus =
+                                        TurnWaitingForInput
+                                    }
+                            (event, state') = appendEventToState
+                                supervisor.supervisorConfig
+                                request.humanRequestCreatedAt
+                                spec.turnSpecBoundary
+                                "request.created"
+                                (Just turnId)
+                                (Just spec.turnSpecSessionId)
+                                (toJSONRequest request)
+                                state
+                                    { statePendingInputs =
+                                        Map.insert
+                                            request.humanRequestId
+                                            pending
+                                            state.statePendingInputs
+                                    , stateTurns =
+                                        Map.insert
+                                            turnId
+                                            slot
+                                                { turnSlotRecord =
+                                                    waitingRecord
+                                                }
+                                            state.stateTurns
+                                    }
+                        writeTVar supervisor.supervisorState state'
+                        publishToSubscribers state' event
+                        pure (Right ())
+        case installed of
+            Left err -> pure (Left err)
+            Right () ->
+                waitForHumanResponse
+                    supervisor
+                    record
+                    request
+                    reply
+
+currentTurnRecord ::
+    Supervisor ->
+    TurnId ->
+    STM (Either Text TurnRecord)
+currentTurnRecord supervisor turnId = do
+    state <- readTVar supervisor.supervisorState
+    case Map.lookup turnId state.stateTurns of
+        Nothing -> pure (Left "turn not found")
+        Just slot
+            | slot.turnSlotCancelling
+                || isTerminalStatus
+                    slot.turnSlotRecord.turnRecordStatus ->
+                pure (Left "turn is no longer running")
+            | otherwise -> pure (Right slot.turnSlotRecord)
+
+waitForHumanResponse ::
+    Supervisor ->
+    TurnRecord ->
+    HumanRequest ->
+    TMVar (Either Text HumanResponse) ->
+    IO (Either Text HumanResponse)
+waitForHumanResponse supervisor record request reply =
+    timeout
+        humanResponsePollIntervalMicros
+        (atomically (takeTMVar reply))
+        >>= \case
+            Just response -> pure response
+            Nothing ->
+                supervisor.supervisorPersistence.turnPersistenceLoadHumanResponse
+                    record
+                    request.humanRequestId
+                    >>= \case
+                        Left err -> pure (Left err)
+                        Right Nothing ->
+                            waitForHumanResponse
+                                supervisor
+                                record
+                                request
+                                reply
+                        Right (Just response) -> do
+                            now <- getCurrentTime
+                            completed <- atomically do
+                                state <- readTVar supervisor.supervisorState
+                                case completePendingInputInState
+                                        supervisor.supervisorConfig
+                                        now
+                                        request.humanRequestId
+                                        state of
+                                    Nothing -> pure False
+                                    Just (_, event, state') -> do
+                                        writeTVar
+                                            supervisor.supervisorState
+                                            state'
+                                        publishToSubscribers state' event
+                                        pure True
+                            pure
+                                ( if completed
+                                    then Right response
+                                    else
+                                        Left
+                                            "turn is no longer waiting for input"
+                                )
 
 setTurnCancellation :: TurnId -> IO () -> SupervisorState -> SupervisorState
 setTurnCancellation turnId action state =
@@ -1166,7 +1756,9 @@ setTurnCancellation turnId action state =
         { stateTurns =
             Map.adjust
                 (\slot ->
-                    if isActiveStatus slot.turnSlotRecord.turnRecordStatus
+                    if
+                        isActiveStatus slot.turnSlotRecord.turnRecordStatus
+                            && not slot.turnSlotCancelling
                         then slot { turnSlotCancel = Just action }
                         else slot)
                 turnId
@@ -1253,6 +1845,7 @@ publishTurnEvent
         case Map.lookup turnId state.stateTurns of
             Just slot
                 | not state.stateClosed
+                , not slot.turnSlotCancelling
                 , slot.turnSlotRecord.turnRecordBoundary == boundary
                 , slot.turnSlotRecord.turnRecordSessionId == sessionId
                 , isActiveStatus slot.turnSlotRecord.turnRecordStatus -> do
@@ -1377,12 +1970,11 @@ cancelSlot
     -> TurnSlot
     -> Map TurnId TurnSlot
     -> Map TurnId TurnSlot
-cancelSlot now slot =
+cancelSlot _now slot =
     Map.insert
         slot.turnSlotRecord.turnRecordId
         slot
-            { turnSlotRecord =
-                cancelledRecord now slot.turnSlotRecord
+            { turnSlotCancelling = True
             , turnSlotCancel = Nothing
             }
 
@@ -1397,6 +1989,28 @@ cancelledRecord now record =
         , turnRecordError = Nothing
         }
 
+terminalRecord
+    :: UTCTime
+    -> TurnTerminalOutcome
+    -> TurnRecord
+    -> TurnRecord
+terminalRecord finishedAt outcome record =
+    case outcome of
+        TurnSucceeded _ ->
+            record
+                { turnRecordStatus = TurnCompleted
+                , turnRecordFinishedAt = Just finishedAt
+                , turnRecordError = Nothing
+                }
+        TurnErrored err ->
+            record
+                { turnRecordStatus = TurnFailed
+                , turnRecordFinishedAt = Just finishedAt
+                , turnRecordError = Just (boundedSupervisorText err)
+                }
+        TurnWasCancelled ->
+            cancelledRecord finishedAt record
+
 resumeWaitingTurn
     :: UTCTime
     -> TurnSlot
@@ -1410,6 +2024,38 @@ resumeWaitingTurn _now slot
             }
     | otherwise = slot
 
+completePendingInputInState ::
+    SupervisorConfig ->
+    UTCTime ->
+    RequestId ->
+    SupervisorState ->
+    Maybe (HumanRequest, ServerEvent, SupervisorState)
+completePendingInputInState config now requestId state = do
+    pending <- Map.lookup requestId state.statePendingInputs
+    let request = pending.pendingInputView
+        turns' =
+            Map.adjust
+                (resumeWaitingTurn now)
+                request.humanRequestTurnId
+                state.stateTurns
+        withoutPending =
+            state
+                { statePendingInputs =
+                    Map.delete requestId state.statePendingInputs
+                , stateTurns = turns'
+                }
+        (event, state') =
+            appendEventToState
+                config
+                now
+                request.humanRequestBoundary
+                "request.resolved"
+                (Just request.humanRequestTurnId)
+                (Just request.humanRequestSessionId)
+                (object ["requestId" .= requestId.unRequestId])
+                withoutPending
+    pure (request, event, state')
+
 validHumanAnswer :: [Text] -> Text -> Bool
 validHumanAnswer options answer =
     null options || answer `elem` options
@@ -1418,6 +2064,33 @@ boundedSupervisorText :: Text -> Text
 boundedSupervisorText value
     | Text.length value <= 16384 = value
     | otherwise = Text.take 16383 value <> "…"
+
+terminalPersistenceInitialRetryMicros :: Int
+terminalPersistenceInitialRetryMicros = 100 * 1000
+
+terminalPersistenceMaximumRetryMicros :: Int
+terminalPersistenceMaximumRetryMicros = 2 * 1000 * 1000
+
+cancellationPollIntervalMicros :: Int
+cancellationPollIntervalMicros = 100 * 1000
+
+cancellationCheckTimeoutMicros :: Int
+cancellationCheckTimeoutMicros = 5 * 1000 * 1000
+
+cancellationCheckBatchSize :: Int
+cancellationCheckBatchSize = 4
+
+humanResponsePollIntervalMicros :: Int
+humanResponsePollIntervalMicros = 100 * 1000
+
+humanRequestCleanupTimeoutMicros :: Int
+humanRequestCleanupTimeoutMicros = 1000 * 1000
+
+maximumHumanRequestBytes :: Int64
+maximumHumanRequestBytes = 64 * 1024
+
+terminalPersistenceShutdownTimeoutMicros :: Int
+terminalPersistenceShutdownTimeoutMicros = 5 * 1000 * 1000
 
 cancelHookTimeoutMicros :: Int
 cancelHookTimeoutMicros = 1000 * 1000
