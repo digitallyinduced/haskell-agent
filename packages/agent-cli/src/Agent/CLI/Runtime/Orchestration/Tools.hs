@@ -93,7 +93,8 @@ import Agent.CLI.Options
       CliOptions(optYolo, optModel, optEffort, optMaxConcurrentAgents,
                  optGhci, optBash, optComputerUse, optNoYolo, optSkills) )
 import Agent.CLI.PendingInputs
-    ( PendingNoticeKind(..)
+    ( PendingInputs
+    , PendingNoticeKind(..)
     , enqueuePendingInput
     , enqueuePendingNotice
     , newPendingInputs
@@ -158,6 +159,7 @@ import Agent.CLI.Session
       sessionLegacySubagentTarget,
       taskPlanHooksForPersistence,
       SessionTempCleanupReport(..),
+      LegacySubagentTarget,
       Persistence(PersistenceDisabled),
       SessionHandle(sessionDir, sessionMeta),
       SessionMeta(metaId, metaTransportModel, metaProvider,
@@ -193,6 +195,10 @@ import Agent.CLI.Subagents.Runtime
       persistAndEvictSubagentSessionWithStatus,
       prepareCollaborationSpawn,
       restoreAgentFromDisk )
+import Agent.CLI.Subagents.Runtime.Types
+    ( SubagentSession
+    , SubagentStoreRoot
+    )
 import Agent.CLI.TUI.App
     ( FullscreenRuntime,
       clearFullscreenHistorySource,
@@ -219,20 +225,25 @@ import Agent.CLI.Worktree
 import Agent.Cancel ()
 import Agent.Claude ()
 import Agent.Dialect
-    ( dialectForId
+    ( Dialect
+    , dialectForId
     , DialectId(CodexDialect, GrokBuildDialect)
     )
 import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Goal ()
 import Agent.GrokBuild.Dialect.Runtime ()
-import Agent.GrokBuild.Dialect.Task ( grokRootChildModels )
+import Agent.GrokBuild.Dialect.Task
+    ( GrokSubagentSpecs
+    , grokRootChildModels
+    )
 import Agent.GrokBuild.Dialect.Workflow ()
 import Agent.Loop
     ( TurnInput(UserMessage, AgentMessage),
       LoopError(LoopNoResponseId) )
 import Agent.OpenAI.Compaction ()
 import Agent.OpenAI.ImageGeneration
-    ( clearImageGenerationHistory
+    ( ImageGenerationHistory
+    , clearImageGenerationHistory
     , imageGenerationTool
     , newImageGenerationHistory
     , recordImageGenerationImages
@@ -252,7 +263,10 @@ import Agent.ReasoningEffort
 import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient ( GenericClientOptions(..) )
 import Agent.Responses.Types ( ResponseItem )
-import Agent.Skills ( SkillCatalog(SkillCatalog) )
+import Agent.Skills
+    ( SkillCatalog(SkillCatalog)
+    , SkillInvocation
+    )
 import Agent.Store.Postgres ( trustedPool )
 import Agent.Store.Types ()
 import Agent.Subagents
@@ -265,7 +279,9 @@ import Agent.Subagents
       interruptActiveSubagents,
       defaultMaxConcurrent,
       defaultSubagentConfig,
-      SubagentConfig(maxConcurrent) )
+      SubagentConfig(maxConcurrent),
+      SubagentId,
+      SubagentRegistry )
 import Agent.Subagents.TaskPath ( taskPathRoot )
 import Agent.TUI.Model ( UiEvent(UiSetNotice) )
 import Agent.TUI.Motion ()
@@ -285,9 +301,10 @@ import Agent.Tools.Secret
     ( SecretPrompt(..), SecretPromptHooks(..) )
 import Agent.Tools.ShowImage
     ( ImageDisplayHooks(..), ImageDisplayRequest(..) )
-import Agent.Tools.TaskPlan (newTaskPlanEnv)
+import Agent.Tools.TaskPlan (TaskPlanEnv, newTaskPlanEnv)
 import Agent.Tools.Types
-    ( AppToolGroup(..)
+    ( AppTool
+    , AppToolGroup(..)
     , ToolEnv(..)
     , appToolsFromGroups
     , setToolSessionTmp
@@ -306,6 +323,7 @@ import Data.Functor ()
 import Data.IORef
     (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.List ()
+import Data.Map.Strict (Map)
 import Data.Maybe ( isNothing, fromMaybe, isJust )
 import Data.Set (Set)
 import Data.Text (Text)
@@ -341,7 +359,10 @@ import qualified Data.Map.Strict as Map
     ( toAscList, empty, lookup, notMember )
 import qualified Agent.OpenAI.Auth as OpenAI ()
 import qualified Agent.OpenRouter as OpenRouter
-    ( clientOptionsFromEnv, mapModel )
+    ( ClientOptions
+    , clientOptionsFromEnv
+    , mapModel
+    )
 import qualified Agent.OpenRouter.Usage as OpenRouterUsage ()
 import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
@@ -353,6 +374,158 @@ import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Client as XAIClient ()
 import qualified Agent.XAI.Request as XAIRequest ()
 import qualified Agent.XAI.Usage as XAIUsage ()
+
+data AgentToolsRequest windowTitleResult = AgentToolsRequest
+    { runAgentChild :: AgentRunMode -> CliOptions -> IO DevResult
+    , loaded :: LoadedAuth
+    , connectedGateway :: Maybe GatewayCredential
+    , learnAboutUserRequested :: Bool
+    , customBearerToken :: Maybe Text
+    , activeAccountIdRef :: IORef Text
+    , activeAccountRef :: IORef Text
+    , activeSelectionRef :: IORef Text
+    , baseToolEnv :: ToolEnv
+    , catalog :: ModelCatalog
+    , gatewayModelsRef :: IORef (Maybe GatewayModelAccess)
+    , gatewayIdentity :: Maybe Text
+    , checkStartupUsageInBackground :: Bool
+    , configuredOptionTarget :: Maybe ModelTarget
+    , customResponses :: Maybe (Text, ResponsesConnection)
+    , cwd :: OsPath
+    , databaseScopes :: DatabaseScopes
+    , escPaused :: IORef Bool
+    , fullscreen :: Maybe FullscreenRuntime
+    , home :: OsPath
+    , interrupt :: InterruptState
+    , isTty :: Bool
+    , mcpSupervisor :: MCP.McpSupervisor
+    , options :: CliOptions
+    , pendingTurn :: Maybe PendingTurn
+    , preferredOpenAiAccountRef :: IORef (Maybe Text)
+    , processRuntime :: AgentProcessRuntime
+    , projectRoot :: OsPath
+    , projectSettings :: ProjectSettings
+    , projectTarget :: Maybe ModelTarget
+    , resolveActiveAccountLabel :: Credential -> IO Text
+    , resumeLock :: Maybe SessionLock
+    , resumed :: Maybe (SessionMeta, [SessionTurn])
+    , resumedTarget :: Maybe ModelTarget
+    , root :: OsPath
+    , selectHttpAccount :: Text -> IO (Either ApiError Text)
+    , selectableTokenProvider :: TokenProvider
+    , setWindowTitle :: Text -> IO windowTitleResult
+    , startup :: StartupRuntime
+    , stateDirectory :: FilePath
+    , stderrHandle :: Handle
+    , targetHint :: Maybe ModelTarget
+    , tokenProvider :: TokenProvider
+    , transition :: Maybe ProviderTransition
+    , transitionTarget :: Maybe ModelTarget
+    , uiRuntimeRef :: IORef (Maybe FullscreenRuntime)
+    , unavailableProviders :: Set Provider
+    }
+
+data ToolStartup = ToolStartup
+    { toolNativeCapabilities :: NativeRunCapabilities
+    , toolOpenRouterOptions :: OpenRouter.ClientOptions
+    , toolHarnessConfig :: HarnessConfig
+    , toolGatewaySelection :: Maybe ModelOption
+    , toolGatewayAllowedChildModels :: Maybe [Text]
+    }
+
+data ToolHostHooks = ToolHostHooks
+    { toolPlanHooks :: PlanModeHooks
+    , toolSecretHooks :: Maybe SecretPromptHooks
+    , toolImageHooks :: Maybe ImageDisplayHooks
+    }
+
+data ToolModelRuntime = ToolModelRuntime
+    { toolProvider :: Provider
+    , toolModel :: Text
+    , toolTransportModel :: Text -> Text
+    , toolInferredTarget :: ModelTarget
+    , toolCustomGenericOptions :: Maybe GenericClientOptions
+    , toolDialectId :: DialectId
+    , toolDialect :: Dialect
+    , toolResumeTargetChanged :: Bool
+    , toolRefreshDialectContext :: Bool
+    , toolLegacySubagentTarget :: Maybe LegacySubagentTarget
+    , toolEffortText :: Text
+    , toolPolicy :: ApprovalPolicy
+    , toolClaudeBypassEnabled :: Bool
+    }
+
+data CollaborationRuntime = CollaborationRuntime
+    { collaborationActiveSessionLock :: IORef (Maybe SessionLock)
+    , collaborationPersistSlotRef :: IORef Persistence
+    , collaborationSubagentSessions
+        :: IORef (Map SubagentId SubagentSession)
+    , collaborationSubagentStoreRoot :: SubagentStoreRoot
+    , collaborationSubagentForkSource
+        :: IORef (Maybe (IO [ResponseItem]))
+    , collaborationPendingNotices :: PendingInputs
+    , collaborationRegistry :: SubagentRegistry
+    , collaborationRootTurnRef :: IORef (Maybe RootTurnId)
+    , collaborationAgentTypes :: GrokSubagentSpecs
+    , collaborationOpenAiChild :: Maybe TokenProvider
+    , collaborationAllowedChildModels :: Maybe [Text]
+    , collaborationChildModelAllowed :: Maybe (Text -> IO Bool)
+    , collaborationResolveChildModel
+        :: Maybe (Text -> IO (Maybe CollaborationModelTarget))
+    , collaborationGatewayChildModelOption
+        :: Maybe (Text -> IO (Maybe ModelOption))
+    , collaborationCreateWorktree
+        :: OsPath -> IO (Either Text SubagentWorktree)
+    , collaborationContext :: Maybe MultiAgentContext
+    , collaborationCloseAgents :: IO ()
+    }
+
+data ScratchRuntime = ScratchRuntime
+    { scratchPromptRequest :: Maybe ManagedTurnRequest
+    , scratchPersistence :: Persistence
+    , scratchTaskPlan :: TaskPlanEnv
+    , scratchSessionTmp :: OsPath
+    , scratchImageGenerationHistory :: ImageGenerationHistory
+    , scratchExternalSessionTools :: [AppTool]
+    , scratchCleanup :: IO ()
+    }
+
+data McpRuntime = McpRuntime
+    { runtimeMcpServerConfigs :: [MCP.McpServerConfig]
+    , runtimeProgressiveMcp :: Bool
+    , runtimeMcpLease :: MCP.McpFleetLease
+    , runtimeMcpFleet :: MCP.McpFleet
+    , runtimeMcpInstructions :: [(Text, Text)]
+    }
+
+data CodingRuntime = CodingRuntime
+    { runtimeCoding :: CodingTools
+    , runtimeExtraTools :: [AppTool]
+    , runtimeCloseExtraTools :: IO ()
+    }
+
+data SessionControlRuntime = SessionControlRuntime
+    { controlGhciEnabledRef :: IORef Bool
+    , controlBashEnabledRef :: IORef Bool
+    , controlSkillsRef :: IORef SkillCatalog
+    , controlSkillInvocationsRef :: IORef [SkillInvocation]
+    , controlCodeModeCloseRef :: IORef (IO ())
+    , controlClaimCurrentSession :: SessionHandle -> IO ()
+    , controlSessionTools :: [AppTool]
+    }
+
+data SessionToolsRuntime = SessionToolsRuntime
+    { sessionAllTools :: [AppTool]
+    , sessionTools :: [AppTool]
+    , sessionMcpTools :: [AppTool]
+    , sessionDatabaseTools :: [AppTool]
+    , sessionLearnedSkillTools :: [AppTool]
+    , sessionGatewayTools :: [AppTool]
+    , sessionPlanMode :: PlanModeEnv
+    , sessionNoteDirectory :: OsPath -> IO ()
+    , sessionCloseAll :: IO ()
+    , sessionResumedPlanPending :: Bool
+    }
 
 runAgentTools
     :: (AgentRunMode -> CliOptions -> IO DevResult)
@@ -451,13 +624,87 @@ runAgentTools
     transitionTarget
     uiRuntimeRef
     unavailableProviders
-    = do
-    let nativeCapabilities =
+    =
+    runAgentToolsRequest AgentToolsRequest{..}
+
+runAgentToolsRequest
+    :: AgentToolsRequest windowTitleResult
+    -> IO RunResult
+runAgentToolsRequest request = do
+    toolStartup <- loadToolStartup request
+    let toolModelRuntime = resolveToolModel request toolStartup
+        toolHostHooks =
+            buildToolHostHooks request toolStartup toolModelRuntime
+    collaborationRuntime <-
+        newCollaborationRuntime request toolStartup toolModelRuntime
+    scratchRuntime <-
+        prepareScratchRuntime
+            request
+            toolStartup
+            toolModelRuntime
+            collaborationRuntime
+    mcpRuntime <-
+        acquireMcpRuntime
+            request
+            toolStartup
+            toolModelRuntime
+            collaborationRuntime
+            scratchRuntime
+    codingRuntime <-
+        acquireCodingRuntime
+            request
+            toolStartup
+            toolModelRuntime
+            toolHostHooks
+            collaborationRuntime
+            scratchRuntime
+            mcpRuntime
+    installCollaborationCallbacks request collaborationRuntime
+    sessionControlRuntime <-
+        newSessionControlRuntime
+            request
+            toolStartup
+            toolModelRuntime
+            collaborationRuntime
+    sessionToolsRuntime <-
+        assembleSessionToolsRuntime
+            request
+            toolStartup
+            toolModelRuntime
+            toolHostHooks
+            collaborationRuntime
+            scratchRuntime
+            mcpRuntime
+            codingRuntime
+            sessionControlRuntime
+    launchAgentToolsSession
+        request
+        toolStartup
+        toolModelRuntime
+        toolHostHooks
+        collaborationRuntime
+        scratchRuntime
+        mcpRuntime
+        codingRuntime
+        sessionControlRuntime
+        sessionToolsRuntime
+
+loadToolStartup
+    :: AgentToolsRequest windowTitleResult
+    -> IO ToolStartup
+loadToolStartup request@AgentToolsRequest
+    { loaded
+    , connectedGateway
+    , gatewayIdentity
+    , home
+    , startup
+    } = do
+    let toolNativeCapabilities =
             maybe
                 fullNativeRunCapabilities
                 (.nativeCapabilities)
                 startup.startupNativeHooks
-    openRouterOptions <- OpenRouter.clientOptionsFromEnv
+    toolOpenRouterOptions <- OpenRouter.clientOptionsFromEnv
     markStartupStage startup "Loading tools…"
     when (isGatewayLoadedAuth loaded /= isJust gatewayIdentity) $
         startupDie startup
@@ -465,248 +712,314 @@ runAgentTools
     when ((gatewayCredentialIdentity <$> connectedGateway) /= gatewayIdentity) $
         startupDie startup
             "gateway credential snapshot and session binding disagree"
-    harnessConfig <-
+    toolHarnessConfig <-
         loadHarnessConfig home >>= \case
             Left err -> startupDie startup (Text.unpack err)
             Right config -> pure config
-    (gatewaySelection, gatewayAllowedChildModels) <-
-        if not (isGatewayLoadedAuth loaded)
-            then pure (Nothing, Nothing)
-            else do
-                access <-
-                    readIORef gatewayModelsRef >>= \case
-                        Nothing ->
-                            startupDie startup
-                                "The organization gateway model catalog is unavailable."
-                        Just value -> pure value
-                cachedGatewayModels access >>= \case
-                    Nothing ->
-                        startupDie startup
-                            "The organization gateway model catalog is unavailable."
-                    Just models ->
-                        case
-                            modelOptionsForGatewayModels catalog models
-                            of
-                            [] ->
-                                startupDie startup
-                                    "The organization gateway does not offer any models."
-                            firstAvailable : remainingAvailable -> do
-                                let available =
-                                        firstAvailable : remainingAvailable
-                                    resolveTarget target =
-                                        resolveModelOptionById
-                                            available
-                                            target.targetModelId
-                                selected <- case options.optModel of
-                                    Just requested ->
-                                        case
-                                            resolveModelOptionById
-                                                available
-                                                requested
-                                            of
-                                            Nothing ->
-                                                startupDie startup $
-                                                    "Model '"
-                                                        <> Text.unpack requested
-                                                        <> "' is not available through your organization gateway."
-                                            Just selected ->
-                                                pure selected
-                                    Nothing ->
-                                        pure $
-                                            fromMaybe firstAvailable $
-                                                ( transitionTarget
-                                                    >>= resolveTarget
-                                                )
-                                                    <|> ( configuredOptionTarget
-                                                            >>= resolveTarget
-                                                        )
-                                                    <|> ( resumedTarget
-                                                            >>= resolveTarget
-                                                        )
-                                                    <|> ( projectTarget
-                                                            >>= resolveTarget
-                                                        )
-                                                    <|> ( targetHint
-                                                            >>= resolveTarget
-                                                        )
-                                pure
-                                    ( Just selected
-                                    , Just
-                                        (map
-                                            (.modelTarget.targetModelId)
-                                            available)
-                                    )
-    let basePlanHooks
-            | Just hooks <- startup.startupNativeHooks =
-                hooks.nativePlanHooks
-            | startup.startupBackground =
-                PlanModeHooks
-                    { planConfirmEnter = \_ -> pure False
-                    , planDecideExit = \_ -> pure PlanCancel
-                    , planAskQuestion = \_ _ -> pure Nothing
-                    }
-            | otherwise =
-                cliPlanHooks
-                    provider interrupt escPaused (resolveColor stderrHandle)
-        planHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
-        baseSecretHooks = SecretPromptHooks \request ->
-            Right <$> promptSecretLine
-                escPaused
-                request.secretPromptMessage
-                request.secretPromptPurpose
-        secretHooks
-            | not nativeCapabilities.nativeHostExtensions
-                || isOneShot options || not isTty = Nothing
-            | otherwise =
-                Just (fullscreenAwareSecretHooks uiRuntimeRef baseSecretHooks)
-        -- Outside the retained TUI, agent-displayed images print inline with
-        -- the same graphics path as pasted attachments.
-        baseImageHooks = ImageDisplayHooks \request -> do
-            color <- resolveColor stderrHandle
-            putImagePreview
-                startup.startupSessionState.sessionPreviewId
-                color
-                [request.displayImage]
-            pure (Right ())
-        imageHooks
-            | not nativeCapabilities.nativeHostExtensions || not isTty =
-                Nothing
-            | otherwise =
-                Just (fullscreenAwareImageHooks uiRuntimeRef baseImageHooks)
-        provider = loaded.loadedProvider
-        fallbackModel =
-            fromMaybe
-                (error "validated default model is missing")
-                (defaultModelFor catalog provider)
-        unrestrictedModel =
-            fromMaybe
-                (maybe fallbackModel (.targetModelId) targetHint)
-                options.optModel
-        model =
-            maybe
-                unrestrictedModel
-                (.modelTarget.targetModelId)
-                gatewaySelection
-        rawTarget = (rawModelOption provider model).modelTarget
-        inferredTarget0 =
-            maybe
-                (fromMaybe rawTarget targetHint)
-                (.modelTarget)
-                gatewaySelection
-        transportModel = case customResponses of
-            Just _ ->
-                \name ->
-                    case resolveConfiguredModel catalog name of
-                        Just option
-                            | option.modelTarget.targetConnectionId
-                                == inferredTarget0.targetConnectionId ->
-                                option.modelTarget.targetWireModelId
-                        _
-                            | name == model ->
-                                inferredTarget0.targetWireModelId
-                            | otherwise -> name
-            _ -> case provider of
-                OpenRouterProvider -> OpenRouter.mapModel openRouterOptions
-                _ -> id
-        inferredTarget =
-            inferredTarget0
-                { targetWireModelId =
-                    if inferredTarget0.targetConnectionId
-                        == builtinConnectionId OpenRouterProvider
-                        && inferredTarget0.targetWireModelId
-                            == inferredTarget0.targetModelId
-                        then transportModel model
-                        else inferredTarget0.targetWireModelId
-                }
-        customGenericOptions = do
-            (_, responses) <- customResponses
-            pure GenericClientOptions
-                { baseUrl = Text.unpack responses.responsesBaseUrl
-                , model = inferredTarget.targetWireModelId
-                , bearerToken = customBearerToken
-                , requestTimeoutSeconds =
-                    responses.responsesRequestTimeoutSeconds
-                }
-        persistedTarget = case fst <$> resumed of
-            Just meta ->
-                Just
-                    ( meta.metaDialect
-                    , meta.metaTransportModel
-                    )
-            Nothing -> do
-                remembered <- projectSettings.settingsLastModel
-                let target = remembered.projectModelTarget
-                if target.targetProvider == provider
-                    then Just
-                        ( target.targetDialect
-                        , Just target.targetWireModelId
-                        )
-                    else Nothing
-        resolvedPersistedTarget =
-            (\(storedDialect, storedTransportModel) ->
-                resolvePersistedDialect
-                    storedDialect
-                    storedTransportModel
-                    inferredTarget)
-                <$> persistedTarget
-        mappedTargetChanged =
-            maybe False snd resolvedPersistedTarget
-        dialectId = case gatewaySelection of
-            Just selected -> selected.modelTarget.targetDialect
-            Nothing -> case transitionTarget of
-                Just target -> target.targetDialect
-                Nothing -> case options.optModel of
-                    Just _ -> inferredTarget.targetDialect
-                    Nothing
-                        | mappedTargetChanged -> inferredTarget.targetDialect
-                        | otherwise ->
-                            maybe
-                                inferredTarget.targetDialect
-                                fst
-                                resolvedPersistedTarget
-        dialect = dialectForId dialectId
-        resumeTargetChanged = case fst <$> resumed of
-            Just meta ->
-                provider /= meta.metaProvider
-                    || inferredTarget.targetConnectionId /= meta.metaConnection
-                    || model /= meta.metaModel
-                    || mappedTargetChanged
-                    || dialectId /= meta.metaDialect
-            Nothing -> False
-        refreshDialectContext = case fst <$> resumed of
-            Just meta -> dialectId /= meta.metaDialect
-            Nothing -> False
-        legacySubagentTarget =
-            sessionLegacySubagentTarget . fst <$> resumed
-        effort =
-            normalizeReasoningEffortForDialect dialectId $
-                fromMaybe
-                    (maybe
-                        (defaultEffortFor provider)
-                        (either
-                            (const (defaultEffortFor provider))
-                            id
-                            . parseReasoningEffort
-                            . (.metaEffort))
-                        (fst <$> resumed))
-                    options.optEffort
-        effortText = reasoningEffortText effort
-        policy = case startup.startupNativeHooks of
-            Just hooks -> case hooks.nativeInteractionMode of
-                NativeYolo -> ApproveAll
-                NativeAsk -> PromptMutating
-                NativePlan -> PromptMutating
-            Nothing ->
-                resolveApprovalPolicy options isTty
-                    projectSettings.settingsAutoApprove
-        claudeBypassEnabled =
-            case startup.startupNativeHooks of
-                Just hooks ->
-                    hooks.nativeInteractionMode == NativeYolo
+    (toolGatewaySelection, toolGatewayAllowedChildModels) <-
+        selectGatewayModels request
+    pure ToolStartup{..}
+
+selectGatewayModels
+    :: AgentToolsRequest windowTitleResult
+    -> IO (Maybe ModelOption, Maybe [Text])
+selectGatewayModels AgentToolsRequest
+    { loaded
+    , catalog
+    , gatewayModelsRef
+    , options
+    , transitionTarget
+    , configuredOptionTarget
+    , resumedTarget
+    , projectTarget
+    , targetHint
+    , startup
+    }
+    | not (isGatewayLoadedAuth loaded) = pure (Nothing, Nothing)
+    | otherwise = do
+        access <-
+            readIORef gatewayModelsRef >>= \case
                 Nothing ->
-                    not options.optNoYolo
-                        && (options.optYolo
-                            || projectSettings.settingsAutoApprove)
+                    startupDie startup
+                        "The organization gateway model catalog is unavailable."
+                Just value -> pure value
+        cachedGatewayModels access >>= \case
+            Nothing ->
+                startupDie startup
+                    "The organization gateway model catalog is unavailable."
+            Just models ->
+                case modelOptionsForGatewayModels catalog models of
+                    [] ->
+                        startupDie startup
+                            "The organization gateway does not offer any models."
+                    firstAvailable : remainingAvailable -> do
+                        let available = firstAvailable : remainingAvailable
+                            resolveTarget target =
+                                resolveModelOptionById
+                                    available
+                                    target.targetModelId
+                        selected <- case options.optModel of
+                            Just requested ->
+                                case resolveModelOptionById available requested of
+                                    Nothing ->
+                                        startupDie startup $
+                                            "Model '"
+                                                <> Text.unpack requested
+                                                <> "' is not available through your organization gateway."
+                                    Just selected -> pure selected
+                            Nothing ->
+                                pure $
+                                    fromMaybe firstAvailable $
+                                        (transitionTarget >>= resolveTarget)
+                                            <|> (configuredOptionTarget >>= resolveTarget)
+                                            <|> (resumedTarget >>= resolveTarget)
+                                            <|> (projectTarget >>= resolveTarget)
+                                            <|> (targetHint >>= resolveTarget)
+                        pure
+                            ( Just selected
+                            , Just (map (.modelTarget.targetModelId) available)
+                            )
+
+resolveToolModel
+    :: AgentToolsRequest windowTitleResult
+    -> ToolStartup
+    -> ToolModelRuntime
+resolveToolModel AgentToolsRequest
+    { loaded
+    , catalog
+    , targetHint
+    , options
+    , customResponses
+    , customBearerToken
+    , resumed
+    , projectSettings
+    , transitionTarget
+    , isTty
+    , startup
+    } ToolStartup
+    { toolOpenRouterOptions = openRouterOptions
+    , toolGatewaySelection = gatewaySelection
+    } =
+    ToolModelRuntime{..}
+  where
+    toolProvider = loaded.loadedProvider
+    fallbackModel =
+        fromMaybe
+            (error "validated default model is missing")
+            (defaultModelFor catalog toolProvider)
+    unrestrictedModel =
+        fromMaybe
+            (maybe fallbackModel (.targetModelId) targetHint)
+            options.optModel
+    toolModel =
+        maybe
+            unrestrictedModel
+            (.modelTarget.targetModelId)
+            gatewaySelection
+    rawTarget = (rawModelOption toolProvider toolModel).modelTarget
+    inferredTarget0 =
+        maybe
+            (fromMaybe rawTarget targetHint)
+            (.modelTarget)
+            gatewaySelection
+    toolTransportModel = case customResponses of
+        Just _ ->
+            \name ->
+                case resolveConfiguredModel catalog name of
+                    Just option
+                        | option.modelTarget.targetConnectionId
+                            == inferredTarget0.targetConnectionId ->
+                            option.modelTarget.targetWireModelId
+                    _
+                        | name == toolModel ->
+                            inferredTarget0.targetWireModelId
+                        | otherwise -> name
+        _ -> case toolProvider of
+            OpenRouterProvider -> OpenRouter.mapModel openRouterOptions
+            _ -> id
+    toolInferredTarget =
+        inferredTarget0
+            { targetWireModelId =
+                if inferredTarget0.targetConnectionId
+                    == builtinConnectionId OpenRouterProvider
+                    && inferredTarget0.targetWireModelId
+                        == inferredTarget0.targetModelId
+                    then toolTransportModel toolModel
+                    else inferredTarget0.targetWireModelId
+            }
+    toolCustomGenericOptions = do
+        (_, responses) <- customResponses
+        pure GenericClientOptions
+            { baseUrl = Text.unpack responses.responsesBaseUrl
+            , model = toolInferredTarget.targetWireModelId
+            , bearerToken = customBearerToken
+            , requestTimeoutSeconds =
+                responses.responsesRequestTimeoutSeconds
+            }
+    persistedTarget = case fst <$> resumed of
+        Just meta ->
+            Just
+                ( meta.metaDialect
+                , meta.metaTransportModel
+                )
+        Nothing -> do
+            remembered <- projectSettings.settingsLastModel
+            let target = remembered.projectModelTarget
+            if target.targetProvider == toolProvider
+                then Just
+                    ( target.targetDialect
+                    , Just target.targetWireModelId
+                    )
+                else Nothing
+    resolvedPersistedTarget =
+        (\(storedDialect, storedTransportModel) ->
+            resolvePersistedDialect
+                storedDialect
+                storedTransportModel
+                toolInferredTarget)
+            <$> persistedTarget
+    mappedTargetChanged = maybe False snd resolvedPersistedTarget
+    toolDialectId = case gatewaySelection of
+        Just selected -> selected.modelTarget.targetDialect
+        Nothing -> case transitionTarget of
+            Just target -> target.targetDialect
+            Nothing -> case options.optModel of
+                Just _ -> toolInferredTarget.targetDialect
+                Nothing
+                    | mappedTargetChanged -> toolInferredTarget.targetDialect
+                    | otherwise ->
+                        maybe
+                            toolInferredTarget.targetDialect
+                            fst
+                            resolvedPersistedTarget
+    toolDialect = dialectForId toolDialectId
+    toolResumeTargetChanged = case fst <$> resumed of
+        Just meta ->
+            toolProvider /= meta.metaProvider
+                || toolInferredTarget.targetConnectionId /= meta.metaConnection
+                || toolModel /= meta.metaModel
+                || mappedTargetChanged
+                || toolDialectId /= meta.metaDialect
+        Nothing -> False
+    toolRefreshDialectContext = case fst <$> resumed of
+        Just meta -> toolDialectId /= meta.metaDialect
+        Nothing -> False
+    toolLegacySubagentTarget =
+        sessionLegacySubagentTarget . fst <$> resumed
+    effort =
+        normalizeReasoningEffortForDialect toolDialectId $
+            fromMaybe
+                (maybe
+                    (defaultEffortFor toolProvider)
+                    (either
+                        (const (defaultEffortFor toolProvider))
+                        id
+                        . parseReasoningEffort
+                        . (.metaEffort))
+                    (fst <$> resumed))
+                options.optEffort
+    toolEffortText = reasoningEffortText effort
+    toolPolicy = case startup.startupNativeHooks of
+        Just hooks -> case hooks.nativeInteractionMode of
+            NativeYolo -> ApproveAll
+            NativeAsk -> PromptMutating
+            NativePlan -> PromptMutating
+        Nothing ->
+            resolveApprovalPolicy options isTty
+                projectSettings.settingsAutoApprove
+    toolClaudeBypassEnabled =
+        case startup.startupNativeHooks of
+            Just hooks ->
+                hooks.nativeInteractionMode == NativeYolo
+            Nothing ->
+                not options.optNoYolo
+                    && (options.optYolo
+                        || projectSettings.settingsAutoApprove)
+
+buildToolHostHooks
+    :: AgentToolsRequest windowTitleResult
+    -> ToolStartup
+    -> ToolModelRuntime
+    -> ToolHostHooks
+buildToolHostHooks AgentToolsRequest
+    { interrupt
+    , escPaused
+    , stderrHandle
+    , uiRuntimeRef
+    , options
+    , isTty
+    , startup
+    } ToolStartup
+    { toolNativeCapabilities = nativeCapabilities
+    } ToolModelRuntime
+    { toolProvider = provider
+    } =
+    ToolHostHooks{..}
+  where
+    basePlanHooks
+        | Just hooks <- startup.startupNativeHooks =
+            hooks.nativePlanHooks
+        | startup.startupBackground =
+            PlanModeHooks
+                { planConfirmEnter = \_ -> pure False
+                , planDecideExit = \_ -> pure PlanCancel
+                , planAskQuestion = \_ _ -> pure Nothing
+                }
+        | otherwise =
+            cliPlanHooks
+                provider interrupt escPaused (resolveColor stderrHandle)
+    toolPlanHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
+    baseSecretHooks = SecretPromptHooks \request ->
+        Right <$> promptSecretLine
+            escPaused
+            request.secretPromptMessage
+            request.secretPromptPurpose
+    toolSecretHooks
+        | not nativeCapabilities.nativeHostExtensions
+            || isOneShot options || not isTty = Nothing
+        | otherwise =
+            Just (fullscreenAwareSecretHooks uiRuntimeRef baseSecretHooks)
+    -- Outside the retained TUI, agent-displayed images print inline with the
+    -- same graphics path as pasted attachments.
+    baseImageHooks = ImageDisplayHooks \request -> do
+        color <- resolveColor stderrHandle
+        putImagePreview
+            startup.startupSessionState.sessionPreviewId
+            color
+            [request.displayImage]
+        pure (Right ())
+    toolImageHooks
+        | not nativeCapabilities.nativeHostExtensions || not isTty =
+            Nothing
+        | otherwise =
+            Just (fullscreenAwareImageHooks uiRuntimeRef baseImageHooks)
+
+newCollaborationRuntime
+    :: AgentToolsRequest windowTitleResult
+    -> ToolStartup
+    -> ToolModelRuntime
+    -> IO CollaborationRuntime
+newCollaborationRuntime AgentToolsRequest
+    { resumeLock
+    , options
+    , projectSettings
+    , cwd
+    , gatewayModelsRef
+    , catalog
+    , home
+    , tokenProvider
+    } ToolStartup
+    { toolNativeCapabilities = nativeCapabilities
+    , toolHarnessConfig = harnessConfig
+    , toolGatewayAllowedChildModels = gatewayAllowedChildModels
+    } ToolModelRuntime
+    { toolProvider = provider
+    , toolTransportModel = transportModel
+    , toolInferredTarget = inferredTarget
+    , toolDialectId = dialectId
+    , toolLegacySubagentTarget = legacySubagentTarget
+    , toolEffortText = effortText
+    } = do
     -- Plan mode itself is process-local, while the assistant's proposed plan
     -- is durable in the session transcript. Reconstruct the approval phase
     -- before entering the REPL so a resumed Codex session cannot interpret
@@ -714,52 +1027,54 @@ runAgentTools
     -- Keep inferred startup, resume, and delegated-agent targets session-local.
     -- Live top-level model/provider switches persist their selection in
     -- Agent.CLI.Provider.Switch instead.
-    activeSessionLock <- newIORef resumeLock
-    persistSlotRef <- newIORef PersistenceDisabled
+    collaborationActiveSessionLock <- newIORef resumeLock
+    collaborationPersistSlotRef <- newIORef PersistenceDisabled
     -- Per-subagent transcripts / previous ids, shared across send_input / task.
-    subagentSessions <- newIORef Map.empty
-    subagentStoreRoot <- newIORef Nothing
-    subagentForkSource <- newIORef (Nothing :: Maybe (IO [ResponseItem]))
-    pendingNotices <- newPendingInputs
+    collaborationSubagentSessions <- newIORef Map.empty
+    collaborationSubagentStoreRoot <- newIORef Nothing
+    collaborationSubagentForkSource <-
+        newIORef (Nothing :: Maybe (IO [ResponseItem]))
+    collaborationPendingNotices <- newPendingInputs
     let maxConcurrentAgents =
             fromMaybe defaultMaxConcurrent $
                 options.optMaxConcurrentAgents
                     <|> projectSettings.settingsMaxConcurrentAgents
                     <|> harnessConfig.configMaxConcurrentAgents
-    registry <- newSubagentRegistry
+    collaborationRegistry <- newSubagentRegistry
         defaultSubagentConfig { maxConcurrent = maxConcurrentAgents }
         cwd
         (\_ _ _ _ -> pure $ Left LoopNoResponseId)
         (\_ _ -> pure ())
-    rootTurnRef <- newIORef (Nothing :: Maybe RootTurnId)
-    agentTypesRef <- newIORef Map.empty
-    openaiChild <- if not nativeCapabilities.nativeCollaboration
-        then pure Nothing
-        else case provider of
-            XAIProvider -> do
-                available <- hasOpenAiAuth
-                if not available
-                    then pure Nothing
-                    else loadAuth (Just OpenAIProvider) >>= \case
-                        Left _ -> pure Nothing
-                        Right openaiLoaded ->
-                            pure (Just openaiLoaded.loadedTokenProvider)
-            _ ->
-                pure Nothing
-    let allowedChildModels =
+    collaborationRootTurnRef <- newIORef (Nothing :: Maybe RootTurnId)
+    collaborationAgentTypes <- newIORef Map.empty
+    collaborationOpenAiChild <-
+        if not nativeCapabilities.nativeCollaboration
+            then pure Nothing
+            else case provider of
+                XAIProvider -> do
+                    available <- hasOpenAiAuth
+                    if not available
+                        then pure Nothing
+                        else loadAuth (Just OpenAIProvider) >>= \case
+                            Left _ -> pure Nothing
+                            Right openaiLoaded ->
+                                pure (Just openaiLoaded.loadedTokenProvider)
+                _ -> pure Nothing
+    let collaborationAllowedChildModels =
             case gatewayAllowedChildModels of
                 Just modelIds -> Just modelIds
                 Nothing -> case provider of
                     XAIProvider ->
-                        Just (grokRootChildModels (isJust openaiChild))
-                    _ ->
-                        Nothing
-        childModelAllowed
-            | Just resolve <- gatewayChildModelOption =
+                        Just
+                            (grokRootChildModels
+                                (isJust collaborationOpenAiChild))
+                    _ -> Nothing
+        collaborationChildModelAllowed
+            | Just resolve <- collaborationGatewayChildModelOption =
                 Just \modelId -> isJust <$> resolve modelId
             | otherwise = Nothing
-        resolveCollaborationChildModel
-            | Just resolve <- gatewayChildModelOption =
+        collaborationResolveChildModel
+            | Just resolve <- collaborationGatewayChildModelOption =
                 Just \modelId ->
                     fmap toCollaborationTarget <$> resolve modelId
             | otherwise = Nothing
@@ -772,7 +1087,7 @@ runAgentTools
                     target.targetWireModelId
                 , collaborationTargetDialect = target.targetDialect
                 }
-        gatewayChildModelOption
+        collaborationGatewayChildModelOption
             | isNothing gatewayAllowedChildModels = Nothing
             | otherwise =
                 Just \requested ->
@@ -788,10 +1103,12 @@ runAgentTools
                                                 catalog models)
                                             (Text.strip requested))
         sendToRoot message = do
-            enqueuePendingInput pendingNotices (AgentMessage message) >>= \case
-                Left err -> pure (Left err)
-                Right () -> pure (Right "queued")
-        createSubagentWorktree source =
+            enqueuePendingInput
+                collaborationPendingNotices
+                (AgentMessage message) >>= \case
+                    Left err -> pure (Left err)
+                    Right () -> pure (Right "queued")
+        collaborationCreateWorktree source =
             createManagedWorktree home source >>= \case
                 Left err -> pure (Left err)
                 Right path -> pure $ Right SubagentWorktree
@@ -801,74 +1118,125 @@ runAgentTools
                             Left err -> pure (Left err)
                             Right () -> pure (Right ())
                     }
-        multiCtx
+        collaborationContext
             | not nativeCapabilities.nativeCollaboration = Nothing
             | otherwise = Just MultiAgentContext
-            { multiRegistry = registry
-            , multiCwd = cwd
-            , multiSelfId = Nothing
-            , multiDepth = 0
-            , multiTaskPath = taskPathRoot
-            , multiRootTurnId = readIORef rootTurnRef
-            , multiResumeFromDisk = Just
-                (restoreAgentFromDisk
-                    provider
-                    inferredTarget.targetConnectionId
-                    transportModel
-                    inferredTarget.targetWireModelId
-                    dialectId
-                    legacySubagentTarget
-                    subagentStoreRoot
-                    registry
-                    subagentSessions
-                    resolveCollaborationChildModel
-                    agentTypesRef)
-            , multiCreateWorktree = Just createSubagentWorktree
-            , multiPrepareSpawn = Just
-                (prepareCollaborationSpawn
-                    provider
-                    inferredTarget.targetConnectionId
-                    transportModel
-                    inferredTarget.targetWireModelId
-                    effortText
-                    dialectId
-                    legacySubagentTarget
-                    subagentSessions subagentStoreRoot agentTypesRef
-                    subagentForkSource)
-            , multiSendToRoot = Just sendToRoot
-            , multiSpawnModelGuidance =
-                if isJust gatewayAllowedChildModels
-                    then Nothing
-                    else
-                        subscriptionSubagentModelGuidance
-                            provider
-                            (tokenProviderBillingMode tokenProvider)
-            , multiAllowedChildModels = allowedChildModels
-            , multiResolveChildModel = resolveCollaborationChildModel
-            , multiChildModelAllowed = childModelAllowed
-            }
-    promptRequest <- loadPrompt options
-    let promptText = fmap (\request -> request.managedTurnText) promptRequest
-    persist <-
+                { multiRegistry = collaborationRegistry
+                , multiCwd = cwd
+                , multiSelfId = Nothing
+                , multiDepth = 0
+                , multiTaskPath = taskPathRoot
+                , multiRootTurnId = readIORef collaborationRootTurnRef
+                , multiResumeFromDisk = Just
+                    (restoreAgentFromDisk
+                        provider
+                        inferredTarget.targetConnectionId
+                        transportModel
+                        inferredTarget.targetWireModelId
+                        dialectId
+                        legacySubagentTarget
+                        collaborationSubagentStoreRoot
+                        collaborationRegistry
+                        collaborationSubagentSessions
+                        collaborationResolveChildModel
+                        collaborationAgentTypes)
+                , multiCreateWorktree = Just collaborationCreateWorktree
+                , multiPrepareSpawn = Just
+                    (prepareCollaborationSpawn
+                        provider
+                        inferredTarget.targetConnectionId
+                        transportModel
+                        inferredTarget.targetWireModelId
+                        effortText
+                        dialectId
+                        legacySubagentTarget
+                        collaborationSubagentSessions
+                        collaborationSubagentStoreRoot
+                        collaborationAgentTypes
+                        collaborationSubagentForkSource)
+                , multiSendToRoot = Just sendToRoot
+                , multiSpawnModelGuidance =
+                    if isJust gatewayAllowedChildModels
+                        then Nothing
+                        else
+                            subscriptionSubagentModelGuidance
+                                provider
+                                (tokenProviderBillingMode tokenProvider)
+                , multiAllowedChildModels =
+                    collaborationAllowedChildModels
+                , multiResolveChildModel =
+                    collaborationResolveChildModel
+                , multiChildModelAllowed =
+                    collaborationChildModelAllowed
+                }
+        collaborationCloseAgents =
+            case collaborationContext of
+                Just ctx -> do
+                    interruptActiveSubagents ctx.multiRegistry
+                    flushAllSubagentSnapshots
+                        collaborationSubagentStoreRoot
+                        ctx.multiRegistry
+                        collaborationSubagentSessions
+                        collaborationAgentTypes
+                    closeSubagentRegistry ctx.multiRegistry
+                Nothing -> pure ()
+    pure CollaborationRuntime{..}
+
+prepareScratchRuntime
+    :: AgentToolsRequest windowTitleResult
+    -> ToolStartup
+    -> ToolModelRuntime
+    -> CollaborationRuntime
+    -> IO ScratchRuntime
+prepareScratchRuntime AgentToolsRequest
+    { options
+    , startup
+    , root
+    , gatewayIdentity
+    , transition
+    , cwd
+    , fullscreen
+    , baseToolEnv
+    , resumed
+    , home
+    } ToolStartup
+    { toolNativeCapabilities = nativeCapabilities
+    } ToolModelRuntime
+    { toolInferredTarget = inferredTarget
+    , toolDialectId = dialectId
+    , toolEffortText = effortText
+    } CollaborationRuntime
+    { collaborationPersistSlotRef = persistSlotRef
+    } = do
+    scratchPromptRequest <- loadPrompt options
+    let promptText =
+            fmap (\request -> request.managedTurnText) scratchPromptRequest
+    scratchPersistence <-
         preparePersistence
             (trustedPool startup.startupDatabaseStore)
-            startup options root
-                inferredTarget { targetDialect = dialectId }
-                gatewayIdentity
-                (isNothing transition) cwd effortText promptText resumed
-    writeIORef persistSlotRef persist
+            startup
+            options
+            root
+            inferredTarget { targetDialect = dialectId }
+            gatewayIdentity
+            (isNothing transition)
+            cwd
+            effortText
+            promptText
+            resumed
+    writeIORef persistSlotRef scratchPersistence
     initialTaskPlan <-
-        loadCurrentTaskPlan persist >>= \case
+        loadCurrentTaskPlan scratchPersistence >>= \case
             Left err ->
                 startupDie startup
                     ("Failed to load current task plan: " <> Text.unpack err)
             Right plan -> pure plan
-    taskPlan <-
+    scratchTaskPlan <-
         newTaskPlanEnv
             initialTaskPlan
-            (taskPlanHooksForPersistence persist)
+            (taskPlanHooksForPersistence scratchPersistence)
     forM_ fullscreen \runtime ->
-        reservedSessionId persist >>= \case
+        reservedSessionId scratchPersistence >>= \case
             Nothing ->
                 clearFullscreenHistorySource runtime
             Just sessionId ->
@@ -881,19 +1249,19 @@ runAgentTools
                         sessionId)
                     (emptyFullscreenHistoryPage
                         (HistoryGeneration 0))
-    (sessionTmp, ephemeralSessionId) <-
-        persistenceTempDir persist >>= \case
+    (scratchSessionTmp, ephemeralSessionId) <-
+        persistenceTempDir scratchPersistence >>= \case
             Just tempDir -> pure (tempDir, Nothing)
             Nothing -> do
                 (sessionId, tempDir) <- allocateSessionTemp root
                 pure (tempDir, Just sessionId)
-    setToolSessionTmp baseToolEnv (Just sessionTmp)
-    imageGenerationHistory <- newImageGenerationHistory
+    setToolSessionTmp baseToolEnv (Just scratchSessionTmp)
+    scratchImageGenerationHistory <- newImageGenerationHistory
     forM_ resumed \(_, turns) ->
         recordImageGenerationResponseItems
-            imageGenerationHistory
+            scratchImageGenerationHistory
             (foldSessionItems turns)
-    externalSessionAppTools <-
+    scratchExternalSessionTools <-
         if options.optSkills
             && nativeCapabilities.nativeHostExtensions
             then do
@@ -901,12 +1269,12 @@ runAgentTools
                     defaultExternalSessionEnv
                         baseToolEnv
                         (unsafeToFilePath cwd)
-                        (unsafeToFilePath sessionTmp)
+                        (unsafeToFilePath scratchSessionTmp)
                         (unsafeToFilePath home)
                 pure [externalSessionTool env]
             else pure []
     let cleanupAllocatedScratch = do
-            cleanupPendingPersistence persist
+            cleanupPendingPersistence scratchPersistence
             forM_ ephemeralSessionId \sessionId -> do
                 _ <- removeSessionTemp root sessionId
                 pure ()
@@ -917,7 +1285,7 @@ runAgentTools
                 startupDie startup (Text.unpack err)
             Right lease -> pure lease
     sessionTempLease <-
-        (acquireSessionTempLease root sessionTmp
+        (acquireSessionTempLease root scratchSessionTmp
             `onException`
                 (mapM_ releaseWorktreeLease worktreeLease
                     >> cleanupAllocatedScratch)) >>= \case
@@ -926,44 +1294,77 @@ runAgentTools
                     cleanupAllocatedScratch
                     startupDie startup (Text.unpack err)
                 Right lease -> pure lease
-    let cleanupScratch =
+    let scratchCleanup =
             mapM_ releaseSessionTempLease sessionTempLease
                 `finally`
                     (mapM_ releaseWorktreeLease worktreeLease
                         `finally` cleanupAllocatedScratch)
-        toolEnv = baseToolEnv
-        mcpServerConfigs =
-            [ MCP.McpServerConfig
-                { MCP.mcpServerName = label
-                , MCP.mcpServerUrl = config.mcpUrl
-                , MCP.mcpServerCommand = Text.unpack config.mcpCommand
-                , MCP.mcpServerArgs = map Text.unpack config.mcpArgs
-                , MCP.mcpServerCwd =
-                    Just $
-                        maybe (unsafeToFilePath cwd) Text.unpack config.mcpCwd
-                , MCP.mcpServerEnv =
-                    [ (Text.unpack name, Text.unpack value)
-                    | (name, value) <- Map.toAscList config.mcpEnv
-                    ] <> case config.mcpUrl of
-                        Just url
-                            | Map.notMember "MCP_OAUTH_TOKEN_FILE" config.mcpEnv ->
-                                [("MCP_OAUTH_TOKEN_FILE", unsafeToFilePath (mcpOAuthStorePath home url))]
-                        _ -> []
-                , MCP.mcpServerStartupTimeoutSeconds =
-                    config.mcpStartupTimeoutSeconds
-                , MCP.mcpServerRequestTimeoutSeconds =
-                    config.mcpRequestTimeoutSeconds
-                , MCP.mcpServerProtocol = config.mcpProtocol
-                }
-            | (label, config) <-
-                Map.toAscList harnessConfig.configMcpServers
-            , config.mcpEnabled
-            , nativeCapabilities.nativeHostExtensions
-            ]
-        progressiveMcp =
-            useProgressiveMcp
-                harnessConfig.configMcpInitStrategy
-                (isOneShot options)
+    pure ScratchRuntime{..}
+
+mcpConfiguration
+    :: AgentToolsRequest windowTitleResult
+    -> ToolStartup
+    -> ([MCP.McpServerConfig], Bool)
+mcpConfiguration AgentToolsRequest
+    { cwd
+    , home
+    , options
+    } ToolStartup
+    { toolNativeCapabilities = nativeCapabilities
+    , toolHarnessConfig = harnessConfig
+    } =
+    ( serverConfigs
+    , useProgressiveMcp
+        harnessConfig.configMcpInitStrategy
+        (isOneShot options)
+    )
+  where
+    serverConfigs =
+        [ MCP.McpServerConfig
+            { MCP.mcpServerName = label
+            , MCP.mcpServerUrl = config.mcpUrl
+            , MCP.mcpServerCommand = Text.unpack config.mcpCommand
+            , MCP.mcpServerArgs = map Text.unpack config.mcpArgs
+            , MCP.mcpServerCwd =
+                Just $
+                    maybe (unsafeToFilePath cwd) Text.unpack config.mcpCwd
+            , MCP.mcpServerEnv =
+                [ (Text.unpack name, Text.unpack value)
+                | (name, value) <- Map.toAscList config.mcpEnv
+                ] <> case config.mcpUrl of
+                    Just url
+                        | Map.notMember
+                            "MCP_OAUTH_TOKEN_FILE"
+                            config.mcpEnv ->
+                            [ ( "MCP_OAUTH_TOKEN_FILE"
+                              , unsafeToFilePath
+                                    (mcpOAuthStorePath home url)
+                              )
+                            ]
+                    _ -> []
+            , MCP.mcpServerStartupTimeoutSeconds =
+                config.mcpStartupTimeoutSeconds
+            , MCP.mcpServerRequestTimeoutSeconds =
+                config.mcpRequestTimeoutSeconds
+            , MCP.mcpServerProtocol = config.mcpProtocol
+            }
+        | (label, config) <-
+            Map.toAscList harnessConfig.configMcpServers
+        , config.mcpEnabled
+        , nativeCapabilities.nativeHostExtensions
+        ]
+
+startStaleResourceCleanup
+    :: AgentToolsRequest windowTitleResult
+    -> OsPath
+    -> IO ()
+startStaleResourceCleanup AgentToolsRequest
+    { processRuntime
+    , startup
+    , root
+    , cwd
+    , home
+    } sessionTmp = do
     -- Housekeeping may inspect hundreds of worktrees and invoke Git for each
     -- candidate. It must never delay interactive startup.
     _ <- processRuntime.processStartCleanup do
@@ -1009,6 +1410,34 @@ runAgentTools
                             <> Text.pack (unsafeToFilePath path)
                             <> ": "
                             <> err)
+    pure ()
+
+acquireMcpRuntime
+    :: AgentToolsRequest windowTitleResult
+    -> ToolStartup
+    -> ToolModelRuntime
+    -> CollaborationRuntime
+    -> ScratchRuntime
+    -> IO McpRuntime
+acquireMcpRuntime request@AgentToolsRequest
+    { processRuntime
+    , startup
+    , options
+    , isTty
+    , escPaused
+    , uiRuntimeRef
+    , mcpSupervisor
+    } toolStartup ToolModelRuntime
+    { toolDialectId = dialectId
+    } CollaborationRuntime
+    { collaborationPendingNotices = pendingNotices
+    } ScratchRuntime
+    { scratchSessionTmp = sessionTmp
+    , scratchCleanup = cleanupScratch
+    } = do
+    let (runtimeMcpServerConfigs, runtimeProgressiveMcp) =
+            mcpConfiguration request toolStartup
+    startStaleResourceCleanup request sessionTmp
     mcpStatusPhaseRef <- newIORef (Nothing :: Maybe Bool)
     mcpFleetRef <- newIORef (Nothing :: Maybe MCP.McpFleet)
     writeIORef processRuntime.processMcpElicitation
@@ -1042,14 +1471,14 @@ runAgentTools
                 atomicModifyIORef' mcpStatusPhaseRef \previous ->
                     (Just isConnecting, previous == Just True && not isConnecting)
             when settled (enqueueMcpSnapshot statuses)
-    mcpLease <-
+    runtimeMcpLease <-
         try @_ @SomeException
-            (if progressiveMcp
+            (if runtimeProgressiveMcp
                 then
                     MCP.acquireMcpFleetProgressive
                         mcpSupervisor
                         reportProgressiveMcp
-                        mcpServerConfigs
+                        runtimeMcpServerConfigs
                 else
                     MCP.acquireMcpFleetWithProgress
                         mcpSupervisor
@@ -1061,32 +1490,67 @@ runAgentTools
                                         "Loading tools: "
                                             <> Text.intercalate ", " names
                                             <> "…"))
-                        mcpServerConfigs)
+                        runtimeMcpServerConfigs)
             >>= \case
-            Left exception -> do
-                cleanupScratch
-                startupDie startup
-                    ("Failed to initialize MCP tools: " <> show exception)
-            Right lease -> pure lease
-    let mcpFleet = mcpLease.mcpLeaseFleet
-    writeIORef mcpFleetRef (Just mcpFleet)
-    when progressiveMcp $
-        MCP.mcpFleetStatuses mcpFleet >>= enqueueMcpSnapshot
-    currentMcpInstructions <- MCP.mcpFleetInstructions mcpFleet
-    let mcpInstructions =
+                Left exception -> do
+                    cleanupScratch
+                    startupDie startup
+                        ("Failed to initialize MCP tools: " <> show exception)
+                Right lease -> pure lease
+    let runtimeMcpFleet = runtimeMcpLease.mcpLeaseFleet
+    writeIORef mcpFleetRef (Just runtimeMcpFleet)
+    when runtimeProgressiveMcp $
+        MCP.mcpFleetStatuses runtimeMcpFleet >>= enqueueMcpSnapshot
+    currentMcpInstructions <- MCP.mcpFleetInstructions runtimeMcpFleet
+    let runtimeMcpInstructions =
             mcpInstructionsForRequest
-                progressiveMcp
+                runtimeProgressiveMcp
                 currentMcpInstructions
-    mapM_ (reportStartupWarning startup) mcpFleet.mcpFleetWarnings
+    mapM_
+        (reportStartupWarning startup)
+        runtimeMcpFleet.mcpFleetWarnings
     setStartupNotice startup.startupFullscreen "Loading built-in tools…"
+    pure McpRuntime{..}
+
+acquireCodingRuntime
+    :: AgentToolsRequest windowTitleResult
+    -> ToolStartup
+    -> ToolModelRuntime
+    -> ToolHostHooks
+    -> CollaborationRuntime
+    -> ScratchRuntime
+    -> McpRuntime
+    -> IO CodingRuntime
+acquireCodingRuntime AgentToolsRequest
+    { startup
+    , baseToolEnv
+    } ToolStartup
+    { toolNativeCapabilities = nativeCapabilities
+    , toolHarnessConfig = harnessConfig
+    } ToolModelRuntime
+    { toolDialectId = dialectId
+    , toolDialect = dialect
+    } ToolHostHooks
+    { toolPlanHooks = planHooks
+    , toolSecretHooks = secretHooks
+    , toolImageHooks = imageHooks
+    } CollaborationRuntime
+    { collaborationContext = multiCtx
+    , collaborationAgentTypes = agentTypesRef
+    } ScratchRuntime
+    { scratchTaskPlan = taskPlan
+    , scratchCleanup = cleanupScratch
+    } McpRuntime
+    { runtimeMcpLease = mcpLease
+    } = do
     let codingToolEnv =
             case startup.startupNativeHooks
                 >>= nativePreparedDiscovery . (.nativeWorkspaceDiscovery) of
                 Just context ->
-                    toolEnv
+                    baseToolEnv
                         { toolCwd = context.nativeDiscoveryProjectRoot }
-                Nothing -> toolEnv
-    coding <-
+                Nothing -> baseToolEnv
+    runtimeCoding <-
         codingToolsForWithTypes
             dialect
             codingToolEnv
@@ -1099,7 +1563,7 @@ runAgentTools
             `onException`
                 (MCP.releaseMcpFleetLease mcpLease >> cleanupScratch)
     let closeBeforeSession =
-            coding.codingClose
+            runtimeCoding.codingClose
                 `finally`
                     (MCP.releaseMcpFleetLease mcpLease
                         `finally` cleanupScratch)
@@ -1117,26 +1581,41 @@ runAgentTools
                 concurrentlyAcquire
                     (newWebFetchRuntime
                         harnessConfig.configWebFetch
-                        toolEnv >>= \case
+                        baseToolEnv >>= \case
                             Left err ->
                                 startupDie startup
                                     ("Failed to initialize web_fetch: "
                                         <> Text.unpack err)
                             Right runtime -> pure runtime)
                     (mapM_ closeWebFetchRuntime)
-                    (newLspRuntime harnessConfig.configLsp toolEnv)
+                    (newLspRuntime harnessConfig.configLsp baseToolEnv)
                     (mapM_ closeLspRuntime . (.lspStartupRuntime))
     (webFetchRuntime, lspStartup) <-
         acquireGrokExtras `onException` closeBeforeSession
     mapM_ (reportStartupWarning startup) lspStartup.lspStartupWarnings
     let lspRuntime = lspStartup.lspStartupRuntime
-        extraTools =
+        runtimeExtraTools =
             maybe [] (pure . webFetchRuntimeTool) webFetchRuntime
                 <> maybe [] (pure . lspRuntimeTool) lspRuntime
-        closeExtraTools =
+        runtimeCloseExtraTools =
             concurrently_
                 (mapM_ closeLspRuntime lspRuntime)
                 (mapM_ closeWebFetchRuntime webFetchRuntime)
+    pure CodingRuntime{..}
+
+installCollaborationCallbacks
+    :: AgentToolsRequest windowTitleResult
+    -> CollaborationRuntime
+    -> IO ()
+installCollaborationCallbacks AgentToolsRequest
+    { startup
+    } CollaborationRuntime
+    { collaborationContext = multiCtx
+    , collaborationPendingNotices = pendingNotices
+    , collaborationSubagentSessions = subagentSessions
+    , collaborationSubagentStoreRoot = subagentStoreRoot
+    , collaborationAgentTypes = agentTypesRef
+    } =
     case multiCtx of
         Just ctx -> do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
@@ -1149,17 +1628,51 @@ runAgentTools
                     Just session -> do
                         _ <-
                             persistAndEvictSubagentSessionWithStatus
-                                subagentStoreRoot ctx.multiRegistry agentTypesRef
-                                agentId status session
+                                subagentStoreRoot
+                                ctx.multiRegistry
+                                agentTypesRef
+                                agentId
+                                status
+                                session
                         pure ()
                     Nothing -> pure ()
         Nothing -> pure ()
-    ghciEnabledRef <- newIORef options.optGhci
-    bashEnabledRef <- newIORef options.optBash
-    skillsRef <- newIORef (SkillCatalog [] [])
-    skillInvocationsRef <- newIORef []
-    codeModeCloseRef <- newIORef (pure ())
-    let claimCurrentSession handle = do
+
+newSessionControlRuntime
+    :: AgentToolsRequest windowTitleResult
+    -> ToolStartup
+    -> ToolModelRuntime
+    -> CollaborationRuntime
+    -> IO SessionControlRuntime
+newSessionControlRuntime AgentToolsRequest
+    { options
+    , startup
+    , root
+    , gatewayIdentity
+    , cwd
+    , runAgentChild
+    , processRuntime
+    } ToolStartup
+    { toolNativeCapabilities = nativeCapabilities
+    , toolGatewayAllowedChildModels = gatewayAllowedChildModels
+    } ToolModelRuntime
+    { toolProvider = provider
+    , toolInferredTarget = inferredTarget
+    , toolModel = model
+    , toolDialectId = dialectId
+    , toolEffortText = effortText
+    , toolPolicy = policy
+    } CollaborationRuntime
+    { collaborationActiveSessionLock = activeSessionLock
+    , collaborationPersistSlotRef = persistSlotRef
+    , collaborationGatewayChildModelOption = gatewayChildModelOption
+    } = do
+    controlGhciEnabledRef <- newIORef options.optGhci
+    controlBashEnabledRef <- newIORef options.optBash
+    controlSkillsRef <- newIORef (SkillCatalog [] [])
+    controlSkillInvocationsRef <- newIORef []
+    controlCodeModeCloseRef <- newIORef (pure ())
+    let controlClaimCurrentSession handle = do
             let desired = sessionLockPath handle.sessionDir
             readIORef activeSessionLock >>= \case
                 Just current
@@ -1168,7 +1681,8 @@ runAgentTools
                     acquireSessionLock
                         handle.sessionDir
                         handle.sessionMeta.metaId >>= \case
-                            Left err -> throwIO (userError (Text.unpack err))
+                            Left err ->
+                                throwIO (userError (Text.unpack err))
                             Right lock -> do
                                 writeIORef activeSessionLock (Just lock)
                                 mapM_ releaseSessionLock previous
@@ -1188,8 +1702,8 @@ runAgentTools
             , toolsCurrentSessionId =
                 readIORef persistSlotRef >>= currentSessionId
             , toolsLaunchTurn = \handle message -> do
-                ghciEnabled <- readIORef ghciEnabledRef
-                bashEnabled <- readIORef bashEnabledRef
+                ghciEnabled <- readIORef controlGhciEnabledRef
+                bashEnabled <- readIORef controlBashEnabledRef
                 let action =
                         runInProcessSessionTurn
                             runAgentChild
@@ -1217,7 +1731,67 @@ runAgentTools
             , toolsSessionStatus =
                 sessionThreadStatus processRuntime.processSessionThreads
             }
-        mcpTools =
+        -- Persisted agent-session tools recursively start another native
+        -- runtime, so they require an explicit collaboration capability from
+        -- the embedding.
+        controlSessionTools
+            | not nativeCapabilities.nativeCollaboration = []
+            | otherwise = agentSessionTools sessionToolsEnv
+    pure SessionControlRuntime{..}
+
+assembleSessionToolsRuntime
+    :: AgentToolsRequest windowTitleResult
+    -> ToolStartup
+    -> ToolModelRuntime
+    -> ToolHostHooks
+    -> CollaborationRuntime
+    -> ScratchRuntime
+    -> McpRuntime
+    -> CodingRuntime
+    -> SessionControlRuntime
+    -> IO SessionToolsRuntime
+assembleSessionToolsRuntime AgentToolsRequest
+    { startup
+    , databaseScopes
+    , gatewayIdentity
+    , options
+    , loaded
+    , tokenProvider
+    , baseToolEnv
+    , resumed
+    } ToolStartup
+    { toolNativeCapabilities = nativeCapabilities
+    } ToolModelRuntime
+    { toolProvider = provider
+    , toolDialectId = dialectId
+    , toolInferredTarget = inferredTarget
+    } ToolHostHooks
+    { toolImageHooks = imageHooks
+    } CollaborationRuntime
+    { collaborationPersistSlotRef = persistSlotRef
+    , collaborationSubagentStoreRoot = subagentStoreRoot
+    , collaborationActiveSessionLock = activeSessionLock
+    , collaborationCloseAgents = closeAgents
+    } ScratchRuntime
+    { scratchPromptRequest = promptRequest
+    , scratchImageGenerationHistory = imageGenerationHistory
+    , scratchExternalSessionTools = externalSessionAppTools
+    , scratchCleanup = cleanupScratch
+    } McpRuntime
+    { runtimeMcpServerConfigs = mcpServerConfigs
+    , runtimeProgressiveMcp = progressiveMcp
+    , runtimeMcpLease = mcpLease
+    , runtimeMcpFleet = mcpFleet
+    } CodingRuntime
+    { runtimeCoding = coding
+    , runtimeExtraTools = extraTools
+    , runtimeCloseExtraTools = closeExtraTools
+    } SessionControlRuntime
+    { controlSkillInvocationsRef = skillInvocationsRef
+    , controlCodeModeCloseRef = codeModeCloseRef
+    , controlSessionTools = persistedSessionTools
+    } = do
+    let sessionMcpTools =
             if null mcpServerConfigs
                 then []
                 else
@@ -1238,15 +1812,9 @@ runAgentTools
                 startup.startupDatabaseStore
                 databaseScopes
                 (readIORef persistSlotRef >>= reservedSessionId)
-        -- Persisted agent-session tools recursively start another native
-        -- runtime, so they require an explicit collaboration capability from
-        -- the embedding.
-        sessionTools
-            | not nativeCapabilities.nativeCollaboration = []
-            | otherwise = agentSessionTools sessionToolsEnv
-        gatewayTools = maybe [] managedGatewayTools promptRequest
-        databaseAppTools = databaseTools databaseToolsEnv
-        learnedSkillAppTools =
+        sessionGatewayTools = maybe [] managedGatewayTools promptRequest
+        sessionDatabaseTools = databaseTools databaseToolsEnv
+        sessionLearnedSkillTools =
             learnedSkillTools skillInvocationsRef learnedSkillToolsEnv
         nativeToolGroups =
             maybe [] (.nativeToolGroups) startup.startupNativeHooks
@@ -1259,7 +1827,7 @@ runAgentTools
         imageGenerationTools =
             [ imageGenerationTool
                 tokenProvider
-                toolEnv
+                baseToolEnv
                 imageGenerationHistory
                 imageHooks
             | provider == OpenAIProvider
@@ -1271,11 +1839,11 @@ runAgentTools
             ]
         surroundingToolGroups =
             [ ExecutionToolGroup extraTools
-            , ExecutionToolGroup mcpTools
-            , HostToolGroup sessionTools
-            , HostToolGroup gatewayTools
-            , HostToolGroup databaseAppTools
-            , HostToolGroup learnedSkillAppTools
+            , ExecutionToolGroup sessionMcpTools
+            , HostToolGroup persistedSessionTools
+            , HostToolGroup sessionGatewayTools
+            , HostToolGroup sessionDatabaseTools
+            , HostToolGroup sessionLearnedSkillTools
             , HostToolGroup externalSessionAppTools
             ]
                 <> nativeToolGroups
@@ -1297,26 +1865,18 @@ runAgentTools
             case startup.startupNativeHooks of
                 Nothing -> appToolsFromGroups groups
                 Just hooks -> hooks.nativeComposeTools groups
-        planMode = coding.codingPlanMode
-        resumedPlanPending =
+        sessionPlanMode = coding.codingPlanMode
+        sessionResumedPlanPending =
             case resumed of
                 Just (_, turns) ->
                     resumedPlanNeedsApproval
                         (map (.turnAssistantText) turns)
                 Nothing -> False
         -- Keep planSessionDir and subagent store root in sync.
-        noteSessionDir dir = do
-            writeIORef planMode.planSessionDir (Just dir)
+        sessionNoteDirectory dir = do
+            writeIORef sessionPlanMode.planSessionDir (Just dir)
             writeIORef subagentStoreRoot (Just dir)
-        closeAgents =
-            case multiCtx of
-                Just ctx -> do
-                    interruptActiveSubagents ctx.multiRegistry
-                    flushAllSubagentSnapshots subagentStoreRoot ctx.multiRegistry
-                        subagentSessions agentTypesRef
-                    closeSubagentRegistry ctx.multiRegistry
-                Nothing -> pure ()
-        closeAll =
+        sessionCloseAll =
             closeAgents
                 `finally`
                     ((readIORef activeSessionLock
@@ -1328,11 +1888,89 @@ runAgentTools
                                         `finally`
                                             (coding.codingClose
                                                 `finally`
-                                                    (join (readIORef codeModeCloseRef)
+                                                    (join
+                                                        (readIORef
+                                                            codeModeCloseRef)
                                                         `finally`
                                                             cleanupScratch)))))
-    let allTools = composeToolGroups allToolGroups
-        tools = composeToolGroups activeToolGroups
+        sessionAllTools = composeToolGroups allToolGroups
+        sessionTools = composeToolGroups activeToolGroups
+    pure SessionToolsRuntime{..}
+
+launchAgentToolsSession
+    :: AgentToolsRequest windowTitleResult
+    -> ToolStartup
+    -> ToolModelRuntime
+    -> ToolHostHooks
+    -> CollaborationRuntime
+    -> ScratchRuntime
+    -> McpRuntime
+    -> CodingRuntime
+    -> SessionControlRuntime
+    -> SessionToolsRuntime
+    -> IO RunResult
+launchAgentToolsSession AgentToolsRequest{..} ToolStartup
+    { toolOpenRouterOptions = openRouterOptions
+    } ToolModelRuntime
+    { toolProvider = provider
+    , toolModel = model
+    , toolTransportModel = transportModel
+    , toolInferredTarget = inferredTarget
+    , toolCustomGenericOptions = customGenericOptions
+    , toolDialect = dialect
+    , toolResumeTargetChanged = resumeTargetChanged
+    , toolRefreshDialectContext = refreshDialectContext
+    , toolLegacySubagentTarget = legacySubagentTarget
+    , toolEffortText = effortText
+    , toolPolicy = policy
+    , toolClaudeBypassEnabled = claudeBypassEnabled
+    } ToolHostHooks
+    { toolPlanHooks = planHooks
+    } CollaborationRuntime
+    { collaborationSubagentSessions = subagentSessions
+    , collaborationSubagentStoreRoot = subagentStoreRoot
+    , collaborationSubagentForkSource = subagentForkSource
+    , collaborationPendingNotices = pendingNotices
+    , collaborationRegistry = registry
+    , collaborationRootTurnRef = rootTurnRef
+    , collaborationAgentTypes = agentTypesRef
+    , collaborationOpenAiChild = openaiChild
+    , collaborationAllowedChildModels = allowedChildModels
+    , collaborationChildModelAllowed = childModelAllowed
+    , collaborationResolveChildModel = resolveCollaborationChildModel
+    , collaborationCreateWorktree = createSubagentWorktree
+    , collaborationContext = multiCtx
+    } ScratchRuntime
+    { scratchPromptRequest = promptRequest
+    , scratchPersistence = persist
+    , scratchSessionTmp = sessionTmp
+    , scratchImageGenerationHistory = imageGenerationHistory
+    } McpRuntime
+    { runtimeMcpFleet = mcpFleet
+    , runtimeMcpInstructions = mcpInstructions
+    } CodingRuntime
+    { runtimeCoding = coding
+    , runtimeExtraTools = extraTools
+    } SessionControlRuntime
+    { controlGhciEnabledRef = ghciEnabledRef
+    , controlBashEnabledRef = bashEnabledRef
+    , controlSkillsRef = skillsRef
+    , controlSkillInvocationsRef = skillInvocationsRef
+    , controlCodeModeCloseRef = codeModeCloseRef
+    , controlClaimCurrentSession = claimCurrentSession
+    , controlSessionTools = agentSessionAppTools
+    } SessionToolsRuntime
+    { sessionAllTools = allTools
+    , sessionTools = tools
+    , sessionMcpTools = mcpTools
+    , sessionDatabaseTools = databaseAppTools
+    , sessionLearnedSkillTools = learnedSkillAppTools
+    , sessionGatewayTools = gatewayTools
+    , sessionPlanMode = planMode
+    , sessionNoteDirectory = noteSessionDir
+    , sessionCloseAll = closeAll
+    , sessionResumedPlanPending = resumedPlanPending
+    } = do
     when resumedPlanPending (activatePlanMode planMode)
     forM_ startup.startupNativeHooks \hooks ->
         when (hooks.nativeInteractionMode == NativePlan) $
@@ -1406,7 +2044,7 @@ runAgentTools
         rootTurnRef
         selectHttpAccount
         selectableTokenProvider
-        sessionTools
+        agentSessionAppTools
         setWindowTitle
         skillInvocationsRef
         skillsRef
@@ -1417,7 +2055,7 @@ runAgentTools
         subagentSessions
         subagentStoreRoot
         tokenProvider
-        toolEnv
+        baseToolEnv
         tools
         transition
         transportModel
