@@ -30,6 +30,7 @@ import Agent.CLI.Models
     )
 import Agent.CLI.NativeRuntime
     ( NativeInteractionMode(..)
+    , NativeIsolationMode(..)
     , NativeProcessRuntime
     , NativeRunHooks(..)
     , NativeSessionTarget(..)
@@ -59,7 +60,7 @@ import Agent.CLI.Session
     , setSessionArchived
     )
 import Agent.CLI.Session.Codec (fromStoredMetadata)
-import Agent.Dialect (dialectSlug)
+import Agent.Dialect (DialectId, dialectSlug)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider
     ( Provider(..)
@@ -72,8 +73,11 @@ import Agent.ReasoningEffort
     )
 import Agent.Server.Backend (Backend(..))
 import Agent.Server.Config
-    ( ResolvedServerConfig(..)
-    , resolveWorkspacePath
+    ( MultiTenantConfig(..)
+    , ResolvedServerConfig(..)
+    , ResolvedServerMode(..)
+    , lookupResolvedTenant
+    , resolveTenantWorkspacePath
     )
 import Agent.Server.Event
     ( boundedPublicText
@@ -82,6 +86,14 @@ import Agent.Server.Event
     , projectPublicValue
     )
 import Agent.Server.Supervisor (TurnControl(..))
+import Agent.Server.Sandbox
+    ( TenantSandbox
+    , closeTenantSandbox
+    , openTenantSandbox
+    , routeSandboxTool
+    )
+import Agent.Server.Tenant
+    ( ResolvedTenant(..) )
 import Agent.Server.Types
 import Agent.Store.Postgres
     ( Store
@@ -89,6 +101,14 @@ import Agent.Store.Postgres
     , managedPostgresConfigFromEnv
     , openStore
     , trustedPool
+    )
+import Agent.Store.Postgres.Tenant
+    ( TenantStoreManager
+    , acquireTenantStore
+    , checkTenantStoreManager
+    , closeTenantStoreManager
+    , openTenantStoreManager
+    , tenantDatabase
     )
 import Agent.Store.Postgres.Session qualified as StoreSession
 import Agent.Store.Types
@@ -103,9 +123,19 @@ import Agent.Tools.PlanMode
 import Control.Applicative ((<|>))
 import Control.Exception.Safe
     ( finally
+    , mask
     , onException
     , tryAny
     )
+import Control.Concurrent.MVar
+    ( MVar
+    , modifyMVar
+    , newEmptyMVar
+    , newMVar
+    , putMVar
+    , readMVar
+    )
+import Control.Monad (forM_, void)
 import Data.Aeson
     ( Value
     , object
@@ -115,6 +145,8 @@ import Data.Aeson
 import Data.Bifunctor (first)
 import Data.Int (Int64)
 import Data.List (find)
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -131,9 +163,8 @@ import System.IO
 import System.OsPath (OsPath, unsafeEncodeUtf)
 
 data ServerRuntime = ServerRuntime
-    { runtimeStore :: !Store
-    , runtimeNative :: !NativeProcessRuntime
-    , runtimeBackend :: !Backend
+    { runtimeBackend :: !Backend
+    , runtimeClose :: !(IO ())
     }
 
 serverRuntimeBackend :: ServerRuntime -> Backend
@@ -142,63 +173,442 @@ serverRuntimeBackend = (.runtimeBackend)
 openServerRuntime
     :: ResolvedServerConfig
     -> IO (Either Text ServerRuntime)
-openServerRuntime config = do
-    postgresConfig <-
-        managedPostgresConfigFromEnv config.resolvedStateDirectory
-    openStore postgresConfig >>= \case
-        Left err -> pure (Left (renderStoreError err))
-        Right store -> do
-            let root = sessionsRoot (unsafeEncodeUtf config.resolvedHome)
-            nativeResult <-
-                tryAny (newNativeProcessRuntime root)
-                    `onException` closeStore store
-            case nativeResult of
-                Left _ -> do
-                    closeStore store
-                    pure (Left "could not initialize the native agent runtime")
-                Right native -> do
-                    let environment = RuntimeEnvironment
-                            { environmentConfig = config
-                            , environmentStore = store
-                            , environmentNative = native
-                            , environmentRoot = root
-                            }
-                        backend = productionBackend environment
-                    pure $
-                        Right ServerRuntime
-                            { runtimeStore = store
-                            , runtimeNative = native
-                            , runtimeBackend = backend
-                            }
+openServerRuntime config = mask \restore -> do
+    case config.resolvedServerMode of
+        MultiTenantMode multi -> do
+            postgresConfig <-
+                managedPostgresConfigFromEnv config.resolvedStateDirectory
+            restore
+                (openTenantStoreManager
+                    postgresConfig
+                    config.resolvedMaxActiveTenants) >>= \case
+                    Left err -> pure (Left (renderStoreError err))
+                    Right stores -> do
+                        manager <-
+                            newTenantRuntimeManager config multi stores
+                        pure $
+                            Right ServerRuntime
+                                { runtimeBackend =
+                                    multiTenantBackend manager
+                                , runtimeClose =
+                                    closeTenantRuntimeManager manager
+                                        `finally`
+                                            closeTenantStoreManager stores
+                                }
+        LocalSingleUserMode -> do
+            postgresConfig <-
+                managedPostgresConfigFromEnv config.resolvedStateDirectory
+            restore (openStore postgresConfig) >>= \case
+                Left err -> pure (Left (renderStoreError err))
+                Right store -> do
+                    let root = sessionsRoot (unsafeEncodeUtf config.resolvedHome)
+                    nativeResult <-
+                        tryAny (restore (newNativeProcessRuntime root))
+                            `onException` closeStore store
+                    case nativeResult of
+                        Left _ -> do
+                            closeStore store
+                            pure
+                                (Left
+                                    "could not initialize the native agent runtime")
+                        Right native -> do
+                            let environment = RuntimeEnvironment
+                                    { environmentConfig = config
+                                    , environmentStore = store
+                                    , environmentNative = native
+                                    , environmentRoot = root
+                                    , environmentTenantId = localTenantId
+                                    , environmentHome =
+                                        config.resolvedHome
+                                    , environmentSandbox = Nothing
+                                    }
+                                backend = productionBackend environment
+                            pure $
+                                Right ServerRuntime
+                                    { runtimeBackend = backend
+                                    , runtimeClose =
+                                        closeNativeProcessRuntime native
+                                            `finally` closeStore store
+                                    }
 
 closeServerRuntime :: ServerRuntime -> IO ()
-closeServerRuntime runtime =
-    closeNativeProcessRuntime runtime.runtimeNative
-        `finally` closeStore runtime.runtimeStore
+closeServerRuntime = (.runtimeClose)
 
 data RuntimeEnvironment = RuntimeEnvironment
     { environmentConfig :: !ResolvedServerConfig
     , environmentStore :: !Store
     , environmentNative :: !NativeProcessRuntime
     , environmentRoot :: !OsPath
+    , environmentTenantId :: !TenantId
+    , environmentHome :: !FilePath
+    , environmentSandbox :: !(Maybe TenantSandbox)
+    }
+
+data TenantRuntimeSlot
+    = TenantRuntimeOpening
+        !(MVar (Either ApiError RuntimeEnvironment))
+    | TenantRuntimeReady !RuntimeEnvironment
+
+data TenantRuntimeState = TenantRuntimeState
+    { tenantRuntimeClosed :: !Bool
+    , tenantRuntimeSlots :: !(Map TenantId TenantRuntimeSlot)
+    }
+
+data TenantRuntimeManager = TenantRuntimeManager
+    { tenantRuntimeConfig :: !ResolvedServerConfig
+    , tenantRuntimeMultiConfig :: !MultiTenantConfig
+    , tenantRuntimeStores :: !TenantStoreManager
+    , tenantRuntimeMaximum :: !Int
+    , tenantRuntimeState :: !(MVar TenantRuntimeState)
+    }
+
+data TenantRuntimeAcquisition
+    = TenantRuntimeRejected !ApiError
+    | TenantRuntimeReadyNow !RuntimeEnvironment
+    | TenantRuntimeWait
+        !(MVar (Either ApiError RuntimeEnvironment))
+    | TenantRuntimeOpen
+        !ResolvedTenant
+        !(MVar (Either ApiError RuntimeEnvironment))
+
+newTenantRuntimeManager
+    :: ResolvedServerConfig
+    -> MultiTenantConfig
+    -> TenantStoreManager
+    -> IO TenantRuntimeManager
+newTenantRuntimeManager config multi stores = do
+    state <- newMVar TenantRuntimeState
+        { tenantRuntimeClosed = False
+        , tenantRuntimeSlots = Map.empty
+        }
+    pure TenantRuntimeManager
+        { tenantRuntimeConfig = config
+        , tenantRuntimeMultiConfig = multi
+        , tenantRuntimeStores = stores
+        , tenantRuntimeMaximum = config.resolvedMaxActiveTenants
+        , tenantRuntimeState = state
+        }
+
+acquireTenantRuntime
+    :: TenantRuntimeManager
+    -> TenantId
+    -> IO (Either ApiError RuntimeEnvironment)
+acquireTenantRuntime manager tenantId = mask \restore -> do
+    decision <- modifyMVar manager.tenantRuntimeState \state ->
+        if state.tenantRuntimeClosed
+            then
+                pure
+                    ( state
+                    , TenantRuntimeRejected
+                        (tenantRuntimeUnavailable
+                            "the tenant runtime manager is closed")
+                    )
+            else case Map.lookup tenantId state.tenantRuntimeSlots of
+                Just (TenantRuntimeReady environment) ->
+                    pure (state, TenantRuntimeReadyNow environment)
+                Just (TenantRuntimeOpening completion) ->
+                    pure (state, TenantRuntimeWait completion)
+                Nothing
+                    | Map.size state.tenantRuntimeSlots
+                        >= manager.tenantRuntimeMaximum ->
+                        pure
+                            ( state
+                            , TenantRuntimeRejected
+                                (tenantRuntimeUnavailable
+                                    "the active tenant runtime limit has been reached")
+                            )
+                    | otherwise ->
+                        case
+                            lookupResolvedTenant
+                                manager.tenantRuntimeConfig
+                                tenantId
+                        of
+                            Left err ->
+                                pure (state, TenantRuntimeRejected err)
+                            Right tenant -> do
+                                completion <- newEmptyMVar
+                                pure
+                                    ( state
+                                        { tenantRuntimeSlots =
+                                            Map.insert
+                                                tenantId
+                                                (TenantRuntimeOpening completion)
+                                                state.tenantRuntimeSlots
+                                        }
+                                    , TenantRuntimeOpen tenant completion
+                                    )
+    case decision of
+        TenantRuntimeRejected err -> pure (Left err)
+        TenantRuntimeReadyNow environment -> pure (Right environment)
+        TenantRuntimeWait completion -> restore (readMVar completion)
+        TenantRuntimeOpen tenant completion -> do
+            outcome <-
+                (tryAny (restore (createTenantRuntime manager tenant))
+                    >>= \case
+                        Left _ ->
+                            pure
+                                (Left
+                                    (tenantRuntimeUnavailable
+                                        "tenant runtime initialization failed"))
+                        Right result -> pure result)
+                    `onException`
+                        void
+                            (publishTenantRuntime
+                                manager
+                                tenant.resolvedTenantId
+                                completion
+                                (Left
+                                    (tenantRuntimeUnavailable
+                                        "tenant runtime initialization was cancelled")))
+            publishTenantRuntime
+                manager
+                tenant.resolvedTenantId
+                completion
+                outcome
+
+publishTenantRuntime
+    :: TenantRuntimeManager
+    -> TenantId
+    -> MVar (Either ApiError RuntimeEnvironment)
+    -> Either ApiError RuntimeEnvironment
+    -> IO (Either ApiError RuntimeEnvironment)
+publishTenantRuntime manager tenantId completion outcome = do
+    effective <- modifyMVar manager.tenantRuntimeState \state ->
+        if state.tenantRuntimeClosed
+            then
+                pure
+                    ( state
+                    , case outcome of
+                        Left err -> Left err
+                        Right _ ->
+                            Left
+                                (tenantRuntimeUnavailable
+                                    "the tenant runtime manager is closed")
+                    )
+            else
+                pure
+                    ( state
+                        { tenantRuntimeSlots =
+                            case outcome of
+                                Left _ ->
+                                    Map.delete tenantId state.tenantRuntimeSlots
+                                Right environment ->
+                                    Map.insert
+                                        tenantId
+                                        (TenantRuntimeReady environment)
+                                        state.tenantRuntimeSlots
+                        }
+                    , outcome
+                    )
+    case (outcome, effective) of
+        (Right environment, Left _) ->
+            void (tryAny (closeRuntimeEnvironment environment))
+        _ -> pure ()
+    putMVar completion effective
+    pure effective
+
+createTenantRuntime
+    :: TenantRuntimeManager
+    -> ResolvedTenant
+    -> IO (Either ApiError RuntimeEnvironment)
+createTenantRuntime manager tenant = mask \restore ->
+    case
+        tenantDatabase
+            tenant.resolvedTenantDatabase
+            tenant.resolvedTenantRuntimeRole
+    of
+        Left err -> pure (Left (storeApiError err))
+        Right database ->
+            openTenantSandbox
+                manager.tenantRuntimeMultiConfig.multiTenantSandboxRunner
+                tenant >>= \case
+                    Left err ->
+                        pure (Left (tenantRuntimeUnavailable err))
+                    Right sandbox -> do
+                        let root =
+                                sessionsRoot
+                                    (unsafeEncodeUtf tenant.resolvedTenantHome)
+                        nativeResult <-
+                            tryAny
+                                (restore (newNativeProcessRuntime root))
+                                `onException` closeTenantSandbox sandbox
+                        case nativeResult of
+                            Left _ -> do
+                                closeTenantSandbox sandbox
+                                pure
+                                    (Left
+                                        (tenantRuntimeUnavailable
+                                            "could not initialize the tenant agent runtime"))
+                            Right native ->
+                                let closeComponents =
+                                        closeNativeProcessRuntime native
+                                            `finally`
+                                                closeTenantSandbox sandbox
+                                in restore
+                                    (acquireTenantStore
+                                        manager.tenantRuntimeStores
+                                        database) `onException`
+                                            closeComponents >>= \case
+                                        Left err -> do
+                                            closeComponents
+                                            pure (Left (storeApiError err))
+                                        Right store ->
+                                            pure $
+                                                Right RuntimeEnvironment
+                                                    { environmentConfig =
+                                                        manager.tenantRuntimeConfig
+                                                    , environmentStore = store
+                                                    , environmentNative = native
+                                                    , environmentRoot = root
+                                                    , environmentTenantId =
+                                                        tenant.resolvedTenantId
+                                                    , environmentHome =
+                                                        tenant.resolvedTenantHome
+                                                    , environmentSandbox =
+                                                        Just sandbox
+                                                    }
+
+closeTenantRuntimeManager :: TenantRuntimeManager -> IO ()
+closeTenantRuntimeManager manager = mask \restore -> do
+    (environments, openings) <-
+        modifyMVar manager.tenantRuntimeState \state ->
+            if state.tenantRuntimeClosed
+                then pure (state, ([], []))
+                else
+                    pure
+                        ( state
+                            { tenantRuntimeClosed = True
+                            , tenantRuntimeSlots = Map.empty
+                            }
+                        , ( [ environment
+                            | TenantRuntimeReady environment <-
+                                Map.elems state.tenantRuntimeSlots
+                            ]
+                          , [ completion
+                            | TenantRuntimeOpening completion <-
+                                Map.elems state.tenantRuntimeSlots
+                            ]
+                          )
+                        )
+    let closeReady =
+            forM_ environments \environment ->
+                void
+                    (tryAny
+                        (restore (closeRuntimeEnvironment environment)))
+        waitOpening =
+            forM_ openings \completion ->
+                void (restore (readMVar completion))
+    closeReady `finally` waitOpening
+
+closeRuntimeEnvironment :: RuntimeEnvironment -> IO ()
+closeRuntimeEnvironment environment =
+    closeNativeProcessRuntime environment.environmentNative
+        `finally`
+            mapM_ closeTenantSandbox environment.environmentSandbox
+
+multiTenantBackend :: TenantRuntimeManager -> Backend
+multiTenantBackend manager = Backend
+    { backendAdmitBoundary = \principal action ->
+        withTenantEnvironment manager principal.principalTenantId \environment ->
+            first gatewayApiError
+                <$> withCurrentGatewayBoundaryAt
+                    (unsafeEncodeUtf environment.environmentHome)
+                    (action . accessBoundary principal)
+    , backendContinueBoundary = \boundary action ->
+        withTenantEnvironment manager boundary.accessTenantId \environment ->
+            first gatewayApiError
+                <$> withExpectedGatewayBoundaryAt
+                    (unsafeEncodeUtf environment.environmentHome)
+                    boundary.accessGatewayBoundary
+                    action
+    , backendTurnBoundaryGuard = \boundary action ->
+        acquireTenantRuntime manager boundary.accessTenantId >>= \case
+            Left err -> pure (Left err.apiErrorMessage)
+            Right environment ->
+                first gatewayTurnError
+                    <$> withGatewayTurnBoundaryAt
+                        (unsafeEncodeUtf environment.environmentHome)
+                        boundary.accessGatewayBoundary
+                        action
+    , backendCheckReady =
+        first storeApiError
+            <$> checkTenantStoreManager manager.tenantRuntimeStores
+    , backendListModels = \boundary ->
+        withBoundaryBackend manager boundary \backend ->
+            backend.backendListModels boundary
+    , backendListSessions = \boundary archive cursor limit ->
+        withBoundaryBackend manager boundary \backend ->
+            backend.backendListSessions boundary archive cursor limit
+    , backendCreateSession = \boundary request ->
+        withBoundaryBackend manager boundary \backend ->
+            backend.backendCreateSession boundary request
+    , backendGetSession = \boundary sessionId ->
+        withBoundaryBackend manager boundary \backend ->
+            backend.backendGetSession boundary sessionId
+    , backendPatchSession = \boundary sessionId request ->
+        withBoundaryBackend manager boundary \backend ->
+            backend.backendPatchSession boundary sessionId request
+    , backendDeleteSession = \boundary sessionId ->
+        withBoundaryBackend manager boundary \backend ->
+            backend.backendDeleteSession boundary sessionId
+    , backendSessionHistory = \boundary sessionId before limit ->
+        withBoundaryBackend manager boundary \backend ->
+            backend.backendSessionHistory boundary sessionId before limit
+    , backendForkSession = \boundary sessionId request ->
+        withBoundaryBackend manager boundary \backend ->
+            backend.backendForkSession boundary sessionId request
+    , backendRunTurn = \control spec ->
+        acquireTenantRuntime
+            manager
+            spec.turnSpecBoundary.accessTenantId >>= \case
+                Left err -> pure (Left err.apiErrorMessage)
+                Right environment -> runTurn environment control spec
+    }
+
+withTenantEnvironment
+    :: TenantRuntimeManager
+    -> TenantId
+    -> (RuntimeEnvironment -> IO (Either ApiError value))
+    -> IO (Either ApiError value)
+withTenantEnvironment manager tenantId action =
+    acquireTenantRuntime manager tenantId >>= \case
+        Left err -> pure (Left err)
+        Right environment -> action environment
+
+withBoundaryBackend
+    :: TenantRuntimeManager
+    -> AccessBoundary
+    -> (Backend -> IO (Either ApiError value))
+    -> IO (Either ApiError value)
+withBoundaryBackend manager boundary action =
+    withTenantEnvironment manager boundary.accessTenantId
+        (action . productionBackend)
+
+tenantRuntimeUnavailable :: Text -> ApiError
+tenantRuntimeUnavailable message = ApiError
+    { apiErrorStatus = 503
+    , apiErrorCode = "tenant_runtime_unavailable"
+    , apiErrorMessage = message
+    , apiErrorDetails = Nothing
     }
 
 productionBackend :: RuntimeEnvironment -> Backend
 productionBackend environment = Backend
-    { backendAdmitBoundary = \action ->
+    { backendAdmitBoundary = \principal action ->
         first gatewayApiError
             <$> withCurrentGatewayBoundaryAt
                 home
-                action
+                (action . accessBoundary principal)
     , backendContinueBoundary = \boundary action ->
         first gatewayApiError
             <$> withExpectedGatewayBoundaryAt
                 home
-                boundary
+                boundary.accessGatewayBoundary
                 action
     , backendTurnBoundaryGuard = \boundary action ->
         first gatewayTurnError
-            <$> withGatewayTurnBoundaryAt home boundary action
+            <$> withGatewayTurnBoundaryAt
+                home boundary.accessGatewayBoundary action
     , backendCheckReady =
         fmap (first storeApiError . fmap (const ())) $
             StoreSession.loadSessionMetadata
@@ -215,7 +625,7 @@ productionBackend environment = Backend
     , backendRunTurn = runTurn environment
     }
   where
-    home = unsafeEncodeUtf environment.environmentConfig.resolvedHome
+    home = unsafeEncodeUtf environment.environmentHome
 
 gatewayApiError :: GatewayBoundaryError -> ApiError
 gatewayApiError err =
@@ -254,7 +664,7 @@ gatewayTurnError = \case
 
 listModels
     :: RuntimeEnvironment
-    -> GatewayBoundary
+    -> AccessBoundary
     -> IO (Either ApiError Value)
 listModels environment boundary =
     loadModelOptions environment boundary
@@ -267,7 +677,7 @@ listModels environment boundary =
 
 listSessions
     :: RuntimeEnvironment
-    -> GatewayBoundary
+    -> AccessBoundary
     -> SessionArchiveFilter
     -> Maybe Text
     -> Int
@@ -279,7 +689,7 @@ listSessions environment boundary archiveFilter rawCursor limit =
             StoreSession.listSessionMetadataForBoundary
                 pool
                 organizationGatewayConnectionId
-                boundary.gatewayBoundaryIdentity
+                boundary.accessGatewayBoundary.gatewayBoundaryIdentity
                 (storeArchiveFilter archiveFilter)
                 cursor
                 limit >>= \case
@@ -317,12 +727,13 @@ listSessions environment boundary archiveFilter rawCursor limit =
 
 createSessionForBoundary
     :: RuntimeEnvironment
-    -> GatewayBoundary
+    -> AccessBoundary
     -> CreateSessionRequest
     -> IO (Either ApiError Value)
 createSessionForBoundary environment boundary request =
-    resolveWorkspacePath
+    resolveTenantWorkspacePath
         environment.environmentConfig
+        boundary.accessTenantId
         request.createSessionCwd >>= \case
             Left err -> pure (Left err)
             Right cwd ->
@@ -351,7 +762,7 @@ createSessionForBoundary environment boundary request =
                                                         , createTarget =
                                                             option.modelTarget
                                                         , createGatewayIdentity =
-                                                            boundary.gatewayBoundaryIdentity
+                                                            boundary.accessGatewayBoundary.gatewayBoundaryIdentity
                                                         , createCwd =
                                                             unsafeEncodeUtf cwd
                                                         , createEffort =
@@ -377,7 +788,7 @@ createSessionForBoundary environment boundary request =
 
 getSessionForBoundary
     :: RuntimeEnvironment
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> IO (Either ApiError Value)
 getSessionForBoundary environment boundary sessionId =
@@ -389,7 +800,7 @@ getSessionForBoundary environment boundary sessionId =
 
 patchSessionForBoundary
     :: RuntimeEnvironment
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> PatchSessionRequest
     -> IO (Either ApiError Value)
@@ -427,7 +838,7 @@ patchSessionForBoundary environment boundary sessionId request =
 
 deleteSessionForBoundary
     :: RuntimeEnvironment
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> IO (Either ApiError ())
 deleteSessionForBoundary environment boundary sessionId =
@@ -442,7 +853,7 @@ deleteSessionForBoundary environment boundary sessionId =
 
 sessionHistoryForBoundary
     :: RuntimeEnvironment
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> Maybe Integer
     -> Int
@@ -473,7 +884,7 @@ sessionHistoryForBoundary environment boundary sessionId before limit =
 
 forkSessionForBoundary
     :: RuntimeEnvironment
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> ForkSessionRequest
     -> IO (Either ApiError Value)
@@ -481,8 +892,9 @@ forkSessionForBoundary environment boundary sessionId request =
     loadAuthorizedMeta environment boundary sessionId >>= \case
         Left err -> pure (Left err)
         Right sourceMeta ->
-            resolveWorkspacePath
+            resolveTenantWorkspacePath
                 environment.environmentConfig
+                boundary.accessTenantId
                 (request.forkSessionCwd
                     <|> Just (unsafeToFilePath sourceMeta.metaCwd)) >>= \case
                     Left err -> pure (Left err)
@@ -554,8 +966,9 @@ runTurn environment control spec =
         spec.turnSpecSessionId >>= \case
             Left err -> pure (Left err.apiErrorMessage)
             Right meta ->
-                resolveWorkspacePath
+                resolveTenantWorkspacePath
                     environment.environmentConfig
+                    spec.turnSpecBoundary.accessTenantId
                     (Just (unsafeToFilePath meta.metaCwd)) >>= \case
                         Left err -> pure (Left err.apiErrorMessage)
                         Right cwd ->
@@ -566,7 +979,12 @@ runTurn environment control spec =
                                         runNativeTurn
                                             environment.environmentNative
                                             output
-                                            (nativeHooks environment control)
+                                            (nativeHooks
+                                                environment
+                                                control
+                                                spec.turnSpecSessionId
+                                                cwd
+                                                meta.metaDialect)
                                             NativeTurnRequest
                                                 { nativeTurnPrompt =
                                                     spec.turnSpecPrompt
@@ -582,11 +1000,17 @@ runTurn environment control spec =
                                                 , nativeTurnInteractionMode =
                                                     NativeAsk
                                                 , nativeTurnShellMode =
-                                                    NativeShellBoth
+                                                    tenantShellMode environment
                                                 }
 
-nativeHooks :: RuntimeEnvironment -> TurnControl -> NativeRunHooks
-nativeHooks environment control = NativeRunHooks
+nativeHooks
+    :: RuntimeEnvironment
+    -> TurnControl
+    -> Text
+    -> FilePath
+    -> DialectId
+    -> NativeRunHooks
+nativeHooks environment control sessionId cwd dialect = NativeRunHooks
     { nativeOnLoopEvent = \event ->
         let (eventType, value) = projectLoopEvent event
         in control.turnControlEmit eventType value
@@ -597,14 +1021,40 @@ nativeHooks environment control = NativeRunHooks
             (projectAgentEntries <$> snapshot)
     , nativeRequestApproval = requestToolApproval control
     , nativeRequestRootAccess =
-        requestRootAccess
-            environment.environmentConfig
-            control
+        case environment.environmentSandbox of
+            Just _ -> const (pure False)
+            Nothing ->
+                requestRootAccess
+                    environment.environmentConfig
+                    environment.environmentTenantId
+                    control
     , nativeTools = []
     , nativePlanHooks = planHooks control
     , nativeInteractionMode = NativeAsk
-    , nativeShellMode = NativeShellBoth
+    , nativeShellMode = tenantShellMode environment
+    , nativeHome =
+        Just (unsafeEncodeUtf environment.environmentHome)
+    , nativeDatabaseStore = Just environment.environmentStore
+    , nativeDatabaseScopeNamespace =
+        renderTenantId environment.environmentTenantId
+            <$ environment.environmentSandbox
+    , nativeIsolationMode =
+        maybe
+            NativeUnrestricted
+            (const NativeSandboxed)
+            environment.environmentSandbox
+    , nativeRouteTool =
+        case environment.environmentSandbox of
+            Nothing -> Right
+            Just sandbox ->
+                routeSandboxTool sandbox sessionId cwd dialect
     }
+
+tenantShellMode :: RuntimeEnvironment -> NativeShellMode
+tenantShellMode environment =
+    case environment.environmentSandbox of
+        Nothing -> NativeShellBoth
+        Just _ -> NativeShellBash
 
 requestToolApproval
     :: TurnControl
@@ -625,7 +1075,6 @@ requestToolApproval control call =
         , humanRequestSpecOptions =
             [ "allow_once"
             , "allow_tool"
-            , "allow_all"
             , "deny"
             ]
         } >>= \case
@@ -634,17 +1083,20 @@ requestToolApproval control call =
                 pure case response.humanResponseDecision of
                     "allow_once" -> Just PermissionAllowOnce
                     "allow_tool" -> Just PermissionAllowTool
-                    "allow_all" -> Just PermissionAllowAll
                     "deny" -> Just PermissionDeny
                     _ -> Nothing
 
 requestRootAccess
     :: ResolvedServerConfig
+    -> TenantId
     -> TurnControl
     -> OsPath
     -> IO Bool
-requestRootAccess config control root =
-    resolveWorkspacePath config (Just (unsafeToFilePath root)) >>= \case
+requestRootAccess config tenantId control root =
+    resolveTenantWorkspacePath
+        config
+        tenantId
+        (Just (unsafeToFilePath root)) >>= \case
         Left _ -> pure False
         Right canonical ->
             control.turnControlRequestInput HumanRequestSpec
@@ -702,7 +1154,7 @@ planHooks control = PlanModeHooks
 
 loadAuthorizedMeta
     :: RuntimeEnvironment
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> IO (Either ApiError SessionMeta)
 loadAuthorizedMeta environment boundary sessionId =
@@ -711,7 +1163,7 @@ loadAuthorizedMeta environment boundary sessionId =
 
 loadAuthorizedSession
     :: RuntimeEnvironment
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> IO (Either ApiError (SessionMeta, Bool))
 loadAuthorizedSession environment boundary sessionId
@@ -721,7 +1173,7 @@ loadAuthorizedSession environment boundary sessionId
         StoreSession.loadSessionMetadataForBoundary
             (trustedPool environment.environmentStore)
             organizationGatewayConnectionId
-            boundary.gatewayBoundaryIdentity
+            boundary.accessGatewayBoundary.gatewayBoundaryIdentity
             sessionId >>= \case
                 Left err -> pure (Left (storeApiError err))
                 Right Nothing -> pure (Left notFoundApiError)
@@ -735,12 +1187,13 @@ loadAuthorizedSession environment boundary sessionId
                                     entry.sessionListEntryMetadata)
 
 validateLoadedMeta
-    :: GatewayBoundary
+    :: AccessBoundary
     -> SessionMeta
     -> Either ApiError ()
 validateLoadedMeta boundary meta
-    | meta.metaGatewayIdentity == boundary.gatewayBoundaryIdentity
-        && case boundary.gatewayBoundaryIdentity of
+    | meta.metaGatewayIdentity
+        == boundary.accessGatewayBoundary.gatewayBoundaryIdentity
+        && case boundary.accessGatewayBoundary.gatewayBoundaryIdentity of
             Nothing ->
                 meta.metaConnection /= organizationGatewayConnectionId
             Just _ ->
@@ -750,21 +1203,29 @@ validateLoadedMeta boundary meta
 
 loadModelOptions
     :: RuntimeEnvironment
-    -> GatewayBoundary
+    -> AccessBoundary
     -> FilePath
     -> IO (Either ApiError (ModelCatalog, [ModelOption]))
 loadModelOptions environment expected cwd = do
-    let home = unsafeEncodeUtf environment.environmentConfig.resolvedHome
+    let home = unsafeEncodeUtf environment.environmentHome
         cwdPath = unsafeEncodeUtf cwd
+        catalogRoot =
+            case environment.environmentSandbox of
+                Nothing -> cwdPath
+                Just _ -> home
     loadGatewayBoundarySnapshotAt home >>= \case
         Left err -> pure (Left (gatewayApiError err))
         Right snapshot ->
-            case validateGatewayBoundary expected snapshot.gatewayBoundary of
+            case
+                validateGatewayBoundary
+                    expected.accessGatewayBoundary
+                    snapshot.gatewayBoundary
+            of
                 Left err -> pure (Left (gatewayApiError err))
                 Right () ->
                     loadGatewayModelOptionsWithCredentialAt
                         home
-                        cwdPath
+                        catalogRoot
                         snapshot.gatewayBoundaryCredential >>= \case
                             Left err ->
                                 pure
@@ -776,16 +1237,24 @@ loadModelOptions environment expected cwd = do
                                         , apiErrorDetails = Nothing
                                         })
                             Right (catalog, maybeGatewayOptions) ->
-                                pure $
-                                    Right
-                                        ( catalog
-                                        , fromMaybe
+                                let options =
+                                        fromMaybe
                                             (modelCatalog catalog)
                                             maybeGatewayOptions
+                                in pure $
+                                    Right
+                                        ( catalog
+                                        , case environment.environmentSandbox of
+                                            Nothing -> options
+                                            Just _ ->
+                                                filter
+                                                    ((/= ClaudeCodeProvider)
+                                                        . (.modelTarget.targetProvider))
+                                                    options
                                         )
 
 selectModel
-    :: GatewayBoundary
+    :: AccessBoundary
     -> ModelCatalog
     -> [ModelOption]
     -> Maybe Text
@@ -817,10 +1286,15 @@ selectModel boundary catalog options requested =
                 Right
                 defaultOption
   where
-    defaultOption = case boundary.gatewayBoundaryIdentity of
+    defaultOption =
+        case boundary.accessGatewayBoundary.gatewayBoundaryIdentity of
         Just _ -> listToMaybe options
         Nothing ->
-            defaultModelOptionFor catalog OpenAIProvider
+            (defaultModelOptionFor catalog OpenAIProvider
+                >>= \preferred ->
+                    find
+                        ((== preferred.modelTarget) . (.modelTarget))
+                        options)
                 <|> listToMaybe options
 
 resolveEffort

@@ -3,8 +3,11 @@ module Agent.CLI.Tools
     ( requireToolRegistry
     , lookupAppTool
     , schemasFromAppTools
+    , schemasFromAppToolsWithHostedSearch
     , schemasFromAppToolsCodeMode
+    , schemasFromAppToolsCodeModeWithHostedSearch
     , hostedSearchToolNames
+    , hostedSearchToolNamesWhen
     , hostedSearchToolCollisions
     , webSearchTool
     , xSearchTool
@@ -99,10 +102,23 @@ hostedSearchTools :: Dialect -> [ResponseTool]
 hostedSearchTools dialect =
     map knownResponseTool (hostedSearchToolTypes dialect)
 
+hostedSearchToolsWhen :: Bool -> Dialect -> [ResponseTool]
+hostedSearchToolsWhen includeHostedSearch dialect
+    | includeHostedSearch = hostedSearchTools dialect
+    | otherwise = []
+
 -- | Model-facing names for hosted search tools advertised in this dialect.
 hostedSearchToolNames :: Dialect -> [Text]
 hostedSearchToolNames =
     map responseToolTypeText . hostedSearchToolTypes
+
+-- | Model-facing hosted search names, optionally omitted at an execution
+-- boundary which requires every model-controlled network action to be routed
+-- through an application tool.
+hostedSearchToolNamesWhen :: Bool -> Dialect -> [Text]
+hostedSearchToolNamesWhen includeHostedSearch dialect
+    | includeHostedSearch = hostedSearchToolNames dialect
+    | otherwise = []
 
 -- | Names reserved so MCP servers cannot shadow hosted search tools.
 hostedSearchToolCollisions :: [(Text, Text)]
@@ -112,26 +128,38 @@ hostedSearchToolCollisions =
     ]
 
 schemasFromAppTools :: Dialect -> [AppTool] -> [ResponseTool]
-schemasFromAppTools dialect tools = case dialectToolLayout dialect of
-    CollaborationNamespaceLayout ->
-        let (multi, nonMulti) = partition isMultiAgentTool tools
-            (imageGeneration, rest) =
-                partition isImageGenerationTool nonMulti
-            base = hostedSearchTools dialect
-                ++ mapMaybe (schemaFromAppTool dialect) rest
-            imageNamespaces =
-                [ imageGenerationNamespaceTool imageGeneration
-                | not (null imageGeneration)
-                ]
-            collaborationNamespaces =
-                [ multiAgentNamespaceTool multi
-                | not (null multi)
-                ]
-        in base ++ imageNamespaces ++ collaborationNamespaces
-    FlatToolLayout ->
-        hostedSearchTools dialect ++ mapMaybe (schemaFromAppTool dialect) tools
-    NoHostToolLayout ->
-        []
+schemasFromAppTools = schemasFromAppToolsWithHostedSearch True
+
+-- | Project application tools while explicitly controlling provider-hosted
+-- search. Hosted search bypasses application-tool dispatch, so sandboxed
+-- runtimes must pass 'False'.
+schemasFromAppToolsWithHostedSearch
+    :: Bool
+    -> Dialect
+    -> [AppTool]
+    -> [ResponseTool]
+schemasFromAppToolsWithHostedSearch includeHostedSearch dialect tools =
+    case dialectToolLayout dialect of
+        CollaborationNamespaceLayout ->
+            let (multi, nonMulti) = partition isMultiAgentTool tools
+                (imageGeneration, rest) =
+                    partition isImageGenerationTool nonMulti
+                base = hostedSearchToolsWhen includeHostedSearch dialect
+                    ++ mapMaybe (schemaFromAppTool dialect) rest
+                imageNamespaces =
+                    [ imageGenerationNamespaceTool imageGeneration
+                    | not (null imageGeneration)
+                    ]
+                collaborationNamespaces =
+                    [ multiAgentNamespaceTool multi
+                    | not (null multi)
+                    ]
+            in base ++ imageNamespaces ++ collaborationNamespaces
+        FlatToolLayout ->
+            hostedSearchToolsWhen includeHostedSearch dialect
+                ++ mapMaybe (schemaFromAppTool dialect) tools
+        NoHostToolLayout ->
+            []
 
 isMultiAgentTool :: AppTool -> Bool
 isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
@@ -301,6 +329,15 @@ grammarCustomTool name description syntax definition =
 -- | Code-mode tool surface: the @exec@/@wait@ entry points first, hosted
 -- search tools last, matching the upstream Codex wire order.
 schemasFromAppToolsCodeMode :: Dialect -> [AppTool] -> [ResponseTool]
-schemasFromAppToolsCodeMode dialect tools =
+schemasFromAppToolsCodeMode =
+    schemasFromAppToolsCodeModeWithHostedSearch True
+
+schemasFromAppToolsCodeModeWithHostedSearch
+    :: Bool
+    -> Dialect
+    -> [AppTool]
+    -> [ResponseTool]
+schemasFromAppToolsCodeModeWithHostedSearch
+        includeHostedSearch dialect tools =
     mapMaybe (schemaFromAppTool dialect) tools
-        ++ hostedSearchTools dialect
+        ++ hostedSearchToolsWhen includeHostedSearch dialect

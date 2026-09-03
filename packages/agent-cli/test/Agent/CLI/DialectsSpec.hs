@@ -2,6 +2,7 @@ module Agent.CLI.DialectsSpec (spec) where
 
 import Agent.CLI.Dialects
     ( CodingTools(..)
+    , classifyCodingTool
     , codingToolsFor
     , filterBashTools
     , filterGhciTools
@@ -21,6 +22,7 @@ import Agent.Tools.ShowImage (ImageDisplayHooks(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(AlwaysReadOnly)
+    , ToolPlacement(..)
     , ToolEnv
     , defaultToolEnv
     , jsonAppTool
@@ -118,6 +120,18 @@ spec = describe "Agent.CLI.Dialects" do
                 names `shouldNotContain` ["analyze_tool_output"]
                 coding.codingClose
 
+    it "keeps model-controlled coding tools on the sandbox side" do
+        let placement name =
+                (classifyCodingTool (fakeTool name)).appToolPlacement
+        placement "update_plan" `shouldBe` HostTool
+        placement "read_tool_output" `shouldBe` SandboxTool
+        placement "search_tool_output" `shouldBe` SandboxTool
+        placement "analyze_tool_output" `shouldBe` SandboxTool
+        placement "shell_command" `shouldBe` SandboxTool
+        placement "read_file" `shouldBe` SandboxTool
+        placement "apply_patch" `shouldBe` SandboxTool
+        placement "new_unreviewed_tool" `shouldBe` SandboxTool
+
     it "filters shell and ghci tools independently" do
         let tools = map fakeTool
                 [ "run_ghci"
@@ -146,6 +160,7 @@ withTempToolEnv action = do
         (\directory ->
             defaultToolEnv (unsafeEncodeUtf directory) >>= action)
 
+fakeTool :: Text.Text -> AppTool
 fakeTool name =
     jsonAppTool name "" [] AlwaysReadOnly
         (noArgsTool name (pure (Right "")))

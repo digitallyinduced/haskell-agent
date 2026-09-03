@@ -52,6 +52,7 @@ import Agent.CLI.Models
 import Agent.CLI.Project
     ( ModelSwitchScope(..)
     , ProjectAccount(..)
+    , defaultProjectSettings
     , loadProjectSettings
     , projectAccountFor
     , resolveProjectRoot
@@ -483,8 +484,9 @@ requestAutomaticProviderFallback env apiError pending = do
                 Nothing -> pure Nothing
                 Just tokenProvider ->
                     chooseAutomaticProviderTransition
+                        env.sessionSandboxedNative
                         env.sessionModelCatalog
-                        env.sessionCwd
+                        env.sessionProjectRoot
                         env.sessionRender.renderStderr
                         env.sessionFullscreen
                         (tokenProviderBillingMode tokenProvider)
@@ -510,8 +512,9 @@ requestStartupProviderFallback env apiError = do
                 Nothing -> pure Nothing
                 Just tokenProvider ->
                     chooseStartupProviderTransition
+                        env.sessionSandboxedNative
                         env.sessionModelCatalog
-                        env.sessionCwd
+                        env.sessionProjectRoot
                         env.sessionFullscreen
                         (tokenProviderBillingMode tokenProvider)
                         env.sessionProvider
@@ -521,23 +524,29 @@ requestStartupProviderFallback env apiError = do
                         apiError
 
 continueAutomaticFallback
-    :: Maybe OsPath
+    :: Bool
+    -> Maybe OsPath
+    -> Maybe OsPath
     -> Handle
     -> Maybe FullscreenRuntime
     -> ProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
-continueAutomaticFallback cwdHint stderrHandle fullscreen failed apiError =
+continueAutomaticFallback
+        sandboxedNative homeHint cwdHint stderrHandle fullscreen failed apiError =
     case ( failed.transitionAutomaticBilling
          , failed.transitionPendingTurn
          ) of
         (Just billing, Just pending) -> do
-            home <- getHomeDirectory
+            home <- maybe getHomeDirectory pure homeHint
             cwd <- maybe getCurrentDirectory pure cwdHint
-            loadModelCatalogAt home cwd >>= \case
+            loadModelCatalogAt
+                home
+                (if sandboxedNative then home else cwd) >>= \case
                 Left _ -> pure Nothing
                 Right catalog ->
                     chooseAutomaticProviderTransition
+                        sandboxedNative
                         catalog
                         cwd
                         stderrHandle
@@ -552,7 +561,8 @@ continueAutomaticFallback cwdHint stderrHandle fullscreen failed apiError =
         _ -> pure Nothing
 
 chooseAutomaticProviderTransition
-    :: ModelCatalog
+    :: Bool
+    -> ModelCatalog
     -> OsPath
     -> Handle
     -> Maybe FullscreenRuntime
@@ -565,7 +575,7 @@ chooseAutomaticProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
 chooseAutomaticProviderTransition
-    catalog cwd stderrHandle fullscreen
+    sandboxedNative catalog cwd stderrHandle fullscreen
         sourceBilling current currentModel unavailable0 sessionId pending apiError =
     tryCandidates unavailable0 candidates
   where
@@ -577,7 +587,11 @@ chooseAutomaticProviderTransition
         [] -> pure Nothing
         rawChoice : rest -> do
             choice <- resolveModelOptionDialect rawChoice
-            validateAutomaticProviderTarget cwd sourceBilling choice >>= \case
+            validateAutomaticProviderTarget
+                sandboxedNative
+                cwd
+                sourceBilling
+                choice >>= \case
                 Left err -> do
                     let failedProvider =
                             choice.modelTarget.targetProvider
@@ -639,7 +653,8 @@ chooseAutomaticProviderTransition
                         }
 
 chooseStartupProviderTransition
-    :: ModelCatalog
+    :: Bool
+    -> ModelCatalog
     -> OsPath
     -> Maybe FullscreenRuntime
     -> BillingMode
@@ -650,7 +665,7 @@ chooseStartupProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
 chooseStartupProviderTransition
-    catalog cwd fullscreen sourceBilling current currentModel
+    sandboxedNative catalog cwd fullscreen sourceBilling current currentModel
         unavailable0 sessionId apiError =
     tryCandidates unavailable0 candidates
   where
@@ -662,7 +677,11 @@ chooseStartupProviderTransition
         [] -> pure Nothing
         rawChoice : rest -> do
             choice <- resolveModelOptionDialect rawChoice
-            validateAutomaticProviderTarget cwd sourceBilling choice >>= \case
+            validateAutomaticProviderTarget
+                sandboxedNative
+                cwd
+                sourceBilling
+                choice >>= \case
                 Left err -> do
                     let failedProvider =
                             choice.modelTarget.targetProvider
@@ -749,11 +768,12 @@ validateProviderTarget choice =
         loadValidatedProviderTarget probeLoadedAvailability choice
 
 validateAutomaticProviderTarget
-    :: OsPath
+    :: Bool
+    -> OsPath
     -> BillingMode
     -> ModelOption
     -> IO (Either Text (Maybe SelectedAccount))
-validateAutomaticProviderTarget cwd sourceBilling choice = do
+validateAutomaticProviderTarget sandboxedNative cwd sourceBilling choice = do
     let provider = choice.modelTarget.targetProvider
     if not (providerSupportsUsageAccountSelection provider)
         then fmap (Nothing <$) $
@@ -761,8 +781,10 @@ validateAutomaticProviderTarget cwd sourceBilling choice = do
                 probeLoadedAutomaticAvailability
                 choice
         else do
-            projectRoot <- resolveProjectRoot cwd
-            settings <- loadProjectSettings projectRoot
+            settings <-
+                if sandboxedNative
+                    then pure defaultProjectSettings
+                    else resolveProjectRoot cwd >>= loadProjectSettings
             let rememberedIds = fmap
                     (\account ->
                         ( account.projectAccountSelectionId

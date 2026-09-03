@@ -7,14 +7,17 @@ module Agent.Server.Application
 import Agent.Server.Auth
     ( AuthConfig
     , AuthFailure(..)
+    , AuthenticatedRequest(..)
     , authorizePreflight
     , authorizeRequest
     , corsResponseHeaders
     , isCorsPreflight
     )
 import Agent.Server.Backend (Backend(..))
+import Agent.Server.Identifier (newUUIDv7Text)
 import Agent.Server.Supervisor
     ( CheckedSubmitError(..)
+    , EventSubscriptionError(..)
     , SubmitError(..)
     , SessionMutationError(..)
     , Supervisor
@@ -60,10 +63,6 @@ import Data.ByteString.Builder
     )
 import Data.ByteString.Char8 qualified as ByteString8
 import Data.ByteString.Lazy qualified as LazyByteString
-import Data.IORef
-    ( atomicModifyIORef'
-    , newIORef
-    )
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
@@ -106,58 +105,54 @@ newApplication
     -> Backend
     -> Supervisor
     -> IO Application
-newApplication config auth backend supervisor = do
-    requestCounter <- newIORef (1 :: Integer)
+newApplication config auth backend supervisor =
     pure \request respond -> do
-        requestId <- atomicModifyIORef' requestCounter \next ->
-            (next + 1, "request-" <> Text.pack (show next))
+        requestId <- newUUIDv7Text
         let corsHeaders = corsResponseHeaders auth request
-            authorization
-                | isCorsPreflight request =
-                    authorizePreflight auth request
-                | otherwise = authorizeRequest auth request
-        case authorization of
-            Left failure ->
-                respond $
-                    apiErrorResponse
-                        requestId
-                        corsHeaders
-                        ApiError
-                            { apiErrorStatus = failure.authFailureStatus
-                            , apiErrorCode = failure.authFailureCode
-                            , apiErrorMessage = failure.authFailureMessage
-                            , apiErrorDetails = Nothing
-                            }
-            Right corsHeaders
-                | isCorsPreflight request ->
-                    respond $
-                        responseLBS
-                            status204
-                            (responseHeaders requestId corsHeaders [])
-                            ""
-                | otherwise -> do
-                    outcome <-
-                        tryAny
-                            (routeRequest
-                                config
-                                backend
-                                supervisor
-                                requestId
-                                corsHeaders
-                                request)
-                    respond case outcome of
-                        Left _ ->
-                            apiErrorResponse
-                                requestId
-                                corsHeaders
-                                ApiError
-                                    { apiErrorStatus = 500
-                                    , apiErrorCode = "internal_error"
-                                    , apiErrorMessage =
-                                        "the request could not be completed"
-                                    , apiErrorDetails = Nothing
-                                    }
-                        Right response -> response
+        if isCorsPreflight request
+            then
+                case authorizePreflight auth request of
+                    Left failure ->
+                        respond
+                            (authFailureResponse
+                                requestId corsHeaders failure)
+                    Right preflightHeaders ->
+                        respond $
+                            responseLBS
+                                status204
+                                (responseHeaders
+                                    requestId preflightHeaders [])
+                                ""
+            else
+                case authorizeRequest auth request of
+                    Left failure ->
+                        respond
+                            (authFailureResponse
+                                requestId corsHeaders failure)
+                    Right authenticated -> do
+                        outcome <-
+                            tryAny
+                                (routeRequest
+                                    config
+                                    backend
+                                    supervisor
+                                    requestId
+                                    authenticated.authenticatedCorsHeaders
+                                    authenticated.authenticatedPrincipal
+                                    request)
+                        respond case outcome of
+                            Left _ ->
+                                apiErrorResponse
+                                    requestId
+                                    authenticated.authenticatedCorsHeaders
+                                    ApiError
+                                        { apiErrorStatus = 500
+                                        , apiErrorCode = "internal_error"
+                                        , apiErrorMessage =
+                                            "the request could not be completed"
+                                        , apiErrorDetails = Nothing
+                                        }
+                            Right response -> response
 
 routeRequest
     :: ApplicationConfig
@@ -165,9 +160,11 @@ routeRequest
     -> Supervisor
     -> Text
     -> [Header]
+    -> Principal
     -> Request
     -> IO Response
-routeRequest config backend supervisor requestId corsHeaders request =
+routeRequest
+        config backend supervisor requestId corsHeaders principal request =
     case (request.requestMethod, request.pathInfo) of
         ("GET", ["healthz"]) ->
             pure (jsonResponse status200 headers (object ["ok" .= True]))
@@ -190,7 +187,8 @@ routeRequest config backend supervisor requestId corsHeaders request =
                         [(hContentType, "application/json")])
                     config.applicationOpenApiDocument
         _ ->
-            admitBoundary requestId corsHeaders backend \boundary ->
+            admitBoundary
+                requestId corsHeaders backend principal \boundary ->
                 dispatchBoundary
                     config
                     backend
@@ -209,11 +207,12 @@ admitBoundary
     :: Text
     -> [Header]
     -> Backend
-    -> (GatewayBoundary -> IO Response)
+    -> Principal
+    -> (AccessBoundary -> IO Response)
     -> IO Response
-admitBoundary requestId corsHeaders backend action = do
+admitBoundary requestId corsHeaders backend principal action = do
     let Backend { backendAdmitBoundary = admit } = backend
-    admit action >>= \case
+    admit principal action >>= \case
         Left err -> pure (apiErrorResponse requestId corsHeaders err)
         Right response -> pure response
 
@@ -224,7 +223,7 @@ dispatchBoundary
     -> Text
     -> [Header]
     -> Request
-    -> GatewayBoundary
+    -> AccessBoundary
     -> IO (Either ApiError Response)
 dispatchBoundary
         config backend supervisor requestId corsHeaders request boundary =
@@ -453,7 +452,7 @@ dispatchBoundary
 createTurn
     :: Backend
     -> Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> CreateTurnRequest
     -> IO (Either ApiError TurnRecord)
@@ -501,6 +500,14 @@ firstSubmitError = \case
             , apiErrorMessage = "the turn queue is full"
             , apiErrorDetails = Nothing
             }
+    Left SubmitTenantQueueFull ->
+        Left ApiError
+            { apiErrorStatus = 429
+            , apiErrorCode = "tenant_turn_queue_full"
+            , apiErrorMessage =
+                "the authenticated tenant turn queue is full"
+            , apiErrorDetails = Nothing
+            }
     Left SubmitSessionBusy ->
         Left ApiError
             { apiErrorStatus = 409
@@ -520,7 +527,7 @@ firstSubmitError = \case
 
 findTurn
     :: Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> IO (Either ApiError TurnRecord)
 findTurn supervisor boundary rawTurnId =
@@ -530,7 +537,7 @@ findTurn supervisor boundary rawTurnId =
 
 runSessionMutation
     :: Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> IO (Either ApiError value)
     -> IO (Either ApiError value)
@@ -560,7 +567,7 @@ runSessionMutation supervisor boundary sessionId action =
 createEventResponse
     :: Backend
     -> Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> [Header]
     -> Request
@@ -570,47 +577,66 @@ createEventResponse
     case parseLastEventId request of
         Left err -> pure (Left err)
         Right lastEventId -> do
-            subscription <-
-                subscribeEvents supervisor boundary lastEventId
-            let stream write flush =
-                    finally
-                        (do
-                            continue <-
-                                emitInitialEvents
-                                    backend
-                                    boundary
-                                    subscription
-                                    write
-                                    flush
-                            if continue
-                                then
-                                    eventLoop
-                                        backend
-                                        boundary
-                                        subscription.subscriptionChannel
-                                        (lastDeliveredId
-                                            subscription.subscriptionLatestEventId
-                                            subscription.subscriptionReplay)
-                                        write
-                                        flush
-                                else pure ())
-                        subscription.subscriptionClose
-            pure $
-                Right $
-                    responseStream
-                        status200
-                        (responseHeaders
-                            requestId
-                            corsHeaders
-                            [ (hContentType, "text/event-stream")
-                            , (hCacheControl, "no-cache")
-                            , ("X-Accel-Buffering", "no")
-                            ])
-                        stream
+            subscribeEvents supervisor boundary lastEventId >>= \case
+                Left EventSubscriberLimitReached ->
+                    pure (Left eventSubscriberLimitError)
+                Left EventSubscriberTenantLimitReached ->
+                    pure (Left eventSubscriberTenantLimitError)
+                Right subscription -> do
+                    let stream write flush =
+                            finally
+                                (do
+                                    continue <-
+                                        emitInitialEvents
+                                            backend
+                                            boundary
+                                            subscription
+                                            write
+                                            flush
+                                    if continue
+                                        then
+                                            eventLoop
+                                                backend
+                                                boundary
+                                                subscription.subscriptionChannel
+                                                (lastDeliveredId
+                                                    subscription.subscriptionLatestEventId
+                                                    subscription.subscriptionReplay)
+                                                write
+                                                flush
+                                        else pure ())
+                                subscription.subscriptionClose
+                    pure $
+                        Right $
+                            responseStream
+                                status200
+                                (responseHeaders
+                                    requestId
+                                    corsHeaders
+                                    [ (hContentType, "text/event-stream")
+                                    , (hCacheControl, "no-cache")
+                                    , ("X-Accel-Buffering", "no")
+                                    ])
+                                stream
+  where
+    eventSubscriberLimitError = ApiError
+        { apiErrorStatus = 429
+        , apiErrorCode = "event_subscriber_limit"
+        , apiErrorMessage =
+            "the server event subscriber limit has been reached"
+        , apiErrorDetails = Nothing
+        }
+    eventSubscriberTenantLimitError = ApiError
+        { apiErrorStatus = 429
+        , apiErrorCode = "tenant_event_subscriber_limit"
+        , apiErrorMessage =
+            "the tenant event subscriber limit has been reached"
+        , apiErrorDetails = Nothing
+        }
 
 emitInitialEvents
     :: Backend
-    -> GatewayBoundary
+    -> AccessBoundary
     -> EventSubscription (TBQueue ServerEvent)
     -> (Builder -> IO ())
     -> IO ()
@@ -646,7 +672,7 @@ emitInitialEvents backend boundary subscription write flush = do
 
 eventLoop
     :: Backend
-    -> GatewayBoundary
+    -> AccessBoundary
     -> TBQueue ServerEvent
     -> Maybe Integer
     -> (Builder -> IO ())
@@ -704,7 +730,7 @@ eventLoop backend boundary channel previousId write flush =
 
 emitUnderBoundary
     :: Backend
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Builder
     -> (Builder -> IO ())
     -> IO ()
@@ -996,6 +1022,22 @@ apiErrorResponse requestId corsHeaders err =
                         err.apiErrorDetails
                 )
             ])
+
+authFailureResponse
+    :: Text
+    -> [Header]
+    -> AuthFailure
+    -> Response
+authFailureResponse requestId corsHeaders failure =
+    apiErrorResponse
+        requestId
+        corsHeaders
+        ApiError
+            { apiErrorStatus = failure.authFailureStatus
+            , apiErrorCode = failure.authFailureCode
+            , apiErrorMessage = failure.authFailureMessage
+            , apiErrorDetails = Nothing
+            }
 
 responseHeaders :: Text -> [Header] -> [Header] -> [Header]
 responseHeaders requestId corsHeaders additional =

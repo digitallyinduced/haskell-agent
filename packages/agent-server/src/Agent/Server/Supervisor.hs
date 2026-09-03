@@ -8,6 +8,7 @@ module Agent.Server.Supervisor
     , SubmitError(..)
     , CheckedSubmitError(..)
     , SessionMutationError(..)
+    , EventSubscriptionError(..)
     , TurnControl(..)
     , TurnRunner
     , TurnBoundaryGuard
@@ -29,6 +30,7 @@ module Agent.Server.Supervisor
     ) where
 
 import Agent.Server.Types
+import Agent.Server.Identifier (newUUIDv7Text)
 import Control.Concurrent.Async
     ( Async
     , async
@@ -75,7 +77,7 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 import Data.Ord (Down(..))
-import Data.Sequence (Seq, ViewL(..), (|>))
+import Data.Sequence (Seq, (|>))
 import Data.Sequence qualified as Seq
 import Data.Set (Set)
 import Data.Set qualified as Set
@@ -86,9 +88,18 @@ import System.Timeout (timeout)
 
 data SupervisorConfig = SupervisorConfig
     { supervisorMaxConcurrentTurns :: !Int
+    , supervisorMaxConcurrentTurnsPerTenant :: !Int
     , supervisorMaxQueuedTurns :: !Int
+    , supervisorMaxQueuedTurnsPerTenant :: !Int
+    , supervisorMaxEventSubscribers :: !Int
+    , supervisorMaxEventSubscribersPerTenant :: !Int
     , supervisorEventReplayLimit :: !Int
     }
+    deriving (Eq, Show)
+
+data EventSubscriptionError
+    = EventSubscriberLimitReached
+    | EventSubscriberTenantLimitReached
     deriving (Eq, Show)
 
 data CheckedSubmitError validationError
@@ -103,6 +114,7 @@ data SessionMutationError
 
 data SubmitError
     = SubmitQueueFull
+    | SubmitTenantQueueFull
     | SubmitSessionBusy
     | SubmitSupervisorClosed
     deriving (Eq, Show)
@@ -123,7 +135,7 @@ type TurnRunner = TurnControl -> TurnSpec -> IO (Either Text ())
 -- and its terminal state/event commit share one uninterrupted boundary.
 type TurnBoundaryGuard =
     forall value.
-    GatewayBoundary ->
+    AccessBoundary ->
     IO value ->
     IO (Either Text value)
 
@@ -145,21 +157,20 @@ data EventBuffer = EventBuffer
     }
 
 data EventSubscriber = EventSubscriber
-    { eventSubscriberBoundary :: !GatewayBoundary
+    { eventSubscriberBoundary :: !AccessBoundary
     , eventSubscriberQueue :: !(TBQueue ServerEvent)
     }
 
 data SupervisorState = SupervisorState
-    { stateNextTurnId :: !Integer
-    , stateNextRequestId :: !Integer
-    , stateQueue :: !(Seq TurnId)
+    { stateQueue :: !(Seq TurnId)
     , stateTurns :: !(Map TurnId TurnSlot)
-    , stateActiveSessions :: !(Set (GatewayBoundary, Text))
+    , stateActiveSessions :: !(Set (AccessBoundary, Text))
     , stateWorkers :: !(Map TurnId (Async ()))
     , statePendingInputs :: !(Map RequestId PendingInput)
-    , stateEvents :: !(Map GatewayBoundary EventBuffer)
+    , stateEvents :: !(Map AccessBoundary EventBuffer)
     , stateNextSubscriberId :: !Integer
     , stateSubscribers :: !(Map Integer EventSubscriber)
+    , stateLastScheduledTenant :: !(Maybe TenantId)
     , stateClosed :: !Bool
     }
 
@@ -184,15 +195,32 @@ newSupervisorWithBoundaryGuard
 newSupervisorWithBoundaryGuard config boundaryGuard runner
     | config.supervisorMaxConcurrentTurns < 1 =
         fail "supervisorMaxConcurrentTurns must be positive"
+    | config.supervisorMaxConcurrentTurnsPerTenant < 1 =
+        fail "supervisorMaxConcurrentTurnsPerTenant must be positive"
+    | config.supervisorMaxConcurrentTurnsPerTenant
+        > config.supervisorMaxConcurrentTurns =
+        fail
+            "supervisorMaxConcurrentTurnsPerTenant exceeds global concurrency"
     | config.supervisorMaxQueuedTurns < 1 =
         fail "supervisorMaxQueuedTurns must be positive"
+    | config.supervisorMaxQueuedTurnsPerTenant < 1 =
+        fail "supervisorMaxQueuedTurnsPerTenant must be positive"
+    | config.supervisorMaxQueuedTurnsPerTenant
+        > config.supervisorMaxQueuedTurns =
+        fail "supervisorMaxQueuedTurnsPerTenant exceeds global queue capacity"
+    | config.supervisorMaxEventSubscribers < 1 =
+        fail "supervisorMaxEventSubscribers must be positive"
+    | config.supervisorMaxEventSubscribersPerTenant < 1 =
+        fail "supervisorMaxEventSubscribersPerTenant must be positive"
+    | config.supervisorMaxEventSubscribersPerTenant
+        > config.supervisorMaxEventSubscribers =
+        fail
+            "supervisorMaxEventSubscribersPerTenant exceeds global capacity"
     | config.supervisorEventReplayLimit < 1 =
         fail "supervisorEventReplayLimit must be positive"
     | otherwise = mask \restore -> do
         state <- newTVarIO SupervisorState
-            { stateNextTurnId = 1
-            , stateNextRequestId = 1
-            , stateQueue = Seq.empty
+            { stateQueue = Seq.empty
             , stateTurns = Map.empty
             , stateActiveSessions = Set.empty
             , stateWorkers = Map.empty
@@ -200,6 +228,7 @@ newSupervisorWithBoundaryGuard config boundaryGuard runner
             , stateEvents = Map.empty
             , stateNextSubscriberId = 1
             , stateSubscribers = Map.empty
+            , stateLastScheduledTenant = Nothing
             , stateClosed = False
             }
         dispatcherVar <- newEmptyMVar
@@ -329,6 +358,7 @@ enqueueTurn
     -> IO (Either SubmitError TurnRecord)
 enqueueTurn supervisor reservationHeld spec = do
     now <- getCurrentTime
+    turnId <- TurnId <$> newUUIDv7Text
     atomically do
         state <- readTVar supervisor.supervisorState
         let key = (spec.turnSpecBoundary, spec.turnSpecSessionId)
@@ -347,13 +377,14 @@ enqueueTurn supervisor reservationHeld spec = do
                 else if Seq.length state.stateQueue
                     >= supervisor.supervisorConfig.supervisorMaxQueuedTurns
                     then pure (Left SubmitQueueFull)
+                else if
+                    queuedForTenant
+                        spec.turnSpecBoundary.accessTenantId
+                        state.stateTurns
+                        >= supervisor.supervisorConfig.supervisorMaxQueuedTurnsPerTenant
+                    then pure (Left SubmitTenantQueueFull)
                     else do
-                        let turnId =
-                                TurnId
-                                    ("turn-"
-                                        <> Text.pack
-                                            (show state.stateNextTurnId))
-                            record = TurnRecord
+                        let record = TurnRecord
                                 { turnRecordId = turnId
                                 , turnRecordSessionId =
                                     spec.turnSpecSessionId
@@ -372,9 +403,7 @@ enqueueTurn supervisor reservationHeld spec = do
                                 , turnSlotAgents = pure toJSONEmptyArray
                                 }
                             withTurn = state
-                                { stateNextTurnId =
-                                    state.stateNextTurnId + 1
-                                , stateQueue = state.stateQueue |> turnId
+                                { stateQueue = state.stateQueue |> turnId
                                 , stateTurns =
                                     Map.insert
                                         turnId
@@ -396,7 +425,7 @@ enqueueTurn supervisor reservationHeld spec = do
 
 cancelTurn
     :: Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> TurnId
     -> IO (Either Text TurnRecord)
 cancelTurn supervisor boundary turnId = mask \restore -> do
@@ -479,7 +508,7 @@ cancelTurn supervisor boundary turnId = mask \restore -> do
 
 lookupTurn
     :: Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> TurnId
     -> IO (Maybe TurnRecord)
 lookupTurn supervisor boundary turnId =
@@ -493,7 +522,7 @@ lookupTurn supervisor boundary turnId =
 
 listTurns
     :: Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Maybe Text
     -> IO [TurnRecord]
 listTurns supervisor boundary sessionId =
@@ -510,7 +539,7 @@ listTurns supervisor boundary sessionId =
 
 sessionHasActiveTurn
     :: Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> IO Bool
 sessionHasActiveTurn supervisor boundary sessionId =
@@ -534,7 +563,7 @@ sessionHasActiveTurn supervisor boundary sessionId =
 -- two credential identities do not interfere with one another.
 withSessionMutation
     :: Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> IO value
     -> IO (Either SessionMutationError value)
@@ -574,7 +603,7 @@ withSessionMutation supervisor boundary sessionId action =
 
 listHumanRequests
     :: Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> IO [HumanRequest]
 listHumanRequests supervisor boundary =
     atomically do
@@ -589,7 +618,7 @@ listHumanRequests supervisor boundary =
 
 resolveHumanRequest
     :: Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> RequestId
     -> HumanResponse
     -> IO (Either Text HumanRequest)
@@ -642,7 +671,7 @@ resolveHumanRequest supervisor boundary requestId response = do
 
 lookupTurnAgents
     :: Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> TurnId
     -> IO (Maybe Value)
 lookupTurnAgents supervisor boundary turnId =
@@ -657,7 +686,7 @@ lookupTurnAgents supervisor boundary turnId =
 
 publishEvent
     :: Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> Maybe TurnId
     -> Maybe Text
@@ -682,12 +711,33 @@ publishEvent supervisor boundary eventType turnId sessionId value = do
 
 subscribeEvents
     :: Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Maybe Integer
-    -> IO (EventSubscription (TBQueue ServerEvent))
+    -> IO
+        (Either
+            EventSubscriptionError
+            (EventSubscription (TBQueue ServerEvent)))
 subscribeEvents supervisor boundary lastEventId =
     atomically do
         state <- readTVar supervisor.supervisorState
+        let subscribers = state.stateSubscribers
+            tenantId = boundary.accessTenantId
+            tenantSubscriberCount =
+                length
+                    [ ()
+                    | subscriber <- Map.elems subscribers
+                    , subscriber.eventSubscriberBoundary.accessTenantId
+                        == tenantId
+                    ]
+        if Map.size subscribers
+            >= supervisor.supervisorConfig.supervisorMaxEventSubscribers
+            then pure (Left EventSubscriberLimitReached)
+            else if tenantSubscriberCount
+                >= supervisor.supervisorConfig.supervisorMaxEventSubscribersPerTenant
+                then pure (Left EventSubscriberTenantLimitReached)
+                else Right <$> createSubscription state
+  where
+    createSubscription state = do
         let buffer =
                 Map.findWithDefault
                     (EventBuffer Seq.empty 1)
@@ -762,11 +812,14 @@ reserveRunnable supervisor = do
             >= supervisor.supervisorConfig.supervisorMaxConcurrentTurns
             then retry
             else case pickRunnable
+                supervisor.supervisorConfig
                 state.stateTurns
                 state.stateActiveSessions
+                state.stateWorkers
+                state.stateLastScheduledTenant
                 state.stateQueue of
                     Nothing -> retry
-                    Just (turnId, remaining) ->
+                    Just (turnId, remaining, tenantId) ->
                         case Map.lookup turnId state.stateTurns of
                             Nothing -> do
                                 writeTVar
@@ -799,6 +852,8 @@ reserveRunnable supervisor = do
                                                 , sessionId
                                                 )
                                                 state.stateActiveSessions
+                                        , stateLastScheduledTenant =
+                                            Just tenantId
                                         }
                                 writeTVar supervisor.supervisorState state'
                                 pure (Just (turnId, slot.turnSlotSpec))
@@ -1035,6 +1090,7 @@ requestTurnInput
     -> IO (Either Text HumanResponse)
 requestTurnInput supervisor turnId spec requestSpec = do
     now <- getCurrentTime
+    requestId <- RequestId <$> newUUIDv7Text
     reply <- atomically newEmptyTMVar
     let boundedRequestSpec = HumanRequestSpec
             { humanRequestSpecKind =
@@ -1055,12 +1111,7 @@ requestTurnInput supervisor turnId spec requestSpec = do
                     slot.turnSlotRecord.turnRecordStatus ->
                     pure (Left "turn is no longer running")
                 | otherwise -> do
-                    let requestId =
-                            RequestId
-                                ("request-"
-                                    <> Text.pack
-                                        (show state.stateNextRequestId))
-                        request = HumanRequest
+                    let request = HumanRequest
                             { humanRequestId = requestId
                             , humanRequestTurnId = turnId
                             , humanRequestSessionId =
@@ -1091,9 +1142,7 @@ requestTurnInput supervisor turnId spec requestSpec = do
                             (Just spec.turnSpecSessionId)
                             (toJSONRequest request)
                             state
-                                { stateNextRequestId =
-                                    state.stateNextRequestId + 1
-                                , statePendingInputs =
+                                { statePendingInputs =
                                     Map.insert
                                         requestId
                                         pending
@@ -1135,31 +1184,62 @@ setTurnAgents turnId agents state =
         }
 
 pickRunnable
-    :: Map TurnId TurnSlot
-    -> Set (GatewayBoundary, Text)
+    :: SupervisorConfig
+    -> Map TurnId TurnSlot
+    -> Set (AccessBoundary, Text)
+    -> Map TurnId (Async ())
+    -> Maybe TenantId
     -> Seq TurnId
-    -> Maybe (TurnId, Seq TurnId)
-pickRunnable turns activeSessions = go Seq.empty
+    -> Maybe (TurnId, Seq TurnId, TenantId)
+pickRunnable config turns activeSessions workers lastTenant queue =
+    case preferred <> fallback of
+        (turnId, tenantId) : _ ->
+            Just (turnId, Seq.filter (/= turnId) queue, tenantId)
+        [] -> Nothing
   where
-    go prefix queue = case Seq.viewl queue of
-        EmptyL -> Nothing
-        turnId :< rest ->
-            case Map.lookup turnId turns of
-                Nothing -> go prefix rest
-                Just slot
-                    | slot.turnSlotRecord.turnRecordStatus /= TurnQueued ->
-                        go prefix rest
-                    | Set.notMember
-                        ( slot.turnSlotRecord.turnRecordBoundary
-                        , slot.turnSlotRecord.turnRecordSessionId
-                        )
-                        activeSessions ->
-                        Just (turnId, prefix <> rest)
-                    | otherwise -> go (prefix |> turnId) rest
+    eligible =
+        [ (turnId, boundary.accessTenantId)
+        | turnId <- toList queue
+        , Just slot <- [Map.lookup turnId turns]
+        , slot.turnSlotRecord.turnRecordStatus == TurnQueued
+        , let boundary = slot.turnSlotRecord.turnRecordBoundary
+        , Set.notMember
+            (boundary, slot.turnSlotRecord.turnRecordSessionId)
+            activeSessions
+        , runningForTenant boundary.accessTenantId turns workers
+            < config.supervisorMaxConcurrentTurnsPerTenant
+        ]
+    preferred =
+        filter (\(_, tenantId) -> Just tenantId /= lastTenant) eligible
+    fallback = case preferred of
+        [] -> eligible
+        _ -> []
+
+queuedForTenant :: TenantId -> Map TurnId TurnSlot -> Int
+queuedForTenant tenantId turns =
+    length
+        [ ()
+        | slot <- Map.elems turns
+        , slot.turnSlotRecord.turnRecordStatus == TurnQueued
+        , slot.turnSlotRecord.turnRecordBoundary.accessTenantId == tenantId
+        ]
+
+runningForTenant
+    :: TenantId
+    -> Map TurnId TurnSlot
+    -> Map TurnId (Async ())
+    -> Int
+runningForTenant tenantId turns workers =
+    length
+        [ ()
+        | turnId <- Map.keys workers
+        , Just slot <- [Map.lookup turnId turns]
+        , slot.turnSlotRecord.turnRecordBoundary.accessTenantId == tenantId
+        ]
 
 publishTurnEvent
     :: Supervisor
-    -> GatewayBoundary
+    -> AccessBoundary
     -> TurnId
     -> Text
     -> Text
@@ -1192,7 +1272,7 @@ publishTurnEvent
 appendEventToState
     :: SupervisorConfig
     -> UTCTime
-    -> GatewayBoundary
+    -> AccessBoundary
     -> Text
     -> Maybe TurnId
     -> Maybe Text
@@ -1245,7 +1325,7 @@ publishToSubscribers state event =
                 writeTBQueue subscriber.eventSubscriberQueue event
 
 sessionBusy
-    :: GatewayBoundary
+    :: AccessBoundary
     -> Text
     -> Map TurnId TurnSlot
     -> Bool

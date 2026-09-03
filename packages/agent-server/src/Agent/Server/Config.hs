@@ -1,34 +1,47 @@
--- | Command-line configuration and canonical workspace-root policy.
+-- | Command-line configuration and canonical tenant workspace policy.
 module Agent.Server.Config
     ( ServerConfig(..)
     , ResolvedServerConfig(..)
+    , ResolvedServerMode(..)
+    , MultiTenantConfig(..)
     , defaultServerConfig
     , parseServerConfig
     , resolveServerConfig
     , resolveWorkspacePath
+    , resolveTenantWorkspacePath
+    , lookupResolvedTenant
     ) where
 
 import Agent.Server.Auth
     ( AuthConfig(..)
     , AuthMode(..)
     )
-import Agent.Server.Types (ApiError(..))
-import Control.Applicative (many)
-import Control.Exception.Safe
-    ( bracket
-    , throwIO
-    , tryIO
+import Agent.Server.PrivateFile
+    ( readPrivateTokenFile
+    , validateTrustedPathAncestry
     )
+import Agent.Server.Tenant
+    ( ResolvedTenant(..)
+    , TenantRegistry
+    , loadTenantRegistry
+    , lookupTenant
+    , tenantRegistryCredentials
+    , tenantRegistryTenants
+    )
+import Agent.Server.Tenant qualified as Tenant
+import Agent.Server.Types
+    ( ApiError(..)
+    , TenantId
+    , localTenantId
+    )
+import Control.Applicative (many)
 import Control.Monad (when)
-import Data.Bits ((.&.))
-import Data.ByteString (ByteString)
-import Data.ByteString qualified as ByteString
 import Data.ByteString.Char8 qualified as ByteString8
+import Data.Maybe (isJust)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
-import Data.Maybe (isJust)
 import Options.Applicative
     ( Parser
     , ParserInfo
@@ -53,8 +66,11 @@ import Options.Applicative
 import System.Directory
     ( canonicalizePath
     , doesDirectoryExist
+    , doesFileExist
+    , executable
     , getCurrentDirectory
     , getHomeDirectory
+    , getPermissions
     , makeAbsolute
     )
 import System.Environment
@@ -68,37 +84,39 @@ import System.FilePath
     , normalise
     , splitDirectories
     )
-import System.IO.Error (isEOFError)
-import System.Posix.Files
-    ( fileMode
-    , fileOwner
-    , getFdStatus
-    , isRegularFile
-    )
-import System.Posix.IO
-    ( OpenFileFlags(..)
-    , OpenMode(ReadOnly)
-    , closeFd
-    , defaultFileFlags
-    , openFd
-    )
-import System.Posix.IO.ByteString qualified as Posix
-import System.Posix.Types (Fd)
-import System.Posix.User (getEffectiveUserID)
+import Control.Exception.Safe (tryIO)
 
 data ServerConfig = ServerConfig
     { serverHost :: !String
     , serverPort :: !Int
     , serverAllowRemote :: !Bool
     , serverTokenFile :: !(Maybe FilePath)
+    , serverTenantRegistry :: !(Maybe FilePath)
+    , serverTenantStateRoot :: !(Maybe FilePath)
+    , serverSandboxRunner :: !(Maybe FilePath)
     , serverCorsOrigins :: ![String]
     , serverWorkspaceRoots :: ![FilePath]
     , serverMaxConcurrentTurns :: !Int
+    , serverMaxConcurrentTurnsPerTenant :: !Int
     , serverMaxQueuedTurns :: !Int
+    , serverMaxQueuedTurnsPerTenant :: !Int
+    , serverMaxActiveTenants :: !Int
+    , serverMaxEventSubscribers :: !Int
+    , serverMaxEventSubscribersPerTenant :: !Int
     , serverEventReplayLimit :: !Int
     , serverMaximumRequestBytes :: !Int
     }
     deriving (Eq, Show)
+
+data MultiTenantConfig = MultiTenantConfig
+    { multiTenantRegistry :: !TenantRegistry
+    , multiTenantStateRoot :: !FilePath
+    , multiTenantSandboxRunner :: !FilePath
+    }
+
+data ResolvedServerMode
+    = LocalSingleUserMode
+    | MultiTenantMode !MultiTenantConfig
 
 data ResolvedServerConfig = ResolvedServerConfig
     { resolvedHost :: !String
@@ -108,8 +126,14 @@ data ResolvedServerConfig = ResolvedServerConfig
     , resolvedDefaultCwd :: !FilePath
     , resolvedHome :: !FilePath
     , resolvedStateDirectory :: !FilePath
+    , resolvedServerMode :: !ResolvedServerMode
     , resolvedMaxConcurrentTurns :: !Int
+    , resolvedMaxConcurrentTurnsPerTenant :: !Int
     , resolvedMaxQueuedTurns :: !Int
+    , resolvedMaxQueuedTurnsPerTenant :: !Int
+    , resolvedMaxActiveTenants :: !Int
+    , resolvedMaxEventSubscribers :: !Int
+    , resolvedMaxEventSubscribersPerTenant :: !Int
     , resolvedEventReplayLimit :: !Int
     , resolvedMaximumRequestBytes :: !Int
     }
@@ -120,10 +144,18 @@ defaultServerConfig = ServerConfig
     , serverPort = 4096
     , serverAllowRemote = False
     , serverTokenFile = Nothing
+    , serverTenantRegistry = Nothing
+    , serverTenantStateRoot = Nothing
+    , serverSandboxRunner = Nothing
     , serverCorsOrigins = []
     , serverWorkspaceRoots = []
     , serverMaxConcurrentTurns = 3
+    , serverMaxConcurrentTurnsPerTenant = 2
     , serverMaxQueuedTurns = 100
+    , serverMaxQueuedTurnsPerTenant = 25
+    , serverMaxActiveTenants = 16
+    , serverMaxEventSubscribers = 256
+    , serverMaxEventSubscribersPerTenant = 8
     , serverEventReplayLimit = 1000
     , serverMaximumRequestBytes = 1024 * 1024
     }
@@ -137,7 +169,7 @@ serverConfigInfo =
         (serverConfigParser <**> helper)
         ( fullDesc
             <> progDesc
-                "Run the local haskell-agent REST and SSE server"
+                "Run the haskell-agent REST and SSE server"
             <> header "agent-server"
         )
 
@@ -161,14 +193,35 @@ serverConfigParser =
         <*> switch
             ( long "allow-remote"
                 <> help
-                    "Permit a non-loopback bind (requires bearer token)"
+                    "Permit a non-loopback bind (requires bearer authentication)"
             )
         <*> optional
             (strOption
                 ( long "token-file"
                     <> metavar "PATH"
                     <> help
-                        "Require a bearer token read from a private file"
+                        "Single-user bearer token in an owner-only file"
+                ))
+        <*> optional
+            (strOption
+                ( long "tenant-registry"
+                    <> metavar "PATH"
+                    <> help
+                        "Owner-only versioned tenant registry (enables multi-tenant mode)"
+                ))
+        <*> optional
+            (strOption
+                ( long "tenant-state-root"
+                    <> metavar "PATH"
+                    <> help
+                        "Server-owned root for tenant homes and VM state"
+                ))
+        <*> optional
+            (strOption
+                ( long "sandbox-runner"
+                    <> metavar "PATH"
+                    <> help
+                        "Prebuilt per-tenant microVM runner executable"
                 ))
         <*> manyStringOption
             "cors-origin"
@@ -177,22 +230,47 @@ serverConfigParser =
         <*> manyStringOption
             "workspace-root"
             "PATH"
-            "Allow a canonical workspace root (repeatable)"
+            "Allow a canonical workspace root in local mode (repeatable)"
         <*> positiveOption
             "max-concurrent-turns"
             "N"
             defaultServerConfig.serverMaxConcurrentTurns
             "Maximum concurrently running turns"
         <*> positiveOption
+            "max-concurrent-turns-per-tenant"
+            "N"
+            defaultServerConfig.serverMaxConcurrentTurnsPerTenant
+            "Maximum concurrently running turns for one tenant"
+        <*> positiveOption
             "max-queued-turns"
             "N"
             defaultServerConfig.serverMaxQueuedTurns
             "Maximum queued turns"
         <*> positiveOption
+            "max-queued-turns-per-tenant"
+            "N"
+            defaultServerConfig.serverMaxQueuedTurnsPerTenant
+            "Maximum queued turns for one tenant"
+        <*> positiveOption
+            "max-active-tenants"
+            "N"
+            defaultServerConfig.serverMaxActiveTenants
+            "Maximum active tenant runtimes and microVMs"
+        <*> positiveOption
+            "max-event-subscribers"
+            "N"
+            defaultServerConfig.serverMaxEventSubscribers
+            "Maximum concurrent SSE event subscribers"
+        <*> positiveOption
+            "max-event-subscribers-per-tenant"
+            "N"
+            defaultServerConfig.serverMaxEventSubscribersPerTenant
+            "Maximum concurrent SSE event subscribers for one tenant"
+        <*> positiveOption
             "event-replay-limit"
             "N"
             defaultServerConfig.serverEventReplayLimit
-            "SSE events retained per gateway boundary"
+            "SSE events retained per authenticated access boundary"
         <*> positiveOption
             "maximum-request-bytes"
             "BYTES"
@@ -226,11 +304,30 @@ resolveServerConfig config
         pure (Left "port must be between 1 and 65535")
     | any (< 1)
         [ config.serverMaxConcurrentTurns
+        , config.serverMaxConcurrentTurnsPerTenant
         , config.serverMaxQueuedTurns
+        , config.serverMaxQueuedTurnsPerTenant
+        , config.serverMaxActiveTenants
+        , config.serverMaxEventSubscribers
+        , config.serverMaxEventSubscribersPerTenant
         , config.serverEventReplayLimit
         , config.serverMaximumRequestBytes
         ] =
         pure (Left "server limits must be positive")
+    | config.serverMaxConcurrentTurnsPerTenant
+        > config.serverMaxConcurrentTurns =
+        pure
+            (Left
+                "per-tenant concurrency cannot exceed global concurrency")
+    | config.serverMaxQueuedTurnsPerTenant > config.serverMaxQueuedTurns =
+        pure
+            (Left
+                "per-tenant queue capacity cannot exceed global capacity")
+    | config.serverMaxEventSubscribersPerTenant
+        > config.serverMaxEventSubscribers =
+        pure
+            (Left
+                "per-tenant event subscribers cannot exceed global capacity")
     | not loopback && not config.serverAllowRemote =
         pure
             (Left
@@ -238,11 +335,22 @@ resolveServerConfig config
     | otherwise = do
         cwd <- getCurrentDirectory
         home <- getHomeDirectory
-        rootsResult <- canonicalRoots cwd config.serverWorkspaceRoots
-        authResult <- resolveAuth config loopback
+        environmentToken <- lookupEnv "AGENT_SERVER_TOKEN"
+        -- Never leave the server bearer in the environment inherited by tools
+        -- or microVM launchers.
+        when (isJust environmentToken) (unsetEnv "AGENT_SERVER_TOKEN")
+        resolvedMode <-
+            case config.serverTenantRegistry of
+                Nothing ->
+                    resolveLocalMode config cwd environmentToken
+                Just registryPath ->
+                    resolveMultiTenantMode
+                        config
+                        home
+                        environmentToken
+                        registryPath
         pure do
-            roots <- rootsResult
-            auth <- authResult
+            (auth, roots, mode) <- resolvedMode
             Right ResolvedServerConfig
                 { resolvedHost = config.serverHost
                 , resolvedPort = config.serverPort
@@ -251,9 +359,20 @@ resolveServerConfig config
                 , resolvedDefaultCwd = cwd
                 , resolvedHome = home
                 , resolvedStateDirectory = home </> ".haskell-agent"
+                , resolvedServerMode = mode
                 , resolvedMaxConcurrentTurns =
                     config.serverMaxConcurrentTurns
+                , resolvedMaxConcurrentTurnsPerTenant =
+                    config.serverMaxConcurrentTurnsPerTenant
                 , resolvedMaxQueuedTurns = config.serverMaxQueuedTurns
+                , resolvedMaxQueuedTurnsPerTenant =
+                    config.serverMaxQueuedTurnsPerTenant
+                , resolvedMaxActiveTenants =
+                    config.serverMaxActiveTenants
+                , resolvedMaxEventSubscribers =
+                    config.serverMaxEventSubscribers
+                , resolvedMaxEventSubscribersPerTenant =
+                    config.serverMaxEventSubscribersPerTenant
                 , resolvedEventReplayLimit =
                     config.serverEventReplayLimit
                 , resolvedMaximumRequestBytes =
@@ -262,16 +381,259 @@ resolveServerConfig config
   where
     loopback = isLoopbackHost config.serverHost
 
+resolveLocalMode
+    :: ServerConfig
+    -> FilePath
+    -> Maybe String
+    -> IO
+        (Either
+            Text
+            (AuthConfig, [FilePath], ResolvedServerMode))
+resolveLocalMode config cwd environmentToken
+    | config.serverTenantStateRoot /= Nothing
+        || config.serverSandboxRunner /= Nothing =
+        pure
+            (Left
+                "--tenant-state-root and --sandbox-runner require --tenant-registry")
+    | otherwise = do
+        roots <- canonicalRoots cwd config.serverWorkspaceRoots
+        auth <-
+            resolveLocalAuth
+                config
+                (isLoopbackHost config.serverHost)
+                environmentToken
+        pure do
+            resolvedRoots <- roots
+            resolvedAuth <- auth
+            Right
+                ( resolvedAuth
+                , resolvedRoots
+                , LocalSingleUserMode
+                )
+
+resolveMultiTenantMode
+    :: ServerConfig
+    -> FilePath
+    -> Maybe String
+    -> FilePath
+    -> IO
+        (Either
+            Text
+            (AuthConfig, [FilePath], ResolvedServerMode))
+resolveMultiTenantMode config home environmentToken registryPath
+    | config.serverTokenFile /= Nothing || environmentToken /= Nothing =
+        pure
+            (Left
+                "multi-tenant mode accepts credentials only from the tenant registry")
+    | not (null config.serverWorkspaceRoots) =
+        pure
+            (Left
+                "--workspace-root is local-mode only; configure roots per tenant")
+    | otherwise =
+        case config.serverSandboxRunner of
+            Nothing ->
+                pure
+                    (Left
+                        "multi-tenant mode requires --sandbox-runner")
+            Just runner -> do
+                resolvedRunner <-
+                    tryIO (canonicalizePath =<< makeAbsolute runner)
+                case resolvedRunner of
+                    Left _ ->
+                        pure
+                            (Left
+                                "the configured sandbox runner is unavailable")
+                    Right canonicalRunner -> do
+                        runnerExists <- doesFileExist canonicalRunner
+                        runnerPermissions <- tryIO (getPermissions canonicalRunner)
+                        if
+                            not runnerExists
+                                || either
+                                    (const True)
+                                    (not . executable)
+                                    runnerPermissions
+                            then
+                                pure
+                                    (Left
+                                        "the configured sandbox runner is not an executable file")
+                            else do
+                                validateTrustedPathAncestry
+                                    canonicalRunner >>= \case
+                                        Left err ->
+                                            pure
+                                                (Left
+                                                    ("the configured sandbox runner is not trusted: "
+                                                        <> err))
+                                        Right () -> do
+                                            let stateRoot =
+                                                    maybe
+                                                        (home
+                                                            </> ".haskell-agent"
+                                                            </> "server-tenants")
+                                                        id
+                                                        config.serverTenantStateRoot
+                                            loadTenantRegistry
+                                                stateRoot
+                                                registryPath >>= \case
+                                                    Left err -> pure (Left err)
+                                                    Right registry
+                                                        | runnerOverlapsTenant
+                                                            canonicalRunner
+                                                            registry ->
+                                                            pure
+                                                                (Left
+                                                                    "the configured sandbox runner must be outside tenant-writable roots")
+                                                        | length
+                                                            (tenantRegistryTenants
+                                                                registry)
+                                                            > config.serverMaxActiveTenants ->
+                                                            pure
+                                                                (Left
+                                                                    "the tenant registry exceeds --max-active-tenants")
+                                                        | otherwise ->
+                                                            pure
+                                                                (Right
+                                                                    ( AuthConfig
+                                                                    { authMode =
+                                                                        TenantBearerAuth
+                                                                            (tenantRegistryCredentials
+                                                                                registry)
+                                                                    , authCorsOrigins =
+                                                                        corsOrigins
+                                                                            config
+                                                                    }
+                                                                , []
+                                                                , MultiTenantMode
+                                                                    MultiTenantConfig
+                                                                        { multiTenantRegistry =
+                                                                            registry
+                                                                        , multiTenantStateRoot =
+                                                                            stateRoot
+                                                                        , multiTenantSandboxRunner =
+                                                                            canonicalRunner
+                                                                        }
+                                                                    ))
+
+runnerOverlapsTenant :: FilePath -> TenantRegistry -> Bool
+runnerOverlapsTenant runner =
+    any overlaps . tenantRegistryTenants
+  where
+    overlaps tenant =
+        any
+            (`containsPath` runner)
+            [ tenant.resolvedTenantWorkspaceRoot
+            , tenant.resolvedTenantStateDirectory
+            , tenant.resolvedTenantHome
+            ]
+
+resolveLocalAuth
+    :: ServerConfig
+    -> Bool
+    -> Maybe String
+    -> IO (Either Text AuthConfig)
+resolveLocalAuth config loopback environmentToken =
+    if loopback
+        && config.serverTokenFile == Nothing
+        && environmentToken == Nothing
+        then
+            pure $
+                Right AuthConfig
+                    { authMode =
+                        LoopbackHostAuth
+                            (allowedLoopbackHosts config.serverPort)
+                    , authCorsOrigins = corsOrigins config
+                    }
+        else
+            loadRemoteToken config environmentToken >>= \case
+                Left err -> pure (Left err)
+                Right token ->
+                    pure $
+                        Right AuthConfig
+                            { authMode = BearerTokenAuth token
+                            , authCorsOrigins = corsOrigins config
+                            }
+
+loadRemoteToken
+    :: ServerConfig
+    -> Maybe String
+    -> IO (Either Text ByteString8.ByteString)
+loadRemoteToken config environmentToken =
+    case (config.serverTokenFile, environmentToken) of
+        (Just _, Just _) ->
+            pure (Left "set only one of --token-file or AGENT_SERVER_TOKEN")
+        (Nothing, Nothing) ->
+            pure
+                (Left
+                    "remote mode requires --token-file or AGENT_SERVER_TOKEN")
+        (Nothing, Just token) ->
+            pure $
+                if null token
+                    then Left "the bearer token must not be empty"
+                    else Right (ByteString8.pack token)
+        (Just path, Nothing) -> readPrivateTokenFile path
+
 resolveWorkspacePath
     :: ResolvedServerConfig
     -> Maybe FilePath
     -> IO (Either ApiError FilePath)
-resolveWorkspacePath config requested = do
+resolveWorkspacePath config requested =
+    case config.resolvedServerMode of
+        MultiTenantMode _ ->
+            pure $
+                Left ApiError
+                    { apiErrorStatus = 500
+                    , apiErrorCode = "tenant_context_required"
+                    , apiErrorMessage =
+                        "a tenant context is required for workspace resolution"
+                    , apiErrorDetails = Nothing
+                    }
+        LocalSingleUserMode ->
+            resolveWorkspacePathIn
+                config.resolvedDefaultCwd
+                config.resolvedWorkspaceRoots
+                requested
+
+resolveTenantWorkspacePath
+    :: ResolvedServerConfig
+    -> TenantId
+    -> Maybe FilePath
+    -> IO (Either ApiError FilePath)
+resolveTenantWorkspacePath config tenantId requested =
+    case config.resolvedServerMode of
+        LocalSingleUserMode
+            | tenantId == localTenantId ->
+                resolveWorkspacePath config requested
+            | otherwise -> pure (Left tenantUnavailable)
+        MultiTenantMode multi ->
+            case lookupTenant multi.multiTenantRegistry tenantId of
+                Nothing -> pure (Left tenantUnavailable)
+                Just tenant ->
+                    Tenant.resolveTenantWorkspacePath tenant requested
+
+lookupResolvedTenant
+    :: ResolvedServerConfig
+    -> TenantId
+    -> Either ApiError ResolvedTenant
+lookupResolvedTenant config tenantId =
+    case config.resolvedServerMode of
+        LocalSingleUserMode -> Left tenantUnavailable
+        MultiTenantMode multi ->
+            maybe
+                (Left tenantUnavailable)
+                Right
+                (lookupTenant multi.multiTenantRegistry tenantId)
+
+resolveWorkspacePathIn
+    :: FilePath
+    -> [FilePath]
+    -> Maybe FilePath
+    -> IO (Either ApiError FilePath)
+resolveWorkspacePathIn defaultCwd roots requested = do
     let raw = case requested of
-            Nothing -> config.resolvedDefaultCwd
+            Nothing -> defaultCwd
             Just path
                 | isAbsolute path -> path
-                | otherwise -> config.resolvedDefaultCwd </> path
+                | otherwise -> defaultCwd </> path
     exists <- doesDirectoryExist raw
     if not exists
         then pure (Left invalidWorkspace)
@@ -280,15 +642,13 @@ resolveWorkspacePath config requested = do
             pure case result of
                 Left _ -> Left invalidWorkspace
                 Right canonical
-                    | any (`containsPath` canonical)
-                        config.resolvedWorkspaceRoots ->
-                            Right canonical
+                    | any (`containsPath` canonical) roots -> Right canonical
                     | otherwise ->
                         Left ApiError
                             { apiErrorStatus = 403
                             , apiErrorCode = "workspace_not_allowed"
                             , apiErrorMessage =
-                                "the canonical working directory is outside the configured workspace roots"
+                                "the working directory is outside the configured workspace roots"
                             , apiErrorDetails = Nothing
                             }
   where
@@ -332,9 +692,22 @@ canonicalRoots cwd configured = go [] candidates
                                     ("could not canonicalize workspace root: "
                                         <> Text.pack path))
                         Right canonical ->
-                            go
-                                (canonical : accumulated)
-                                rest
+                            go (canonical : accumulated) rest
+
+tenantUnavailable :: ApiError
+tenantUnavailable = ApiError
+    { apiErrorStatus = 401
+    , apiErrorCode = "tenant_unavailable"
+    , apiErrorMessage = "the authenticated tenant is unavailable"
+    , apiErrorDetails = Nothing
+    }
+
+corsOrigins :: ServerConfig -> Set.Set ByteString8.ByteString
+corsOrigins config =
+    Set.fromList
+        (map
+            (TextEncoding.encodeUtf8 . Text.pack)
+            config.serverCorsOrigins)
 
 containsPath :: FilePath -> FilePath -> Bool
 containsPath root candidate =
@@ -345,141 +718,7 @@ containsPath root candidate =
             ".." : _ -> False
             _ -> True
 
-resolveAuth
-    :: ServerConfig
-    -> Bool
-    -> IO (Either Text AuthConfig)
-resolveAuth config loopback = do
-    environmentToken <- lookupEnv "AGENT_SERVER_TOKEN"
-    -- Agent tools inherit the server environment. Remove the bearer secret
-    -- even in loopback mode so shell subprocesses cannot read a stale value.
-    when (isJust environmentToken) (unsetEnv "AGENT_SERVER_TOKEN")
-    if loopback
-        && config.serverTokenFile == Nothing
-        && environmentToken == Nothing
-        then
-            pure $
-                Right AuthConfig
-                    { authMode =
-                        LoopbackHostAuth
-                            (allowedLoopbackHosts config.serverPort)
-                    , authCorsOrigins = origins
-                    }
-        else
-            loadRemoteToken config environmentToken >>= \case
-                Left err -> pure (Left err)
-                Right token ->
-                    pure $
-                        Right AuthConfig
-                            { authMode = BearerTokenAuth token
-                            , authCorsOrigins = origins
-                            }
-  where
-    origins =
-        Set.fromList
-            (map
-                (TextEncoding.encodeUtf8 . Text.pack)
-                config.serverCorsOrigins)
-
-loadRemoteToken
-    :: ServerConfig
-    -> Maybe String
-    -> IO (Either Text ByteString)
-loadRemoteToken config environmentToken =
-    case (config.serverTokenFile, environmentToken) of
-        (Just _, Just _) ->
-            pure
-                (Left
-                    "set only one of --token-file or AGENT_SERVER_TOKEN")
-        (Nothing, Nothing) ->
-            pure
-                (Left
-                    "remote mode requires --token-file or AGENT_SERVER_TOKEN")
-        (Nothing, Just token) ->
-            pure (validateToken (ByteString8.pack token))
-        (Just path, Nothing) -> do
-            readPrivateTokenFile path >>= \case
-                Left err -> pure (Left err)
-                Right bytes -> pure (validateToken bytes)
-
-readPrivateTokenFile :: FilePath -> IO (Either Text ByteString)
-readPrivateTokenFile path = do
-    inspected <- tryIO $
-        bracket
-            (openFd
-                path
-                ReadOnly
-                defaultFileFlags
-                    { nofollow = True
-                    , cloexec = True
-                    })
-            closeFd
-            \descriptor -> do
-                status <- getFdStatus descriptor
-                user <- getEffectiveUserID
-                if not (isRegularFile status)
-                    then
-                        pure $
-                            Left
-                                "the bearer token path must be a regular file"
-                    else if fileOwner status /= user
-                        then
-                            pure $
-                                Left
-                                    "the bearer token file must be owned by the current user"
-                        else if fileMode status .&. 0o077 /= 0
-                            then
-                                pure $
-                                    Left
-                                        "the bearer token file must not be accessible by group or other users"
-                            else Right <$> readTokenBytes descriptor
-    pure case inspected of
-        Left _ -> Left "could not inspect the bearer token file"
-        Right result -> result
-
-readTokenBytes :: Fd -> IO ByteString
-readTokenBytes descriptor = go 4097 []
-  where
-    go remaining chunks
-        | remaining <= 0 =
-            pure (ByteString.concat (reverse chunks))
-        | otherwise = do
-            tryIO
-                (Posix.fdRead descriptor (fromIntegral remaining))
-                >>= \case
-                    Left err
-                        | isEOFError err ->
-                            pure (ByteString.concat (reverse chunks))
-                        | otherwise -> throwIO err
-                    Right chunk
-                        | ByteString.null chunk ->
-                            pure (ByteString.concat (reverse chunks))
-                        | otherwise ->
-                            go
-                                (remaining - ByteString.length chunk)
-                                (chunk : chunks)
-
-validateToken :: ByteString -> Either Text ByteString
-validateToken raw =
-    let token = stripAsciiSpace raw
-    in if ByteString.length raw > 4096
-        then Left "the bearer token is too large"
-        else if ByteString.null token
-        then Left "the bearer token must not be empty"
-        else Right token
-
-stripAsciiSpace :: ByteString -> ByteString
-stripAsciiSpace =
-    ByteString8.dropWhileEnd isAsciiSpace
-        . ByteString8.dropWhile isAsciiSpace
-  where
-    isAsciiSpace character =
-        character == ' '
-            || character == '\t'
-            || character == '\r'
-            || character == '\n'
-
-allowedLoopbackHosts :: Int -> Set.Set ByteString
+allowedLoopbackHosts :: Int -> Set.Set ByteString8.ByteString
 allowedLoopbackHosts port =
     Set.fromList
         [ ByteString8.pack ("127.0.0.1:" <> show port)

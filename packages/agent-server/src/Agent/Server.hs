@@ -5,6 +5,7 @@ module Agent.Server
     , module Agent.Server.Backend
     , module Agent.Server.Config
     , module Agent.Server.Supervisor
+    , module Agent.Server.Tenant
     , module Agent.Server.Types
     ) where
 
@@ -17,6 +18,7 @@ import Agent.Server.Runtime
     , serverRuntimeBackend
     )
 import Agent.Server.Supervisor
+import Agent.Server.Tenant hiding (resolveTenantWorkspacePath)
 import Agent.Server.Types
 import Control.Exception.Safe (bracket)
 import Data.ByteString.Lazy qualified as LazyByteString
@@ -57,8 +59,16 @@ runServer = do
                                 supervisorConfig = SupervisorConfig
                                     { supervisorMaxConcurrentTurns =
                                         config.resolvedMaxConcurrentTurns
+                                    , supervisorMaxConcurrentTurnsPerTenant =
+                                        config.resolvedMaxConcurrentTurnsPerTenant
                                     , supervisorMaxQueuedTurns =
                                         config.resolvedMaxQueuedTurns
+                                    , supervisorMaxQueuedTurnsPerTenant =
+                                        config.resolvedMaxQueuedTurnsPerTenant
+                                    , supervisorMaxEventSubscribers =
+                                        config.resolvedMaxEventSubscribers
+                                    , supervisorMaxEventSubscribersPerTenant =
+                                        config.resolvedMaxEventSubscribersPerTenant
                                     , supervisorEventReplayLimit =
                                         config.resolvedEventReplayLimit
                                     }

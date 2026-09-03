@@ -43,6 +43,14 @@
               }
             }
           },
+          "429": {
+            "description": "The global or per-tenant event subscriber limit was reached.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          },
           "default": { "$ref": "#/components/responses/Error" }
         }
       }
@@ -487,7 +495,7 @@
       "get": {
         "tags": ["events"],
         "operationId": "streamEvents",
-        "description": "Server-Sent Events for the exact admitted gateway boundary. Send Last-Event-ID to replay the bounded per-boundary window. replay.reset requires refetching REST state. Slow consumers receive a gap reset rather than unbounded buffering.",
+        "description": "Server-Sent Events for the exact authenticated tenant and admitted gateway boundary. Send Last-Event-ID to replay the bounded per-boundary window. replay.reset requires refetching REST state. Slow consumers receive a gap reset rather than unbounded buffering.",
         "parameters": [
           {
             "name": "Last-Event-ID",

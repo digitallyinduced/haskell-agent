@@ -36,6 +36,7 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
+    , ToolPlacement(..)
     , ToolSchema(..)
     )
 import Control.Applicative ((<|>))
@@ -71,6 +72,7 @@ computerUseTool = AppTool
     , appToolApproval = AlwaysPrompt
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolPlacement = UnclassifiedTool
     }
   where
     handler

@@ -40,6 +40,7 @@ import Agent.CLI.BrowserTools
 import Agent.CLI.Render (summarizeToolCall)
 import Agent.CLI.NativeRuntime
     ( NativeInteractionMode(..)
+    , NativeIsolationMode(..)
     , NativeProcessRuntime
     , NativeRunHooks(..)
     , NativeShellMode(..)
@@ -5443,6 +5444,11 @@ runNativeTurn
             , nativeInteractionMode =
                 turnOptions.nativeTurnInteractionMode
             , nativeShellMode = turnOptions.nativeTurnShellMode
+            , nativeHome = Nothing
+            , nativeDatabaseStore = Nothing
+            , nativeDatabaseScopeNamespace = Nothing
+            , nativeIsolationMode = NativeUnrestricted
+            , nativeRouteTool = Right
             }
         args = nativeTurnArguments start
     result <- tryAny $

@@ -46,8 +46,13 @@ library
                     , Agent.Server.Backend
                     , Agent.Server.Config
                     , Agent.Server.Event
+                    , Agent.Server.Identifier
+                    , Agent.Server.PrivateFile
                     , Agent.Server.Runtime
+                    , Agent.Server.Sandbox
+                    , Agent.Server.Sandbox.Worker
                     , Agent.Server.Supervisor
+                    , Agent.Server.Tenant
                     , Agent.Server.Types
     build-depends:    agent-cli >= 0.1 && < 0.2
                     , agent-cli-runtime >= 0.1 && < 0.2
@@ -64,11 +69,13 @@ library
                     , http-types
                     , memory
                     , optparse-applicative >= 0.18 && < 0.19
+                    , process
                     , safe-exceptions
                     , stm
                     , text >= 2.0 && < 2.2
                     , time
                     , unix
+                    , uuid-types
                     , wai
                     , warp
 
@@ -77,6 +84,14 @@ executable agent-server
     hs-source-dirs:   app
     main-is:          Main.hs
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M4G"
+    build-depends:    agent-server
+                    , base >= 4.17 && < 5
+
+executable agent-sandbox-worker
+    import:           common-options
+    hs-source-dirs:   app
+    main-is:          SandboxWorker.hs
+    ghc-options:      -threaded -rtsopts "-with-rtsopts=-N2 -M1G"
     build-depends:    agent-server
                     , base >= 4.17 && < 5
 
@@ -89,7 +104,9 @@ test-suite agent-server-test
                     , Agent.Server.AuthSpec
                     , Agent.Server.ConfigSpec
                     , Agent.Server.EventSpec
+                    , Agent.Server.SandboxSpec
                     , Agent.Server.SupervisorSpec
+                    , Agent.Server.TenantSpec
     ghc-options:      -threaded
     build-depends:    agent-server
                     , agent-core
@@ -99,11 +116,14 @@ test-suite agent-server-test
                     , bytestring
                     , containers
                     , directory
+                    , filepath
                     , hspec >= 2.11 && < 2.12
                     , http-types
                     , safe-exceptions
                     , stm
+                    , temporary
                     , text
                     , time
+                    , unix
                     , wai
                     , wai-extra

@@ -74,6 +74,9 @@ data SessionEnv = SessionEnv
     , sessionPlanMode :: !PlanModeEnv
     , sessionProjectRoot :: !OsPath
     , sessionCwd :: !OsPath
+    -- | Sandboxed native sessions treat the workspace as guest-only input;
+    -- host startup helpers must not inspect it or launch processes within it.
+    , sessionSandboxedNative :: !Bool
     , sessionHome :: !OsPath
     , sessionMcpRegistrations :: ![McpToolRegistration]
     , sessionMcpWarnings :: ![Text]

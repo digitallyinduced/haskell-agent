@@ -63,8 +63,8 @@ import Agent.CLI.Prompt
     ( codexEnvironmentContext,
       subscriptionSubagentModelGuidance,
       appendMcpInstructions,
-      systemPromptForCatalogModel,
-      systemPromptForTools )
+      systemPromptForCatalogModelWithHostedSearch,
+      systemPromptForToolsWithHostedSearch )
 import Agent.CLI.PromptHooks ()
 import Agent.CLI.Provider.OpenAI ()
 import Agent.CLI.Provider.Switch ()
@@ -88,7 +88,10 @@ import Agent.CLI.Runtime.Orchestration.Providers
 import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Startup
     ( clearNativeProgress, mcpToolCollision, reportStartupWarning )
-import Agent.CLI.Runtime.Orchestration.Types ()
+import Agent.CLI.Runtime.Orchestration.Types
+    ( NativeIsolationMode(..)
+    , NativeRunHooks(nativeIsolationMode)
+    )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Repl ()
@@ -143,7 +146,8 @@ import Agent.CLI.Session.Runtime.Types
                      accountRef, accountIdRef, selectionRef, accountLabel,
                      selectAccount, onPersisted, compactRunner, codeModeNestedSlot),
       StartupRuntime(startupBackground, startupDatabaseStore,
-                     startupNetworkRecovery, startupSessionState) )
+                     startupNetworkRecovery, startupSessionState,
+                     startupNativeHooks) )
 import Agent.CLI.Session.Selection ( reservedSessionId )
 import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ()
@@ -175,7 +179,9 @@ import Agent.CLI.TUI.History ()
 import Agent.CLI.TUI.SessionHistory ()
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Tools
-    ( schemasFromAppTools, schemasFromAppToolsCodeMode )
+    ( schemasFromAppToolsCodeModeWithHostedSearch
+    , schemasFromAppToolsWithHostedSearch
+    )
 import Agent.CLI.Turn ()
 import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch ()
@@ -475,10 +481,18 @@ runAgentSession
                     then Nothing
                     else Just selectableTokenProvider)
                 model
-        let initializeCodeMode =
-                if options.optCodeMode
-                    then codeModeSessionRuntimeFor codexModelInfo tools
-                    else imageGenerationCodeModeRuntimeFor codexModelInfo tools
+        let sandboxedNative =
+                maybe
+                    False
+                    ((== NativeSandboxed) . (.nativeIsolationMode))
+                    startup.startupNativeHooks
+            includeHostedSearch = not sandboxedNative
+            initializeCodeMode
+                | sandboxedNative = pure (Right Nothing)
+                | options.optCodeMode =
+                    codeModeSessionRuntimeFor codexModelInfo tools
+                | otherwise =
+                    imageGenerationCodeModeRuntimeFor codexModelInfo tools
             codeModeFallbackWarning
                 | options.optCodeMode =
                     "code mode unavailable; falling back to compatible \
@@ -505,7 +519,8 @@ runAgentSession
             catalogSession = codexModelInfo <&> \info ->
                 CodexCatalogSession
                     { catalogInstructionsFor = \toolNames sessionTmpDir ->
-                        systemPromptForCatalogModel
+                        systemPromptForCatalogModelWithHostedSearch
+                            includeHostedSearch
                             dialect
                             info
                             toolNames
@@ -520,7 +535,8 @@ runAgentSession
                             (map (.appToolName) providerTools)
                             (Just sessionTmp)
                     Nothing ->
-                        systemPromptForTools
+                        systemPromptForToolsWithHostedSearch
+                            includeHostedSearch
                             dialect
                             (map (.appToolName) providerTools)
                             cwd
@@ -529,12 +545,17 @@ runAgentSession
                             (isOneShot options)
             wireSchemas = case codeModeRuntime of
                 Just codeMode ->
-                    schemasFromAppToolsCodeMode
+                    schemasFromAppToolsCodeModeWithHostedSearch
+                        includeHostedSearch
                         dialect
                         ( codeMode.codeModeWireTools
                             <> codeMode.codeModeDirectTools
                         )
-                Nothing -> schemasFromAppTools dialect providerTools
+                Nothing ->
+                    schemasFromAppToolsWithHostedSearch
+                        includeHostedSearch
+                        dialect
+                        providerTools
             environmentContextBlock =
                 (.catalogEnvironmentContext) <$> catalogSession
             registryTools =
@@ -677,21 +698,24 @@ runAgentSession
             Just snapshot ->
                 newIORef snapshot.promptSnapshotGeneratedContext
             Nothing ->
-                loadAgentsContext
-                    stderrHandle
-                    fullscreen
-                    agentsContextNotice
-                    options
-                    dialect
-                    home
-                    cwd
-                    (if refreshDialectContext || resumeNeedsFreshContext
-                        then []
-                        else initialItems)
-                    (if refreshDialectContext || resumeNeedsFreshContext
-                        then Nothing
-                        else initialPrevious)
-                    environmentContextBlock
+                if sandboxedNative
+                    then newIORef environmentContextBlock
+                    else
+                        loadAgentsContext
+                            stderrHandle
+                            fullscreen
+                            agentsContextNotice
+                            options
+                            dialect
+                            home
+                            cwd
+                            (if refreshDialectContext || resumeNeedsFreshContext
+                                then []
+                                else initialItems)
+                            (if refreshDialectContext || resumeNeedsFreshContext
+                                then Nothing
+                                else initialPrevious)
+                            environmentContextBlock
         -- Fullscreen sessions load skills after Brick has taken over the
         -- terminal, so filesystem discovery cannot delay the first frame.
         -- Minimal and one-shot sessions still initialize them synchronously
@@ -855,7 +879,7 @@ runAgentSession
                         | otherwise = action Nothing
                 withStartupAvailability \startupUnavailable ->
                     runAgentProviders
-                        (if startup.startupBackground
+                        (if sandboxedNative || startup.startupBackground
                             then SessionLocalSwitch
                             else TopLevelSwitch)
                         loaded

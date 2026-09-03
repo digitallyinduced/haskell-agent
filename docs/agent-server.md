@@ -27,11 +27,100 @@ agent-server \
   --workspace-root /another/allowed/root \
   --max-concurrent-turns 3 \
   --max-queued-turns 100 \
+  --max-event-subscribers 256 \
+  --max-event-subscribers-per-tenant 8 \
   --event-replay-limit 1000
 ```
 
 Workspace roots and requested working directories are canonicalized before
 use. A symlink cannot be used to select a directory outside an allowed root.
+
+## Multi-tenant sandbox deployment
+
+Multi-tenant mode uses an opaque bearer credential to select a tenant. Each
+tenant gets a disjoint workspace, server-owned state directory, PostgreSQL
+database and restricted runtime role. Model-controlled filesystem, shell,
+process, and network tools execute in one NixOS QEMU microVM per tenant, shared
+by that tenant's sessions and started lazily on the first sandboxed tool call.
+Provider API calls, authorization, and PostgreSQL access remain in the host
+server; database credentials and provider secrets are not copied into the
+guest. Host-side project instructions, filesystem skills, Git status, and
+project settings are disabled in this mode so tenant-controlled workspace
+symlinks cannot turn startup discovery into a host read or write.
+
+Build the Linux runner and start the server with a registry:
+
+```console
+nix build .#agent-sandbox-runner
+
+agent-server \
+  --host 0.0.0.0 \
+  --allow-remote \
+  --tenant-registry /run/credentials/agent-tenants.json \
+  --tenant-state-root /var/lib/agent-server/tenants \
+  --sandbox-runner "$PWD/result/bin/agent-sandbox-runner" \
+  --max-active-tenants 16
+```
+
+The owner-only registry is strict, versioned JSON:
+
+```json
+{
+  "version": 1,
+  "tenants": [
+    {
+      "id": "018f6a14-7d52-7a52-9c00-66d5e7d70334",
+      "workspaceRoot": "/srv/agent-workspaces/acme",
+      "credentials": [
+        {
+          "id": "018f6a14-7d52-7a52-9c00-66d5e7d70335",
+          "tokenFile": "/run/credentials/acme-agent-token"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Tenant and credential ids must be canonical UUIDs. Credential files use the
+same owner-only, non-symlink rules as the registry, and tenant tokens must
+contain at least 32 bytes. Tokens must be unique. Workspace roots must exist,
+must not overlap one another or server state, and cannot contain the registry
+or a token file. Their parent ancestry must be root- or server-owned and not
+group/other-writable. The sandbox runner has the same trusted-ancestry
+requirement and must be outside every tenant workspace and state directory.
+`--max-active-tenants` must cover the complete registry.
+
+The VM receives only two writable 9p exports: the tenant workspace as
+`/workspace` and a dedicated guest-data directory as `/state`. VM images,
+locks, sockets, registry data, and credentials stay in host-only paths. The
+runner pins both exports by open directory descriptors before QEMU starts, so
+a later pathname replacement cannot redirect a mount. It also compares the
+workspace descriptor's device and inode with the identity recorded when the
+registry was loaded, rejecting a pre-launch substitution.
+
+Outbound guest networking is available for development tools. Its immutable
+nftables policy rejects loopback, private, link-local, metadata, reserved, and
+all host addresses captured at VM launch. The runner monitors host address
+changes and terminates stale VMs; the next sandboxed call starts a replacement
+with a fresh deny set. There is no inbound guest service or SSH.
+Failure to start, attest, or communicate with a VM fails the tool call closed;
+the server never falls back to host execution.
+
+The managed host PostgreSQL cluster provisions a separate database and
+`NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOINHERIT`, `NOBYPASSRLS`
+runtime role for each tenant. Public database connectivity is revoked, runtime
+roles receive only the application grants in their own database, and custom
+scope role names include the tenant namespace. The microVM has no PostgreSQL
+credentials or socket mount.
+
+Production operators should additionally enforce host cgroup and filesystem
+quotas, PostgreSQL database quotas/backups, TLS termination, and authentication
+rate limits. The server bounds global/per-tenant turns, queues, active tenant
+runtimes, SSE subscribers, replay buffers, request bodies, protocol frames,
+and guest tool output. A tenant VM uses two vCPUs, 2 GiB RAM, and an ephemeral
+tmpfs root over a read-only Nix store image; workspace and guest-state storage
+remain operator-owned host capacity.
 
 ## Basic workflow
 
@@ -170,6 +259,10 @@ identity captured at admission, an executing turn holds the admission-aware
 lease for its complete runtime and terminal event, and every SSE write
 revalidates its captured identity. Session queries apply the identity predicate
 inside PostgreSQL before ordering and limiting.
+
+In multi-tenant mode, the tenant identity derived from the opaque bearer is the
+outer authorization boundary. Organization-gateway identity is nested inside
+that tenant and is never accepted as a substitute for tenant authentication.
 
 ## Version 1 scope
 

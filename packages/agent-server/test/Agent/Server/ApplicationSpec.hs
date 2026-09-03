@@ -59,7 +59,7 @@ spec = describe "agent-server WAI application" do
                 ""
             response.simpleStatus `shouldBe` status403
             LBS8.unpack response.simpleBody
-                `shouldContain` "\"requestId\":\"request-"
+                `shouldContain` "\"requestId\":\""
 
     it "keeps allowed CORS headers on authentication failures" do
         let auth = AuthConfig
@@ -187,14 +187,19 @@ withApplicationAuth auth runner action =
   where
     supervisorConfig = SupervisorConfig
         { supervisorMaxConcurrentTurns = 1
+        , supervisorMaxConcurrentTurnsPerTenant = 1
         , supervisorMaxQueuedTurns = 10
+        , supervisorMaxQueuedTurnsPerTenant = 10
+        , supervisorMaxEventSubscribers = 10
+        , supervisorMaxEventSubscribersPerTenant = 5
         , supervisorEventReplayLimit = 10
         }
 
 fakeBackend :: Backend
 fakeBackend = Backend
-    { backendAdmitBoundary = \action ->
-        Right <$> action (GatewayBoundary Nothing)
+    { backendAdmitBoundary = \principal action ->
+        Right <$> action
+            (accessBoundary principal (GatewayBoundary Nothing))
     , backendContinueBoundary = \_ action ->
         Right <$> action
     , backendTurnBoundaryGuard = \_ action ->

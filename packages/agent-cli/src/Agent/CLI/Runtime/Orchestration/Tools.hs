@@ -37,6 +37,7 @@ import Agent.CLI.Database.Store
     (DatabaseScopes, databaseToolsEnvForStore)
 import Agent.CLI.Dialects
     ( CodingTools(..),
+      classifyCodingTool,
       codingToolsForWithTypes,
       filterBashTools,
       filterGhciTools )
@@ -126,6 +127,7 @@ import Agent.CLI.Runtime.Orchestration.Types
     ( AgentProcessRuntime(..)
     , AgentRunMode
     , NativeInteractionMode(..)
+    , NativeIsolationMode(..)
     , NativeRunHooks(..)
     )
 import Agent.CLI.Runtime.Orchestration.Restart ()
@@ -276,7 +278,12 @@ import Agent.Tools.Secret
     ( SecretPrompt(..), SecretPromptHooks(..) )
 import Agent.Tools.ShowImage
     ( ImageDisplayHooks(..), ImageDisplayRequest(..) )
-import Agent.Tools.Types (ToolEnv, setToolSessionTmp)
+import Agent.Tools.Types
+    ( ToolEnv(..)
+    , ToolPlacement(..)
+    , setToolSessionTmp
+    , withToolPlacement
+    )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async ( concurrently, concurrently_ )
@@ -297,7 +304,7 @@ import Data.Text (Text)
 import Data.Time.Clock ()
 import System.Console.ANSI ()
 import System.Console.ANSI.Codes ()
-import System.Directory.OsPath (getHomeDirectory)
+import System.Directory.OsPath ()
 import System.Environment ()
 import System.Exit ()
 import System.IO (Handle)
@@ -437,6 +444,11 @@ runAgentTools
     uiRuntimeRef
     unavailableProviders
     = do
+    let sandboxedNative =
+            maybe
+                False
+                ((== NativeSandboxed) . (.nativeIsolationMode))
+                startup.startupNativeHooks
     openRouterOptions <- OpenRouter.clientOptionsFromEnv
     markStartupStage startup "Loading tools…"
     when (isGatewayLoadedAuth loaded /= isJust gatewayIdentity) $
@@ -535,7 +547,7 @@ runAgentTools
                 request.secretPromptMessage
                 request.secretPromptPurpose
         secretHooks
-            | isOneShot options || not isTty = Nothing
+            | sandboxedNative || isOneShot options || not isTty = Nothing
             | otherwise =
                 Just (fullscreenAwareSecretHooks uiRuntimeRef baseSecretHooks)
         -- Outside the retained TUI, agent-displayed images print inline with
@@ -548,7 +560,7 @@ runAgentTools
                 [request.displayImage]
             pure (Right ())
         imageHooks
-            | not isTty = Nothing
+            | sandboxedNative || not isTty = Nothing
             | otherwise =
                 Just (fullscreenAwareImageHooks uiRuntimeRef baseImageHooks)
         provider = loaded.loadedProvider
@@ -711,17 +723,19 @@ runAgentTools
         (\_ _ -> pure ())
     rootTurnRef <- newIORef (Nothing :: Maybe RootTurnId)
     agentTypesRef <- newIORef Map.empty
-    openaiChild <- case provider of
-        XAIProvider -> do
-            available <- hasOpenAiAuth
-            if not available
-                then pure Nothing
-                else loadAuth (Just OpenAIProvider) >>= \case
-                    Left _ -> pure Nothing
-                    Right openaiLoaded ->
-                        pure (Just openaiLoaded.loadedTokenProvider)
-        _ ->
-            pure Nothing
+    openaiChild <- if sandboxedNative
+        then pure Nothing
+        else case provider of
+            XAIProvider -> do
+                available <- hasOpenAiAuth
+                if not available
+                    then pure Nothing
+                    else loadAuth (Just OpenAIProvider) >>= \case
+                        Left _ -> pure Nothing
+                        Right openaiLoaded ->
+                            pure (Just openaiLoaded.loadedTokenProvider)
+            _ ->
+                pure Nothing
     let allowedChildModels =
             case gatewayAllowedChildModels of
                 Just modelIds -> Just modelIds
@@ -777,7 +791,9 @@ runAgentTools
                             Left err -> pure (Left err)
                             Right () -> pure (Right ())
                     }
-        multiCtx = Just MultiAgentContext
+        multiCtx
+            | sandboxedNative = Nothing
+            | otherwise = Just MultiAgentContext
             { multiRegistry = registry
             , multiCwd = cwd
             , multiSelfId = Nothing
@@ -857,7 +873,6 @@ runAgentTools
         recordImageGenerationResponseItems
             imageGenerationHistory
             (foldSessionItems turns)
-    home <- getHomeDirectory
     let cleanupAllocatedScratch = do
             cleanupPendingPersistence persist
             forM_ ephemeralSessionId \sessionId -> do
@@ -911,6 +926,7 @@ runAgentTools
             | (label, config) <-
                 Map.toAscList harnessConfig.configMcpServers
             , config.mcpEnabled
+            , not sandboxedNative
             ]
         progressiveMcp =
             useProgressiveMcp
@@ -1031,10 +1047,16 @@ runAgentTools
                 currentMcpInstructions
     mapM_ (reportStartupWarning startup) mcpFleet.mcpFleetWarnings
     setStartupNotice startup.startupFullscreen "Loading built-in tools…"
+    let codingToolEnv
+            -- Host-presented plan/secret tools may retain their ToolEnv even
+            -- though execution tools are replaced by the guest proxy. Keep
+            -- every such fallback path in the server-owned tenant home.
+            | sandboxedNative = toolEnv { toolCwd = home }
+            | otherwise = toolEnv
     coding <-
         codingToolsForWithTypes
             dialect
-            toolEnv
+            codingToolEnv
             (Just planHooks)
             secretHooks
             imageHooks
@@ -1048,7 +1070,7 @@ runAgentTools
                     (MCP.releaseMcpFleetLease mcpLease
                         `finally` cleanupScratch)
         acquireGrokExtras
-            | dialectId /= GrokBuildDialect =
+            | sandboxedNative || dialectId /= GrokBuildDialect =
                 pure
                     ( Nothing
                     , LspStartup
@@ -1181,7 +1203,12 @@ runAgentTools
                 startup.startupDatabaseStore
                 databaseScopes
                 (readIORef persistSlotRef >>= reservedSessionId)
-        sessionTools = agentSessionTools sessionToolsEnv
+        -- Persisted agent-session tools recursively start another native
+        -- runtime. Until that child can inherit the same sandbox broker,
+        -- exposing them here would reopen host shell and filesystem handlers.
+        sessionTools
+            | sandboxedNative = []
+            | otherwise = agentSessionTools sessionToolsEnv
         gatewayTools = maybe [] managedGatewayTools promptRequest
         databaseAppTools = databaseTools databaseToolsEnv
         learnedSkillAppTools =
@@ -1202,33 +1229,51 @@ runAgentTools
                 imageHooks
             | provider == OpenAIProvider
             , dialectId == CodexDialect
+            , not sandboxedNative
             , not (isGatewayLoadedAuth loaded)
             , inferredTarget.targetConnectionId
                 == builtinConnectionId OpenAIProvider
             ]
-        allTools =
-            coding.codingAppTools
-                ++ extraTools
-                ++ mcpTools
-                ++ sessionTools
-                ++ gatewayTools
-                ++ databaseAppTools
-                ++ learnedSkillAppTools
+        classifiedCodingTools = map classifyCodingTool coding.codingAppTools
+        classifiedExtraTools =
+            map (withToolPlacement SandboxTool) extraTools
+        classifiedMcpTools =
+            map (withToolPlacement SandboxTool) mcpTools
+        classifiedSessionTools =
+            map (withToolPlacement HostTool) sessionTools
+        classifiedGatewayTools =
+            map (withToolPlacement HostTool) gatewayTools
+        classifiedDatabaseTools =
+            map (withToolPlacement HostTool) databaseAppTools
+        classifiedLearnedSkillTools =
+            map (withToolPlacement HostTool) learnedSkillAppTools
+        classifiedImageGenerationTools =
+            map (withToolPlacement HostTool) imageGenerationTools
+        classifiedComputerTools =
+            map (withToolPlacement SandboxTool) computerTools
+        unroutedAllTools =
+            classifiedCodingTools
+                ++ classifiedExtraTools
+                ++ classifiedMcpTools
+                ++ classifiedSessionTools
+                ++ classifiedGatewayTools
+                ++ classifiedDatabaseTools
+                ++ classifiedLearnedSkillTools
                 ++ nativeAppTools
-                ++ imageGenerationTools
-                ++ computerTools
-        tools =
+                ++ classifiedImageGenerationTools
+                ++ classifiedComputerTools
+        unroutedTools =
             filterGhciTools options.optGhci
-                (filterBashTools options.optBash coding.codingAppTools)
-                ++ extraTools
-                ++ mcpTools
-                ++ sessionTools
-                ++ gatewayTools
-                ++ databaseAppTools
-                ++ learnedSkillAppTools
+                (filterBashTools options.optBash classifiedCodingTools)
+                ++ classifiedExtraTools
+                ++ classifiedMcpTools
+                ++ classifiedSessionTools
+                ++ classifiedGatewayTools
+                ++ classifiedDatabaseTools
+                ++ classifiedLearnedSkillTools
                 ++ nativeAppTools
-                ++ imageGenerationTools
-                ++ computerTools
+                ++ classifiedImageGenerationTools
+                ++ classifiedComputerTools
         planMode = coding.codingPlanMode
         resumedPlanPending =
             case resumed of
@@ -1263,6 +1308,23 @@ runAgentTools
                                                     (join (readIORef codeModeCloseRef)
                                                         `finally`
                                                             cleanupScratch)))))
+    (allTools, tools) <-
+        case startup.startupNativeHooks of
+            Nothing -> pure (unroutedAllTools, unroutedTools)
+            Just hooks ->
+                case
+                    ( traverse hooks.nativeRouteTool unroutedAllTools
+                    , traverse hooks.nativeRouteTool unroutedTools
+                    )
+                of
+                    (Right routedAll, Right routed) ->
+                        pure (routedAll, routed)
+                    (Left err, _) ->
+                        startupDie startup
+                            ("Native tool routing failed: " <> Text.unpack err)
+                    (_, Left err) ->
+                        startupDie startup
+                            ("Native tool routing failed: " <> Text.unpack err)
     when resumedPlanPending (activatePlanMode planMode)
     forM_ startup.startupNativeHooks \hooks ->
         when (hooks.nativeInteractionMode == NativePlan) $

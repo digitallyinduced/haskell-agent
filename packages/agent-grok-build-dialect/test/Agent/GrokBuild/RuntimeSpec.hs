@@ -37,6 +37,7 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
+    , ToolPlacement(..)
     , ToolSchema(..)
     , defaultToolEnv
     , jsonToolParameters
@@ -563,6 +564,7 @@ fake name = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolPlacement = UnclassifiedTool
     }
 
 withTempDir :: (FilePath -> IO a) -> IO a

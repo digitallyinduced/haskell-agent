@@ -28,6 +28,7 @@ import Agent.CLI.GatewayClient
     ( GatewayModelAccess
     , gatewayCredentialIdentity
     , loadGatewayCredential
+    , loadGatewayCredentialAt
     , newGatewayModelAccess
     )
 import Agent.CLI.GatewayBridge ()
@@ -105,7 +106,13 @@ import Agent.CLI.Runtime.Orchestration.Types
         , runCwdHint
         , runNativeHooks
         )
-    , NativeRunHooks(nativeRegisterCancel)
+    , NativeRunHooks
+        ( nativeDatabaseStore
+        , nativeHome
+        , nativeIsolationMode
+        , nativeRegisterCancel
+        )
+    , NativeIsolationMode(NativeSandboxed)
     )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
@@ -242,7 +249,7 @@ import System.Directory.OsPath
 import System.Environment ()
 import System.Exit ( die )
 import System.IO ( hIsTerminalDevice, stderr, stdin )
-import System.OsPath ( decodeFS, takeDirectory, takeFileName )
+import System.OsPath ( OsPath, decodeFS, takeDirectory, takeFileName )
 import System.Posix.Process ( executeFile )
 import System.Process ( callProcess )
 import qualified Data.ByteString as BS ()
@@ -406,7 +413,9 @@ runAgentWithRuntime processRuntime runMode options = do
                     Just failed
                         | failed.transitionCause == AutomaticFallback ->
                             continueAutomaticFallback
-                                runMode.runCwdHint
+                                (nativeRunIsSandboxed runMode)
+                                (runMode.runNativeHooks >>= (.nativeHome))
+                                (nativeDiscoveryCwdHint runMode)
                                 runMode.runStderr
                                 Nothing
                                 failed
@@ -464,6 +473,24 @@ withRestoredCurrentDirectory action = do
     originalCwd <- getCurrentDirectory
     action `finally` setCurrentDirectory originalCwd
 
+-- Host-side catalog and project discovery must never use the tenant
+-- workspace. Sandboxed native callers provide a server-owned per-tenant home
+-- which remains outside the guest's writable mounts.
+nativeDiscoveryCwdHint :: AgentRunMode -> Maybe OsPath
+nativeDiscoveryCwdHint runMode =
+    case runMode.runNativeHooks of
+        Just hooks
+            | hooks.nativeIsolationMode == NativeSandboxed ->
+                hooks.nativeHome
+        _ -> runMode.runCwdHint
+
+nativeRunIsSandboxed :: AgentRunMode -> Bool
+nativeRunIsSandboxed runMode =
+    maybe
+        False
+        ((== NativeSandboxed) . (.nativeIsolationMode))
+        runMode.runNativeHooks
+
 recoveryGatewayAccess
     :: Provider
     -> Maybe ProviderTransition
@@ -498,11 +525,23 @@ runAgent
             Nothing -> prepared.preparedRun
             Just runtime ->
                 let chooseRecoveryModel nextOptions nextTransition = do
-                        home <- getHomeDirectory
+                        home <-
+                            maybe
+                                getHomeDirectory
+                                pure
+                                (runMode.runNativeHooks >>= (.nativeHome))
                         cwd <- case nextOptions.optCwd <|> runMode.runCwdHint of
                             Nothing -> getCurrentDirectory
                             Just path -> makeAbsolute path
-                        loadModelCatalogAt home cwd >>= \case
+                        let sandboxedNative =
+                                maybe
+                                    False
+                                    ((== NativeSandboxed)
+                                        . (.nativeIsolationMode))
+                                    runMode.runNativeHooks
+                        loadModelCatalogAt
+                            home
+                            (if sandboxedNative then home else cwd) >>= \case
                             Left err -> pure (Left err)
                             Right catalog -> do
                                 color <- resolveColor runMode.runStderr
@@ -601,7 +640,9 @@ runAgent
                         , restartFallback =
                             \failed apiError ->
                                 continueAutomaticFallback
-                                    runMode.runCwdHint
+                                    (nativeRunIsSandboxed runMode)
+                                    (runMode.runNativeHooks >>= (.nativeHome))
+                                    (nativeDiscoveryCwdHint runMode)
                                     runMode.runStderr
                                     (Just runtime)
                                     failed
@@ -715,19 +756,26 @@ prepareAgentIterationTracked
     startupTimingsRef <- newIORef []
     syntaxLoadDurationRef <- newIORef Nothing
     startupFinishedRef <- newIORef False
-    home <- getHomeDirectory
+    home <- case runMode.runNativeHooks >>= (.nativeHome) of
+        Nothing -> getHomeDirectory
+        Just path -> pure path
     configuredTheme <-
         loadHarnessConfig home >>= \case
             Left err -> failPreparation (Text.unpack err)
             Right config -> pure config.configTheme
     let root = sessionsRoot home
-    databaseConfig <- managedPostgresConfigForHome home
-    databaseStore <- openStore databaseConfig >>= \case
-        Left err -> failPreparation (Text.unpack (renderStoreError err))
-        Right store -> writeIORef databaseStoreRef (Just store) >> pure store
+    databaseStore <- case runMode.runNativeHooks >>= (.nativeDatabaseStore) of
+        Just borrowed -> pure borrowed
+        Nothing -> do
+            databaseConfig <- managedPostgresConfigForHome home
+            openStore databaseConfig >>= \case
+                Left err -> failPreparation (Text.unpack (renderStoreError err))
+                Right store -> do
+                    writeIORef databaseStoreRef (Just store)
+                    pure store
     let sessionPool = trustedPool databaseStore
     connectedGateway <-
-        loadGatewayCredential >>= \case
+        loadGatewayCredentialAt home >>= \case
             Left err ->
                 failPreparation
                     ("Could not load gateway credentials: " <> Text.unpack err)
@@ -1019,7 +1067,9 @@ prepareAgentIterationTracked
             writeIORef uiRuntimeRef Nothing
             writeIORef cancelToolRef (pure ())
             forM_ fullscreen resetFullscreenSessionActions
-            closeStore databaseStore
+            case runMode.runNativeHooks >>= (.nativeDatabaseStore) of
+                Just _ -> pure ()
+                Nothing -> closeStore databaseStore
     pure PreparedAgent
         { preparedFullscreen = fullscreen
         , preparedRun = action `finally` cleanup

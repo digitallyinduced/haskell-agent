@@ -1,6 +1,17 @@
 -- | Public protocol and supervisor types for the HTTP agent server.
 module Agent.Server.Types
     ( GatewayBoundary(..)
+    , TenantId
+    , parseTenantId
+    , renderTenantId
+    , localTenantId
+    , CredentialId
+    , parseCredentialId
+    , renderCredentialId
+    , Principal(..)
+    , localPrincipal
+    , AccessBoundary(..)
+    , accessBoundary
     , TurnId(..)
     , RequestId(..)
     , TurnStatus(..)
@@ -25,6 +36,7 @@ module Agent.Server.Types
     ) where
 
 import Agent.CLI.GatewayBoundary (GatewayBoundary(..))
+import Agent.Server.Identifier (isUUIDText)
 import Data.Aeson
     ( FromJSON(..)
     , Object
@@ -41,7 +53,65 @@ import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Aeson.Types (Parser)
 import Data.Text (Text)
+import Data.Text qualified as Text
 import Data.Time.Clock (UTCTime)
+
+newtype TenantId = TenantId Text
+    deriving (Eq, Ord, Show)
+
+parseTenantId :: Text -> Either Text TenantId
+parseTenantId raw
+    | isUUIDText normalized = Right (TenantId normalized)
+    | otherwise = Left "tenant id must be a UUID"
+  where
+    normalized = Text.toLower (Text.strip raw)
+
+renderTenantId :: TenantId -> Text
+renderTenantId (TenantId value) = value
+
+-- A fixed, internal identity keeps local single-user mode on the same typed
+-- authorization path without accepting a tenant selector from the client.
+localTenantId :: TenantId
+localTenantId = TenantId "00000000-0000-0000-0000-000000000000"
+
+newtype CredentialId = CredentialId Text
+    deriving (Eq, Ord, Show)
+
+parseCredentialId :: Text -> Either Text CredentialId
+parseCredentialId raw
+    | isUUIDText normalized = Right (CredentialId normalized)
+    | otherwise = Left "credential id must be a UUID"
+  where
+    normalized = Text.toLower (Text.strip raw)
+
+renderCredentialId :: CredentialId -> Text
+renderCredentialId (CredentialId value) = value
+
+data Principal = Principal
+    { principalTenantId :: !TenantId
+    , principalCredentialId :: !(Maybe CredentialId)
+    }
+    deriving (Eq, Ord, Show)
+
+localPrincipal :: Principal
+localPrincipal = Principal
+    { principalTenantId = localTenantId
+    , principalCredentialId = Nothing
+    }
+
+-- | Complete server authorization boundary. Organization gateway identity is
+-- deliberately nested below, and never substituted for, tenant identity.
+data AccessBoundary = AccessBoundary
+    { accessTenantId :: !TenantId
+    , accessGatewayBoundary :: !GatewayBoundary
+    }
+    deriving (Eq, Ord, Show)
+
+accessBoundary :: Principal -> GatewayBoundary -> AccessBoundary
+accessBoundary principal gateway = AccessBoundary
+    { accessTenantId = principal.principalTenantId
+    , accessGatewayBoundary = gateway
+    }
 
 newtype TurnId = TurnId { unTurnId :: Text }
     deriving (Eq, Ord, Show)
@@ -70,14 +140,14 @@ turnStatusText = \case
 data TurnSpec = TurnSpec
     { turnSpecSessionId :: !Text
     , turnSpecPrompt :: !Text
-    , turnSpecBoundary :: !GatewayBoundary
+    , turnSpecBoundary :: !AccessBoundary
     }
     deriving (Eq, Show)
 
 data TurnRecord = TurnRecord
     { turnRecordId :: !TurnId
     , turnRecordSessionId :: !Text
-    , turnRecordBoundary :: !GatewayBoundary
+    , turnRecordBoundary :: !AccessBoundary
     , turnRecordStatus :: !TurnStatus
     , turnRecordCreatedAt :: !UTCTime
     , turnRecordStartedAt :: !(Maybe UTCTime)
@@ -130,7 +200,7 @@ data HumanRequest = HumanRequest
     { humanRequestId :: !RequestId
     , humanRequestTurnId :: !TurnId
     , humanRequestSessionId :: !Text
-    , humanRequestBoundary :: !GatewayBoundary
+    , humanRequestBoundary :: !AccessBoundary
     , humanRequestKind :: !HumanRequestKind
     , humanRequestPrompt :: !Text
     , humanRequestOptions :: ![Text]
@@ -151,7 +221,7 @@ instance ToJSON HumanRequest where
 
 data ServerEvent = ServerEvent
     { serverEventId :: !Integer
-    , serverEventBoundary :: !GatewayBoundary
+    , serverEventBoundary :: !AccessBoundary
     , serverEventType :: !Text
     , serverEventTurnId :: !(Maybe TurnId)
     , serverEventSessionId :: !(Maybe Text)

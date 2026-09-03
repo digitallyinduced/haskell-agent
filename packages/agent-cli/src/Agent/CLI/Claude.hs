@@ -55,6 +55,7 @@ data ClaudeSessionRuntime = ClaudeSessionRuntime
     , approveRegisteredTool
         :: !(ToolCall -> IO (Either Text Bool))
     , planMode :: !PlanModeEnv
+    , providerNativeToolsEnabled :: !Bool
     }
 
 newtype ClaudeSessionRuntimeSlot =
@@ -125,6 +126,11 @@ approveNative
     :: ClaudeSessionRuntime
     -> ClaudeCodePermissionRequest
     -> IO ClaudeCodePermissionResult
+approveNative runtime _
+    | not runtime.providerNativeToolsEnabled =
+        pure $
+            deny
+                "Provider-native tools are disabled by the sandbox boundary."
 approveNative runtime request = do
     let call =
             functionToolCall

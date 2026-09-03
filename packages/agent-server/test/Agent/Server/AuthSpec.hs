@@ -1,6 +1,12 @@
 module Agent.Server.AuthSpec (spec) where
 
 import Agent.Server.Auth
+import Agent.Server.Tenant
+    ( parseCredentialId
+    , parseTenantId
+    )
+import Agent.Server.Types (Principal(..))
+import Data.Text qualified as Text
 import Data.Set qualified as Set
 import Network.HTTP.Types (methodOptions)
 import Network.Wai
@@ -40,6 +46,41 @@ spec = describe "HTTP boundary authentication" do
             defaultRequest
                 { requestHeaders =
                     [("Host", "attacker.example")]
+                }
+            `shouldSatisfy` isLeft
+
+    it "derives the tenant only from an opaque registry bearer" do
+        tenantA <- either (fail . Text.unpack) pure $
+            parseTenantId "018f6a14-7d52-7a52-9c00-66d5e7d70334"
+        tenantB <- either (fail . Text.unpack) pure $
+            parseTenantId "018f6a14-7d52-7a52-9c00-66d5e7d70335"
+        credentialA <- either (fail . Text.unpack) pure $
+            parseCredentialId "018f6a14-7d52-7a52-9c00-66d5e7d70336"
+        credentialB <- either (fail . Text.unpack) pure $
+            parseCredentialId "018f6a14-7d52-7a52-9c00-66d5e7d70337"
+        let principalA = Principal tenantA (Just credentialA)
+            principalB = Principal tenantB (Just credentialB)
+            multi = AuthConfig
+                { authMode = TenantBearerAuth
+                    [ tenantCredential principalA "tenant-a-token"
+                    , tenantCredential principalB "tenant-b-token"
+                    ]
+                , authCorsOrigins = Set.empty
+                }
+            request token = defaultRequest
+                { requestHeaders =
+                    [("Authorization", "Bearer " <> token)]
+                }
+        fmap (.authenticatedPrincipal)
+            (authorizeRequest multi (request "tenant-a-token"))
+            `shouldBe` Right principalA
+        fmap (.authenticatedPrincipal)
+            (authorizeRequest multi (request "tenant-b-token"))
+            `shouldBe` Right principalB
+        authorizeRequest
+            multi
+            defaultRequest
+                { queryString = [("token", Just "tenant-a-token")]
                 }
             `shouldSatisfy` isLeft
 

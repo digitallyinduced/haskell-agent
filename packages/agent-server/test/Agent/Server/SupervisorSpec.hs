@@ -37,12 +37,12 @@ spec = describe "turn supervisor" do
                 `shouldReturn` Left SubmitSessionBusy
             putMVar release ()
 
-    it "scopes the active-session lock to the exact gateway boundary" do
+    it "scopes the active-session lock to the exact access boundary" do
         firstStarted <- newEmptyMVar
         secondStarted <- newEmptyMVar
         release <- newEmptyMVar
-        let tenantA = GatewayBoundary (Just "tenant-a")
-            tenantB = GatewayBoundary (Just "tenant-b")
+        let tenantA = testBoundary tenantAId (Just "gateway")
+            tenantB = testBoundary tenantBId (Just "gateway")
             runner _ turn = do
                 if turn.turnSpecBoundary == tenantA
                     then putMVar firstStarted ()
@@ -51,7 +51,9 @@ spec = describe "turn supervisor" do
                 pure (Right ())
         withSupervisorConfig
             defaultConfig
-                { supervisorMaxConcurrentTurns = 2 }
+                { supervisorMaxConcurrentTurns = 2
+                , supervisorMaxConcurrentTurnsPerTenant = 2
+                }
             runner \supervisor -> do
                 first <-
                     submitTurn supervisor
@@ -77,7 +79,7 @@ spec = describe "turn supervisor" do
             mutation <- async $
                 withSessionMutation
                     supervisor
-                    (GatewayBoundary Nothing)
+                    localAccessBoundary
                     "session-a"
                     (putMVar entered () >> takeMVar release)
             takeWithin entered
@@ -100,7 +102,7 @@ spec = describe "turn supervisor" do
             takeWithin entered
             withSessionMutation
                 supervisor
-                (GatewayBoundary Nothing)
+                localAccessBoundary
                 "session-a"
                 (pure ())
                 `shouldReturn` Left SessionMutationBusy
@@ -128,7 +130,7 @@ spec = describe "turn supervisor" do
                 (2 * 1000 * 1000)
                 (cancelTurn
                     supervisor
-                    (GatewayBoundary Nothing)
+                    localAccessBoundary
                     turn.turnRecordId)
             case cancelled of
                 Just (Right record) ->
@@ -138,7 +140,7 @@ spec = describe "turn supervisor" do
                         ("cancellation did not finish: " <> show other)
             sessionHasActiveTurn
                 supervisor
-                (GatewayBoundary Nothing)
+                localAccessBoundary
                 "session-a"
                 `shouldReturn` False
 
@@ -156,7 +158,9 @@ spec = describe "turn supervisor" do
                     pure (Right ())
         withSupervisorConfig
             defaultConfig
-                { supervisorMaxConcurrentTurns = 2 }
+                { supervisorMaxConcurrentTurns = 2
+                , supervisorMaxConcurrentTurnsPerTenant = 2
+                }
             runner \supervisor -> do
                 void (submitTurn supervisor (turnSpec "session-a"))
                 takeWithin firstStarted
@@ -180,7 +184,7 @@ spec = describe "turn supervisor" do
             request <- awaitRequest supervisor
             resolveHumanRequest
                 supervisor
-                (GatewayBoundary Nothing)
+                localAccessBoundary
                 request.humanRequestId
                 HumanResponse
                     { humanResponseDecision = "request_changes"
@@ -194,15 +198,16 @@ spec = describe "turn supervisor" do
                         , humanResponseValue = Just "add tests"
                         }
 
-    it "isolates replay buffers by exact gateway identity and signals gaps" do
+    it "isolates replay buffers by exact access boundary and signals gaps" do
         withSupervisor (\_ _ -> pure (Right ())) \supervisor -> do
-            let tenantA = GatewayBoundary (Just "tenant-a")
-                tenantB = GatewayBoundary (Just "tenant-b")
+            let tenantA = testBoundary tenantAId (Just "gateway")
+                tenantB = testBoundary tenantBId (Just "gateway")
             publishEvent supervisor tenantA "a.one" Nothing Nothing (object [])
             publishEvent supervisor tenantB "b.one" Nothing Nothing (object [])
             publishEvent supervisor tenantA "a.two" Nothing Nothing (object [])
             publishEvent supervisor tenantA "a.three" Nothing Nothing (object [])
-            subscription <- subscribeEvents supervisor tenantA (Just 0)
+            subscription <-
+                subscribeEvents supervisor tenantA (Just 0) >>= expectRight
             subscription.subscriptionResetRequired `shouldBe` True
             map (.serverEventType) subscription.subscriptionReplay
                 `shouldBe` ["a.two", "a.three"]
@@ -213,11 +218,30 @@ spec = describe "turn supervisor" do
             first.serverEventType `shouldBe` "a.four"
             subscription.subscriptionClose
 
+    it "bounds event subscribers globally and by tenant" do
+        let config = defaultConfig
+                { supervisorMaxEventSubscribers = 2
+                , supervisorMaxEventSubscribersPerTenant = 1
+                }
+            tenantA = testBoundary tenantAId (Just "gateway-a")
+            tenantAOtherGateway =
+                testBoundary tenantAId (Just "gateway-b")
+            tenantB = testBoundary tenantBId Nothing
+        withSupervisorConfig config (\_ _ -> pure (Right ())) \supervisor -> do
+            first <- subscribeEvents supervisor tenantA Nothing >>= expectRight
+            subscribeEvents supervisor tenantAOtherGateway Nothing
+                >>= expectLeft EventSubscriberTenantLimitReached
+            second <- subscribeEvents supervisor tenantB Nothing >>= expectRight
+            subscribeEvents supervisor localAccessBoundary Nothing
+                >>= expectLeft EventSubscriberLimitReached
+            first.subscriptionClose
+            second.subscriptionClose
+
     it "does not run stale queued work across a boundary change" do
         releaseFirst <- newEmptyMVar
         staleRan <- newEmptyMVar
-        let tenantA = GatewayBoundary (Just "tenant-a")
-            tenantB = GatewayBoundary (Just "tenant-b")
+        let tenantA = testBoundary tenantAId (Just "gateway-a")
+            tenantB = testBoundary tenantAId (Just "gateway-b")
         current <- newEmptyMVar
         putMVar current tenantA
         let guard expected action = do
@@ -266,14 +290,18 @@ withSupervisorConfig config runner =
 defaultConfig :: SupervisorConfig
 defaultConfig = SupervisorConfig
     { supervisorMaxConcurrentTurns = 1
+    , supervisorMaxConcurrentTurnsPerTenant = 1
     , supervisorMaxQueuedTurns = 10
+    , supervisorMaxQueuedTurnsPerTenant = 10
+    , supervisorMaxEventSubscribers = 10
+    , supervisorMaxEventSubscribersPerTenant = 5
     , supervisorEventReplayLimit = 2
     }
 
 turnSpec :: Text -> TurnSpec
-turnSpec = turnSpecFor (GatewayBoundary Nothing)
+turnSpec = turnSpecFor localAccessBoundary
 
-turnSpecFor :: GatewayBoundary -> Text -> TurnSpec
+turnSpecFor :: AccessBoundary -> Text -> TurnSpec
 turnSpecFor boundary sessionId = TurnSpec
     { turnSpecSessionId = sessionId
     , turnSpecPrompt = "hello"
@@ -290,7 +318,7 @@ awaitRequest supervisor = go (100 :: Int)
         | otherwise =
             listHumanRequests
                 supervisor
-                (GatewayBoundary Nothing) >>= \case
+                localAccessBoundary >>= \case
                     request : _ -> pure request
                     [] -> threadDelay 10000 >> go (attempts - 1)
 
@@ -304,3 +332,33 @@ isRight :: Either left right -> Bool
 isRight = \case
     Right _ -> True
     Left _ -> False
+
+expectRight :: Show left => Either left right -> IO right
+expectRight = \case
+    Right value -> pure value
+    Left err ->
+        expectationFailure ("expected Right, got Left " <> show err)
+            >> fail "unreachable"
+
+expectLeft :: (Eq left, Show left) => left -> Either left right -> Expectation
+expectLeft expected = \case
+    Left actual -> actual `shouldBe` expected
+    Right _ -> expectationFailure "expected Left, got Right"
+
+localAccessBoundary :: AccessBoundary
+localAccessBoundary =
+    accessBoundary localPrincipal (GatewayBoundary Nothing)
+
+testBoundary :: Text -> Maybe Text -> AccessBoundary
+testBoundary rawTenant gatewayIdentity =
+    AccessBoundary
+        { accessTenantId =
+            either (error . show) id (parseTenantId rawTenant)
+        , accessGatewayBoundary = GatewayBoundary gatewayIdentity
+        }
+
+tenantAId :: Text
+tenantAId = "018f6a14-7d52-7a52-9c00-66d5e7d70334"
+
+tenantBId :: Text
+tenantBId = "018f6a14-7d52-7a52-9c00-66d5e7d70335"

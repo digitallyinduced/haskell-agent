@@ -321,7 +321,9 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         prefix <-
                             takeGrokFirstTurnContext
                                 grokFirstTurnContext
-                                (loadGrokFirstTurnPrefix env.sessionCwd)
+                                (loadGrokFirstTurnPrefix
+                                    (not env.sessionSandboxedNative)
+                                    env.sessionCwd)
                         pure (UserMessage prefix : framed, Just prefix)
                     else pure (framed, Nothing)
             else pure (stampedInputs, Nothing)
@@ -814,13 +816,23 @@ grokFirstTurnPrefix osName shell cwd today gitStatus =
             <> status
             <> "\n</git_status>"
 
-loadGrokFirstTurnPrefix :: System.OsPath.OsPath -> IO Text
-loadGrokFirstTurnPrefix cwd = do
-    shell <- maybe "/bin/sh" Text.pack <$> lookupEnv "SHELL"
-    osVersion <- loadOperatingSystem
+loadGrokFirstTurnPrefix :: Bool -> System.OsPath.OsPath -> IO Text
+loadGrokFirstTurnPrefix allowHostWorkspaceDiscovery cwd = do
     today <- localDay . zonedTimeToLocalTime <$> getZonedTime
-    status <- loadGitStatus cwd
-    pure (grokFirstTurnPrefix osVersion shell cwd today status)
+    if allowHostWorkspaceDiscovery
+        then do
+            shell <- maybe "/bin/sh" Text.pack <$> lookupEnv "SHELL"
+            osVersion <- loadOperatingSystem
+            status <- loadGitStatus cwd
+            pure (grokFirstTurnPrefix osVersion shell cwd today status)
+        else
+            pure
+                (grokFirstTurnPrefix
+                    "linux sandbox"
+                    "/bin/bash"
+                    cwd
+                    today
+                    Nothing)
 
 -- | Consume a persisted first-turn prefix before consulting the live
 -- environment. The persisted value keeps a resumed request byte-for-byte

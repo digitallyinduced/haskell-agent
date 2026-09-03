@@ -36,7 +36,7 @@ import Agent.CLI.Compaction ()
 import Agent.CLI.Config ()
 import Agent.Connectivity ()
 import Agent.CLI.Database ()
-import Agent.CLI.Database.Store ( deriveDatabaseScopes )
+import Agent.CLI.Database.Store ( deriveDatabaseScopesWithNamespace )
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ()
 import Agent.CLI.GatewayClient
@@ -75,7 +75,8 @@ import Agent.CLI.Options ( CliOptions(optModel, optProvider, optYolo) )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
 import Agent.CLI.Project
-    ( loadProjectSettings,
+    ( defaultProjectSettings,
+      loadProjectSettings,
       loadUserSettings,
       projectAccountFor,
       projectModelProvider,
@@ -113,7 +114,9 @@ import Agent.CLI.Runtime.Orchestration.Types
     ( ActiveHttpAuth(activeHttpGeneration, ActiveHttpAuth,
                      activeHttpAccountId, activeHttpProvider, activeHttpResolveLabel),
       AgentProcessRuntime(processMcpSupervisor),
-      AgentRunMode )
+      AgentRunMode,
+      NativeIsolationMode(NativeSandboxed),
+      NativeRunHooks(nativeDatabaseScopeNamespace, nativeIsolationMode) )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Repl ()
@@ -132,7 +135,7 @@ import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupToolEnv, startupStderr, startupStdout,
                      startupStdoutTty, startupStdinTty, startupFullscreen,
                      startupUiRuntimeRef, startupEscPaused, startupInterrupt,
-                     startupDatabaseStore) )
+                     startupDatabaseStore, startupNativeHooks) )
 import Agent.CLI.Session.Selection ()
 import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ()
@@ -362,21 +365,42 @@ runAgentInitializedWithLock
             case fullscreen of
                 Just runtime -> setFullscreenWindowTitle runtime title
                 Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
-    projectRoot <- resolveProjectRoot cwd
+    let sandboxedNative =
+            maybe
+                False
+                ((== NativeSandboxed) . (.nativeIsolationMode))
+                startup.startupNativeHooks
+    projectRoot <-
+        if sandboxedNative
+            -- The tenant workspace is mounted only into the guest. Host-side
+            -- settings and plan persistence stay below the server-owned
+            -- per-tenant home instead of following workspace symlinks.
+            then pure home
+            else resolveProjectRoot cwd
     stateDirectory <- decodeFS (home </> unsafeEncodeUtf ".haskell-agent")
     projectRootPath <- decodeFS projectRoot
+    let scopeNamespace =
+            startup.startupNativeHooks >>= (.nativeDatabaseScopeNamespace)
     databaseScopes <-
-        deriveDatabaseScopes stateDirectory projectRootPath >>= \case
+        deriveDatabaseScopesWithNamespace
+            scopeNamespace
+            stateDirectory
+            projectRootPath >>= \case
             Left err -> startupDie startup (Text.unpack err)
             Right scopes -> pure scopes
     ((projectSettings0, userSettings), (catalogResult, branch)) <-
         concurrently
             (concurrently
-                (loadProjectSettings projectRoot)
+                (if sandboxedNative
+                    then pure defaultProjectSettings
+                    else loadProjectSettings projectRoot)
                 (loadUserSettings home))
             (concurrently
-                (loadModelCatalogAt home cwd)
-                (detectGitBranch cwd))
+                (loadModelCatalogAt home
+                    (if sandboxedNative then home else cwd))
+                (if sandboxedNative
+                    then pure ""
+                    else detectGitBranch cwd))
     let projectSettings =
             withInheritedLastModel projectSettings0 userSettings
     catalog <- either

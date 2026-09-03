@@ -15,6 +15,7 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
+    , ToolPlacement(..)
     , ToolSchema(..)
     )
 import Agent.ToolDispatch (ToolCall(..), typedTool)
@@ -694,6 +695,7 @@ mcpSearchTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolPlacement = UnclassifiedTool
     }
 
 grokSearchTool :: McpFleet -> AppTool
@@ -815,6 +817,7 @@ grokSearchTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolPlacement = UnclassifiedTool
     }
 
 callCatalogEntryWithReconnect
@@ -960,6 +963,7 @@ mcpCallTool fleet = AppTool
         ClassifyReadOnly (catalogCallIsReadOnly fleet callArgumentsDecoder)
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolPlacement = UnclassifiedTool
     }
 
 grokUseTool :: McpFleet -> AppTool
@@ -989,6 +993,7 @@ grokUseTool fleet = AppTool
         ClassifyReadOnly (catalogCallIsReadOnly fleet grokCallArgumentsDecoder)
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolPlacement = UnclassifiedTool
     }
 
 mcpListResourcesTool :: McpFleet -> AppTool
@@ -1028,6 +1033,7 @@ mcpListResourcesTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolPlacement = UnclassifiedTool
     }
   where
     resourceJson :: McpResource -> Value
@@ -1073,6 +1079,7 @@ mcpReadResourceTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolPlacement = UnclassifiedTool
     }
   where
     readArgumentsDecoder = Json.object do

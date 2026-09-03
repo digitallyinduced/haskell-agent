@@ -19,6 +19,7 @@ module Agent.ToolDispatch
     , textTool
     , streamingTextTool
     , streamingRichTextTool
+    , passthroughTool
     , noArgsTool
     , functionToolCall
     , customToolCall
@@ -192,6 +193,9 @@ data ToolHandler
     | TextTool Text (Text -> IO (Either Text Text))
     | StreamingTextTool Text ((Text -> IO ()) -> Text -> IO (Either Text Text))
     | StreamingRichTextTool Text ((Text -> IO ()) -> Text -> IO (Either Text ToolHandlerResult))
+    -- | Boundary adapter which receives the original call without decoding or
+    -- rewriting its arguments. Used by out-of-process tool brokers.
+    | PassthroughTool Text ((Text -> IO ()) -> ToolCall -> IO (Either Text ToolHandlerResult))
     | NoArgsTool Text (IO (Either Text Text))
 
 typedTool :: Text -> Decoder args -> (args -> IO (Either Text Text)) -> ToolHandler
@@ -243,6 +247,12 @@ streamingRichTextTool
     -> ((Text -> IO ()) -> Text -> IO (Either Text ToolHandlerResult))
     -> ToolHandler
 streamingRichTextTool = StreamingRichTextTool
+
+passthroughTool
+    :: Text
+    -> ((Text -> IO ()) -> ToolCall -> IO (Either Text ToolHandlerResult))
+    -> ToolHandler
+passthroughTool = PassthroughTool
 
 noArgsTool :: Text -> IO (Either Text Text) -> ToolHandler
 noArgsTool = NoArgsTool
@@ -409,6 +419,7 @@ handlerName = \case
     TextTool name _ -> name
     StreamingTextTool name _ -> name
     StreamingRichTextTool name _ -> name
+    PassthroughTool name _ -> name
     NoArgsTool name _ -> name
 
 runHandler
@@ -431,6 +442,7 @@ runHandler emitOutput call value = \case
     TextTool _ run -> plainResult <$> run value
     StreamingTextTool _ run -> plainResult <$> run emitOutput value
     StreamingRichTextTool _ run -> run emitOutput value
+    PassthroughTool _ run -> run emitOutput call
     NoArgsTool _ run ->
         plainResult <$> run
   where

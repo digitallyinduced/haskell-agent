@@ -4,6 +4,7 @@ module Agent.CLI.Runtime.Orchestration.Types
     , AgentProcessRuntime(..)
     , AgentRunMode(..)
     , NativeInteractionMode(..)
+    , NativeIsolationMode(..)
     , NativeShellMode(..)
     , NativeRunHooks(..)
     , foregroundRunMode
@@ -18,6 +19,7 @@ import Agent.CLI.Permission ( PermissionChoice )
 import Agent.Error ( ApiError )
 import Agent.Loop ( LoopEvent )
 import Agent.Provider ( Credential, TokenProvider )
+import Agent.Store.Postgres ( Store )
 import Agent.ToolDispatch ( ToolCall )
 import Agent.Tools.PlanMode ( PlanModeHooks )
 import Agent.Tools.Types ( AppTool )
@@ -68,6 +70,15 @@ data NativeShellMode
     | NativeShellBoth
     deriving (Eq, Show)
 
+-- | Whether a native embedding shares the host execution boundary.
+--
+-- Sandboxed embeddings must route every model-callable tool explicitly. The
+-- CLI remains unrestricted so existing local behavior is unchanged.
+data NativeIsolationMode
+    = NativeUnrestricted
+    | NativeSandboxed
+    deriving (Eq, Show)
+
 data NativeRunHooks = NativeRunHooks
     { nativeOnLoopEvent :: !(LoopEvent -> IO ())
     , nativeOnSessionId :: !(Text -> IO ())
@@ -79,6 +90,19 @@ data NativeRunHooks = NativeRunHooks
     , nativePlanHooks :: !PlanModeHooks
     , nativeInteractionMode :: !NativeInteractionMode
     , nativeShellMode :: !NativeShellMode
+    , nativeHome :: !(Maybe OsPath)
+    -- | A host-owned store borrowed for the duration of the turn. Native
+    -- orchestration never closes a borrowed store.
+    , nativeDatabaseStore :: !(Maybe Store)
+    -- | Stable, non-secret namespace mixed into every derived custom-data
+    -- scope. Multi-tenant callers use the tenant id here because PostgreSQL
+    -- roles are cluster-global even when each tenant has its own database.
+    , nativeDatabaseScopeNamespace :: !(Maybe Text)
+    , nativeIsolationMode :: !NativeIsolationMode
+    -- | Route one fully classified tool to its execution boundary. Sandboxed
+    -- embeddings reject unclassified tools and replace sandbox handlers with
+    -- broker-backed handlers.
+    , nativeRouteTool :: !(AppTool -> Either Text AppTool)
     }
 
 data AgentRunMode = AgentRunMode

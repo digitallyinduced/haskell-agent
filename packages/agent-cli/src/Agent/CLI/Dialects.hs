@@ -2,6 +2,7 @@ module Agent.CLI.Dialects
     ( CodingTools(..)
     , codingToolsFor
     , codingToolsForWithTypes
+    , classifyCodingTool
     , filterBashTools
     , filterChildGrokTools
     , filterGhciTools
@@ -57,7 +58,12 @@ import Agent.Tools.Secret
     , newSecretStore
     )
 import Agent.Tools.ShowImage (ImageDisplayHooks, showImageTool)
-import Agent.Tools.Types (AppTool(..), ToolEnv(..))
+import Agent.Tools.Types
+    ( AppTool(..)
+    , ToolEnv(..)
+    , ToolPlacement(..)
+    , withToolPlacement
+    )
 import Control.Exception.Safe (finally, onException)
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
@@ -82,6 +88,30 @@ data CodingTools = CodingTools
     , codingAgentTypes :: !GrokSubagentSpecs
     , codingGrokRuntime :: !(Maybe GrokRuntimeControl)
     }
+
+-- | Assign every built-in coding tool to its execution trust boundary.
+--
+-- The allowlist is deliberately the smaller side of the policy: newly added
+-- coding tools default to the sandbox until somebody explicitly establishes
+-- that they are pure host interaction or host-owned state operations.
+classifyCodingTool :: AppTool -> AppTool
+classifyCodingTool tool =
+    withToolPlacement placement tool
+  where
+    placement
+        | tool.appToolName `elem` hostCodingToolNames = HostTool
+        | otherwise = SandboxTool
+
+hostCodingToolNames :: [Text]
+hostCodingToolNames =
+    [ "update_plan"
+    , "enter_plan_mode"
+    , "write_plan"
+    , "exit_plan_mode"
+    , "ask_user_question"
+    , "ask_secret"
+    , "show_image"
+    ]
 
 codingToolsFor
     :: Dialect

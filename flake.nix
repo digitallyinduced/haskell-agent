@@ -869,6 +869,25 @@
                                     haskellPackages.ghc
                                     (old.disallowedRequisites or [ ]);
                             });
+                agentSandboxVm =
+                    if pkgs.stdenv.hostPlatform.isLinux then
+                        (nixpkgs.lib.nixosSystem {
+                            inherit system;
+                            specialArgs = {
+                                agentServer = agentServerExecutable;
+                            };
+                            modules = [ ./nix/sandbox-vm.nix ];
+                        }).config.system.build.vm
+                    else
+                        null;
+                agentSandboxRunner =
+                    if pkgs.stdenv.hostPlatform.isLinux then
+                        import ./nix/sandbox-runner.nix {
+                            inherit pkgs;
+                            vm = agentSandboxVm;
+                        }
+                    else
+                        null;
                 agentNativeBridgePackage = pkgs.runCommand
                     "haskell-agent-native-bridge-0.1.0"
                     {
@@ -1022,6 +1041,8 @@
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;
                 packages.agent-server = agentServerExecutable;
+                packages.${if pkgs.stdenv.hostPlatform.isLinux
+                    then "agent-sandbox-runner" else null} = agentSandboxRunner;
                 packages.${if pkgs.stdenv.hostPlatform.isDarwin
                     then "agent-native-bridge" else null} = agentNativeBridgePackage;
                 packages.agent-cli-runtime = agentCliRuntimePackage;
@@ -1059,6 +1080,12 @@
                     drv = self.packages.${system}.agent-server;
                     exePath = "/bin/agent-server";
                 };
+                apps.${if pkgs.stdenv.hostPlatform.isLinux
+                    then "agent-sandbox-runner" else null} =
+                    flake-utils.lib.mkApp {
+                        drv = self.packages.${system}.agent-sandbox-runner;
+                        exePath = "/bin/agent-sandbox-runner";
+                    };
                 apps.agent-runtime-daemon = flake-utils.lib.mkApp {
                     drv = self.packages.${system}.agent-runtime-daemon;
                     exePath = "/bin/agent-runtime-daemon";
@@ -1156,6 +1183,7 @@
                     agent-claude = haskellPackages.agent-claude;
                 } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
                     agent-cli-static-runtime = agentCliStaticRuntimeCheck;
+                    agent-sandbox-runner = agentSandboxRunner;
                     nixos-module = import ./nix/tests/telegram-module.nix {
                         inherit self nixpkgs pkgs system;
                     };

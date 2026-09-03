@@ -25,6 +25,7 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
+    , ToolPlacement(..)
     , ToolSchema(..)
     , jsonToolParameters
     )
@@ -485,6 +486,7 @@ fake name = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolPlacement = UnclassifiedTool
     }
 
 raceArgs :: Text

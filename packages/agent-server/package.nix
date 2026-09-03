@@ -1,8 +1,8 @@
 { mkDerivation, aeson, agent-cli, agent-cli-runtime, agent-core
 , agent-store, async, base, bytestring, containers, crypton
 , directory, filepath, hspec, http-types, lib, memory
-, optparse-applicative, safe-exceptions, stm, text, time, unix, wai
-, wai-extra, warp
+, optparse-applicative, process, safe-exceptions, stm, temporary
+, text, time, unix, uuid-types, wai, wai-extra, warp
 }:
 mkDerivation {
   pname = "agent-server";
@@ -14,14 +14,15 @@ mkDerivation {
   libraryHaskellDepends = [
     aeson agent-cli agent-cli-runtime agent-core agent-store async base
     bytestring containers crypton directory filepath http-types memory
-    optparse-applicative safe-exceptions stm text time unix wai warp
+    optparse-applicative process safe-exceptions stm text time unix
+    uuid-types wai warp
   ];
   executableHaskellDepends = [ base ];
   testHaskellDepends = [
-    aeson agent-core async base bytestring containers directory hspec
-    http-types safe-exceptions stm text time wai wai-extra
+    aeson agent-core async base bytestring containers directory
+    filepath hspec http-types safe-exceptions stm temporary text time
+    unix wai wai-extra
   ];
   description = "Local HTTP API for managing haskell-agent sessions";
   license = lib.meta.getLicenseFromSpdxId "MIT";
-  mainProgram = "agent-server";
 }

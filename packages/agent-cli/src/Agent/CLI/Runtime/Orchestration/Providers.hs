@@ -72,7 +72,10 @@ import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Startup
     ( finishStartup )
 import Agent.CLI.Runtime.Orchestration.Types
-    ( AccountSwitchRequest(..) )
+    ( AccountSwitchRequest(..)
+    , NativeIsolationMode(..)
+    , NativeRunHooks(..)
+    )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap
     ( runSessionRecap, runSessionTurnSummary )
@@ -348,7 +351,13 @@ runAgentProviders
     transition
     transportModel
     unavailableProviders
-    = case provider of
+    =
+        let sandboxedNative =
+                maybe
+                    False
+                    ((== NativeSandboxed) . (.nativeIsolationMode))
+                    startup.startupNativeHooks
+        in case provider of
                     OpenAIProvider ->
                         try @_ @CodexAuthFailed
                             (withCodexWsWithProviderOrHttpFallback tokenProvider \conn credential -> do
@@ -660,8 +669,9 @@ runAgentProviders
                                             , not (isGatewayLoadedAuth loaded)
                                             , isProviderUnavailable err ->
                                                 chooseStartupProviderTransition
+                                                    sandboxedNative
                                                     catalog
-                                                    cwd
+                                                    projectRoot
                                                     fullscreen
                                                     (tokenProviderBillingMode
                                                         tokenProvider)
@@ -951,6 +961,12 @@ runAgentProviders
                                     , mcpToolNames =
                                         MCP.inProcessMcpToolNames
                                             claudeMcpServer
+                                    , nativeToolsEnabled =
+                                        case startup.startupNativeHooks of
+                                            Just hooks ->
+                                                hooks.nativeIsolationMode
+                                                    /= NativeSandboxed
+                                            Nothing -> True
                                     }
                         when claudeBypassEnabled $
                             case fullscreen of
