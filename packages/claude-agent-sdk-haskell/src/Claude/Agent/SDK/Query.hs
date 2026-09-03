@@ -1,7 +1,8 @@
 -- | One-shot and per-turn query functions, analogous to the official SDK's
 -- top-level @query()@ API.
 module Claude.Agent.SDK.Query
-    ( query
+    ( QueryResult(..)
+    , query
     , queryWithProgress
     , queryContent
     , queryContentWithProgress
@@ -55,6 +56,13 @@ import qualified Data.Text as Text
 import System.Exit (ExitCode)
 import System.Timeout (timeout)
 
+-- | A completed query together with the canonical message sequence that
+-- produced its terminal result.
+data QueryResult = QueryResult
+    { queryMessages :: ![Message]
+    , queryResultMessage :: !ResultMessage
+    } deriving (Eq, Show)
+
 -- | Run a self-contained query and close its client afterward.
 query
     :: ClaudeAgentOptions
@@ -84,12 +92,13 @@ queryTurnContentWithProgress
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
 queryTurnContentWithProgress turn content onProgress onMessage =
-    queryTurnContentWithMessageValidatorAndProgress
-        turn
-        content
-        (const (pure (Right ())))
-        onProgress
-        onMessage
+    fmap queryResultOnly $
+        queryTurnContentWithMessageValidatorAndProgress
+            turn
+            content
+            (const (pure (Right ())))
+            onProgress
+            onMessage
 
 -- | Run a self-contained query with structured user content.
 queryContent
@@ -212,12 +221,13 @@ queryTurnContentWithMessageValidator
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
 queryTurnContentWithMessageValidator turn content validateMessage onMessage = do
-    queryTurnContentWithMessageValidatorAndProgress
-        turn
-        content
-        validateMessage
-        (const (pure ()))
-        onMessage
+    fmap queryResultOnly $
+        queryTurnContentWithMessageValidatorAndProgress
+            turn
+            content
+            validateMessage
+            (const (pure ()))
+            onMessage
 
 -- | Like 'queryTurnContentWithMessageValidator', with a live observer that
 -- runs after query routing and canonicalization state updates. It sees only
@@ -229,7 +239,7 @@ queryTurnContentWithMessageValidatorAndProgress
     -> (Message -> IO (Either ClaudeSDKError ()))
     -> (QueryProgress -> IO ())
     -> (Message -> IO ())
-    -> IO (Either ClaudeSDKError ResultMessage)
+    -> IO (Either ClaudeSDKError QueryResult)
 queryTurnContentWithMessageValidatorAndProgress
     turn content validateMessage onProgress onMessage = do
     completed <-
@@ -275,11 +285,12 @@ receiveResponseWithMessageValidator
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
 receiveResponseWithMessageValidator turn validateMessage onMessage =
-    receiveResponseWithMessageValidatorAndProgress
-        turn
-        validateMessage
-        (const (pure ()))
-        onMessage
+    fmap queryResultOnly $
+        receiveResponseWithMessageValidatorAndProgress
+            turn
+            validateMessage
+            (const (pure ()))
+            onMessage
 
 -- | Receive a response with classified live query progress.
 receiveResponseWithMessageValidatorAndProgress
@@ -287,7 +298,7 @@ receiveResponseWithMessageValidatorAndProgress
     -> (Message -> IO (Either ClaudeSDKError ()))
     -> (QueryProgress -> IO ())
     -> (Message -> IO ())
-    -> IO (Either ClaudeSDKError ResultMessage)
+    -> IO (Either ClaudeSDKError QueryResult)
 receiveResponseWithMessageValidatorAndProgress
     turn validateMessage onProgress onMessage =
     go emptyQueryAccumulator False
@@ -295,7 +306,7 @@ receiveResponseWithMessageValidatorAndProgress
     go
         :: QueryAccumulator
         -> Bool
-        -> IO (Either ClaudeSDKError ResultMessage)
+        -> IO (Either ClaudeSDKError QueryResult)
     go accumulator sawOutput = do
         maybeMessage <-
             timeout
@@ -357,7 +368,16 @@ receiveResponseWithMessageValidatorAndProgress
                                     Right () -> do
                                         mapM_ onProgress progress
                                         mapM_ onMessage messages
-                                        pure (Right result)
+                                        pure $ Right QueryResult
+                                            { queryMessages = messages
+                                            , queryResultMessage = result
+                                            }
+
+queryResultOnly
+    :: Either ClaudeSDKError QueryResult
+    -> Either ClaudeSDKError ResultMessage
+queryResultOnly =
+    fmap \QueryResult{queryResultMessage} -> queryResultMessage
 
 validateLiveProgressSession
     :: ClaudeSDKTurn

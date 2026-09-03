@@ -53,6 +53,19 @@ spec = describe "query" do
         messages `shouldSatisfy` any hasCanonicalAssistant
         messages `shouldSatisfy` all (not . hasRetractedContent)
 
+    it "returns the canonical messages with the terminal query result" do
+        completed <- expectRight
+            =<< runQueryResultLines canonicalResponseLines
+        map messageUuid completed.queryMessages
+            `shouldBe`
+                [ Just "system-init"
+                , Just "assistant-replacement"
+                , Just "fallback"
+                , Just "result"
+                ]
+        completed.queryResultMessage.result
+            `shouldBe` Just "canonical answer"
+
     it "renders structured tool_result content and retains its raw JSON" do
         (result, messages) <- runQueryLines
             [ structuredToolResultUser
@@ -852,6 +865,29 @@ runQueryLines linesToEmit =
                     modifyIORef' messagesRef (<> [message]))
         messages <- readIORef messagesRef
         pure (result, messages)
+
+runQueryResultLines
+    :: [Text]
+    -> IO (Either ClaudeSDKError QueryResult)
+runQueryResultLines linesToEmit =
+    withFakeClaude (oneShotScript linesToEmit) \directory executable -> do
+        let options = testOptions executable directory
+        withClaudeSDKClient options \client ->
+            withClaudeSDKTurn
+                client
+                (pure True)
+                Nothing
+                options.model
+                options.effort
+                \turn -> do
+                    result <-
+                        queryTurnContentWithMessageValidatorAndProgress
+                            turn
+                            [UserTextBlock "hello"]
+                            (const (pure (Right ())))
+                            (const (pure ()))
+                            (const (pure ()))
+                    pure ((, pure ()) <$> result)
 
 runQueryProgress
     :: [Text]

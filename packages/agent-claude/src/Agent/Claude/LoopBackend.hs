@@ -91,7 +91,6 @@ import qualified Data.Char as Char
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
-    , modifyIORef'
     , newIORef
     , readIORef
     , writeIORef
@@ -110,7 +109,8 @@ import Claude.Agent.SDK.Errors
     , renderClaudeSDKError
     )
 import Claude.Agent.SDK.Query
-    ( queryTurnContentWithMessageValidatorAndProgress
+    ( QueryResult(..)
+    , queryTurnContentWithMessageValidatorAndProgress
     )
 import Claude.Agent.SDK.Types
     ( ClaudeAgentOptions(..)
@@ -361,7 +361,6 @@ submitClaudeCodeTurn
                         -- transcript reference aligned after compaction/reset
                         -- before its successful-turn callback appends.
                         writeIORef transcript history
-                        messages <- newIORef []
                         eventState <- newIORef emptyClaudeEventState
                         let prompt =
                                 buildClaudePrompt
@@ -387,13 +386,14 @@ submitClaudeCodeTurn
                                                 progress
                                     writeIORef eventState nextState
                                     mapM_ onEvent events)
-                                (\message ->
-                                    modifyIORef' messages (message :))
+                                (const (pure ()))
                         case awaitResult of
                             Left sdkError ->
                                 pure (Left sdkError)
-                            Right result -> do
-                                turnMessages <- reverse <$> readIORef messages
+                            Right QueryResult
+                                { queryMessages = turnMessages
+                                , queryResultMessage = result
+                                } -> do
                                 case
                                     interpretClaudeTurnWithCredentialValidation
                                         (transport == ClaudeCodeLocalSubscription)
