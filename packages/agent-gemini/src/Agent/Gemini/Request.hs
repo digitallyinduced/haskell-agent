@@ -39,7 +39,9 @@ buildRequest
 buildRequest fallbackModel params = do
     (tools, customToolNames) <-
         projectTools (enabledTools params.toolChoice params.tools)
-    projection <- projectInput customToolNames params.input
+    projection <- projectInput
+        (declaredCustomToolNames params.tools)
+        params.input
     let model = normalizeModelId
             (fromMaybe fallbackModel params.model)
         systemTexts =
@@ -77,6 +79,16 @@ enabledTools
     -> Maybe [ResponseTool]
 enabledTools (Just (ToolChoiceMode ToolChoiceNone)) _ = Nothing
 enabledTools _ tools = tools
+
+declaredCustomToolNames :: Maybe [ResponseTool] -> Set Text
+declaredCustomToolNames =
+    maybe Set.empty (Set.unions . map customNames)
+  where
+    customNames = \case
+        CustomToolValue tool -> Set.singleton tool.name
+        NamespaceToolValue namespace ->
+            Set.unions (map customNames namespace.tools)
+        _ -> Set.empty
 
 data Projection = Projection
     { systemTexts :: ![Text]

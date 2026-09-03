@@ -183,6 +183,42 @@ spec = describe "Gemini request projection" do
                         ]
                     ]
 
+    it "preserves custom replay input when tools are disabled" do
+        let patch = "*** Begin Patch\n*** End Patch"
+            custom = CustomToolValue CustomTool
+                { name = "apply_patch"
+                , description = Just "Apply a patch."
+                , format = Nothing
+                }
+            params = defaultResponseCreateParams
+                { tools = Just [custom]
+                , toolChoice = Just (ToolChoiceMode ToolChoiceNone)
+                , input = Just
+                    (ResponseInputItems [functionCall "apply_patch" patch])
+                }
+        case buildRequest "gemini-test" params of
+            Left err -> expectationFailure
+                ("unexpected request error: " <> show err)
+            Right request -> do
+                request.requestCustomToolNames `shouldBe` Set.empty
+                request.requestBody `shouldBe` object
+                    [ "contents" .=
+                        [ object
+                            [ "role" .= ("model" :: Text)
+                            , "parts" .=
+                                [ object
+                                    [ "functionCall" .= object
+                                        [ "id" .= ("call-1" :: Text)
+                                        , "name" .= ("apply_patch" :: Text)
+                                        , "args" .= object
+                                            ["input" .= (patch :: Text)]
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ]
+                    ]
+
     it "maps disabled reasoning to the model's minimum thinking level" do
         let params :: ResponseCreateParams
             params = withReasoning
