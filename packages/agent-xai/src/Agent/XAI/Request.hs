@@ -62,6 +62,8 @@ buildRequest options request =
                     , reasoningMode = Nothing
                     , summary = Just "concise"
                     }
+                , include = request.include
+                , promptCacheKey = request.promptCacheKey
                 }
   where
     systemItems = case request.instructions of
