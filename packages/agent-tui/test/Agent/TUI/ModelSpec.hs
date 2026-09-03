@@ -1662,8 +1662,22 @@ spec = describe "fullscreen UI reducer" do
         map (.blockInspectionGroupable) blocks
             `shouldBe` [False, False]
 
-    it "shows an apply_patch diff while running and after completion" do
-        let call =
+    it "repaints an apply_patch diff while input streams" do
+        let early =
+                customToolCall
+                    "patch-1"
+                    "apply_patch"
+                    ""
+            preview =
+                customToolCall
+                    "patch-1"
+                    "apply_patch"
+                    "*** Begin Patch\n\
+                    \*** Update File: A.hs\n\
+                    \@@\n\
+                    \-old\n\
+                    \+ne"
+            canonical =
                 customToolCall
                     "patch-1"
                     "apply_patch"
@@ -1673,11 +1687,14 @@ spec = describe "fullscreen UI reducer" do
                     \-old\n\
                     \+new\n\
                     \*** End Patch"
-            started =
+            running =
                 apply
                     [ UiLoop TurnStarted
-                    , UiLoop (ToolStarted call)
+                    , UiLoop (ToolStarted early)
+                    , UiLoop (ToolArgumentsUpdated preview)
                     ]
+            updated =
+                reduceUi (UiLoop (ToolUpdated canonical)) running
             finished =
                 reduceUi
                     (UiLoop
@@ -1687,12 +1704,13 @@ spec = describe "fullscreen UI reducer" do
                                 , output = "Updated A.hs"
                                 , callKind = CustomCallKind
                                 }))
-                    started
-        case Foldable.toList started.uiBlocks of
+                    updated
+        case Foldable.toList running.uiBlocks of
             [block] -> do
                 block.blockKind `shouldBe` BlockEdit
                 block.blockBody `shouldSatisfy` Text.isInfixOf "-old"
-                block.blockBody `shouldSatisfy` Text.isInfixOf "+new"
+                block.blockBody `shouldSatisfy` Text.isInfixOf "+ne"
+                block.blockState `shouldBe` BlockRunning
             _ -> expectationFailure "expected one running edit block"
         case Foldable.toList finished.uiBlocks of
             [block] -> do
