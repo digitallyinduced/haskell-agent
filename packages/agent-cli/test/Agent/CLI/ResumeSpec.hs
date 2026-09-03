@@ -110,17 +110,17 @@ spec = do
                 , legacyGateway
                 ]
 
-        it "offers direct sessions only while disconnected" do
+        it "offers every session while disconnected" do
             map (.metaId)
                 (filterResumeSessionsForBoundary Nothing sessions)
-                `shouldBe` ["direct"]
+                `shouldBe` ["direct", "allowed", "other", "legacy"]
 
-        it "offers sessions from every gateway credential" do
+        it "offers every session while connected to a gateway" do
             map (.metaId)
                 (filterResumeSessionsForBoundary
                     (Just "gateway-a")
                     sessions)
-                `shouldBe` ["allowed", "other", "legacy"]
+                `shouldBe` ["direct", "allowed", "other", "legacy"]
 
         it "allows resume metadata from another gateway credential" do
             validateResumeMetaForBoundary
