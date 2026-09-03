@@ -156,6 +156,7 @@ import Agent.Tools.PlanMode
 import Agent.Tools.TaskPlan
     ( restoreTaskPlanReminder
     , takeTaskPlanReminder
+    , taskPlanReminderText
     )
 import Agent.OsPath (toText, unsafeToFilePath)
 import Control.Monad (forM_, when)
@@ -311,7 +312,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
         turnInputs0 =
             turnInputsWithContext
                 planReminder
-                taskPlanReminder
+                (taskPlanReminderText <$> taskPlanReminder)
                 pendingStartup
                 inputs
     (conversationStartedAt, previousActivityAt) <-
@@ -357,8 +358,9 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         Nothing -> Just consumed
                         Just _ -> current
                     , ())
-            forM_ taskPlanReminder \_ ->
-                mapM_ restoreTaskPlanReminder taskPlan
+            forM_ taskPlanReminder \reminder ->
+                forM_ taskPlan \env ->
+                    restoreTaskPlanReminder env reminder
         persistPromptSnapshot = case persist of
             PersistenceDisabled -> pure ()
             PersistenceEnabled slotRef -> do
@@ -462,8 +464,9 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                     (rebasePreparedTurn boundary prepared)
                     ConversationInterrupted)
                 >> when (isNothing boundary)
-                    (forM_ taskPlanReminder \_ ->
-                        mapM_ restoreTaskPlanReminder taskPlan)
+                    (forM_ taskPlanReminder \reminder ->
+                        forM_ taskPlan \env ->
+                            restoreTaskPlanReminder env reminder)
                 >> restorePlanStateAfterIncomplete planMode initialPlanState
                 >> abortSubagentTurn rootTurnId
             )
@@ -525,8 +528,9 @@ runOneTurnBusy includeTurnContext env@SessionEnv
             commitConversationPatch
                 (finishConversation committedPrepared ConversationRestarted)
             when (isNothing automaticCompaction) $
-                forM_ taskPlanReminder \_ ->
-                    mapM_ restoreTaskPlanReminder taskPlan
+                forM_ taskPlanReminder \reminder ->
+                    forM_ taskPlan \env ->
+                        restoreTaskPlanReminder env reminder
             planState <- readIORef planMode.planStateRef
             case fullscreen of
                 Just runtime ->
@@ -585,8 +589,9 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                                 committedPrepared
                                 ConversationProviderUnavailable)
                         when (isNothing automaticCompaction) $
-                            forM_ taskPlanReminder \_ ->
-                                mapM_ restoreTaskPlanReminder taskPlan
+                            forM_ taskPlanReminder \reminder ->
+                                forM_ taskPlan \env ->
+                                    restoreTaskPlanReminder env reminder
                         case fullscreen of
                             Nothing -> pure ()
                             Just runtime ->

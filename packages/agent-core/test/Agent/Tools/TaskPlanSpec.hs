@@ -55,13 +55,44 @@ spec = describe "task plans" do
             current = CurrentTaskPlan 12 plan
             reminder = taskPlanContextText current
         env <- newTaskPlanEnv (Just current) Nothing
-        takeTaskPlanReminder env `shouldReturn` Just reminder
+        consumed <- takeTaskPlanReminder env
+        taskPlanReminderText <$> consumed `shouldBe` Just reminder
         isTaskPlanContextText reminder `shouldBe` True
         Text.count "<task-plan-state" reminder `shouldBe` 1
         reminder `shouldSatisfy` Text.isInfixOf "‹evil›"
         takeTaskPlanReminder env `shouldReturn` Nothing
-        restoreTaskPlanReminder env
-        takeTaskPlanReminder env `shouldReturn` Just reminder
+        mapM_ (restoreTaskPlanReminder env) consumed
+        restored <- takeTaskPlanReminder env
+        taskPlanReminderText <$> restored `shouldBe` Just reminder
+
+    it "does not let a stale restore requeue a replacement plan" do
+        let old = CurrentTaskPlan 1 $
+                TaskPlan Nothing [TaskPlanItem "old" TaskPlanPending]
+            replacement = CurrentTaskPlan 1 $
+                TaskPlan Nothing
+                    [TaskPlanItem "replacement" TaskPlanInProgress]
+        env <- newTaskPlanEnv (Just old) Nothing
+        Just oldReminder <- takeTaskPlanReminder env
+        resetTaskPlanState env (Just replacement)
+        Just replacementReminder <- takeTaskPlanReminder env
+        restoreTaskPlanReminder env oldReminder
+        takeTaskPlanReminder env `shouldReturn` Nothing
+        restoreTaskPlanReminder env replacementReminder
+        restored <- takeTaskPlanReminder env
+        taskPlanReminderText <$> restored
+            `shouldBe` Just (taskPlanContextText replacement)
+
+    it "does not make a freshly published plan into a resume reminder" do
+        let resumed = CurrentTaskPlan 4 $
+                TaskPlan Nothing [TaskPlanItem "resumed" TaskPlanPending]
+            fresh = TaskPlan Nothing
+                [TaskPlanItem "fresh" TaskPlanInProgress]
+        env <- newTaskPlanEnv (Just resumed) Nothing
+        Just consumed <- takeTaskPlanReminder env
+        replaceTaskPlan env fresh
+            `shouldReturn` Right (CurrentTaskPlan 5 fresh)
+        restoreTaskPlanReminder env consumed
+        takeTaskPlanReminder env `shouldReturn` Nothing
 
     it "resets the in-memory projection when the host changes sessions" do
         let oldPlan = TaskPlan Nothing
@@ -77,8 +108,9 @@ spec = describe "task plans" do
         takeTaskPlanReminder env `shouldReturn` Nothing
         resetTaskPlanState env (Just current)
         readTaskPlan env `shouldReturn` Just current
-        takeTaskPlanReminder env
-            `shouldReturn` Just (taskPlanContextText current)
+        reminder <- takeTaskPlanReminder env
+        taskPlanReminderText <$> reminder
+            `shouldBe` Just (taskPlanContextText current)
 
     it "bounds rendered context" do
         let plan = TaskPlan Nothing
