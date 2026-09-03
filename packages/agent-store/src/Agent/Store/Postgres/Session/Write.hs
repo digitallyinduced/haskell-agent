@@ -15,7 +15,9 @@ module Agent.Store.Postgres.Session.Write
     , appendSessionTurn
     , appendSessionTurnIndexed
     , appendSessionTurnIndexedWithPromptReset
+    , appendSessionTurnIndexedWithPromptResetAndTaskPlanClear
     , appendSessionTurns
+    , appendSessionTurnsClearingTaskPlan
     , setSessionArchived
     , deleteSession
     , importLegacySession
@@ -38,6 +40,9 @@ import Agent.Store.Postgres.Connection
     , withSession
     )
 import Agent.Store.Postgres.Hasql (mkStatement)
+import Agent.Store.Postgres.Session.TaskPlan
+    ( replaceSessionTaskPlanTransaction
+    )
 import Agent.Store.Postgres.Session.Types
 import Agent.Store.Postgres.SessionItem (insertResponseItems)
 import Agent.Store.Types (StoreError)
@@ -255,7 +260,7 @@ appendSessionTurnIndexed
     -> SessionMetadata
     -> IO (Either StoreError (Maybe Int64))
 appendSessionTurnIndexed =
-    appendSessionTurnIndexedInternal False
+    appendSessionTurnIndexedInternal False False
 
 -- | Append a turn and retire the current provider-visible prompt prefix in
 -- the same transaction. The next request must establish a new prompt epoch.
@@ -265,15 +270,26 @@ appendSessionTurnIndexedWithPromptReset
     -> SessionMetadata
     -> IO (Either StoreError (Maybe Int64))
 appendSessionTurnIndexedWithPromptReset =
-    appendSessionTurnIndexedInternal True
+    appendSessionTurnIndexedInternal True False
+
+-- | Append a transcript reset while atomically retiring both the current
+-- provider-visible prompt prefix and current task plan.
+appendSessionTurnIndexedWithPromptResetAndTaskPlanClear
+    :: StorePool
+    -> SessionTurn
+    -> SessionMetadata
+    -> IO (Either StoreError (Maybe Int64))
+appendSessionTurnIndexedWithPromptResetAndTaskPlanClear =
+    appendSessionTurnIndexedInternal True True
 
 appendSessionTurnIndexedInternal
     :: Bool
+    -> Bool
     -> StorePool
     -> SessionTurn
     -> SessionMetadata
     -> IO (Either StoreError (Maybe Int64))
-appendSessionTurnIndexedInternal resetPrompt pool turn metadata =
+appendSessionTurnIndexedInternal resetPrompt clearTaskPlan pool turn metadata =
     withSession pool $
         Transactions.transaction Transactions.Serializable Transactions.Write do
             _ <- Transaction.statement
@@ -311,6 +327,11 @@ appendSessionTurnIndexedInternal resetPrompt pool turn metadata =
                             )
                             invalidatePromptEpochStatement
                         pure ()
+                    when clearTaskPlan do
+                        _ <- Transaction.statement
+                            metadata.sessionMetadataKey
+                            clearTaskPlanStatement
+                        pure ()
                     pure (Just turnIndex)
 
 -- | Append a sequence of turns as one atomic transcript transition.
@@ -324,17 +345,42 @@ appendSessionTurns
     -> SessionMetadata
     -> IO (Either StoreError Bool)
 appendSessionTurns pool turns metadata =
+    appendSessionTurnsWithTaskPlanClear False pool turns metadata
+
+-- | Append a transcript transition and clear its current task plan in the
+-- same serializable transaction.
+appendSessionTurnsClearingTaskPlan
+    :: StorePool
+    -> [SessionTurn]
+    -> SessionMetadata
+    -> IO (Either StoreError Bool)
+appendSessionTurnsClearingTaskPlan =
+    appendSessionTurnsWithTaskPlanClear True
+
+appendSessionTurnsWithTaskPlanClear
+    :: Bool
+    -> StorePool
+    -> [SessionTurn]
+    -> SessionMetadata
+    -> IO (Either StoreError Bool)
+appendSessionTurnsWithTaskPlanClear clearTaskPlan pool turns metadata =
     withSession pool $
         Transactions.transaction Transactions.Serializable Transactions.Write do
             _ <- Transaction.statement
                 metadata.sessionMetadataKey
                 blockingAdvisoryLockStatement
-            case turns of
+            appended <- case turns of
                 [] ->
                     Transaction.statement
                         metadata.sessionMetadataKey
                         sessionExistsStatement
                 _ -> appendAll turns
+            when (appended && clearTaskPlan) do
+                _ <- Transaction.statement
+                    metadata.sessionMetadataKey
+                    clearTaskPlanStatement
+                pure ()
+            pure appended
   where
     appendAll [] = pure True
     appendAll (turn : rest) = do
@@ -342,6 +388,15 @@ appendSessionTurns pool turns metadata =
         if appended
             then appendAll rest
             else Transaction.condemn >> pure False
+
+clearTaskPlanStatement :: Statement Text ()
+clearTaskPlanStatement = mkStatement
+    "DELETE FROM harness.session_task_plans p\
+    \ USING harness.sessions s\
+    \ WHERE p.session_id = s.session_id AND s.session_key = $1"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    Decoders.noResult
+    True
 
 setSessionArchived
     :: StorePool
@@ -415,6 +470,14 @@ importLegacySession pool legacy =
                         "legacy.import_completed"
                         metadata
                         legacy.legacyTurns
+                    forM_ legacy.legacyTaskPlan \plan -> do
+                        revision <- replaceSessionTaskPlanTransaction
+                            sessionKey
+                            plan.sessionTaskPlanSnapshotExplanation
+                            plan.sessionTaskPlanSnapshotItems
+                        case revision of
+                            Just 1 -> pure ()
+                            _ -> Transaction.condemn
                     forM_ legacy.legacyPromptSnapshot \snapshot -> do
                         epoch <- Transaction.statement
                             (sessionKey, snapshot)

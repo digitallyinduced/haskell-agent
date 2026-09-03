@@ -433,6 +433,7 @@ importLegacySession schemaVersion validId sessionDirForId pool sessionId = do
                     , legacyTurns = map toStoredTurn turns
                     , legacyPromptSnapshot =
                         toStoredPromptSnapshot <$> meta.metaPromptSnapshot
+                    , legacyTaskPlan = Nothing
                     }
             lift (Store.importLegacySession pool legacy) >>= \case
                 Left err -> throwE (renderStoreError err)

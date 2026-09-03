@@ -32,6 +32,7 @@ import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Tools.MultiAgentsSpec as MultiAgentsSpec
 import qualified Agent.Tools.OutputArtifactSpec as OutputArtifactSpec
 import qualified Agent.Tools.PlanModeSpec as PlanModeSpec
+import qualified Agent.Tools.TaskPlanSpec as TaskPlanSpec
 import qualified Agent.Tools.SecretSpec as SecretSpec
 import qualified Agent.Tools.ShowImageSpec as ShowImageSpec
 import qualified Agent.Tools.ViewImageSpec as ViewImageSpec
@@ -69,6 +70,7 @@ main = hspec do
     MultiAgentsSpec.spec
     OutputArtifactSpec.spec
     PlanModeSpec.spec
+    TaskPlanSpec.spec
     SecretSpec.spec
     ShowImageSpec.spec
     ViewImageSpec.spec

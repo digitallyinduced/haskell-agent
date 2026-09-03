@@ -36,6 +36,13 @@ import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import Agent.Store.Postgres.Connection (StorePool)
 import qualified Agent.Store.Postgres.Session as Store
 import Agent.Store.Types (renderStoreError)
+import Agent.Tools.TaskPlan
+    ( CurrentTaskPlan(..)
+    , TaskPlan(..)
+    , TaskPlanHooks(..)
+    , TaskPlanItem(..)
+    , TaskPlanStatus(..)
+    )
 import Control.Concurrent (newEmptyMVar, putMVar, readMVar, takeMVar)
 import Control.Concurrent.Async
     ( cancelWith, concurrently, mapConcurrently, waitCatch, withAsync )
@@ -986,6 +993,42 @@ spec = describe "Agent.CLI.Session" do
                 storedContentPartRoundTrip
 
     describe "PostgreSQL session persistence" do
+        it "materializes and round-trips task plans through persistence hooks" $
+            withTempStore \store root -> do
+                persistence <-
+                    newPendingPersistence (testCreate (trustedPool store) root)
+                hooks <- case taskPlanHooksForPersistence persistence of
+                    Nothing -> expectationFailure "missing task-plan hooks" >> fail "hooks"
+                    Just value -> pure value
+                hooks.taskPlanPersistReplace sampleTaskPlan
+                    `shouldReturn` Right 1
+                loadCurrentTaskPlan persistence
+                    `shouldReturn`
+                        Right
+                            (Just CurrentTaskPlan
+                                { currentTaskPlanRevision = 1
+                                , currentTaskPlanValue = sampleTaskPlan
+                                })
+                hooks.taskPlanPersistClear `shouldReturn` Right ()
+                loadCurrentTaskPlan persistence `shouldReturn` Right Nothing
+
+        it "does not materialize a pending session when clearing its task plan" $
+            withTempStore \store root -> do
+                PersistenceEnabled slot <-
+                    newPendingPersistence (testCreate (trustedPool store) root)
+                hooks <- case taskPlanHooksForPersistence
+                    (PersistenceEnabled slot) of
+                    Nothing ->
+                        expectationFailure "missing task-plan hooks"
+                            >> fail "hooks"
+                    Just value -> pure value
+                hooks.taskPlanPersistClear `shouldReturn` Right ()
+                readIORef slot >>= \case
+                    PersistencePending{} -> pure ()
+                    PersistenceActive{} ->
+                        expectationFailure
+                            "clearing an absent plan materialized the session"
+
         it "rejects inconsistent gateway identities at every creation boundary" $
             withTempStore \store root -> do
                 let pool = trustedPool store
@@ -1050,6 +1093,12 @@ spec = describe "Agent.CLI.Session" do
                         { metaLastRecap = Just "recap"
                         , metaLastTurnSummary = Just "summary"
                         }
+                Store.replaceSessionTaskPlan
+                    pool
+                    source.sessionMeta.metaId
+                    sampleTaskPlan.taskPlanExplanation
+                    sampleStoredTaskPlanItems
+                    `shouldReturn` Right (Just 1)
                 let planPath = source.sessionDir </> unsafeEncodeUtf "plan.md"
                     agentsDir = source.sessionDir </> unsafeEncodeUtf "agents"
                     childDir = agentsDir </> unsafeEncodeUtf "child"
@@ -1089,6 +1138,10 @@ spec = describe "Agent.CLI.Session" do
                         loadSession pool root forked.sessionMeta.metaId
                             `shouldReturn`
                                 Right (forked.sessionMeta, [sourceTurn])
+                        Store.loadSessionTaskPlan
+                            pool
+                            forked.sessionMeta.metaId
+                            `shouldReturn` Right (Just sampleStoredTaskPlan)
                         doesFileExist
                             (forked.sessionDir </> unsafeEncodeUtf "plan.md")
                             `shouldReturn` True
@@ -1400,6 +1453,12 @@ spec = describe "Agent.CLI.Session" do
                         , metaLastTurnSummary = Just "stale summary"
                         , metaLastRecapMainTurns = 2
                         }
+                Store.replaceSessionTaskPlan
+                    pool
+                    final.sessionMeta.metaId
+                    sampleTaskPlan.taskPlanExplanation
+                    sampleStoredTaskPlanItems
+                    `shouldReturn` Right (Just 1)
 
                 rewound <- rewindSession final [first, checkpoint] >>= \case
                     Left err ->
@@ -1416,6 +1475,8 @@ spec = describe "Agent.CLI.Session" do
                 rewound.sessionMeta.metaInputTokens `shouldBe` 17
                 rewound.sessionMeta.metaOutputTokens `shouldBe` 7
                 rewound.sessionMeta.metaCachedTokens `shouldBe` 3
+                Store.loadSessionTaskPlan pool rewound.sessionMeta.metaId
+                    `shouldReturn` Right Nothing
 
                 loadSession pool root rewound.sessionMeta.metaId >>= \case
                     Left err -> expectationFailure (Text.unpack err)
@@ -1520,6 +1581,12 @@ spec = describe "Agent.CLI.Session" do
                 source4 <- appendTurnWithMetaUpdate source3 cleared
                     \meta -> meta { metaLastResponseId = Nothing }
                 _source5 <- appendTurn source4 fifth
+                Store.replaceSessionTaskPlan
+                    pool
+                    source0.sessionMeta.metaId
+                    sampleTaskPlan.taskPlanExplanation
+                    sampleStoredTaskPlanItems
+                    `shouldReturn` Right (Just 1)
 
                 loadSessionHistoryTurnsAround
                     pool root source0.sessionMeta.metaId 1 1 >>= \case
@@ -1543,6 +1610,8 @@ spec = describe "Agent.CLI.Session" do
                                     meta.metaLastResponseId `shouldBe` Nothing
                                     meta.metaInputTokens `shouldBe` 10
                                     meta.metaOutputTokens `shouldBe` 2
+                            Store.loadSessionTaskPlan pool forkId
+                                `shouldReturn` Right Nothing
                             loadSession pool root source0.sessionMeta.metaId
                                 >>= \case
                                     Left err ->
@@ -1558,7 +1627,6 @@ spec = describe "Agent.CLI.Session" do
                                                 , cleared
                                                 , fifth
                                                 ]
-
                 chunks <- newIORef []
                 streamSessionTransfer
                     pool root source0.sessionMeta.metaId
@@ -1573,6 +1641,8 @@ spec = describe "Agent.CLI.Session" do
                 envelope.transferSession.transferTurns
                     `shouldBe`
                         [first, compacted, third, cleared, fifth]
+                envelope.transferSession.transferTaskPlan
+                    `shouldBe` Just sampleTaskPlan
                 importSessionTransferRemapped pool root Nothing envelope
                     >>= \case
                         Left err -> expectationFailure (Text.unpack err)
@@ -1591,6 +1661,46 @@ spec = describe "Agent.CLI.Session" do
                                             , cleared
                                             , fifth
                                             ]
+                                    Store.loadSessionTaskPlan pool importedId
+                                        `shouldReturn`
+                                            Right (Just sampleStoredTaskPlan)
+
+        it "rolls back failed task-plan imports so the transfer can be retried" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                    sessionId = "session-atomic-transfer"
+                    invalidPlan = TaskPlan
+                        { taskPlanExplanation = Nothing
+                        , taskPlanItems =
+                            [ TaskPlanItem
+                                "first active step"
+                                TaskPlanInProgress
+                            , TaskPlanItem
+                                "second active step"
+                                TaskPlanInProgress
+                            ]
+                        }
+                    transfer = SessionTransfer
+                        { transferMeta = testMeta sessionId
+                        , transferTaskPlan = Just invalidPlan
+                        , transferTurns = []
+                        }
+                    sessionDir =
+                        root </> unsafeEncodeUtf (Text.unpack sessionId)
+                importSessionTransfer pool root Nothing transfer
+                    >>= (`shouldSatisfy` either (const True) (const False))
+                Store.loadSession pool sessionId
+                    `shouldReturn` Right Nothing
+                doesDirectoryExist sessionDir `shouldReturn` False
+
+                importSessionTransfer
+                    pool
+                    root
+                    Nothing
+                    (transfer { transferTaskPlan = Just sampleTaskPlan })
+                    `shouldReturn` Right sessionId
+                Store.loadSessionTaskPlan pool sessionId
+                    `shouldReturn` Right (Just sampleStoredTaskPlan)
 
         it "materializes pending persistence into a resumable session ID" $
             withTempStore \store root -> do
@@ -1795,6 +1905,23 @@ spec = describe "Agent.CLI.Session" do
                 modeOf handle.sessionTempDir `shouldReturn` 0o700
 
     describe "json codec" do
+        it "round-trips an optional current task plan and accepts older transfers" do
+            let transfer = SessionTransfer
+                    { transferMeta = testMeta "session-plan"
+                    , transferTaskPlan = Just sampleTaskPlan
+                    , transferTurns = []
+                    }
+                encoded = Aeson.encode transfer
+            Hermes.decodeEither sessionTransferDecoder (LBS.toStrict encoded)
+                `shouldBe` Right transfer
+            let legacy = case Aeson.toJSON transfer of
+                    Aeson.Object object ->
+                        Aeson.Object (KeyMap.delete "currentTaskPlan" object)
+                    value -> value
+            Hermes.decodeEither sessionTransferDecoder
+                (LBS.toStrict (Aeson.encode legacy))
+                `shouldBe` Right transfer { transferTaskPlan = Nothing }
+
         it "encodes and decodes SessionTurn" do
             let turn = SessionTurn
                     { turnAt = fixedTime
@@ -1917,6 +2044,28 @@ spec = describe "Agent.CLI.Session" do
                     TranscriptAppend
                     [oldLocalSummary])
                 `shouldBe` False
+
+sampleTaskPlan :: TaskPlan
+sampleTaskPlan = TaskPlan
+    { taskPlanExplanation = Just "Keep durable progress."
+    , taskPlanItems =
+        [ TaskPlanItem "persist the plan" TaskPlanCompleted
+        , TaskPlanItem "resume the plan" TaskPlanInProgress
+        ]
+    }
+
+sampleStoredTaskPlanItems :: [Store.SessionTaskPlanItem]
+sampleStoredTaskPlanItems =
+    [ Store.SessionTaskPlanItem "persist the plan" Store.SessionTaskPlanCompleted
+    , Store.SessionTaskPlanItem "resume the plan" Store.SessionTaskPlanInProgress
+    ]
+
+sampleStoredTaskPlan :: Store.SessionTaskPlan
+sampleStoredTaskPlan = Store.SessionTaskPlan
+    { Store.sessionTaskPlanRevision = 1
+    , Store.sessionTaskPlanExplanation = Just "Keep durable progress."
+    , Store.sessionTaskPlanItems = sampleStoredTaskPlanItems
+    }
 
 testCreate :: StorePool -> OsPath -> SessionCreate
 testCreate pool root = SessionCreate

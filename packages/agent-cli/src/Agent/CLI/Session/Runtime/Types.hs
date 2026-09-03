@@ -79,6 +79,7 @@ import Agent.Subagents
     )
 import Agent.Tools.MultiAgents (MultiAgentContext)
 import Agent.Tools.PlanMode (PlanModeEnv)
+import Agent.Tools.TaskPlan (TaskPlanEnv)
 import Agent.Tools.Types
     ( AppTool
     , ToolEnv
@@ -129,6 +130,7 @@ data SessionRequest = SessionRequest
     , bashEnabledRef :: !(IORef Bool)
     , toolEnv :: !ToolEnv
     , planMode :: !PlanModeEnv
+    , taskPlan :: !(Maybe TaskPlanEnv)
     , startup :: !StartupRuntime
     , learnAboutUserRequested :: !Bool
     , databaseScopes :: !DatabaseScopes

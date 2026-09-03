@@ -70,9 +70,10 @@ import Agent.CLI.Secret ()
 import Agent.CLI.Session
     ( TranscriptEffect(TranscriptReset),
       appendTurnKeepTitleIndexed,
-      appendTurnWithPromptResetIndexed,
+      appendTurnWithPromptResetAndTaskPlanClearIndexed,
       createSession,
       forkSessionAt,
+      loadCurrentTaskPlan,
       loadSession,
       rewindSession,
       removeSessionTemp,
@@ -92,7 +93,8 @@ import Agent.CLI.Session
                   metaInputTokens, metaOutputTokens, metaCachedTokens, metaLastRecap,
                   metaLastTurnSummary, metaLastRecapMainTurns, metaTransportModel,
                   metaTitleUserTurns, metaId, metaCwd, metaGatewayIdentity),
-      SessionTransfer(transferTurns, SessionTransfer, transferMeta),
+      SessionTransfer(transferTurns, SessionTransfer, transferMeta,
+                      transferTaskPlan),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
                   turnAssistantText, turnError, turnResponseId, turnEffect,
                   turnItems, turnDisplayItems, turnProviderTelemetry) )
@@ -168,6 +170,10 @@ import Agent.ToolDispatch ()
 import Agent.Tools.MultiAgents ()
 import Agent.Tools.PlanMode ( PlanModeEnv(planSessionDir) )
 import Agent.Tools.Secret ()
+import Agent.Tools.TaskPlan
+    ( CurrentTaskPlan(currentTaskPlanValue)
+    , resetTaskPlanState
+    )
 import Agent.Tools.Types ()
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ()
@@ -176,7 +182,8 @@ import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar ()
 import Control.Concurrent.STM ()
 import Control.Exception ()
-import Control.Exception.Safe ( finally, mask, onException )
+import Control.Exception.Safe
+    ( displayException, finally, mask, onException, tryAny )
 import Control.Monad ( forM_, void )
 import Data.IORef ( readIORef, writeIORef )
 import Data.List ()
@@ -228,6 +235,7 @@ handleSessionAction
             , sessionGatewayIdentity = gatewayIdentity
             , sessionDialect = dialect
             , sessionPlanMode = planMode
+            , sessionTaskPlan = taskPlan
             , sessionStoreRoot = storeRoot
             , sessionSetWindowTitle = setWindowTitle
             , sessionUsage = usageRef
@@ -318,18 +326,17 @@ handleSessionAction
                                                                             (RunRestart
                                                                                 updated.sessionMeta.metaId)
     ReplClear -> do
-        sessionReset
-        fullscreenEvent UiConversationCleared
         color <- resolveColor stderr
-        message <- case persist of
-            PersistenceDisabled ->
-                pure "conversation cleared"
+        clearResult <- mask \restore -> case persist of
+            PersistenceDisabled -> do
+                resetCurrentTaskPlan
+                pure (Right ("conversation cleared", Nothing))
             PersistenceEnabled slotRef -> do
                 now <- getCurrentTime
-                slot <- readIORef slotRef
-                case slot of
-                    PersistencePending _ _ _ ->
-                        pure "conversation cleared"
+                readIORef slotRef >>= \case
+                    PersistencePending{} -> do
+                        resetCurrentTaskPlan
+                        pure (Right ("conversation cleared", Nothing))
                     PersistenceActive handle -> do
                         let turn = SessionTurn
                                 { turnAt = now
@@ -344,39 +351,63 @@ handleSessionAction
                                 , turnUsage = Nothing
                                 , turnProviderTelemetry = []
                                 }
-                        (handle', turnIndex) <-
-                            appendTurnWithPromptResetIndexed handle turn \meta ->
-                                meta
-                                    { metaLastResponseId = Nothing
-                                    , metaInputTokens = 0
-                                    , metaOutputTokens = 0
-                                    , metaCachedTokens = 0
-                                    , metaLastRecap = Nothing
-                                    , metaLastTurnSummary = Nothing
-                                    , metaLastRecapMainTurns = 0
-                                    }
-                        let meta = handle'.sessionMeta
-                        writeIORef slotRef
-                            (PersistenceActive handle')
-                        forM_ fullscreen \runtime ->
-                            commitFullscreenHistoryTurn
-                                runtime
-                                (sessionHistoryTurn turnIndex turn)
-                                HistoryCommitReset
-                        pure
-                            ("conversation cleared (session "
-                                <> meta.metaId
-                                <> ")")
-        displayInfo message $
-            Text.hPutStrLn stderr
-                (roleMuted color (glyphOk <> message))
-        continue
+                        tryAny
+                            (restore
+                                (appendTurnWithPromptResetAndTaskPlanClearIndexed
+                                    handle
+                                    turn
+                                    \meta ->
+                                        meta
+                                            { metaLastResponseId = Nothing
+                                            , metaInputTokens = 0
+                                            , metaOutputTokens = 0
+                                            , metaCachedTokens = 0
+                                            , metaLastRecap = Nothing
+                                            , metaLastTurnSummary = Nothing
+                                            , metaLastRecapMainTurns = 0
+                                            })) >>= \case
+                            Left err ->
+                                pure $
+                                    Left
+                                        ("could not clear conversation: "
+                                            <> Text.pack (displayException err))
+                            Right (handle', turnIndex) -> do
+                                let meta = handle'.sessionMeta
+                                writeIORef slotRef
+                                    (PersistenceActive handle')
+                                resetCurrentTaskPlan
+                                pure $
+                                    Right
+                                        ( "conversation cleared (session "
+                                            <> meta.metaId
+                                            <> ")"
+                                        , Just (turnIndex, turn)
+                                        )
+        case clearResult of
+            Left err -> do
+                displayError err $
+                    putTextLn stderr (roleError color err)
+                continue
+            Right (message, committedTurn) -> do
+                sessionReset
+                fullscreenEvent UiConversationCleared
+                forM_ committedTurn \(turnIndex, turn) ->
+                    forM_ fullscreen \runtime ->
+                        commitFullscreenHistoryTurn
+                            runtime
+                            (sessionHistoryTurn turnIndex turn)
+                            HistoryCommitReset
+                displayInfo message $
+                    Text.hPutStrLn stderr
+                        (roleMuted color (glyphOk <> message))
+                continue
     ReplNew -> do
         sessionReset
         fullscreenEvent UiConversationCleared
         color <- resolveColor stderr
         case persist of
             PersistenceDisabled -> do
+                resetCurrentTaskPlan
                 displayInfo "started a fresh conversation" $
                     Text.hPutStrLn stderr
                         (roleMuted color
@@ -452,6 +483,7 @@ handleSessionAction
                 env.sessionSetTempDir handle'.sessionTempDir
                 writeIORef slotRef
                     (PersistenceActive handle')
+                resetCurrentTaskPlan
                 writeIORef env.sessionTitleTurnCount 0
                 writeIORef planMode.planSessionDir
                     (Just handle'.sessionDir)
@@ -702,18 +734,29 @@ handleSessionAction
                                         >>= \case
                                             Left err -> failAfk err
                                             Right (meta, turns) ->
-                                                handoffRemote
-                                                    host
-                                                    path
-                                                    handle.sessionDir
-                                                    SessionTransfer
-                                                        { transferMeta = meta
-                                                        , transferTurns = turns
-                                                        }
+                                                loadCurrentTaskPlan persist
                                                     >>= \case
                                                         Left err -> failAfk err
-                                                        Right message ->
-                                                            finishAfk message
+                                                        Right currentPlan ->
+                                                            handoffRemote
+                                                                host
+                                                                path
+                                                                handle.sessionDir
+                                                                SessionTransfer
+                                                                    { transferMeta =
+                                                                        meta
+                                                                    , transferTaskPlan =
+                                                                        (.currentTaskPlanValue)
+                                                                            <$> currentPlan
+                                                                    , transferTurns =
+                                                                        turns
+                                                                    }
+                                                                >>= \case
+                                                                    Left err ->
+                                                                        failAfk err
+                                                                    Right message ->
+                                                                        finishAfk
+                                                                            message
     ReplWorktree -> do
         result <- withReplActivity \report ->
             createManagedWorktreeWithProgress
@@ -851,6 +894,8 @@ handleSessionAction
     displayError message minimalAction = case fullscreen of
         Nothing -> minimalAction
         Just runtime -> emitUiEvent runtime (UiErrorMessage message)
+    resetCurrentTaskPlan =
+        mapM_ (\current -> resetTaskPlanState current Nothing) taskPlan
     shellModeText = \case
         ShellGhci -> "ghci"
         ShellBash -> "bash"
