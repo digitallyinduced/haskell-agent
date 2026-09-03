@@ -1,6 +1,7 @@
 -- | Provider-neutral loop adapters for Responses-compatible transports.
 module Agent.Responses.LoopBackend
     ( statelessResponsesBackend
+    , statelessResponsesBackendPreservingHistory
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
     , turnInputsToItems
@@ -52,7 +53,8 @@ import Agent.Provider
     , runWithTokenProvider
     )
 import Agent.Responses.Request
-    ( isServerCompactionCheckpoint
+    ( filterCompactionCheckpointsByOrigin
+    , isServerCompactionCheckpoint
     , stripReplayedItemStatus
     )
 import Agent.Responses.Types
@@ -92,6 +94,23 @@ statelessResponsesBackend
 statelessResponsesBackend send getParams =
     statelessResponsesBackendWithRawReasoning True send getParams
 
+-- | Adapt a stateless transport that cannot safely replay opaque server
+-- checkpoints. Keep the complete request history even when a response
+-- contains a checkpoint, and omit the unusable checkpoint itself from the
+-- next snapshot so a later provider cannot mistake it for compatible state.
+statelessResponsesBackendPreservingHistory
+    :: (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+statelessResponsesBackendPreservingHistory send getParams =
+    statelessResponsesBackendWithMode
+        PreservePreCheckpointHistory
+        True
+        send
+        getParams
+
 -- | Adapt a stateless Responses transport while optionally exposing raw
 -- reasoning text. Reasoning summaries remain visible in either mode.
 statelessResponsesBackendWithRawReasoning
@@ -102,6 +121,29 @@ statelessResponsesBackendWithRawReasoning
     -> IO ResponseCreateParams
     -> Backend
 statelessResponsesBackendWithRawReasoning showRawReasoning send getParams =
+    statelessResponsesBackendWithMode
+        ReplacePreCheckpointHistory
+        showRawReasoning
+        send
+        getParams
+
+data ServerCheckpointMode
+    = ReplacePreCheckpointHistory
+    | PreservePreCheckpointHistory
+
+statelessResponsesBackendWithMode
+    :: ServerCheckpointMode
+    -> Bool
+    -> (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+statelessResponsesBackendWithMode
+        checkpointMode
+        showRawReasoning
+        send
+        getParams =
     Backend \snapshot _legacyPreviousResponseId inputs onEvent -> do
         baseParams <- getParams
         projectEvent <- newStreamEventToLoopEvents showRawReasoning
@@ -116,9 +158,16 @@ statelessResponsesBackendWithRawReasoning showRawReasoning send getParams =
                 let normalizedRequestItems =
                         normalizeResponseInputItems requestItems
                     completedItems =
-                        fromMaybe
-                            (normalizedRequestItems <> response.output)
-                            (latestServerCheckpointSuffix response.output)
+                        case checkpointMode of
+                            ReplacePreCheckpointHistory ->
+                                fromMaybe
+                                    (normalizedRequestItems <> response.output)
+                                    (latestServerCheckpointSuffix response.output)
+                            PreservePreCheckpointHistory ->
+                                normalizedRequestItems
+                                    <> filterCompactionCheckpointsByOrigin
+                                        (const False)
+                                        response.output
                 in
                 pure $ Right BackendResult
                     { backendOutput = responseToTurnOutput response

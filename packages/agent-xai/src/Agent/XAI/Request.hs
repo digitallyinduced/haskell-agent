@@ -3,6 +3,7 @@
 module Agent.XAI.Request
     ( mapModel
     , buildRequest
+    , filterXaiOrLegacyCompactionCheckpoints
     ) where
 
 import Agent.Responses.Request
@@ -45,8 +46,7 @@ mapModel options model =
 buildRequest :: ClientOptions -> ResponseCreateParams -> ResponseCreateParams
 buildRequest options request =
     stripLocalCompactionMarker $
-        filterRequestCompactionCheckpointsByOrigin
-            keepXaiOrLegacyCheckpoint $
+        filterXaiOrLegacyCompactionCheckpoints $
             (if options.hostedXSearchEnabled then withHostedXSearch else id) $
                 mapResponseTools xaiTool $
                     forceStatelessStreaming defaultResponseCreateParams
@@ -73,10 +73,6 @@ buildRequest options request =
                     , promptCacheKey = request.promptCacheKey
                     }
   where
-    keepXaiOrLegacyCheckpoint = \case
-        Nothing -> True
-        Just origin -> origin == "xai"
-
     systemItems = case request.instructions of
         Just instructions
             | not (Text.null (Text.strip instructions)) ->
@@ -98,6 +94,17 @@ buildRequest options request =
         KnownResponseTool ToolXSearch -> Just hostedXSearchTool
         KnownResponseTool ToolComputer -> Nothing
         _ -> Just tool
+
+-- | Keep xAI checkpoints and legacy checkpoints without provenance. This
+-- projection intentionally leaves local-summary metadata intact so callers
+-- can make compaction-policy decisions before the wire sanitizer removes it.
+filterXaiOrLegacyCompactionCheckpoints
+    :: ResponseCreateParams
+    -> ResponseCreateParams
+filterXaiOrLegacyCompactionCheckpoints =
+    filterRequestCompactionCheckpointsByOrigin \case
+        Nothing -> True
+        Just origin -> origin == "xai"
 
 -- | Grok Build always splices hosted @x_search@ onto grok-4.6 Responses
 -- requests. Keep a single empty-fields entry even when the caller omitted

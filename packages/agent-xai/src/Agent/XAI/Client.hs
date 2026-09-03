@@ -26,7 +26,11 @@ import Agent.XAI.Error
     , isCapacityBody
     )
 import Agent.XAI.Options
-import Agent.XAI.Request (buildRequest, mapModel)
+import Agent.XAI.Request
+    ( buildRequest
+    , filterXaiOrLegacyCompactionCheckpoints
+    , mapModel
+    )
 import Agent.XAI.Stream (streamAssemblyConfig)
 import Control.Retry
     ( RetryPolicyM
@@ -135,7 +139,9 @@ xaiProviderConfig options credential request = ProviderClientConfig
     , providerRequestTimeoutSeconds = options.requestTimeoutSeconds
     , providerBuildRequest = buildRequest options
     , providerConfigureRequest =
-        configureCompactionHeaders options request
+        configureCompactionHeaders
+            options
+            (filterXaiOrLegacyCompactionCheckpoints request)
             . setRequestHeader "Authorization"
             ["Bearer " <> Text.encodeUtf8 credential.accessToken]
             . setRequestHeader "X-XAI-Token-Auth"

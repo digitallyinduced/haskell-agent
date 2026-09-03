@@ -24,6 +24,7 @@ import Agent.Provider
 import Agent.Json (rawJsonFromEncoding)
 import qualified Agent.Json.Decode as Json
 import qualified Agent.Responses.Codec as Codec
+import Agent.Responses.GenericBackend (genericResponsesBackendWith)
 import Agent.Responses.LoopBackend
     ( newStreamEventToLoopEvents
     , statelessResponsesBackend
@@ -551,6 +552,44 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
 
         fmap (.backendState.backendItems) result
             `shouldBe` Right [checkpoint, answer]
+
+    it "retains generic history while dropping an unreplayable checkpoint" do
+        let oldItems = turnInputsToItems [UserMessage "old context"]
+            newItems = turnInputsToItems [UserMessage "new input"]
+            checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "compact-generic"
+                , encryptedContent = Just "opaque"
+                }
+            answer = MessageItem ResponseMessage
+                { messageId = Just "message-generic"
+                , content = MessageContentParts
+                    [OutputTextPart "continued" Nothing Nothing]
+                , role = RoleAssistant
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                }
+            send _params _onEvent =
+                pure (Right (responseWithOutput [checkpoint, answer]))
+            backend =
+                genericResponsesBackendWith send
+                    (pure defaultResponseCreateParams)
+            snapshot =
+                advanceBackendSnapshot
+                    emptyBackendSnapshot
+                    oldItems
+                    Nothing
+
+        result <- backend.submitTurn
+            snapshot
+            Nothing
+            [UserMessage "new input"]
+            (const (pure ()))
+
+        fmap (.backendState.backendItems) result
+            `shouldBe`
+                Right
+                    (oldItems <> newItems <> [answer])
 
     it "preserves retained history when only the request has a checkpoint" do
         let retained = turnInputsToItems [UserMessage "retained context"]

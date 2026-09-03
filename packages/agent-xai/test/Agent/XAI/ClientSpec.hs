@@ -229,6 +229,40 @@ spec = do
                 "\"type\":\"context_compaction\""
                 (LBS.toStrict sent.body)
                 `shouldBe` True
+            lookup "x-compaction-at" sent.headers `shouldBe` Nothing
+
+        it "keeps x-compaction-at when a foreign checkpoint is projected out" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "continued")
+                    , completedEvent "resp-foreign-checkpoint" []
+                    ]
+                checkpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "openai-context"
+                        , encryptedContent = Just "opaque-openai"
+                        }
+                request = (helloRequest "continue")
+                    { model = Just "grok-4.6"
+                    , input = Just
+                        (ResponseInputItems
+                            [ checkpoint
+                            , compactionCheckpointOriginItem "openai"
+                            ])
+                    }
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith
+                    options
+                    (xaiCredential "token-a")
+                    request
+                void (expectRight result)
+
+            [sent] <- readIORef recorded
+            lookup "x-compaction-at" sent.headers `shouldBe` Just "400000"
+            BS.isInfixOf
+                "opaque-openai"
+                (LBS.toStrict sent.body)
+                `shouldBe` False
 
         it "does not invent server compaction metadata for unknown Grok models" do
             recorded <- newIORef []
