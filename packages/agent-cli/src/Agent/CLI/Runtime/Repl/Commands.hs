@@ -13,13 +13,11 @@ import Agent.CLI.AgentViewport
     ( AgentViewportEnv(viewportSelect, viewportEntries,
                        viewportSelected) )
 import Agent.CLI.Approval ( setApprovalPolicy, toggleAlwaysApprove )
-import Agent.CLI.Artifact ( fencedCodeBlock, lastDiffBlock )
 import Agent.CLI.Auth ()
 import Agent.CLI.Changelog (loadReleaseNotes)
 import Agent.CLI.Clipboard ( loadImagesFromPastedText )
 import Agent.CLI.Command
-    ( CopyRequest(..),
-      formatSlashHelpWithCatalog,
+    ( formatSlashHelpWithCatalog,
       parseReplLineWithCatalog,
       ReplAction(ReplCommandError, ReplQuit, ReplReload,
                  ReplUpdateAndRestart, ReplPrompt, ReplExpandedPrompt,
@@ -50,18 +48,7 @@ import Agent.CLI.Command.Instructions ( initInstruction )
 import Agent.CLI.Compaction
     ( CompactOutcome(compactSummary, compactBeforeTokens,
                      compactAfterTokens, compactHistory) )
-import Agent.CLI.Config
-    ( HarnessConfig(..)
-    , McpServerConfig(..)
-    , loadHarnessConfig
-    , updateHarnessConfig
-    )
 import Agent.CLI.Context ( formatContextReport )
-import Agent.CLI.Transcript
-    ( assistantResponseBodies
-    , foldTranscriptTurns
-    )
-import qualified Agent.CLI.Transcript as Transcript
 import Agent.Connectivity ()
 import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
@@ -82,11 +69,8 @@ import Agent.CLI.GitDiff
     )
 import Agent.CLI.Input
     ( formatPasteChip,
-      readApprovalLine,
       readChoiceSelection,
-      readChoiceSelectionAt,
       readReplHistory,
-      readModalText,
       submissionPromptText,
       truncateDisplayText,
       ReplLine(ReplText, ReplMeta, ReplEof, ReplQuitInterrupt, ReplCycleMode,
@@ -98,14 +82,12 @@ import Agent.CLI.GatewayClient ( loadGatewayCredential )
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
 import Agent.CLI.Login
-    ( connectProviderAccount
-    , runFullscreenLoginManager
+    ( runFullscreenLoginManager
     , runLoginManager
     )
 import Agent.CLI.Lsp ()
 import Agent.CLI.ManagedTurn ()
 import Agent.CLI.McpManager ( runMcpManager )
-import Agent.CLI.McpOAuth ( loginMcp )
 import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig ()
 import Agent.CLI.Models ()
@@ -151,34 +133,34 @@ import Agent.CLI.Review
     , reviewPrompt
     )
 import Agent.CLI.Runtime.HistorySource ()
-import Agent.CLI.Runtime.MetaConsole
-    ( MetaSecretValue(..)
-    , applyMetaConfigActions
-    , buildMetaContext
-    , isMetaConfigAction
-    , metaConfigRequiresRestart
-    , runMetaPlanner
-    )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ( runSessionRecap )
 import Agent.CLI.Runtime.Repl.Attachments
     ( handleAttachmentAction, handleClipboardInput )
+import Agent.CLI.Runtime.Repl.Context
+    ( ReplHandlerContext(..)
+    , displayReplError
+    , displayReplInfo
+    , requestReplChoice
+    , requestReplText
+    , withReplSuspended
+    )
+import Agent.CLI.Runtime.Repl.MetaConsole ( handleMetaConsoleRequest )
 import Agent.CLI.Runtime.Repl.Selection
-    ( handleSelectionAction, handleSelectionInput, selectRequestedAccount )
+    ( handleSelectionAction, handleSelectionInput )
 import Agent.CLI.Runtime.Repl.Session ( handleSessionAction )
+import Agent.CLI.Runtime.Repl.Transcript
+    ( TranscriptAction(..), handleTranscriptAction )
 import Agent.CLI.Runtime.Repl.Workflow ( handleWorkflowAction )
 import Agent.CLI.Runtime.Types
     ( RunResult(RunEnableCodeMode, RunFreshSession, RunRestart, RunUpdateAndRestart,
                 RunSwitchProvider, RunReload, RunQuit) )
-import Agent.CLI.Secret ( promptSecretLine )
 import Agent.CLI.Session
     ( TranscriptEffect(TranscriptReplace),
       appendTurnWithMetaUpdateIndexed,
       ensureSession,
-      loadSession,
       Persistence(..),
-      PersistenceState(PersistenceActive, PersistencePending),
-      sessionsRoot,
+      PersistenceState(PersistenceActive),
       SessionHandle(sessionMeta, sessionDir),
       SessionMeta(metaId, metaLastResponseId),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
@@ -215,31 +197,19 @@ import Agent.CLI.TUI.App
       commitFullscreenImagePreviews,
       commitFullscreenHistoryTurn,
       emitUiEvent,
-      requestFullscreenChoiceWithBody,
       requestFullscreenDocument,
       requestFullscreenFilterChoice,
-      requestFullscreenSecret,
-      requestFullscreenText,
       queuedFullscreenInputDisplays,
-      setFullscreenImagePreviews,
-      withFullscreenSuspended )
+      setFullscreenImagePreviews )
 import Agent.CLI.TUI.SessionHistory ( sessionHistoryTurn )
 import Agent.CLI.TUI.Types
     ( FullscreenRuntime(runtimeInput)
     , HistoryCommit(..)
     )
 import Agent.CLI.Terminal
-    ( copyTerminalClipboard
-    , formatTerminalCapabilities
+    ( formatTerminalCapabilities
     , resolveColor
     )
-import Agent.CLI.TranscriptExport
-    ( defaultExportFileName
-    , resolveExportPath
-    , saveCopyText
-    , saveTranscriptNoClobber
-    )
-import qualified Agent.CLI.TranscriptExport as TranscriptExport
 import Agent.CLI.Tools ()
 import Agent.CLI.Turn ( runOneTurn )
 import Agent.CLI.Usage ()
@@ -260,7 +230,7 @@ import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient ()
 import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ( toText, unsafeToFilePath )
-import Agent.Provider ( Provider(ClaudeCodeProvider), providerSlug )
+import Agent.Provider ( Provider(ClaudeCodeProvider) )
 import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient ()
 import Agent.Responses.Types ( ResponseCreateParams(model) )
@@ -298,10 +268,10 @@ import Control.Concurrent.STM ()
 import Control.Exception ( AsyncException(UserInterrupt) )
 import Control.Exception.Safe
     ( displayException, finally, throwIO, tryAny, tryIO )
-import Control.Monad ( foldM, forM_, unless, when )
+import Control.Monad ( forM_, when )
 import Data.Foldable ( toList )
 import Data.IORef ( newIORef, readIORef, writeIORef )
-import Data.List ( elemIndex, findIndex )
+import Data.List ( findIndex )
 import Data.Maybe ( fromMaybe, isNothing )
 import Data.Text ( Text )
 import Data.Time.Clock ( getCurrentTime )
@@ -316,14 +286,6 @@ import System.Posix.Files ( getSymbolicLinkStatus )
 import qualified Agent.Responses.GenericClient as GenericResponses
     ()
 import qualified Agent.MCP as MCP
-import qualified Agent.CLI.MetaConsole as Meta
-    ( MetaAction(..)
-    , MetaPlan(..)
-    , formatMetaError
-    , metaPlanMutates
-    , metaPlanPreviews
-    )
-import qualified Data.Map.Strict as Map
 import qualified Agent.OpenAI.Auth as OpenAI ()
 import qualified Agent.OpenRouter as OpenRouter ()
 import qualified Agent.OpenRouter.Usage as OpenRouterUsage ()
@@ -332,7 +294,7 @@ import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text
-    ( intercalate, map, null, pack, replace, strip, toCaseFold, toLower )
+    ( intercalate, null, pack, replace, strip, toCaseFold )
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn, readFile )
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Usage as XAIUsage ()
@@ -359,11 +321,9 @@ handleReplLine
             , sessionProvider = provider
             , sessionPolicy = policyRef
             , sessionPersist = persist
-            , sessionDatabasePool = databasePool
             , sessionPlanMode = planMode
             , sessionProjectRoot = projectRoot
             , sessionCwd = cwd
-            , sessionHome = home
             , sessionTokenProvider = tokenProvider
             , sessionOpenAiPool = openAiPool
             , sessionGatewayModels = gatewayModelsRef
@@ -372,8 +332,6 @@ handleReplLine
             , sessionRefreshSkills = refreshSkills
             , sessionDraft = draftRef
             , sessionPreviewId = previewIdRef
-            , sessionInterrupt = interrupt
-            , sessionLastAssistant = lastAssistantRef
             , sessionTerminal = terminal
             , sessionFullscreen = fullscreen
             , sessionAgentViewport = agentViewport
@@ -456,6 +414,12 @@ handleReplLine
         submitLine slashCatalog skillInvocations
             continue stdoutColor False line
   where
+    handlerContext =
+        ReplHandlerContext
+            { handlerSessionEnv = env
+            , handlerContinueWith = continueWith
+            , handlerStdoutColor = stdoutColor
+            }
     submitLine
             slashCatalog skillInvocations
             continue color pasted line = do
@@ -599,9 +563,9 @@ handleReplLine
                                         Text.putStrLn
                                             (colorizeGitDiff color diff)
                                     continue
-                    ReplExport maybePath -> do
-                        exportTranscript maybePath
-                        continue
+                    ReplExport maybePath ->
+                        handleTranscriptAction handlerContext
+                            (ExportTranscript maybePath)
                     ReplPermissions
                         | provider == ClaudeCodeProvider -> do
                             let message =
@@ -761,70 +725,18 @@ handleReplLine
                     action@ReplGoalSet{} -> handleWorkflowAction env submitExpandedTurn color continue action
                     action@ReplWorkflowRuns -> handleWorkflowAction env submitExpandedTurn color continue action
                     action@ReplWorkflowManage{} -> handleWorkflowAction env submitExpandedTurn color continue action
-                    ReplCopy request -> do
-                        loadAssistantResponses >>= \case
-                            Left err ->
-                                displayError err do
-                                    color <- resolveColor stderr
-                                    Text.hPutStrLn stderr
-                                        (roleError color err)
-                            Right responses ->
-                                case listAt
-                                    (request.copyResponseIndex - 1)
-                                    responses of
-                                    Nothing -> do
-                                        let available = length responses
-                                            responseNoun
-                                                | available == 1 =
-                                                    "response is"
-                                                | otherwise =
-                                                    "responses are"
-                                            message
-                                                | available == 0 =
-                                                    "no assistant response to copy"
-                                                | otherwise =
-                                                    "only "
-                                                        <> Text.pack
-                                                            (show available)
-                                                        <> " assistant "
-                                                        <> responseNoun
-                                                        <> " available to copy"
-                                        displayError message do
-                                            color <- resolveColor stderr
-                                            Text.hPutStrLn stderr
-                                                (roleError color message)
-                                    Just answer ->
-                                        copyAssistantResponse request answer
-                        continue
-                    ReplCopyCode index -> do
-                        answer <- readIORef lastAssistantRef
-                        let label =
-                                "code block " <> Text.pack (show index)
-                        copyCommand
-                            label
-                            (label <> " was not found")
-                            (answer >>= fencedCodeBlock index)
-                        continue
-                    ReplCopyDiff -> do
-                        answer <- readIORef lastAssistantRef
-                        copyCommand
-                            "diff block"
-                            "no diff block was found"
-                            (answer >>= lastDiffBlock)
-                        continue
-                    ReplCopyPath -> do
-                        copyCommand
-                            "worktree path"
-                            "worktree path is unavailable"
-                            (Just (toText cwd))
-                        continue
-                    ReplCopySession -> do
-                        sessionId <- currentSessionId persist
-                        copyCommand
-                            "session id"
-                            "this session has no persisted id yet"
-                            sessionId
-                        continue
+                    ReplCopy request ->
+                        handleTranscriptAction handlerContext
+                            (CopyResponse request)
+                    ReplCopyCode index ->
+                        handleTranscriptAction handlerContext
+                            (CopyCodeBlock index)
+                    ReplCopyDiff ->
+                        handleTranscriptAction handlerContext CopyDiffBlock
+                    ReplCopyPath ->
+                        handleTranscriptAction handlerContext CopyWorktreePath
+                    ReplCopySession ->
+                        handleTranscriptAction handlerContext CopySessionId
                     ReplDesktop -> do
                         currentSessionId persist >>= \case
                             Nothing -> do
@@ -1042,85 +954,11 @@ handleReplLine
                                                     (historyLabel prompt))
                                             prompts
                                 maybe continue continueWith selected
-                    ReplTranscript -> do
-                        outcome <- case persist of
-                            PersistenceDisabled ->
-                                pure (Right "No conversation transcript is available yet.")
-                            PersistenceEnabled slotRef ->
-                                readIORef slotRef >>= \case
-                                    PersistencePending _ _ _ ->
-                                        pure (Right "No conversation transcript is available yet.")
-                                    PersistenceActive handle ->
-                                        loadSession
-                                            env.sessionDatabasePool
-                                            (sessionsRoot env.sessionHome)
-                                            handle.sessionMeta.metaId
-                                            >>= \case
-                                                Left err -> pure (Left err)
-                                                Right (meta, turns) ->
-                                                    let blocks =
-                                                            foldTranscriptTurns
-                                                                (zip [0 ..] turns)
-                                                    in if null blocks
-                                                        then pure (Right "No conversation transcript is available yet.")
-                                                        else
-                                                            legacy
-                                                                (openPager
-                                                                    (Transcript.renderTranscriptMarkdown
-                                                                        meta
-                                                                        blocks))
-                                                                >>= \case
-                                                                    Left err -> pure (Left err)
-                                                                    Right () -> pure (Right "")
-                        case outcome of
-                            Left err -> do
-                                displayError err $
-                                    Text.hPutStrLn stderr
-                                        (roleError color err)
-                            Right message
-                                | Text.null message -> pure ()
-                                | otherwise ->
-                                    displayInfo message (Text.putStrLn message)
-                        continue
+                    ReplTranscript ->
+                        handleTranscriptAction handlerContext ShowTranscript
                     ReplFind maybeQuery ->
-                        loadPersistedTranscript >>= \case
-                            Left err -> do
-                                displayError err $
-                                    Text.hPutStrLn stderr
-                                        (roleError color err)
-                                continue
-                            Right Nothing -> do
-                                let message =
-                                        "No conversation transcript is available yet."
-                                displayInfo message (Text.putStrLn message)
-                                continue
-                            Right (Just (meta, blocks)) -> do
-                                let query = fromMaybe "" maybeQuery
-                                    matches =
-                                        Transcript.searchTranscriptBlocks
-                                            query
-                                            blocks
-                                if null matches
-                                    then do
-                                        let message =
-                                                "No transcript blocks matched “"
-                                                    <> query
-                                                    <> "”."
-                                        displayInfo message
-                                            (Text.putStrLn message)
-                                    else
-                                        legacy
-                                            (openPager
-                                                (Transcript.renderTranscriptMarkdown
-                                                    meta
-                                                    matches))
-                                            >>= \case
-                                                Left err ->
-                                                    displayError err $
-                                                        Text.hPutStrLn stderr
-                                                            (roleError color err)
-                                                Right () -> pure ()
-                                continue
+                        handleTranscriptAction handlerContext
+                            (FindTranscript maybeQuery)
                     ReplEditPrompt -> do
                         legacy editPrompt >>= \case
                             Left err -> do
@@ -1241,338 +1079,17 @@ handleReplLine
                 fullscreenEvent (UiUserSubmitted original)
                 result <- runOneTurn env original skillInputs
                 finishTurn False result
-    runMetaConsoleRequest rawRequest
-        | Text.null request = do
-            displayError "Meta Console request must not be empty" do
-                color <- resolveColor stderr
-                Text.hPutStrLn stderr
-                    (roleError color
-                        "Meta Console request must not be empty")
-            continue
-        | otherwise =
-            loadHarnessConfig env.sessionHome >>= \case
-                Left err -> metaFailure err
-                Right config -> do
-                    context <- buildMetaContext env config
-                    obtainMetaPlan context request (0 :: Int) >>= \case
-                        Left err -> metaFailure err
-                        Right Nothing -> do
-                            displayInfo "Meta Console cancelled" do
-                                color <- resolveColor stderr
-                                Text.hPutStrLn stderr
-                                    (roleMuted color
-                                        "Meta Console cancelled")
-                            continue
-                        Right (Just plan) -> do
-                            approved <- approveMetaPlan plan
-                            if not approved
-                                then do
-                                    displayInfo
-                                        "Meta Console changes cancelled"
-                                        do
-                                            color <-
-                                                resolveColor stderr
-                                            Text.hPutStrLn stderr
-                                                (roleMuted color
-                                                    "Meta Console changes cancelled")
-                                    continue
-                                else
-                                    applyMetaPlan config plan
-      where
-        request = Text.strip rawRequest
-    obtainMetaPlan context original clarificationCount =
-        withReplActivity "Meta Console · interpreting…" $
-            runMetaPlanner env context original >>= \case
-                Left err ->
-                    pure (Left (Meta.formatMetaError err))
-                Right plan ->
-                    case plan.metaActions of
-                        [Meta.MetaClarify question]
-                            | clarificationCount >= 2 ->
-                                pure
-                                    (Left
-                                        "Meta Console still needs clarification after two replies")
-                            | otherwise ->
-                                askMetaClarification question >>= \case
-                                    Nothing -> pure (Right Nothing)
-                                    Just answer ->
-                                        obtainMetaPlan
-                                            context
-                                            (original
-                                                <> "\n\nClarification question: "
-                                                <> question
-                                                <> "\nClarification answer: "
-                                                <> answer)
-                                            (clarificationCount + 1)
-                        _ -> pure (Right (Just plan))
-    askMetaClarification question =
-        case fullscreen of
-            Just runtime ->
-                requestFullscreenText
-                    runtime
-                    "Meta Console clarification"
-                    question
-                    ""
-            Nothing ->
-                readApprovalLine
-                    ("\nMeta Console needs clarification:\n"
-                        <> safeMetaText question
-                        <> "\nanswer> ")
-    approveMetaPlan plan
-        | not (Meta.metaPlanMutates plan) = pure True
-        | otherwise =
-            readIORef policyRef >>= \case
-                ApproveAll -> do
-                    showMetaPreview "Meta Console will apply" plan
-                    pure True
-                DenyMutating -> do
-                    displayError
-                        "Meta Console changes are blocked by the current deny-mutations policy"
-                        do
-                            color <- resolveColor stderr
-                            Text.hPutStrLn stderr
-                                (roleError color
-                                    "Meta Console changes are blocked by the current deny-mutations policy")
-                    pure False
-                PromptMutating ->
-                    case fullscreen of
-                        Just runtime ->
-                            requestFullscreenChoiceWithBody
-                                runtime
-                                "Apply Meta Console changes?"
-                                (metaPreviewBody plan)
-                                0
-                                [ ( "Apply changes"
-                                  , "Execute only the typed actions shown above"
-                                  )
-                                , ( "Cancel"
-                                  , "Leave configuration unchanged"
-                                  )
-                                ]
-                                >>= pure . (== Just 0)
-                        Nothing -> do
-                            showMetaPreview "Meta Console proposes" plan
-                            readApprovalLine
-                                "Apply these changes? [y/N] "
-                                >>= pure . maybe False isYes
-    showMetaPreview heading plan =
-        displayInfo (heading <> "\n" <> metaPreviewBody plan) do
-            color <- resolveColor stderr
-            Text.hPutStrLn stderr
-                (roleMuted color
-                    (heading <> "\n" <> metaPreviewBody plan))
-    metaPreviewBody plan =
-        safeMetaText plan.metaSummary
-            <> "\n"
-            <> Text.intercalate
-                "\n"
-                [ Text.pack (show index)
-                    <> ". "
-                    <> safeMetaText preview
-                | (index, preview) <-
-                    zip [(1 :: Int) ..] (Meta.metaPlanPreviews plan)
-                ]
-    applyMetaPlan initial plan =
-        collectMetaSecrets plan.metaActions >>= \case
-            Left err -> metaFailure err
-            Right secrets -> do
-                configResult <-
-                    if any isMetaConfigAction plan.metaActions
-                        then
-                            updateHarnessConfig
-                                env.sessionHome
-                                (applyMetaConfigActions
-                                    secrets
-                                    plan.metaActions)
-                        else pure (Right initial)
-                case configResult of
-                    Left err -> metaFailure err
-                    Right appliedConfig ->
-                        executeMetaHostActions
-                            appliedConfig
-                            plan.metaActions
-                            >>= \case
-                                Left err -> metaFailure err
-                                Right terminalResult -> do
-                                    let success =
-                                            (if Meta.metaPlanMutates plan
-                                                then "Meta Console applied\n"
-                                                else "Meta Console\n")
-                                                <> metaPreviewBody plan
-                                    displayInfo success do
-                                        color <- resolveColor stderr
-                                        Text.hPutStrLn stderr
-                                            (roleSuccess color
-                                                (glyphOk <> success))
-                                    case terminalResult of
-                                        Just result -> pure result
-                                        Nothing
-                                            | metaPlanNeedsRestart
-                                                plan.metaActions ->
-                                                requestMetaRestart
-                                                    fullscreen
-                                                    persist
-                                            | otherwise -> continue
-    collectMetaSecrets =
-        foldM collectOneSecret (Right [])
-      where
-        collectOneSecret (Left err) _ = pure (Left err)
-        collectOneSecret (Right values) action = case action of
-            Meta.MetaSetMcpSecretEnv server key ->
-                promptMetaSecret
-                    ("MCP " <> server <> " · " <> key)
-                    ("Enter the value for environment variable "
-                        <> key
-                        <> " on MCP server "
-                        <> server
-                        <> ". It stays local and is never sent to the model.")
-                    >>= \case
-                        Nothing ->
-                            pure
-                                (Left
-                                    ("secret input for MCP server '"
-                                        <> server
-                                        <> "' was cancelled"))
-                        Just value ->
-                            pure
-                                (Right
-                                    (values
-                                        <> [ MetaMcpSecretValue
-                                                server key value
-                                           ]))
-            Meta.MetaSetLspSecretEnv server key ->
-                promptMetaSecret
-                    ("LSP " <> server <> " · " <> key)
-                    ("Enter the value for environment variable "
-                        <> key
-                        <> " on LSP server "
-                        <> server
-                        <> ". It stays local and is never sent to the model.")
-                    >>= \case
-                        Nothing ->
-                            pure
-                                (Left
-                                    ("secret input for LSP server '"
-                                        <> server
-                                        <> "' was cancelled"))
-                        Just value ->
-                            pure
-                                (Right
-                                    (values
-                                        <> [ MetaLspSecretValue
-                                                server key value
-                                           ]))
-            _ -> pure (Right values)
-    promptMetaSecret title body =
-        case fullscreen of
-            Just runtime ->
-                requestFullscreenSecret runtime title body
-            Nothing ->
-                promptSecretLine
-                    env.sessionEscPaused
-                    body
-                    (Just
-                        "Meta Console configuration; the value is written only to the local config file")
-    executeMetaHostActions config =
-        foldM (executeOneMetaHostAction config) (Right Nothing)
-    executeOneMetaHostAction _ (Left err) _ = pure (Left err)
-    executeOneMetaHostAction _ result@(Right (Just _)) _ = pure result
-    executeOneMetaHostAction config (Right Nothing) action = case action of
-        Meta.MetaConnectAccount requestedProvider -> do
-            color <- resolveColor stderr
-            tryAny
-                (legacy
-                    (connectProviderAccount color requestedProvider))
-                >>= \case
-                    Left err ->
-                        pure
-                            (Left
-                                ("Could not connect "
-                                    <> providerSlug requestedProvider
-                                    <> ": "
-                                    <> Text.pack (displayException err)))
-                    Right Nothing ->
-                        pure
-                            (Left
-                                ("Connecting "
-                                    <> providerSlug requestedProvider
-                                    <> " was cancelled or did not complete"))
-                    Right (Just _) -> pure (Right Nothing)
-        Meta.MetaSelectAccount requestedProvider selector ->
-            selectRequestedAccount env requestedProvider selector
-        Meta.MetaLoginMcpOAuth name ->
-            case Map.lookup name config.configMcpServers >>= (.mcpUrl) of
-                Nothing ->
-                    pure
-                        (Left
-                            ("Remote MCP server '"
-                                <> name
-                                <> "' is not configured"))
-                Just url ->
-                    tryAny (legacy (loginMcp url)) >>= \case
-                        Left _ ->
-                            pure
-                                (Left
-                                    "MCP OAuth login failed; the login flow did not complete")
-                        Right () -> pure (Right Nothing)
-        Meta.MetaSessionCommand command ->
-            runMetaSessionCommand command
-        Meta.MetaInform _ -> pure (Right Nothing)
-        _ -> pure (Right Nothing)
-    runMetaSessionCommand command =
-        case parseReplLineWithCatalog slashCatalog command of
-            action
-                | safeMetaSessionAction action -> do
-                    result <-
-                        submitLine
-                            slashCatalog
-                            skillInvocations
-                            (pure RunQuit)
-                            stdoutColor
-                            False
-                            command
-                    pure $
-                        Right case result of
-                            RunQuit -> Nothing
-                            terminalResult -> Just terminalResult
-            _ ->
-                pure
-                    (Left
-                        ("Meta Console rejected unsupported session command: "
-                            <> command))
-    safeMetaSessionAction = \case
-        ReplSetEffort{} -> True
-        ReplToggleFast -> True
-        ReplSetModel{} -> True
-        ReplSetShell{} -> True
-        ReplToggleAlwaysApprove -> True
-        ReplSetAgentLimit{} -> True
-        ReplEnableCodeMode -> True
-        ReplSkills True -> True
-        _ -> False
-    metaPlanNeedsRestart actions =
-        metaConfigRequiresRestart actions
-            || any
-                (\case
-                    Meta.MetaLoginMcpOAuth{} -> True
-                    _ -> False)
-                actions
-    metaFailure err = do
-        let safeError = safeMetaText err
-        displayError safeError do
-            color <- resolveColor stderr
-            Text.hPutStrLn stderr (roleError color safeError)
-        continue
-    isYes =
-        (`elem` ["y", "yes"])
-            . Text.toLower
-            . Text.strip
-    safeMetaText =
-        Text.map
-            (\character ->
-                if character < ' ' && character `notElem` ['\n', '\t']
-                    then ' '
-                    else character)
+    runMetaConsoleRequest =
+        handleMetaConsoleRequest
+            handlerContext
+            slashCatalog
+            (submitLine
+                slashCatalog
+                skillInvocations
+                (pure RunQuit)
+                stdoutColor
+                False)
+
     continue = continueWith ""
     chooseReviewTarget =
         requestChoice
@@ -1659,134 +1176,8 @@ handleReplLine
                                     (Right
                                         (ReviewCustom
                                             <$> nonBlank instructions))
-    exportTranscript maybePath =
-        loadActiveTranscript >>= \case
-            Left err ->
-                displayError err $
-                    Text.hPutStrLn stderr (roleError stdoutColor err)
-            Right (sessionId, turns) -> do
-                let markdown = TranscriptExport.renderTranscriptMarkdown turns
-                    defaultPath = defaultExportFileName sessionId
-                case maybePath of
-                    Just path -> saveExport markdown path
-                    Nothing ->
-                        requestChoice
-                            "Export conversation"
-                            "Copy the visible conversation or save it as Markdown."
-                            0
-                            [ ( "Copy Markdown to clipboard"
-                              , "Copy the current visible transcript"
-                              )
-                            , ( "Save Markdown to a file"
-                              , "Create a new file without overwriting"
-                              )
-                            ] >>= \case
-                                Nothing -> pure ()
-                                Just 0 ->
-                                    copyCommand
-                                        "conversation Markdown"
-                                        "conversation is unavailable"
-                                        (Just markdown)
-                                Just _ ->
-                                    requestText
-                                        "Export path"
-                                        "Relative paths use the current working directory. Existing files are never replaced."
-                                        defaultPath >>= mapM_
-                                            (\entered ->
-                                                forM_
-                                                    (nonBlank entered)
-                                                    (saveExport markdown))
-    loadActiveTranscript =
-        case persist of
-            PersistenceDisabled ->
-                pure
-                    (Left
-                        "transcript export requires a persisted session")
-            PersistenceEnabled slotRef ->
-                readIORef slotRef >>= \case
-                    PersistencePending{} ->
-                        pure
-                            (Left
-                                "transcript export requires an active persisted session")
-                    PersistenceActive handle ->
-                        loadSession
-                            databasePool
-                            (sessionsRoot home)
-                            handle.sessionMeta.metaId >>= \case
-                                Left err -> pure (Left err)
-                                Right (_, turns) ->
-                                    pure
-                                        (Right
-                                            ( handle.sessionMeta.metaId
-                                            , turns
-                                            ))
-    saveExport markdown rawPath =
-        resolveExportPath cwd rawPath >>= \case
-            Left err ->
-                displayError err $
-                    Text.hPutStrLn stderr
-                        (roleError stdoutColor err)
-            Right path ->
-                saveTranscriptNoClobber path markdown >>= \case
-                    Left err -> do
-                        let message =
-                                "could not export to "
-                                    <> toText path
-                                    <> ": "
-                                    <> err
-                        displayError message $
-                            Text.hPutStrLn stderr
-                                (roleError stdoutColor message)
-                    Right () -> do
-                        let message =
-                                "exported conversation to " <> toText path
-                        displayInfo message $
-                            Text.hPutStrLn stderr
-                                (roleSuccess stdoutColor
-                                    (glyphOk <> message))
-    requestChoice title body initial rows
-        | null rows = pure Nothing
-        | otherwise =
-            case fullscreen of
-                Just runtime ->
-                    requestFullscreenChoiceWithBody
-                        runtime
-                        title
-                        body
-                        (max 0 (min (length rows - 1) initial))
-                        rows
-                Nothing -> do
-                    color <- resolveColor stderr
-                    Text.hPutStrLn stderr
-                        (roleMuted color
-                            (Text.intercalate
-                                "\n"
-                                (filter
-                                    (not . Text.null)
-                                    [title, body])))
-                    let labels =
-                            [ if Text.null detail
-                                then label
-                                else label <> " — " <> detail
-                            | (label, detail) <- rows
-                            ]
-                    selected <-
-                        readChoiceSelectionAt initial
-                            (\active label ->
-                                if active
-                                    then roleSuccess color label
-                                    else roleMuted color label)
-                            labels
-                    pure (selected >>= (`elemIndex` labels))
-    requestText title body initial =
-        case fullscreen of
-            Just runtime ->
-                requestFullscreenText runtime title body initial
-            Nothing -> do
-                color <- resolveColor stderr
-                unless (Text.null (Text.strip body)) $
-                    Text.hPutStrLn stderr (roleMuted color body)
-                readModalText interrupt (title <> ": ") initial
+    requestChoice = requestReplChoice handlerContext
+    requestText = requestReplText handlerContext
     approvalPolicyRows =
         [ (label, detail)
         | (_, label, detail) <- approvalPolicyOptions
@@ -1811,9 +1202,7 @@ handleReplLine
         | otherwise = Just stripped
       where
         stripped = Text.strip value
-    legacy action = case fullscreen of
-        Nothing -> action
-        Just runtime -> withFullscreenSuspended runtime action
+    legacy = withReplSuspended handlerContext
     fullscreenEvent event = case fullscreen of
         Nothing -> pure ()
         Just runtime -> emitUiEvent runtime event
@@ -1821,12 +1210,8 @@ handleReplLine
         forM_ fullscreen \runtime ->
             readLiveAttachments conversationRef
                 >>= setFullscreenImagePreviews runtime
-    displayInfo message minimalAction = case fullscreen of
-        Nothing -> minimalAction
-        Just runtime -> emitUiEvent runtime (UiSystemMessage message)
-    displayError message minimalAction = case fullscreen of
-        Nothing -> minimalAction
-        Just runtime -> emitUiEvent runtime (UiErrorMessage message)
+    displayInfo = displayReplInfo handlerContext
+    displayError = displayReplError handlerContext
     withReplActivity message action = do
         case fullscreen of
             Nothing ->
@@ -1838,78 +1223,6 @@ handleReplLine
             case fullscreen of
                 Nothing -> clearThinking render
                 Just runtime -> emitUiEvent runtime (UiSetNotice Nothing)
-    loadAssistantResponses =
-        loadPersistedTranscript >>= \case
-            Left err -> pure (Left err)
-            Right persisted -> do
-                latest <- readIORef lastAssistantRef
-                let responses =
-                        maybe
-                            []
-                            (assistantResponseBodies . snd)
-                            persisted
-                pure $
-                    Right $
-                        if null responses
-                            then maybe [] pure latest
-                            else responses
-    copyAssistantResponse request answer = do
-        let index = request.copyResponseIndex
-            label
-                | index == 1 = "last response"
-                | otherwise =
-                    "response " <> Text.pack (show index)
-        case request.copyDestination of
-            Nothing ->
-                copyCommand
-                    label
-                    "no assistant response to copy"
-                    (Just answer)
-            Just rawPath ->
-                resolveExportPath cwd rawPath >>= \case
-                    Left err ->
-                        displayError err do
-                            color <- resolveColor stderr
-                            Text.hPutStrLn stderr
-                                (roleError color err)
-                    Right path ->
-                        saveCopyText path answer >>= \case
-                            Left err ->
-                                displayError err do
-                                    color <- resolveColor stderr
-                                    Text.hPutStrLn stderr
-                                        (roleError color err)
-                            Right () -> do
-                                let message =
-                                        "copied "
-                                            <> label
-                                            <> " to "
-                                            <> toText path
-                                displayInfo message do
-                                    color <- resolveColor stderr
-                                    Text.hPutStrLn stderr
-                                        (roleSuccess color
-                                            (glyphOk <> message))
-    copyCommand label missing payload = case payload of
-        Nothing ->
-            displayError missing do
-                color <- resolveColor stderr
-                Text.hPutStrLn stderr (roleError color missing)
-        Just value -> do
-            copied <- copyTerminalClipboard terminal stdout value
-            if copied
-                then
-                    let message = "copied " <> label
-                    in displayInfo message do
-                        color <- resolveColor stderr
-                        Text.hPutStrLn stderr
-                            (roleSuccess color (glyphOk <> message))
-                else
-                    displayError "terminal clipboard is unavailable" do
-                        color <- resolveColor stderr
-                        Text.hPutStrLn stderr
-                            (roleError color
-                                "terminal clipboard is unavailable")
     editPrompt = do
         initialDraft <- readIORef draftRef
         outcome <- tryAny do
@@ -1931,45 +1244,6 @@ handleReplLine
             Left exception ->
                 Left
                     ( "could not edit prompt: "
-                        <> Text.pack (show exception)
-                    )
-            Right result -> result
-
-    loadPersistedTranscript =
-        case persist of
-            PersistenceDisabled -> pure (Right Nothing)
-            PersistenceEnabled slotRef ->
-                readIORef slotRef >>= \case
-                    PersistencePending{} -> pure (Right Nothing)
-                    PersistenceActive handle ->
-                        loadSession
-                            databasePool
-                            (sessionsRoot home)
-                            handle.sessionMeta.metaId
-                            >>= pure . fmap
-                                (\(meta, turns) ->
-                                    let blocks =
-                                            foldTranscriptTurns
-                                                (zip [0 ..] turns)
-                                    in if null blocks
-                                        then Nothing
-                                        else Just (meta, blocks))
-
-    openPager markdown = do
-        outcome <- tryAny do
-            resolveExternalProgram
-                [("PAGER", "$PAGER")]
-                "less -R" >>= \case
-                    Left err -> pure (Left err)
-                    Right program ->
-                        withTemporaryTextFile
-                            "agent-transcript-"
-                            markdown
-                            (runExternalProgramOnFile program)
-        pure $ case outcome of
-            Left exception ->
-                Left
-                    ( "could not open transcript: "
                         <> Text.pack (show exception)
                     )
             Right result -> result
@@ -2076,29 +1350,6 @@ requestMcpRestart fullscreen persist = do
         PersistenceEnabled slotRef -> do
             handle <- ensureSession slotRef
             report "restarting MCP servers…"
-            pure (RunRestart handle.sessionMeta.metaId)
-
-requestMetaRestart
-    :: Maybe FullscreenRuntime
-    -> Persistence
-    -> IO RunResult
-requestMetaRestart fullscreen persist = do
-    color <- resolveColor stderr
-    let report message =
-            case fullscreen of
-                Nothing ->
-                    putTextLn stderr
-                        (roleMuted color (glyphSession <> message))
-                Just runtime ->
-                    emitUiEvent runtime (UiSystemMessage message)
-    case persist of
-        PersistenceDisabled -> do
-            report
-                "restart the agent to apply Meta Console changes"
-            pure RunQuit
-        PersistenceEnabled slotRef -> do
-            handle <- ensureSession slotRef
-            report "restarting to apply Meta Console changes…"
             pure (RunRestart handle.sessionMeta.metaId)
 
 requestGatewayRestart

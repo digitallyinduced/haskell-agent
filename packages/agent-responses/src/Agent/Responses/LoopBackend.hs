@@ -961,8 +961,8 @@ codexRateLimitsWarning limits =
 
 -- | Stateful projection of one streamed response attempt into loop events.
 --
--- On top of 'streamEventToLoopEventWithRawReasoning' this surfaces streamed
--- shell arguments as a repaintable command preview and reports coarse activity
+-- On top of 'streamEventToLoopEventWithRawReasoning' this surfaces selected
+-- streamed arguments as repaintable tool previews and reports coarse activity
 -- for other tools. It also warns when a model gets stuck in a degenerate
 -- repetition loop inside one call (observed as multi-minute 128k-output-token
 -- samples whose arguments repeat @\\u0000@ or a hallucinated path segment).
@@ -1018,10 +1018,18 @@ data ToolArgumentStreamState = ToolArgumentStreamState
     , toolCallsById :: !(Map Text ToolCall)
     , currentToolCall :: !(Maybe ToolCall)
     , shellPreviewsByCallId :: !(Map Text Text)
+    , rawPreviewsByCallId :: !(Map Text RawArgumentPreview)
     , currentToolName :: !(Maybe Text)
     , streamedArgumentChars :: !Int
     , announcedArgumentChars :: !Int
     , warnedArgumentChars :: !Int
+    }
+
+data RawArgumentPreview = RawArgumentPreview
+    { publishedRawArguments :: !Text
+    , pendingRawArgumentChunks :: ![Text]
+    , pendingRawArgumentChars :: !Int
+    , retainedRawArgumentChars :: !Int
     }
 
 emptyToolArgumentStreamState :: ToolArgumentStreamState
@@ -1030,6 +1038,7 @@ emptyToolArgumentStreamState = ToolArgumentStreamState
     , toolCallsById = Map.empty
     , currentToolCall = Nothing
     , shellPreviewsByCallId = Map.empty
+    , rawPreviewsByCallId = Map.empty
     , currentToolName = Nothing
     , streamedArgumentChars = 0
     , announcedArgumentChars = 0
@@ -1089,7 +1098,7 @@ announceToolCall maybeCall name identities state =
         , currentToolName = Just name
         }
     , [ ActivityUpdated (writingToolCallActivity name Nothing)
-      | not (isLiveShellTool name)
+      | not (isLiveArgumentTool name)
       ]
     )
 
@@ -1116,10 +1125,20 @@ resolveToolCall identities state =
   where
     firstJust = foldr (<|>) Nothing
 
--- Keep enough raw arguments to render a useful one-line shell preview without
--- accumulating an unbounded repeated strict Text value for runaway calls.
-liveToolArgumentPrefixChars :: Int
-liveToolArgumentPrefixChars = 4096
+-- Keep live previews useful without retaining unbounded repeated strict Text
+-- values for runaway calls. Shell previews only need one command line, while
+-- apply_patch needs enough source to show a representative multi-file diff.
+liveShellArgumentPrefixChars :: Int
+liveShellArgumentPrefixChars = 4096
+
+liveRawArgumentPrefixChars :: Int
+liveRawArgumentPrefixChars = 64 * 1024
+
+-- Publish the first raw fragment immediately, then batch very small provider
+-- deltas. Rebuilding a cumulative strict Text for every token is quadratic
+-- and can also make terminal repainting dominate a long patch stream.
+liveRawArgumentPublishChunkChars :: Int
+liveRawArgumentPublishChunkChars = 256
 
 updateToolArguments
     :: [Maybe Text]
@@ -1133,6 +1152,8 @@ updateToolArguments identities delta state =
             Just call
                 | isLiveShellTool call.name ->
                     updateLiveShellCall call delta state
+                | isLiveRawArgumentTool call.name ->
+                    updateLiveRawCall call delta state
             _ -> (state, [])
         (counted, activityEvents) =
             countToolArgumentChars name (Text.length delta) withDraft
@@ -1145,13 +1166,11 @@ updateLiveShellCall
     -> (ToolArgumentStreamState, [LoopEvent])
 updateLiveShellCall call delta state =
     let rawArguments =
-            Text.take liveToolArgumentPrefixChars (call.arguments <> delta)
+            appendArgumentPrefix
+                liveShellArgumentPrefixChars
+                call.arguments
+                delta
         updatedCall = withToolArguments call rawArguments
-        updatedCalls =
-            Map.map
-                (\known ->
-                    if known.callId == call.callId then updatedCall else known)
-                state.toolCallsById
         maybeCommand = jsonTextFieldPartial "command" rawArguments
         preview = Text.takeWhile (/= '\n') <$> maybeCommand
         previousPreview = Map.lookup call.callId state.shellPreviewsByCallId
@@ -1163,10 +1182,8 @@ updateLiveShellCall call delta state =
                 Text.decodeUtf8
                     (LBS.toStrict
                         (Aeson.encode (Aeson.object ["command" Aeson..= command])))
-        next = state
-            { toolCallsById = updatedCalls
-            , currentToolCall = Just updatedCall
-            , shellPreviewsByCallId =
+        next = (trackUpdatedToolCall updatedCall state)
+            { shellPreviewsByCallId =
                 maybe state.shellPreviewsByCallId
                     (\value -> Map.insert call.callId value
                         state.shellPreviewsByCallId)
@@ -1179,6 +1196,103 @@ updateLiveShellCall call delta state =
       , command <- maybeToList preview
       ]
     )
+
+updateLiveRawCall
+    :: ToolCall
+    -> Text
+    -> ToolArgumentStreamState
+    -> (ToolArgumentStreamState, [LoopEvent])
+updateLiveRawCall call delta state =
+    let preview = Map.findWithDefault
+            (initialRawArgumentPreview call)
+            call.callId
+            state.rawPreviewsByCallId
+        room =
+            liveRawArgumentPrefixChars - preview.retainedRawArgumentChars
+        retainedDelta = Text.copy (Text.take room delta)
+        retainedDeltaChars = Text.length retainedDelta
+        pendingChars =
+            preview.pendingRawArgumentChars + retainedDeltaChars
+        withDelta = preview
+            { pendingRawArgumentChunks =
+                [retainedDelta | retainedDeltaChars > 0]
+                    <> preview.pendingRawArgumentChunks
+            , pendingRawArgumentChars = pendingChars
+            , retainedRawArgumentChars =
+                preview.retainedRawArgumentChars + retainedDeltaChars
+            }
+        shouldPublish =
+            retainedDeltaChars > 0
+                && ( Text.null preview.publishedRawArguments
+                    || pendingChars >= liveRawArgumentPublishChunkChars
+                    || withDelta.retainedRawArgumentChars
+                        == liveRawArgumentPrefixChars
+                   )
+        rawArguments =
+            preview.publishedRawArguments
+                <> Text.concat (reverse withDelta.pendingRawArgumentChunks)
+        published = withDelta
+            { publishedRawArguments = rawArguments
+            , pendingRawArgumentChunks = []
+            , pendingRawArgumentChars = 0
+            }
+        nextPreview = if shouldPublish then published else withDelta
+        withPreview = state
+            { rawPreviewsByCallId =
+                Map.insert call.callId nextPreview state.rawPreviewsByCallId
+            }
+        updatedCall = withToolArguments call rawArguments
+    in if shouldPublish
+        then
+            ( trackUpdatedToolCall updatedCall withPreview
+            , [ToolArgumentsUpdated updatedCall]
+            )
+        else (withPreview, [])
+
+initialRawArgumentPreview :: ToolCall -> RawArgumentPreview
+initialRawArgumentPreview call =
+    let initial =
+            Text.copy
+                (Text.take liveRawArgumentPrefixChars call.arguments)
+    in RawArgumentPreview
+        { publishedRawArguments = initial
+        , pendingRawArgumentChunks = []
+        , pendingRawArgumentChars = 0
+        , retainedRawArgumentChars = Text.length initial
+        }
+
+trackUpdatedToolCall
+    :: ToolCall
+    -> ToolArgumentStreamState
+    -> ToolArgumentStreamState
+trackUpdatedToolCall updatedCall state =
+    state
+        { toolCallsById =
+            Map.map
+                (\known ->
+                    if known.callId == updatedCall.callId
+                        then updatedCall
+                        else known)
+                state.toolCallsById
+        , currentToolCall = Just updatedCall
+        }
+
+appendArgumentPrefix :: Int -> Text -> Text -> Text
+appendArgumentPrefix limit previous delta
+    | room <= 0 = previous
+    | Text.null previous = retainedDelta
+    | otherwise = previous <> retainedDelta
+  where
+    room = limit - Text.length previous
+    retainedDelta = Text.copy (Text.take room delta)
+
+isLiveArgumentTool :: Text -> Bool
+isLiveArgumentTool name =
+    isLiveShellTool name || isLiveRawArgumentTool name
+
+isLiveRawArgumentTool :: Text -> Bool
+isLiveRawArgumentTool name =
+    canonicalToolName name `elem` ["apply_patch"]
 
 isLiveShellTool :: Text -> Bool
 isLiveShellTool name =
@@ -1222,7 +1336,7 @@ countToolArgumentChars name deltaChars state =
         }
     , [ ActivityUpdated (writingToolCallActivity name (Just total))
       | announce
-      , not (isLiveShellTool name)
+      , not (isLiveArgumentTool name)
       ]
         <> [ WarningRaised (runawayToolArgumentWarning name total)
            | warn

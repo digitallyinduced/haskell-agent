@@ -169,17 +169,7 @@ reduceUi event state = case event of
             { uiContextTokens = tokens
             , uiContextWindow = contextWindow
             }
-    UiSetAwaitingInput awaiting ->
-        (if awaiting then finalizeStreams state else state)
-            { uiAwaitingInput = awaiting
-            , uiRunning = if awaiting then False else state.uiRunning
-            , uiGenerating =
-                if awaiting then False else state.uiGenerating
-            , uiActivity =
-                if awaiting && state.uiCompletionRemainingMillis == 0
-                    then "Ready"
-                    else state.uiActivity
-            }
+    UiSetAwaitingInput awaiting -> setAwaitingInput awaiting state
     UiSetRepository branch cwd workspace ->
         state { uiBranch = branch, uiCwd = cwd, uiWorkspaceRoot = workspace }
     UiSetNotice notice ->
@@ -230,114 +220,134 @@ reduceUi event state = case event of
         replaceOrAppendRecap "Generating recap…" BlockRunning state
     UiRecapReady summary ->
         replaceOrAppendRecap summary BlockComplete state
-    UiRecapUnavailable message ->
-        case latestRecapIndex state of
-            Just index ->
-                (removeBlockAt index state)
-                    { uiNotice = Just (warningNotice message)
-                    , uiNoticeElapsedMillis = 0
-                    }
-            Nothing ->
-                state
-                    { uiNotice = Just (warningNotice message)
-                    , uiNoticeElapsedMillis = 0
-                    }
+    UiRecapUnavailable message -> recapUnavailable message state
     UiErrorMessage message ->
         (appendBlock BlockError "Error" message "" BlockFailed Nothing state)
             { uiRetryCountdown = Nothing }
     UiRetryCountdown prefix remainingMillis suffix ->
-        let
-            ident = BlockId state.uiNextBlockId
-            remaining = max 0 remainingMillis
-            withBlock =
-                appendBlock
-                    BlockError
-                    "Error"
-                    (retryCountdownText prefix remaining suffix)
-                    ""
-                    BlockFailed
-                    Nothing
-                    state
-        in withBlock
-            { uiRetryCountdown =
-                if remaining == 0
-                    then Nothing
-                    else Just RetryCountdown
-                        { retryCountdownBlockId = ident
-                        , retryCountdownPrefix = prefix
-                        , retryCountdownRemainingMillis = remaining
-                        , retryCountdownSuffix = suffix
-                        }
-            }
-    UiConversationCleared ->
-        state
-            { uiBlocks = Seq.empty
-            , uiSelectedBlock = Nothing
-            , uiSelectedBlockIndex = Nothing
-            , uiBlockIndices = Map.empty
-            , uiNextBlockId = 1
-            , uiTurnStartBlock = 0
-            , uiAttemptStartBlock = 0
-            , uiToolCalls = Map.empty
-            , uiInspectionGroups = Map.empty
-            , uiShellProcesses = Map.empty
-            , uiShellPolls = Map.empty
-            , uiRetryCountdown = Nothing
-            , uiTodos = []
-            , uiGenerating = False
-            , uiGenerationChars = 0
-            , uiGenerationMillis = 0
-            , uiGenerationLastDeltaMillis = 0
-            , uiResponseMillis = 0
-            , uiLastTokensPerSecond = Nothing
-            }
-    UiSetFollow follow ->
-        state
-            { uiFollow = follow
-            , uiSelectedBlock =
-                if follow
-                    then (.blockId) <$> Seq.lookup
-                        (Seq.length state.uiBlocks - 1)
-                        state.uiBlocks
-                    else state.uiSelectedBlock
-            , uiSelectedBlockIndex =
-                if follow
-                    then
-                        if Seq.null state.uiBlocks
-                            then Nothing
-                            else Just (Seq.length state.uiBlocks - 1)
-                    else state.uiSelectedBlockIndex
-            }
+        setRetryCountdown prefix remainingMillis suffix state
+    UiConversationCleared -> clearConversation state
+    UiSetFollow follow -> setFollow follow state
     UiTurnEnded terminalState ->
         finalizeTurn terminalState state
-    UiTurnRestarted ->
-        let blocks = Seq.take state.uiTurnStartBlock state.uiBlocks
-            selected =
-                selectionAfterTruncate
-                    blocks
-                    state.uiSelectedBlockIndex
-            processes =
-                retainShellProcesses blocks state.uiShellProcesses
-        in state
-            { uiBlocks = blocks
-            , uiSelectedBlock = (.blockId) . snd <$> selected
-            , uiSelectedBlockIndex = fst <$> selected
-            , uiBlockIndices =
-                Map.filter (< Seq.length blocks) state.uiBlockIndices
-            , uiRunning = False
-            , uiGenerating = False
-            , uiActivity = "Restarting…"
-            , uiNotice =
-                Just (progressNotice "Restarting current turn…")
+    UiTurnRestarted -> restartTurn state
+
+setAwaitingInput :: Bool -> UiState -> UiState
+setAwaitingInput awaiting state =
+    (if awaiting then finalizeStreams state else state)
+        { uiAwaitingInput = awaiting
+        , uiRunning = if awaiting then False else state.uiRunning
+        , uiGenerating = if awaiting then False else state.uiGenerating
+        , uiActivity =
+            if awaiting && state.uiCompletionRemainingMillis == 0
+                then "Ready"
+                else state.uiActivity
+        }
+
+recapUnavailable :: Text -> UiState -> UiState
+recapUnavailable message state =
+    withNotice
+        (maybe state (`removeBlockAt` state) (latestRecapIndex state))
+  where
+    withNotice current =
+        current
+            { uiNotice = Just (warningNotice message)
             , uiNoticeElapsedMillis = 0
-            , uiCompletionRemainingMillis = 0
-            , uiToolCalls = Map.empty
-            , uiInspectionGroups = Map.empty
-            , uiShellProcesses = processes
-            , uiShellPolls =
-                retainShellPolls processes state.uiShellPolls
-            , uiAttemptStartBlock = state.uiTurnStartBlock
             }
+
+setRetryCountdown :: Text -> Int -> Text -> UiState -> UiState
+setRetryCountdown prefix remainingMillis suffix state =
+    withBlock
+        { uiRetryCountdown =
+            if remaining == 0
+                then Nothing
+                else Just RetryCountdown
+                    { retryCountdownBlockId = ident
+                    , retryCountdownPrefix = prefix
+                    , retryCountdownRemainingMillis = remaining
+                    , retryCountdownSuffix = suffix
+                    }
+        }
+  where
+    ident = BlockId state.uiNextBlockId
+    remaining = max 0 remainingMillis
+    withBlock =
+        appendBlock
+            BlockError
+            "Error"
+            (retryCountdownText prefix remaining suffix)
+            ""
+            BlockFailed
+            Nothing
+            state
+
+clearConversation :: UiState -> UiState
+clearConversation state =
+    state
+        { uiBlocks = Seq.empty
+        , uiSelectedBlock = Nothing
+        , uiSelectedBlockIndex = Nothing
+        , uiBlockIndices = Map.empty
+        , uiNextBlockId = 1
+        , uiTurnStartBlock = 0
+        , uiAttemptStartBlock = 0
+        , uiToolCalls = Map.empty
+        , uiInspectionGroups = Map.empty
+        , uiShellProcesses = Map.empty
+        , uiShellPolls = Map.empty
+        , uiRetryCountdown = Nothing
+        , uiTodos = []
+        , uiGenerating = False
+        , uiGenerationChars = 0
+        , uiGenerationMillis = 0
+        , uiGenerationLastDeltaMillis = 0
+        , uiResponseMillis = 0
+        , uiLastTokensPerSecond = Nothing
+        }
+
+setFollow :: Bool -> UiState -> UiState
+setFollow follow state =
+    state
+        { uiFollow = follow
+        , uiSelectedBlock =
+            if follow
+                then (.blockId) <$> Seq.lookup lastIndex state.uiBlocks
+                else state.uiSelectedBlock
+        , uiSelectedBlockIndex =
+            if follow
+                then
+                    if Seq.null state.uiBlocks
+                        then Nothing
+                        else Just lastIndex
+                else state.uiSelectedBlockIndex
+        }
+  where
+    lastIndex = Seq.length state.uiBlocks - 1
+
+restartTurn :: UiState -> UiState
+restartTurn state =
+    state
+        { uiBlocks = blocks
+        , uiSelectedBlock = (.blockId) . snd <$> selected
+        , uiSelectedBlockIndex = fst <$> selected
+        , uiBlockIndices =
+            Map.filter (< Seq.length blocks) state.uiBlockIndices
+        , uiRunning = False
+        , uiGenerating = False
+        , uiActivity = "Restarting…"
+        , uiNotice = Just (progressNotice "Restarting current turn…")
+        , uiNoticeElapsedMillis = 0
+        , uiCompletionRemainingMillis = 0
+        , uiToolCalls = Map.empty
+        , uiInspectionGroups = Map.empty
+        , uiShellProcesses = processes
+        , uiShellPolls = retainShellPolls processes state.uiShellPolls
+        , uiAttemptStartBlock = state.uiTurnStartBlock
+        }
+  where
+    blocks = Seq.take state.uiTurnStartBlock state.uiBlocks
+    selected = selectionAfterTruncate blocks state.uiSelectedBlockIndex
+    processes = retainShellProcesses blocks state.uiShellProcesses
 
 resetGeneration :: UiState -> UiState
 resetGeneration state =
@@ -377,21 +387,7 @@ snapshotGenerationRate usage state =
 
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of
-    TurnStarted ->
-        resetGeneration
-            state
-                { uiRunning = True
-                , uiAwaitingInput = False
-                , uiActivity = "Thinking…"
-                , uiNotice = Nothing
-                , uiNoticeElapsedMillis = 0
-                , uiElapsedMillis = 0
-                , uiCompletionRemainingMillis = 0
-                , uiTurnStartBlock = Seq.length state.uiBlocks
-                , uiAttemptStartBlock = Seq.length state.uiBlocks
-                , uiToolCalls = Map.empty
-                , uiInspectionGroups = Map.empty
-                }
+    TurnStarted -> startTurn state
     ReasoningDelta delta ->
         appendOrExtend BlockThinking "Thought" delta BlockStreaming $
             appendGenerationChars delta state
@@ -407,48 +403,14 @@ reduceLoop event state = case event of
     ProviderLimitUpdated
         { providerLimitText = text
         , providerLimitWarning = warning
-        } ->
-        state
-            { uiPrompt =
-                state.uiPrompt
-                    { promptLimitStatus =
-                        Just PromptLimitStatus
-                            { promptLimitText = text
-                            , promptLimitWarning = warning
-                            }
-                    }
-            }
+        } -> setProviderLimit text warning state
     WarningRaised warning ->
         state
             { uiNotice = Just (warningNotice warning)
             , uiNoticeElapsedMillis = 0
             }
-    ResponseRestarted message ->
-        let finalized =
-                finalizeAttempt BlockFailed (finalizeStreams state)
-        in resetGeneration
-            finalized
-                { uiRunning = True
-                , uiActivity = "Retrying response…"
-                , uiNotice = Just (warningNotice message)
-                , uiNoticeElapsedMillis = 0
-                , uiAttemptStartBlock = Seq.length finalized.uiBlocks
-                , uiToolCalls = Map.empty
-                , uiInspectionGroups = Map.empty
-                }
-    ToolStarted call
-        | Map.member call.callId state.uiToolCalls
-            || Map.member call.callId state.uiShellPolls ->
-            -- A streaming backend may announce the call before execution;
-            -- the core loop announces it again once the response is complete.
-            -- Refresh the canonical metadata without adding another block.
-            updateToolCall call
-                state
-                    { uiRunning = True
-                    , uiGenerating = False
-                    , uiAwaitingInput = False
-                    }
-        | otherwise -> startToolCall call state
+    ResponseRestarted message -> restartResponse message state
+    ToolStarted call -> startOrUpdateToolCall call state
     ToolUpdated call ->
         updateToolCall call state
     ToolArgumentsUpdated call ->
@@ -469,34 +431,98 @@ reduceLoop event state = case event of
         state
     NativeAgentFinished{} ->
         state
-    TurnFinished output ->
-        let finalized = finalizeStreams state
-            continuing = not (null output.toolCalls)
-            finishedActivity =
-                case telemetrySummary <$> output.providerTelemetry of
-                    Just summary
-                        | not (Text.null summary) ->
-                            "Finished · " <> summary
-                    _ -> "Finished"
-            withFallback = case output.assistantText of
-                Just text
-                    | not (Text.null (Text.strip text))
-                    , not
-                        (hasAssistantTextSince
-                            finalized.uiAttemptStartBlock
-                            finalized) ->
-                        appendBlock BlockAssistant "Assistant" text ""
-                            BlockComplete Nothing finalized
-                _ -> finalized
-        in snapshotGenerationRate output.tokenUsage withFallback
-            { uiRunning = continuing
-            , uiActivity =
-                if continuing
-                    then "Running tools…"
-                    else finishedActivity
-            , uiCompletionRemainingMillis =
-                if continuing then 0 else completionStatusDurationMillis
+    TurnFinished output -> finishLoopTurn output state
+
+startTurn :: UiState -> UiState
+startTurn state =
+    resetGeneration
+        state
+            { uiRunning = True
+            , uiAwaitingInput = False
+            , uiActivity = "Thinking…"
+            , uiNotice = Nothing
+            , uiNoticeElapsedMillis = 0
+            , uiElapsedMillis = 0
+            , uiCompletionRemainingMillis = 0
+            , uiTurnStartBlock = Seq.length state.uiBlocks
+            , uiAttemptStartBlock = Seq.length state.uiBlocks
+            , uiToolCalls = Map.empty
+            , uiInspectionGroups = Map.empty
             }
+
+setProviderLimit :: Text -> Bool -> UiState -> UiState
+setProviderLimit text warning state =
+    state
+        { uiPrompt =
+            state.uiPrompt
+                { promptLimitStatus =
+                    Just PromptLimitStatus
+                        { promptLimitText = text
+                        , promptLimitWarning = warning
+                        }
+                }
+        }
+
+restartResponse :: Text -> UiState -> UiState
+restartResponse message state =
+    resetGeneration
+        finalized
+            { uiRunning = True
+            , uiActivity = "Retrying response…"
+            , uiNotice = Just (warningNotice message)
+            , uiNoticeElapsedMillis = 0
+            , uiAttemptStartBlock = Seq.length finalized.uiBlocks
+            , uiToolCalls = Map.empty
+            , uiInspectionGroups = Map.empty
+            }
+  where
+    finalized = finalizeAttempt BlockFailed (finalizeStreams state)
+
+startOrUpdateToolCall :: ToolCall -> UiState -> UiState
+startOrUpdateToolCall call state
+    | Map.member call.callId state.uiToolCalls
+        || Map.member call.callId state.uiShellPolls =
+        -- A streaming backend may announce the call before execution;
+        -- the core loop announces it again once the response is complete.
+        -- Refresh the canonical metadata without adding another block.
+        updateToolCall call
+            state
+                { uiRunning = True
+                , uiGenerating = False
+                , uiAwaitingInput = False
+                }
+    | otherwise = startToolCall call state
+
+finishLoopTurn :: TurnOutput -> UiState -> UiState
+finishLoopTurn output state =
+    snapshotGenerationRate output.tokenUsage withFallback
+        { uiRunning = continuing
+        , uiActivity =
+            if continuing
+                then "Running tools…"
+                else finishedActivity
+        , uiCompletionRemainingMillis =
+            if continuing then 0 else completionStatusDurationMillis
+        }
+  where
+    finalized = finalizeStreams state
+    continuing = not (null output.toolCalls)
+    finishedActivity =
+        case telemetrySummary <$> output.providerTelemetry of
+            Just summary
+                | not (Text.null summary) ->
+                    "Finished · " <> summary
+            _ -> "Finished"
+    withFallback = case output.assistantText of
+        Just text
+            | not (Text.null (Text.strip text))
+            , not
+                (hasAssistantTextSince
+                    finalized.uiAttemptStartBlock
+                    finalized) ->
+                appendBlock BlockAssistant "Assistant" text ""
+                    BlockComplete Nothing finalized
+        _ -> finalized
 
 appendOrExtend
     :: BlockKind

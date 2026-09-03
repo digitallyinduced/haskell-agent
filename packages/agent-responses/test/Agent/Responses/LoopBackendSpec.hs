@@ -68,7 +68,6 @@ import Agent.Responses.Types
 import Agent.Responses.Types.Items (responseItemDecoder)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
-import qualified Data.Aeson.Key as Key
 import Data.IORef
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Either (isLeft)
@@ -912,9 +911,8 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
         map encodedField (requestInputItems request) !! 1
             `shouldBe` Just (Aeson.String "opaque")
 
--- | Streamed tool calls are announced immediately. Shell argument deltas
--- repaint that call with the partial command, while other tools retain coarse
--- activity updates.
+-- | Streamed tool calls are announced immediately. Selected argument deltas
+-- repaint the call, while other tools retain coarse activity updates.
 streamProjectionSpec :: Spec
 streamProjectionSpec = describe "newStreamEventToLoopEvents" do
     it "publishes Codex weekly capacity updates for retained prompt chrome" do
@@ -986,15 +984,65 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
         events <- projectEvent
             (customToolCallAdded "ct-1" "call-9" "apply_patch")
         events `shouldBe`
-            [ ToolStarted ToolCall
-                { callId = "call-9"
-                , name = "apply_patch"
-                , arguments = ""
-                , callKind = CustomCallKind
-                , argumentsEncrypted = False
-                }
-            , ActivityUpdated "Writing apply_patch call…"
+            [ToolStarted (customToolCall "call-9" "apply_patch" "")]
+
+    it "repaints streamed apply_patch input as it arrives" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        let prefix = "*** Begin Patch\n*** Update File: A.hs\n"
+        first <- projectEvent
+            (customInputDelta "ct-1" "call-9" prefix)
+        first `shouldBe`
+            [ ToolArgumentsUpdated
+                (customToolCall
+                    "call-9"
+                    "apply_patch"
+                    prefix)
             ]
+        let continuation =
+                "@@\n-old\n+new\n" <> Text.replicate 256 "x"
+        second <- projectEvent
+            (customInputDelta "ct-1" "call-9" continuation)
+        second `shouldBe`
+            [ ToolArgumentsUpdated
+                (customToolCall
+                    "call-9"
+                    "apply_patch"
+                    (prefix <> continuation))
+            ]
+
+    it "batches tiny apply_patch deltas without losing their content" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        batches <- mapM
+            (\_ -> projectEvent (customInputDelta "ct-1" "call-9" "x"))
+            [1 :: Int .. 8193]
+        let previews =
+                [ call.arguments
+                | ToolArgumentsUpdated call <- concat batches
+                ]
+        length previews `shouldSatisfy` (< 40)
+        last previews `shouldBe` Text.replicate 8193 "x"
+
+    it "bounds a live apply_patch preview" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        let retained = Text.replicate (64 * 1024) "p"
+        first <- projectEvent
+            (customInputDelta
+                "ct-1"
+                "call-9"
+                (retained <> "not retained"))
+        first `shouldBe`
+            [ ToolArgumentsUpdated
+                (customToolCall "call-9" "apply_patch" retained)
+            ]
+        second <- projectEvent
+            (customInputDelta "ct-1" "call-9" "still not retained")
+        second `shouldBe` []
 
     it "updates a streamed custom tool from its done item" do
         projectEvent <- newStreamEventToLoopEvents False
@@ -1007,13 +1055,8 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                 "apply_patch"
                 "*** Begin Patch")
         events `shouldBe`
-            [ ToolUpdated ToolCall
-                { callId = "call-9"
-                , name = "apply_patch"
-                , arguments = "*** Begin Patch"
-                , callKind = CustomCallKind
-                , argumentsEncrypted = False
-                }
+            [ ToolUpdated
+                (customToolCall "call-9" "apply_patch" "*** Begin Patch")
             ]
 
     it "does not replace a shell preview with coarse argument activity" do
@@ -1044,11 +1087,12 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
 
     it "counts custom tool input as argument streaming" do
         projectEvent <- newStreamEventToLoopEvents False
-        _ <- projectEvent (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "large_custom_tool")
         loud <- projectEvent
             (customInputDelta "ct-1" "call-9" (Text.replicate 10000 "p"))
         loud `shouldBe`
-            [ActivityUpdated "Writing apply_patch call… (10k chars)"]
+            [ActivityUpdated "Writing large_custom_tool call… (10k chars)"]
 
     it "keeps plain deltas mapped through the pure projection" do
         projectEvent <- newStreamEventToLoopEvents False
@@ -1072,6 +1116,15 @@ functionToolCall functionCallId functionName functionArguments = ToolCall
     , argumentsEncrypted = False
     }
 
+customToolCall :: Text.Text -> Text.Text -> Text.Text -> ToolCall
+customToolCall customCallId customName customInput = ToolCall
+    { callId = customCallId
+    , name = customName
+    , arguments = customInput
+    , callKind = CustomCallKind
+    , argumentsEncrypted = False
+    }
+
 functionCallAdded :: Text.Text -> Text.Text -> Text.Text -> ResponseStreamEvent
 functionCallAdded functionItemId functionCallId functionName =
     ResponseOutputItemAddedEvent
@@ -1090,7 +1143,6 @@ functionCallAdded functionItemId functionCallId functionName =
         , sequenceNumber = Just 1
 
         }
-
 functionCallDone
     :: Text.Text
     -> Text.Text
@@ -1253,12 +1305,5 @@ developerMessage messageText contentItemKinds =
             , createTime = Nothing
             , contentItemKinds = Just contentItemKinds
             , executedToolCalls = Nothing
-
             }
-
         }
-
-jsonField :: Text.Text -> Aeson.Value -> Maybe Aeson.Value
-jsonField fieldName = \case
-    Aeson.Object object -> KeyMap.lookup (Key.fromText fieldName) object
-    _ -> Nothing

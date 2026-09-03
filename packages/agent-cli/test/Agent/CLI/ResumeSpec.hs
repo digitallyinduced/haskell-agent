@@ -119,22 +119,18 @@ spec = do
                 (filterResumeSessionsForBoundary Nothing sessions)
                 `shouldBe` ["direct"]
 
-        it "offers only sessions from the exact gateway credential" do
+        it "offers sessions from every gateway credential" do
             map (.metaId)
                 (filterResumeSessionsForBoundary
                     (Just "gateway-a")
                     sessions)
-                `shouldBe` ["allowed"]
+                `shouldBe` ["allowed", "other", "legacy"]
 
-        it "rejects resume metadata before startup can use it" do
+        it "allows resume metadata from another gateway credential" do
             validateResumeMetaForBoundary
                 (Just "gateway-a")
                 (gateway "gateway-b" "other")
-                `shouldBe`
-                    Left
-                        "This session belongs to a different organization \
-                        \gateway credential and cannot be resumed. Start a new \
-                        \session."
+                `shouldBe` Right ()
 
     describe "resumeNeedsGeneratedContext" do
         it "requeues context after compact, clear, and new boundaries" do
