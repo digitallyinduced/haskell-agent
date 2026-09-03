@@ -21,6 +21,7 @@ import qualified Database.SQLite3 as SQLite
 import System.Directory
     ( createDirectory
     , createDirectoryIfMissing
+    , createFileLink
     , getTemporaryDirectory
     , removeFile
     , removePathForcibly
@@ -506,6 +507,31 @@ spec = describe "Agent.CLI.ExternalSession" do
                     Text.length call.historicalCallArguments
                         `shouldSatisfy` (<= 40)
                 [] -> expectationFailure "expected a recovered Claude tool call"
+
+    it "does not follow symlinked Claude transcripts during discovery" $
+        withFixture \fixture -> do
+            let slug = map
+                    (\character ->
+                        if character == pathSeparator then '-' else character)
+                    fixture.cwd
+                project =
+                    fixture.env.externalClaudeRoot </> "projects" </> slug
+                outside = fixture.root </> "outside-claude.jsonl"
+                linked = project </> "linked.jsonl"
+            writeJsonl outside
+                [ object
+                    [ "type" .= ("user" :: Text)
+                    , "uuid" .= ("outside-user" :: Text)
+                    , "sessionId" .= ("outside-session" :: Text)
+                    , "cwd" .= fixture.cwd
+                    , "message" .= object
+                        ["content" .= ("outside secret" :: Text)]
+                    ]
+                ]
+            createDirectoryIfMissing True project
+            createFileLink outside linked
+            discoverExternalSessions fixture.env ExternalClaude 0
+                `shouldReturn` []
 
     it "reads Cursor's native SQLite store and ignores system metadata" $
         withFixture \fixture -> do

@@ -43,7 +43,8 @@ discoverClaude env cwd = do
                 projectDirectories <- directoryChildren projects
                 filter isClaudeTranscript . concat
                     <$> traverse directoryChildren projectDirectories
-    candidates <- mapMaybe id <$> traverse (claudeMetadata env) paths
+    safePaths <- filterM (isSafeFile projects) paths
+    candidates <- mapMaybe id <$> traverse (claudeMetadata env) safePaths
     filterM (\candidate ->
         maybe (pure False) (`samePath` cwd) candidate.candidateCwd)
         candidates
