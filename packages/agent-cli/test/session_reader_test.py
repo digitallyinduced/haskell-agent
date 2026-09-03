@@ -264,6 +264,42 @@ class SessionReaderTest(unittest.TestCase):
                         "output": "shell result",
                     },
                 },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "mcp_approval_request",
+                        "id": "approval-a",
+                        "name": "unsafe_a",
+                        "server_label": "danger",
+                        "arguments": '{"path":"a"}',
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "mcp_approval_request",
+                        "id": "approval-b",
+                        "name": "unsafe_b",
+                        "server_label": "danger",
+                        "arguments": '{"path":"b"}',
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "mcp_approval_response",
+                        "approval_request_id": "approval-b",
+                        "approve": False,
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "mcp_approval_response",
+                        "approval_request_id": "approval-a",
+                        "approve": True,
+                    },
+                },
             ],
         )
         item = reader.candidate(
@@ -287,13 +323,27 @@ class SessionReaderTest(unittest.TestCase):
         ]
         self.assertEqual(
             [call["call_id"] for call in calls],
-            ["call-a", "call-b", "shell-call"],
+            [
+                "call-a",
+                "call-b",
+                "shell-call",
+                "approval-a",
+                "approval-b",
+            ],
         )
         self.assertEqual(
             [result["call_id"] for result in results],
-            ["call-b", "call-a", "shell-call"],
+            [
+                "call-b",
+                "call-a",
+                "shell-call",
+                "approval-b",
+                "approval-a",
+            ],
         )
-        self.assertIn("shell result", results[-1]["output"])
+        self.assertIn("shell result", results[2]["output"])
+        self.assertIn("'approve': False", results[3]["output"])
+        self.assertIn("'approve': True", results[4]["output"])
 
     def test_arbitrary_typed_tool_json_is_not_treated_as_content_parts(self):
         output = [

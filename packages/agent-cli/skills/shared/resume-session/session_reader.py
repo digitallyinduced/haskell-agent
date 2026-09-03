@@ -188,6 +188,14 @@ def safe_string(value: Any) -> str:
     return str(value)
 
 
+def protocol_call_id(payload: dict[str, Any]) -> str:
+    return safe_string(
+        payload.get("call_id")
+        or payload.get("approval_request_id")
+        or payload.get("id")
+    )
+
+
 def clipped(text: str, limit: int = MAX_TEXT_CHARS) -> str:
     text = text.replace("\x00", "\N{REPLACEMENT CHARACTER}")
     return text if len(text) <= limit else text[:limit] + "\n[truncated]"
@@ -928,9 +936,7 @@ def codex_turn(
         return turn, role not in {"user", "assistant"}, omissions
     if kind == "local_shell_call":
         call = {
-            "call_id": safe_string(
-                payload.get("call_id") or payload.get("id")
-            ),
+            "call_id": protocol_call_id(payload),
             "name": "local_shell",
             "arguments": json_preview(payload.get("action"), max_tool_chars),
         }
@@ -941,9 +947,7 @@ def codex_turn(
         )
     if kind in {"function_call", "custom_tool_call"}:
         call = {
-            "call_id": safe_string(
-                payload.get("call_id") or payload.get("id")
-            ),
+            "call_id": protocol_call_id(payload),
             "name": safe_string(payload.get("name") or kind),
             "arguments": json_preview(
                 payload.get("arguments", payload.get("input")), max_tool_chars
@@ -956,9 +960,7 @@ def codex_turn(
         )
     if kind == "computer_call":
         call = {
-            "call_id": safe_string(
-                payload.get("call_id") or payload.get("id")
-            ),
+            "call_id": protocol_call_id(payload),
             "name": "computer",
             "arguments": json_preview(
                 payload.get("actions", payload.get("action")),
@@ -993,9 +995,7 @@ def codex_turn(
             payload,
         )
         call = {
-            "call_id": safe_string(
-                payload.get("call_id") or payload.get("id")
-            ),
+            "call_id": protocol_call_id(payload),
             "name": kind,
             "arguments": json_preview(arguments, max_tool_chars),
         }
@@ -1025,7 +1025,7 @@ def codex_turn(
         )
         output, omissions = tool_result_content(raw_output)
         result = {
-            "call_id": safe_string(payload.get("call_id")),
+            "call_id": protocol_call_id(payload),
             "output": historical_tool_result(output, max_tool_chars),
             "stale": "true",
         }
