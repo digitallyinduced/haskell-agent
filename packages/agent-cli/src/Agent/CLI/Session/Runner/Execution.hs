@@ -121,6 +121,7 @@ import qualified Data.Text as Text
 import qualified Data.Set as Set
 import Data.Time.Clock (getCurrentTime, utctDay)
 import System.IO (Handle)
+import System.OsPath (OsPath)
 
 formatQueuedPrompts :: [Text.Text] -> Text.Text
 formatQueuedPrompts [] = "No prompts are queued."
@@ -647,6 +648,483 @@ buildSkillContextRuntime
         callbacks.runnerFinishStartup startup
         pure learnedSkills
 
+data SessionLoopEventRuntime = SessionLoopEventRuntime
+    { loopEventRender :: !RenderConfig
+    , loopEventEmit :: !(LoopEvent -> IO ())
+    }
+
+buildSessionLoopEventRuntime
+    :: SessionHostRuntime
+    -> SessionControlRuntime
+    -> SessionRequest
+    -> (LoopEvent -> IO ())
+    -> SessionLoopEventRuntime
+buildSessionLoopEventRuntime
+        host controls SessionRequest{..} managedLoopPublisher =
+    SessionLoopEventRuntime
+        { loopEventRender = render
+        , loopEventEmit = emitLoop
+        }
+  where
+    fullscreen = host.hostFullscreen
+    terminal = host.hostTerminal
+    renderStateRef = controls.controlRenderStateRef
+    agentViewportRuntime = controls.controlAgentViewportRuntime
+    render = RenderConfig
+        { renderShowThinking = host.hostStderrTty
+        , renderThinkingSpinner = controls.controlSpinnerRef
+        , renderState = renderStateRef
+        , renderColor = host.hostUseColor
+        , renderLock = host.hostIoLock
+        , renderStdout = host.hostStdoutHandle
+        , renderStderr = host.hostStderrHandle
+        , renderModelRef = controls.controlModelRef
+        , renderNativeProgress =
+            host.hostStderrTty
+                && terminal.terminalNativeProgress
+                && nativeProgressAnimationEnabled options.optMotionMode
+        , renderMotionMode = options.optMotionMode
+        , renderWorkspace = toText cwd
+        }
+    emitLoop event = do
+        recordAgentViewportEvent agentViewportRuntime event
+        forM_ startup.startupNativeHooks \hooks ->
+            hooks.nativeOnLoopEvent event
+        managedLoopPublisher event
+        case event of
+            TurnFinished turn -> do
+                history <- readLiveTranscript conversationRef
+                forM_ (reportedContextTokens turn.tokenUsage) \tokens ->
+                    writeIORef contextOccupancyRef $
+                        Just (reportedOccupancy tokens (length history))
+            _ -> pure ()
+        case fullscreen of
+            Nothing -> renderEvent render event
+            Just runtime -> do
+                now <- getCurrentTime
+                modifyIORef' renderStateRef \state ->
+                    case event of
+                        TurnStarted -> beginRenderTurn now state
+                        TextDelta delta ->
+                            countGenerationChars delta
+                                state{statePrintedText = True}
+                        ReasoningDelta delta ->
+                            countGenerationChars delta state
+                        ResponseRestarted _ ->
+                            resetRenderGeneration now state
+                        ToolStarted _ ->
+                            state{stateActivity = "Running tool…"}
+                        TurnFinished turn ->
+                            recordRenderTurnRate now turn state
+                        _ -> state
+                emitUiEvent runtime (UiLoop event)
+                case event of
+                    TurnFinished _ -> do
+                        occupancy <- readIORef contextOccupancyRef
+                        params <- readIORef paramsRef
+                        history <- readLiveTranscript conversationRef
+                        contextWindow <- currentContextWindow
+                        emitUiEvent runtime $
+                            UiSetContextUsage
+                                (Just
+                                    (contextUsageTokens
+                                        occupancy
+                                        params
+                                        history))
+                                contextWindow
+                    _ -> pure ()
+
+data SessionApprovalRuntime = SessionApprovalRuntime
+    { approvalApproveClassified
+        :: !(Maybe Bool -> ToolCall -> IO (Either Text.Text Bool))
+    , approvalApproveRegistered
+        :: !(ToolCall -> IO (Either Text.Text Bool))
+    }
+
+buildSessionApprovalRuntime
+    :: SessionHostRuntime
+    -> SessionControlRuntime
+    -> SessionRequest
+    -> SessionApprovalRuntime
+buildSessionApprovalRuntime host controls SessionRequest{..} =
+    SessionApprovalRuntime
+        { approvalApproveClassified = approveToolWithClassification
+        , approvalApproveRegistered = approveRegisteredTool
+        }
+  where
+    approveToolWithClassification classifiedReadOnly call =
+        withMVar host.hostIoLock \_ ->
+            let classify = const (pure classifiedReadOnly)
+            in case startup.startupNativeHooks of
+                Just hooks ->
+                    approveToolDecisionWithReporterAndPersistenceClassified
+                        classify
+                        hooks.nativeRequestApproval
+                        (const (pure ()))
+                        (pure ())
+                        policyRef
+                        controls.controlAllowedToolsRef
+                        controls.controlToolRegistry
+                        planMode
+                        call
+                Nothing -> case promptRequest of
+                    Just request
+                        | isJust request.managedTurnBridgeDirectory ->
+                            approveToolDecisionWithReporterAndPersistenceClassified
+                                classify
+                                (requestManagedApproval request)
+                                (const (pure ()))
+                                (pure ())
+                                policyRef
+                                controls.controlAllowedToolsRef
+                                controls.controlToolRegistry
+                                planMode
+                                call
+                    _ -> case host.hostFullscreen of
+                        Nothing ->
+                            withStdinPaused escPaused $
+                                approveToolDecisionClassified
+                                    classify
+                                    policyRef
+                                    controls.controlAllowedToolsRef
+                                    controls.controlToolRegistry
+                                    planMode
+                                    projectRoot
+                                    cwd
+                                    call
+                        Just runtime ->
+                            approveToolDecisionWithReporterAndPersistenceClassified
+                                classify
+                                (requestFullscreenPermission
+                                    runtime
+                                    (toText cwd))
+                                (\case
+                                    ApprovalWarning _ -> pure ()
+                                    ApprovalSuccess message ->
+                                        emitUiEvent runtime
+                                            (UiSetNotice
+                                                (Just
+                                                    (successNotice
+                                                        message))))
+                                (saveProjectAutoApprove projectRoot True)
+                                policyRef
+                                controls.controlAllowedToolsRef
+                                controls.controlToolRegistry
+                                planMode
+                                call
+    approveRegisteredTool =
+        approveToolWithClassification Nothing
+
+data SessionShellRuntime = SessionShellRuntime
+    { shellToolAllowed :: !(ToolCall -> IO Bool)
+    , shellActiveToolNames :: !(IO [Text.Text])
+    , shellCurrentMode :: !(IO ShellMode)
+    , shellSetMode :: !(ShellMode -> IO Text.Text)
+    , shellSetTempDir :: !(OsPath -> IO ())
+    }
+
+buildSessionShellRuntime
+    :: SessionHostRuntime
+    -> SessionRequest
+    -> SessionShellRuntime
+buildSessionShellRuntime host SessionRequest{..} =
+    SessionShellRuntime
+        { shellToolAllowed = shellToolAllowed
+        , shellActiveToolNames = currentActiveToolNames
+        , shellCurrentMode = currentShellMode
+        , shellSetMode = setShellMode
+        , shellSetTempDir = setSessionTempDir
+        }
+  where
+    nativeCapabilities = host.hostNativeCapabilities
+    shellToolAllowed call = do
+        ghciEnabled <- readIORef ghciEnabledRef
+        bashEnabled <- readIORef bashEnabledRef
+        let toolName = canonicalToolName call.name
+        pure $
+            (not (isGhciToolName toolName) || ghciEnabled)
+                && (not (isBashToolName toolName) || bashEnabled)
+    activeShellTools ghciEnabled bashEnabled =
+        filterGhciTools ghciEnabled
+            (filterBashTools bashEnabled allTools)
+    currentShellMode = do
+        ghciEnabled <- readIORef ghciEnabledRef
+        bashEnabled <- readIORef bashEnabledRef
+        pure $ case (ghciEnabled, bashEnabled) of
+            (True, False) -> ShellGhci
+            (False, True) -> ShellBash
+            (True, True) -> ShellBoth
+            (False, False) -> ShellNone
+    currentActiveToolNames = do
+        ghciEnabled <- readIORef ghciEnabledRef
+        bashEnabled <- readIORef bashEnabledRef
+        let active =
+                activeShellTools ghciEnabled bashEnabled
+            internalNames = map (.appToolName) active
+            projectedNames =
+                case dialectToolLayout dialect of
+                    NoHostToolLayout -> []
+                    FlatToolLayout
+                        | dialectId dialect == GrokBuildDialect ->
+                            map grokBuildPublicToolName internalNames
+                        | otherwise -> internalNames
+                    CollaborationNamespaceLayout ->
+                        filter (`notElem` multiAgentToolNames) internalNames
+                            <> if any
+                                (`elem` multiAgentToolNames)
+                                internalNames
+                                then ["collaboration"]
+                                else []
+        pure $
+            case dialectToolLayout dialect of
+                NoHostToolLayout -> []
+                _ ->
+                    hostedSearchToolNamesWhen
+                        nativeCapabilities.nativeProviderHostedTools
+                        dialect
+                        ++ projectedNames
+    shellModeFlags = \case
+        ShellGhci -> (True, False)
+        ShellBash -> (False, True)
+        ShellBoth -> (True, True)
+        ShellNone -> (False, False)
+    shellModeLabel = \case
+        ShellGhci -> "ghci"
+        ShellBash -> "bash"
+        ShellBoth -> "ghci + bash"
+        ShellNone -> "none"
+    refreshShellParams ghciEnabled bashEnabled
+        | isJust codeModeNestedSlot = pure ()
+        | otherwise = do
+            sessionTmp <- readIORef toolEnv.toolSessionTmp
+            today <- utctDay <$> getCurrentTime
+            let enabledTools = activeShellTools ghciEnabled bashEnabled
+                enabledNames = map (.appToolName) enabledTools
+                instructionText =
+                    appendMcpInstructions mcpInstructions case codexCatalogSession of
+                        Just catalog ->
+                            catalog.catalogInstructionsFor
+                                enabledNames sessionTmp
+                        Nothing ->
+                            systemPromptForToolsWithHostedSearch
+                                nativeCapabilities.nativeProviderHostedTools
+                                dialect
+                                enabledNames
+                                cwd
+                                sessionTmp
+                                today
+                                (isOneShot options)
+                toolSchemas =
+                    schemasFromAppToolsWithHostedSearch
+                        nativeCapabilities.nativeProviderHostedTools
+                        dialect
+                        enabledTools
+            modifyIORef' paramsRef
+                (setRequestInstructionsAndTools
+                    instructionText
+                    (Just toolSchemas))
+    setShellMode mode = do
+        let (ghciEnabled, bashEnabled) = shellModeFlags mode
+        writeIORef ghciEnabledRef ghciEnabled
+        writeIORef bashEnabledRef bashEnabled
+        unless ghciEnabled suspendGhci
+        refreshShellParams ghciEnabled bashEnabled
+        pure ("shell tools: " <> shellModeLabel mode)
+    setSessionTempDir tempDir = do
+        -- Persistent tool runtimes capture temp-backed state at startup.
+        -- Reset them before publishing the new root so no process or state
+        -- file remains attached to the previous session.
+        resetToolSessionTemp tempDir
+        setToolSessionTmp toolEnv (Just tempDir)
+        ghciEnabled <- readIORef ghciEnabledRef
+        bashEnabled <- readIORef bashEnabledRef
+        refreshShellParams ghciEnabled bashEnabled
+
+data SessionSubagentRuntime = SessionSubagentRuntime
+    { subagentBeginTurn :: !(IO (Maybe RootTurnId))
+    , subagentFinishTurn :: !(Maybe RootTurnId -> IO ())
+    , subagentAbortTurn :: !(Maybe RootTurnId -> IO ())
+    , subagentConcurrentLimit :: !(IO Int)
+    , subagentSetConcurrentLimit :: !(Int -> IO Text.Text)
+    }
+
+buildSessionSubagentRuntime :: SessionRequest -> SessionSubagentRuntime
+buildSessionSubagentRuntime SessionRequest{..} =
+    SessionSubagentRuntime
+        { subagentBeginTurn = beginSubagentTurn
+        , subagentFinishTurn = finishSubagentTurn
+        , subagentAbortTurn = abortSubagentTurn
+        , subagentConcurrentLimit = currentConcurrentLimit
+        , subagentSetConcurrentLimit = setConcurrentLimit
+        }
+  where
+    beginSubagentTurn =
+        case multiCtx of
+            Nothing -> pure Nothing
+            Just ctx -> do
+                rootTurnId <- beginRootTurn ctx.multiRegistry
+                writeIORef rootTurnRef (Just rootTurnId)
+                pure (Just rootTurnId)
+    finishSubagentTurn rootTurnId =
+        atomicModifyIORef' rootTurnRef \current ->
+            (if current == rootTurnId then Nothing else current, ())
+    abortSubagentTurn rootTurnId = do
+        case rootTurnId of
+            Just owned -> case multiCtx of
+                Just ctx -> abortRootTurn ctx.multiRegistry owned
+                Nothing -> pure ()
+            Nothing -> pure ()
+        finishSubagentTurn rootTurnId
+    currentConcurrentLimit = case multiCtx of
+        Nothing ->
+            pure defaultSubagentConfig.maxConcurrent
+        Just ctx ->
+            (.maxConcurrent) <$> subagentConfig ctx.multiRegistry
+    setConcurrentLimit limit = do
+        let next = max 1 limit
+        case multiCtx of
+            Just ctx -> setMaxConcurrent ctx.multiRegistry next
+            Nothing -> pure ()
+        saveProjectMaxConcurrentAgents projectRoot next
+        pure ("concurrent agent limit: " <> Text.pack (show next))
+
+buildSessionLoopConfig
+    :: SessionControlRuntime
+    -> SessionRequest
+    -> SessionBackend
+    -> SessionLoopEventRuntime
+    -> SessionShellRuntime
+    -> SessionApprovalRuntime
+    -> LoopConfig
+buildSessionLoopConfig
+        controls SessionRequest{..} SessionBackend{..}
+        eventRuntime shellRuntime approvalRuntime =
+    LoopConfig
+        { loopBackend = backend
+        , loopBackendState = BackendStateStore
+            { readBackendState =
+                withLiveBackendState conversationRef pure
+            , commitBackendState =
+                commitLiveBackendState conversationRef
+            }
+        , loopTools = controls.controlToolRegistry
+        , loopDispatch =
+            defaultLoopDispatch
+                { toolDispatchFinalizeOutput = \call output ->
+                    if isComputerToolCallKind call.callKind
+                        then pure output
+                        else finalizeToolOutput toolEnv call output
+                }
+        , loopMaxTurns = options.optMaxTurns
+        , loopOnEvent = eventRuntime.loopEventEmit
+        , loopApprove = \call ->
+            shellRuntime.shellToolAllowed call >>= \case
+                False ->
+                    pure (Left
+                        ("Tool " <> call.name
+                            <> " is disabled by the current /shell setting."))
+                True -> approvalRuntime.approvalApproveRegistered call
+        , loopReadSteering =
+            readSteeringInputs controls.controlSteeringInputs
+        , loopCommitSteering = \count ->
+            commitSteeringInputs controls.controlSteeringInputs count
+        , loopInterrupt = interruptBackend
+        , loopCancel = toolEnv.toolCancel
+        }
+
+installSessionToolRuntimes
+    :: SessionHostRuntime
+    -> SessionControlRuntime
+    -> SessionRequest
+    -> SessionLoopEventRuntime
+    -> SessionShellRuntime
+    -> SessionApprovalRuntime
+    -> LoopConfig
+    -> IO ()
+installSessionToolRuntimes
+        host controls SessionRequest{..}
+        eventRuntime shellRuntime approvalRuntime config = do
+    installClaudeSessionRuntime claudeRuntimeSlot ClaudeSessionRuntime
+        { approveNativeTool = \call readOnly ->
+            approvalRuntime.approvalApproveClassified readOnly call
+        , approveRegisteredTool =
+            approvalRuntime.approvalApproveRegistered
+        , planMode
+        , providerNativeToolsEnabled =
+            host.hostNativeCapabilities.nativeProviderNativeTools
+        }
+    forM_ codeModeNestedSlot \slot ->
+        setCodeModeNestedInvoke slot \call -> do
+            allowed <- shellRuntime.shellToolAllowed call
+            if not allowed
+                then pure $ Left $
+                    "Tool " <> call.name
+                        <> " is disabled by the current /shell setting."
+                else
+                    approvalRuntime.approvalApproveRegistered call >>= \case
+                        Left denial -> pure (Left denial)
+                        Right False ->
+                            pure (Left "Tool call rejected by user.")
+                        Right True -> do
+                            eventRuntime.loopEventEmit (ToolStarted call)
+                            result <- dispatchRegisteredToolCall
+                                config.loopDispatch
+                                controls.controlToolRegistry
+                                call
+                            eventRuntime.loopEventEmit (ToolFinished result)
+                            pure (Right result)
+
+data SessionLoopRuntime = SessionLoopRuntime
+    { loopRuntimeConfig :: !LoopConfig
+    , loopRuntimeRender :: !RenderConfig
+    , loopRuntimeShell :: !SessionShellRuntime
+    , loopRuntimeSubagents :: !SessionSubagentRuntime
+    }
+
+newSessionLoopRuntime
+    :: SessionHostRuntime
+    -> SessionControlRuntime
+    -> SessionRequest
+    -> SessionBackend
+    -> IO SessionLoopRuntime
+newSessionLoopRuntime host controls request@SessionRequest{..} sessionBackend = do
+    managedLoopPublisher <-
+        maybe
+            (pure (const (pure ())))
+            newManagedLoopEventPublisher
+            promptRequest
+    sessionDir <- readIORef planMode.planSessionDir
+    forM_ sessionDir (writeIORef storeRoot . Just)
+    let eventRuntime =
+            buildSessionLoopEventRuntime
+                host controls request managedLoopPublisher
+        shellRuntime = buildSessionShellRuntime host request
+        approvalRuntime =
+            buildSessionApprovalRuntime host controls request
+        subagentRuntime = buildSessionSubagentRuntime request
+        config =
+            buildSessionLoopConfig
+                controls
+                request
+                sessionBackend
+                eventRuntime
+                shellRuntime
+                approvalRuntime
+    installSessionToolRuntimes
+        host
+        controls
+        request
+        eventRuntime
+        shellRuntime
+        approvalRuntime
+        config
+    pure SessionLoopRuntime
+        { loopRuntimeConfig = config
+        , loopRuntimeRender = eventRuntime.loopEventRender
+        , loopRuntimeShell = shellRuntime
+        , loopRuntimeSubagents = subagentRuntime
+        }
+
 runSession
     :: SessionRunnerContinuation
     -> SessionRequest
@@ -659,15 +1137,10 @@ runSession
   host <- newSessionHostRuntime request
   let initialPrevious = host.hostInitialPrevious
       grokFirstTurnContextRef = host.hostGrokFirstTurnContextRef
-      ioLock = host.hostIoLock
       fullscreen = host.hostFullscreen
       nativeCapabilities = host.hostNativeCapabilities
       preparedWorkspaceEnvironment = host.hostPreparedWorkspaceEnvironment
       terminal = host.hostTerminal
-      stdoutHandle = host.hostStdoutHandle
-      stderrHandle = host.hostStderrHandle
-      useColor = host.hostUseColor
-      stderrTty = host.hostStderrTty
       reportSessionError = host.hostReportSessionError
       setWindowTitle = host.hostWindowTitle.windowTitleSet
       beginWindowTitleBusy = host.hostWindowTitle.windowTitleBeginBusy
@@ -676,19 +1149,13 @@ runSession
   withSessionTitleRuntime host request sessionBackend \titleManager -> do
     controls <- newSessionControlRuntime host request
     let previewIdRef = startup.startupSessionState.sessionPreviewId
-        toolRegistry = controls.controlToolRegistry
         steeringInputs = controls.controlSteeringInputs
-        spinnerRef = controls.controlSpinnerRef
-        renderStateRef = controls.controlRenderStateRef
-        allowedToolsRef = controls.controlAllowedToolsRef
         lastAssistantRef = controls.controlLastAssistantRef
-        modelRef = controls.controlModelRef
         unavailableProvidersRef = controls.controlUnavailableProvidersRef
         startupUnavailableRef = controls.controlStartupUnavailableRef
         restartEffortRef = controls.controlRestartEffortRef
         lastFailedTurnRef = controls.controlLastFailedTurnRef
         titleTurnCount = controls.controlTitleTurnCount
-        agentViewportRuntime = controls.controlAgentViewportRuntime
         agentViewport = controls.controlAgentViewport
         skillsRuntime =
             buildSkillContextRuntime
@@ -697,338 +1164,21 @@ runSession
             skillsRuntime.skillReloadGeneratedContext
         sessionReset = skillsRuntime.skillResetSession
         refreshSkills = skillsRuntime.skillRefresh
-    managedLoopPublisher <-
-        maybe
-            (pure (const (pure ())))
-            newManagedLoopEventPublisher
-            promptRequest
-    let syncStore = do
-            sessionDir <- readIORef planMode.planSessionDir
-            case sessionDir of
-                Just dir -> writeIORef storeRoot (Just dir)
-                Nothing -> pure ()
-    syncStore
-    let render = RenderConfig
-            { renderShowThinking = stderrTty
-            , renderThinkingSpinner = spinnerRef
-            , renderState = renderStateRef
-            , renderColor = useColor
-            , renderLock = ioLock
-            , renderStdout = stdoutHandle
-            , renderStderr = stderrHandle
-            , renderModelRef = modelRef
-            , renderNativeProgress =
-                stderrTty
-                    && terminal.terminalNativeProgress
-                    && nativeProgressAnimationEnabled
-                        options.optMotionMode
-            , renderMotionMode = options.optMotionMode
-            , renderWorkspace = toText cwd
-            }
-        emitLoop event = do
-            recordAgentViewportEvent agentViewportRuntime event
-            forM_ startup.startupNativeHooks \hooks ->
-                hooks.nativeOnLoopEvent event
-            managedLoopPublisher event
-            case event of
-                TurnFinished turn -> do
-                    history <- readLiveTranscript conversationRef
-                    forM_ (reportedContextTokens turn.tokenUsage) \tokens ->
-                        writeIORef contextOccupancyRef $
-                            Just (reportedOccupancy tokens (length history))
-                _ -> pure ()
-            case fullscreen of
-                Nothing -> renderEvent render event
-                Just runtime -> do
-                    now <- getCurrentTime
-                    modifyIORef' renderStateRef \state ->
-                        case event of
-                            TurnStarted -> beginRenderTurn now state
-                            TextDelta delta ->
-                                countGenerationChars delta
-                                    state{statePrintedText = True}
-                            ReasoningDelta delta ->
-                                countGenerationChars delta state
-                            ResponseRestarted _ ->
-                                resetRenderGeneration now state
-                            ToolStarted _ ->
-                                state{stateActivity = "Running tool…"}
-                            TurnFinished turn ->
-                                recordRenderTurnRate now turn state
-                            _ -> state
-                    emitUiEvent runtime (UiLoop event)
-                    case event of
-                        TurnFinished _ -> do
-                            occupancy <- readIORef contextOccupancyRef
-                            params <- readIORef paramsRef
-                            history <- readLiveTranscript conversationRef
-                            contextWindow <- currentContextWindow
-                            emitUiEvent runtime $
-                                UiSetContextUsage
-                                    (Just
-                                        (contextUsageTokens
-                                            occupancy
-                                            params
-                                            history))
-                                    contextWindow
-                        _ -> pure ()
-        shellToolAllowed call = do
-            ghciEnabled <- readIORef ghciEnabledRef
-            bashEnabled <- readIORef bashEnabledRef
-            let toolName = canonicalToolName call.name
-            pure $
-                (not (isGhciToolName toolName) || ghciEnabled)
-                    && (not (isBashToolName toolName) || bashEnabled)
-        approveToolWithClassification classifiedReadOnly call =
-            withMVar ioLock \_ ->
-                let classify = const (pure classifiedReadOnly)
-                in case startup.startupNativeHooks of
-                    Just hooks ->
-                        approveToolDecisionWithReporterAndPersistenceClassified
-                            classify
-                            hooks.nativeRequestApproval
-                            (const (pure ()))
-                            (pure ())
-                            policyRef
-                            allowedToolsRef
-                            toolRegistry
-                            planMode
-                            call
-                    Nothing -> case promptRequest of
-                        Just request
-                            | isJust request.managedTurnBridgeDirectory ->
-                                approveToolDecisionWithReporterAndPersistenceClassified
-                                    classify
-                                    (requestManagedApproval request)
-                                    (const (pure ()))
-                                    (pure ())
-                                    policyRef
-                                    allowedToolsRef
-                                    toolRegistry
-                                    planMode
-                                    call
-                        _ -> case fullscreen of
-                            Nothing ->
-                                withStdinPaused escPaused $
-                                    approveToolDecisionClassified
-                                        classify
-                                        policyRef
-                                        allowedToolsRef
-                                        toolRegistry
-                                        planMode
-                                        projectRoot
-                                        cwd
-                                        call
-                            Just runtime ->
-                                approveToolDecisionWithReporterAndPersistenceClassified
-                                    classify
-                                    (requestFullscreenPermission
-                                        runtime
-                                        (toText cwd))
-                                    (\case
-                                        ApprovalWarning _ -> pure ()
-                                        ApprovalSuccess message ->
-                                            emitUiEvent runtime
-                                                (UiSetNotice
-                                                    (Just
-                                                        (successNotice
-                                                            message))))
-                                    (saveProjectAutoApprove projectRoot True)
-                                    policyRef
-                                    allowedToolsRef
-                                    toolRegistry
-                                    planMode
-                                    call
-        approveRegisteredTool =
-            approveToolWithClassification Nothing
-        config = LoopConfig
-            { loopBackend = backend
-            , loopBackendState = BackendStateStore
-                { readBackendState =
-                    withLiveBackendState conversationRef pure
-                , commitBackendState =
-                    commitLiveBackendState conversationRef
-                }
-            , loopTools = toolRegistry
-            , loopDispatch =
-                defaultLoopDispatch
-                    { toolDispatchFinalizeOutput = \call output ->
-                        if isComputerToolCallKind call.callKind
-                            then pure output
-                            else finalizeToolOutput toolEnv call output
-                    }
-            , loopMaxTurns = options.optMaxTurns
-            , loopOnEvent = emitLoop
-            , loopApprove = \call ->
-                shellToolAllowed call >>= \case
-                    False ->
-                        pure (Left
-                            ("Tool " <> call.name
-                                <> " is disabled by the current /shell setting."))
-                    True -> approveRegisteredTool call
-            , loopReadSteering =
-                readSteeringInputs steeringInputs
-            , loopCommitSteering = \count ->
-                commitSteeringInputs steeringInputs count
-            , loopInterrupt = interruptBackend
-            , loopCancel = toolEnv.toolCancel
-            }
-        beginSubagentTurn = do
-            case multiCtx of
-                Nothing -> pure Nothing
-                Just ctx -> do
-                    rootTurnId <- beginRootTurn ctx.multiRegistry
-                    writeIORef rootTurnRef (Just rootTurnId)
-                    pure (Just rootTurnId)
-        finishSubagentTurn rootTurnId =
-            atomicModifyIORef' rootTurnRef \current ->
-                (if current == rootTurnId then Nothing else current, ())
-        abortSubagentTurn rootTurnId = do
-            case rootTurnId of
-                Just owned -> case multiCtx of
-                    Just ctx -> abortRootTurn ctx.multiRegistry owned
-                    Nothing -> pure ()
-                Nothing -> pure ()
-            finishSubagentTurn rootTurnId
-        activeShellTools ghciEnabled bashEnabled =
-            filterGhciTools ghciEnabled
-                (filterBashTools bashEnabled allTools)
-        currentShellMode = do
-            ghciEnabled <- readIORef ghciEnabledRef
-            bashEnabled <- readIORef bashEnabledRef
-            pure $ case (ghciEnabled, bashEnabled) of
-                (True, False) -> ShellGhci
-                (False, True) -> ShellBash
-                (True, True) -> ShellBoth
-                (False, False) -> ShellNone
-        currentActiveToolNames = do
-            ghciEnabled <- readIORef ghciEnabledRef
-            bashEnabled <- readIORef bashEnabledRef
-            let active =
-                    activeShellTools ghciEnabled bashEnabled
-                internalNames = map (.appToolName) active
-                projectedNames =
-                    case dialectToolLayout dialect of
-                        NoHostToolLayout -> []
-                        FlatToolLayout
-                            | dialectId dialect
-                                == GrokBuildDialect ->
-                                    map
-                                        grokBuildPublicToolName
-                                        internalNames
-                            | otherwise -> internalNames
-                        CollaborationNamespaceLayout ->
-                            filter
-                                (`notElem` multiAgentToolNames)
-                                internalNames
-                                <> if any
-                                    (`elem` multiAgentToolNames)
-                                    internalNames
-                                    then ["collaboration"]
-                                    else []
-            pure $
-                case dialectToolLayout dialect of
-                    NoHostToolLayout -> []
-                    _ ->
-                        hostedSearchToolNamesWhen
-                            nativeCapabilities.nativeProviderHostedTools
-                            dialect
-                            ++ projectedNames
-        shellModeFlags = \case
-            ShellGhci -> (True, False)
-            ShellBash -> (False, True)
-            ShellBoth -> (True, True)
-            ShellNone -> (False, False)
-        shellModeLabel = \case
-            ShellGhci -> "ghci"
-            ShellBash -> "bash"
-            ShellBoth -> "ghci + bash"
-            ShellNone -> "none"
-        refreshShellParams ghciEnabled bashEnabled
-            | isJust codeModeNestedSlot = pure ()
-            | otherwise = do
-                sessionTmp <- readIORef toolEnv.toolSessionTmp
-                today <- utctDay <$> getCurrentTime
-                let enabledTools = activeShellTools ghciEnabled bashEnabled
-                    enabledNames = map (.appToolName) enabledTools
-                    instructionText =
-                        appendMcpInstructions mcpInstructions case codexCatalogSession of
-                            Just catalog ->
-                                catalog.catalogInstructionsFor
-                                    enabledNames sessionTmp
-                            Nothing ->
-                                systemPromptForToolsWithHostedSearch
-                                    nativeCapabilities.nativeProviderHostedTools
-                                    dialect
-                                    enabledNames
-                                    cwd
-                                    sessionTmp
-                                    today
-                                    (isOneShot options)
-                    toolSchemas =
-                        schemasFromAppToolsWithHostedSearch
-                            nativeCapabilities.nativeProviderHostedTools
-                            dialect
-                            enabledTools
-                modifyIORef' paramsRef
-                    (setRequestInstructionsAndTools
-                        instructionText
-                        (Just toolSchemas))
-        setShellMode mode = do
-            let (ghciEnabled, bashEnabled) = shellModeFlags mode
-            writeIORef ghciEnabledRef ghciEnabled
-            writeIORef bashEnabledRef bashEnabled
-            unless ghciEnabled suspendGhci
-            refreshShellParams ghciEnabled bashEnabled
-            pure ("shell tools: " <> shellModeLabel mode)
-        setSessionTempDir tempDir = do
-            -- Persistent tool runtimes capture temp-backed state at startup.
-            -- Reset them before publishing the new root so no process or
-            -- state file remains attached to the previous session.
-            resetToolSessionTemp tempDir
-            setToolSessionTmp toolEnv (Just tempDir)
-            ghciEnabled <- readIORef ghciEnabledRef
-            bashEnabled <- readIORef bashEnabledRef
-            refreshShellParams ghciEnabled bashEnabled
-        currentConcurrentLimit = case multiCtx of
-            Nothing ->
-                pure defaultSubagentConfig.maxConcurrent
-            Just ctx ->
-                (.maxConcurrent) <$> subagentConfig ctx.multiRegistry
-        setConcurrentLimit limit = do
-            let next = max 1 limit
-            case multiCtx of
-                Just ctx -> setMaxConcurrent ctx.multiRegistry next
-                Nothing -> pure ()
-            saveProjectMaxConcurrentAgents projectRoot next
-            pure ("concurrent agent limit: " <> Text.pack (show next))
-    installClaudeSessionRuntime claudeRuntimeSlot ClaudeSessionRuntime
-        { approveNativeTool = \call readOnly ->
-            approveToolWithClassification readOnly call
-        , approveRegisteredTool
-        , planMode
-        , providerNativeToolsEnabled =
-            nativeCapabilities.nativeProviderNativeTools
-        }
-    forM_ codeModeNestedSlot \slot ->
-        setCodeModeNestedInvoke slot \call -> do
-            allowed <- shellToolAllowed call
-            if not allowed
-                then pure $ Left $
-                    "Tool " <> call.name
-                        <> " is disabled by the current /shell setting."
-                else approveRegisteredTool call >>= \case
-                    Left denial -> pure (Left denial)
-                    Right False ->
-                        pure (Left "Tool call rejected by user.")
-                    Right True -> do
-                        emitLoop (ToolStarted call)
-                        result <- dispatchRegisteredToolCall
-                            config.loopDispatch
-                            toolRegistry
-                            call
-                        emitLoop (ToolFinished result)
-                        pure (Right result)
+    loopRuntime <-
+        newSessionLoopRuntime host controls request sessionBackend
+    let config = loopRuntime.loopRuntimeConfig
+        render = loopRuntime.loopRuntimeRender
+        shellRuntime = loopRuntime.loopRuntimeShell
+        subagentRuntime = loopRuntime.loopRuntimeSubagents
+        setSessionTempDir = shellRuntime.shellSetTempDir
+        currentActiveToolNames = shellRuntime.shellActiveToolNames
+        currentShellMode = shellRuntime.shellCurrentMode
+        setShellMode = shellRuntime.shellSetMode
+        beginSubagentTurn = subagentRuntime.subagentBeginTurn
+        finishSubagentTurn = subagentRuntime.subagentFinishTurn
+        abortSubagentTurn = subagentRuntime.subagentAbortTurn
+        currentConcurrentLimit = subagentRuntime.subagentConcurrentLimit
+        setConcurrentLimit = subagentRuntime.subagentSetConcurrentLimit
     btwRequests <- newChan
     recapRequests <- newChan
     turnActivityRef <- newIORef Nothing
