@@ -4,6 +4,7 @@ module Agent.Responses.LoopBackend
     , statelessResponsesBackendPreservingHistory
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
+    , tokenProviderStatelessResponsesBackendPreservingHistory
     , turnInputsToItems
     , responseToTurnOutput
     , responseItemToToolCall
@@ -204,6 +205,21 @@ tokenProviderStatelessResponsesBackend
     -> Backend
 tokenProviderStatelessResponsesBackend provider send =
     statelessResponsesBackend \params onEvent ->
+        runWithTokenProvider provider \credential ->
+            send credential params onEvent
+
+-- | Credentialed counterpart to
+-- 'statelessResponsesBackendPreservingHistory'.
+tokenProviderStatelessResponsesBackendPreservingHistory
+    :: TokenProvider
+    -> (Credential
+        -> ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+tokenProviderStatelessResponsesBackendPreservingHistory provider send =
+    statelessResponsesBackendPreservingHistory \params onEvent ->
         runWithTokenProvider provider \credential ->
             send credential params onEvent
 
