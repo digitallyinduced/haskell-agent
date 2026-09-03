@@ -967,7 +967,7 @@ renderLines
 renderLines _ [] = []
 renderLines linkName lines_
     | Just (table, rest) <- Block.takeTableRows lines_ =
-        tableWidget table : renderLines linkName rest
+        tableWidget linkName table : renderLines linkName rest
 renderLines linkName (line : rest)
     | Just (_, heading) <- Block.headingPartsWith (== ' ') line =
         padTop (Pad 1)
@@ -1190,17 +1190,24 @@ renderCodeRow paddingAttr horizontalPadding fragments =
 -- | Render a table against the width Brick actually gives it. Natural column
 -- widths are only preferences: short columns keep their size while verbose
 -- columns share the remaining space and wrap inside it.
-tableWidget :: Block.MarkdownTable -> Widget n
-tableWidget table = case table.tableRows of
+tableWidget
+    :: Ord n
+    => Maybe (Text -> n)
+    -> Block.MarkdownTable
+    -> Widget n
+tableWidget linkName table = case table.tableRows of
   [] -> emptyWidget
-  rows@(headerCells : _) -> tableRowsWidget table rows headerCells
+  rows@(headerCells : _) ->
+      tableRowsWidget linkName table rows headerCells
 
 tableRowsWidget
-    :: Block.MarkdownTable
+    :: Ord n
+    => Maybe (Text -> n)
+    -> Block.MarkdownTable
     -> [[Text]]
     -> [Text]
     -> Widget n
-tableRowsWidget table rows headerCells =
+tableRowsWidget linkName table rows headerCells =
     B.Widget B.Greedy B.Fixed do
         context <- B.getContext
         borderAttr <- B.lookupAttrName Theme.borderAttr
@@ -1249,10 +1256,12 @@ tableRowsWidget table rows headerCells =
                     header : body ->
                         let logicalRows =
                                 renderTableRow
+                                    linkName
                                     borderAttr headerAttr horizontalPadding
                                     table.tableAlignments widths header
                                     : map
                                         (renderTableRow
+                                            linkName
                                             borderAttr bodyAttr
                                             horizontalPadding
                                             table.tableAlignments widths)
@@ -1260,16 +1269,12 @@ tableRowsWidget table rows headerCells =
                         in top
                             : (List.intersperse divider logicalRows
                                 <> [bottom])
-            image =
+            tableContent =
                 if gridFits
-                    then V.vertCat renderedRows
-                    else compactTableImage
-                        availableWidth borderAttr styledRows
-            boundedImage
-                | V.imageWidth image > availableWidth =
-                    V.cropRight availableWidth image
-                | otherwise = image
-        pure B.emptyResult { B.image = boundedImage }
+                    then vBox renderedRows
+                    else compactTableWidget
+                        linkName availableWidth borderAttr styledRows
+        B.render tableContent
   where
     columnCount = length headerCells
     normalizedRows =
@@ -1346,15 +1351,17 @@ fitColumnWidths budget minimumWidths naturalWidths
         | otherwise =
             (remaining, current)
 
-compactTableImage
-    :: Int
+compactTableWidget
+    :: Ord n
+    => Maybe (Text -> n)
+    -> Int
     -> V.Attr
     -> [[[(V.Attr, Text)]]]
-    -> V.Image
-compactTableImage width borderAttr rows =
-    V.vertCat $
+    -> Widget n
+compactTableWidget linkName width borderAttr rows =
+    vBox $
         concat
-            [ map renderStyledLine $
+            [ map (styledFragmentsWidget linkName) $
                 wrapStyledWords width $
                     List.intercalate
                         [(borderAttr, " │ ")]
@@ -1376,9 +1383,10 @@ tableRule
     -> Char
     -> Char
     -> [Int]
-    -> V.Image
+    -> Widget n
 tableRule attr horizontalPadding left middle right widths =
-    V.text' attr $
+    imageWidget $
+        V.text' attr $
         Text.singleton left
             <> Text.intercalate
                 (Text.singleton middle)
@@ -1390,21 +1398,23 @@ tableRule attr horizontalPadding left middle right widths =
             <> Text.singleton right
 
 renderTableRow
-    :: V.Attr
+    :: Ord n
+    => Maybe (Text -> n)
+    -> V.Attr
     -> V.Attr
     -> Int
     -> [Block.TableAlignment]
     -> [Int]
     -> [[(V.Attr, Text)]]
-    -> V.Image
+    -> Widget n
 renderTableRow
-    borderAttr paddingAttr horizontalPadding alignments widths cells =
-    V.vertCat
-        [ V.horizCat $
+    linkName borderAttr paddingAttr horizontalPadding alignments widths cells =
+    vBox
+        [ hBox $
             border
                 : (List.intersperse border
                     [ renderTableCell
-                        paddingAttr alignment horizontalPadding width fragments
+                        linkName paddingAttr alignment horizontalPadding width fragments
                     | (alignment, width, fragments) <-
                         zip3 normalizedAlignments widths rowFragments
                     ]
@@ -1412,7 +1422,7 @@ renderTableRow
         | rowFragments <- physicalRows
         ]
   where
-    border = V.char borderAttr '│'
+    border = imageWidget (V.char borderAttr '│')
     normalizedAlignments = alignments <> repeat Block.AlignDefault
     wrappedCells =
         zipWith
@@ -1427,14 +1437,16 @@ renderTableRow
             ]
 
 renderTableCell
-    :: V.Attr
+    :: Ord n
+    => Maybe (Text -> n)
+    -> V.Attr
     -> Block.TableAlignment
     -> Int
     -> Int
     -> [(V.Attr, Text)]
-    -> V.Image
-renderTableCell paddingAttr alignment horizontalPadding width fragments =
-    V.horizCat
+    -> Widget n
+renderTableCell linkName paddingAttr alignment horizontalPadding width fragments =
+    hBox
         [ blank horizontalPadding
         , blank leftPadding
         , content
@@ -1446,13 +1458,10 @@ renderTableCell paddingAttr alignment horizontalPadding width fragments =
         tableAlignmentPadding alignment $
             max 0 (width - fragmentsDisplayWidth fragments)
     content =
-        V.horizCat
-            [ terminalTextImage attr text
-            | (attr, text) <- fragments
-            ]
+        styledFragmentsWidget linkName fragments
     blank count
-        | count <= 0 = V.emptyImage
-        | otherwise = V.charFill paddingAttr ' ' count 1
+        | count <= 0 = emptyWidget
+        | otherwise = imageWidget (V.charFill paddingAttr ' ' count 1)
 
 tableAlignmentPadding :: Block.TableAlignment -> Int -> (Int, Int)
 tableAlignmentPadding alignment padding = case alignment of
@@ -1470,6 +1479,29 @@ fragmentsDisplayWidth =
                 . graphemeClusters
                 . snd)
 
+styledFragmentsWidget
+    :: Ord n
+    => Maybe (Text -> n)
+    -> [(V.Attr, Text)]
+    -> Widget n
+styledFragmentsWidget linkName =
+    hBox . map renderFragment
+  where
+    renderFragment (attr, text) =
+        case (linkName, V.attrURL attr) of
+            (Just toName, V.SetTo url) ->
+                clickable (toName url) (spanWidget attr text)
+            _ -> spanWidget attr text
+
+imageWidget :: V.Image -> Widget n
+imageWidget image =
+    B.Widget B.Fixed B.Fixed $
+        pure B.emptyResult { B.image = image }
+
+spanWidget :: V.Attr -> Text -> Widget n
+spanWidget attr text =
+    imageWidget (terminalTextImage attr text)
+
 inlineWidgetWithAttr
     :: Ord n
     => Maybe (Text -> n)
@@ -1482,23 +1514,7 @@ inlineWidgetWithAttr linkName plainAttr inlines =
         styled <- resolveInline plainAttr inlines
         let width = max 1 context.availWidth
             rows = wrapStyled width styled
-            rowWidget row =
-                hBox
-                    [ linkWidget attr text
-                    | (attr, text) <- row
-                    ]
-            linkWidget attr text =
-                case (linkName, V.attrURL attr) of
-                    (Just toName, V.SetTo url) ->
-                        clickable (toName url) (spanWidget attr text)
-                    _ -> spanWidget attr text
-            spanWidget attr text =
-                B.Widget B.Fixed B.Fixed $
-                    pure B.emptyResult
-                        { B.image =
-                            terminalTextImage attr text
-                        }
-        B.render (vBox (map rowWidget rows))
+        B.render (vBox (map (styledFragmentsWidget linkName) rows))
 
 data InlineContext = InlineContext
     { inlineStrong :: !Bool
