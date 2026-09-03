@@ -41,6 +41,10 @@ import Agent.CLI.Dialects
       filterBashTools,
       filterGhciTools )
 import Agent.CLI.Error ( formatException )
+import Agent.CLI.ExternalSession
+    ( defaultExternalSessionEnv
+    , externalSessionTool
+    )
 import Agent.CLI.GatewayClient
     ( GatewayCredential
     , GatewayModelAccess
@@ -88,7 +92,7 @@ import Agent.CLI.Options
       normalizeReasoningEffortForDialect,
       resolveApprovalPolicy,
       CliOptions(optYolo, optModel, optEffort, optMaxConcurrentAgents,
-                 optGhci, optBash, optComputerUse, optNoYolo) )
+                 optGhci, optBash, optComputerUse, optNoYolo, optSkills) )
 import Agent.CLI.PendingInputs
     ( PendingNoticeKind(..)
     , enqueuePendingInput
@@ -871,6 +875,12 @@ runAgentTools
             imageGenerationHistory
             (foldSessionItems turns)
     home <- getHomeDirectory
+    externalSessionEnv <-
+        defaultExternalSessionEnv
+            baseToolEnv
+            (unsafeToFilePath cwd)
+            (unsafeToFilePath sessionTmp)
+            (unsafeToFilePath home)
     let cleanupAllocatedScratch = do
             cleanupPendingPersistence persist
             forM_ ephemeralSessionId \sessionId -> do
@@ -1200,6 +1210,8 @@ runAgentTools
         databaseAppTools = databaseTools databaseToolsEnv
         learnedSkillAppTools =
             learnedSkillTools skillInvocationsRef learnedSkillToolsEnv
+        externalSessionAppTools =
+            [externalSessionTool externalSessionEnv | options.optSkills]
         nativeAppTools =
             maybe [] (.nativeTools) startup.startupNativeHooks
         computerTools =
@@ -1228,6 +1240,7 @@ runAgentTools
                 ++ gatewayTools
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
+                ++ externalSessionAppTools
                 ++ nativeAppTools
                 ++ imageGenerationTools
                 ++ computerTools
@@ -1240,6 +1253,7 @@ runAgentTools
                 ++ gatewayTools
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
+                ++ externalSessionAppTools
                 ++ nativeAppTools
                 ++ imageGenerationTools
                 ++ computerTools
