@@ -345,6 +345,56 @@ class SessionReaderTest(unittest.TestCase):
         self.assertIn("'approve': False", results[3]["output"])
         self.assertIn("'approve': True", results[4]["output"])
 
+    def test_codex_recovers_inline_mcp_call_results(self):
+        completed, skipped, omissions = reader.codex_turn(
+            {
+                "type": "mcp_call",
+                "id": "mcp-1",
+                "server_label": "docs",
+                "name": "search",
+                "arguments": '{"query":"parser"}',
+                "status": "completed",
+                "result": "matching documentation",
+            },
+            500,
+        )
+        self.assertFalse(skipped)
+        self.assertEqual(omissions, reader.ContentOmissions())
+        self.assertIsNotNone(completed)
+        self.assertEqual(completed["tool_calls"][0]["call_id"], "mcp-1")
+        self.assertEqual(completed["tool_calls"][0]["name"], "mcp_call")
+        self.assertIn("docs", completed["tool_calls"][0]["arguments"])
+        self.assertIn("search", completed["tool_calls"][0]["arguments"])
+        self.assertIn("parser", completed["tool_calls"][0]["arguments"])
+        self.assertEqual(completed["tool_results"][0]["call_id"], "mcp-1")
+        self.assertEqual(completed["tool_results"][0]["stale"], "true")
+        self.assertTrue(
+            completed["tool_results"][0]["output"].startswith(
+                reader.HISTORICAL_TOOL_RESULT_LABEL + " "
+            )
+        )
+        self.assertIn(
+            "matching documentation",
+            completed["tool_results"][0]["output"],
+        )
+
+        pending, pending_skipped, pending_omissions = reader.codex_turn(
+            {
+                "type": "mcp_call",
+                "id": "mcp-2",
+                "server_label": "docs",
+                "name": "search",
+                "arguments": '{"query":"pending"}',
+                "status": "in_progress",
+            },
+            500,
+        )
+        self.assertFalse(pending_skipped)
+        self.assertEqual(pending_omissions, reader.ContentOmissions())
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["tool_calls"][0]["call_id"], "mcp-2")
+        self.assertEqual(pending["tool_results"], [])
+
     def test_arbitrary_typed_tool_json_is_not_treated_as_content_parts(self):
         output = [
             {"type": "text", "value": "required state"},
@@ -1155,7 +1205,7 @@ class SessionReaderTest(unittest.TestCase):
         self.assertEqual(reader.user_text(wrapped), "merge")
         self.assertEqual(reader.user_text("<user_query></user_query>"), "")
 
-    def test_generated_context_wrappers_are_not_user_requests(self):
+    def test_generated_context_wrappers_match_exact_shared_prefixes(self):
         wrappers = [
             (
                 "# AGENTS.md instructions for /tmp/project\n\n"
@@ -1200,6 +1250,32 @@ class SessionReaderTest(unittest.TestCase):
         for wrapper in wrappers:
             with self.subTest(wrapper=wrapper.splitlines()[0]):
                 self.assertEqual(reader.user_text(wrapper), "")
+
+        near_matches = [
+            "# Skill instructions:\nPlease implement parser support",
+            "# SKILL INSTRUCTIONS: example\nPlease implement parser support",
+            (
+                "## skills\n"
+                "The following reusable skills are available in this session.\n"
+                "Please update this documentation."
+            ),
+            (
+                "Plan Mode is active. Do not make any edits or writes to the "
+                "system except for the plan file."
+            ),
+            (
+                "The User approved the plan. Plan mode is now off. "
+                "What does this sentence mean?"
+            ),
+            "<SUBAGENT_NOTIFICATION> is an XML example",
+            (
+                "<learned-skills> These are durable, reusable instructions "
+                "learned from earlier sessions."
+            ),
+        ]
+        for request in near_matches:
+            with self.subTest(request=request.splitlines()[0]):
+                self.assertEqual(reader.user_text(request), request)
 
     def test_quoted_resume_tags_are_not_treated_as_harness_wrappers(self):
         for tag in ("current_request", "user_query"):

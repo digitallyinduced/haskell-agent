@@ -32,21 +32,23 @@ UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
-# Keep concrete user-context prefixes aligned with
+# Keep these exact, case-sensitive prefixes aligned with
 # Agent.OpenAI.Compaction.isGeneratedContextUserText.
+GENERATED_CONTEXT_USER_PREFIXES = (
+    "# Skill instructions: ",
+    "Plan mode is active. Do not make any edits or writes to the system "
+    "except for the plan file.",
+    "The user approved the plan. Plan mode is now off.",
+    "<subagent_notification>",
+    "## Skills\nThe following reusable skills are available in this session.",
+    "<learned-skills>\nThese are durable, reusable instructions learned from "
+    "earlier sessions.",
+)
 GENERATED_WRAPPER_RE = re.compile(
-    r"^\s*(?:"
-    r"#\s*AGENTS\.md instructions for(?:\s|$)|"
-    r"#\s*Skill instructions:(?:\s|$)|"
-    r"##\s*Skills\r?\n"
-    r"The following reusable skills are available in this session\.(?:\s|$)|"
-    r"Plan mode is active\. Do not make any edits or writes to the system "
-    r"except for the plan file\.(?:\s|$)|"
-    r"The user approved the plan\. Plan mode is now off\.(?:\s|$)|"
+    r"^\s*(?:#\s*AGENTS\.md instructions for(?:\s|$)|"
     r"<(?:system-reminder|environment_context|system|developer|instructions|"
     r"user_instructions|manually_attached_skills|timestamp|local-command-caveat|"
-    r"harness_instructions|prior_conversation|current_request|user_query|"
-    r"learned-skills|subagent_notification)"
+    r"harness_instructions|prior_conversation|current_request|user_query)"
     r"(?:\s|>))",
     re.IGNORECASE,
 )
@@ -229,6 +231,14 @@ def json_preview(value: Any, limit: int) -> str:
 def historical_tool_result(value: Any, limit: int) -> str:
     output = one_line(value, limit)
     return f"{HISTORICAL_TOOL_RESULT_LABEL} {output}".rstrip()
+
+
+def is_generated_wrapper(text: str) -> bool:
+    stripped = text.lstrip()
+    return any(
+        stripped.startswith(prefix)
+        for prefix in GENERATED_CONTEXT_USER_PREFIXES
+    ) or GENERATED_WRAPPER_RE.match(text) is not None
 
 
 def numeric_timestamp_seconds(value: Any) -> float | None:
@@ -658,7 +668,7 @@ def tagged_user_request(text: str) -> str | None:
     if match := TOP_LEVEL_USER_REQUEST_RE.match(text):
         return clipped(match.group("request").strip())
     if not (
-        GENERATED_WRAPPER_RE.match(text)
+        is_generated_wrapper(text)
         or OUTER_HARNESS_RE.match(text)
     ):
         return None
@@ -689,7 +699,7 @@ def prior_conversation_user_text(text: str) -> str:
             candidate = entry.strip() if nested is None else nested
             if (
                 candidate
-                and not GENERATED_WRAPPER_RE.match(candidate)
+                and not is_generated_wrapper(candidate)
                 and not OUTER_HARNESS_RE.match(candidate)
             ):
                 return clipped(candidate)
@@ -704,7 +714,7 @@ def user_text(text: str) -> str:
         return prior
     if tagged is not None:
         return ""
-    if GENERATED_WRAPPER_RE.match(text) or OUTER_HARNESS_RE.match(text):
+    if is_generated_wrapper(text) or OUTER_HARNESS_RE.match(text):
         return ""
     return clipped(text)
 
@@ -981,6 +991,46 @@ def codex_turn(
             inert_turn("assistant", tool_calls=[call]),
             False,
             ContentOmissions(),
+        )
+    if kind == "mcp_call":
+        call_id = protocol_call_id(payload)
+        arguments = {
+            key: payload[key]
+            for key in ("server_label", "name", "arguments")
+            if key in payload
+        }
+        call = {
+            "call_id": call_id,
+            "name": "mcp_call",
+            "arguments": json_preview(arguments, max_tool_chars),
+        }
+        results: list[dict[str, str]] = []
+        omissions = ContentOmissions()
+        for key in ("result", "output", "error"):
+            if key not in payload or payload[key] is None:
+                continue
+            raw_output = (
+                {"error": payload[key]} if key == "error" else payload[key]
+            )
+            output, omissions = tool_result_content(raw_output)
+            results.append(
+                {
+                    "call_id": call_id,
+                    "output": historical_tool_result(
+                        output, max_tool_chars
+                    ),
+                    "stale": "true",
+                }
+            )
+            break
+        return (
+            inert_turn(
+                "assistant",
+                tool_calls=[call],
+                tool_results=results,
+            ),
+            False,
+            omissions,
         )
     if kind in {
         "shell_call",
