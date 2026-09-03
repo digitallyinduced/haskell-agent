@@ -74,6 +74,13 @@ spec = describe "PostgreSQL session schema" do
             "CREATE TABLE IF NOT EXISTS harness.session_prompt_epochs"
         ddl `shouldContainBytes` "is_active boolean NOT NULL DEFAULT TRUE"
         ddl `shouldContainBytes` "session_prompt_epochs_immutable"
+        ddl `shouldContainBytes`
+            "CREATE TABLE IF NOT EXISTS harness.session_task_plans"
+        ddl `shouldContainBytes`
+            "CREATE TABLE IF NOT EXISTS harness.session_task_plan_items"
+        ddl `shouldContainBytes`
+            "status IN ('pending', 'in_progress', 'completed')"
+        ddl `shouldContainBytes` "session_task_plan_one_active_idx"
 
     it "tracks restart-safe legacy imports" do
         let ddl = ByteString.intercalate "\n" sessionSchemaStatements
@@ -192,6 +199,7 @@ spec = describe "PostgreSQL session schema" do
                                     , legacyTurns = []
                                     , legacyPromptSnapshot =
                                         Just importedPrompt
+                                    , legacyTaskPlan = Nothing
                                     }
                             importLegacySession pool legacy
                                 `shouldReturn` Right True
@@ -204,8 +212,132 @@ spec = describe "PostgreSQL session schema" do
                                             , sessionPromptEpochSnapshot =
                                                 importedPrompt
                                             })
+                            let atomicImportKey = "session-atomic-import"
+                                atomicMetadata = promptMetadata
+                                    { sessionMetadataKey = atomicImportKey
+                                    }
+                                invalidPlanItems =
+                                    [ SessionTaskPlanItem
+                                        "first active step"
+                                        SessionTaskPlanInProgress
+                                    , SessionTaskPlanItem
+                                        "second active step"
+                                        SessionTaskPlanInProgress
+                                    ]
+                                invalidLegacy = LegacySession
+                                    { legacySourcePath =
+                                        "afk:session-atomic-import"
+                                    , legacyContentHash = "invalid-plan"
+                                    , legacyMetadata = atomicMetadata
+                                    , legacyTurns = []
+                                    , legacyPromptSnapshot = Nothing
+                                    , legacyTaskPlan =
+                                        Just SessionTaskPlanSnapshot
+                                            { sessionTaskPlanSnapshotExplanation =
+                                                Nothing
+                                            , sessionTaskPlanSnapshotItems =
+                                                invalidPlanItems
+                                            }
+                                    }
+                            importLegacySession pool invalidLegacy
+                                >>= (`shouldSatisfy`
+                                    either (const True) (const False))
+                            loadSession pool atomicImportKey
+                                `shouldReturn` Right Nothing
+                            let validPlanItems =
+                                    [ SessionTaskPlanItem
+                                        "retry safely"
+                                        SessionTaskPlanInProgress
+                                    ]
+                                validLegacy = invalidLegacy
+                                    { legacyContentHash = "valid-plan"
+                                    , legacyTaskPlan =
+                                        Just SessionTaskPlanSnapshot
+                                            { sessionTaskPlanSnapshotExplanation =
+                                                Just "atomic import"
+                                            , sessionTaskPlanSnapshotItems =
+                                                validPlanItems
+                                            }
+                                    }
+                            importLegacySession pool validLegacy
+                                `shouldReturn` Right True
+                            loadSessionTaskPlan pool atomicImportKey
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 1
+                                            , sessionTaskPlanExplanation =
+                                                Just "atomic import"
+                                            , sessionTaskPlanItems =
+                                                validPlanItems
+                                            })
                             createSession pool metadata
                                 `shouldReturn` Right True
+                            let initialPlanItems =
+                                    [ SessionTaskPlanItem
+                                        "inspect storage"
+                                        SessionTaskPlanCompleted
+                                    , SessionTaskPlanItem
+                                        "persist plan"
+                                        SessionTaskPlanInProgress
+                                    ]
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn` Right Nothing
+                            replaceSessionTaskPlan
+                                pool "session-1" (Just "first") initialPlanItems
+                                `shouldReturn` Right (Just 1)
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 1
+                                            , sessionTaskPlanExplanation =
+                                                Just "first"
+                                            , sessionTaskPlanItems =
+                                                initialPlanItems
+                                            })
+                            let replacementItems =
+                                    [ SessionTaskPlanItem
+                                        "finish"
+                                        SessionTaskPlanPending
+                                    ]
+                            replaceSessionTaskPlan
+                                pool "session-1" Nothing replacementItems
+                                `shouldReturn` Right (Just 2)
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 2
+                                            , sessionTaskPlanExplanation = Nothing
+                                            , sessionTaskPlanItems =
+                                                replacementItems
+                                            })
+                            replaceSessionTaskPlan
+                                pool
+                                "session-1"
+                                Nothing
+                                [ SessionTaskPlanItem
+                                    "one"
+                                    SessionTaskPlanInProgress
+                                , SessionTaskPlanItem
+                                    "two"
+                                    SessionTaskPlanInProgress
+                                ] >>= \case
+                                    Left _ -> pure ()
+                                    Right value ->
+                                        expectationFailure
+                                            ("accepted invalid task plan: "
+                                                <> show value)
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 2
+                                            , sessionTaskPlanExplanation = Nothing
+                                            , sessionTaskPlanItems =
+                                                replacementItems
+                                            })
                             appendSessionTurn pool turn metadata
                                 `shouldReturn` Right True
                             loadSession pool "session-1" >>= \case
@@ -233,8 +365,46 @@ spec = describe "PostgreSQL session schema" do
                                     }
                             createSession pool metadata2
                                 `shouldReturn` Right True
-                            appendSessionTurns pool [turn2, turn3] metadata2
+                            copySessionTaskPlan pool "session-1" "session-2"
                                 `shouldReturn` Right True
+                            loadSessionTaskPlan pool "session-2"
+                                `shouldReturn`
+                                    Right
+                                        (Just SessionTaskPlan
+                                            { sessionTaskPlanRevision = 1
+                                            , sessionTaskPlanExplanation = Nothing
+                                            , sessionTaskPlanItems =
+                                                replacementItems
+                                            })
+                            let clearMetadata = metadata
+                                    { sessionMetadataKey = "session-clear"
+                                    , sessionMetadataTitle = "clear"
+                                    }
+                                clearTurn = turn
+                                    { sessionTurnEffect = TranscriptReset
+                                    , sessionTurnUserText = "/clear"
+                                    }
+                            createSession pool clearMetadata
+                                `shouldReturn` Right True
+                            copySessionTaskPlan
+                                pool "session-1" "session-clear"
+                                `shouldReturn` Right True
+                            appendSessionTurnIndexedWithPromptResetAndTaskPlanClear
+                                pool clearTurn clearMetadata
+                                `shouldReturn` Right (Just 0)
+                            loadSessionTaskPlan pool "session-clear"
+                                `shouldReturn` Right Nothing
+                            clearSessionTaskPlan pool "session-1"
+                                `shouldReturn` Right True
+                            loadSessionTaskPlan pool "session-1"
+                                `shouldReturn` Right Nothing
+                            clearSessionTaskPlan pool "session-1"
+                                `shouldReturn` Right False
+                            appendSessionTurnsClearingTaskPlan
+                                pool [turn2, turn3] metadata2
+                                `shouldReturn` Right True
+                            loadSessionTaskPlan pool "session-2"
+                                `shouldReturn` Right Nothing
                             loadSessionMetadataMany
                                 pool
                                 ["session-2", "missing", "session-1"]
@@ -471,6 +641,277 @@ spec = describe "PostgreSQL session schema" do
                                         expectationFailure
                                             ("unexpected native direct search: "
                                                 <> show other)
+                            let
+                                pageGateway = "pagination-gateway"
+                                pageIdentity =
+                                    Just "gateway-sha256:page-tenant"
+                                otherPageIdentity =
+                                    Just "gateway-sha256:other-page-tenant"
+                                pageMetadata
+                                    sessionKey
+                                    updatedAt
+                                    connection
+                                    identity =
+                                        metadata
+                                            { sessionMetadataKey = sessionKey
+                                            , sessionMetadataCreatedAt =
+                                                updatedAt
+                                            , sessionMetadataUpdatedAt =
+                                                updatedAt
+                                            , sessionMetadataConnection =
+                                                connection
+                                            , sessionMetadataGatewayIdentity =
+                                                identity
+                                            }
+                                pageTieTime = addUTCTime 100 now
+                                pageFixtures =
+                                    [ pageMetadata
+                                        "page-authorized-a"
+                                        pageTieTime
+                                        pageGateway
+                                        pageIdentity
+                                    , pageMetadata
+                                        "page-authorized-b"
+                                        pageTieTime
+                                        pageGateway
+                                        pageIdentity
+                                    , pageMetadata
+                                        "page-authorized-c"
+                                        (addUTCTime 90 now)
+                                        pageGateway
+                                        pageIdentity
+                                    -- These rows sort before or between the
+                                    -- authorized rows and would consume page
+                                    -- capacity if filtering happened after
+                                    -- ORDER BY/LIMIT.
+                                    , pageMetadata
+                                        "page-other-newer"
+                                        (addUTCTime 300 now)
+                                        pageGateway
+                                        otherPageIdentity
+                                    , pageMetadata
+                                        "page-other-between"
+                                        (addUTCTime 95 now)
+                                        pageGateway
+                                        otherPageIdentity
+                                    , pageMetadata
+                                        "page-direct-newer"
+                                        (addUTCTime 200 now)
+                                        "openai"
+                                        Nothing
+                                    ]
+                            mapM_
+                                (\pageFixture ->
+                                    createSession pool pageFixture
+                                        `shouldReturn` Right True)
+                                pageFixtures
+                            loadSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                pageIdentity
+                                "page-authorized-a" >>= \case
+                                    Right (Just loaded) ->
+                                        do
+                                            loaded.sessionListEntryMetadata.sessionMetadataKey
+                                                `shouldBe` "page-authorized-a"
+                                            loaded.sessionListEntryArchived
+                                                `shouldBe` False
+                                    other ->
+                                        expectationFailure
+                                            ("expected authorized metadata: "
+                                                <> show other)
+                            loadSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                otherPageIdentity
+                                "page-authorized-a"
+                                `shouldReturn` Right Nothing
+                            loadSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                Nothing
+                                "page-authorized-a"
+                                `shouldReturn` Right Nothing
+                            loadSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                pageIdentity
+                                "page-direct-newer"
+                                `shouldReturn` Right Nothing
+                            listSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                pageIdentity
+                                SessionAll
+                                Nothing
+                                2 >>= \case
+                                    Left err ->
+                                        expectationFailure
+                                            ("could not list first boundary page: "
+                                                <> show err)
+                                    Right firstPage -> do
+                                        map
+                                            (\entry ->
+                                                entry.sessionListEntryMetadata.sessionMetadataKey)
+                                            firstPage.sessionListPageSessions
+                                            `shouldBe`
+                                                [ "page-authorized-a"
+                                                , "page-authorized-b"
+                                                ]
+                                        firstPage.sessionListPageNextCursor
+                                            `shouldBe`
+                                                Just SessionListCursor
+                                                    { sessionListCursorUpdatedAt =
+                                                        pageTieTime
+                                                    , sessionListCursorKey =
+                                                        "page-authorized-b"
+                                                    }
+                                        listSessionMetadataForBoundary
+                                            pool
+                                            pageGateway
+                                            pageIdentity
+                                            SessionAll
+                                            firstPage.sessionListPageNextCursor
+                                            2 >>= \case
+                                                Left err ->
+                                                    expectationFailure
+                                                        ( "could not list second "
+                                                            <> "boundary page: "
+                                                            <> show err
+                                                        )
+                                                Right secondPage -> do
+                                                    map
+                                                        (\entry ->
+                                                            entry.sessionListEntryMetadata.sessionMetadataKey)
+                                                        secondPage.sessionListPageSessions
+                                                        `shouldBe`
+                                                            [ "page-authorized-c"
+                                                            ]
+                                                    secondPage.sessionListPageNextCursor
+                                                        `shouldBe` Nothing
+                            listSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                otherPageIdentity
+                                SessionAll
+                                Nothing
+                                100 >>= \case
+                                    Left err ->
+                                        expectationFailure
+                                            ("could not list other boundary: "
+                                                <> show err)
+                                    Right otherPage ->
+                                        map
+                                            (\entry ->
+                                                entry.sessionListEntryMetadata.sessionMetadataKey)
+                                            otherPage.sessionListPageSessions
+                                            `shouldBe`
+                                                [ "page-other-newer"
+                                                , "page-other-between"
+                                                ]
+                            let
+                                directTieTime = addUTCTime 500 now
+                                directFixtures =
+                                    [ pageMetadata
+                                        "page-direct-a"
+                                        directTieTime
+                                        "openai"
+                                        Nothing
+                                    , pageMetadata
+                                        "page-direct-b"
+                                        directTieTime
+                                        "anthropic"
+                                        Nothing
+                                    -- Identity-bearing direct-connection rows
+                                    -- and identity-less gateway rows are both
+                                    -- outside the direct boundary.
+                                    , pageMetadata
+                                        "page-direct-with-identity"
+                                        (addUTCTime 700 now)
+                                        "openai"
+                                        pageIdentity
+                                    , pageMetadata
+                                        "page-gateway-without-identity"
+                                        (addUTCTime 800 now)
+                                        pageGateway
+                                        Nothing
+                                    ]
+                            mapM_
+                                (\pageFixture ->
+                                    createSession pool pageFixture
+                                        `shouldReturn` Right True)
+                                directFixtures
+                            listSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                Nothing
+                                SessionAll
+                                Nothing
+                                2 >>= \case
+                                    Left err ->
+                                        expectationFailure
+                                            ("could not list direct boundary: "
+                                                <> show err)
+                                    Right directPage ->
+                                        map
+                                            (\entry ->
+                                                entry.sessionListEntryMetadata.sessionMetadataKey)
+                                            directPage.sessionListPageSessions
+                                            `shouldBe`
+                                                [ "page-direct-a"
+                                                , "page-direct-b"
+                                                ]
+                            setSessionArchived
+                                pool
+                                "page-authorized-a"
+                                True
+                                now
+                                `shouldReturn` Right True
+                            loadSessionMetadataForBoundary
+                                pool
+                                pageGateway
+                                pageIdentity
+                                "page-authorized-a" >>= \case
+                                    Right (Just loaded) ->
+                                        loaded.sessionListEntryArchived
+                                            `shouldBe` True
+                                    other ->
+                                        expectationFailure
+                                            ("expected archived metadata: "
+                                                <> show other)
+                            let
+                                expectFilteredPage archiveFilter expected =
+                                    listSessionMetadataForBoundary
+                                        pool
+                                        pageGateway
+                                        pageIdentity
+                                        archiveFilter
+                                        Nothing
+                                        100 >>= \case
+                                            Left err ->
+                                                expectationFailure
+                                                    ("could not list archive filter: "
+                                                        <> show err)
+                                            Right page ->
+                                                map
+                                                    (\entry ->
+                                                        entry.sessionListEntryMetadata.sessionMetadataKey)
+                                                    page.sessionListPageSessions
+                                                    `shouldBe` expected
+                            expectFilteredPage
+                                SessionActive
+                                [ "page-authorized-b"
+                                , "page-authorized-c"
+                                ]
+                            expectFilteredPage
+                                SessionArchived
+                                ["page-authorized-a"]
+                            expectFilteredPage
+                                SessionAll
+                                [ "page-authorized-a"
+                                , "page-authorized-b"
+                                , "page-authorized-c"
+                                ]
                             setSessionArchived pool "session-2" True now
                                 `shouldReturn` Right True
                             searchNativeConversations pool "second" 10 >>= \case

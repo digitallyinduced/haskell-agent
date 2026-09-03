@@ -483,8 +483,9 @@ requestAutomaticProviderFallback env apiError pending = do
                 Nothing -> pure Nothing
                 Just tokenProvider ->
                     chooseAutomaticProviderTransition
+                        env.sessionProviderFallback
                         env.sessionModelCatalog
-                        env.sessionCwd
+                        env.sessionProjectRoot
                         env.sessionRender.renderStderr
                         env.sessionFullscreen
                         (tokenProviderBillingMode tokenProvider)
@@ -510,8 +511,9 @@ requestStartupProviderFallback env apiError = do
                 Nothing -> pure Nothing
                 Just tokenProvider ->
                     chooseStartupProviderTransition
+                        env.sessionProviderFallback
                         env.sessionModelCatalog
-                        env.sessionCwd
+                        env.sessionProjectRoot
                         env.sessionFullscreen
                         (tokenProviderBillingMode tokenProvider)
                         env.sessionProvider
@@ -521,23 +523,28 @@ requestStartupProviderFallback env apiError = do
                         apiError
 
 continueAutomaticFallback
-    :: Maybe OsPath
+    :: Bool
+    -> Maybe OsPath
+    -> Maybe OsPath
     -> Handle
     -> Maybe FullscreenRuntime
     -> ProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
-continueAutomaticFallback cwdHint stderrHandle fullscreen failed apiError =
-    case ( failed.transitionAutomaticBilling
-         , failed.transitionPendingTurn
-         ) of
+continueAutomaticFallback
+        fallbackEnabled homeHint cwdHint stderrHandle fullscreen failed apiError
+    | not fallbackEnabled = pure Nothing
+    | otherwise = case ( failed.transitionAutomaticBilling
+                       , failed.transitionPendingTurn
+                       ) of
         (Just billing, Just pending) -> do
-            home <- getHomeDirectory
+            home <- maybe getHomeDirectory pure homeHint
             cwd <- maybe getCurrentDirectory pure cwdHint
             loadModelCatalogAt home cwd >>= \case
                 Left _ -> pure Nothing
                 Right catalog ->
                     chooseAutomaticProviderTransition
+                        True
                         catalog
                         cwd
                         stderrHandle
@@ -552,7 +559,8 @@ continueAutomaticFallback cwdHint stderrHandle fullscreen failed apiError =
         _ -> pure Nothing
 
 chooseAutomaticProviderTransition
-    :: ModelCatalog
+    :: Bool
+    -> ModelCatalog
     -> OsPath
     -> Handle
     -> Maybe FullscreenRuntime
@@ -565,9 +573,10 @@ chooseAutomaticProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
 chooseAutomaticProviderTransition
-    catalog cwd stderrHandle fullscreen
-        sourceBilling current currentModel unavailable0 sessionId pending apiError =
-    tryCandidates unavailable0 candidates
+    fallbackEnabled catalog cwd stderrHandle fullscreen
+        sourceBilling current currentModel unavailable0 sessionId pending apiError
+    | not fallbackEnabled = pure Nothing
+    | otherwise = tryCandidates unavailable0 candidates
   where
     candidates =
         fallbackCandidates
@@ -577,7 +586,10 @@ chooseAutomaticProviderTransition
         [] -> pure Nothing
         rawChoice : rest -> do
             choice <- resolveModelOptionDialect rawChoice
-            validateAutomaticProviderTarget cwd sourceBilling choice >>= \case
+            validateAutomaticProviderTarget
+                cwd
+                sourceBilling
+                choice >>= \case
                 Left err -> do
                     let failedProvider =
                             choice.modelTarget.targetProvider
@@ -639,7 +651,8 @@ chooseAutomaticProviderTransition
                         }
 
 chooseStartupProviderTransition
-    :: ModelCatalog
+    :: Bool
+    -> ModelCatalog
     -> OsPath
     -> Maybe FullscreenRuntime
     -> BillingMode
@@ -650,9 +663,10 @@ chooseStartupProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
 chooseStartupProviderTransition
-    catalog cwd fullscreen sourceBilling current currentModel
-        unavailable0 sessionId apiError =
-    tryCandidates unavailable0 candidates
+    fallbackEnabled catalog cwd fullscreen sourceBilling current currentModel
+        unavailable0 sessionId apiError
+    | not fallbackEnabled = pure Nothing
+    | otherwise = tryCandidates unavailable0 candidates
   where
     candidates =
         fallbackCandidates
@@ -662,7 +676,10 @@ chooseStartupProviderTransition
         [] -> pure Nothing
         rawChoice : rest -> do
             choice <- resolveModelOptionDialect rawChoice
-            validateAutomaticProviderTarget cwd sourceBilling choice >>= \case
+            validateAutomaticProviderTarget
+                cwd
+                sourceBilling
+                choice >>= \case
                 Left err -> do
                     let failedProvider =
                             choice.modelTarget.targetProvider
@@ -761,8 +778,7 @@ validateAutomaticProviderTarget cwd sourceBilling choice = do
                 probeLoadedAutomaticAvailability
                 choice
         else do
-            projectRoot <- resolveProjectRoot cwd
-            settings <- loadProjectSettings projectRoot
+            settings <- resolveProjectRoot cwd >>= loadProjectSettings
             let rememberedIds = fmap
                     (\account ->
                         ( account.projectAccountSelectionId

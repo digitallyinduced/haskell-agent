@@ -3,13 +3,13 @@ module Agent.CLI.SkillsSpec (spec) where
 import Agent.CLI.Command (SkillCommand(..))
 import Agent.CLI.Options (CliOptions(..), defaultCliOptions)
 import Agent.CLI.Skills
-import System.OsPath (takeDirectory, unsafeEncodeUtf)
 import Agent.Skills
-import Data.IORef (newIORef, readIORef)
-import qualified Data.Text as Text
 import Agent.Tools.IO (resolveForRead, resolveUnderCwd)
 import Agent.Tools.Types (defaultToolEnv)
 import Data.Either (isLeft, isRight)
+import Data.IORef (newIORef, readIORef)
+import qualified Data.Text as Text
+import System.OsPath (takeDirectory, unsafeEncodeUtf, (</>))
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -38,7 +38,7 @@ spec = describe "Agent.CLI.Skills" do
         map (.skillScope) matching `shouldBe` [BuiltinSkill]
         map (.skillModelInvocable) matching `shouldBe` [True]
 
-    it "allows file tools to read packaged skills but not their parent directory" do
+    it "allows packaged skills and their shared resume guidance but not the parent directory" do
         catalog <- loadSkillsCatalog
             defaultCliOptions
             (fromFilePath "/tmp")
@@ -62,6 +62,11 @@ spec = describe "Agent.CLI.Skills" do
             >>= (`shouldSatisfy` isLeft)
         resolveUnderCwd env telegram.skillPath
             >>= (`shouldSatisfy` isLeft)
+        let sharedResumeDirectory =
+                takeDirectory telegram.skillDirectory
+                    </> fromFilePath "shared/resume-session"
+        resolveForRead env (sharedResumeDirectory </> fromFilePath "CORE.md")
+            >>= (`shouldSatisfy` isRight)
 
     it "loads the packaged add-model skill" do
         catalog <- loadSkillsCatalog
@@ -89,6 +94,34 @@ spec = describe "Agent.CLI.Skills" do
         map (.skillScope) matching `shouldBe` [BuiltinSkill]
         map (.skillModelInvocable) matching `shouldBe` [True]
         map (.skillUserInvocable) matching `shouldBe` [True]
+
+    it "loads the packaged external session resume skills" do
+        catalog <- loadSkillsCatalog
+            defaultCliOptions
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            False
+        let resumeNames =
+                [ "resume-claude"
+                , "resume-codex"
+                , "resume-cursor"
+                , "resume-grok"
+                ]
+            matching =
+                filter ((`elem` resumeNames) . (.skillName))
+                    catalog.catalogSkills
+        map (.skillName) matching `shouldMatchList` resumeNames
+        map (.skillScope) matching `shouldBe` replicate 4 BuiltinSkill
+        map (.skillModelInvocable) matching `shouldBe` replicate 4 True
+        map (.skillUserInvocable) matching `shouldBe` replicate 4 True
+        let commands =
+                filter
+                    ((`elem` resumeNames) . (.skillCommandName))
+                    ( map skillInvocationCommand
+                        (buildSkillInvocations reservedSlashNames catalog)
+                    )
+        map (.skillCommandName) commands `shouldMatchList` resumeNames
 
     it "loads the packaged post-task review as always-active context" do
         catalog <- loadSkillsCatalog

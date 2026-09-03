@@ -8,8 +8,10 @@
 module Agent.Store.Postgres.Migrations
     ( Migration(..)
     , coreMigrations
+    , coreMigrationsForRuntimeRole
     , runMigrations
     , runCoreMigrations
+    , runCoreMigrationsForRuntimeRole
     ) where
 
 import Control.Monad (forM_)
@@ -20,6 +22,7 @@ import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import qualified Hasql.Decoders as Decoders
 import qualified Hasql.Encoders as Encoders
 import Hasql.Statement (Statement)
@@ -34,6 +37,7 @@ import Agent.Store.Postgres.Session
     ( sessionSchemaStatements
     , sessionSearchIndexStatements
     , sessionPromptEpochSchemaStatements
+    , sessionTaskPlanSchemaStatements
     )
 import Agent.Store.Postgres.Skill
     ( learnedSkillRuntimeGrantStatements
@@ -259,7 +263,67 @@ coreMigrations =
               \ ADD COLUMN IF NOT EXISTS gateway_identity text"
             ]
         }
+    , Migration
+        { migrationVersion = 109
+        , migrationName = "durable session task plans"
+        , migrationStatements =
+            sessionTaskPlanSchemaStatements
+            <> [ "GRANT SELECT, INSERT, UPDATE, DELETE\
+                 \ ON harness.session_task_plans TO ha_runtime"
+               , "GRANT SELECT, INSERT, DELETE\
+                 \ ON harness.session_task_plan_items TO ha_runtime"
+               ]
+        }
+    , Migration
+        { migrationVersion = 110
+        , migrationName = "private database connection privilege"
+        , migrationStatements =
+            [ "DO $ha$\
+              \ BEGIN\
+              \   EXECUTE format(\
+              \     'REVOKE CONNECT ON DATABASE %I FROM PUBLIC',\
+              \     current_database()\
+              \   );\
+              \ END\
+              \ $ha$"
+            , "DO $ha$\
+              \ BEGIN\
+              \   EXECUTE format(\
+              \     'GRANT CONNECT ON DATABASE %I TO ha_runtime',\
+              \     current_database()\
+              \   );\
+              \ END\
+              \ $ha$"
+            ]
+        }
     ]
+
+-- | Specialize all runtime grants for a validated cluster-global role.
+--
+-- Tenant databases use distinct roles while retaining the same relational
+-- schema. Migration history is database-local, so the specialized statements
+-- remain deterministic for that tenant database.
+coreMigrationsForRuntimeRole
+    :: Text
+    -> Either StoreError [Migration]
+coreMigrationsForRuntimeRole runtimeRole
+    | not (validRoleIdentifier runtimeRole) =
+        Left $
+            StoreConfigurationError
+                "the PostgreSQL runtime role is not a safe identifier"
+    | otherwise =
+        Right (map specialize coreMigrations)
+  where
+    specialize migration =
+        migration
+            { migrationStatements =
+                map
+                    ( TextEncoding.encodeUtf8
+                        . Text.replace "ha_runtime" runtimeRole
+                        . TextEncoding.decodeUtf8
+                    )
+                    migration.migrationStatements
+            }
 
 -- Version 1 shipped only on the in-development PostgreSQL branch. Empty
 -- clusters can be upgraded in place; non-empty normalized session stores fail
@@ -574,11 +638,39 @@ sessionRuntimeGrantStatements =
       \ ON harness.session_response_content_parts TO ha_runtime"
     , "GRANT SELECT, INSERT\
       \ ON harness.session_prompt_epochs TO ha_runtime"
+    , "GRANT SELECT, INSERT, UPDATE, DELETE\
+      \ ON harness.session_task_plans TO ha_runtime"
+    , "GRANT SELECT, INSERT, DELETE\
+      \ ON harness.session_task_plan_items TO ha_runtime"
     ]
 
 runCoreMigrations :: StorePool -> IO (Either StoreError ())
 runCoreMigrations pool =
     runMigrations pool coreMigrations
+
+runCoreMigrationsForRuntimeRole
+    :: StorePool
+    -> Text
+    -> IO (Either StoreError ())
+runCoreMigrationsForRuntimeRole pool runtimeRole =
+    case coreMigrationsForRuntimeRole runtimeRole of
+        Left err -> pure (Left err)
+        Right migrations -> runMigrations pool migrations
+
+validRoleIdentifier :: Text -> Bool
+validRoleIdentifier value =
+    Text.length value >= 1
+        && Text.length value <= 63
+        && maybe False isAsciiLower (Text.find (const True) value)
+        && Text.all
+            (\character ->
+                isAsciiLower character
+                    || character >= '0' && character <= '9'
+                    || character == '_')
+            value
+  where
+    isAsciiLower character =
+        character >= 'a' && character <= 'z'
 
 -- | Apply all pending migrations in one serializable transaction.
 --

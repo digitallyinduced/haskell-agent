@@ -48,6 +48,7 @@ library
                     , Agent.Store.Postgres.Scope
                     , Agent.Store.Postgres.Session
                     , Agent.Store.Postgres.Skill
+                    , Agent.Store.Postgres.Tenant
                     , Agent.Store.Postgres.UsageCache
     other-modules:    Agent.Store.Custom.QueryResult
                     , Agent.Store.Postgres.Custom.Sql
@@ -55,6 +56,7 @@ library
                     , Agent.Store.Postgres.Skill.Types
                     , Agent.Store.Postgres.Session.Read
                     , Agent.Store.Postgres.Session.Schema
+                    , Agent.Store.Postgres.Session.TaskPlan
                     , Agent.Store.Postgres.Session.Types
                     , Agent.Store.Postgres.Session.Write
                     , Agent.Store.Postgres.Hasql
@@ -173,6 +175,7 @@ test-suite agent-store-test
                     , Agent.Store.Postgres.ScopeSpec
                     , Agent.Store.Postgres.SessionSpec
                     , Agent.Store.Postgres.SkillSpec
+                    , Agent.Store.Postgres.TenantSpec
     build-depends:    agent-store
                     , async
                     , base >= 4.14 && < 5

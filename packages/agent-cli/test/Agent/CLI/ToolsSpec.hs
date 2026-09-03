@@ -136,6 +136,23 @@ spec = describe "schemasFromAppTools" do
             KnownResponseTool ToolWebSearch : _ -> pure ()
             other -> expectationFailure ("expected web_search first, got " <> show other)
 
+    it "omits provider-hosted search at a sandboxed network boundary" do
+        schemasFromAppToolsWithHostedSearch
+            False
+            codexDialect
+            []
+            `shouldBe` []
+        schemasFromAppToolsWithHostedSearch
+            False
+            grokBuildDialect
+            []
+            `shouldBe` []
+        schemasFromAppToolsCodeModeWithHostedSearch
+            False
+            codexDialect
+            []
+            `shouldBe` []
+
     it "disables strict mode for all OpenAI JSON tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             [_, FunctionToolValue tool] -> do

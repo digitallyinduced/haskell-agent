@@ -17,6 +17,7 @@ module Agent.Store.Postgres.Session
     , sessionSchemaStatements
     , sessionSearchIndexStatements
     , sessionPromptEpochSchemaStatements
+    , sessionTaskPlanSchemaStatements
     , createSession
     , createSessionWithInitialPromptEpoch
     , createSessionFromSnapshot
@@ -27,18 +28,25 @@ module Agent.Store.Postgres.Session
     , appendSessionTurn
     , appendSessionTurnIndexed
     , appendSessionTurnIndexedWithPromptReset
+    , appendSessionTurnIndexedWithPromptResetAndTaskPlanClear
     , appendSessionTurns
+    , appendSessionTurnsClearingTaskPlan
     , loadSession
     , loadSessionWithImplementation
     , loadSessions
     , loadSessionMetadataMany
     , loadSessionMetadata
+    , loadSessionMetadataForBoundary
     , loadLatestSessionPromptEpoch
     , loadActiveSession
     , loadActiveSessionWithImplementation
     , SessionTurnPage(..)
     , SessionHistorySnapshot(..)
     , SessionResumeStats(..)
+    , SessionTaskPlanStatus(..)
+    , SessionTaskPlanItem(..)
+    , SessionTaskPlan(..)
+    , SessionTaskPlanSnapshot(..)
     , loadRecentSessionTurns
     , loadRecentSessionHistoryTurns
     , loadSessionTurnsBefore
@@ -50,6 +58,11 @@ module Agent.Store.Postgres.Session
     , loadSessionResumeStats
     , loadSessionEvents
     , listSessionMetadata
+    , SessionListCursor(..)
+    , SessionListEntry(..)
+    , SessionListPage(..)
+    , SessionArchiveFilter(..)
+    , listSessionMetadataForBoundary
     , listSessionArchiveKeys
     , setSessionArchived
     , searchConversationTurns
@@ -59,9 +72,14 @@ module Agent.Store.Postgres.Session
     , deleteSession
     , importLegacySession
     , withSessionAdvisoryLock
+    , loadSessionTaskPlan
+    , replaceSessionTaskPlan
+    , clearSessionTaskPlan
+    , copySessionTaskPlan
     ) where
 
 import Agent.Store.Postgres.Session.Read
 import Agent.Store.Postgres.Session.Schema
+import Agent.Store.Postgres.Session.TaskPlan
 import Agent.Store.Postgres.Session.Types
 import Agent.Store.Postgres.Session.Write

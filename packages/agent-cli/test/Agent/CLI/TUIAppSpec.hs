@@ -116,6 +116,12 @@ import Agent.CLI.TUI.ImagePreview
     ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
     )
+import Agent.CLI.TUI.Scroll
+    ( ConversationAnchor(..)
+    , ConversationPhase(..)
+    , conversationAnchorSticky
+    , startConversationAnchor
+    )
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , TerminalKind(..)
@@ -301,6 +307,17 @@ spec = do
                         initialUiState
             syntaxLanguagesForBlocks (toList conversation.uiBlocks)
                 `shouldBe` Set.fromList ["haskell", "python"]
+
+        it "requests source grammars from Markdown diff fences" do
+            let conversation =
+                    reduceUi
+                        (UiAssistantHistory
+                            "```diff\n--- a/src/Agent/Syntax.hs\n\
+                            \+++ b/src/Agent/Syntax.hs\n\
+                            \@@ -1 +1 @@\n-old\n+new\n```")
+                        initialUiState
+            syntaxLanguagesForBlocks (toList conversation.uiBlocks)
+                `shouldBe` Set.singleton "haskell"
 
         it "requests the JavaScript grammar for exec source" do
             let conversation =
@@ -1131,10 +1148,27 @@ spec = do
             (_, hovered) <-
                 runFullscreenScriptWithState
                     initialState
-                    [ FullscreenScriptMouseUp name
+                    [ FullscreenScriptMouseUp name (B.Location (0, 0))
                     , FullscreenScriptHalt
                     ]
             hovered.appHoveredControl `shouldBe` Just name
+            hovered.appHoveredLine `shouldBe` Just 0
+            hovered.appUi.uiSelectedBlock `shouldBe` Nothing
+
+        it "tracks the hovered transcript line inside a multi-line item" do
+            runtime <- newScriptRuntime initialUiState
+            let blockId = BlockId 42
+                name = ConversationBlock AgentRoot blockId
+                initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, hovered) <-
+                runFullscreenScriptWithState
+                    initialState
+                    [ FullscreenScriptMouseUp name (B.Location (4, 2))
+                    , FullscreenScriptHalt
+                    ]
+            hovered.appHoveredControl `shouldBe` Just name
+            hovered.appHoveredLine `shouldBe` Just 2
             hovered.appUi.uiSelectedBlock `shouldBe` Nothing
 
         it "clears the hovered transcript row after the pointer leaves" do
@@ -1145,11 +1179,12 @@ spec = do
             (_, finalState) <-
                 runFullscreenScriptWithState
                     initialState
-                    [ FullscreenScriptMouseUp name
-                    , FullscreenScriptMouseUp ConversationViewport
+                    [ FullscreenScriptMouseUp name (B.Location (0, 1))
+                    , FullscreenScriptMouseUp ConversationViewport (B.Location (0, 0))
                     , FullscreenScriptHalt
                     ]
             finalState.appHoveredControl `shouldBe` Nothing
+            finalState.appHoveredLine `shouldBe` Nothing
 
         it "clears the hovered transcript row when terminal focus is lost" do
             runtime <- newScriptRuntime initialUiState
@@ -1159,11 +1194,12 @@ spec = do
             (_, finalState) <-
                 runFullscreenScriptWithState
                     initialState
-                    [ FullscreenScriptMouseUp name
+                    [ FullscreenScriptMouseUp name (B.Location (0, 0))
                     , FullscreenScriptVty V.EvLostFocus
                     , FullscreenScriptHalt
                     ]
             finalState.appHoveredControl `shouldBe` Nothing
+            finalState.appHoveredLine `shouldBe` Nothing
 
     describe "fullscreen window title" do
         it "replays the stored session title as UTF-8 OSC bytes" do
@@ -1687,6 +1723,11 @@ spec = do
                 (conversationScrollbarRenderer @()).renderVScrollbar
                 `shouldBe` V.char V.defAttr '┃'
 
+    describe "conversation prompt anchor" do
+        it "does not stick a stale prompt that is visible at the tail" do
+            timeout 2_000_000 visiblePromptRepairsStaleAnchor
+                `shouldReturn` Just True
+
     describe "history replacement viewport" do
         it "keeps startup system messages ahead of the first committed turn" do
             timeout 2_000_000 startupMessagesPrecedeFirstCommittedTurn
@@ -2137,7 +2178,7 @@ spec = do
 data FullscreenScriptEvent
     = FullscreenScriptApp !AppEvent
     | FullscreenScriptVty !V.Event
-    | FullscreenScriptMouseUp !Name
+    | FullscreenScriptMouseUp !Name !B.Location
     | FullscreenScriptHalt
 
 data ReplacementScenario
@@ -2712,9 +2753,9 @@ runFullscreenScriptWithState initialState script = do
                     fullscreenApp.appHandleEvent (AppEvent event)
                 AppEvent (FullscreenScriptVty event) ->
                     fullscreenApp.appHandleEvent (VtyEvent event)
-                AppEvent (FullscreenScriptMouseUp name) ->
+                AppEvent (FullscreenScriptMouseUp name location) ->
                     fullscreenApp.appHandleEvent
-                        (MouseUp name Nothing (B.Location (0, 0)))
+                        (MouseUp name Nothing location)
                 AppEvent FullscreenScriptHalt ->
                     halt
                 VtyEvent event ->
@@ -2772,6 +2813,41 @@ markerBlock blockId body = UiBlock
     , blockCallId = Nothing
     , blockInspectionGroupable = False
     }
+
+visiblePromptRepairsStaleAnchor :: IO Bool
+visiblePromptRepairsStaleAnchor = do
+    let prompt = "latest prompt"
+        ui =
+            reduceUi (UiUserSubmitted prompt) $
+                reduceUi
+                    (UiAssistantHistory
+                        (Text.unlines
+                            (replicate 30 "earlier transcript row")))
+                    initialUiState
+        promptBlockId = BlockId (ui.uiNextBlockId - 1)
+        staleAnchor =
+            (startConversationAnchor promptBlockId prompt 0)
+                { anchorViewportTop = 1
+                , anchorPhase = ConversationFollowingTail
+                }
+    runtime <- newScriptRuntime ui
+    let initialState =
+            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                { appUi = ui
+                , appConversationAnchor = Just staleAnchor
+                }
+    (_, finalState) <-
+        runFullscreenScriptWithState
+            initialState
+            [ FullscreenScriptVty (V.EvKey V.KEnd [])
+            , FullscreenScriptApp AppConversationReflow
+            , FullscreenScriptHalt
+            ]
+    pure $
+        maybe
+            False
+            (not . conversationAnchorSticky)
+            finalState.appConversationAnchor
 
 renderedAppText :: (Int, Int) -> AppState -> Text
 renderedAppText size state =

@@ -321,9 +321,7 @@ packagedModelCatalogPathAt cwd = do
             | root <- roots
             ]
     firstExisting
-        ( [installed, "config/models.default.json"]
-            <> sourceCandidates
-        ) >>= \case
+        (installed : sourceCandidates) >>= \case
             Just path -> pure path
             Nothing -> pure installed
   where

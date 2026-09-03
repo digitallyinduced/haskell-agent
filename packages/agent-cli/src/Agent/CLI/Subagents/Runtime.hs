@@ -15,8 +15,9 @@ import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.CLI.Compaction
     ( CompactionInstall(CompactionNotInstalled)
     , autoCompactBackendWith
-    , autoCompactOpenAiBackendWithSender
+    , autoCompactOpenAiBackendWithSenderHookAndDecorator
     , boundCompletedToolContinuations
+    , decorateCompactOutcomeWithTaskPlan
     , runXaiBackendCompactHistoryWithContextWindow
     )
 import Agent.Connectivity (withConnectionRecoveryOn)
@@ -735,11 +736,14 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                                         tokenProvider
                                         request
                         compactingBackend =
-                            autoCompactOpenAiBackendWithSender
+                            autoCompactOpenAiBackendWithSenderHookAndDecorator
                                 runtime.subagentOptions.optCompactThreshold
                                 compactSender
                                 (const (pure ()))
                                 (pure childParams)
+                                (decorateCompactOutcomeWithTaskPlan
+                                    coding.codingTaskPlan)
+                                (\_ _ -> pure CompactionNotInstalled)
                                 prepared.preparedSession.subSessionContextTokens
                                 baseBackend
                         backend =

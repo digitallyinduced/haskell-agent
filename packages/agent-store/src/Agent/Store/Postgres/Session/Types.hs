@@ -15,8 +15,16 @@ module Agent.Store.Postgres.Session.Types
     , ConversationSearchResult(..)
     , NativeConversationSearchResult(..)
     , SessionTurnPage(..)
+    , SessionListCursor(..)
+    , SessionListEntry(..)
+    , SessionListPage(..)
+    , SessionArchiveFilter(..)
     , SessionHistorySnapshot(..)
     , SessionResumeStats(..)
+    , SessionTaskPlanStatus(..)
+    , SessionTaskPlanItem(..)
+    , SessionTaskPlan(..)
+    , SessionTaskPlanSnapshot(..)
     ) where
 
 import Data.Int (Int32, Int64)
@@ -26,12 +34,46 @@ import Data.Vector (Vector)
 
 import Agent.Store.SessionItem (StoredResponseItem)
 
+data SessionTaskPlanStatus
+    = SessionTaskPlanPending
+    | SessionTaskPlanInProgress
+    | SessionTaskPlanCompleted
+    deriving (Eq, Show)
+
+data SessionTaskPlanItem = SessionTaskPlanItem
+    { sessionTaskPlanItemStep :: !Text
+    , sessionTaskPlanItemStatus :: !SessionTaskPlanStatus
+    }
+    deriving (Eq, Show)
+
+-- | The current durable task plan for a session.
+data SessionTaskPlan = SessionTaskPlan
+    { sessionTaskPlanRevision :: !Int64
+    , sessionTaskPlanExplanation :: !(Maybe Text)
+    , sessionTaskPlanItems :: ![SessionTaskPlanItem]
+    }
+    deriving (Eq, Show)
+
+-- | An unversioned task plan imported together with a session snapshot.
+data SessionTaskPlanSnapshot = SessionTaskPlanSnapshot
+    { sessionTaskPlanSnapshotExplanation :: !(Maybe Text)
+    , sessionTaskPlanSnapshotItems :: ![SessionTaskPlanItem]
+    }
+    deriving (Eq, Show)
+
 data SessionLegacyTarget = SessionLegacyTarget
     { sessionLegacyProvider :: !Text
     , sessionLegacyConnection :: !Text
     , sessionLegacyEffectiveModel :: !Text
     , sessionLegacyDialect :: !Text
     }
+    deriving (Eq, Show)
+
+-- | Archive visibility applied by PostgreSQL before ordering and pagination.
+data SessionArchiveFilter
+    = SessionActive
+    | SessionArchived
+    | SessionAll
     deriving (Eq, Show)
 
 data NativeConversationSearchResult = NativeConversationSearchResult
@@ -95,6 +137,28 @@ data SessionTurnPage = SessionTurnPage
     , sessionPageTotal :: !Int64
     , sessionPageHasOlder :: !Bool
     , sessionPageHasNewer :: !Bool
+    }
+    deriving (Eq, Show)
+
+-- | Stable keyset cursor for the session list's
+-- @(updated_at DESC, session_key ASC)@ ordering.
+data SessionListCursor = SessionListCursor
+    { sessionListCursorUpdatedAt :: !UTCTime
+    , sessionListCursorKey :: !Text
+    }
+    deriving (Eq, Show)
+
+data SessionListEntry = SessionListEntry
+    { sessionListEntryMetadata :: !SessionMetadata
+    , sessionListEntryArchived :: !Bool
+    }
+    deriving (Eq, Show)
+
+-- | One page of session metadata. A next cursor is present only when another
+-- row existed inside the same gateway boundary at query time.
+data SessionListPage = SessionListPage
+    { sessionListPageSessions :: ![SessionListEntry]
+    , sessionListPageNextCursor :: !(Maybe SessionListCursor)
     }
     deriving (Eq, Show)
 
@@ -205,5 +269,6 @@ data LegacySession = LegacySession
     , legacyMetadata :: !SessionMetadata
     , legacyTurns :: ![SessionTurn]
     , legacyPromptSnapshot :: !(Maybe SessionPromptSnapshot)
+    , legacyTaskPlan :: !(Maybe SessionTaskPlanSnapshot)
     }
     deriving (Eq, Show)

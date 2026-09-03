@@ -16,8 +16,10 @@ import Agent.CLI.Compaction
     , reportedOccupancy
     )
 import Agent.CLI.Compaction.Projection (reportedContextTokens)
-import Agent.CLI.Context (contextUsageTokens)
+import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
+import Agent.CLI.Context (contextUsageTokens, formatContextReport)
 import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Responses.Types (ResponseCreateParams(model))
 import Agent.CLI.Session.Runner.Types
     ( SessionRunnerContinuation(..) )
 import Agent.CLI.AgentViewport.Runtime
@@ -43,7 +45,13 @@ import Agent.CLI.Options
 import Agent.CLI.PendingInputs
 import Agent.CLI.SteeringInputs
 import Agent.CLI.Runtime.Types
-import Agent.CLI.Runtime.Orchestration.Types (NativeRunHooks(..))
+import Agent.CLI.Runtime.Orchestration.Types
+    ( NativeDiscoveryContext(..)
+    , NativeRunCapabilities(..)
+    , NativeRunHooks(..)
+    , fullNativeRunCapabilities
+    , nativePreparedDiscovery
+    )
 import Agent.CLI.Session.Runtime.Types
 import Agent.CLI.Interrupt
 import Agent.Store.Postgres
@@ -59,6 +67,7 @@ import Agent.CLI.SessionLock
     , releaseSessionLock
     )
 import Agent.CLI.Session.Interaction
+import Agent.CLI.Session.Selection (currentSessionId)
 import Agent.CLI.Skills
 import Agent.CLI.StartupContext
 import Agent.CLI.Startup.Auth
@@ -71,6 +80,7 @@ import Agent.CLI.Error
 import Agent.CLI.Dialects
 import Agent.CLI.Dictation (dictationTargetForSession)
 import Agent.CLI.TUI.App
+import Agent.CLI.TUI.Types (FullscreenRuntime(..))
 import Agent.TUI.Model
 import Agent.TUI.Motion
 import Agent.CLI.WindowTitle
@@ -97,11 +107,26 @@ import Control.Exception.Safe
     )
 import Control.Monad (forM_, unless, void, when)
 import Data.IORef
+import Data.Foldable (toList)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust, isNothing)
 import qualified Data.Text as Text
 import qualified Data.Set as Set
 import Data.Time.Clock (getCurrentTime, utctDay)
+
+formatQueuedPrompts :: [Text.Text] -> Text.Text
+formatQueuedPrompts [] = "No prompts are queued."
+formatQueuedPrompts prompts =
+    "Queued prompts (" <> Text.pack (show (length prompts)) <> "):\n"
+        <> Text.intercalate
+            "\n"
+            (zipWith formatPrompt [1 :: Int ..] prompts)
+  where
+    formatPrompt index prompt =
+        Text.pack (show index)
+            <> ". "
+            <> Text.replace "\n" "\n   " prompt
+
 runSession
     :: SessionRunnerContinuation
     -> SessionRequest
@@ -112,6 +137,21 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
   grokFirstTurnContextRef <- newIORef initialGrokContext
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
+      nativeCapabilities =
+          maybe
+              fullNativeRunCapabilities
+              (.nativeCapabilities)
+              startup.startupNativeHooks
+      preparedDiscovery =
+          startup.startupNativeHooks
+              >>= nativePreparedDiscovery . (.nativeWorkspaceDiscovery)
+      loadsHostWorkspaceContext = isNothing preparedDiscovery
+      preparedWorkspaceEnvironment =
+          (\context ->
+              PreparedWorkspaceEnvironment
+                  context.nativeDiscoveryOperatingSystem
+                  context.nativeDiscoveryShell)
+              <$> preparedDiscovery
       terminal = startup.startupTerminal
       stdoutHandle = startup.startupStdout
       stderrHandle = startup.startupStderr
@@ -339,18 +379,28 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         pure learnedSkills
         reloadGeneratedContext = do
             freshAgents <-
-                loadAgentsContext
-                    stderrHandle
-                    fullscreen
-                    SuppressAgentsContextLoaded
-                    options
-                    dialect
-                    home
-                    cwd
-                    []
-                    Nothing
-                    ((.catalogEnvironmentContext) <$> codexCatalogSession)
-            freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
+                if loadsHostWorkspaceContext
+                    then
+                        loadAgentsContext
+                            stderrHandle
+                            fullscreen
+                            SuppressAgentsContextLoaded
+                            options
+                            dialect
+                            home
+                            cwd
+                            []
+                            Nothing
+                            ((.catalogEnvironmentContext)
+                                <$> codexCatalogSession)
+                    else
+                        newIORef
+                            ((.catalogEnvironmentContext)
+                                <$> codexCatalogSession)
+            freshSkills <-
+                if loadsHostWorkspaceContext
+                    then loadSkillsCatalogQuiet options home projectRoot cwd
+                    else pure (SkillCatalog [] [])
             (omitted, _) <-
                 installSkills freshAgents True freshSkills
             reportSkillCatalog True freshSkills omitted
@@ -381,8 +431,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             readIORef toolEnv.toolSessionTmp >>= mapM_ resetToolSessionTemp
             reloadGeneratedContext
         refreshSkills queueContext = do
-            refreshed <- loadSkillsCatalogQuiet
-                options home projectRoot cwd
+            refreshed <-
+                if loadsHostWorkspaceContext
+                    then loadSkillsCatalogQuiet options home projectRoot cwd
+                    else pure (SkillCatalog [] [])
             (omitted, _) <-
                 installSkills startupContext queueContext refreshed
             when queueContext $
@@ -679,7 +731,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             pure $
                 case dialectToolLayout dialect of
                     NoHostToolLayout -> []
-                    _ -> hostedSearchToolNames dialect ++ projectedNames
+                    _ ->
+                        hostedSearchToolNamesWhen
+                            nativeCapabilities.nativeProviderHostedTools
+                            dialect
+                            ++ projectedNames
         shellModeFlags = \case
             ShellGhci -> (True, False)
             ShellBash -> (False, True)
@@ -703,14 +759,19 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 catalog.catalogInstructionsFor
                                     enabledNames sessionTmp
                             Nothing ->
-                                systemPromptForTools
+                                systemPromptForToolsWithHostedSearch
+                                    nativeCapabilities.nativeProviderHostedTools
                                     dialect
                                     enabledNames
                                     cwd
                                     sessionTmp
                                     today
                                     (isOneShot options)
-                    toolSchemas = schemasFromAppTools dialect enabledTools
+                    toolSchemas =
+                        schemasFromAppToolsWithHostedSearch
+                            nativeCapabilities.nativeProviderHostedTools
+                            dialect
+                            enabledTools
                 modifyIORef' paramsRef
                     (setRequestInstructionsAndTools
                         instructionText
@@ -748,6 +809,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             approveToolWithClassification readOnly call
         , approveRegisteredTool
         , planMode
+        , providerNativeToolsEnabled =
+            nativeCapabilities.nativeProviderNativeTools
         }
     forM_ codeModeNestedSlot \slot ->
         setCodeModeNestedInvoke slot \call -> do
@@ -920,8 +983,13 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionTitleManager = titleManager
             , sessionTitleTurnCount = titleTurnCount
             , sessionPlanMode = planMode
+            , sessionTaskPlan = taskPlan
             , sessionProjectRoot = projectRoot
             , sessionCwd = cwd
+            , sessionProviderFallback =
+                nativeCapabilities.nativeProviderFallback
+            , sessionPreparedWorkspaceEnvironment =
+                preparedWorkspaceEnvironment
             , sessionHome = home
             , sessionMcpRegistrations = mcpRegistrations
             , sessionMcpWarnings = mcpWarnings
@@ -1000,6 +1068,70 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                     emitUiEvent runtime (UiInputSteered text)
                                     pure (Right ()))
             (writeChan btwRequests)
+            (\command -> do
+                let copyImmediate label missing payload =
+                        case payload of
+                            Nothing -> emitUiEvent runtime (UiErrorMessage missing)
+                            Just value -> do
+                                copied <- runtime.runtimeCopy value
+                                emitUiEvent runtime $
+                                    if copied
+                                        then UiSystemMessage ("copied " <> label)
+                                        else UiErrorMessage
+                                            "terminal clipboard is unavailable"
+                    showImmediate message =
+                        emitUiEvent runtime (UiSystemMessage message)
+                case command of
+                    ReplCopy request
+                        | request.copyResponseIndex == 1
+                        , Nothing <- request.copyDestination ->
+                        readIORef lastAssistantRef >>= copyImmediate
+                            "last response"
+                            "no assistant response to copy"
+                    ReplCopyCode index -> do
+                        answer <- readIORef lastAssistantRef
+                        let label =
+                                "code block " <> Text.pack (show index)
+                        copyImmediate
+                            label
+                            (label <> " was not found")
+                            (answer >>= fencedCodeBlock index)
+                    ReplCopyDiff -> do
+                        answer <- readIORef lastAssistantRef
+                        copyImmediate
+                            "diff block"
+                            "no diff block was found"
+                            (answer >>= lastDiffBlock)
+                    ReplCopyPath ->
+                        copyImmediate
+                            "worktree path"
+                            "worktree path is unavailable"
+                            (Just (toText cwd))
+                    ReplCopySession ->
+                        currentSessionId persist >>= copyImmediate
+                            "session id"
+                            "this session has no persisted id yet"
+                    ReplQueue -> do
+                        prompts <-
+                            toList
+                                <$> queuedFullscreenInputDisplays
+                                    runtime.runtimeInput
+                        showImmediate (formatQueuedPrompts prompts)
+                    ReplContext -> do
+                        currentParams <- readIORef env.sessionParams
+                        history <- readLiveTranscript conversationRef
+                        occupancy <- readIORef contextOccupancyRef
+                        contextWindow <- currentContextWindow
+                        activeTools <- env.sessionActiveToolNames
+                        showImmediate $
+                            formatContextReport
+                                (maybe "<unknown>" id currentParams.model)
+                                contextWindow
+                                occupancy
+                                currentParams
+                                history
+                                activeTools
+                    _ -> pure ())
             (writeChan recapRequests (RecapSession RecapAuto))
             (\level ->
                 readIORef startup.startupRestartEffort >>= ($ level))
@@ -1009,8 +1141,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 readIORef startup.startupAgentSelect >>= ($ target))
     let initializeSkills = do
             markStartupStage startup "Loading skills…"
-            skills <- loadSkillsCatalogQuiet
-                options home projectRoot cwd
+            skills <-
+                if loadsHostWorkspaceContext
+                    then loadSkillsCatalogQuiet options home projectRoot cwd
+                    else pure (SkillCatalog [] [])
             (omitted, _) <- installSkills startupContext
                 queueInitialContext
                 skills

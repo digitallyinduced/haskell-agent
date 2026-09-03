@@ -22,7 +22,10 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(AlwaysReadOnly)
     , ToolEnv
+    , appToolsFromGroups
     , defaultToolEnv
+    , executionToolsFromGroups
+    , hostToolsFromGroups
     , jsonAppTool
     )
 import Control.Exception.Safe (bracket, finally)
@@ -118,6 +121,47 @@ spec = describe "Agent.CLI.Dialects" do
                 names `shouldNotContain` ["analyze_tool_output"]
                 coding.codingClose
 
+    it "partitions execution tools from host services when constructed" do
+        withTempToolEnv \env ->
+            forM_
+                [ (codexDialect, "shell_command")
+                , (grokBuildDialect, "run_terminal_cmd")
+                ]
+                \(dialect, shellName) -> do
+                    coding <-
+                        codingToolsFor
+                            dialect env Nothing Nothing Nothing Nothing
+                    let names = map (.appToolName)
+                        executionNames =
+                            names
+                                (executionToolsFromGroups
+                                    coding.codingAppToolGroups)
+                        hostNames =
+                            names
+                                (hostToolsFromGroups
+                                    coding.codingAppToolGroups)
+                        assertions = do
+                            names
+                                (appToolsFromGroups
+                                    coding.codingAppToolGroups)
+                                `shouldBe` names coding.codingAppTools
+                            forM_
+                                [ "run_ghci"
+                                , "read_file"
+                                , shellName
+                                , "read_tool_output"
+                                , "search_tool_output"
+                                ]
+                                \name ->
+                                    executionNames `shouldContain` [name]
+                            executionNames
+                                `shouldNotContain` ["ask_user_question"]
+                            hostNames `shouldContain` ["ask_user_question"]
+                            forM_
+                                ["read_file", shellName, "read_tool_output"]
+                                \name -> hostNames `shouldNotContain` [name]
+                    assertions `finally` coding.codingClose
+
     it "filters shell and ghci tools independently" do
         let tools = map fakeTool
                 [ "run_ghci"
@@ -146,6 +190,7 @@ withTempToolEnv action = do
         (\directory ->
             defaultToolEnv (unsafeEncodeUtf directory) >>= action)
 
+fakeTool :: Text.Text -> AppTool
 fakeTool name =
     jsonAppTool name "" [] AlwaysReadOnly
         (noArgsTool name (pure (Right "")))

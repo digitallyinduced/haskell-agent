@@ -129,6 +129,20 @@ spec = describe "systemPrompt" do
         prompt `shouldNotSatisfy` Text.isInfixOf "<background_tasks>"
         prompt `shouldNotSatisfy` Text.isInfixOf "<plan_mode>"
 
+    it "omits hosted search guidance at a sandboxed network boundary" do
+        let prompt =
+                systemPromptForToolsWithHostedSearch
+                    False
+                    grokBuildDialect
+                    ["read_file", "grep"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    True
+        prompt `shouldSatisfy` Text.isInfixOf "read_file"
+        prompt `shouldNotSatisfy` Text.isInfixOf "web_search"
+        prompt `shouldNotSatisfy` Text.isInfixOf "x_search"
+
     it "renders restricted generic child prompts without unavailable tools" do
         let prompt =
                 systemPromptForTools

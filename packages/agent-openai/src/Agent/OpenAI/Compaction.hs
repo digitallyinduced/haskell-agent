@@ -56,6 +56,7 @@ import Agent.OpenAI.Compaction.Commands
     , rewindSessionUserText
     )
 import Agent.Responses.Types
+import Agent.Tools.TaskPlan (isTaskPlanContextText)
 import Agent.Json (RawJson, rawJsonFromEncoding)
 import qualified Data.Aeson as Aeson
 import Data.Maybe (isJust, listToMaybe, mapMaybe)
@@ -733,6 +734,7 @@ isImageResizeNotice = \case
 isGeneratedContextUserText :: Text -> Bool
 isGeneratedContextUserText text =
     isReloadedGeneratedContextUserText text
+        || isTaskPlanContextText text
         || any (`Text.isPrefixOf` Text.stripStart text)
             [ "# Skill instructions: "
             , "Plan mode is active. Do not make any edits or writes to the system except for the plan file."

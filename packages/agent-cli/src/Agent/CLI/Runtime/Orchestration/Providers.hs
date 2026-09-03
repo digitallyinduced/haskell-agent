@@ -22,12 +22,16 @@ import Agent.CLI.Compaction
       OccupancySnapshot,
       autoCompactBackendWith,
       boundCompletedToolContinuations,
+      claudeAutoCompactTokenLimit,
+      claudeCompactionInputLimit,
+      decorateCompactOutcomeWithTaskPlan,
+      decorateCompactOutcomeWithTaskPlanWithin,
       installLiveCompactOutcome,
       runProviderCompactWith,
-      runBackendCompactHistoryWithContextWindow,
-      runXaiBackendCompactHistoryWithContextWindow,
-      runBackendCompactWithContextWindow,
+      runBackendCompactHistoryWithLimits,
+      runBackendCompactWithLimits,
       runResponsesCompactWithContextWindow,
+      runXaiBackendCompactHistoryWithContextWindow,
       runXaiResponsesCompactWithContextWindow )
 import Agent.CLI.Config ()
 import Agent.Connectivity ( withConnectionRecoveryOn )
@@ -62,6 +66,7 @@ import Agent.CLI.ProviderFallback ( isProviderUnavailable )
 import Agent.CLI.ProviderTransition
     ( ProviderTransition(transitionCause),
       TransitionCause(AutomaticFallback) )
+import Agent.Tools.TaskPlan (TaskPlanEnv)
 import Agent.CLI.Recap ()
 import Agent.CLI.Render ( putTextLn )
 import Agent.CLI.ReplMode ()
@@ -74,7 +79,11 @@ import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Startup
     ( finishStartup )
 import Agent.CLI.Runtime.Orchestration.Types
-    ( AccountSwitchRequest(..) )
+    ( AccountSwitchRequest(..)
+    , NativeRunCapabilities(..)
+    , NativeRunHooks(..)
+    , fullNativeRunCapabilities
+    )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap
     ( runSessionRecap, runSessionTurnSummary )
@@ -141,7 +150,7 @@ import Agent.Claude.Control
     , defaultClaudeCodeHostHandlers
     )
 import Agent.Dialect (Dialect)
-import Agent.Error ( ApiError(..) )
+import Agent.Error ( ApiError(..), ErrorType(InvalidRequestError) )
 import Agent.GrokBuild.Dialect.Goal ()
 import Agent.GrokBuild.Dialect.Runtime ()
 import Agent.GrokBuild.Dialect.Task ()
@@ -157,6 +166,7 @@ import Agent.Loop
     )
 import Agent.OpenAI.Auth (Pool)
 import Agent.OpenAI.Compaction ()
+import Agent.OpenAI.ModelMetadata (codexEffectiveContextWindowFor)
 import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..),
@@ -283,6 +293,7 @@ runAgentProviders
     -> Dialect
     -> Maybe FullscreenRuntime
     -> IORef (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
+    -> Maybe TaskPlanEnv
     -> OsPath
     -> Maybe Text
     -> Text
@@ -329,6 +340,7 @@ runAgentProviders
     dialect
     fullscreen
     automaticCompactionHookRef
+    taskPlan
     home
     initialPrevious
     model
@@ -355,7 +367,13 @@ runAgentProviders
     transition
     transportModel
     unavailableProviders
-    = case provider of
+    =
+        let nativeCapabilities =
+                maybe
+                    fullNativeRunCapabilities
+                    (.nativeCapabilities)
+                    startup.startupNativeHooks
+        in case provider of
                     OpenAIProvider ->
                         try @_ @CodexAuthFailed
                             (withCodexWsWithProviderOrHttpFallback tokenProvider \conn credential -> do
@@ -589,6 +607,8 @@ runAgentProviders
                                             (readIORef paramsRef)
                                             contextTokensRef
                                             recordCompactionUsage
+                                            (decorateCompactOutcomeWithTaskPlan
+                                                taskPlan)
                                             (\outcome inputs ->
                                                 readIORef
                                                     automaticCompactionHookRef
@@ -618,13 +638,18 @@ runAgentProviders
                                                     installLiveCompactOutcome
                                                         conversationRef
                                                         (Just contextTokensRef)
-                                                        (runProviderCompactWith
-                                                            (Just compactSender)
-                                                            recordCompactionUsage
-                                                            provider
-                                                            (Just tokenProvider)
-                                                            paramsRef
-                                                            historyRef)
+                                                        (\requestedFocus ->
+                                                            runProviderCompactWith
+                                                                (Just compactSender)
+                                                                recordCompactionUsage
+                                                                provider
+                                                                (Just tokenProvider)
+                                                                paramsRef
+                                                                historyRef
+                                                                requestedFocus
+                                                                >>= decorateManualCompact
+                                                                    (codexEffectiveContextWindowFor
+                                                                        . (.model)))
                                                         focus
                                             resetCodexTurnState turnState
                                             runCompact `finally`
@@ -667,8 +692,9 @@ runAgentProviders
                                             , not (isGatewayLoadedAuth loaded)
                                             , isProviderUnavailable err ->
                                                 chooseStartupProviderTransition
+                                                    nativeCapabilities.nativeProviderFallback
                                                     catalog
-                                                    cwd
+                                                    projectRoot
                                                     fullscreen
                                                     (tokenProviderBillingMode
                                                         tokenProvider)
@@ -687,7 +713,12 @@ runAgentProviders
                                             startupFailure err
                                 Right result -> pure result
                     XAIProvider -> do
-                        xaiOptions <- XAI.clientOptionsFromEnv
+                        xaiOptions0 <- XAI.clientOptionsFromEnv
+                        let xaiOptions =
+                                xaiOptions0
+                                    { XAI.hostedXSearchEnabled =
+                                        nativeCapabilities.nativeProviderHostedTools
+                                    }
                         let xaiContextWindow =
                                 contextWindowForParams
                                     (XAIRequest.mapModel xaiOptions)
@@ -787,18 +818,22 @@ runAgentProviders
                                 installLiveCompactOutcome
                                     conversationRef
                                     (Just contextTokensRef)
-                                    (runXaiResponsesCompactWithContextWindow
-                                        contextWindow
-                                        (\request ->
-                                            runWithTokenProvider tokenProvider
-                                                \credential ->
-                                                    XAIClient.createResponseWith
-                                                        (xaiOptionsFor request)
-                                                        credential
-                                                        request)
-                                        recordCompactionUsage
-                                        paramsRef
-                                        historyRef)
+                                    (\requestedFocus ->
+                                        runXaiResponsesCompactWithContextWindow
+                                            contextWindow
+                                            (\request ->
+                                                runWithTokenProvider tokenProvider
+                                                    \credential ->
+                                                        XAIClient.createResponseWith
+                                                            (xaiOptionsFor request)
+                                                            credential
+                                                            request)
+                                            recordCompactionUsage
+                                            paramsRef
+                                            historyRef
+                                            requestedFocus
+                                            >>= decorateManualCompact
+                                                xaiContextWindow)
                                     focus
                         activeBackend <-
                             prepareTransitionBackend
@@ -871,18 +906,22 @@ runAgentProviders
                                 historyRef <-
                                     newIORef =<< readLiveTranscript conversationRef
                                 installLiveCompactOutcome conversationRef Nothing
-                                    (runResponsesCompactWithContextWindow
-                                        contextWindow
-                                        (\request ->
-                                            runWithTokenProvider tokenProvider
-                                                \credential ->
-                                                    GeminiClient.createResponseWith
-                                                        geminiOptions
-                                                        credential
-                                                        request)
-                                        recordCompactionUsage
-                                        paramsRef
-                                        historyRef)
+                                    (\requestedFocus ->
+                                        runResponsesCompactWithContextWindow
+                                            contextWindow
+                                            (\request ->
+                                                runWithTokenProvider tokenProvider
+                                                    \credential ->
+                                                        GeminiClient.createResponseWith
+                                                            geminiOptions
+                                                            credential
+                                                            request)
+                                            recordCompactionUsage
+                                            paramsRef
+                                            historyRef
+                                            requestedFocus
+                                            >>= decorateManualCompact
+                                                geminiContextWindow)
                                     focus
                         activeBackend <-
                             prepareTransitionBackend
@@ -905,8 +944,12 @@ runAgentProviders
                                 , interruptBackend = pure ()
                                 , resetBackendState = pure ()
                                 }
-                    ClaudeCodeProvider ->
-                        withSelectedClaudeAuth
+                    ClaudeCodeProvider
+                        | not
+                            nativeCapabilities.nativeProviderNativeTools ->
+                            startupDie startup
+                                "Claude Code is unavailable in this runtime"
+                        | otherwise -> withSelectedClaudeAuth
                             connectedGateway
                             loaded
                             (startupDie startup . Text.unpack)
@@ -930,12 +973,18 @@ runAgentProviders
                                         currentParams
                             claudeCompactThreshold = do
                                 contextWindow <- claudeContextWindow
+                                let hardLimit =
+                                        claudeCompactionInputLimit contextWindow
                                 pure $
                                     max 1 $
-                                        min contextWindow $
+                                        min hardLimit $
                                             fromMaybe
-                                                (contextWindow * 4 `div` 5)
+                                                (claudeAutoCompactTokenLimit
+                                                    contextWindow)
                                                 options.optCompactThreshold
+                            claudeSummaryInputLimit =
+                                claudeCompactionInputLimit
+                                    <$> claudeContextWindow
                             btwBackend privateParams =
                                 Backend \state previous inputs onEvent -> do
                                     privateTranscript <-
@@ -955,18 +1004,24 @@ runAgentProviders
                                         onEvent
                             compactRunner focus = do
                                 contextWindow <- claudeContextWindow
+                                inputLimit <- claudeSummaryInputLimit
                                 historyRef <-
                                     newIORef =<< readLiveTranscript
                                         conversationRef
                                 installLiveCompactOutcome
                                     conversationRef
                                     (Just contextTokensRef)
-                                    (runBackendCompactWithContextWindow
-                                        contextWindow
-                                        btwBackend
-                                        recordCompactionUsage
-                                        paramsRef
-                                        historyRef)
+                                    (\requestedFocus ->
+                                        runBackendCompactWithLimits
+                                            contextWindow
+                                            inputLimit
+                                            btwBackend
+                                            recordCompactionUsage
+                                            paramsRef
+                                            historyRef
+                                            requestedFocus
+                                            >>= decorateManualCompact
+                                                (const contextWindow))
                                     focus
                             claudeRequest =
                                 sessionRequest
@@ -1014,6 +1069,8 @@ runAgentProviders
                                     , mcpToolNames =
                                         MCP.inProcessMcpToolNames
                                             claudeMcpServer
+                                    , nativeToolsEnabled =
+                                        nativeCapabilities.nativeProviderNativeTools
                                     }
                         when claudeBypassEnabled $
                             case fullscreen of
@@ -1039,14 +1096,18 @@ runAgentProviders
                             \handle -> do
                                 let compactHistory history _inputs = do
                                         contextWindow <- claudeContextWindow
+                                        inputLimit <- claudeSummaryInputLimit
                                         currentParams <- readIORef paramsRef
-                                        runBackendCompactHistoryWithContextWindow
+                                        runBackendCompactHistoryWithLimits
                                             contextWindow
+                                            inputLimit
                                             btwBackend
                                             recordCompactionUsage
                                             currentParams
                                             history
                                             Nothing
+                                            >>= decorateAutomaticCompact
+                                                (const contextWindow)
                                     compactingBackend =
                                         autoCompactBackendWith
                                             claudeCompactThreshold
@@ -1135,37 +1196,41 @@ runAgentProviders
                                 historyRef <-
                                     newIORef =<< readLiveTranscript conversationRef
                                 installLiveCompactOutcome conversationRef Nothing
-                                    (case customGenericOptions of
-                                        Just genericOptions ->
-                                            runResponsesCompactWithContextWindow
-                                                contextWindow
-                                                (\request ->
-                                                    GenericResponses.createResponseWith
-                                                        genericOptions
-                                                            { GenericResponses.model =
-                                                                transportModel
-                                                                    (fromMaybe
-                                                                        model
-                                                                        request.model)
-                                                            }
-                                                        request)
-                                                recordCompactionUsage
-                                                paramsRef
-                                                historyRef
-                                        Nothing ->
-                                            runResponsesCompactWithContextWindow
-                                                contextWindow
-                                                (\request ->
-                                                    runWithTokenProvider
-                                                        tokenProvider
-                                                        \credential ->
-                                                            OpenRouter.createResponseWith
-                                                                openRouterOptions
-                                                                credential
-                                                                request)
-                                                recordCompactionUsage
-                                                paramsRef
-                                                historyRef)
+                                    (\requestedFocus ->
+                                        (case customGenericOptions of
+                                            Just genericOptions ->
+                                                runResponsesCompactWithContextWindow
+                                                    contextWindow
+                                                    (\request ->
+                                                        GenericResponses.createResponseWith
+                                                            genericOptions
+                                                                { GenericResponses.model =
+                                                                    transportModel
+                                                                        (fromMaybe
+                                                                            model
+                                                                            request.model)
+                                                                }
+                                                            request)
+                                                    recordCompactionUsage
+                                                    paramsRef
+                                                    historyRef
+                                            Nothing ->
+                                                runResponsesCompactWithContextWindow
+                                                    contextWindow
+                                                    (\request ->
+                                                        runWithTokenProvider
+                                                            tokenProvider
+                                                            \credential ->
+                                                                OpenRouter.createResponseWith
+                                                                    openRouterOptions
+                                                                    credential
+                                                                    request)
+                                                    recordCompactionUsage
+                                                    paramsRef
+                                                    historyRef)
+                                            requestedFocus
+                                            >>= decorateManualCompact
+                                                openRouterContextWindow)
                                     focus
                         activeBackend <-
                             prepareTransitionBackend
@@ -1189,6 +1254,28 @@ runAgentProviders
                                 , resetBackendState = pure ()
                                 }
           where
+            decorateManualCompact contextWindowForResult = \case
+                Left err -> pure (Left err)
+                Right outcome -> do
+                    currentParams <- readIORef paramsRef
+                    decorateCompactOutcomeWithTaskPlanWithin
+                        (contextWindowForResult currentParams)
+                        currentParams
+                        taskPlan
+                        outcome
+            decorateAutomaticCompact contextWindowForResult = \case
+                Left err -> pure (Left err)
+                Right outcome ->
+                    decorateManualCompact
+                        contextWindowForResult
+                        (Right outcome) >>= pure . \case
+                            Left message ->
+                                Left
+                                    (ProviderError
+                                        InvalidRequestError
+                                        message
+                                        Nothing)
+                            Right decorated -> Right decorated
             startupFailure err = do
                 now <- getCurrentTime
                 startupDie startup

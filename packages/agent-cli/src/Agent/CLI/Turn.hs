@@ -65,7 +65,10 @@ import Agent.CLI.Session
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
     )
-import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.SessionEnv
+    ( PreparedWorkspaceEnvironment(..)
+    , SessionEnv(..)
+    )
 import Agent.CLI.Session.History
     ( currentLiveTranscriptGeneration
     , durableTranscriptCheckpoint
@@ -149,6 +152,10 @@ import Agent.Tools.PlanMode
     , planFilePath
     , planModeReminder
     , writePlanMarkdown
+    )
+import Agent.Tools.TaskPlan
+    ( restoreTaskPlanReminder
+    , takeTaskPlanReminder
     )
 import Agent.OsPath (toText, unsafeToFilePath)
 import Control.Monad (forM_, when)
@@ -242,6 +249,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
     , sessionConversation = conversationRef
     , sessionPersist = persist
     , sessionPlanMode = planMode
+    , sessionTaskPlan = taskPlan
     , sessionStartupContext = startupContext
     , sessionGrokFirstTurnContext = grokFirstTurnContext
     , sessionBackground = background
@@ -295,9 +303,17 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                                 planPath
                         else Nothing
             else pure Nothing
+    taskPlanReminder <-
+        if includeTurnContext
+            then maybe (pure Nothing) takeTaskPlanReminder taskPlan
+            else pure Nothing
     let
         turnInputs0 =
-            turnInputsWithContext planReminder pendingStartup inputs
+            turnInputsWithContext
+                planReminder
+                taskPlanReminder
+                pendingStartup
+                inputs
     (conversationStartedAt, previousActivityAt) <-
         timestampConversationBounds persist
     stampedInputs <-
@@ -308,7 +324,11 @@ runOneTurnBusy includeTurnContext env@SessionEnv
     sentStartupContext <- case pendingStartup of
         Nothing -> pure Nothing
         Just _ ->
-            case drop (if isJust planReminder then 1 else 0) stampedInputs of
+            case drop
+                    ( (if isJust planReminder then 1 else 0)
+                        + (if isJust taskPlanReminder then 1 else 0)
+                    )
+                    stampedInputs of
                 UserMessage context : _ -> pure (Just context)
                 _ -> fail "startup context did not produce a user message"
     (turnInputs, pendingGrokContext) <-
@@ -321,7 +341,9 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         prefix <-
                             takeGrokFirstTurnContext
                                 grokFirstTurnContext
-                                (loadGrokFirstTurnPrefix env.sessionCwd)
+                                (loadGrokFirstTurnPrefix
+                                    env.sessionPreparedWorkspaceEnvironment
+                                    env.sessionCwd)
                         pure (UserMessage prefix : framed, Just prefix)
                     else pure (framed, Nothing)
             else pure (stampedInputs, Nothing)
@@ -335,6 +357,8 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         Nothing -> Just consumed
                         Just _ -> current
                     , ())
+            forM_ taskPlanReminder \_ ->
+                mapM_ restoreTaskPlanReminder taskPlan
         persistPromptSnapshot = case persist of
             PersistenceDisabled -> pure ()
             PersistenceEnabled slotRef -> do
@@ -437,6 +461,9 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                 (finishConversation
                     (rebasePreparedTurn boundary prepared)
                     ConversationInterrupted)
+                >> when (isNothing boundary)
+                    (forM_ taskPlanReminder \_ ->
+                        mapM_ restoreTaskPlanReminder taskPlan)
                 >> restorePlanStateAfterIncomplete planMode initialPlanState
                 >> abortSubagentTurn rootTurnId
             )
@@ -497,6 +524,9 @@ runOneTurnBusy includeTurnContext env@SessionEnv
             abortSubagentTurn rootTurnId
             commitConversationPatch
                 (finishConversation committedPrepared ConversationRestarted)
+            when (isNothing automaticCompaction) $
+                forM_ taskPlanReminder \_ ->
+                    mapM_ restoreTaskPlanReminder taskPlan
             planState <- readIORef planMode.planStateRef
             case fullscreen of
                 Just runtime ->
@@ -554,6 +584,9 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                             (finishConversation
                                 committedPrepared
                                 ConversationProviderUnavailable)
+                        when (isNothing automaticCompaction) $
+                            forM_ taskPlanReminder \_ ->
+                                mapM_ restoreTaskPlanReminder taskPlan
                         case fullscreen of
                             Nothing -> pure ()
                             Just runtime ->
@@ -814,13 +847,26 @@ grokFirstTurnPrefix osName shell cwd today gitStatus =
             <> status
             <> "\n</git_status>"
 
-loadGrokFirstTurnPrefix :: System.OsPath.OsPath -> IO Text
-loadGrokFirstTurnPrefix cwd = do
-    shell <- maybe "/bin/sh" Text.pack <$> lookupEnv "SHELL"
-    osVersion <- loadOperatingSystem
+loadGrokFirstTurnPrefix
+    :: Maybe PreparedWorkspaceEnvironment
+    -> System.OsPath.OsPath
+    -> IO Text
+loadGrokFirstTurnPrefix preparedEnvironment cwd = do
     today <- localDay . zonedTimeToLocalTime <$> getZonedTime
-    status <- loadGitStatus cwd
-    pure (grokFirstTurnPrefix osVersion shell cwd today status)
+    case preparedEnvironment of
+        Nothing -> do
+            shell <- maybe "/bin/sh" Text.pack <$> lookupEnv "SHELL"
+            osVersion <- loadOperatingSystem
+            status <- loadGitStatus cwd
+            pure (grokFirstTurnPrefix osVersion shell cwd today status)
+        Just environment ->
+            pure
+                (grokFirstTurnPrefix
+                    environment.preparedOperatingSystem
+                    environment.preparedShell
+                    cwd
+                    today
+                    Nothing)
 
 -- | Consume a persisted first-turn prefix before consulting the live
 -- environment. The persisted value keeps a resumed request byte-for-byte

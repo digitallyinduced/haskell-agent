@@ -30,12 +30,12 @@ import Agent.CLI.TUI.ImagePreview
 import Agent.CLI.TUI.LambdaArt ()
 import Agent.CLI.TUI.Motion
     ( motionModeForTerminalFocus, userActionPending )
-import Agent.TUI.Accent ( accentRail, waveHeader )
+import Agent.TUI.Accent ( accentRail, highlightWidgetRow, waveHeader )
 import Agent.CLI.TUI.Types
     ( AppState(appSubmittedImagePreviews, appTerminalFocus,
                appHistorySelectedBlock, appUi, appAgentSelected,
                appSyntaxHighlighter, appCompletionFlashes, appMotionElapsedMillis,
-               appHoveredControl, appPressedControl, appRuntime),
+               appHoveredControl, appHoveredLine, appPressedControl, appRuntime),
       FullscreenRuntime(runtimeWaveTrough, runtimeMotionMode,
                         runtimeNativeImagePreviews, runtimeColor),
       activeTheme,
@@ -97,7 +97,6 @@ import Brick
       vBox,
       vLimit,
       withAttr,
-      withDefAttr,
       withBorderStyle,
       AttrName,
       Context(availWidth),
@@ -162,21 +161,15 @@ import qualified Data.Text.Encoding as TextEncoding ()
 import qualified Agent.TUI.Theme as Theme
     ( assistantAttr,
       borderActiveAttr,
-      borderAttr,
       completionFlashAttr,
       controlLinkAttr,
-      dimAttr,
       errorAttr,
       inspectAttr,
       mutedAttr,
       successAttr,
-      syntaxCommentAttr,
       thinkingAttr,
       thinkingBodyAttr,
       transcriptHoverAttr,
-      transcriptHoverMutedAttr,
-      transcriptHoverMutedCancelledAttr,
-      transcriptHoverMutedItalicAttr,
       todoCancelledAttr,
       todoCompletedAttr,
       todoInProgressAttr,
@@ -185,7 +178,6 @@ import qualified Agent.TUI.Theme as Theme
       toolPathAttr,
       userAttr,
       userMutedAttr,
-      waitingDimAttr,
       waveTroughForTheme )
 import qualified Agent.CLI.TUI.Transcript as Transcript ()
 import qualified Graphics.Vty as V ()
@@ -366,8 +358,9 @@ drawBlock state target ui block =
         hoveredRow =
             (if hovered
                 then
-                    withDefAttr Theme.transcriptHoverAttr
-                        . hoverReadableAttrs
+                    highlightWidgetRow
+                        Theme.transcriptHoverAttr
+                        (fromMaybe 0 state.appHoveredLine)
                 else id) $
                 padRight Max blockRow
         rendered =
@@ -385,29 +378,6 @@ drawBlock state target ui block =
                 (codeCopyCacheState state target block.blockId))
             rendered
         else rendered
-
--- The hover band occupies palette bright-black, so semantic gray foregrounds
--- inherit dimmed terminal text instead of disappearing into the background.
-hoverReadableAttrs :: Widget Name -> Widget Name
-hoverReadableAttrs =
-    overrideAttr Theme.mutedAttr Theme.transcriptHoverMutedAttr
-        . overrideAttr Theme.inspectAttr Theme.transcriptHoverMutedAttr
-        . overrideAttr
-            Theme.thinkingBodyAttr
-            Theme.transcriptHoverMutedItalicAttr
-        . overrideAttr
-            Theme.todoCompletedAttr
-            Theme.transcriptHoverMutedAttr
-        . overrideAttr
-            Theme.todoCancelledAttr
-            Theme.transcriptHoverMutedCancelledAttr
-        . overrideAttr
-            Theme.syntaxCommentAttr
-            Theme.transcriptHoverMutedItalicAttr
-        . overrideAttr Theme.dimAttr Theme.transcriptHoverMutedAttr
-        . overrideAttr Theme.waitingDimAttr Theme.transcriptHoverMutedAttr
-        . overrideAttr Theme.borderAttr Theme.transcriptHoverMutedAttr
-        . overrideAttr Theme.controlLinkAttr Theme.transcriptHoverMutedAttr
 
 submittedUserMessage
     :: AppState

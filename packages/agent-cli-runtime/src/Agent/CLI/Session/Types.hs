@@ -62,6 +62,11 @@ import Agent.Responses.Types.Items (responseItemDecoder)
 import Agent.Responses.Types.Tools (ResponseTool, responseToolDecoder)
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Session (TranscriptEffect(..))
+import Agent.Tools.TaskPlan
+    ( TaskPlan(..)
+    , TaskPlanItem(..)
+    , TaskPlanStatus(..)
+    )
 import Control.Monad (unless, when)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, (.=))
 import qualified Data.Aeson as Aeson
@@ -176,12 +181,14 @@ sessionPromptSnapshotDecoder = Hermes.object do
 
 data SessionTransfer = SessionTransfer
     { transferMeta :: !SessionMeta
+    , transferTaskPlan :: !(Maybe TaskPlan)
     , transferTurns :: ![SessionTurn]
     } deriving (Eq, Show)
 
 instance ToJSON SessionTransfer where
     toJSON transfer = object
         [ "meta" .= transfer.transferMeta
+        , "currentTaskPlan" .= fmap taskPlanJson transfer.transferTaskPlan
         , "turns" .= transfer.transferTurns
         ]
 
@@ -197,7 +204,46 @@ sessionTransferDecoder :: Hermes.Decoder SessionTransfer
 sessionTransferDecoder = Hermes.object $
     SessionTransfer
         <$> Hermes.atKey "meta" sessionMetaDecoder
+        <*> optionalKey "currentTaskPlan" taskPlanDecoder
         <*> Hermes.atKey "turns" (Hermes.list sessionTurnDecoder)
+
+taskPlanJson :: TaskPlan -> Aeson.Value
+taskPlanJson plan = object
+    [ "explanation" .= plan.taskPlanExplanation
+    , "plan" .= map taskPlanItemJson plan.taskPlanItems
+    ]
+
+taskPlanItemJson :: TaskPlanItem -> Aeson.Value
+taskPlanItemJson item = object
+    [ "step" .= item.taskPlanStep
+    , "status" .= taskPlanStatusText item.taskPlanStatus
+    ]
+
+taskPlanDecoder :: Hermes.Decoder TaskPlan
+taskPlanDecoder = Hermes.object do
+    explanation <- optionalKey "explanation" Hermes.text
+    items <- Hermes.atKey "plan" (Hermes.list taskPlanItemDecoder)
+    when
+        (length (filter ((== TaskPlanInProgress) . (.taskPlanStatus)) items) > 1)
+        (fail "task plan has more than one in_progress item")
+    pure (TaskPlan explanation items)
+
+taskPlanItemDecoder :: Hermes.Decoder TaskPlanItem
+taskPlanItemDecoder = Hermes.object do
+    step <- Hermes.atKey "step" Hermes.text
+    statusText <- Hermes.atKey "status" Hermes.text
+    status <- case statusText of
+        "pending" -> pure TaskPlanPending
+        "in_progress" -> pure TaskPlanInProgress
+        "completed" -> pure TaskPlanCompleted
+        invalid -> fail ("unknown task plan status: " <> Text.unpack invalid)
+    pure (TaskPlanItem step status)
+
+taskPlanStatusText :: TaskPlanStatus -> Text
+taskPlanStatusText = \case
+    TaskPlanPending -> "pending"
+    TaskPlanInProgress -> "in_progress"
+    TaskPlanCompleted -> "completed"
 
 -- | Durable provenance for subagent transcripts written before child target
 -- metadata was persisted. Keeping this target separate from the mutable root

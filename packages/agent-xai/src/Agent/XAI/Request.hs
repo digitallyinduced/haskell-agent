@@ -44,7 +44,7 @@ mapModel options model =
 buildRequest :: ClientOptions -> ResponseCreateParams -> ResponseCreateParams
 buildRequest options request =
     stripLocalCompactionMarker $
-        withHostedXSearch $
+        (if options.hostedXSearchEnabled then withHostedXSearch else id) $
             mapResponseTools xaiTool $
                 forceStatelessStreaming defaultResponseCreateParams
                 { model = Just $
@@ -62,8 +62,6 @@ buildRequest options request =
                     , reasoningMode = Nothing
                     , summary = Just "concise"
                     }
-                , include = request.include
-                , promptCacheKey = request.promptCacheKey
                 }
   where
     systemItems = case request.instructions of

@@ -15,6 +15,11 @@ data-files:         data/CHANGELOG.md
                   , skills/add-model/SKILL.md
                   , skills/learn-about-user/SKILL.md
                   , skills/post-task-learning-review/SKILL.md
+                  , skills/resume-claude/SKILL.md
+                  , skills/resume-codex/SKILL.md
+                  , skills/resume-cursor/SKILL.md
+                  , skills/resume-grok/SKILL.md
+                  , skills/shared/resume-session/CORE.md
                   , skills/telegram-agent/SKILL.md
 
 common common-options
@@ -54,6 +59,15 @@ library
                     , Agent.CLI.Compaction.Continuation
                     , Agent.CLI.Compaction.Projection
                     , Agent.CLI.Compaction.Types
+                    , Agent.CLI.ExternalSession.Content
+                    , Agent.CLI.ExternalSession.JSONL
+                    , Agent.CLI.ExternalSession.Paths
+                    , Agent.CLI.ExternalSession.Provider.Claude
+                    , Agent.CLI.ExternalSession.Provider.Codex
+                    , Agent.CLI.ExternalSession.Provider.Cursor
+                    , Agent.CLI.ExternalSession.Provider.Grok
+                    , Agent.CLI.ExternalSession.SQLite
+                    , Agent.CLI.ExternalSession.Types
                     , Agent.CLI.Clipboard.Linux
                     , Agent.CLI.Clipboard.MacOS
                     , Agent.CLI.McpStatus
@@ -161,6 +175,7 @@ library
                     , Agent.CLI.Dictation
                     , Agent.CLI.Dialects
                     , Agent.CLI.ExternalProgram
+                    , Agent.CLI.ExternalSession
                     , Agent.CLI.FileUri
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.GatewayModels
@@ -248,6 +263,7 @@ library
                     , agent-cli-runtime:Agent.CLI.Duration as Agent.CLI.Duration
                     , agent-cli-runtime:Agent.CLI.Environment as Agent.CLI.Environment
                     , agent-cli-runtime:Agent.CLI.Error as Agent.CLI.Error
+                    , agent-cli-runtime:Agent.CLI.GatewayBoundary as Agent.CLI.GatewayBoundary
                     , agent-cli-runtime:Agent.CLI.GatewayBridge as Agent.CLI.GatewayBridge
                     , agent-cli-runtime:Agent.CLI.GatewayClient as Agent.CLI.GatewayClient
                     , agent-cli-runtime:Agent.CLI.ManagedTurn as Agent.CLI.ManagedTurn
@@ -286,6 +302,7 @@ library
                     , containers
                     , crypton
                     , directory
+                    , direct-sqlite >= 2.3 && < 2.4
                     , entropy
                     , filelock
                     , filepath
@@ -481,6 +498,7 @@ test-suite agent-cli-test
                     , Agent.CLI.DatabaseSpec
                     , Agent.CLI.DesktopSpec
                     , Agent.CLI.ExternalProgramSpec
+                    , Agent.CLI.ExternalSessionSpec
                     , Agent.CLI.FileUriSpec
                     , Agent.CLI.GatewayModelsSpec
                     , Agent.CLI.GitDiffSpec
@@ -496,6 +514,7 @@ test-suite agent-cli-test
                     , Agent.CLI.MetaConsoleRuntimeSpec
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.NativeAgentsSpec
+                    , Agent.CLI.NativeRuntimeSpec
                     , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PlanSpec
@@ -568,6 +587,7 @@ test-suite agent-cli-test
                     , colour
                     , containers
                     , directory
+                    , direct-sqlite >= 2.3 && < 2.4
                     , filepath
                     , haskeline >= 0.8 && < 0.9
                     , hspec >= 2.11 && < 2.12
