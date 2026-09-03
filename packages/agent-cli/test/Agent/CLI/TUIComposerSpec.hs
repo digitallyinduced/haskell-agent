@@ -8,7 +8,7 @@ import Agent.CLI.Dictation
     , insertDictation
     )
 import Agent.CLI.GatewayClient (newGatewayModelAccessWith)
-import Agent.CLI.Command (ReplAction(..))
+import Agent.CLI.Command (CopyRequest(..), ReplAction(..))
 import Agent.Provider (Provider(..))
 import Agent.CLI.Input
     ( ReplLine(..)
@@ -80,15 +80,29 @@ spec = describe "fullscreen composer" do
             (ReplText "ordinary follow-up")
             `shouldBe` Nothing
 
-    it "runs metadata copy commands immediately only while a turn is active" do
+    it "runs safe inspection and copy commands immediately during active turns" do
         let running = initialUiState { uiRunning = True }
+        immediateReplCommand running (ReplText "/copy")
+            `shouldBe` Just (ReplCopy (CopyRequest 1 Nothing))
+        immediateReplCommand running (ReplText "/copy-code 2")
+            `shouldBe` Just (ReplCopyCode 2)
+        immediateReplCommand running (ReplText "/copy-diff")
+            `shouldBe` Just ReplCopyDiff
         immediateReplCommand running (ReplText "/copy-path")
             `shouldBe` Just ReplCopyPath
         immediateReplCommand running (ReplText "/copy-session")
             `shouldBe` Just ReplCopySession
+        immediateReplCommand running (ReplText "/queue")
+            `shouldBe` Just ReplQueue
+        immediateReplCommand running (ReplText "/context")
+            `shouldBe` Just ReplContext
         immediateReplCommand initialUiState (ReplText "/copy-path")
             `shouldBe` Nothing
-        immediateReplCommand running (ReplText "/copy-diff")
+        immediateReplCommand running (ReplText "/copy 2")
+            `shouldBe` Nothing
+        immediateReplCommand running (ReplText "/copy TO answer.md")
+            `shouldBe` Nothing
+        immediateReplCommand running (ReplText "/agents")
             `shouldBe` Nothing
 
     it "preserves paste provenance for steering prompts" do
