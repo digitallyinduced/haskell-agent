@@ -177,13 +177,18 @@ loadDirectOpenAiAuth =
     runExceptT loadOpenAi
 
 -- | Dictation must not send an organization gateway bearer to a direct
--- provider transcription endpoint.
-loadOpenAiDictationAuth :: IO (Maybe LoadedAuth)
+-- provider transcription endpoint. Preserve OpenAI lookup failures so a
+-- borrowed Claude backend can still explain a broken local configuration.
+loadOpenAiDictationAuth :: IO (Either Text LoadedAuth)
 loadOpenAiDictationAuth =
     loadGatewayCredential >>= \case
-        Right Nothing -> OpenAIAuth.loadOpenAiDictationAuth
-        Right (Just _) -> pure Nothing
-        Left _ -> pure Nothing
+        Right Nothing ->
+            OpenAIAuth.loadOpenAiDictationAuth
+        Right (Just _) ->
+            pure $ Left
+                "No OpenAI credential found for OpenAI dictation"
+        Left gatewayErr ->
+            pure $ Left ("cannot load gateway credential: " <> gatewayErr)
 
 gatewayLoadedAuth :: GatewayCredential -> Either Text LoadedAuth
 gatewayLoadedAuth gateway = do
