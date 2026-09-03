@@ -859,6 +859,7 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
     isVisibleModelOutput = \case
         TextDelta{} -> True
         ReasoningDelta{} -> True
+        ToolArgumentsUpdated{} -> True
         _ -> False
 
 transientStreamingResultPolicy :: RetryPolicyM IO
