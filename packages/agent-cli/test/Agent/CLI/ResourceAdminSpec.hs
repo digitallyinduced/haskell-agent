@@ -48,6 +48,74 @@ spec = describe "typed learned-resource administration validation" do
         map validateResourceSlug ["double--dash", "-leading", "trailing-"]
             `shouldSatisfy` all isLeft
 
+    it "short-circuits invalid read keys before accessing the store" do
+        readResourceSkill
+            unreachableStorageContext
+            unreachableStorageContext
+            ResourceUserScope
+            ""
+            Nothing
+            `shouldReturn` Left
+                (ResourceAdminInvalid "slug must not be empty")
+        readResourceSkill
+            unreachableStorageContext
+            unreachableStorageContext
+            ResourceUserScope
+            "remember-user-preference"
+            (Just 0)
+            `shouldReturn` Left
+                (ResourceAdminInvalid "revision must be positive")
+
+    it "preserves validation precedence across mutation inputs" do
+        createResourceSkill
+            unreachableStorageContext
+            unreachableStorageContext
+            ResourceUserScope
+            ""
+            invalidDraft
+            ""
+            `shouldReturn` Left
+                (ResourceAdminInvalid "slug must not be empty")
+        updateResourceSkill
+            unreachableStorageContext
+            unreachableStorageContext
+            ResourceUserScope
+            "remember-user-preference"
+            1
+            invalidDraft
+            ""
+            `shouldReturn` Left
+                (ResourceAdminInvalid "title must not be empty")
+        rollbackResourceSkill
+            unreachableStorageContext
+            unreachableStorageContext
+            ResourceUserScope
+            "remember-user-preference"
+            1
+            0
+            ""
+            `shouldReturn` Left
+                (ResourceAdminInvalid "target revision must be positive")
+
+    it "validates list and history limits before accessing the store" do
+        listResourceSkills
+            unreachableStorageContext
+            unreachableStorageContext
+            Nothing
+            0
+            `shouldReturn` Left
+                (ResourceAdminInvalid
+                    "list limit must be between 1 and 1000")
+        historyResourceSkill
+            unreachableStorageContext
+            unreachableStorageContext
+            ResourceUserScope
+            ""
+            0
+            `shouldReturn` Left
+                (ResourceAdminInvalid
+                    "history limit must be between 1 and 1000")
+
 validDraft :: ResourceSkillDraft
 validDraft = ResourceSkillDraft
     { resourceDraftTitle = "Remember"
@@ -57,6 +125,13 @@ validDraft = ResourceSkillDraft
     , resourceDraftActivation = SkillRelevant
     , resourceDraftPriority = 0
     }
+
+invalidDraft :: ResourceSkillDraft
+invalidDraft = validDraft { resourceDraftTitle = "" }
+
+unreachableStorageContext :: value
+unreachableStorageContext =
+    error "resource administration accessed storage after invalid input"
 
 isLeft :: Either error value -> Bool
 isLeft = either (const True) (const False)

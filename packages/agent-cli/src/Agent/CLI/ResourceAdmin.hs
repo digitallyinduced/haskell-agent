@@ -55,6 +55,13 @@ import Agent.Store.Postgres.Skill
     , updateLearnedSkill
     )
 import Agent.Store.Types (StoreError(..))
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Except
+    ( ExceptT(..)
+    , except
+    , runExceptT
+    , throwE
+    )
 import Data.Char (isAsciiLower, isDigit)
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
@@ -116,6 +123,8 @@ data ResourceAdminError
     | ResourceAdminUnavailable
     deriving (Eq, Show)
 
+type ResourceAdmin = ExceptT ResourceAdminError IO
+
 validateResourceSlug :: Text -> Either ResourceAdminError Text
 validateResourceSlug slug
     | Text.null slug =
@@ -161,27 +170,24 @@ listResourceSkills
     -> Maybe ResourceScope
     -> Int
     -> IO (Either ResourceAdminError [ResourceSkill])
-listResourceSkills store scopes selected limit
-    | limit < 1 || limit > 1000 =
-        pure (invalid "list limit must be between 1 and 1000")
-    | otherwise =
-        fmap
-            ( fmap
-                ( map skillFromStored
-                    . take limit
-                    . maybe id
-                        (\scope -> filter
-                            ((== scope) . resourceScopeFromStored
-                                . (.scopeKind) . (.learnedSkillScope)))
-                        selected
-                )
-                . mapStoreError
-            ) $
-            listAllLearnedSkillsLimited
-                (trustedPool store)
-                (applicableDatabaseScopes scopes)
-                (resourceScopeKind <$> selected)
-                limit
+listResourceSkills store scopes selected limit = runExceptT do
+    _ <- except (validateLimit "list" limit)
+    stored <- liftStore $
+        listAllLearnedSkillsLimited
+            (trustedPool store)
+            (applicableDatabaseScopes scopes)
+            (resourceScopeKind <$> selected)
+            limit
+    pure
+        ( map skillFromStored
+            . take limit
+            . maybe id
+                (\scope -> filter
+                    ((== scope) . resourceScopeFromStored
+                        . (.scopeKind) . (.learnedSkillScope)))
+                selected
+            $ stored
+        )
 
 readResourceSkill
     :: Store
@@ -190,28 +196,19 @@ readResourceSkill
     -> Text
     -> Maybe Int64
     -> IO (Either ResourceAdminError ResourceSkill)
-readResourceSkill store scopes selected slug requestedRevision =
-    case validateKey slug requestedRevision of
-        Left err -> pure (Left err)
-        Right () -> do
-            let scope = selectScope scopes selected
-                pool = trustedPool store
-            mapStoreError <$> readLearnedSkill pool scope slug >>= \case
-                Left err -> pure (Left err)
-                Right Nothing -> pure (Left ResourceAdminNotFound)
-                Right (Just current) ->
-                    case requestedRevision of
-                        Nothing -> pure (Right (skillFromStored current))
-                        Just revision ->
-                            mapStoreError
-                                <$> readLearnedSkillRevision
-                                    pool scope slug revision
-                                >>= pure . (>>= \case
-                                    Nothing ->
-                                        Left ResourceAdminRevisionNotFound
-                                    Just stored ->
-                                        Right
-                                            (historicalSkill current stored))
+readResourceSkill store scopes selected slug requestedRevision = runExceptT do
+    _ <- except (validateKey slug requestedRevision)
+    let scope = selectScope scopes selected
+        pool = trustedPool store
+    current <- require ResourceAdminNotFound
+        =<< liftStore (readLearnedSkill pool scope slug)
+    case requestedRevision of
+        Nothing -> pure (skillFromStored current)
+        Just revision -> do
+            stored <- require ResourceAdminRevisionNotFound
+                =<< liftStore
+                    (readLearnedSkillRevision pool scope slug revision)
+            pure (historicalSkill current stored)
 
 createResourceSkill
     :: Store
@@ -222,35 +219,36 @@ createResourceSkill
     -> Text
     -> IO (Either ResourceAdminError ResourceSkill)
 createResourceSkill store scopes selected slug rawDraft rawSummary =
-    case (,,)
-        <$> validateResourceSlug slug
-        <*> validateResourceSkillDraft rawDraft
-        <*> validateResourceSummary rawSummary of
-        Left err -> pure (Left err)
-        Right (_, draft, summary) -> do
-            now <- getCurrentTime
-            finishMutation =<< mapStoreError
-                <$> createLearnedSkill
-                    (trustedPool store)
-                    LearnedSkillCreate
-                        { learnedSkillCreateScope = selectScope scopes selected
-                        , learnedSkillCreateSlug = slug
-                        , learnedSkillCreateTitle = draft.resourceDraftTitle
-                        , learnedSkillCreateDescription =
-                            draft.resourceDraftDescription
-                        , learnedSkillCreateAppliesWhen =
-                            draft.resourceDraftAppliesWhen
-                        , learnedSkillCreateInstructions =
-                            draft.resourceDraftInstructions
-                        , learnedSkillCreateActivation =
-                            draft.resourceDraftActivation
-                        , learnedSkillCreatePriority =
-                            draft.resourceDraftPriority
-                        , learnedSkillCreateStatus = SkillActive
-                        , learnedSkillCreateSummary = summary
-                        , learnedSkillCreateSource = nativeAdminSource
-                        , learnedSkillCreateAt = now
-                        }
+    runExceptT do
+        (_, draft, summary) <- except $
+            (,,)
+                <$> validateResourceSlug slug
+                <*> validateResourceSkillDraft rawDraft
+                <*> validateResourceSummary rawSummary
+        now <- liftIO getCurrentTime
+        result <- liftStore $
+            createLearnedSkill
+                (trustedPool store)
+                LearnedSkillCreate
+                    { learnedSkillCreateScope = selectScope scopes selected
+                    , learnedSkillCreateSlug = slug
+                    , learnedSkillCreateTitle = draft.resourceDraftTitle
+                    , learnedSkillCreateDescription =
+                        draft.resourceDraftDescription
+                    , learnedSkillCreateAppliesWhen =
+                        draft.resourceDraftAppliesWhen
+                    , learnedSkillCreateInstructions =
+                        draft.resourceDraftInstructions
+                    , learnedSkillCreateActivation =
+                        draft.resourceDraftActivation
+                    , learnedSkillCreatePriority =
+                        draft.resourceDraftPriority
+                    , learnedSkillCreateStatus = SkillActive
+                    , learnedSkillCreateSummary = summary
+                    , learnedSkillCreateSource = nativeAdminSource
+                    , learnedSkillCreateAt = now
+                    }
+        finishMutation result
 
 updateResourceSkill
     :: Store
@@ -262,40 +260,44 @@ updateResourceSkill
     -> Text
     -> IO (Either ResourceAdminError ResourceSkill)
 updateResourceSkill store scopes selected slug expected rawDraft rawSummary =
-    case (,,)
-        <$> validateMutationKey slug expected
-        <*> validateResourceSkillDraft rawDraft
-        <*> validateResourceSummary rawSummary of
-        Left err -> pure (Left err)
-        Right (_, draft, summary) ->
-            updateWithPatch store scopes selected slug expected summary
-                LearnedSkillPatch
-                    { learnedSkillPatchTitle =
-                        Just draft.resourceDraftTitle
-                    , learnedSkillPatchDescription =
-                        Just draft.resourceDraftDescription
-                    , learnedSkillPatchAppliesWhen =
-                        Just draft.resourceDraftAppliesWhen
-                    , learnedSkillPatchInstructions =
-                        Just draft.resourceDraftInstructions
-                    , learnedSkillPatchActivation =
-                        Just draft.resourceDraftActivation
-                    , learnedSkillPatchPriority =
-                        Just draft.resourceDraftPriority
-                    , learnedSkillPatchStatus = Nothing
-                    }
+    runExceptT do
+        (_, draft, summary) <- except $
+            (,,)
+                <$> validateMutationKey slug expected
+                <*> validateResourceSkillDraft rawDraft
+                <*> validateResourceSummary rawSummary
+        updateWithPatch store scopes selected slug expected summary
+            LearnedSkillPatch
+                { learnedSkillPatchTitle =
+                    Just draft.resourceDraftTitle
+                , learnedSkillPatchDescription =
+                    Just draft.resourceDraftDescription
+                , learnedSkillPatchAppliesWhen =
+                    Just draft.resourceDraftAppliesWhen
+                , learnedSkillPatchInstructions =
+                    Just draft.resourceDraftInstructions
+                , learnedSkillPatchActivation =
+                    Just draft.resourceDraftActivation
+                , learnedSkillPatchPriority =
+                    Just draft.resourceDraftPriority
+                , learnedSkillPatchStatus = Nothing
+                }
 
 archiveResourceSkill
     :: Store -> DatabaseScopes -> ResourceScope -> Text -> Int64 -> Text
     -> IO (Either ResourceAdminError ResourceSkill)
-archiveResourceSkill =
-    setResourceSkillArchived SkillArchived
+archiveResourceSkill store scopes selected slug expected summary =
+    runExceptT $
+        setResourceSkillArchived
+            SkillArchived store scopes selected slug expected summary
 
 restoreResourceSkill
     :: Store -> DatabaseScopes -> ResourceScope -> Text -> Int64 -> Text
     -> IO (Either ResourceAdminError ResourceSkill)
-restoreResourceSkill =
-    setResourceSkillArchived SkillActive
+restoreResourceSkill store scopes selected slug expected summary =
+    runExceptT $
+        setResourceSkillArchived
+            SkillActive store scopes selected slug expected summary
 
 rollbackResourceSkill
     :: Store
@@ -307,26 +309,27 @@ rollbackResourceSkill
     -> Text
     -> IO (Either ResourceAdminError ResourceSkill)
 rollbackResourceSkill store scopes selected slug expected target rawSummary =
-    case (,,)
-        <$> validateMutationKey slug expected
-        <*> validatePositiveRevision "target revision" target
-        <*> validateResourceSummary rawSummary of
-        Left err -> pure (Left err)
-        Right (_, _, summary) -> do
-            now <- getCurrentTime
-            finishMutation =<< mapStoreError
-                <$> rollbackLearnedSkill
-                    (trustedPool store)
-                    LearnedSkillRollback
-                        { learnedSkillRollbackScope =
-                            selectScope scopes selected
-                        , learnedSkillRollbackSlug = slug
-                        , learnedSkillRollbackExpectedRevision = expected
-                        , learnedSkillRollbackTargetRevision = target
-                        , learnedSkillRollbackSummary = summary
-                        , learnedSkillRollbackSource = nativeAdminSource
-                        , learnedSkillRollbackAt = now
-                        }
+    runExceptT do
+        (_, _, summary) <- except $
+            (,,)
+                <$> validateMutationKey slug expected
+                <*> validatePositiveRevision "target revision" target
+                <*> validateResourceSummary rawSummary
+        now <- liftIO getCurrentTime
+        result <- liftStore $
+            rollbackLearnedSkill
+                (trustedPool store)
+                LearnedSkillRollback
+                    { learnedSkillRollbackScope =
+                        selectScope scopes selected
+                    , learnedSkillRollbackSlug = slug
+                    , learnedSkillRollbackExpectedRevision = expected
+                    , learnedSkillRollbackTargetRevision = target
+                    , learnedSkillRollbackSummary = summary
+                    , learnedSkillRollbackSource = nativeAdminSource
+                    , learnedSkillRollbackAt = now
+                    }
+        finishMutation result
 
 historyResourceSkill
     :: Store
@@ -335,37 +338,34 @@ historyResourceSkill
     -> Text
     -> Int
     -> IO (Either ResourceAdminError [ResourceSkillRevision])
-historyResourceSkill store scopes selected slug limit
-    | limit < 1 || limit > 1000 =
-        pure (invalid "history limit must be between 1 and 1000")
-    | otherwise = case validateResourceSlug slug of
-        Left err -> pure (Left err)
-        Right _ -> do
-            result <- mapStoreError <$> listLearnedSkillRevisionsLimited
-                (trustedPool store)
-                (selectScope scopes selected)
-                slug
-                limit
-            pure case result of
-                Right [] -> Left ResourceAdminNotFound
-                Right revisions ->
-                    Right (map revisionFromStored revisions)
-                Left err -> Left err
+historyResourceSkill store scopes selected slug limit = runExceptT do
+    _ <- except $
+        (,)
+            <$> validateLimit "history" limit
+            <*> validateResourceSlug slug
+    revisions <- liftStore $
+        listLearnedSkillRevisionsLimited
+            (trustedPool store)
+            (selectScope scopes selected)
+            slug
+            limit
+    case revisions of
+        [] -> throwE ResourceAdminNotFound
+        _ -> pure (map revisionFromStored revisions)
 
 setResourceSkillArchived
     :: LearnedSkillStatus
     -> Store -> DatabaseScopes -> ResourceScope -> Text -> Int64 -> Text
-    -> IO (Either ResourceAdminError ResourceSkill)
-setResourceSkillArchived status store scopes selected slug expected rawSummary =
-    case (,)
-        <$> validateMutationKey slug expected
-        <*> validateResourceSummary rawSummary of
-        Left err -> pure (Left err)
-        Right (_, summary) ->
-            updateWithPatch store scopes selected slug expected summary
-                emptyPatch
-                    { learnedSkillPatchStatus = Just status
-                    }
+    -> ResourceAdmin ResourceSkill
+setResourceSkillArchived status store scopes selected slug expected rawSummary = do
+    (_, summary) <- except $
+        (,)
+            <$> validateMutationKey slug expected
+            <*> validateResourceSummary rawSummary
+    updateWithPatch store scopes selected slug expected summary
+        emptyPatch
+            { learnedSkillPatchStatus = Just status
+            }
 
 updateWithPatch
     :: Store
@@ -375,11 +375,11 @@ updateWithPatch
     -> Int64
     -> Text
     -> LearnedSkillPatch
-    -> IO (Either ResourceAdminError ResourceSkill)
+    -> ResourceAdmin ResourceSkill
 updateWithPatch store scopes selected slug expected summary patch = do
-    now <- getCurrentTime
-    finishMutation =<< mapStoreError
-        <$> updateLearnedSkill
+    now <- liftIO getCurrentTime
+    result <- liftStore $
+        updateLearnedSkill
             (trustedPool store)
             LearnedSkillUpdate
                 { learnedSkillUpdateScope = selectScope scopes selected
@@ -390,18 +390,19 @@ updateWithPatch store scopes selected slug expected summary patch = do
                 , learnedSkillUpdateSource = nativeAdminSource
                 , learnedSkillUpdateAt = now
                 }
+    finishMutation result
 
 finishMutation
-    :: Either ResourceAdminError LearnedSkillMutationResult
-    -> IO (Either ResourceAdminError ResourceSkill)
-finishMutation = pure . (>>= \case
-    LearnedSkillMutationApplied skill -> Right (skillFromStored skill)
-    LearnedSkillMutationAlreadyExists -> Left ResourceAdminAlreadyExists
-    LearnedSkillMutationNotFound -> Left ResourceAdminNotFound
+    :: LearnedSkillMutationResult
+    -> ResourceAdmin ResourceSkill
+finishMutation = \case
+    LearnedSkillMutationApplied skill -> pure (skillFromStored skill)
+    LearnedSkillMutationAlreadyExists -> throwE ResourceAdminAlreadyExists
+    LearnedSkillMutationNotFound -> throwE ResourceAdminNotFound
     LearnedSkillMutationConflict revision ->
-        Left (ResourceAdminConflict revision)
+        throwE (ResourceAdminConflict revision)
     LearnedSkillMutationRevisionNotFound ->
-        Left ResourceAdminRevisionNotFound)
+        throwE ResourceAdminRevisionNotFound
 
 validateKey :: Text -> Maybe Int64 -> Either ResourceAdminError ()
 validateKey slug revision = do
@@ -417,6 +418,12 @@ validatePositiveRevision
 validatePositiveRevision label revision
     | revision < 1 = invalid (label <> " must be positive")
     | otherwise = Right revision
+
+validateLimit :: Text -> Int -> Either ResourceAdminError Int
+validateLimit label limit
+    | limit < 1 || limit > 1000 =
+        invalid (label <> " limit must be between 1 and 1000")
+    | otherwise = Right limit
 
 validateRequired
     :: Text -> Int -> Text -> Either ResourceAdminError Text
@@ -444,6 +451,12 @@ validateOptional label maximum value
 
 invalid :: Text -> Either ResourceAdminError value
 invalid = Left . ResourceAdminInvalid
+
+require :: ResourceAdminError -> Maybe value -> ResourceAdmin value
+require err = maybe (throwE err) pure
+
+liftStore :: IO (Either StoreError value) -> ResourceAdmin value
+liftStore action = ExceptT (mapStoreError <$> action)
 
 mapStoreError :: Either StoreError value -> Either ResourceAdminError value
 mapStoreError = either (Left . mapOne) Right
