@@ -634,16 +634,23 @@ reflowConversation = do
                 Just (VP _ top (_, height) (_, contentHeight)) -> do
                     renderedReserveRows <-
                         conversationRenderedReserveRows
+                    renderedAnchorTop <-
+                        conversationRenderedAnchorTop top anchor
                     let unpaddedContentHeight =
                             max 0
                                 (contentHeight - renderedReserveRows)
+                        alignedAnchor =
+                            maybe
+                                anchor
+                                (`Scroll.realignConversationAnchor` anchor)
+                                renderedAnchorTop
                         (next, scrollAction) =
                             Scroll.reflowConversationAnchor
                                 state.appUi.uiFollow
                                 top
                                 height
                                 unpaddedContentHeight
-                                anchor
+                                alignedAnchor
                     modify' \current ->
                         current { appConversationAnchor = Just next }
                     case scrollAction of
@@ -758,6 +765,46 @@ conversationRenderedReserveRows =
     lookupExtent ConversationReserve >>= \case
         Just (Extent _ _ (_, reserveRows)) -> pure reserveRows
         Nothing -> pure 0
+
+conversationRenderedAnchorTop
+    :: Int
+    -> Scroll.ConversationAnchor
+    -> EventM Name AppState (Maybe Int)
+conversationRenderedAnchorTop viewportTop anchor =
+    lookupExtent ConversationViewportExtent >>= \case
+        Nothing -> pure Nothing
+        Just viewportBounds ->
+            lookupExtent
+                (ConversationBlock AgentRoot anchor.anchorBlockId)
+                >>= \case
+                    Just blockBounds
+                        | extentTopRowInside viewportBounds blockBounds ->
+                            let
+                                Location (_, viewportRow) =
+                                    viewportBounds.extentUpperLeft
+                                Location (_, blockRow) =
+                                    blockBounds.extentUpperLeft
+                            in pure $
+                                Just $
+                                    max 0
+                                        (viewportTop
+                                            + blockRow
+                                            - viewportRow)
+                    _ -> pure Nothing
+
+-- Brick translates child extents by the viewport offset. Only a block whose
+-- top row is actually visible can safely repair the saved content position;
+-- an extent clipped above the viewport must retain sticky-prompt behavior.
+extentTopRowInside :: Extent Name -> Extent Name -> Bool
+extentTopRowInside outer inner =
+    innerRow >= outerRow
+        && innerRow < outerRow + outerHeight
+        && innerHeight > 0
+  where
+    Location (_, outerRow) = outer.extentUpperLeft
+    (_, outerHeight) = outer.extentSize
+    Location (_, innerRow) = inner.extentUpperLeft
+    (_, innerHeight) = inner.extentSize
 
 isSubmittedPrompt :: UiEvent -> Bool
 isSubmittedPrompt = \case

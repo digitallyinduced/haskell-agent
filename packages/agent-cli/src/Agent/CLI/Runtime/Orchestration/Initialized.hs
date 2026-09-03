@@ -36,7 +36,7 @@ import Agent.CLI.Compaction ()
 import Agent.CLI.Config ()
 import Agent.Connectivity ()
 import Agent.CLI.Database ()
-import Agent.CLI.Database.Store ( deriveDatabaseScopes )
+import Agent.CLI.Database.Store ( deriveDatabaseScopesWithNamespace )
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ()
 import Agent.CLI.GatewayClient
@@ -113,7 +113,10 @@ import Agent.CLI.Runtime.Orchestration.Types
     ( ActiveHttpAuth(activeHttpGeneration, ActiveHttpAuth,
                      activeHttpAccountId, activeHttpProvider, activeHttpResolveLabel),
       AgentProcessRuntime(processMcpSupervisor),
-      AgentRunMode )
+      AgentRunMode,
+      NativeDiscoveryContext(..),
+      NativeRunHooks(nativeDatabaseScopeNamespace, nativeWorkspaceDiscovery),
+      nativePreparedDiscovery )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Repl ()
@@ -132,7 +135,7 @@ import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupToolEnv, startupStderr, startupStdout,
                      startupStdoutTty, startupStdinTty, startupFullscreen,
                      startupUiRuntimeRef, startupEscPaused, startupInterrupt,
-                     startupDatabaseStore) )
+                     startupDatabaseStore, startupNativeHooks) )
 import Agent.CLI.Session.Selection ()
 import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ()
@@ -362,21 +365,43 @@ runAgentInitializedWithLock
             case fullscreen of
                 Just runtime -> setFullscreenWindowTitle runtime title
                 Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
-    projectRoot <- resolveProjectRoot cwd
+    let preparedDiscovery =
+            nativePreparedDiscovery . (.nativeWorkspaceDiscovery)
+                =<< startup.startupNativeHooks
+    projectRoot <-
+        maybe
+            (resolveProjectRoot cwd)
+            (pure . (.nativeDiscoveryProjectRoot))
+            preparedDiscovery
     stateDirectory <- decodeFS (home </> unsafeEncodeUtf ".haskell-agent")
     projectRootPath <- decodeFS projectRoot
+    let scopeNamespace =
+            startup.startupNativeHooks >>= (.nativeDatabaseScopeNamespace)
     databaseScopes <-
-        deriveDatabaseScopes stateDirectory projectRootPath >>= \case
+        deriveDatabaseScopesWithNamespace
+            scopeNamespace
+            stateDirectory
+            projectRootPath >>= \case
             Left err -> startupDie startup (Text.unpack err)
             Right scopes -> pure scopes
     ((projectSettings0, userSettings), (catalogResult, branch)) <-
         concurrently
             (concurrently
-                (loadProjectSettings projectRoot)
+                (maybe
+                    (loadProjectSettings projectRoot)
+                    (pure . (.nativeDiscoveryProjectSettings))
+                    preparedDiscovery)
                 (loadUserSettings home))
             (concurrently
-                (loadModelCatalogAt home cwd)
-                (detectGitBranch cwd))
+                (loadModelCatalogAt home
+                    (maybe
+                        cwd
+                        (.nativeDiscoveryCatalogRoot)
+                        preparedDiscovery))
+                (maybe
+                    (detectGitBranch cwd)
+                    (pure . (.nativeDiscoveryGitBranch))
+                    preparedDiscovery))
     let projectSettings =
             withInheritedLastModel projectSettings0 userSettings
     catalog <- either

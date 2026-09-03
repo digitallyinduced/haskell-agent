@@ -404,6 +404,13 @@ provisionSql database =
             <> " SET lock_timeout TO '5s';"
         , "ALTER ROLE " <> quoteIdentifier roleName
             <> " SET idle_in_transaction_session_timeout TO '30s';"
+        , "DO $ha_connect$"
+        , "BEGIN"
+        , "  EXECUTE 'GRANT CONNECT ON DATABASE '"
+        , "    || quote_ident(current_database())"
+        , "    || ' TO " <> quoteIdentifier roleName <> "';"
+        , "END"
+        , "$ha_connect$;"
         , "INSERT INTO harness.custom_scopes"
             <> " (scope_key, scope_kind, role_name, schema_name)"
         , "VALUES ("

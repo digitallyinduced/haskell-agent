@@ -41,6 +41,10 @@ import Agent.CLI.Dialects
       filterBashTools,
       filterGhciTools )
 import Agent.CLI.Error ( formatException )
+import Agent.CLI.ExternalSession
+    ( defaultExternalSessionEnv
+    , externalSessionTool
+    )
 import Agent.CLI.GatewayClient
     ( GatewayCredential
     , GatewayModelAccess
@@ -73,7 +77,6 @@ import Agent.CLI.ModelConfig
     )
 import Agent.CLI.Models
     ( defaultModelFor,
-      gatewayModelOptions,
       rawModelOption,
       resolveConfiguredModel,
       resolveModelOptionById,
@@ -88,7 +91,7 @@ import Agent.CLI.Options
       normalizeReasoningEffortForDialect,
       resolveApprovalPolicy,
       CliOptions(optYolo, optModel, optEffort, optMaxConcurrentAgents,
-                 optGhci, optBash, optComputerUse, optNoYolo) )
+                 optGhci, optBash, optComputerUse, optNoYolo, optSkills) )
 import Agent.CLI.PendingInputs
     ( PendingNoticeKind(..)
     , enqueuePendingInput
@@ -125,8 +128,12 @@ import Agent.CLI.Runtime.Orchestration.Concurrent
 import Agent.CLI.Runtime.Orchestration.Types
     ( AgentProcessRuntime(..)
     , AgentRunMode
+    , NativeDiscoveryContext(..)
     , NativeInteractionMode(..)
+    , NativeRunCapabilities(..)
     , NativeRunHooks(..)
+    , fullNativeRunCapabilities
+    , nativePreparedDiscovery
     )
 import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Session ( runAgentSession )
@@ -279,7 +286,12 @@ import Agent.Tools.Secret
 import Agent.Tools.ShowImage
     ( ImageDisplayHooks(..), ImageDisplayRequest(..) )
 import Agent.Tools.TaskPlan (newTaskPlanEnv)
-import Agent.Tools.Types (ToolEnv, setToolSessionTmp)
+import Agent.Tools.Types
+    ( AppToolGroup(..)
+    , ToolEnv(..)
+    , appToolsFromGroups
+    , setToolSessionTmp
+    )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async ( concurrently, concurrently_ )
@@ -300,7 +312,7 @@ import Data.Text (Text)
 import Data.Time.Clock ()
 import System.Console.ANSI ()
 import System.Console.ANSI.Codes ()
-import System.Directory.OsPath (getHomeDirectory)
+import System.Directory.OsPath ()
 import System.Environment ()
 import System.Exit ()
 import System.IO (Handle)
@@ -440,6 +452,11 @@ runAgentTools
     uiRuntimeRef
     unavailableProviders
     = do
+    let nativeCapabilities =
+            maybe
+                fullNativeRunCapabilities
+                (.nativeCapabilities)
+                startup.startupNativeHooks
     openRouterOptions <- OpenRouter.clientOptionsFromEnv
     markStartupStage startup "Loading tools…"
     when (isGatewayLoadedAuth loaded /= isJust gatewayIdentity) $
@@ -538,7 +555,8 @@ runAgentTools
                 request.secretPromptMessage
                 request.secretPromptPurpose
         secretHooks
-            | isOneShot options || not isTty = Nothing
+            | not nativeCapabilities.nativeHostExtensions
+                || isOneShot options || not isTty = Nothing
             | otherwise =
                 Just (fullscreenAwareSecretHooks uiRuntimeRef baseSecretHooks)
         -- Outside the retained TUI, agent-displayed images print inline with
@@ -551,7 +569,8 @@ runAgentTools
                 [request.displayImage]
             pure (Right ())
         imageHooks
-            | not isTty = Nothing
+            | not nativeCapabilities.nativeHostExtensions || not isTty =
+                Nothing
             | otherwise =
                 Just (fullscreenAwareImageHooks uiRuntimeRef baseImageHooks)
         provider = loaded.loadedProvider
@@ -714,17 +733,19 @@ runAgentTools
         (\_ _ -> pure ())
     rootTurnRef <- newIORef (Nothing :: Maybe RootTurnId)
     agentTypesRef <- newIORef Map.empty
-    openaiChild <- case provider of
-        XAIProvider -> do
-            available <- hasOpenAiAuth
-            if not available
-                then pure Nothing
-                else loadAuth (Just OpenAIProvider) >>= \case
-                    Left _ -> pure Nothing
-                    Right openaiLoaded ->
-                        pure (Just openaiLoaded.loadedTokenProvider)
-        _ ->
-            pure Nothing
+    openaiChild <- if not nativeCapabilities.nativeCollaboration
+        then pure Nothing
+        else case provider of
+            XAIProvider -> do
+                available <- hasOpenAiAuth
+                if not available
+                    then pure Nothing
+                    else loadAuth (Just OpenAIProvider) >>= \case
+                        Left _ -> pure Nothing
+                        Right openaiLoaded ->
+                            pure (Just openaiLoaded.loadedTokenProvider)
+            _ ->
+                pure Nothing
     let allowedChildModels =
             case gatewayAllowedChildModels of
                 Just modelIds -> Just modelIds
@@ -780,7 +801,9 @@ runAgentTools
                             Left err -> pure (Left err)
                             Right () -> pure (Right ())
                     }
-        multiCtx = Just MultiAgentContext
+        multiCtx
+            | not nativeCapabilities.nativeCollaboration = Nothing
+            | otherwise = Just MultiAgentContext
             { multiRegistry = registry
             , multiCwd = cwd
             , multiSelfId = Nothing
@@ -870,7 +893,18 @@ runAgentTools
         recordImageGenerationResponseItems
             imageGenerationHistory
             (foldSessionItems turns)
-    home <- getHomeDirectory
+    externalSessionAppTools <-
+        if options.optSkills
+            && nativeCapabilities.nativeHostExtensions
+            then do
+                env <-
+                    defaultExternalSessionEnv
+                        baseToolEnv
+                        (unsafeToFilePath cwd)
+                        (unsafeToFilePath sessionTmp)
+                        (unsafeToFilePath home)
+                pure [externalSessionTool env]
+            else pure []
     let cleanupAllocatedScratch = do
             cleanupPendingPersistence persist
             forM_ ephemeralSessionId \sessionId -> do
@@ -924,6 +958,7 @@ runAgentTools
             | (label, config) <-
                 Map.toAscList harnessConfig.configMcpServers
             , config.mcpEnabled
+            , nativeCapabilities.nativeHostExtensions
             ]
         progressiveMcp =
             useProgressiveMcp
@@ -1044,10 +1079,17 @@ runAgentTools
                 currentMcpInstructions
     mapM_ (reportStartupWarning startup) mcpFleet.mcpFleetWarnings
     setStartupNotice startup.startupFullscreen "Loading built-in tools…"
+    let codingToolEnv =
+            case startup.startupNativeHooks
+                >>= nativePreparedDiscovery . (.nativeWorkspaceDiscovery) of
+                Just context ->
+                    toolEnv
+                        { toolCwd = context.nativeDiscoveryProjectRoot }
+                Nothing -> toolEnv
     coding <-
         codingToolsForWithTypes
             dialect
-            toolEnv
+            codingToolEnv
             (Just planHooks)
             (Just taskPlan)
             secretHooks
@@ -1062,7 +1104,8 @@ runAgentTools
                     (MCP.releaseMcpFleetLease mcpLease
                         `finally` cleanupScratch)
         acquireGrokExtras
-            | dialectId /= GrokBuildDialect =
+            | not nativeCapabilities.nativeHostExtensions
+                || dialectId /= GrokBuildDialect =
                 pure
                     ( Nothing
                     , LspStartup
@@ -1195,13 +1238,18 @@ runAgentTools
                 startup.startupDatabaseStore
                 databaseScopes
                 (readIORef persistSlotRef >>= reservedSessionId)
-        sessionTools = agentSessionTools sessionToolsEnv
+        -- Persisted agent-session tools recursively start another native
+        -- runtime, so they require an explicit collaboration capability from
+        -- the embedding.
+        sessionTools
+            | not nativeCapabilities.nativeCollaboration = []
+            | otherwise = agentSessionTools sessionToolsEnv
         gatewayTools = maybe [] managedGatewayTools promptRequest
         databaseAppTools = databaseTools databaseToolsEnv
         learnedSkillAppTools =
             learnedSkillTools skillInvocationsRef learnedSkillToolsEnv
-        nativeAppTools =
-            maybe [] (.nativeTools) startup.startupNativeHooks
+        nativeToolGroups =
+            maybe [] (.nativeToolGroups) startup.startupNativeHooks
         computerTools =
             [ ComputerUse.computerUseTool
             | options.optComputerUse
@@ -1216,33 +1264,39 @@ runAgentTools
                 imageHooks
             | provider == OpenAIProvider
             , dialectId == CodexDialect
+            , nativeCapabilities.nativeHostExtensions
             , not (isGatewayLoadedAuth loaded)
             , inferredTarget.targetConnectionId
                 == builtinConnectionId OpenAIProvider
             ]
-        allTools =
-            coding.codingAppTools
-                ++ extraTools
-                ++ mcpTools
-                ++ sessionTools
-                ++ gatewayTools
-                ++ databaseAppTools
-                ++ learnedSkillAppTools
-                ++ nativeAppTools
-                ++ imageGenerationTools
-                ++ computerTools
-        tools =
-            filterGhciTools options.optGhci
-                (filterBashTools options.optBash coding.codingAppTools)
-                ++ extraTools
-                ++ mcpTools
-                ++ sessionTools
-                ++ gatewayTools
-                ++ databaseAppTools
-                ++ learnedSkillAppTools
-                ++ nativeAppTools
-                ++ imageGenerationTools
-                ++ computerTools
+        surroundingToolGroups =
+            [ ExecutionToolGroup extraTools
+            , ExecutionToolGroup mcpTools
+            , HostToolGroup sessionTools
+            , HostToolGroup gatewayTools
+            , HostToolGroup databaseAppTools
+            , HostToolGroup learnedSkillAppTools
+            , HostToolGroup externalSessionAppTools
+            ]
+                <> nativeToolGroups
+                <> [ HostToolGroup imageGenerationTools
+                   , ExecutionToolGroup computerTools
+                   ]
+        allToolGroups =
+            coding.codingAppToolGroups <> surroundingToolGroups
+        activeCodingGroups =
+            map filterCodingExecution coding.codingAppToolGroups
+        activeToolGroups = activeCodingGroups <> surroundingToolGroups
+        filterCodingExecution = \case
+            ExecutionToolGroup appTools ->
+                ExecutionToolGroup $
+                    filterGhciTools options.optGhci
+                        (filterBashTools options.optBash appTools)
+            hostGroup@(HostToolGroup _) -> hostGroup
+        composeToolGroups groups =
+            case startup.startupNativeHooks of
+                Nothing -> appToolsFromGroups groups
+                Just hooks -> hooks.nativeComposeTools groups
         planMode = coding.codingPlanMode
         resumedPlanPending =
             case resumed of
@@ -1277,6 +1331,8 @@ runAgentTools
                                                     (join (readIORef codeModeCloseRef)
                                                         `finally`
                                                             cleanupScratch)))))
+    let allTools = composeToolGroups allToolGroups
+        tools = composeToolGroups activeToolGroups
     when resumedPlanPending (activatePlanMode planMode)
     forM_ startup.startupNativeHooks \hooks ->
         when (hooks.nativeInteractionMode == NativePlan) $

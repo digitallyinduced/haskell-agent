@@ -22,14 +22,16 @@ import Agent.CLI.Compaction
       OccupancySnapshot,
       autoCompactBackendWith,
       boundCompletedToolContinuations,
+      claudeAutoCompactTokenLimit,
+      claudeCompactionInputLimit,
       decorateCompactOutcomeWithTaskPlan,
       decorateCompactOutcomeWithTaskPlanWithin,
       installLiveCompactOutcome,
       runProviderCompactWith,
-      runBackendCompactHistoryWithContextWindow,
-      runXaiBackendCompactHistoryWithContextWindow,
-      runBackendCompactWithContextWindow,
+      runBackendCompactHistoryWithLimits,
+      runBackendCompactWithLimits,
       runResponsesCompactWithContextWindow,
+      runXaiBackendCompactHistoryWithContextWindow,
       runXaiResponsesCompactWithContextWindow )
 import Agent.CLI.Config ()
 import Agent.Connectivity ( withConnectionRecoveryOn )
@@ -77,7 +79,11 @@ import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Startup
     ( finishStartup )
 import Agent.CLI.Runtime.Orchestration.Types
-    ( AccountSwitchRequest(..) )
+    ( AccountSwitchRequest(..)
+    , NativeRunCapabilities(..)
+    , NativeRunHooks(..)
+    , fullNativeRunCapabilities
+    )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap
     ( runSessionRecap, runSessionTurnSummary )
@@ -361,7 +367,13 @@ runAgentProviders
     transition
     transportModel
     unavailableProviders
-    = case provider of
+    =
+        let nativeCapabilities =
+                maybe
+                    fullNativeRunCapabilities
+                    (.nativeCapabilities)
+                    startup.startupNativeHooks
+        in case provider of
                     OpenAIProvider ->
                         try @_ @CodexAuthFailed
                             (withCodexWsWithProviderOrHttpFallback tokenProvider \conn credential -> do
@@ -680,8 +692,9 @@ runAgentProviders
                                             , not (isGatewayLoadedAuth loaded)
                                             , isProviderUnavailable err ->
                                                 chooseStartupProviderTransition
+                                                    nativeCapabilities.nativeProviderFallback
                                                     catalog
-                                                    cwd
+                                                    projectRoot
                                                     fullscreen
                                                     (tokenProviderBillingMode
                                                         tokenProvider)
@@ -700,7 +713,12 @@ runAgentProviders
                                             startupFailure err
                                 Right result -> pure result
                     XAIProvider -> do
-                        xaiOptions <- XAI.clientOptionsFromEnv
+                        xaiOptions0 <- XAI.clientOptionsFromEnv
+                        let xaiOptions =
+                                xaiOptions0
+                                    { XAI.hostedXSearchEnabled =
+                                        nativeCapabilities.nativeProviderHostedTools
+                                    }
                         let xaiContextWindow =
                                 contextWindowForParams
                                     (XAIRequest.mapModel xaiOptions)
@@ -926,8 +944,12 @@ runAgentProviders
                                 , interruptBackend = pure ()
                                 , resetBackendState = pure ()
                                 }
-                    ClaudeCodeProvider ->
-                        withSelectedClaudeAuth
+                    ClaudeCodeProvider
+                        | not
+                            nativeCapabilities.nativeProviderNativeTools ->
+                            startupDie startup
+                                "Claude Code is unavailable in this runtime"
+                        | otherwise -> withSelectedClaudeAuth
                             connectedGateway
                             loaded
                             (startupDie startup . Text.unpack)
@@ -951,12 +973,18 @@ runAgentProviders
                                         currentParams
                             claudeCompactThreshold = do
                                 contextWindow <- claudeContextWindow
+                                let hardLimit =
+                                        claudeCompactionInputLimit contextWindow
                                 pure $
                                     max 1 $
-                                        min contextWindow $
+                                        min hardLimit $
                                             fromMaybe
-                                                (contextWindow * 4 `div` 5)
+                                                (claudeAutoCompactTokenLimit
+                                                    contextWindow)
                                                 options.optCompactThreshold
+                            claudeSummaryInputLimit =
+                                claudeCompactionInputLimit
+                                    <$> claudeContextWindow
                             btwBackend privateParams =
                                 Backend \state previous inputs onEvent -> do
                                     privateTranscript <-
@@ -976,6 +1004,7 @@ runAgentProviders
                                         onEvent
                             compactRunner focus = do
                                 contextWindow <- claudeContextWindow
+                                inputLimit <- claudeSummaryInputLimit
                                 historyRef <-
                                     newIORef =<< readLiveTranscript
                                         conversationRef
@@ -983,8 +1012,9 @@ runAgentProviders
                                     conversationRef
                                     (Just contextTokensRef)
                                     (\requestedFocus ->
-                                        runBackendCompactWithContextWindow
+                                        runBackendCompactWithLimits
                                             contextWindow
+                                            inputLimit
                                             btwBackend
                                             recordCompactionUsage
                                             paramsRef
@@ -1039,6 +1069,8 @@ runAgentProviders
                                     , mcpToolNames =
                                         MCP.inProcessMcpToolNames
                                             claudeMcpServer
+                                    , nativeToolsEnabled =
+                                        nativeCapabilities.nativeProviderNativeTools
                                     }
                         when claudeBypassEnabled $
                             case fullscreen of
@@ -1064,9 +1096,11 @@ runAgentProviders
                             \handle -> do
                                 let compactHistory history _inputs = do
                                         contextWindow <- claudeContextWindow
+                                        inputLimit <- claudeSummaryInputLimit
                                         currentParams <- readIORef paramsRef
-                                        runBackendCompactHistoryWithContextWindow
+                                        runBackendCompactHistoryWithLimits
                                             contextWindow
+                                            inputLimit
                                             btwBackend
                                             recordCompactionUsage
                                             currentParams

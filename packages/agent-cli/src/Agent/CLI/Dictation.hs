@@ -1,6 +1,7 @@
 -- | Terminal microphone recording and provider transcription.
 module Agent.CLI.Dictation
-    ( DictationBackend(..)
+    ( DictationAuthError(..)
+    , DictationBackend(..)
     , DictationControl(..)
     , DictationResult(..)
     , DictationTarget(..)
@@ -10,8 +11,11 @@ module Agent.CLI.Dictation
     , dictateWith
     , dictateWithTarget
     , dictationTargetForSession
-    , dictationBackendForProvider
+    , dictationBackendsForProvider
+    , dictationBackendUnavailable
     , insertDictation
+    , loadDictationBackendAuth
+    , selectDictationBackend
     , transcribeAudio
     ) where
 
@@ -54,6 +58,9 @@ import Control.Exception (AsyncException(UserInterrupt))
 import Control.Monad (unless, void)
 import qualified Data.ByteString as BS
 import Data.Char (isSpace)
+import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.List.NonEmpty as NonEmpty
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -113,18 +120,142 @@ dictationTargetForSession
 dictationTargetForSession provider =
     maybe (DirectDictation provider) GatewayDictation
 
--- | Select dictation from the active model provider. Providers without a
--- speech-to-text integration fail explicitly rather than spending credentials
--- from an unrelated provider.
-dictationBackendForProvider :: Provider -> Either Text DictationBackend
-dictationBackendForProvider = \case
-    OpenAIProvider -> Right OpenAIDictation
-    XAIProvider -> Right XAIDictation
+-- | Select the dictation backends allowed for the active model provider, in
+-- preference order. Providers with their own speech-to-text integration only
+-- ever transcribe with their own credentials. Claude has no transcription
+-- API, so Claude sessions borrow whichever OpenAI or xAI account is
+-- configured locally; OpenAI is tried first because ChatGPT subscriptions
+-- stream partial transcripts. Remaining providers fail explicitly rather than
+-- spending credentials from an unrelated provider.
+dictationBackendsForProvider
+    :: Provider
+    -> Either Text (NonEmpty DictationBackend)
+dictationBackendsForProvider = \case
+    OpenAIProvider -> Right (OpenAIDictation :| [])
+    XAIProvider -> Right (XAIDictation :| [])
+    ClaudeCodeProvider -> Right (OpenAIDictation :| [XAIDictation])
     provider ->
         Left $
             "Dictation is not supported for "
                 <> providerSlug provider
                 <> " models"
+
+-- | Why a backend cannot supply a credential. Distinguishing a plain absence
+-- from a broken configuration lets borrowed-backend errors stay short while
+-- still surfacing anything the user should fix.
+data DictationAuthError
+    = DictationCredentialMissing !Text
+    -- ^ Nothing is configured for this backend.
+    | DictationCredentialInvalid !Text
+    -- ^ Something is configured but could not be loaded.
+    deriving (Eq, Show)
+
+dictationAuthErrorText :: DictationAuthError -> Text
+dictationAuthErrorText = \case
+    DictationCredentialMissing err -> err
+    DictationCredentialInvalid err -> err
+
+-- | Load the direct credential a backend transcribes with, without recording
+-- any audio.
+loadDictationBackendAuth
+    :: DictationBackend
+    -> IO (Either DictationAuthError LoadedAuth)
+loadDictationBackendAuth = \case
+    OpenAIDictation ->
+        classifyOpenAiDictationAuth <$> loadOpenAiDictationAuth
+    XAIDictation ->
+        loadAuth (Just XAIProvider) >>= \case
+            Left err ->
+                pure (Left (classifyDictationLookupError err))
+            Right loaded
+                | loaded.loadedProvider /= XAIProvider ->
+                    pure $ Left $ DictationCredentialInvalid
+                        "xAI dictation requires direct xAI credentials"
+                | otherwise ->
+                    pure (Right loaded)
+
+classifyOpenAiDictationAuth
+    :: Either Text LoadedAuth
+    -> Either DictationAuthError LoadedAuth
+classifyOpenAiDictationAuth = \case
+    Right loaded ->
+        Right loaded
+    Left err ->
+        Left $ case classifyDictationLookupError err of
+            DictationCredentialMissing _ ->
+                DictationCredentialMissing
+                    "No OpenAI credential found for OpenAI dictation"
+            invalid ->
+                invalid
+
+-- | Treat only a true absence as missing. Errors such as
+-- @no valid OpenAI credentials found@ are broken configuration, even when
+-- first-start onboarding would offer a fresh login.
+classifyDictationLookupError :: Text -> DictationAuthError
+classifyDictationLookupError err
+    | dictationCredentialAbsent err = DictationCredentialMissing err
+    | otherwise = DictationCredentialInvalid err
+
+dictationCredentialAbsent :: Text -> Bool
+dictationCredentialAbsent message =
+    "no credentials found." `Text.isPrefixOf` message
+        || message == "No OpenAI credential found for OpenAI dictation"
+
+-- | Pick the first allowed backend that has a usable credential. Only the
+-- credential lookup participates in the fallback; once a backend is chosen,
+-- its transcription errors surface directly instead of silently retrying
+-- with another account.
+selectDictationBackend
+    :: Provider
+    -> (DictationBackend -> IO (Either DictationAuthError LoadedAuth))
+    -> IO (Either Text (DictationBackend, LoadedAuth))
+selectDictationBackend provider loadBackendAuth =
+    case dictationBackendsForProvider provider of
+        Left err ->
+            pure (Left err)
+        Right backends ->
+            go [] (NonEmpty.toList backends)
+  where
+    go failures = \case
+        [] ->
+            pure $ Left $
+                dictationBackendUnavailable provider (reverse failures)
+        backend : remaining ->
+            loadBackendAuth backend >>= \case
+                Right loaded ->
+                    pure (Right (backend, loaded))
+                Left err ->
+                    go ((backend, err) : failures) remaining
+
+-- | Explain why no allowed backend could transcribe. A provider with a single
+-- native backend reports that backend's error verbatim. Borrowed backends
+-- summarize which accounts would work and only repeat lookup errors that
+-- describe a broken configuration, so a Claude user is not shown every
+-- provider's generic sign-in hint.
+dictationBackendUnavailable
+    :: Provider
+    -> [(DictationBackend, DictationAuthError)]
+    -> Text
+dictationBackendUnavailable provider failures =
+    case failures of
+        [(_, err)] -> dictationAuthErrorText err
+        _ ->
+            "Dictation for "
+                <> providerSlug provider
+                <> " models requires an OpenAI or xAI account; connect one \
+                   \with /login"
+                <> case mapMaybe detail failures of
+                    [] -> ""
+                    details ->
+                        " (" <> Text.intercalate "; " details <> ")"
+  where
+    detail (backend, err) = case err of
+        DictationCredentialMissing _ -> Nothing
+        DictationCredentialInvalid message ->
+            Just (backendLabel backend <> ": " <> message)
+    backendLabel = \case
+        OpenAIDictation -> "openai"
+        XAIDictation -> "xai"
 
 -- | Legacy standalone entry point. The inline model-aware REPL and fullscreen
 -- composer use 'dictateForProvider'; this preserves the original xAI default
@@ -175,11 +306,12 @@ dictateWithTarget target control =
         requireExecutable "ffmpeg"
         case target of
             DirectDictation provider ->
-                case dictationBackendForProvider provider of
-                    Left err ->
-                        pure (DictationFailed err)
-                    Right backend ->
-                        runBackend backend
+                selectDictationBackend provider loadDictationBackendAuth
+                    >>= \case
+                        Left err ->
+                            pure (DictationFailed err)
+                        Right (backend, loaded) ->
+                            runBackend backend loaded
             GatewayDictation gateway ->
                 transcribeGatewayPcm
                     gateway
@@ -192,36 +324,23 @@ dictateWithTarget target control =
                             pure
                                 (DictationTranscript
                                     (Text.strip transcript))
-    runBackend = \case
+    runBackend backend loaded = case backend of
         OpenAIDictation ->
-            loadOpenAiDictationAuth >>= \case
-                Nothing ->
-                    pure $ DictationFailed
-                        "No OpenAI credential found for OpenAI dictation"
-                Just loaded ->
-                    finish =<<
-                        transcribePcmWithOpenAI
-                            loaded.loadedTokenProvider
-                            (streamMicrophone
-                                openAITranscriptionSampleRate
-                                control.dictationWaitForStop)
-                            control.dictationOnTranscript
+            finish =<<
+                transcribePcmWithOpenAI
+                    loaded.loadedTokenProvider
+                    (streamMicrophone
+                        openAITranscriptionSampleRate
+                        control.dictationWaitForStop)
+                    control.dictationOnTranscript
         XAIDictation ->
-            loadAuth (Just XAIProvider) >>= \case
-                Left err ->
-                    pure (DictationFailed err)
-                Right loaded
-                    | loaded.loadedProvider /= XAIProvider ->
-                        pure $ DictationFailed
-                            "xAI dictation requires direct xAI credentials"
-                    | otherwise ->
-                        finish =<<
-                            transcribePcmWithXAI
-                                loaded.loadedTokenProvider
-                                (streamMicrophone
-                                    16_000
-                                    control.dictationWaitForStop)
-                                control.dictationOnTranscript
+            finish =<<
+                transcribePcmWithXAI
+                    loaded.loadedTokenProvider
+                    (streamMicrophone
+                        16_000
+                        control.dictationWaitForStop)
+                    control.dictationOnTranscript
     finish = \case
         Left err ->
             pure (DictationFailed (Text.pack (show err)))

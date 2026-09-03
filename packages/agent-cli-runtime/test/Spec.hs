@@ -4,6 +4,7 @@ import Agent.CLI.Session.TitlePolicy (titleRefreshIndex)
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
 import qualified Agent.CLI.EnvironmentSpec as EnvironmentSpec
 import qualified Agent.CLI.ErrorSpec as ErrorSpec
+import qualified Agent.CLI.GatewayBoundarySpec as GatewayBoundarySpec
 import qualified Agent.CLI.GatewayBridgeSpec as GatewayBridgeSpec
 import qualified Agent.CLI.GatewayClientSpec as GatewayClientSpec
 import qualified Agent.CLI.ManagedTurnSpec as ManagedTurnSpec
@@ -21,6 +22,7 @@ main = hspec do
     CredentialStoreSpec.spec
     EnvironmentSpec.spec
     ErrorSpec.spec
+    GatewayBoundarySpec.spec
     GatewayBridgeSpec.spec
     GatewayClientSpec.spec
     ManagedTurnSpec.spec

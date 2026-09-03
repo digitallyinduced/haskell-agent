@@ -10,7 +10,9 @@ module Agent.CLI.Prompt
     , sessionTempGuidance
     , systemPrompt
     , systemPromptForCatalogModel
+    , systemPromptForCatalogModelWithHostedSearch
     , systemPromptForTools
+    , systemPromptForToolsWithHostedSearch
     ) where
 
 import Agent.CLI.Timestamp (timeContextGuidance)
@@ -28,7 +30,7 @@ import Agent.Dialect
     , PromptStyle(..)
     , dialectPromptStyle
     )
-import Agent.CLI.Tools (hostedSearchToolNames)
+import Agent.CLI.Tools (hostedSearchToolNamesWhen)
 import Agent.GrokBuild.Dialect.Prompt
     ( codingGrokPromptTools
     , grokSystemPrompt
@@ -94,8 +96,8 @@ systemPrompt dialect cwd sessionTmp today isNonInteractive =
         ClaudeCodePromptStyle ->
             claudeCodeSystemPrompt cwd today
 
--- | Render a child prompt against the final filtered application-tool set.
--- Hosted search tools are server-side and remain available independently.
+-- | Render a child prompt against the final filtered application-tool set,
+-- including provider-hosted search by default.
 systemPromptForTools
     :: Dialect
     -> [Text]
@@ -104,7 +106,22 @@ systemPromptForTools
     -> Day
     -> Bool
     -> Text
-systemPromptForTools
+systemPromptForTools =
+    systemPromptForToolsWithHostedSearch True
+
+-- | Render a prompt while explicitly controlling provider-hosted search.
+-- Embeddings without that capability omit it because hosted tools bypass the
+-- application-tool execution boundary.
+systemPromptForToolsWithHostedSearch
+    :: Bool
+    -> Dialect
+    -> [Text]
+    -> OsPath
+    -> Maybe OsPath
+    -> Day
+    -> Bool
+    -> Text
+systemPromptForToolsWithHostedSearch includeHostedSearch
         dialect toolNames cwd sessionTmp today isNonInteractive =
     Text.intercalate "\n\n" $
         filter (not . Text.null)
@@ -118,7 +135,8 @@ systemPromptForTools
             , timeContextGuidance
             ]
   where
-    availableNames = hostedSearchToolNames dialect ++ toolNames
+    availableNames =
+        hostedSearchToolNamesWhen includeHostedSearch dialect ++ toolNames
     available = Set.fromList availableNames
     base = case dialectPromptStyle dialect of
         GrokBuildPromptStyle ->
@@ -151,7 +169,18 @@ systemPromptForCatalogModel
     -> [Text]
     -> Maybe OsPath
     -> Text
-systemPromptForCatalogModel dialect info toolNames sessionTmp =
+systemPromptForCatalogModel =
+    systemPromptForCatalogModelWithHostedSearch True
+
+systemPromptForCatalogModelWithHostedSearch
+    :: Bool
+    -> Dialect
+    -> ModelInfo
+    -> [Text]
+    -> Maybe OsPath
+    -> Text
+systemPromptForCatalogModelWithHostedSearch
+        includeHostedSearch dialect info toolNames sessionTmp =
     Text.intercalate "\n\n" $
         filter (not . Text.null)
             [ Text.strip
@@ -166,7 +195,8 @@ systemPromptForCatalogModel dialect info toolNames sessionTmp =
             ]
   where
     available =
-        Set.fromList (hostedSearchToolNames dialect ++ toolNames)
+        Set.fromList
+            (hostedSearchToolNamesWhen includeHostedSearch dialect ++ toolNames)
 
 -- | The upstream @<environment_context>@ user fragment: working directory,
 -- shell, date, and timezone. Sent as conversation context rather than inside

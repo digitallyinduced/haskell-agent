@@ -11,6 +11,7 @@ import qualified Agent.Store.PoolCacheSpec as PoolCacheSpec
 import qualified Agent.Store.Postgres.ScopeSpec as ScopeSpec
 import qualified Agent.Store.Postgres.SessionSpec as SessionSpec
 import qualified Agent.Store.Postgres.SkillSpec as SkillSpec
+import qualified Agent.Store.Postgres.TenantSpec as TenantSpec
 
 main :: IO ()
 main = hspec do
@@ -20,4 +21,5 @@ main = hspec do
     CustomSpec.spec
     SessionSpec.spec
     SkillSpec.spec
+    TenantSpec.spec
     ManagedSpec.spec

@@ -89,6 +89,22 @@ spec =
                         ])
             configured.disallowedTools `shouldNotContain` ["AskUserQuestion"]
 
+        it "disables native tools while retaining the synthetic MCP bridge" do
+            sdk <-
+                toClaudeAgentOptions
+                    ClaudeCodeDefaultTools
+                    (defaultClaudeCodeOptions "/bin/claude" "/tmp")
+            let host =
+                    defaultClaudeCodeHostHandlers
+                        { handleMcpMessage = Just (\_ -> pure Aeson.Null)
+                        , mcpToolNames = ["database_query"]
+                        , nativeToolsEnabled = False
+                        }
+                configured = configureClaudeCodeHostTools host sdk
+            configured.tools `shouldBe` Just []
+            configured.allowedTools `shouldBe`
+                ["mcp__haskell-agent__database_query"]
+
 withEnvironmentVariables
     :: [(String, Maybe String)]
     -> IO a

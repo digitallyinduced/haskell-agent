@@ -55,6 +55,15 @@ spec = describe "fullscreen conversation scrolling" do
             conversationFollowScroll False
                 `shouldBe` KeepConversationPosition
 
+    it "realigns a stale prompt row before deciding whether it is sticky" do
+        let stale =
+                (startConversationAnchor (BlockId 7) "question" 40)
+                    { anchorViewportTop = 45 }
+            aligned = realignConversationAnchor 50 stale
+        conversationAnchorSticky stale `shouldBe` True
+        aligned.anchorTop `shouldBe` 50
+        conversationAnchorSticky aligned `shouldBe` False
+
     it "reserves the rest of the viewport below a submitted prompt" do
         let anchor = startConversationAnchor (BlockId 7) "question" 40
             (next, action) =

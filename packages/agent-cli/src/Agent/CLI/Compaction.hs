@@ -5,6 +5,8 @@ module Agent.CLI.Compaction
     , CompactionInstall(..)
     , OpenAiCompactionSender
     , codexAutoCompactTokenLimit
+    , claudeAutoCompactTokenLimit
+    , claudeCompactionInputLimit
     , autoCompactOpenAiBackend
     , autoCompactOpenAiBackendWithThreshold
     , autoCompactOpenAiBackendWithSender
@@ -28,6 +30,8 @@ module Agent.CLI.Compaction
     , runBackendCompactWithContextWindow
     , runBackendCompactHistoryWithContextWindow
     , runXaiBackendCompactHistoryWithContextWindow
+    , runBackendCompactWithLimits
+    , runBackendCompactHistoryWithLimits
     , OccupancyKind(..)
     , OccupancySnapshot(..)
     , estimatedOccupancy
@@ -124,6 +128,41 @@ import qualified Data.Text as Text
 
 codexAutoCompactTokenLimit :: Int
 codexAutoCompactTokenLimit = defaultCodexAutoCompactTokenLimit
+
+-- | Claude Code reserves up to 20k tokens for model output, begins preparing
+-- compaction at 80% of that effective window, and keeps a further 13k-token
+-- margin before a compaction prompt may fill the window. Scale both fixed
+-- reserves down for synthetic small windows used by tests and custom models.
+claudeAutoCompactTokenLimit :: Int -> Int
+claudeAutoCompactTokenLimit contextWindow =
+    max 1 $
+        min
+            (claudeCompactionInputLimit contextWindow)
+            (claudeEffectiveContextWindow contextWindow * 4 `div` 5)
+
+-- | Maximum estimated input size for an isolated Claude summary request.
+-- The Responses estimator cannot see Claude Code's own prompt framing, so this
+-- hard limit deliberately leaves the same output and safety headroom used by
+-- Claude Code instead of spending the model's complete context window.
+claudeCompactionInputLimit :: Int -> Int
+claudeCompactionInputLimit contextWindow =
+    max 1
+        ( effectiveWindow
+            - boundedClaudeReserve 13_000 effectiveWindow
+        )
+  where
+    effectiveWindow = claudeEffectiveContextWindow contextWindow
+
+claudeEffectiveContextWindow :: Int -> Int
+claudeEffectiveContextWindow contextWindow =
+    max 1
+        ( max 1 contextWindow
+            - boundedClaudeReserve 20_000 (max 1 contextWindow)
+        )
+
+boundedClaudeReserve :: Int -> Int -> Int
+boundedClaudeReserve maximumReserve window =
+    min maximumReserve (max 0 window `div` 5)
 
 data CompactAttempt error = CompactAttempt
     { compactAttemptUsage :: !TokenUsage
@@ -279,13 +318,27 @@ runBackendCompactWithContextWindow
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
-runBackendCompactWithContextWindow contextWindow makeBackend recordUsage
+runBackendCompactWithContextWindow contextWindow =
+    runBackendCompactWithLimits contextWindow contextWindow
+
+-- | Variant with a provider-specific input limit for the isolated summary
+-- request. The full context window still governs the installed checkpoint.
+runBackendCompactWithLimits
+    :: Int
+    -> Int
+    -> (ResponseCreateParams -> Backend)
+    -> (TokenUsage -> IO ())
+    -> IORef ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Maybe Text
+    -> IO (Either Text CompactOutcome)
+runBackendCompactWithLimits contextWindow inputLimit makeBackend recordUsage
         paramsRef transcriptRef focus = do
     params <- readIORef paramsRef
     history <- readIORef transcriptRef
     either (Left . formatApiError) Right
-        <$> runBackendCompactHistoryWithContextWindow
-        contextWindow makeBackend recordUsage params history focus
+        <$> runBackendCompactHistoryWithLimits
+        contextWindow inputLimit makeBackend recordUsage params history focus
 
 -- | History-taking variant used by automatic compaction wrappers, where the
 -- exact checkpoint being compacted is already available.
@@ -297,8 +350,20 @@ runBackendCompactHistoryWithContextWindow
     -> [ResponseItem]
     -> Maybe Text
     -> IO (Either ApiError CompactOutcome)
-runBackendCompactHistoryWithContextWindow =
-    runBackendCompactHistoryPreparedWithContextWindow
+runBackendCompactHistoryWithContextWindow contextWindow =
+    runBackendCompactHistoryWithLimits contextWindow contextWindow
+
+runBackendCompactHistoryWithLimits
+    :: Int
+    -> Int
+    -> (ResponseCreateParams -> Backend)
+    -> (TokenUsage -> IO ())
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> Maybe Text
+    -> IO (Either ApiError CompactOutcome)
+runBackendCompactHistoryWithLimits =
+    runBackendCompactHistoryPreparedWithLimits
         (filter isPortableLocalSummaryItem)
 
 -- | Summarize xAI history through xAI itself. Unlike portable summarization,
@@ -312,12 +377,15 @@ runXaiBackendCompactHistoryWithContextWindow
     -> [ResponseItem]
     -> Maybe Text
     -> IO (Either ApiError CompactOutcome)
-runXaiBackendCompactHistoryWithContextWindow =
-    runBackendCompactHistoryPreparedWithContextWindow
+runXaiBackendCompactHistoryWithContextWindow contextWindow =
+    runBackendCompactHistoryPreparedWithLimits
         prepareXaiBackendSummaryHistory
+        contextWindow
+        contextWindow
 
-runBackendCompactHistoryPreparedWithContextWindow
+runBackendCompactHistoryPreparedWithLimits
     :: ([ResponseItem] -> [ResponseItem])
+    -> Int
     -> Int
     -> (ResponseCreateParams -> Backend)
     -> (TokenUsage -> IO ())
@@ -325,16 +393,18 @@ runBackendCompactHistoryPreparedWithContextWindow
     -> [ResponseItem]
     -> Maybe Text
     -> IO (Either ApiError CompactOutcome)
-runBackendCompactHistoryPreparedWithContextWindow
-        prepareHistory contextWindow makeBackend recordUsage
+runBackendCompactHistoryPreparedWithLimits
+        prepareHistory contextWindow inputLimit makeBackend recordUsage
         params history focus = do
     attempt <- runAttemptAndRecord recordUsage $
         summarizeBackendLocalAttempt
-            prepareHistory contextWindow makeBackend params history focus
+            prepareHistory contextWindow inputLimit makeBackend params history
+                focus
     pure attempt.compactAttemptResult
 
 summarizeBackendLocalAttempt
     :: ([ResponseItem] -> [ResponseItem])
+    -> Int
     -> Int
     -> (ResponseCreateParams -> Backend)
     -> ResponseCreateParams
@@ -342,10 +412,13 @@ summarizeBackendLocalAttempt
     -> Maybe Text
     -> IO (CompactAttempt ApiError)
 summarizeBackendLocalAttempt
-        prepareHistory contextWindow makeBackend params history focus
+        prepareHistory contextWindow inputLimit makeBackend params history focus
     | contextWindow <= 0 =
         pure $ compactApiFailure
             "model context_window must be positive"
+    | inputLimit <= 0 =
+        pure $ compactApiFailure
+            "compaction input limit must be positive"
     | null sourceHistory =
         pure $ compactApiFailure "nothing to compact"
     | null summaryHistory =
@@ -368,7 +441,7 @@ summarizeBackendLocalAttempt
             promptItem = userTextItem summaryPrompt
             requestHistory =
                 trimResponseHistoryToFit
-                    contextWindow
+                    summaryInputLimit
                     summaryParams
                     [promptItem]
                     summaryHistory
@@ -376,7 +449,7 @@ summarizeBackendLocalAttempt
         if estimateRequestTokensWithItems
                 summaryParams
                 (requestHistory <> [promptItem])
-                > contextWindow
+                > summaryInputLimit
             then pure $ CompactAttempt emptyTokenUsage $
                 Left (requestTooLargeError "local compaction")
             else
@@ -437,6 +510,7 @@ summarizeBackendLocalAttempt
                                 , compactAttemptResult = outcome
                                 }
   where
+    summaryInputLimit = min contextWindow inputLimit
     sourceHistory = stripTaskPlanContextItems history
     summaryHistory = prepareHistory sourceHistory
 

@@ -47,7 +47,7 @@ buildRequest options request =
     stripLocalCompactionMarker $
         filterRequestCompactionCheckpointsByOrigin
             keepXaiOrLegacyCheckpoint $
-            withHostedXSearch $
+            (if options.hostedXSearchEnabled then withHostedXSearch else id) $
                 mapResponseTools xaiTool $
                     forceStatelessStreaming defaultResponseCreateParams
                     { model = Just $

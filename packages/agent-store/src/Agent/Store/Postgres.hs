@@ -7,6 +7,7 @@ module Agent.Store.Postgres
     , defaultManagedPostgresConfig
     , managedPostgresConfigFromEnv
     , openStore
+    , openStoreWithRuntimeRole
     , closeStore
     , withStore
     , storeConfig
@@ -51,7 +52,14 @@ data StoreCloseState
     | StoreClosed !(Either Exception.SomeException ())
 
 openStore :: ManagedPostgresConfig -> IO (Either StoreError Store)
-openStore config = mask \restore ->
+openStore config =
+    openStoreWithRuntimeRole config "ha_runtime"
+
+openStoreWithRuntimeRole
+    :: ManagedPostgresConfig
+    -> Text
+    -> IO (Either StoreError Store)
+openStoreWithRuntimeRole config runtimeRole = mask \restore ->
     restore (ensureManagedPostgres config) >>= \case
         Left err -> pure (Left err)
         Right _ -> do
@@ -59,7 +67,9 @@ openStore config = mask \restore ->
                 Left err -> pure (Left err)
                 Right ownerPool -> do
                     migrationResult <-
-                        restore (runCoreMigrations ownerPool)
+                        restore
+                            (runCoreMigrationsForRuntimeRole
+                                ownerPool runtimeRole)
                             `onException` closeStorePool ownerPool
                     case migrationResult of
                         Left err ->
@@ -69,7 +79,7 @@ openStore config = mask \restore ->
                                 restore
                                     (openRoleStorePool
                                         config
-                                        "ha_runtime"
+                                        runtimeRole
                                         defaultPoolConfig)
                                     `onException` closeStorePool ownerPool
                             case runtimeResult of

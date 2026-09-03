@@ -1,0 +1,749 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "haskell-agent server API",
+    "version": "1.0.0",
+    "description": "Local, versioned API for durable agent sessions and process-local turns. Default loopback mode requires an exact local Host header; configuring a token enables bearer mode on any bind. Remote mode requires --allow-remote, bearer authentication, and trusted TLS termination. Organization-gateway credentials form an exact isolation boundary for sessions, turns, requests, and events."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:4096",
+      "description": "Default loopback server"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    },
+    {}
+  ],
+  "tags": [
+    { "name": "status" },
+    { "name": "models" },
+    { "name": "sessions" },
+    { "name": "turns" },
+    { "name": "requests" },
+    { "name": "events" }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": ["status"],
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "The HTTP process is alive.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "ok": { "const": true } },
+                  "required": ["ok"]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The global or per-tenant event subscriber limit was reached.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": ["status"],
+        "operationId": "ready",
+        "responses": {
+          "200": {
+            "description": "The database and native runtime were initialized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "ready": { "const": true } },
+                  "required": ["ready"]
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": ["status"],
+        "operationId": "openApiDocument",
+        "responses": {
+          "200": {
+            "description": "This OpenAPI 3.1 document.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": ["models"],
+        "operationId": "listModels",
+        "description": "Lists direct models, or only aliases advertised by the exact connected organization gateway.",
+        "responses": {
+          "200": {
+            "description": "Available models.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Model" }
+                    }
+                  },
+                  "required": ["data"]
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/sessions": {
+      "get": {
+        "tags": ["sessions"],
+        "operationId": "listSessions",
+        "parameters": [
+          {
+            "name": "archive",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["active", "archived", "all"],
+              "default": "active"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": { "type": "string" },
+            "description": "Opaque keyset cursor returned by nextCursor."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A boundary-filtered session page.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "post": {
+        "tags": ["sessions"],
+        "operationId": "createSession",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateSession" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Session created.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Session" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/sessions/{sessionId}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/SessionId" }
+      ],
+      "get": {
+        "tags": ["sessions"],
+        "operationId": "getSession",
+        "responses": {
+          "200": {
+            "description": "Session metadata.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Session" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "patch": {
+        "tags": ["sessions"],
+        "operationId": "patchSession",
+        "description": "Renames and/or archives a session. Rejected while the session has an active turn.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PatchSession" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated metadata.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Session" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      },
+      "delete": {
+        "tags": ["sessions"],
+        "operationId": "deleteSession",
+        "description": "Deletes a durable session. Rejected while it has an active turn.",
+        "responses": {
+          "204": { "description": "Deleted." },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/sessions/{sessionId}/history": {
+      "parameters": [
+        { "$ref": "#/components/parameters/SessionId" },
+        {
+          "name": "cursor",
+          "in": "query",
+          "schema": { "type": "integer", "minimum": 0 },
+          "description": "Load history before this durable turn index."
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          }
+        }
+      ],
+      "get": {
+        "tags": ["sessions"],
+        "operationId": "getSessionHistory",
+        "description": "Returns canonical items and separate displayItems. displayItems are failed partial output for rendering only and must never be replayed to a model.",
+        "responses": {
+          "200": {
+            "description": "History page.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HistoryPage" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/sessions/{sessionId}/fork": {
+      "parameters": [
+        { "$ref": "#/components/parameters/SessionId" }
+      ],
+      "post": {
+        "tags": ["sessions"],
+        "operationId": "forkSession",
+        "description": "Forks the active transcript, or through an inclusive durable turn index. Historical forks inherit title and cwd; patch the child afterward when needed.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ForkSession" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Fork created.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Session" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/sessions/{sessionId}/turns": {
+      "parameters": [
+        { "$ref": "#/components/parameters/SessionId" }
+      ],
+      "post": {
+        "tags": ["turns"],
+        "operationId": "createTurn",
+        "description": "Queues one in-process agent turn. A session may have only one queued/running/waiting turn.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateTurn" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Turn accepted.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Turn" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/turns": {
+      "get": {
+        "tags": ["turns"],
+        "operationId": "listTurns",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "query",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Process-local turn records.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Turn" }
+                    }
+                  },
+                  "required": ["data"]
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/turns/{turnId}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TurnId" }
+      ],
+      "get": {
+        "tags": ["turns"],
+        "operationId": "getTurn",
+        "responses": {
+          "200": {
+            "description": "Turn record.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Turn" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/turns/{turnId}/cancel": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TurnId" }
+      ],
+      "post": {
+        "tags": ["turns"],
+        "operationId": "cancelTurn",
+        "responses": {
+          "200": {
+            "description": "Cancelled or already-terminal turn.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Turn" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/turns/{turnId}/agents": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TurnId" }
+      ],
+      "get": {
+        "tags": ["turns"],
+        "operationId": "getTurnAgents",
+        "responses": {
+          "200": {
+            "description": "Bounded child-agent status snapshot. Transcripts are omitted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Agent" }
+                    }
+                  },
+                  "required": ["data"]
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/requests": {
+      "get": {
+        "tags": ["requests"],
+        "operationId": "listRequests",
+        "responses": {
+          "200": {
+            "description": "Pending approvals, root access prompts, and plan interactions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/HumanRequest" }
+                    }
+                  },
+                  "required": ["data"]
+                }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/requests/{requestId}/resolve": {
+      "parameters": [
+        { "$ref": "#/components/parameters/RequestId" }
+      ],
+      "post": {
+        "tags": ["requests"],
+        "operationId": "resolveRequest",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ResolveRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Request resolved.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HumanRequest" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "tags": ["events"],
+        "operationId": "streamEvents",
+        "description": "Server-Sent Events for the exact authenticated tenant and admitted gateway boundary. Send Last-Event-ID to replay the bounded per-boundary window. replay.reset requires refetching REST state. Slow consumers receive a gap reset rather than unbounded buffering.",
+        "parameters": [
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "schema": { "type": "integer", "minimum": 0 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream. Runtime events include response retry/retraction boundaries; failed partial output is marked displayOnly.",
+            "content": {
+              "text/event-stream": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Required whenever bearer mode is configured, and always for an explicitly enabled non-loopback binding. Tokens are accepted only in the Authorization header."
+      }
+    },
+    "parameters": {
+      "SessionId": {
+        "name": "sessionId",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "TurnId": {
+        "name": "turnId",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "RequestId": {
+        "name": "requestId",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Error response.",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Model": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "provider": { "type": "string" },
+          "connection": { "type": "string" },
+          "transportModel": { "type": "string" },
+          "dialect": { "type": "string" },
+          "label": { "type": ["string", "null"] },
+          "contextWindow": { "type": ["integer", "null"] }
+        },
+        "required": ["id", "provider", "connection", "transportModel", "dialect"]
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "provider": { "type": "string" },
+          "connection": { "type": "string" },
+          "model": { "type": "string" },
+          "transportModel": { "type": ["string", "null"] },
+          "dialect": { "type": "string" },
+          "cwd": { "type": "string" },
+          "effort": { "type": "string" },
+          "title": { "type": "string" },
+          "titleIsManual": { "type": "boolean" },
+          "archived": { "type": "boolean" },
+          "usage": {
+            "type": "object",
+            "properties": {
+              "input": { "type": "integer" },
+              "output": { "type": "integer" },
+              "cached": { "type": "integer" }
+            },
+            "required": ["input", "output", "cached"]
+          }
+        },
+        "required": ["id", "createdAt", "updatedAt", "provider", "connection", "model", "dialect", "cwd", "effort", "title", "titleIsManual", "archived", "usage"]
+      },
+      "SessionPage": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Session" }
+          },
+          "nextCursor": { "type": ["string", "null"] }
+        },
+        "required": ["data", "nextCursor"]
+      },
+      "CreateSession": {
+        "type": "object",
+        "properties": {
+          "model": { "type": "string" },
+          "cwd": { "type": "string" },
+          "effort": {
+            "type": "string",
+            "enum": ["none", "low", "medium", "high", "xhigh", "max"]
+          },
+          "title": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "PatchSession": {
+        "type": "object",
+        "properties": {
+          "title": { "type": "string" },
+          "archived": { "type": "boolean" }
+        },
+        "minProperties": 1,
+        "maxProperties": 1,
+        "additionalProperties": false
+      },
+      "ForkSession": {
+        "type": "object",
+        "properties": {
+          "throughTurn": { "type": "integer", "minimum": 0 },
+          "title": { "type": "string" },
+          "cwd": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "HistoryPage": {
+        "type": "object",
+        "properties": {
+          "session": { "$ref": "#/components/schemas/Session" },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": { "type": "integer" },
+                "turn": {
+                  "type": "object",
+                  "description": "items is canonical history; displayItems is rendering-only failed partial output."
+                }
+              },
+              "required": ["index", "turn"]
+            }
+          },
+          "generationStart": { "type": "integer" },
+          "total": { "type": "integer" },
+          "hasOlder": { "type": "boolean" },
+          "hasNewer": { "type": "boolean" },
+          "nextCursor": { "type": ["integer", "null"] }
+        },
+        "required": ["session", "data", "generationStart", "total", "hasOlder", "hasNewer", "nextCursor"]
+      },
+      "CreateTurn": {
+        "type": "object",
+        "properties": {
+          "input": { "type": "string", "minLength": 1 }
+        },
+        "required": ["input"],
+        "additionalProperties": false
+      },
+      "Turn": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "sessionId": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["queued", "running", "waiting_for_input", "completed", "failed", "cancelled"]
+          },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "startedAt": { "type": ["string", "null"], "format": "date-time" },
+          "finishedAt": { "type": ["string", "null"], "format": "date-time" },
+          "error": { "type": ["string", "null"] }
+        },
+        "required": ["id", "sessionId", "status", "createdAt", "startedAt", "finishedAt", "error"]
+      },
+      "Agent": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "status": { "type": "string" },
+          "model": { "type": ["string", "null"] },
+          "steps": { "type": "array", "items": { "type": "object" } }
+        },
+        "required": ["path", "status", "steps"]
+      },
+      "HumanRequest": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "turnId": { "type": "string" },
+          "sessionId": { "type": "string" },
+          "kind": {
+            "type": "string",
+            "enum": ["tool_approval", "root_access", "plan_enter", "plan_exit", "plan_question"]
+          },
+          "prompt": { "type": "string" },
+          "options": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "createdAt": { "type": "string", "format": "date-time" }
+        },
+        "required": ["id", "turnId", "sessionId", "kind", "prompt", "options", "createdAt"]
+      },
+      "ResolveRequest": {
+        "type": "object",
+        "properties": {
+          "decision": { "type": "string" },
+          "value": { "type": "string" }
+        },
+        "required": ["decision"],
+        "additionalProperties": false
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" },
+              "requestId": { "type": "string" },
+              "details": {}
+            },
+            "required": ["code", "message", "requestId"]
+          }
+        },
+        "required": ["error"]
+      }
+    }
+  }
+}

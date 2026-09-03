@@ -13,7 +13,7 @@ module Agent.CLI.Subagents.Runtime
 import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.CLI.Compaction
-    ( CompactionInstall(..)
+    ( CompactionInstall(CompactionNotInstalled)
     , autoCompactBackendWith
     , autoCompactOpenAiBackendWithSenderHookAndDecorator
     , boundCompletedToolContinuations

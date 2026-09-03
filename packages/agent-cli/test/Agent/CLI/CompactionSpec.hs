@@ -12,6 +12,8 @@ import Agent.CLI.Compaction
     , autoCompactOpenAiBackendWithThreshold
     , codexAutoCompactTokenLimit
     , compactOpenAIWith
+    , claudeAutoCompactTokenLimit
+    , claudeCompactionInputLimit
     , decorateCompactOutcomeWithTaskPlan
     , decorateCompactOutcomeWithTaskPlanWithin
     , estimatedOccupancy
@@ -20,6 +22,7 @@ import Agent.CLI.Compaction
     , runProviderCompact
     , runProviderCompactWith
     , runBackendCompactWithContextWindow
+    , runBackendCompactWithLimits
     , runResponsesCompactWith
     , runResponsesCompactWithContextWindow
     , runXaiBackendCompactHistoryWithContextWindow
@@ -45,6 +48,7 @@ import Agent.ToolDispatch
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
+import Agent.XAI.LoopBackend (xaiCompactionCheckpointOriginItem)
 import Agent.Tools.TaskPlan
     ( CurrentTaskPlan(..)
     , TaskPlan(..)
@@ -55,7 +59,6 @@ import Agent.Tools.TaskPlan
     , replaceTaskPlan
     , taskPlanContextText
     )
-import Agent.XAI.LoopBackend (xaiCompactionCheckpointOriginItem)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import Agent.Provider
@@ -664,6 +667,10 @@ spec = do
             readIORef recordedUsage `shouldReturn` [compactionUsage]
 
     describe "runBackendCompactWithContextWindow" do
+        it "matches Claude Code headroom for a 200k context window" do
+            claudeAutoCompactTokenLimit 200_000 `shouldBe` 144_000
+            claudeCompactionInputLimit 200_000 `shouldBe` 167_000
+
         it "uses an isolated fresh backend and records summary usage" do
             let history = [userTextItem "old context"]
                 paramsValue =
@@ -758,6 +765,46 @@ spec = do
                     snapshot.backendContinuation `shouldBe` Nothing
                     previous `shouldBe` Nothing
                 _ -> expectationFailure "expected one xAI summary request"
+
+        it "applies a separate summary input limit" do
+            let history =
+                    [ userTextItem (Text.replicate 20_000 "old")
+                    , userTextItem "recent"
+                    ]
+                inputLimit = 2_000
+            params <- newIORef defaultResponseCreateParams
+            transcript <- newIORef history
+            requests <- newIORef []
+            let makeBackend summaryParams =
+                    Backend \snapshot _previous _inputs _onEvent -> do
+                        modifyIORef' requests
+                            (<> [(summaryParams, snapshot.backendItems)])
+                        pure $ successful snapshot TurnOutput
+                            { responseId = "claude-summary-session"
+                            , toolCalls = []
+                            , assistantText = Just "portable summary"
+                            , tokenUsage = compactionUsage
+                            , providerTelemetry = Nothing
+                            , completion = TurnCompleted
+                            }
+            result <-
+                runBackendCompactWithLimits
+                    200_000
+                    inputLimit
+                    makeBackend
+                    (const (pure ()))
+                    params
+                    transcript
+                    Nothing
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef requests >>= \case
+                [(summaryParams, requestHistory)] ->
+                    estimateRequestTokensWithItems
+                        summaryParams
+                        (requestHistory
+                            <> [userTextItem (summarizationPrompt Nothing)])
+                        `shouldSatisfy` (<= inputLimit)
+                _ -> expectationFailure "expected one bounded summary request"
 
         it "clears a provider continuation before automatic continuation" do
             let oldHistory = [userTextItem "old context"]

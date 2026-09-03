@@ -4,7 +4,8 @@
 -- xai-org/grok-build @ crates/codegen/xai-grok-tools/src/implementations/grok_build.
 -- Do not rename these to match Codex; Grok models are trained on this dialect.
 module Agent.GrokBuild.Dialect.Tools
-    ( grokTools
+    ( GrokToolSet(..)
+    , grokTools
     , filterGrokToolsForType
     , newGrokSession
     , closeGrokSession
@@ -47,7 +48,14 @@ import Agent.Tools.PlanMode
     , enterPlanModeTool
     , exitPlanModeTool
     )
-import Agent.Tools.Types (AppTool, ToolEnv(..))
+import Agent.Tools.Types (AppToolGroup(..), ToolEnv(..))
+
+-- | Construction-time partition of Grok tools. Execution tools are the
+-- replaceable ambient-compute surface; host tools are explicit interaction
+-- services supplied by the embedding.
+data GrokToolSet = GrokToolSet
+    { grokToolGroups :: ![AppToolGroup]
+    }
 
 -- Core upstream parity: file tools, terminal/background lifecycle, progress,
 -- monitor, subagents, and plan-mode interaction.
@@ -61,11 +69,11 @@ grokTools
     -> Maybe WorkflowRuntime
     -> Maybe MultiAgentContext
     -> GrokSubagentSpecs
-    -> [AppTool]
+    -> GrokToolSet
 grokTools
         session ghci planMode goals scheduler workflows multi typesRef =
     let env = session.grokEnv
-        base =
+        executionBase =
             [ runGhciTool ghci
             , readFileTool env
             , grepTool env
@@ -77,7 +85,9 @@ grokTools
             , waitTasksTool session multi
             , killTaskTool session multi
             , monitorTool session
-            , enterPlanModeTool planMode
+            ]
+        hostServices =
+            [ enterPlanModeTool planMode
             , exitPlanModeTool planMode
             , askUserQuestionTool planMode
             ]
@@ -94,4 +104,10 @@ grokTools
         taskTools = case multi of
             Nothing -> []
             Just ctx -> [taskTool env.toolCwd ctx typesRef]
-    in base <> rootRuntimeTools <> taskTools
+    in GrokToolSet
+        { grokToolGroups =
+            [ ExecutionToolGroup executionBase
+            , HostToolGroup hostServices
+            , ExecutionToolGroup (rootRuntimeTools <> taskTools)
+            ]
+        }

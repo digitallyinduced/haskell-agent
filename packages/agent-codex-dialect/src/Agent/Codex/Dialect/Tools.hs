@@ -5,7 +5,8 @@
 -- run_ghci is a local extension shared with Grok/OpenRouter.
 -- Multi-agent v1 tools are optional and registered when a registry is supplied.
 module Agent.Codex.Dialect.Tools
-    ( codexTools
+    ( CodexToolSet(..)
+    , codexTools
     , shellCommandIsReadOnly
     ) where
 
@@ -71,6 +72,7 @@ import Agent.Tools.Scheduling
 import Agent.Tools.ShellReadOnly (shellCommandIsReadOnly)
 import Agent.Tools.Types
     ( AppTool
+    , AppToolGroup(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
     , ToolEnv(..)
@@ -86,6 +88,13 @@ import qualified Data.Text as Text
 import qualified Data.Text.Read as Text
 import System.OsPath (unsafeEncodeUtf)
 
+-- | Construction-time partition of Codex tools. Execution tools may be
+-- replaced wholesale by an embedding before the generic agent loop sees
+-- them; host-service tools remain implemented by the embedding.
+data CodexToolSet = CodexToolSet
+    { codexToolGroups :: ![AppToolGroup]
+    }
+
 codexTools
     :: ToolEnv
     -> CodexShellSession
@@ -93,23 +102,35 @@ codexTools
     -> PlanModeEnv
     -> TaskPlanEnv
     -> Maybe MultiAgentContext
-    -> IO [AppTool]
+    -> IO CodexToolSet
 codexTools env shellSession ghci planMode taskPlan multi =
-    pure $
+    pure CodexToolSet
+        { codexToolGroups =
+            [ ExecutionToolGroup executionPrefix
+            , HostToolGroup hostServices
+            , ExecutionToolGroup executionSuffix
+            ]
+        }
+  where
+    executionPrefix =
         [ runGhciTool ghci
         , viewImageTool env
         , readFileTool env
         , grepTool env
         , listDirTool env
         , applyPatchTool env
-        , updatePlanTool planMode taskPlan
+        ]
+    hostServices =
+        [ updatePlanTool planMode taskPlan
         , enterCodexPlanModeTool planMode
         , writePlanTool planMode
         , askUserQuestionTool planMode
-        , shellCommandTool env shellSession
+        ]
+    executionSuffix =
+        [ shellCommandTool env shellSession
         , writeStdinTool shellSession
         ]
-        ++ maybe [] multiAgentTools multi
+            <> maybe [] multiAgentTools multi
 
 --------------------------------------------------------------------------------
 -- shell_command

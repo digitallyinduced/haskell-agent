@@ -381,6 +381,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeCancel :: !(IO ())
     , runtimeSteer :: !(Bool -> Text -> IO (Either Text ()))
     , runtimeBtw :: !(Text -> IO ())
+    , runtimeImmediateCommand :: !(ReplAction -> IO ())
     , runtimeRecap :: !(IO ())
     , runtimeRestartEffort :: !(Text -> IO ())
     , runtimeCtrlC :: !(IO CtrlCDecision)
@@ -436,6 +437,7 @@ data FullscreenSessionActions = FullscreenSessionActions
     , sessionCancel :: !(IO ())
     , sessionSteer :: !(Bool -> Text -> IO (Either Text ()))
     , sessionBtw :: !(Text -> IO ())
+    , sessionImmediateCommand :: !(ReplAction -> IO ())
     , sessionRecap :: !(IO ())
     , sessionRestartEffort :: !(Text -> IO ())
     , sessionCtrlC :: !(IO CtrlCDecision)
@@ -487,6 +489,8 @@ data AppState = AppState
     , appAgentHover :: !(Maybe AgentHover)
     , appMarkdownLinkHovered :: !Bool
     , appHoveredControl :: !(Maybe Name)
+      -- | Local row inside `appHoveredControl` for line-level transcript hover.
+    , appHoveredLine :: !(Maybe Int)
     , appPressedControl :: !(Maybe Name)
     , appWorkerStopped :: !Bool
     , appConversationAnchor :: !(Maybe Scroll.ConversationAnchor)

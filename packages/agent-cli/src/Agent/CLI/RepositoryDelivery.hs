@@ -33,6 +33,7 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (forever, unless, when)
+import Crypto.Hash (Digest, SHA1, SHA256, hash)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
@@ -592,7 +593,7 @@ statusAtSnapshot snapshot =
                                         finishStatus upstreamOid ahead behind
       where
         finishStatus upstreamOid ahead behind =
-            readValidatedRemote root remote >>= \case
+            readValidatedRemote root headOid remote >>= \case
                 Left err -> pure (Left err)
                 Right validatedRemote ->
                     pure
@@ -648,8 +649,9 @@ readUpstream root fullBranch =
 readValidatedRemote
     :: FilePath
     -> Text
+    -> Text
     -> IO (Either DeliveryError ValidatedRemote)
-readValidatedRemote root remote =
+readValidatedRemote root headOid remote =
     readLocalConfig >>= \case
         Left err -> pure (Left err)
         Right entries ->
@@ -661,22 +663,15 @@ readValidatedRemote root remote =
     finish fetchUrl pushUrl
         | fetchUrl == pushUrl
             && validRemoteUrl pushUrl =
-                runGit
-                    root
-                    ["hash-object", "--stdin"]
-                    pushUrl
-                    localTimeoutMicros >>= \case
-                        Left err -> pure (Left err)
-                        Right fingerprint ->
-                            pure
-                                (Right
-                                    ValidatedRemote
-                                        { validatedRemoteUrl = pushUrl
-                                        , validatedRemoteFingerprint =
-                                            decodeTrimmed fingerprint
-                                        , validatedGitHubRepository =
-                                            githubRepositoryFromUrl pushUrl
-                                        })
+                pure do
+                    fingerprint <- gitBlobHashForOid headOid pushUrl
+                    pure
+                        ValidatedRemote
+                            { validatedRemoteUrl = pushUrl
+                            , validatedRemoteFingerprint = fingerprint
+                            , validatedGitHubRepository =
+                                githubRepositoryFromUrl pushUrl
+                            }
         | otherwise = invalid
     readLocalConfig =
         runGit
@@ -727,7 +722,10 @@ validatedRemoteForStatus
     :: DeliveryStatus
     -> IO (Either DeliveryError ValidatedRemote)
 validatedRemoteForStatus status =
-    readValidatedRemote status.deliveryRoot status.deliveryRemote >>= \case
+    readValidatedRemote
+        status.deliveryRoot
+        status.deliveryHeadOid
+        status.deliveryRemote >>= \case
         Left _ ->
             pure
                 (Left
@@ -741,6 +739,27 @@ validatedRemoteForStatus status =
                             (DeliveryStale
                                 "the remote destination changed"))
             | otherwise -> pure (Right remote)
+
+gitBlobHashForOid
+    :: Text
+    -> BS.ByteString
+    -> Either DeliveryError Text
+gitBlobHashForOid oid bytes =
+    let material =
+            BS8.pack ("blob " <> show (BS.length bytes) <> "\NUL") <> bytes
+    in case Text.length oid of
+        40 ->
+            Right
+                (Text.pack
+                    (show (hash material :: Digest SHA1)))
+        64 ->
+            Right
+                (Text.pack
+                    (show (hash material :: Digest SHA256)))
+        _ ->
+            Left
+                (DeliveryCommandFailed
+                    "Git returned an unsupported object format")
 
 queryRemoteHead
     :: DeliveryStatus
