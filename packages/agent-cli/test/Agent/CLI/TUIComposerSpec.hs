@@ -1,15 +1,23 @@
 module Agent.CLI.TUIComposerSpec (spec) where
 
+import Agent.CLI.Auth (LoadedAuth(..), staticCredentialProvider)
 import Agent.CLI.Dictation
-    ( DictationBackend(..)
+    ( DictationAuthError(..)
+    , DictationBackend(..)
     , DictationTarget(..)
-    , dictationBackendForProvider
+    , dictationBackendsForProvider
+    , dictationBackendUnavailable
     , dictationTargetForSession
     , insertDictation
+    , selectDictationBackend
     )
 import Agent.CLI.GatewayClient (newGatewayModelAccessWith)
 import Agent.CLI.Command (CopyRequest(..), ReplAction(..))
-import Agent.Provider (Provider(..))
+import Agent.Provider
+    ( BillingMode(..)
+    , Credential(..)
+    , Provider(..)
+    )
 import Agent.CLI.Input
     ( ReplLine(..)
     , displayEditorText
@@ -34,6 +42,8 @@ import Control.Concurrent.STM (atomically)
 import qualified Data.ByteString as ByteString
 import Data.Char (isControl)
 import Data.Foldable (toList)
+import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -269,16 +279,75 @@ spec = describe "fullscreen composer" do
             `shouldBe` ("hello, world", 12)
 
     it "routes dictation through the active model provider" do
-        dictationBackendForProvider OpenAIProvider
-            `shouldBe` Right OpenAIDictation
-        dictationBackendForProvider XAIProvider
-            `shouldBe` Right XAIDictation
-        dictationBackendForProvider OpenRouterProvider
+        dictationBackendsForProvider OpenAIProvider
+            `shouldBe` Right (OpenAIDictation :| [])
+        dictationBackendsForProvider XAIProvider
+            `shouldBe` Right (XAIDictation :| [])
+        dictationBackendsForProvider OpenRouterProvider
             `shouldBe` Left
                 "Dictation is not supported for openrouter models"
-        dictationBackendForProvider ClaudeCodeProvider
+        dictationBackendsForProvider GeminiProvider
             `shouldBe` Left
-                "Dictation is not supported for claude-code models"
+                "Dictation is not supported for gemini models"
+
+    it "borrows an OpenAI account before an xAI account for Claude" do
+        dictationBackendsForProvider ClaudeCodeProvider
+            `shouldBe` Right (OpenAIDictation :| [XAIDictation])
+        attempted <- newIORef []
+        let loadBackend backend = do
+                modifyIORef' attempted (<> [backend])
+                pure $ Right (fakeLoadedAuth backend)
+        selected <- selectDictationBackend ClaudeCodeProvider loadBackend
+        fmap fst selected `shouldBe` Right OpenAIDictation
+        readIORef attempted `shouldReturn` [OpenAIDictation]
+
+    it "falls back to xAI when Claude has no OpenAI credential" do
+        attempted <- newIORef []
+        let loadBackend backend = do
+                modifyIORef' attempted (<> [backend])
+                pure case backend of
+                    OpenAIDictation ->
+                        Left (DictationCredentialMissing "no openai")
+                    XAIDictation ->
+                        Right (fakeLoadedAuth backend)
+        selected <- selectDictationBackend ClaudeCodeProvider loadBackend
+        fmap fst selected `shouldBe` Right XAIDictation
+        readIORef attempted `shouldReturn` [OpenAIDictation, XAIDictation]
+
+    it "never borrows another provider's account for native dictation" do
+        attempted <- newIORef []
+        let loadBackend backend = do
+                modifyIORef' attempted (<> [backend])
+                pure (Left (DictationCredentialMissing "no credential"))
+        selected <- selectDictationBackend XAIProvider loadBackend
+        fmap fst selected `shouldBe` Left "no credential"
+        readIORef attempted `shouldReturn` [XAIDictation]
+        rejected <-
+            selectDictationBackend OpenRouterProvider loadBackend
+        fmap fst rejected
+            `shouldBe` Left "Dictation is not supported for openrouter models"
+
+    it "summarizes missing borrowed accounts without provider sign-in hints" do
+        dictationBackendUnavailable
+            ClaudeCodeProvider
+            [ (OpenAIDictation, DictationCredentialMissing "no openai")
+            , (XAIDictation, DictationCredentialMissing "no credentials found.")
+            ]
+            `shouldBe`
+                "Dictation for claude-code models requires an OpenAI or xAI \
+                \account; connect one with /login"
+        dictationBackendUnavailable
+            ClaudeCodeProvider
+            [ (OpenAIDictation, DictationCredentialMissing "no openai")
+            , (XAIDictation, DictationCredentialInvalid "invalid auth JSON")
+            ]
+            `shouldBe`
+                "Dictation for claude-code models requires an OpenAI or xAI \
+                \account; connect one with /login (xai: invalid auth JSON)"
+        dictationBackendUnavailable
+            XAIProvider
+            [(XAIDictation, DictationCredentialInvalid "invalid auth JSON")]
+            `shouldBe` "invalid auth JSON"
 
     it "keeps organization-gateway dictation inside the gateway boundary" do
         case dictationTargetForSession XAIProvider Nothing of
@@ -485,3 +554,25 @@ genDraftAtom =
         , Text.pack ['\x1f44d', '\x1f3fd']
         , Text.pack ['1', '\xfe0f', '\x20e3']
         ]
+
+fakeLoadedAuth :: DictationBackend -> LoadedAuth
+fakeLoadedAuth backend =
+    LoadedAuth
+        { loadedProvider = provider
+        , loadedTokenProvider =
+            staticCredentialProvider ApiBilled credential
+        , loadedAccountLabel = const (pure "fake")
+        , loadedSelectionId = Nothing
+        , loadedOpenAiPool = Nothing
+        }
+  where
+    provider = case backend of
+        OpenAIDictation -> OpenAIProvider
+        XAIDictation -> XAIProvider
+    credential =
+        Credential
+            { accessToken = "token"
+            , accountId = "account"
+            , leaseId = Nothing
+            , provider
+            }
