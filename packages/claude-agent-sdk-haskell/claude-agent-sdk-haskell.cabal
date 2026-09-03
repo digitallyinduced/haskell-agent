@@ -68,6 +68,7 @@ library
                     , process               >= 1.6.26
                     , safe-exceptions
                     , text
+                    , transformers
                     , unix
                     , uuid-types
 
