@@ -8,6 +8,7 @@ module Agent.CLI.TUI.Composer.Logic
     , composerEscapeAction
     , currentSlashMenu
     , immediateBtwQuestion
+    , immediateReplCommand
     , isKillKey
     , selectedSlashSuggestion
     , slashReplacement
@@ -60,6 +61,21 @@ immediateBtwQuestion ui replLine
   where
     fromText text = case parseReplLine text of
         ReplBtw question -> Just question
+        _ -> Nothing
+
+-- | Commands that only inspect session metadata may safely run while the
+-- provider turn continues.
+immediateReplCommand :: UiState -> ReplLine -> Maybe ReplAction
+immediateReplCommand ui replLine
+    | not ui.uiRunning = Nothing
+    | otherwise = case replLine of
+        ReplText text -> fromText text
+        ReplPasted text -> fromText text
+        _ -> Nothing
+  where
+    fromText text = case parseReplLine text of
+        ReplCopyPath -> Just ReplCopyPath
+        ReplCopySession -> Just ReplCopySession
         _ -> Nothing
 
 applyComposerUiEvent :: UiEvent -> AppState -> AppState

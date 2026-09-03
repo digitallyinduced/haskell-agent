@@ -59,6 +59,7 @@ import Agent.CLI.SessionLock
     , releaseSessionLock
     )
 import Agent.CLI.Session.Interaction
+import Agent.CLI.Session.Selection (currentSessionId)
 import Agent.CLI.Skills
 import Agent.CLI.StartupContext
 import Agent.CLI.Startup.Auth
@@ -71,6 +72,7 @@ import Agent.CLI.Error
 import Agent.CLI.Dialects
 import Agent.CLI.Dictation (dictationTargetForSession)
 import Agent.CLI.TUI.App
+import Agent.CLI.TUI.Types (FullscreenRuntime(..))
 import Agent.TUI.Model
 import Agent.TUI.Motion
 import Agent.CLI.WindowTitle
@@ -1001,6 +1003,28 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                     emitUiEvent runtime (UiInputSteered text)
                                     pure (Right ()))
             (writeChan btwRequests)
+            (\command -> do
+                let copyImmediate label missing payload =
+                        case payload of
+                            Nothing -> emitUiEvent runtime (UiErrorMessage missing)
+                            Just value -> do
+                                copied <- runtime.runtimeCopy value
+                                emitUiEvent runtime $
+                                    if copied
+                                        then UiSystemMessage ("copied " <> label)
+                                        else UiErrorMessage
+                                            "terminal clipboard is unavailable"
+                case command of
+                    ReplCopyPath ->
+                        copyImmediate
+                            "worktree path"
+                            "worktree path is unavailable"
+                            (Just (toText cwd))
+                    ReplCopySession ->
+                        currentSessionId persist >>= copyImmediate
+                            "session id"
+                            "this session has no persisted id yet"
+                    _ -> pure ())
             (writeChan recapRequests (RecapSession RecapAuto))
             (\level ->
                 readIORef startup.startupRestartEffort >>= ($ level))

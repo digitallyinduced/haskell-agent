@@ -28,6 +28,7 @@ module Agent.CLI.TUI.Composer
     , handleEffortControlClick
     , handlePromptControlClick
     , immediateBtwQuestion
+    , immediateReplCommand
     , isKillKey
     , newFullscreenInputBuffer
     , prepareBracketedPaste
@@ -548,40 +549,52 @@ handleComposerKey
 
     submitText state text pasted = do
         let replLine = if pasted then ReplPasted text else ReplText text
-        accepted <- case immediateBtwQuestion state.appUi replLine of
-            Just question -> do
+        accepted <- case immediateReplCommand state.appUi replLine of
+            Just command -> do
                 applyUiEvent UiDraftSubmitted \current ->
                     current
                         { appSlashIndex = 0
                         , appSlashDismissed = False
                         , appUndo = []
                         }
-                _ <- liftIO (state.appRuntime.runtimeBtw question)
+                _ <- liftIO
+                    (state.appRuntime.runtimeImmediateCommand command)
                 pure True
             Nothing ->
-                case steeringPrompt state.appUi pasted text of
-                    Just (steeringPasted, prompt) -> do
-                        result <- liftIO
-                            (state.appRuntime.runtimeSteer
-                                steeringPasted
-                                prompt)
-                        case result of
-                            Left message -> do
-                                applyUiEvent
-                                    (UiSetNotice
-                                        (Just (warningNotice message)))
-                                    id
-                                pure False
-                            Right () -> do
-                                applyUiEvent UiDraftSubmitted \current ->
-                                    current
-                                        { appSlashIndex = 0
-                                        , appSlashDismissed = False
-                                        , appUndo = []
-                                        }
-                                pure True
+                case immediateBtwQuestion state.appUi replLine of
+                    Just question -> do
+                        applyUiEvent UiDraftSubmitted \current ->
+                            current
+                                { appSlashIndex = 0
+                                , appSlashDismissed = False
+                                , appUndo = []
+                                }
+                        _ <- liftIO (state.appRuntime.runtimeBtw question)
+                        pure True
                     Nothing ->
-                        enqueueInput state replLine (Just text) True
+                        case steeringPrompt state.appUi pasted text of
+                            Just (steeringPasted, prompt) -> do
+                                result <- liftIO
+                                    (state.appRuntime.runtimeSteer
+                                        steeringPasted
+                                        prompt)
+                                case result of
+                                    Left message -> do
+                                        applyUiEvent
+                                            (UiSetNotice
+                                                (Just (warningNotice message)))
+                                            id
+                                        pure False
+                                    Right () -> do
+                                        applyUiEvent UiDraftSubmitted \current ->
+                                            current
+                                                { appSlashIndex = 0
+                                                , appSlashDismissed = False
+                                                , appUndo = []
+                                                }
+                                        pure True
+                            Nothing ->
+                                enqueueInput state replLine (Just text) True
         when accepted do
             liftIO (appendReplHistory text)
             modify' \current ->

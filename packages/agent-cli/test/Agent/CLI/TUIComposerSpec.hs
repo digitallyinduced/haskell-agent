@@ -8,6 +8,7 @@ import Agent.CLI.Dictation
     , insertDictation
     )
 import Agent.CLI.GatewayClient (newGatewayModelAccessWith)
+import Agent.CLI.Command (ReplAction(..))
 import Agent.Provider (Provider(..))
 import Agent.CLI.Input
     ( ReplLine(..)
@@ -77,6 +78,17 @@ spec = describe "fullscreen composer" do
         immediateBtwQuestion
             initialUiState { uiRunning = True }
             (ReplText "ordinary follow-up")
+            `shouldBe` Nothing
+
+    it "runs metadata copy commands immediately only while a turn is active" do
+        let running = initialUiState { uiRunning = True }
+        immediateReplCommand running (ReplText "/copy-path")
+            `shouldBe` Just ReplCopyPath
+        immediateReplCommand running (ReplText "/copy-session")
+            `shouldBe` Just ReplCopySession
+        immediateReplCommand initialUiState (ReplText "/copy-path")
+            `shouldBe` Nothing
+        immediateReplCommand running (ReplText "/copy-diff")
             `shouldBe` Nothing
 
     it "preserves paste provenance for steering prompts" do
