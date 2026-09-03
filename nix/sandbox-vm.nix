@@ -39,7 +39,7 @@ in
 {
   imports = [ "${modulesPath}/virtualisation/qemu-vm.nix" ];
 
-  system.stateVersion = "25.11";
+  system.stateVersion = "26.05";
   system.name = "agent-tenant-sandbox";
 
   virtualisation = {
