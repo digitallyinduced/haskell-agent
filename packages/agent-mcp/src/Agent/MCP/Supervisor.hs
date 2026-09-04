@@ -4,6 +4,7 @@ module Agent.MCP.Supervisor
     , acquireMcpFleet
     , acquireMcpFleetWithProgress
     , acquireMcpFleetProgressive
+    , acquireMcpFleetWith
     , releaseMcpFleetLease
     , closeMcpSupervisor
     , restartMcpSupervisor
@@ -22,9 +23,9 @@ import Agent.MCP.Fleet
 import Agent.MCP.Types
 import Control.Concurrent.Async
     ( Async
-    , asyncWithUnmask
     , cancel
     , waitCatch
+    , withAsyncWithUnmask
     )
 import Control.Concurrent.MVar
     ( modifyMVar
@@ -272,22 +273,21 @@ startPendingMcpAcquire
     -> IO McpFleetLease
 startPendingMcpAcquire
     supervisor request entryId completion workerSlot obsolete waitForWorker = do
-        worker <-
-            asyncWithUnmask \unmask ->
-                tryAny
-                    (unmask
-                        (request.acquireStart request.acquireConfigs))
-                    >>= \case
-                        Left exception ->
-                            pure (Left (exceptionSummary exception))
-                        Right fleet -> pure (Right fleet)
-        atomically $ void (tryPutTMVar workerSlot worker)
-        mapM_ closeMcpFleet obsolete
         outcome <-
-            waitForWorker worker
-                `onException` do
-                    cancel worker
-                    void (waitCatch worker)
+            (withAsyncWithUnmask
+                (\unmask ->
+                    tryAny
+                        (unmask
+                            (request.acquireStart request.acquireConfigs))
+                        >>= \case
+                            Left exception ->
+                                pure (Left (exceptionSummary exception))
+                            Right fleet -> pure (Right fleet))
+                \worker -> do
+                    atomically $ void (tryPutTMVar workerSlot worker)
+                    mapM_ closeMcpFleet obsolete
+                    waitForWorker worker)
+                `onException`
                     failMcpPending supervisor entryId completion
                         "MCP fleet startup cancelled"
         finishPendingMcpAcquire

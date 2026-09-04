@@ -13,12 +13,11 @@ import Agent.CLI.Session
     , SessionTurnPage(..)
     )
 import Agent.CLI.Session.Types (TranscriptEffect(..))
+import Agent.CLI.Render (renderToolOutputValue)
 import Agent.CLI.TurnState
     ( isDisplayAttemptBoundary
     , isTurnAbortedNote
     )
-import Agent.Json (RawJson, rawJsonBytes)
-import qualified Agent.Json.Decode as Hermes
 import Agent.CLI.TUI.History
     ( HistoryCursor(..)
     , HistoryDirection
@@ -62,7 +61,6 @@ import Agent.TUI.Model
 import Data.Foldable (toList)
 import qualified Data.Sequence as Seq
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 
 sessionHistoryPage
     :: HistoryGeneration
@@ -235,7 +233,7 @@ projectItem state = \case
                 (ToolFinished
                     (ToolCallResult
                         output.callId
-                        (renderJsonValue output.output)
+                        (renderToolOutputValue output.output)
                         FunctionCallKind)))
             state
     CustomToolCallOutputItem output ->
@@ -244,7 +242,7 @@ projectItem state = \case
                 (ToolFinished
                     (ToolCallResult
                         output.callId
-                        (renderJsonValue output.output)
+                        (renderToolOutputValue output.output)
                         CustomCallKind)))
             state
     _ -> state
@@ -263,7 +261,7 @@ projectDisplayItem state item
                         (UiLoop
                             (ToolOutputUpdated
                                 output.callId
-                                (renderJsonValue output.output)))
+                                (renderToolOutputValue output.output)))
                         state
             CustomToolCallOutputItem output
                 | output.status == Just ItemIncomplete ->
@@ -271,7 +269,7 @@ projectDisplayItem state item
                         (UiLoop
                             (ToolOutputUpdated
                                 output.callId
-                                (renderJsonValue output.output)))
+                                (renderToolOutputValue output.output)))
                         state
             _ -> projectItem state item
 
@@ -342,12 +340,3 @@ responseContentText = \case
     SummaryTextPart{text} -> [text]
     RefusalPart{refusal} -> [refusal]
     _ -> []
-
-renderJsonValue :: RawJson -> Text.Text
-renderJsonValue value =
-    case Hermes.decodeEither
-            (Hermes.nullable Hermes.text)
-            (rawJsonBytes value) of
-        Right (Just text) -> text
-        Right Nothing -> ""
-        Left _ -> TextEncoding.decodeUtf8 (rawJsonBytes value)

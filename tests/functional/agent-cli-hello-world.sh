@@ -104,6 +104,7 @@ args=(
   --motion off
   --no-agents-md
   --no-skills
+  --no-computer-use
   --max-turns 12
 )
 if [[ -n $(printf '%q' "$provider") ]]; then

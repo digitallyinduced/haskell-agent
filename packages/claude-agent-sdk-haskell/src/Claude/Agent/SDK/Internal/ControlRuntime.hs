@@ -17,6 +17,7 @@ import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
     , cancel
+    , mapConcurrently_
     , waitCatch
     )
 import Control.Concurrent.Chan
@@ -535,11 +536,12 @@ stopCore core reader = do
             (True, stopped)
     unless alreadyStopped do
         workers <- readMVar core.coreWorkers
-        forM_ (Map.elems workers) \worker ->
-            void $
-                timeout
-                    core.coreHandlers.shutdownTimeoutMicros
-                    (cancel worker)
+        let cancelWithinTimeout worker =
+                void $
+                    timeout
+                        core.coreHandlers.shutdownTimeoutMicros
+                        (cancel worker)
+        mapConcurrently_ cancelWithinTimeout (Map.elems workers)
         void $
             timeout
                 core.coreHandlers.shutdownTimeoutMicros

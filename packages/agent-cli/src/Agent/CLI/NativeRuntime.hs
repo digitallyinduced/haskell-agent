@@ -59,17 +59,15 @@ import Agent.TUI.Motion (MotionMode(..))
 import qualified Agent.MCP as MCP
 import Control.Concurrent.Async
     ( Async
-    , async
+    , asyncWithUnmask
     , cancel
-    , waitCatch
     )
 import Control.Concurrent.MVar
     ( newEmptyMVar
     , putMVar
     , takeMVar
     )
-import Control.Exception.Safe (finally, mask_, onException)
-import Control.Monad (void)
+import Control.Exception.Safe (finally, mask, mask_, onException)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -120,14 +118,13 @@ data NativeProcessRuntime = NativeProcessRuntime
     }
 
 newNativeProcessRuntime :: OsPath -> IO NativeProcessRuntime
-newNativeProcessRuntime root = do
+newNativeProcessRuntime root = mask \restore -> do
     elicitationRef <- newIORef Nothing
     cleanupStarted <- newIORef False
     cleanupRequest <- newEmptyMVar
-    cleanupWorker <- async (takeMVar cleanupRequest >>= id)
-    let closeCleanupWorker = do
-            cancel cleanupWorker
-            void (waitCatch cleanupWorker)
+    cleanupWorker <- asyncWithUnmask \unmask ->
+        unmask (takeMVar cleanupRequest >>= id)
+    let closeCleanupWorker = cancel cleanupWorker
         startCleanup action = mask_ do
             shouldStart <- atomicModifyIORef'
                 cleanupStarted
@@ -136,17 +133,18 @@ newNativeProcessRuntime root = do
                 then putMVar cleanupRequest action
                 else pure ()
     networkMonitor <-
-        newNetworkRecoveryMonitor
+        restore newNetworkRecoveryMonitor
             `onException` closeCleanupWorker
     mcpSupervisor <-
-        MCP.newMcpSupervisorWith
-            MCP.defaultMcpHostHooks
-                { MCP.mcpHostElicit = readIORef elicitationRef }
+        restore
+            (MCP.newMcpSupervisorWith
+                MCP.defaultMcpHostHooks
+                    { MCP.mcpHostElicit = readIORef elicitationRef })
             `onException`
                 (closeNetworkRecoveryMonitor networkMonitor
                     `finally` closeCleanupWorker)
     sessionThreads <-
-        newSessionThreadManager root
+        restore (newSessionThreadManager root)
             `onException`
                 (MCP.closeMcpSupervisor mcpSupervisor
                     `finally`
@@ -169,9 +167,7 @@ closeNativeProcessRuntime runtime =
                 `finally`
                     (closeNetworkRecoveryMonitor
                         runtime.nativeNetworkRecovery
-                        `finally` do
-                            cancel runtime.nativeCleanupWorker
-                            void (waitCatch runtime.nativeCleanupWorker)))
+                        `finally` cancel runtime.nativeCleanupWorker))
 
 restartNativeMcpRuntime :: NativeProcessRuntime -> IO ()
 restartNativeMcpRuntime runtime =

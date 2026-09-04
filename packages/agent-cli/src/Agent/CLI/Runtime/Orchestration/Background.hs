@@ -52,6 +52,8 @@ runInProcessSessionTurn runAgent parentOptions policy ghciEnabled bashEnabled
                 , optSaveSession = True
                 , optGhci = ghciEnabled
                 , optBash = bashEnabled
+                , optComputerUse = False
+                , optComputerUseExplicit = True
                 , optScreenMode = ScreenMinimal
                 }
 

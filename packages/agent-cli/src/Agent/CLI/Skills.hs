@@ -41,7 +41,7 @@ import qualified System.Directory as Directory
 import qualified System.Environment as Environment
 import qualified System.FilePath as FilePath
 import System.IO (stderr)
-import System.OsPath (OsPath, unsafeEncodeUtf)
+import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
 
 reservedSlashNames :: [Text]
 reservedSlashNames =
@@ -201,17 +201,19 @@ installSkillCatalogWithOmissions reservedNames queueContext contextRef catalogRe
 -- models read SKILL.md and skill-relative resources even when packaged skills
 -- live outside the worktree (for example under /nix/store).
 installSkillToolRoots :: ToolEnv -> SkillCatalog -> IO ()
-installSkillToolRoots env catalog = do
-    sharedRoots <-
-        if any isBuiltinExternalResume catalog.catalogSkills
-            then do
-                core <- getDataFileName "skills/shared/resume-session/CORE.md"
-                pure [unsafeEncodeUtf (FilePath.takeDirectory core)]
-            else pure []
+installSkillToolRoots env catalog =
     setToolSkillRoots
         env
         (map (.skillDirectory) catalog.catalogSkills <> sharedRoots)
   where
+    sharedRoots =
+        case filter isBuiltinExternalResume catalog.catalogSkills of
+            skill : _ ->
+                [ takeDirectory skill.skillDirectory
+                    </> unsafeEncodeUtf "shared/resume-session"
+                ]
+            [] -> []
+
     isBuiltinExternalResume skill =
         skill.skillScope == BuiltinSkill
             && skill.skillName `elem`
