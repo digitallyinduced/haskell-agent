@@ -879,8 +879,13 @@
                     });
                 # Both installable CLI variants expose the same advertised
                 # runtime capabilities; only the harness linkage differs.
+                agentCliGstreamerCorePlugins =
+                    pkgs.lib.getLib pkgs.gst_all_1.gstreamer;
                 agentCliGstreamerPlugins =
                     pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                        # Core elements supplies filesink, which terminates
+                        # the Wayland portal screenshot pipeline.
+                        agentCliGstreamerCorePlugins
                         pkgs.gst_all_1.gst-plugins-base
                         pkgs.gst_all_1.gst-plugins-good
                         pkgs.gst_all_1.gst-plugins-bad
@@ -1030,6 +1035,20 @@
                             done
                             ${pkgs.gnugrep}/bin/grep -F \
                                 "GST_PLUGIN_SYSTEM_PATH_1_0" "$wrapper"
+                            pluginPath="${pkgs.lib.makeSearchPath
+                                "lib/gstreamer-1.0"
+                                agentCliGstreamerPlugins}"
+                            ${pkgs.gnugrep}/bin/grep -F \
+                                "${
+                                    agentCliGstreamerCorePlugins
+                                }/lib/gstreamer-1.0" \
+                                "$wrapper"
+                            env -i \
+                                HOME="$home" \
+                                GST_PLUGIN_SYSTEM_PATH_1_0="$pluginPath" \
+                                GST_REGISTRY_1_0="$TMPDIR/gstreamer-registry.bin" \
+                                ${pkgs.gst_all_1.gstreamer}/bin/gst-inspect-1.0 \
+                                filesink >/dev/null
 
                             run_agent storage start
                             test "$(
