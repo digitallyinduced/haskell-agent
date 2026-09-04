@@ -384,6 +384,7 @@ parseSpecializedSlashCommand catalog raw spec args commandTail =
             ["reload"] -> ReplSkills True
             _ -> slashUsageError spec
         "shell" -> parseShellCommand args
+        "computer-use" -> parseComputerUseCommand args
         other -> unknownCommand ("/" <> other)
 
 parseOptionalTextCommand :: (Maybe Text -> ReplAction) -> Text -> ReplAction
@@ -652,6 +653,17 @@ parseShellCommand = \case
         _ -> ReplCommandError "usage: /shell [ghci|bash|both|none]"
     _ -> ReplCommandError "usage: /shell [ghci|bash|both|none]"
 
+parseComputerUseCommand :: [Text] -> ReplAction
+parseComputerUseCommand = \case
+    [] -> ReplToggleComputerUse
+    [raw] -> case Text.toLower raw of
+        "on" -> ReplSetComputerUse True
+        "off" -> ReplSetComputerUse False
+        _ -> usageError
+    _ -> usageError
+  where
+    usageError = ReplCommandError "usage: /computer-use [on|off]"
+
 parseModelCommand :: [Text] -> ReplAction
 parseModelCommand = \case
     [] -> ReplShowModel
@@ -856,6 +868,7 @@ argCompletions catalog spec = case spec.slashName of
             (reasoningEffortsForDialect catalog.slashCatalogDialect)
     "model" -> catalog.slashCatalogModelIds
     "shell" -> ["ghci", "bash", "both", "none"]
+    "computer-use" -> ["on", "off"]
     "help" ->
         map (.slashName) catalog.slashCatalogCommands
             <> map (.skillCommandName) catalog.slashCatalogSkills

@@ -732,6 +732,66 @@ main = hspec $ do
                         indices `shouldBe` [1 .. chunkCount - 1]
 
     describe "task adapter IPC" $ do
+        it "cancels all running tasks before waiting for their cleanup" $
+            withSystemTempDirectory "daemon-task-shutdown" $ \directory -> do
+                journal <- openJournal (defaultJournalConfig directory)
+                runForever <- newEmptyTMVarIO
+                callbackReady <- newEmptyTMVarIO
+                stopCallback <- newEmptyTMVarIO
+                started <- newTQueueIO
+                cancelling <- newTQueueIO
+                releaseCleanup <- newTQueueIO
+                let runner =
+                        TaskRunner
+                            { runTask = \task _ -> do
+                                atomically (writeTQueue started task.taskId)
+                                _ <-
+                                    atomically (takeTMVar runForever)
+                                        `finally`
+                                            uninterruptibleMask_
+                                                ( do
+                                                    atomically (writeTQueue cancelling task.taskId)
+                                                    atomically (readTQueue releaseCleanup)
+                                                )
+                                pure (Right ())
+                            }
+                    runAdapter =
+                        withTaskAdapter journal runner $ \supervisor -> do
+                            supervisor.handleCommand
+                                (CommandId "submit-shutdown-first")
+                                (submitCommand "shutdown-first" "shutdown-session")
+                                >>= shouldSucceed
+                            supervisor.handleCommand
+                                (CommandId "submit-shutdown-second")
+                                (submitCommand "shutdown-second" "other-shutdown-session")
+                                >>= shouldSucceed
+                            _ <- atomically (readTQueue started)
+                            _ <- atomically (readTQueue started)
+                            atomically (putTMVar callbackReady ())
+                            atomically (takeTMVar stopCallback)
+                withAsync runAdapter $ \adapter -> do
+                    cancelled <-
+                        ( do
+                            timeout 1_000_000 (atomically (takeTMVar callbackReady))
+                                `shouldReturn` Just ()
+                            atomically (putTMVar stopCallback ())
+                            timeout
+                                500_000
+                                ( sequence
+                                    [ atomically (readTQueue cancelling)
+                                    , atomically (readTQueue cancelling)
+                                    ]
+                                )
+                        ) `finally`
+                            atomically
+                                ( writeTQueue releaseCleanup ()
+                                    >> writeTQueue releaseCleanup ()
+                                )
+                    wait adapter
+                    cancelled `shouldSatisfy` \case
+                        Just taskIds -> length taskIds == 2
+                        Nothing -> False
+
         it "submits, queues, cancels, lists, and replays durable task changes" $
             withSystemTempDirectory "daemon-task-adapter" $ \directory -> do
                 journal <- openJournal (defaultJournalConfig directory)
@@ -1051,6 +1111,7 @@ main = hspec $ do
                         , "hello agent"
                         , "--save-session"
                         , "--no-yolo"
+                        , "--no-computer-use"
                         , "--resume"
                         , "session-id"
                         , "--cwd"

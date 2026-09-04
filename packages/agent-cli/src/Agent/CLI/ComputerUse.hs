@@ -3,6 +3,7 @@ module Agent.CLI.ComputerUse
     ( ComputerObservation(..)
     , ComputerUseBackend(..)
     , ScreenshotEncoding(..)
+    , computerToolName
     , computerUseTool
     , computerUseToolWith
     , computerFunctionParameters
@@ -11,6 +12,7 @@ module Agent.CLI.ComputerUse
     , screenshotMacOS
     , summarizeComputerCall
     , summarizeComputerToolCall
+    , computerToolCallHasPendingSafetyChecks
     , computerApprovalPrompt
     , pointerScript
     , keyCombinationScript
@@ -66,6 +68,11 @@ import System.IO.Unsafe (unsafePerformIO)
 import System.Process (readProcessWithExitCode)
 import Text.Read (readMaybe)
 
+-- | Stable internal handler identity. The Codex wire schema is projected as
+-- @computer_use@, but incoming calls are normalized back to this name.
+computerToolName :: Text
+computerToolName = "computer"
+
 -- | A dedicated internal schema marker, rather than a provider-native wire
 -- type, keeps this privileged handler separate from caller-defined functions.
 computerUseTool :: AppTool
@@ -73,14 +80,14 @@ computerUseTool
     | os == "darwin" = computerUseToolWith localComputerUseBackend
     | otherwise =
         (computerUseToolWith localComputerUseBackend)
-            { appToolHandler = noArgsTool "computer"
+            { appToolHandler = noArgsTool computerToolName
                 (pure (Left
                     "Local computer use is currently supported only on macOS."))
             }
 
 computerUseToolWith :: ComputerUseBackend -> AppTool
 computerUseToolWith backend = AppTool
-    { appToolName = "computer"
+    { appToolName = computerToolName
     , appToolDescription =
         "Start each computer session with a screenshot-only call. Then run up to 10 approved actions on the main macOS display and receive one fresh final screenshot. A screenshot marker is valid only at the end of a batch."
     , appToolSchema = HostedComputerSchema
@@ -91,7 +98,7 @@ computerUseToolWith backend = AppTool
     }
   where
     handler =
-        typedToolWithCall "computer" computerToolInputDecoder \call input ->
+        typedToolWithCall computerToolName computerToolInputDecoder \call input ->
             executeComputerCallWithBackend
                 backend
                 (case call.callKind of
@@ -908,7 +915,7 @@ safeQuoted limit value =
 
 summarizeComputerToolCall :: ToolCall -> Maybe Text
 summarizeComputerToolCall call
-    | call.name /= "computer"
+    | call.name /= computerToolName
         || not (isComputerToolCallKind call.callKind) = Nothing
     | otherwise =
         case Json.decodeText computerToolInputDecoder call.arguments of
@@ -921,9 +928,17 @@ summarizeComputerToolCall call
                         then "Computer action"
                         else "Computer: " <> detail
 
+computerToolCallHasPendingSafetyChecks :: ToolCall -> Bool
+computerToolCallHasPendingSafetyChecks call
+    | not (isComputerToolCallKind call.callKind) = False
+    | otherwise =
+        case Json.decodeText computerToolInputDecoder call.arguments of
+            Left _ -> False
+            Right input -> not (null input.toolPendingSafetyChecks)
+
 computerApprovalPrompt :: ToolCall -> Maybe Text
 computerApprovalPrompt call =
-    fmap ("Allow this computer action?\n\n" <>) $
+    fmap ("Allow this computer-use request?\n\n" <>) $
         summarizeComputerToolCall call
 
 dataUrl :: Text -> BS.ByteString -> Text

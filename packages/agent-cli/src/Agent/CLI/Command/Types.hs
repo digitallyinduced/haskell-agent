@@ -110,6 +110,8 @@ data ReplAction
     | ReplSkills !Bool
     | ReplShowShell
     | ReplSetShell !ShellMode
+    | ReplToggleComputerUse
+    | ReplSetComputerUse !Bool
     | ReplInvokeSkill !Text !Text
     | ReplHelp (Maybe Text)
     -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
