@@ -103,6 +103,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode(..))
+import System.FilePath (searchPathSeparator)
 #if defined(darwin_HOST_OS)
 import qualified System.Directory as Directory
 import System.FilePath
@@ -459,7 +460,8 @@ startShellCommandWithStdin keepStdin env workdir command onComplete = do
 configuredProcess :: ToolEnv -> CreateProcess -> IO CreateProcess
 configuredProcess env spec = do
     sessionTmp <- readIORef env.toolSessionTmp
-    processEnv <- configuredProcessEnvFor sessionTmp spec.env
+    processEnv <-
+        configuredProcessEnvFor env.toolPathPrefix sessionTmp spec.env
     command <- configuredCommandSpec sessionTmp spec.cmdspec
     pure spec
         { cmdspec = command
@@ -528,18 +530,41 @@ sandboxString value =
 
 configuredProcessEnv :: ToolEnv -> IO (Maybe [(String, String)])
 configuredProcessEnv env =
-    readIORef env.toolSessionTmp >>= (`configuredProcessEnvFor` Nothing)
+    readIORef env.toolSessionTmp
+        >>= \sessionTmp ->
+            configuredProcessEnvFor env.toolPathPrefix sessionTmp Nothing
 
 configuredProcessEnvFor
-    :: Maybe OsPath
+    :: Maybe FilePath
+    -> Maybe OsPath
     -> Maybe [(String, String)]
     -> IO (Maybe [(String, String)])
-configuredProcessEnvFor sessionTmp inherited =
-    case sessionTmp of
-        Nothing -> pure inherited
-        Just temp ->
-            Just . sessionTempProcessEnv temp
-                <$> maybe getEnvironment pure inherited
+configuredProcessEnvFor pathPrefix sessionTmp inherited =
+    case (pathPrefix, sessionTmp) of
+        (Nothing, Nothing) -> pure inherited
+        _ -> do
+            base <- maybe getEnvironment pure inherited
+            pure . Just $
+                applySessionTmp sessionTmp (applyPathPrefix pathPrefix base)
+  where
+    applySessionTmp Nothing = id
+    applySessionTmp (Just temp) = sessionTempProcessEnv temp
+
+applyPathPrefix
+    :: Maybe FilePath
+    -> [(String, String)]
+    -> [(String, String)]
+applyPathPrefix Nothing inherited = inherited
+applyPathPrefix (Just "") inherited = inherited
+applyPathPrefix (Just prefix) inherited =
+    ("PATH", combined) : filter ((/= "PATH") . fst) inherited
+  where
+    combined =
+        prefix
+            <> maybe
+                ""
+                ([searchPathSeparator] <>)
+                (lookup "PATH" inherited)
 
 -- | Point a child process at one session's private scratch directory without
 -- mutating the parent process environment (several sessions may coexist).

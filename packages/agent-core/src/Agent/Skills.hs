@@ -127,6 +127,7 @@ data SkillDiscoverOptions = SkillDiscoverOptions
     , skillsProjectRoot :: !OsPath
     , skillsCwd :: !OsPath
     , skillsMaxDepth :: !Int
+    , skillsIncludeAmbient :: !Bool
     , skillsBuiltinRoots :: ![(SkillOrigin, OsPath)]
     } deriving (Eq, Show)
 
@@ -275,36 +276,40 @@ discoverSkills options = do
                     )
 
 skillRoots :: SkillDiscoverOptions -> IO [(SkillScope, SkillOrigin, FilePath)]
-skillRoots options = do
-    canonical <- mapConcurrentlyBounded 3 canonicalizePath
-        [ unsafeToFilePath options.skillsProjectRoot
-        , unsafeToFilePath options.skillsCwd
-        , unsafeToFilePath options.skillsHome
-        ]
-    let (projectRoot, cwd, home) = case canonical of
-            [project, current, userHome] -> (project, current, userHome)
-            _ -> error "skillRoots: canonical path count changed"
-    let dirs =
-            map unsafeToFilePath $
-                directoryChain (unsafeEncodeUtf projectRoot) (unsafeEncodeUtf cwd)
-        projectRoots =
-            [ ( RepositorySkill depth (dir == cwd)
-              , origin
-              , dir </> relativeRoot origin
-              )
-            | (depth, dir) <- zip [0..] dirs
-            , origin <- origins
+skillRoots options
+    | not options.skillsIncludeAmbient = pure builtinRoots
+    | otherwise = do
+        canonical <- mapConcurrentlyBounded 3 canonicalizePath
+            [ unsafeToFilePath options.skillsProjectRoot
+            , unsafeToFilePath options.skillsCwd
+            , unsafeToFilePath options.skillsHome
             ]
-        userRoots =
-            [ (UserSkill, origin, home </> userRoot origin)
-            | origin <- origins
-            ]
-        builtinRoots =
-            [ (BuiltinSkill, origin, unsafeToFilePath root)
-            | (origin, root) <- options.skillsBuiltinRoots
-            ]
-    pure (projectRoots <> userRoots <> builtinRoots)
+        let (projectRoot, cwd, home) = case canonical of
+                [project, current, userHome] -> (project, current, userHome)
+                _ -> error "skillRoots: canonical path count changed"
+        let dirs =
+                map unsafeToFilePath $
+                    directoryChain
+                        (unsafeEncodeUtf projectRoot)
+                        (unsafeEncodeUtf cwd)
+            projectRoots =
+                [ ( RepositorySkill depth (dir == cwd)
+                  , origin
+                  , dir </> relativeRoot origin
+                  )
+                | (depth, dir) <- zip [0..] dirs
+                , origin <- origins
+                ]
+            userRoots =
+                [ (UserSkill, origin, home </> userRoot origin)
+                | origin <- origins
+                ]
+        pure (projectRoots <> userRoots <> builtinRoots)
   where
+    builtinRoots =
+        [ (BuiltinSkill, origin, unsafeToFilePath root)
+        | (origin, root) <- options.skillsBuiltinRoots
+        ]
     origins = [AgentSkills, GrokSkills, CodexSkills]
     relativeRoot = \case
         AgentSkills -> ".agents" </> "skills"

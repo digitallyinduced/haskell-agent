@@ -2,6 +2,9 @@
 module Agent.CLI.Options
     ( ApprovalAnswer(..)
     , ApprovalPolicy(..)
+    , BundleCommand(..)
+    , BundleInspectOptions(..)
+    , BundleRunOptions(..)
     , CliOptions(..)
     , Command(..)
     , GatewayCommand(..)
@@ -54,6 +57,7 @@ data Command
     | Login
     | Gateway GatewayCommand
     | Mcp McpCommand
+    | Bundle BundleCommand
     | ListSessions SessionOutputFormat
     | ShowSession Text SessionOutputFormat (Maybe SessionPageRequest)
     | WaitSession Text
@@ -61,6 +65,26 @@ data Command
     | Storage StorageCommand
     | RunAgent CliOptions
     deriving (Eq, Show)
+
+data BundleCommand
+    = BundleInspect BundleInspectOptions
+    | BundleRun BundleRunOptions
+    deriving (Eq, Show)
+
+data BundleInspectOptions = BundleInspectOptions
+    { bundleInspectPath :: !OsPath
+    , bundleInspectJSON :: !Bool
+    } deriving (Eq, Show)
+
+data BundleRunOptions = BundleRunOptions
+    { bundleRunPath :: !OsPath
+    , bundleRunAgent :: !(Maybe Text)
+    , bundleRunPrompt :: !(Maybe Text)
+    , bundleRunPromptFile :: !(Maybe OsPath)
+    , bundleRunCwd :: !(Maybe OsPath)
+    , bundleRunYolo :: !Bool
+    , bundleRunNoYolo :: !Bool
+    } deriving (Eq, Show)
 
 data SessionPageRequest
     = SessionRecent !Int
@@ -144,6 +168,15 @@ data CliOptions = CliOptions
       -- ^ Discover and inject AGENTS.md at session start (default: True).
     , optSkills :: !Bool
       -- ^ Discover and expose filesystem skills (default: True).
+    , optBundleContext :: !(Maybe Text)
+      -- ^ Declarative bundle instructions injected into generated context.
+      -- Its presence also marks gateway-required bundle execution.
+    , optBundleSkillRoots :: ![OsPath]
+      -- ^ Explicit skill roots selected by a declarative bundle.
+    , optBundlePathPrefix :: !(Maybe FilePath)
+      -- ^ Session-local PATH prefix supplied by a declarative bundle.
+    , optAmbientSkills :: !Bool
+      -- ^ Include packaged, repository, user, and learned skills.
     , optGhci :: !Bool
       -- ^ Expose the persistent run_ghci tool (default: False).
     , optBash :: !Bool
@@ -177,6 +210,10 @@ defaultCliOptions = CliOptions
     , optSaveSession = False
     , optAgentsMd = True
     , optSkills = True
+    , optBundleContext = Nothing
+    , optBundleSkillRoots = []
+    , optBundlePathPrefix = Nothing
+    , optAmbientSkills = True
     , optGhci = False
     , optBash = True
     , optComputerUse = False
@@ -191,10 +228,16 @@ freshSessionOptions :: CliOptions -> OsPath -> CliOptions
 freshSessionOptions options cwd =
     options
         { optProvider = Nothing
-        , optModel = Nothing
+        , optModel =
+            if isJust options.optBundleContext
+                then options.optModel
+                else Nothing
         , optCwd = Just cwd
         , optWorktree = False
-        , optEffort = Nothing
+        , optEffort =
+            if isJust options.optBundleContext
+                then options.optEffort
+                else Nothing
         , optPrompt = Nothing
         , optPromptFile = Nothing
         , optManagedTurnFile = Nothing
@@ -245,7 +288,8 @@ parseArgs args
 isRunInvocation :: [String] -> Bool
 isRunInvocation = \case
     command : _ ->
-        command `notElem` ["gateway", "login", "mcp", "sessions", "storage"]
+        command `notElem`
+            ["bundle", "gateway", "login", "mcp", "sessions", "storage"]
     [] -> True
 
 parserPreferences :: Options.ParserPrefs
@@ -306,8 +350,72 @@ commandParser =
             <> Options.command "storage"
                 (Options.info storageParser
                     (Options.progDesc "Administer managed PostgreSQL storage"))
+            <> Options.command "bundle"
+                (Options.info bundleParser
+                    (Options.progDesc "Inspect or run a declarative agent bundle"))
         )
         Options.<|> (RunAgent <$> runOptionsParser)
+
+bundleParser :: Options.Parser Command
+bundleParser = Bundle <$> Options.hsubparser
+    ( Options.command "inspect"
+        (Options.info
+            (BundleInspect <$> bundleInspectOptionsParser)
+            (Options.progDesc "Validate and describe an agent bundle"))
+    <> Options.command "run"
+        (Options.info
+            (BundleRun <$> bundleRunOptionsParser)
+            (Options.progDesc "Run an agent from a bundle"))
+    )
+
+bundleInspectOptionsParser :: Options.Parser BundleInspectOptions
+bundleInspectOptionsParser =
+    BundleInspectOptions
+        <$> Options.argument pathReader
+            (Options.metavar "BUNDLE")
+        <*> Options.switch
+            ( Options.long "json"
+                <> Options.help "Emit the validated manifest JSON"
+            )
+
+bundleRunOptionsParser :: Options.Parser BundleRunOptions
+bundleRunOptionsParser =
+    BundleRunOptions
+        <$> Options.argument pathReader
+            (Options.metavar "BUNDLE")
+        <*> Options.optional
+            (Options.option textReader
+                ( Options.long "agent"
+                    <> Options.metavar "NAME"
+                    <> Options.help "Agent to run (default: bundle default)"
+                ))
+        <*> Options.optional
+            (Options.option textReader
+                ( Options.short 'p'
+                    <> Options.long "prompt"
+                    <> Options.metavar "TEXT"
+                    <> Options.help "Run one prompt and exit"
+                ))
+        <*> Options.optional
+            (Options.option pathReader
+                ( Options.long "prompt-file"
+                    <> Options.metavar "FILE"
+                    <> Options.help "Read the one-shot prompt from a file"
+                ))
+        <*> Options.optional
+            (Options.option pathReader
+                ( Options.long "cwd"
+                    <> Options.metavar "DIR"
+                    <> Options.help "Working directory for tools"
+                ))
+        <*> Options.switch
+            ( Options.long "yolo"
+                <> Options.help "Auto-approve every tool"
+            )
+        <*> Options.switch
+            ( Options.long "no-yolo"
+                <> Options.help "Deny mutating tools without a TTY (default)"
+            )
 
 gatewayParser :: Options.Parser Command
 gatewayParser = Gateway <$> Options.hsubparser
@@ -579,6 +687,13 @@ motionReader =
 validateCommand :: Command -> Either String Command
 validateCommand = \case
     RunAgent options -> RunAgent <$> validate options
+    Bundle (BundleRun options)
+        | isJust options.bundleRunPrompt
+            && isJust options.bundleRunPromptFile ->
+            Left "use only one of -p/--prompt or --prompt-file"
+        | options.bundleRunYolo && options.bundleRunNoYolo ->
+            Left "use either --yolo or --no-yolo, not both"
+        | otherwise -> Right (Bundle (BundleRun options))
     ShowSession _ SessionHuman (Just _) ->
         Left "session pagination requires --json"
     command@(ShowSession _ SessionJSON (Just page))
@@ -649,6 +764,8 @@ usage :: String
 usage = unlines
     [ "Usage: agent-cli [OPTIONS]"
     , "       agent-cli login"
+    , "       agent-cli bundle inspect <bundle> [--json]"
+    , "       agent-cli bundle run <bundle> [--agent NAME] [-p TEXT]"
     , "       agent-cli gateway connect --url <https-url>"
     , "       agent-cli gateway <status|disconnect>"
     , "       agent-cli sessions [list]"

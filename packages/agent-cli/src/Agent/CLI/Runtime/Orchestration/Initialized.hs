@@ -49,7 +49,10 @@ import Agent.CLI.GatewayClient
     , newGatewayModelAccess
     , refreshGatewayModels
     )
-import Agent.CLI.GatewayModels (gatewayProviderForStartup)
+import Agent.CLI.GatewayModels
+    ( gatewayProviderForStartup
+    , resolveGatewayModelTarget
+    )
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt ()
@@ -76,7 +79,8 @@ import Agent.CLI.Models
       ModelOption(modelTarget),
       ModelTarget(targetWireModelId, targetConnectionId, targetProvider,
                   targetModelId, targetDialect) )
-import Agent.CLI.Options ( CliOptions(optModel, optProvider, optYolo) )
+import Agent.CLI.Options
+    ( CliOptions(optBundleContext, optModel, optProvider, optYolo) )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
 import Agent.CLI.Project
@@ -289,6 +293,7 @@ data InitializedWorkspace = InitializedWorkspace
 
 data InitializedTargets = InitializedTargets
     { initializedGatewayIdentity :: Maybe Text
+    , initializedBundleGatewayModels :: Maybe GatewayModelAccess
     , initializedTransitionTarget :: Maybe ModelTarget
     , initializedConfiguredTarget :: Maybe ModelTarget
     , initializedResumedTarget :: Maybe ModelTarget
@@ -515,9 +520,13 @@ resolveInitializedTargets request workspace = do
         connectedGatewayIdentity =
             gatewayCredentialIdentity <$> connectedGateway
         transitionTarget = (.transitionTarget) <$> transition
-        configuredOptionTarget =
-            (.modelTarget)
-                <$> (options.optModel >>= resolveConfiguredModel catalog)
+    (configuredOptionTarget, bundleGatewayModels) <-
+        resolveConfiguredStartupTarget
+            startup
+            options
+            connectedGateway
+            catalog
+    let
         resumedBoundaryResult =
             case fst <$> resumed of
                 Nothing -> Right ()
@@ -644,6 +653,7 @@ resolveInitializedTargets request workspace = do
                 && isNothing options.optModel
     pure InitializedTargets
         { initializedGatewayIdentity = connectedGatewayIdentity
+        , initializedBundleGatewayModels = bundleGatewayModels
         , initializedTransitionTarget = transitionTarget
         , initializedConfiguredTarget = configuredOptionTarget
         , initializedResumedTarget = resumedTarget
@@ -654,6 +664,47 @@ resolveInitializedTargets request workspace = do
         , initializedCheckStartupUsageInBackground =
             checkStartupUsageInBackground
         }
+
+resolveConfiguredStartupTarget
+    :: StartupRuntime
+    -> CliOptions
+    -> Maybe GatewayCredential
+    -> ModelCatalog
+    -> IO (Maybe ModelTarget, Maybe GatewayModelAccess)
+resolveConfiguredStartupTarget startup options connectedGateway catalog =
+    case options.optBundleContext of
+        Nothing ->
+            pure
+                ( (.modelTarget)
+                    <$> (options.optModel >>= resolveConfiguredModel catalog)
+                , Nothing
+                )
+        Just _ ->
+            case connectedGateway of
+                Nothing ->
+                    startupDie startup
+                        "Agent bundles require an active organization gateway."
+                Just credential ->
+                    case options.optModel of
+                        Nothing -> pure (Nothing, Nothing)
+                        Just modelId -> do
+                            access <- newGatewayModelAccess credential
+                            models <-
+                                refreshGatewayModels access >>= either
+                                    (startupDie startup . Text.unpack)
+                                    pure
+                            when (null models) $
+                                startupDie startup
+                                    "The organization gateway does not offer any models."
+                            target <-
+                                either
+                                    (startupDie startup . Text.unpack)
+                                    pure
+                                    (resolveGatewayModelTarget
+                                        catalog
+                                        models
+                                        modelId)
+                            pure (Just target, Just access)
 
 loadInitializedAuth
     :: InitializedRequest
@@ -902,17 +953,25 @@ validateInitializedAuth request targets loaded = do
 
 newInitializedAccountRefs
     :: InitializedRequest
+    -> InitializedTargets
     -> InitializedAuth
     -> IO InitializedAccountRefs
-newInitializedAccountRefs request auth = do
+newInitializedAccountRefs request targets auth = do
     let loaded = auth.initializedLoaded
         startupAccountIds = auth.initializedStartupAccountIds
     initialGatewayModels <-
-        loadGatewayModelAccess
-            request.initializedConnectedGateway
-            loaded >>= either
-                (startupDie request.initializedStartup . Text.unpack)
-                pure
+        case targets.initializedBundleGatewayModels of
+            Just access
+                | isGatewayLoadedAuth loaded -> pure (Just access)
+                | otherwise ->
+                    startupDie request.initializedStartup
+                        "Gateway credential and loaded authentication disagree."
+            Nothing ->
+                loadGatewayModelAccess
+                    request.initializedConnectedGateway
+                    loaded >>= either
+                        (startupDie request.initializedStartup . Text.unpack)
+                        pure
     gatewayModelsRef <- newIORef initialGatewayModels
     activeAccountRef <- newIORef ""
     activeAccountIdRef <-
@@ -1210,7 +1269,7 @@ runInitialized request = do
         request
         targets
         initializedAuth.initializedLoaded
-    accountRefs <- newInitializedAccountRefs request initializedAuth
+    accountRefs <- newInitializedAccountRefs request targets initializedAuth
     activeHttpAuth <-
         initializeActiveHttpAuth
             targets

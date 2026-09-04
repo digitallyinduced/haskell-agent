@@ -1,6 +1,6 @@
 module Agent.SkillsSpec (spec) where
 
-import System.OsPath (unsafeEncodeUtf)
+import System.OsPath (OsPath, unsafeEncodeUtf)
 import Agent.Skills
 import Control.Exception.Safe (bracket, finally)
 import qualified Data.Text as Text
@@ -19,6 +19,7 @@ import System.FilePath ((</>))
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
+fromFilePath :: FilePath -> OsPath
 fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
@@ -37,6 +38,26 @@ spec = describe "Agent.Skills" do
             catalog <- discoverSkills (options home repo cwd)
             map (.skillDescription) catalog.catalogSkills
                 `shouldBe` ["local commit", "root review", "user commit"]
+
+    it "excludes ambient skills while retaining explicitly bundled roots" do
+        withTempDir \dir -> do
+            let home = dir </> "home"
+                repo = dir </> "repo"
+                bundledRoot = dir </> "bundled"
+            writeSkill (home </> ".agents" </> "skills" </> "ambient")
+                "ambient" "ambient skill" []
+            writeSkill (repo </> ".agents" </> "skills" </> "repository")
+                "repository" "repository skill" []
+            writeSkill (bundledRoot </> "selected")
+                "selected" "bundled skill" []
+            catalog <- discoverSkills
+                (options home repo repo)
+                    { skillsIncludeAmbient = False
+                    , skillsBuiltinRoots =
+                        [(AgentSkills, fromFilePath bundledRoot)]
+                    }
+            map (.skillDescription) catalog.catalogSkills
+                `shouldBe` ["bundled skill"]
 
     it "parses Grok fields and Codex invocation policy" do
         withTempDir \dir -> do
@@ -251,6 +272,7 @@ options home repo cwd = SkillDiscoverOptions
     , skillsProjectRoot = fromFilePath repo
     , skillsCwd = fromFilePath cwd
     , skillsMaxDepth = 6
+    , skillsIncludeAmbient = True
     , skillsBuiltinRoots = []
     }
 

@@ -61,7 +61,7 @@ import Agent.CLI.Models (ModelTarget(targetConnectionId))
 import Agent.CLI.Options
     ( ApprovalPolicy
     , isOneShot
-    , CliOptions(optCodeMode)
+    , CliOptions(optBundleContext, optCodeMode)
     )
 import Agent.CLI.PendingInputs (PendingInputs)
 import Agent.CLI.Plan ()
@@ -169,7 +169,10 @@ import Agent.CLI.SessionTitle ()
 import Agent.CLI.Skills ()
 import Agent.CLI.Startup.Auth ( markStartupStage, startupDie )
 import Agent.CLI.StartupContext
-    ( AgentsContextNotice(..), loadAgentsContext )
+    ( AgentsContextNotice(..)
+    , appendGeneratedContext
+    , loadAgentsContext
+    )
 import Agent.CLI.Style ( cliWindowTitle, roleMuted )
 import Agent.CLI.Subagents.Runtime
     ( SubagentRuntime(subagentOpenAiChild, SubagentRuntime,
@@ -1035,7 +1038,9 @@ loadSessionStartupContext AgentSessionRequest
             | not
                 promptRuntime.sessionCodeRuntime.sessionLoadsHostWorkspaceContext ->
                 newIORef
-                    promptRuntime.sessionCodeRuntime.sessionEnvironmentContext
+                    (appendGeneratedContext
+                        promptRuntime.sessionCodeRuntime.sessionEnvironmentContext
+                        options.optBundleContext)
             | otherwise ->
                 loadAgentsContext
                     stderrHandle

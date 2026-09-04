@@ -29,6 +29,13 @@ module Agent.CLI.Runtime.Internal
 
 import Agent.CLI.AgentSessions
     ( closeSessionThreadManager, newSessionThreadManager )
+import Agent.CLI.Bundle
+    ( LoadedBundle(..)
+    , PreparedBundle(..)
+    , formatAgentBundle
+    , loadAgentBundle
+    , prepareBundleRun
+    )
 import Agent.CLI.GatewayClient (runGatewayCommand)
 import Agent.CLI.Interrupt ( catchUserInterrupt )
 import Agent.CLI.Login ( runLoginManager )
@@ -45,7 +52,10 @@ import Agent.CLI.McpStatus
     )
 import Agent.Connectivity.NetworkPath (withNetworkRecovery)
 import Agent.CLI.Options
-    ( CliOptions
+    ( BundleCommand(..)
+    , BundleInspectOptions(..)
+    , BundleRunOptions(..)
+    , CliOptions
     , Command(..)
     , McpCommand(..)
     , parseArgs
@@ -88,6 +98,8 @@ import Agent.CLI.Worktree ( isUnderWorktreeRoot, worktreeRoot )
 import Control.Concurrent.Async ( withAsync )
 import Control.Concurrent.MVar ( newEmptyMVar, putMVar, takeMVar )
 import Control.Exception.Safe ( finally, mask_, onException )
+import Control.Monad (when)
+import qualified Data.ByteString as ByteString
 import Data.Text ( Text )
 import System.Directory.OsPath
     ( getCurrentDirectory, getHomeDirectory, makeAbsolute )
@@ -98,6 +110,7 @@ import System.IO ( stderr )
 import qualified Agent.MCP as MCP
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as TextIO
 
 -- | GHCi @:cmd@ helper: on 'DevReload', reload modules and resume that exact
 -- session. Keeping the id in the generated GHCi command avoids a shared
@@ -167,6 +180,7 @@ devMainResume resumeId = do
         Right (ImportSession cwd) -> runImportSession cwd >> pure DevQuit
         Right (Storage command) ->
             runStorageAdmin command >> pure DevQuit
+        Right (Bundle command) -> runBundleCommand command
         Right (RunAgent options) -> do
             result <- runAgentWithRestarts options
             case result of
@@ -193,12 +207,45 @@ run = do
         Right (WaitSession sessionId) -> runWaitSession sessionId
         Right (ImportSession cwd) -> runImportSession cwd
         Right (Storage command) -> runStorageAdmin command
+        Right (Bundle command) -> do
+            result <- runBundleCommand command
+            case result of
+                DevQuit -> pure ()
+                DevReload _ ->
+                    die ":reload is only available under `repl` (nix develop)"
         Right (RunAgent options) -> do
             result <- runAgentWithRestarts options
             case result of
                 DevQuit -> pure ()
                 DevReload _ ->
                     die ":reload is only available under `repl` (nix develop)"
+
+runBundleCommand :: BundleCommand -> IO DevResult
+runBundleCommand = \case
+    BundleInspect inspectOptions -> do
+        loaded <-
+            loadAgentBundle inspectOptions.bundleInspectPath
+                >>= either die pure
+        if inspectOptions.bundleInspectJSON
+            then do
+                ByteString.putStr loaded.loadedBundleBytes
+                when
+                    (ByteString.null loaded.loadedBundleBytes
+                        || ByteString.last loaded.loadedBundleBytes /= 10)
+                    (putChar '\n')
+            else TextIO.putStr
+                (formatAgentBundle loaded.loadedBundleManifest)
+        pure DevQuit
+    BundleRun bundleOptions -> do
+        loaded <-
+            loadAgentBundle bundleOptions.bundleRunPath
+                >>= either die pure
+        prepared <-
+            either die pure
+                (prepareBundleRun
+                    bundleOptions
+                    loaded.loadedBundleManifest)
+        runAgentWithRestarts prepared.preparedBundleOptions
 
 -- | Tear down and rebuild provider-specific auth, tools, prompt, and transport.
 -- Automatic transitions carry the exact failed turn in memory and commit

@@ -58,7 +58,8 @@ import Agent.CLI.Options
       isOneShot,
       CliOptions(optMotionMode, optManagedTurnFile, optScreenMode,
                  optProvider, optModel, optWorktree, optEffort, optPrompt,
-                 optPromptFile, optResume, optCwd, optCodeMode, optYolo),
+                 optPromptFile, optResume, optCwd, optCodeMode, optYolo,
+                 optBundlePathPrefix),
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
@@ -227,7 +228,10 @@ import Agent.TUI.Motion ( nativeProgressAnimationEnabled )
 import Agent.Tools.MultiAgents ()
 import Agent.Tools.PlanMode ()
 import Agent.Tools.Secret ()
-import Agent.Tools.Types ( defaultToolEnv, ToolEnv(toolCancel) )
+import Agent.Tools.Types
+    ( defaultToolEnv
+    , ToolEnv(toolCancel, toolPathPrefix)
+    )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Chan ()
@@ -998,7 +1002,9 @@ prepareAgentIterationTracked
                 unless background (setCurrentDirectory cwd)
                 terminalCwd <- decodeFS cwd
                 reportTerminalCwd terminal stdoutHandle terminalCwd
-                toolEnv <- defaultToolEnv cwd
+                baseToolEnv <- defaultToolEnv cwd
+                let toolEnv = baseToolEnv
+                        { toolPathPrefix = options.optBundlePathPrefix }
                 writeIORef cancelToolRef (requestCancel toolEnv.toolCancel)
                 forM_ runMode.runNativeHooks \hooks ->
                     hooks.nativeRegisterCancel

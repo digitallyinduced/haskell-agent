@@ -190,6 +190,15 @@ To embed the runtime through a local REST and Server-Sent Events API, run
 turn supervision, approvals, cancellation, and an OpenAPI 3.1 document. See
 the [agent server guide](docs/agent-server.md).
 
+### Reproducible agent bundles
+
+`haskell-agent.lib.mkAgentBundle` packages named agent instructions, model
+aliases, tools, skills, and Nix-provided executables into one immutable,
+runnable derivation. Inspect it with `agent-cli bundle inspect`, run it with
+`nix run`, or add it to a Nix profile for atomic local upgrades and rollback.
+Provider routing and credentials remain controlled by the active organization
+gateway. See the [AgentBundle guide](docs/agent-bundles.md).
+
 The provider's Bash/shell execution tool is enabled by default. Enable the
 persistent `run_ghci` tool when needed:
 

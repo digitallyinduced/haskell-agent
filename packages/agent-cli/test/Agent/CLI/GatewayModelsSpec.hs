@@ -54,6 +54,39 @@ spec = describe "Agent.CLI.GatewayModels" do
         map (.modelTarget.targetDialect) options
             `shouldBe` [GenericResponsesDialect, ClaudeCodeDialect]
 
+    it "resolves bundle aliases only from the live gateway catalog" do
+        resolveGatewayModelTarget
+            testCatalog
+            [GatewayModel "company-a" GatewayResponsesProtocol]
+            "company-a"
+            `shouldBe`
+                Right
+                    (ModelTarget
+                        OpenAIProvider
+                        organizationGatewayConnectionId
+                        "company-a"
+                        "company-a"
+                        GenericResponsesDialect)
+        resolveGatewayModelTarget
+            testCatalog
+            [GatewayModel "company-a" GatewayResponsesProtocol]
+            "router-default"
+            `shouldBe`
+                Left
+                    "Model alias \"router-default\" is not offered by the active organization gateway."
+        resolveGatewayModelTarget
+            testCatalog
+            [GatewayModel "sonnet" GatewayAnthropicProtocol]
+            "sonnet"
+            `shouldBe`
+                Right
+                    (ModelTarget
+                        ClaudeCodeProvider
+                        organizationGatewayConnectionId
+                        "sonnet"
+                        "sonnet"
+                        ClaudeCodeDialect)
+
     it "aligns gateway auth with a resumed Claude model target" do
         let options =
                 modelOptionsForGatewayModels

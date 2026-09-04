@@ -524,8 +524,10 @@ buildSkillContextRuntime
                             <$> codexCatalogSession)
                 else
                     newIORef
-                        ((.catalogEnvironmentContext)
-                            <$> codexCatalogSession)
+                        (appendGeneratedContext
+                            ((.catalogEnvironmentContext)
+                                <$> codexCatalogSession)
+                            options.optBundleContext)
         freshSkills <-
             if loadsHostWorkspaceContext
                 then loadSkillsCatalogQuiet options home projectRoot cwd
@@ -533,10 +535,11 @@ buildSkillContextRuntime
         (omitted, _) <-
             installSkills freshAgents True freshSkills
         reportSkillCatalog True freshSkills omitted
-        void $ installLearnedSkills
-            freshAgents
-            defaultLearnedSkillContextMaxChars
-            True
+        when options.optAmbientSkills $
+            void $ installLearnedSkills
+                freshAgents
+                defaultLearnedSkillContextMaxChars
+                True
         fresh <- readIORef freshAgents
         writeIORef startupContext fresh
     sessionReset = do
@@ -639,7 +642,7 @@ buildSkillContextRuntime
             skills
         reportSkillCatalog (isNothing fullscreen) skills omitted
         learnedSkills <-
-            if needsInitialContext
+            if needsInitialContext && options.optAmbientSkills
                 then installLearnedSkills
                     startupContext
                     defaultLearnedSkillContextMaxChars

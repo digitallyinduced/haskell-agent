@@ -166,6 +166,7 @@ library
                     , Agent.CLI.Afk
                     , Agent.CLI.BrowserTools
                     , Agent.CLI.Btw
+                    , Agent.CLI.Bundle
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
                     , Agent.CLI.Claude
@@ -495,6 +496,7 @@ test-suite agent-cli-test
                     , Agent.CLI.AuthSpec
                     , Agent.CLI.BrowserToolsSpec
                     , Agent.CLI.BtwSpec
+                    , Agent.CLI.BundleSpec
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
                     , Agent.CLI.ClaudeGatewayProxySpec
