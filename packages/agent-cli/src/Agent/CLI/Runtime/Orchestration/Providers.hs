@@ -74,7 +74,6 @@ import Agent.CLI.Request ()
 import Agent.CLI.Resume ()
 import Agent.CLI.Runtime.HistorySource ()
 import Agent.CLI.Runtime.Orchestration.Background ()
-import Agent.CLI.Runtime.Orchestration.Concurrent ()
 import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Startup
     ( finishStartup )

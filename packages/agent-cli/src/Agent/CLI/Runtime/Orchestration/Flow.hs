@@ -85,7 +85,6 @@ import Agent.CLI.Request ()
 import Agent.CLI.Resume ( validateResumeMetaForBoundary )
 import Agent.CLI.Runtime.HistorySource ()
 import Agent.CLI.Runtime.Orchestration.Background ()
-import Agent.CLI.Runtime.Orchestration.Concurrent ()
 import Agent.CLI.Runtime.Orchestration.Initialized
     ( PreparedStartupAuthWorker
     , runAgentInitialized

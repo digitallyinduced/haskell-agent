@@ -16,7 +16,7 @@ import Agent.Loop
     )
 import Agent.Error (ApiError(..))
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (poll, withAsync)
+import Control.Concurrent.Async (concurrently, poll, withAsync)
 import Control.Exception.Safe (SomeException, bracket, onException)
 import qualified Control.Exception.Safe as Exception
 import Control.Monad (forM_, when)
@@ -72,6 +72,20 @@ main = do
                 True
                 (read worktreeMillis)
                 (read accountMillis)
+                (read samples)
+        ["startup-tools-serial", mcpMillis, codingMillis, skillsMillis, samples] ->
+            benchmarkStartupTools
+                False
+                (read mcpMillis)
+                (read codingMillis)
+                (read skillsMillis)
+                (read samples)
+        ["startup-tools-overlap", mcpMillis, codingMillis, skillsMillis, samples] ->
+            benchmarkStartupTools
+                True
+                (read mcpMillis)
+                (read codingMillis)
+                (read skillsMillis)
                 (read samples)
         _ -> benchmarkConcurrency args
 
@@ -169,6 +183,60 @@ overlapStartup worktreeMillis accountMillis =
                     pure 2
                 Just (Left err) -> Exception.throwIO err
                 Just (Right accountResult) -> pure (1 + accountResult)
+
+benchmarkStartupTools :: Bool -> Int -> Int -> Int -> Int -> IO ()
+benchmarkStartupTools
+        useOverlap mcpMillis codingMillis skillsMillis sampleCount = do
+    statsEnabled <- getRTSStatsEnabled
+    when (not statsEnabled) $
+        fail "run with +RTS -T"
+    serialChecksum <- serialTools mcpMillis codingMillis skillsMillis
+    overlapChecksum <- overlapTools mcpMillis codingMillis skillsMillis
+    when (serialChecksum /= overlapChecksum) $
+        fail "startup tool implementations disagree on checksum"
+    let action =
+            if useOverlap
+                then overlapTools mcpMillis codingMillis skillsMillis
+                else serialTools mcpMillis codingMillis skillsMillis
+        label =
+            if useOverlap
+                then "startup-tools-overlap"
+                else "startup-tools-serial"
+    samples <- mapM (const (measure action)) [1 .. max 1 sampleCount]
+    let sample = medianSample samples
+    putStrLn
+        ( label
+            <> " mcp-ms=" <> show mcpMillis
+            <> " coding-ms=" <> show codingMillis
+            <> " skills-ms=" <> show skillsMillis
+            <> " samples=" <> show sampleCount
+            <> " elapsed-ms=" <> show sample.sampleElapsedMillis
+            <> " cpu-ms=" <> show sample.sampleCpuMillis
+            <> " allocated-bytes=" <> show sample.sampleAllocatedBytes
+        )
+
+serialTools :: Int -> Int -> Int -> IO Int
+serialTools mcpMillis codingMillis skillsMillis = do
+    mcpResult <- delayedResult mcpMillis 1
+    codingResult <- delayedResult codingMillis 1
+    skillsResult <- delayedResult skillsMillis 1
+    pure (mcpResult + codingResult + skillsResult)
+
+overlapTools :: Int -> Int -> Int -> IO Int
+overlapTools mcpMillis codingMillis skillsMillis = do
+    (mcpResult, (codingResult, skillsResult)) <-
+        concurrently
+            (delayedResult mcpMillis 1)
+            (do
+                codingResult <- delayedResult codingMillis 1
+                skillsResult <- delayedResult skillsMillis 1
+                pure (codingResult, skillsResult))
+    pure (mcpResult + codingResult + skillsResult)
+
+delayedResult :: Int -> Int -> IO Int
+delayedResult millis result = do
+    threadDelay (millis * 1000)
+    pure result
 
 medianSample :: [Sample] -> Sample
 medianSample samples =

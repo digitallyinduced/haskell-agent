@@ -630,10 +630,7 @@ buildSkillContextRuntime
                         (UiSystemMessage (formatSkillOmission omitted))
     initializeSkills = do
         markStartupStage startup "Loading skills…"
-        skills <-
-            if loadsHostWorkspaceContext
-                then loadSkillsCatalogQuiet options home projectRoot cwd
-                else pure (SkillCatalog [] [])
+        skills <- readIORef skillsRef
         (omitted, _) <- installSkills startupContext
             queueInitialContext
             skills
