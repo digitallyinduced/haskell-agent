@@ -483,6 +483,30 @@ spec = describe "fullscreen UI reducer" do
         Foldable.toList state.uiToolCalls
             `shouldBe` [(0, preview)]
 
+    it "repaints an inspection call from incomplete streamed arguments" do
+        let early = functionToolCall "read-1" "read_file" ""
+            preview =
+                functionToolCall
+                    "read-1"
+                    "read_file"
+                    "{\"target_file\":\"src/Ma"
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted early)
+                    , UiLoop (ToolArgumentsUpdated preview)
+                    ]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockInspect
+                block.blockTitle `shouldBe` "Read"
+                block.blockDetail `shouldBe` "src/Ma"
+                block.blockState `shouldBe` BlockRunning
+                state.uiActivity `shouldBe` "Read src/Ma"
+            _ -> expectationFailure "expected one updated inspection block"
+        Foldable.toList state.uiToolCalls
+            `shouldBe` [(0, preview)]
+
     it "makes repeated tool starts idempotent by call id" do
         let early = functionToolCall "c1" "Task" "{}"
             canonical =

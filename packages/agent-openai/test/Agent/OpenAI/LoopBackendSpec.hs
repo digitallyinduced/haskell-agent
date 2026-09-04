@@ -953,7 +953,7 @@ spec = do
             observedEvents <- readIORef events
             reverse observedEvents `shouldBe` [TextDelta "partial"]
 
-        it "blocks credential failover after hidden output was streamed" do
+        it "blocks credential failover after a tool call was streamed" do
             transcript <- newIORef []
             events <- newIORef []
             let exhausted = ProviderError UsageLimitReached
@@ -980,8 +980,7 @@ spec = do
             recorded <- reverse <$> readIORef events
             [() | ToolStarted started <- recorded, started.callId == "fc-1"]
                 `shouldBe` [()]
-            filter (not . isToolStartedEvent) recorded `shouldBe`
-                [ActivityUpdated "Writing shell call…"]
+            filter (not . isToolStartedEvent) recorded `shouldBe` []
 
         it "resubmits after a mid-response socket drop behind a restart boundary" do
             attempts <- newIORef (0 :: Int)
@@ -1020,7 +1019,7 @@ spec = do
                 , TextDelta "complete"
                 ]
 
-        it "discards a hidden partial attempt before reconnecting" do
+        it "discards a tool-only partial attempt before reconnecting" do
             attempts <- newIORef (0 :: Int)
             transcript <- newIORef []
             events <- newIORef []
@@ -1054,8 +1053,7 @@ spec = do
             [() | ToolStarted started <- recorded, started.callId == "fc-1"]
                 `shouldBe` [()]
             filter (not . isToolStartedEvent) recorded `shouldBe`
-                [ ActivityUpdated "Writing shell call…"
-                , ActivityUpdated
+                [ ActivityUpdated
                     "Connection lost mid-response (Codex connection limit reached); reconnecting in 0s (attempt 1)…"
                 , ResponseAttemptDiscarded
                 , ActivityUpdated "Reconnecting to Codex (attempt 1)…"

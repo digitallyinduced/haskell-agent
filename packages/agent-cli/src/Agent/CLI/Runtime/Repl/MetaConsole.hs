@@ -5,7 +5,8 @@ module Agent.CLI.Runtime.Repl.MetaConsole
 
 import Agent.CLI.Command
     ( ReplAction(ReplSetEffort, ReplToggleFast, ReplSetModel,
-                 ReplSetShell, ReplToggleAlwaysApprove, ReplSetAgentLimit,
+                 ReplSetShell, ReplToggleComputerUse, ReplSetComputerUse,
+                 ReplToggleAlwaysApprove, ReplSetAgentLimit,
                  ReplEnableCodeMode, ReplSkills)
     , SlashCatalog
     , parseReplLineWithCatalog
@@ -456,6 +457,8 @@ safeMetaSessionAction = \case
     ReplToggleFast -> True
     ReplSetModel{} -> True
     ReplSetShell{} -> True
+    ReplToggleComputerUse -> True
+    ReplSetComputerUse{} -> True
     ReplToggleAlwaysApprove -> True
     ReplSetAgentLimit{} -> True
     ReplEnableCodeMode -> True
