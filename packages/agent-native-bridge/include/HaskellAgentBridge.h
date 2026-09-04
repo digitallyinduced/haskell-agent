@@ -136,6 +136,197 @@ int32_t ha_engine_set_browser_callback(
     void *context
 );
 
+enum {
+    HA_COMPUTER_ABI_VERSION = 1,
+    HA_COMPUTER_QUERY_DISPLAY = 1,
+    HA_COMPUTER_RUN_AND_OBSERVE = 2
+};
+
+enum {
+    HA_COMPUTER_ACTION_CLICK = 1,
+    HA_COMPUTER_ACTION_DOUBLE_CLICK = 2,
+    HA_COMPUTER_ACTION_SCROLL = 3,
+    HA_COMPUTER_ACTION_MOVE = 4,
+    HA_COMPUTER_ACTION_DRAG = 5,
+    HA_COMPUTER_ACTION_TYPE = 6,
+    HA_COMPUTER_ACTION_KEYPRESS = 7,
+    HA_COMPUTER_ACTION_WAIT = 8
+};
+
+enum {
+    HA_COMPUTER_BUTTON_NONE = 0,
+    HA_COMPUTER_BUTTON_LEFT = 1,
+    HA_COMPUTER_BUTTON_RIGHT = 2,
+    HA_COMPUTER_BUTTON_MIDDLE = 3,
+    HA_COMPUTER_BUTTON_BACK = 4,
+    HA_COMPUTER_BUTTON_FORWARD = 5
+};
+
+enum {
+    HA_COMPUTER_MODIFIER_SHIFT = 1 << 0,
+    HA_COMPUTER_MODIFIER_CONTROL = 1 << 1,
+    HA_COMPUTER_MODIFIER_OPTION = 1 << 2,
+    HA_COMPUTER_MODIFIER_COMMAND = 1 << 3,
+    HA_COMPUTER_MODIFIER_FUNCTION = 1 << 4
+};
+
+enum {
+    HA_COMPUTER_IMAGE_NONE = 0,
+    HA_COMPUTER_IMAGE_PNG = 1,
+    HA_COMPUTER_IMAGE_JPEG = 2
+};
+
+enum {
+    HA_COMPUTER_STATUS_SUCCESS = 0,
+    HA_COMPUTER_STATUS_INVALID_ARGUMENT = 1,
+    HA_COMPUTER_STATUS_UNAVAILABLE = 2,
+    HA_COMPUTER_STATUS_TIMEOUT = 3,
+    HA_COMPUTER_STATUS_PERMISSION_DENIED = 4,
+    HA_COMPUTER_STATUS_UNSUPPORTED = 5,
+    HA_COMPUTER_STATUS_FAILED = 6,
+    HA_COMPUTER_STATUS_OUTPUT_TOO_LARGE = 7,
+    HA_COMPUTER_STATUS_SESSION_LOCKED = 8,
+    HA_COMPUTER_STATUS_DISPLAY_CHANGED = 9
+};
+
+enum {
+    HA_COMPUTER_ACTION_STRUCT_SIZE_V1 = 64,
+    HA_COMPUTER_MAX_ACTIONS = 10,
+    HA_COMPUTER_MAX_POINTS_PER_ACTION = 1024,
+    HA_COMPUTER_MAX_TOTAL_POINTS = 10240,
+    HA_COMPUTER_MAX_TEXT_BYTES = 327680,
+    HA_COMPUTER_ERROR_CAPACITY = 65536,
+    HA_COMPUTER_OUTPUT_CAPACITY = 16777216
+};
+
+typedef struct ha_computer_point_v1 {
+    int32_t x;
+    int32_t y;
+} ha_computer_point_v1;
+
+/*
+ * Fixed-width action record for HA_COMPUTER_ABI_VERSION. struct_size must be
+ * HA_COMPUTER_ACTION_STRUCT_SIZE_V1. text_offset/text_length select UTF-8 in
+ * the callback's text buffer. point_offset/point_count select records in its
+ * point buffer. Offsets and lengths are element counts, not byte pointers.
+ *
+ * Pointer coordinates are integer logical pixels in the final screenshot's
+ * top-left coordinate space: 0 <= x < output_width and
+ * 0 <= y < output_height. CLICK uses x/y, button, and modifiers.
+ * DOUBLE_CLICK and MOVE use x/y and modifiers. SCROLL uses x/y,
+ * delta_x/delta_y, and modifiers; positive deltas follow browser-wheel
+ * convention and move the viewport right/down. DRAG uses at least two ordered
+ * points, including its start and end, and the left button. TYPE uses a text
+ * range. KEYPRESS uses a nonempty text range for the final key and modifiers
+ * for the chord. WAIT has no fields and waits two seconds. Every field not
+ * named for an action must be zero.
+ */
+typedef struct ha_computer_action_v1 {
+    uint32_t struct_size;
+    int32_t action;
+    int32_t x;
+    int32_t y;
+    int32_t delta_x;
+    int32_t delta_y;
+    int32_t button;
+    uint32_t modifiers;
+    uint64_t text_offset;
+    uint64_t text_length;
+    uint64_t point_offset;
+    uint64_t point_count;
+} ha_computer_action_v1;
+
+/*
+ * Host computer-control callback for native agent turns.
+ *
+ * QUERY_DISPLAY requires zero actions/points/text, expected display token and
+ * dimensions and requested_image_format zero, and a writable error buffer. On
+ * success it writes a nonzero opaque lease to output_display_token and positive
+ * logical main-display dimensions to output_width and output_height, sets
+ * output_image_format and output_length to zero, and does not write image
+ * bytes.
+ *
+ * RUN_AND_OBSERVE executes the complete ordered action batch, waits for the UI
+ * to settle, and captures exactly one final main-display observation. It must
+ * verify expected_display_token is the host's current unconsumed lease for the
+ * same main display and that the logical display remains expected_width by
+ * expected_height before changing input state. A stale lease must fail with
+ * HA_COMPUTER_STATUS_DISPLAY_CHANGED before any side effect. The host must
+ * serialize leases across every callback context controlling the same desktop
+ * and invalidate a lease when a transaction starts changing input state.
+ * requested_image_format is PNG or JPEG. On success, output contains encoded
+ * image bytes, output_length is their length, output_display_token is a
+ * nonzero successor lease distinct from expected_display_token,
+ * output_width/output_height are the observed logical image dimensions, and
+ * output_image_format is PNG or JPEG. The encoded image is normalized to
+ * exactly output_width by output_height pixels, including on Retina displays,
+ * so action coordinates map one-to-one to image pixels. Every successful RUN
+ * consumes its input lease, including an observation-only run with zero
+ * actions.
+ *
+ * Actions contain no screenshot record: the Haskell runtime removes a final
+ * screenshot marker and rejects an earlier one. actions may be NULL only when
+ * action_count is zero. points and text follow the same rule. All ranges must
+ * be contained in their corresponding buffers. The host must reject unknown
+ * versions, operations, action values, modifiers, image formats, nonzero
+ * unused fields, malformed UTF-8, and counts above the HA_COMPUTER_MAX_*
+ * limits with HA_COMPUTER_STATUS_INVALID_ARGUMENT.
+ *
+ * output/output_length/output_display_token/output_width/output_height and
+ * output_image_format are nonnull callback-scoped writable pointers. On
+ * failure, set the display token, dimensions, and image format to zero and
+ * write a useful UTF-8 error to output when possible. Never report
+ * output_length above output_capacity. The runtime supplies
+ * HA_COMPUTER_ERROR_CAPACITY for QUERY_DISPLAY and HA_COMPUTER_OUTPUT_CAPACITY
+ * for RUN_AND_OBSERVE.
+ *
+ * The callback runs synchronously on an agent tool worker, never the setter's
+ * caller or AppKit main thread, and must not call engine functions. No input
+ * or output buffer remains valid after it returns. The host owns callback and
+ * context. ha_engine_set_computer_callback may wait for an in-flight callback;
+ * after it returns, a replaced callback/context will not be used again. Keep
+ * the installed callback/context valid until replacement, disable, or engine
+ * destruction returns.
+ */
+typedef int32_t (*ha_computer_callback)(
+    void *context,
+    uint32_t abi_version,
+    int32_t operation,
+    uint64_t expected_display_token,
+    int32_t expected_width,
+    int32_t expected_height,
+    const ha_computer_action_v1 *actions,
+    size_t action_count,
+    const ha_computer_point_v1 *points,
+    size_t point_count,
+    const uint8_t *text,
+    size_t text_length,
+    int32_t requested_image_format,
+    uint8_t *output,
+    size_t output_capacity,
+    size_t *output_length,
+    uint64_t *output_display_token,
+    int32_t *output_width,
+    int32_t *output_height,
+    int32_t *output_image_format
+);
+
+/*
+ * Installs native computer control for future turns. A turn replaces the
+ * local macOS backend only when its turn.start enables computer use and this
+ * callback is nonnull. Passing NULL disables native computer control; context
+ * is ignored. Tools retained by an already-started turn fail as inactive.
+ *
+ * Returns 0 on success, 1 for a null engine, or 2 for an internal failure.
+ * Calls must be serialized with ha_engine_destroy. This function may block
+ * until a running computer callback returns.
+ */
+int32_t ha_engine_set_computer_callback(
+    void *engine,
+    ha_computer_callback callback,
+    void *context
+);
+
 typedef void (*ha_repository_check_output_callback)(
     void *context,
     int32_t stream,

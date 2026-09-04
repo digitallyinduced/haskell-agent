@@ -140,6 +140,7 @@ jobs:
             # package test while rebuilding only its affected graph.
             build_targets+=(
               .#checks.x86_64-linux.agent-cli
+              .#checks.x86_64-linux.agent-external-session
               .#checks.x86_64-linux.agent-repository
               .#checks.x86_64-linux.agent-native-bridge
               .#checks.x86_64-linux.package-boundaries

@@ -302,6 +302,25 @@
                     ];
                 };
 
+                agentExternalSessionProductionSource = nix-filter.lib {
+                    root = ./packages/agent-external-session;
+                    include = [
+                        "src"
+                        "agent-external-session.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentExternalSessionCheckSource = nix-filter.lib {
+                    root = ./packages/agent-external-session;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-external-session.cabal"
+                        "LICENSE"
+                    ];
+                };
+
                 agentRepositoryProductionSource = nix-filter.lib {
                     root = ./packages/agent-repository;
                     include = [
@@ -681,6 +700,19 @@
                                             else agentCliRuntimeProductionSource;
                                 })
                             [ pkgs.postgresql_18 ]);
+                        agent-external-session = localPackage
+                            (pkgs.haskell.lib.addTestToolDepends
+                                (pkgs.haskell.lib.overrideSrc
+                                    (final.callPackage
+                                        ./packages/agent-external-session/package.nix
+                                        { })
+                                    {
+                                        src =
+                                            if packageMode != "production"
+                                                then agentExternalSessionCheckSource
+                                                else agentExternalSessionProductionSource;
+                                    })
+                                [ pkgs.zstd ]);
                         agent-repository = localPackage
                             (pkgs.haskell.lib.addTestToolDepends
                                 (pkgs.haskell.lib.overrideSrc
@@ -818,6 +850,8 @@
                 agentStorePackage = productionHaskellPackages.agent-store;
                 agentCliRuntimePackage =
                     productionHaskellPackages.agent-cli-runtime;
+                agentExternalSessionPackage =
+                    productionHaskellPackages.agent-external-session;
                 agentRepositoryPackage =
                     productionHaskellPackages.agent-repository;
                 agentCliPackage = productionHaskellPackages.agent-cli;
@@ -1198,6 +1232,8 @@
                     then "agent-cli-macos-archive" else null} =
                     agentCliMacosRelease.archive;
                 packages.agent-cli-runtime = agentCliRuntimePackage;
+                packages.agent-external-session =
+                    agentExternalSessionPackage;
                 packages.agent-repository = agentRepositoryPackage;
                 packages.agent-native-bridge-library =
                     agentNativeBridgeHaskellPackage;
@@ -1254,6 +1290,7 @@
                     packages = packages: [
                         packages.agent-cli
                         packages.agent-cli-runtime
+                        packages.agent-external-session
                         packages.agent-repository
                         packages.agent-native-bridge
                         packages.agent-telegram
@@ -1316,6 +1353,8 @@
                     # justStaticExecutables output or its requisite assertions.
                     agent-cli-executable = agentCliExecutable;
                     agent-cli-runtime = haskellPackages.agent-cli-runtime;
+                    agent-external-session =
+                        haskellPackages.agent-external-session;
                     agent-repository = haskellPackages.agent-repository;
                     agent-native-bridge = agentNativeBridgeCheckPackage;
                     agent-cli = haskellPackages.agent-cli;
