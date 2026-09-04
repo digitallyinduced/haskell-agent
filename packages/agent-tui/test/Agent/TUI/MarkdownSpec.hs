@@ -845,6 +845,44 @@ spec = describe "fullscreen Markdown rendering" do
             plain `shouldSatisfy` (not . Text.isInfixOf "`code`")
             spans `shouldSatisfy` any (hasUrl url)
 
+        it "registers application click targets for links in grid cells" do
+            let url = "https://example.com/docs"
+                input =
+                    "| Kind | Value |\n\
+                    \| --- | --- |\n\
+                    \| docs | [" <> url <> "](" <> url <> ") |"
+                widget :: Widget Text.Text
+                widget = markdownWidgetWithLinks id input
+                (_, _, _, extents) =
+                    renderFinal
+                        Theme.terminalDefault
+                        [widget]
+                        (80, 8)
+                        (const Nothing)
+                        emptyRenderState
+            map extentName extents `shouldContain` [url]
+            map extentSize extents `shouldSatisfy` all ((== 1) . snd)
+
+        it "registers click targets for wrapped links in compact tables" do
+            let url = "https://example.com/abcdefgh"
+                input =
+                    "| A | B |\n\
+                    \| --- | --- |\n\
+                    \| x | [" <> url <> "](" <> url <> ") |"
+                widget :: Widget Text.Text
+                widget = markdownWidgetWithLinks id input
+                (_, _, _, extents) =
+                    renderFinal
+                        Theme.terminalDefault
+                        [widget]
+                        (8, 20)
+                        (const Nothing)
+                        emptyRenderState
+                linkExtents = filter ((== url) . extentName) extents
+            length linkExtents `shouldSatisfy` (> 1)
+            map extentSize linkExtents `shouldSatisfy`
+                all (\(width, height) -> width > 0 && height == 1)
+
         it "preserves multiple records and links in compact layout" do
             let url = "https://example.com"
                 input =

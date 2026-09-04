@@ -100,11 +100,10 @@ validateGatewayBoundary expected current
     | gatewayBoundariesMatch expected current = Right ()
     | otherwise = Left GatewayBoundaryChanged
 
--- | Validate persisted session routing metadata against the current boundary.
+-- | Admit persisted session history at the current boundary.
 --
--- This preserves the stricter distinction between a direct connection,
--- a gateway connection without legacy identity binding, and an exact gateway
--- credential identity.
+-- Session history is portable across direct and gateway routes. Startup
+-- retargets the resumed session before making another provider request.
 validateGatewaySessionBoundary
     :: GatewayBoundary
     -> Text

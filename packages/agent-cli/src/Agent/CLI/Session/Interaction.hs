@@ -11,6 +11,7 @@ module Agent.CLI.Session.Interaction
 import Agent.CLI.Btw
     ( formatBtwError
     , runBtwWithCancel
+    , sideCallSnapshot
     )
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Command
@@ -73,7 +74,6 @@ import Agent.TUI.Model
 import Control.Monad (forM_)
 import Data.IORef
     ( modifyIORef'
-    , newIORef
     , readIORef
     , writeIORef
     )
@@ -189,7 +189,9 @@ runBtwQuestion registerCancel env question = do
         stdoutHandle = env.sessionRender.renderStdout
         stderrHandle = env.sessionRender.renderStderr
     color <- resolveColor stdoutHandle
-    transcriptRef <- newIORef =<< readLiveTranscript env.sessionConversation
+    params <- readIORef env.sessionParams
+    transcript <- readLiveTranscript env.sessionConversation
+    let snapshot = sideCallSnapshot params transcript
     forM_ fullscreen \runtime ->
         emitUiEvent runtime
             (UiSetNotice (Just (progressNotice "btw · asking…")))
@@ -210,8 +212,7 @@ runBtwQuestion registerCancel env question = do
                                 Just _ -> action
                     else action)
             env.sessionBtwBackend
-            env.sessionParams
-            transcriptRef
+            snapshot
             question
     forM_ fullscreen \runtime ->
         emitUiEvent runtime (UiSetNotice Nothing)

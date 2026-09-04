@@ -56,6 +56,8 @@ import Control.Concurrent.MVar
     )
 import Control.Exception.Safe (SomeException, mask, onException, try)
 import Control.Monad (forM, void, when)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Except (ExceptT(..), runExceptT, throwE)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -164,43 +166,49 @@ continueCodexShellCommand
     -> Text
     -> Int
     -> IO (Either Text CodexShellResult)
-continueCodexShellCommand session commandId input yieldMs = do
-    lookupCommand session commandId >>= \case
-        Nothing -> pure (Left (unknownSession commandId))
-        Just task ->
-            withMVar task.managedLock \() -> do
-                current <- lookupCommand session commandId
-                case current of
-                    Nothing -> pure (Left (unknownSession commandId))
-                    Just _ -> do
-                        tryReadMVar task.managedRunning.runningResult >>= \case
+continueCodexShellCommand session commandId input yieldMs =
+    runExceptT do
+        task <- lookupManagedCommand session commandId
+        ExceptT $
+            withMVar task.managedLock \() ->
+                runExceptT $
+                    continueLocked session commandId task input yieldMs
+
+continueLocked
+    :: CodexShellSession
+    -> Int
+    -> ManagedCommand
+    -> Text
+    -> Int
+    -> ExceptT Text IO CodexShellResult
+continueLocked session commandId task input yieldMs = do
+    -- Re-check after taking the command-specific lock: reset/close may have
+    -- removed this command between the initial lookup and lock acquisition.
+    void $ lookupManagedCommand session commandId
+    lift (tryReadMVar task.managedRunning.runningResult) >>= \case
+        Just result ->
+            ExceptT $ finishCommand session commandId task result
+        Nothing -> do
+            inputResult <- lift $ runExceptT $ writeContinuationInput task input
+            case inputResult of
+                Right () ->
+                    ExceptT $ waitForContinuation session commandId task yieldMs
+                -- A process can exit between the result check and its stdin
+                -- write. Return its completed result when available.
+                Left err ->
+                    lift (tryReadMVar task.managedRunning.runningResult)
+                        >>= \case
                             Just result ->
-                                finishCommand session commandId task result
-                            Nothing -> do
-                                inputResult <-
-                                    if Text.null input
-                                        then pure (Right ())
-                                        else if input == "\ETX"
-                                            then interruptShellCommand task.managedRunning
-                                                >> pure (Right ())
-                                            else writeShellCommandInput
-                                                task.managedRunning
-                                                input
-                                case inputResult of
-                                    Right () ->
-                                        waitForContinuation
-                                            session commandId task yieldMs
-                                    Left err ->
-                                        tryReadMVar
-                                            task.managedRunning.runningResult
-                                                >>= \case
-                                                    Just result ->
-                                                        finishCommand
-                                                            session
-                                                            commandId
-                                                            task
-                                                            result
-                                                    Nothing -> pure (Left err)
+                                ExceptT $ finishCommand session commandId task result
+                            Nothing -> throwE err
+
+writeContinuationInput :: ManagedCommand -> Text -> ExceptT Text IO ()
+writeContinuationInput task input
+    | Text.null input = pure ()
+    | input == "\ETX" =
+        lift $ interruptShellCommand task.managedRunning
+    | otherwise =
+        ExceptT $ writeShellCommandInput task.managedRunning input
 
 waitForInitialYield
     :: CodexShellSession
@@ -481,6 +489,15 @@ lookupCommand session commandId =
     withMVar session.sessionCommands \case
         Nothing -> pure Nothing
         Just store -> pure (Map.lookup commandId store.storeCommands)
+
+lookupManagedCommand
+    :: CodexShellSession
+    -> Int
+    -> ExceptT Text IO ManagedCommand
+lookupManagedCommand session commandId =
+    lift (lookupCommand session commandId) >>= \case
+        Nothing -> throwE (unknownSession commandId)
+        Just task -> pure task
 
 removeCommand :: CodexShellSession -> Int -> IO ()
 removeCommand session commandId =

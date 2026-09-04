@@ -77,6 +77,7 @@ import System.Posix.Files (ownerReadMode, ownerWriteMode, setFileMode, unionFile
 data PersistentShell = PersistentShell
     { shellCwd :: !OsPath
     , shellEnvFile :: !OsPath
+    , shellEnvResource :: !ResourceKey
     }
 
 maxRetainedCompletedTasks :: Int
@@ -102,7 +103,6 @@ data GrokSession = GrokSession
     { grokEnv :: !ToolEnv
     , grokLifecycle :: !(MVar ())
     , grokShell :: !(MVar PersistentShell)
-    , grokShellEnvResource :: !(IORef ResourceKey)
     , grokTasks :: !(MVar BackgroundTaskStore)
     , grokTodos :: !(IORef (Map Text (Text, Text)))
     , grokResources :: !ResourceScope
@@ -121,8 +121,8 @@ newGrokSession env = do
         shell <- newMVar PersistentShell
             { shellCwd = env.toolCwd
             , shellEnvFile = envFile
+            , shellEnvResource = envResource
             }
-        shellEnvResource <- newIORef envResource
         tasks <- newMVar BackgroundTaskStore
             { backgroundNextId = 0
             , backgroundTasks = Map.empty
@@ -132,7 +132,6 @@ newGrokSession env = do
             { grokEnv = env
             , grokLifecycle = lifecycle
             , grokShell = shell
-            , grokShellEnvResource = shellEnvResource
             , grokTasks = tasks
             , grokTodos = todos
             , grokResources = resources
@@ -153,19 +152,29 @@ resetGrokSessionTemp session tempDir =
                     cleanupEnvFiles
             previousResource <-
                 (modifyMVar session.grokShell \shell ->
-                    do
-                        previous <-
-                            readIORef session.grokShellEnvResource
-                        writeIORef session.grokShellEnvResource nextResource
-                        pure
-                            ( shell
-                                { shellCwd = session.grokEnv.toolCwd
-                                , shellEnvFile = nextEnvFile
-                                }
-                            , previous
-                            ))
+                    pure $
+                        replaceShellEnvironment
+                            session.grokEnv.toolCwd
+                            nextEnvFile
+                            nextResource
+                            shell)
                     `onException` releaseResource nextResource
             releaseResource previousResource
+
+replaceShellEnvironment
+    :: OsPath
+    -> OsPath
+    -> ResourceKey
+    -> PersistentShell
+    -> (PersistentShell, ResourceKey)
+replaceShellEnvironment nextCwd nextEnvFile nextResource shell =
+    ( shell
+        { shellCwd = nextCwd
+        , shellEnvFile = nextEnvFile
+        , shellEnvResource = nextResource
+        }
+    , shell.shellEnvResource
+    )
 
 currentSessionTempDir :: ToolEnv -> IO OsPath
 currentSessionTempDir env =

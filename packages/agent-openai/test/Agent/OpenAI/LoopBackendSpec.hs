@@ -704,6 +704,30 @@ spec = do
                 , seed <> turnInputsToItems [UserMessage "new"]
                 ]
 
+        it "drops xAI checkpoints when replaying after a provider switch" do
+            seen <- newIORef []
+            let xaiCheckpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "xai-context"
+                        , encryptedContent = Just "opaque-xai"
+                        }
+                retained = turnInputsToItems [UserMessage "old"]
+                seed =
+                    [ xaiCheckpoint
+                    , compactionCheckpointOriginItem "xai"
+                    ]
+                        <> retained
+            transcript <- newIORef seed
+            let backend =
+                    openAiBackendWith (recordingSend seen) (pure baseParams)
+            _ <- submitWithState transcript backend Nothing
+                [UserMessage "new"]
+                (const (pure ()))
+            [(request, previous)] <- readIORef seen
+            previous `shouldBe` Nothing
+            inputItems request `shouldBe`
+                retained <> turnInputsToItems [UserMessage "new"]
+
         it "starts a fresh chain when inherited cache retention is rejected" do
             seen <- newIORef []
             let seed = turnInputsToItems [UserMessage "old"]
@@ -1036,6 +1060,53 @@ spec = do
                 , ResponseAttemptDiscarded
                 , ActivityUpdated "Reconnecting to Codex (attempt 1)…"
                 ]
+
+        it "keeps a streamed apply_patch preview across reconnects" do
+            attempts <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            events <- newIORef []
+            let patch = "*** Begin Patch\n"
+                send _request _previous onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    attempt <- readIORef attempts
+                    if attempt == 1
+                        then do
+                            onEvent ResponseOutputItemAddedEvent
+                                { item =
+                                    customCallItem
+                                        "patch-1"
+                                        "apply_patch"
+                                        ""
+                                , outputIndex = Just 0
+                                , sequenceNumber = Nothing
+                                }
+                            onEvent ResponseCustomToolInputDeltaEvent
+                                { delta = Just patch
+                                , streamItemId = Nothing
+                                , streamCallId = Just "patch-1"
+                                , streamOutputIndex = Just 0
+                                , sequenceNumber = Nothing
+                                }
+                            pure (Left (ConnectionError "socket closed"))
+                        else pure (Right
+                            (testResponse "resp-replayed" [assistantItem "ok"]))
+                backend = openAiBackendWithRetryPolicies
+                    (constantDelay 0 <> limitRetries 3)
+                    (constantDelay 0 <> limitRetries 5)
+                    send
+                    (pure baseParams)
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            result `shouldBe`
+                Right (emptyTurnOutput "resp-replayed" [] (Just "ok"))
+            readIORef attempts `shouldReturn` 2
+            recorded <- reverse <$> readIORef events
+            let previews =
+                    [call | ToolArgumentsUpdated call <- recorded]
+            previews `shouldBe`
+                [customToolCall "patch-1" "apply_patch" patch]
+            length [() | ResponseRestarted _ <- recorded] `shouldBe` 1
+            [() | ResponseAttemptDiscarded <- recorded] `shouldBe` []
 
         it "reports the transport failure once the reconnect policy is exhausted" do
             attempts <- newIORef (0 :: Int)
