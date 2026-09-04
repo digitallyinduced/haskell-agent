@@ -20,7 +20,7 @@ import Agent.CLI.Artifact ()
 import Agent.CLI.Auth ()
 import Agent.CLI.Clipboard ()
 import Agent.CLI.Command
-    ( currentEffort, currentModel, mkSlashCatalog )
+    ( currentEffort, currentModel, mkSlashCatalog, SlashCatalog )
 import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.CLI.Compaction ()
 import Agent.CLI.Config ()
@@ -37,7 +37,8 @@ import Agent.CLI.GatewayClient
     )
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input
-    ( readReplLineWithCatalogForProvider
+    ( ReplLine
+    , readReplLineWithCatalogForProvider
     , readReplLineWithCatalogForTarget
     )
 import Agent.CLI.Interrupt ()
@@ -119,7 +120,8 @@ import Agent.CLI.Style
       userBackground )
 import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
-    ( emitUiEvent,
+    ( FullscreenRuntime
+    , emitUiEvent,
       readFullscreenLineOrWithCatalog,
       setFullscreenImagePreviews )
 import Agent.CLI.Terminal
@@ -166,7 +168,8 @@ import Agent.Store.Types ()
 import Agent.Subagents ()
 import Agent.Subagents.TaskPath ()
 import Agent.TUI.Model
-    ( UiEvent(UiSetPromptLimitStatus, UiSystemMessage) )
+    ( PromptState
+    , UiEvent(UiSetPromptLimitStatus, UiSystemMessage) )
 import Agent.TUI.Motion ()
 import Agent.ToolDispatch ()
 import Agent.Tools.MultiAgents ()
@@ -256,7 +259,6 @@ replWithDraft env@SessionEnv
     , sessionParams = paramsRef
     , sessionPolicy = policyRef
     , sessionPlanMode = planMode
-    , sessionTokenProvider = tokenProvider
     , sessionSkillInvocations = skillInvocationsRef
     , sessionRefreshSkills = refreshSkills
     , sessionActiveToolNames = readActiveToolNames
@@ -314,35 +316,13 @@ replWithDraft env@SessionEnv
                         (isJust selectAccount)
                         usage
                         (length pendingAttachments)
-                readPrompt = do
-                    startupUnavailable <- readIORef startupUnavailableRef
-                    failedTurn <- readIORef env.sessionLastFailedTurn
-                    let backgroundWake =
-                            case failedTurn of
-                                -- Preserve the user's retry candidate. Its
-                                -- next retry or replacement turn will consume
-                                -- the queued completion through normal
-                                -- steering.
-                                Just _ -> retry
-                                Nothing ->
-                                    BackgroundCompletionWake
-                                        <$ awaitBackgroundCompletion
-                                            env.sessionSteeringInputs
-                        wake = case startupUnavailable of
-                            Nothing -> backgroundWake
-                            Just unavailable ->
-                                (ProviderUnavailableWake <$> unavailable)
-                                    `orElse` backgroundWake
-                    readFullscreenLineOrWithCatalog
-                        runtime
-                        slashCatalog
-                        promptState
-                        draft
-                        wake
-            withAsync
-                (refreshAccountLimit (isNothing gatewayAccess) runtime)
-                \_ ->
-                readPrompt
+            readFullscreenPrompt
+                env
+                runtime
+                slashCatalog
+                promptState
+                draft
+                (isNothing gatewayAccess)
         Nothing -> Right <$> withMVar render.renderLock \_ -> do
             -- The inline editor redraws its ANSI frame with several writes.
             -- Keep the renderer out for the complete prompt lifetime so a
@@ -453,8 +433,55 @@ replWithDraft env@SessionEnv
                 planState
                 policy
                 mline
-  where
-    refreshAccountLimit allowOpenAi runtime =
+
+readFullscreenPrompt
+    :: SessionEnv
+    -> FullscreenRuntime
+    -> SlashCatalog
+    -> PromptState
+    -> Text
+    -> Bool
+    -> IO (Either ReplWake ReplLine)
+readFullscreenPrompt env runtime slashCatalog promptState draft allowOpenAi =
+    withAsync
+        (refreshPromptAccountLimit env allowOpenAi runtime)
+        \_ -> do
+            startupUnavailable <- readIORef env.sessionStartupUnavailable
+            failedTurn <- readIORef env.sessionLastFailedTurn
+            let backgroundWake =
+                    case failedTurn of
+                        -- Preserve the user's retry candidate. Its next retry
+                        -- or replacement turn will consume the queued
+                        -- completion through normal steering.
+                        Just _ -> retry
+                        Nothing ->
+                            BackgroundCompletionWake
+                                <$ awaitBackgroundCompletion
+                                    env.sessionSteeringInputs
+                wake = case startupUnavailable of
+                    Nothing -> backgroundWake
+                    Just unavailable ->
+                        (ProviderUnavailableWake <$> unavailable)
+                            `orElse` backgroundWake
+            readFullscreenLineOrWithCatalog
+                runtime
+                slashCatalog
+                promptState
+                draft
+                wake
+
+refreshPromptAccountLimit
+    :: SessionEnv
+    -> Bool
+    -> FullscreenRuntime
+    -> IO ()
+refreshPromptAccountLimit
+    SessionEnv
+        { sessionProvider = provider
+        , sessionTokenProvider = tokenProvider
+        }
+    allowOpenAi
+    runtime =
         case (provider, tokenProvider) of
             (XAIProvider, Just tokens)
                 | tokenProviderBillingMode tokens == SubscriptionBilled ->
@@ -489,15 +516,15 @@ replWithDraft env@SessionEnv
                                     publish
                                         (formatOpenRouterLimitStatus snapshot)
             _ -> pure ()
-      where
-        refreshWith tokens fetch formatStatus =
-            getNextToken tokens Nothing >>= \case
-                Left _ -> pure ()
-                Right credential ->
-                    fetch credential >>= \case
-                        Left _ -> pure ()
-                        Right snapshot -> publish (formatStatus snapshot)
-        publish limitStatus =
-            forM_
-                limitStatus
-                (emitUiEvent runtime . UiSetPromptLimitStatus . Just)
+  where
+    refreshWith tokens fetch formatStatus =
+        getNextToken tokens Nothing >>= \case
+            Left _ -> pure ()
+            Right credential ->
+                fetch credential >>= \case
+                    Left _ -> pure ()
+                    Right snapshot -> publish (formatStatus snapshot)
+    publish limitStatus =
+        forM_
+            limitStatus
+            (emitUiEvent runtime . UiSetPromptLimitStatus . Just)
