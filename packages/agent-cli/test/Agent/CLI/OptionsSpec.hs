@@ -403,6 +403,30 @@ spec = do
                 True
                 `shouldBe` False
 
+        it "requires an explicit opt-in for one-shot TTY invocations" do
+            resolveComputerUseEnabled
+                defaultCliOptions { optPrompt = Just "hi" }
+                True
+                `shouldBe` False
+            resolveComputerUseEnabled
+                defaultCliOptions
+                    { optPromptFile = Just (fromFilePath "prompt.md") }
+                True
+                `shouldBe` False
+            resolveComputerUseEnabled
+                defaultCliOptions
+                    { optManagedTurnFile = Just (fromFilePath "turn.json") }
+                True
+                `shouldBe` False
+            resolveComputerUseEnabled
+                defaultCliOptions
+                    { optPrompt = Just "hi"
+                    , optComputerUse = True
+                    , optComputerUseExplicit = True
+                    }
+                True
+                `shouldBe` True
+
         it "uses conventional tool calling by default" do
             defaultCliOptions.optCodeMode `shouldBe` False
             parseArgs ["--code-mode"]

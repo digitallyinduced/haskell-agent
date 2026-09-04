@@ -219,12 +219,15 @@ isOneShot options =
         || isJust options.optManagedTurnFile
 
 -- | Resolve the provider-visible computer-use capability. It is enabled by
--- default only for an interactive terminal, while explicit flags remain
--- authoritative for native clients and deliberate non-interactive runs.
+-- default only for an interactive terminal session that keeps reading input,
+-- while explicit flags remain authoritative for native clients and deliberate
+-- one-shot or non-interactive runs.
 resolveComputerUseEnabled :: CliOptions -> Bool -> Bool
 resolveComputerUseEnabled options stdinTty =
     options.optComputerUse
-        && (stdinTty || options.optComputerUseExplicit)
+        && ( options.optComputerUseExplicit
+                || (stdinTty && not (isOneShot options))
+           )
 
 -- | One-shot without a TTY auto-approves so scripts do not hang, unless
 -- @--no-yolo@ is set. Interactive sessions prompt on mutating tools, unless
