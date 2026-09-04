@@ -13,13 +13,12 @@ module Agent.CLI.RepositoryDelivery
     , validateRemoteName
     ) where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (cancel, wait, withAsync)
 import Control.Applicative ((<|>))
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
-    , modifyMVar_
     , newMVar
     )
 import Control.Exception.Safe
@@ -32,7 +31,7 @@ import Control.Exception.Safe
     , throwIO
     , tryAny
     )
-import Control.Monad (forever, unless, when)
+import Control.Monad (unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
@@ -2301,12 +2300,4 @@ maxActiveConfirmations = 1024
 
 {-# NOINLINE deliveryConfirmations #-}
 deliveryConfirmations :: MVar (Map Text StoredConfirmation)
-deliveryConfirmations = unsafePerformIO do
-    confirmations <- newMVar Map.empty
-    _ <- forkIO $ forever do
-        threadDelay 60_000_000
-        monotonicNow <- getMonotonicTimeNSec
-        modifyMVar_ confirmations
-            (pure . Map.filter
-                (\stored -> stored.storedDeadlineNanos > monotonicNow))
-    pure confirmations
+deliveryConfirmations = unsafePerformIO (newMVar Map.empty)
