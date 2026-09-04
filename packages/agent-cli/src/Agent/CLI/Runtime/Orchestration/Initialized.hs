@@ -109,7 +109,6 @@ import Agent.CLI.Resume ( publishResumeHistoryAfterBoundary )
 import Agent.CLI.Runtime.HistorySource
     ( loadFullscreenHistoryPage, sessionUiPageSize )
 import Agent.CLI.Runtime.Orchestration.Background ()
-import Agent.CLI.Runtime.Orchestration.Concurrent ()
 import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Startup
     ( setStartupRepository )
