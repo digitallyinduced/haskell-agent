@@ -2,19 +2,22 @@ module Claude.Agent.SDK.ControlSpec (spec) where
 
 import Claude.Agent.SDK
 import Control.Concurrent
-    ( forkIO
+    ( forkFinally
+    , forkIO
     , newChan
     , newEmptyMVar
     , newMVar
     , putMVar
     , readChan
+    , readMVar
     , takeMVar
     , threadDelay
+    , tryPutMVar
     , withMVar
     , writeChan
     )
 import Control.Concurrent.Async (wait, withAsync)
-import Control.Exception.Safe (finally)
+import Control.Exception.Safe (finally, uninterruptibleMask_)
 import Control.Monad (void)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -235,6 +238,82 @@ spec = describe "Claude SDK control protocol" do
         mapMaybeResponseId writes
             `shouldNotContain` ["cancel-me"]
 
+    it "cancels in-flight control handlers concurrently during shutdown" do
+        firstStarted <- newEmptyMVar
+        secondStarted <- newEmptyMVar
+        firstCancelling <- newEmptyMVar
+        secondCancelling <- newEmptyMVar
+        releaseCleanup <- newEmptyMVar
+        factory <-
+            fakeTransportFactory \emit value ->
+                case request value of
+                    Just (requestId, "initialize", _) -> do
+                        emit (successResponse requestId (Aeson.object []))
+                        emit (permissionRequest "first" "First")
+                        emit (permissionRequest "second" "Second")
+                    _ -> pure ()
+        let blockedHandler started cancelling =
+                finally
+                    ( putMVar started ()
+                        >> threadDelay maxBound
+                        >> pure (ToolPermissionAllow Nothing [])
+                    )
+                    ( uninterruptibleMask_ do
+                        putMVar cancelling ()
+                        readMVar releaseCleanup
+                    )
+            handlers =
+                defaultClaudeAgentHandlers
+                    { canUseTool =
+                        Just \permission ->
+                            case permission.toolName of
+                                "First" ->
+                                    blockedHandler
+                                        firstStarted
+                                        firstCancelling
+                                "Second" ->
+                                    blockedHandler
+                                        secondStarted
+                                        secondCancelling
+                                other ->
+                                    expectationFailure
+                                        ("unexpected tool: " <> show other)
+                                        >> pure
+                                            (ToolPermissionAllow Nothing [])
+                    , shutdownTimeoutMicros = 1_000_000
+                    }
+            runClient =
+                withClaudeSDKClientWithTransportAndHandlers
+                    testOptions
+                    factory.transportFactory
+                    handlers
+                    \client ->
+                        withTurn client \_ -> do
+                            readMVar firstStarted
+                            readMVar secondStarted
+                            pure (Right ((), pure ()))
+        (do
+            finished <- newEmptyMVar
+            void $ forkFinally runClient (putMVar finished)
+            cancelled <-
+                timeout
+                    500_000
+                    ( readMVar firstCancelling
+                        >> readMVar secondCancelling
+                    )
+            _ <- tryPutMVar releaseCleanup ()
+            outcome <- timeout 5_000_000 (takeMVar finished)
+            case outcome of
+                Just (Right result) ->
+                    result `shouldBe` Right ()
+                Just (Left exception) ->
+                    expectationFailure
+                        ("client failed: " <> show exception)
+                Nothing ->
+                    expectationFailure "client did not shut down"
+            cancelled `shouldBe` Just ())
+            `finally` void (tryPutMVar releaseCleanup ())
+
     it "fails closed for unknown inbound control requests" do
         responseSeen <- newEmptyMVar
         factory <-
@@ -406,6 +485,18 @@ spec = describe "Claude SDK control protocol" do
                         pure ()
                 result `shouldBe` Just (Right ())
         takeMVar endInputObservedClosed `shouldReturn` False
+
+permissionRequest :: Text -> Text -> Aeson.Value
+permissionRequest requestId toolName =
+    Aeson.object
+        [ "type" Aeson..= ("control_request" :: Text)
+        , "request_id" Aeson..= requestId
+        , "request" Aeson..= Aeson.object
+            [ "subtype" Aeson..= ("can_use_tool" :: Text)
+            , "tool_name" Aeson..= toolName
+            , "input" Aeson..= Aeson.object []
+            ]
+        ]
 
 data FakeTransport = FakeTransport
     { transportFactory :: !TransportFactory
