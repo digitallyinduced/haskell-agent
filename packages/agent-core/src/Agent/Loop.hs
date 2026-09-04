@@ -3,6 +3,7 @@
 -- hits a cap.
 module Agent.Loop
     ( Backend(..)
+    , BackendMiddleware
     , BackendContinuation(..)
     , BackendRevision(..)
     , BackendResult(..)
@@ -52,6 +53,18 @@ import Agent.Loop.Internal
 import Agent.ToolDispatch (ToolDispatchConfig(..))
 import Control.Exception.Safe (SomeException)
 import qualified Data.Text as Text
+
+-- | Decorate one provider/model submission.
+--
+-- This is the model-step analogue of WAI middleware. Values compose with
+-- ordinary function composition: in @(outer . inner) backend@, @outer@
+-- observes the request first and the result last.
+--
+-- A backend submission may stream events and may produce tool calls, but host
+-- tool approval and execution happen in the surrounding loop after the
+-- submission returns. Middleware that retries its wrapped backend therefore
+-- retries only the provider step, not already-completed host tools.
+type BackendMiddleware = Backend -> Backend
 
 defaultLoopMaxTurns :: Int
 defaultLoopMaxTurns = 2000

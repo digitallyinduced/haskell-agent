@@ -43,6 +43,7 @@ import qualified Agent.Responses.LoopBackend as Responses
 import Agent.Loop
     ( Backend(..)
     , BackendContinuation(..)
+    , BackendMiddleware
     , BackendResult(..)
     , BackendSnapshot(..)
     , LoopEvent(..)
@@ -601,7 +602,7 @@ isOpenAiReplayUnsafeWebSocketTransportFailure = \case
 -- Keep this wrapper outside automatic compaction and connection recovery:
 -- compaction may mint the token needed by the immediately following request,
 -- and recovery retries must replay the same turn state rather than clearing it.
-withCodexTurnStateScope :: IO CodexTurnState -> Backend -> Backend
+withCodexTurnStateScope :: IO CodexTurnState -> BackendMiddleware
 withCodexTurnStateScope getTurnState (Backend submit) =
     Backend \state legacyPreviousResponseId inputs onEvent -> do
         when (startsNewLogicalTurn inputs) $
