@@ -2,7 +2,18 @@
 module Agent.XAI.ClientSpec (spec) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Loop
+    ( Backend(..)
+    , BackendResult(..)
+    , BackendSnapshot(..)
+    , TurnInput(..)
+    , advanceBackendSnapshot
+    , emptyBackendSnapshot
+    )
+import qualified Agent.Responses.Codec as ResponsesCodec
+import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.XAI.Client
+import Agent.XAI.LoopBackend
 import Agent.XAI.Options
 import Agent.XAI.TestSupport (withLoopbackApplication)
 import Agent.Provider (Credential(..), Provider(..))
@@ -14,6 +25,7 @@ import Control.Exception.Safe (finally)
 import Control.Monad (void, when)
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.CaseInsensitive as CI
@@ -56,9 +68,237 @@ spec = do
                 `shouldBe` Just "interactive"
             lookup "User-Agent" request.headers
                 `shouldBe` Just (grokUserAgent defaultGrokClientVersion)
+            lookup "x-compaction-at" request.headers
+                `shouldBe` Just "400000"
+            lookup "x-compactions-remaining" request.headers
+                `shouldBe` Just "1"
             requestModel request `shouldBe` Just "grok-4.6"
             -- instructions travel as the leading system item
             requestInputRoles request `shouldBe` Just ["system", "user"]
+
+        it "applies an explicit threshold to the server compaction hint" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "hello")
+                    , completedEvent "resp-override" []
+                    ]
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith
+                    options { autoCompactTokenLimit = Just 450_000 }
+                    (xaiCredential "token-a")
+                    (helloRequest "hi")
+                void (expectRight result)
+
+            [sent] <- readIORef recorded
+            lookup "x-compaction-at" sent.headers `shouldBe` Just "450000"
+            lookup "x-compactions-remaining" sent.headers `shouldBe` Just "1"
+
+        it "applies the threshold resolved from an expanded context window" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "hello")
+                    , completedEvent "resp-expanded-context" []
+                    ]
+                resolvedThreshold =
+                    grokAutoCompactTokenLimit "grok-4.6" 1_000_000
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith
+                    options
+                        { autoCompactTokenLimit =
+                            Just resolvedThreshold
+                        }
+                    (xaiCredential "token-a")
+                    (helloRequest "hi")
+                void (expectRight result)
+
+            [sent] <- readIORef recorded
+            lookup "x-compaction-at" sent.headers `shouldBe` Just "800000"
+            lookup "x-compactions-remaining" sent.headers `shouldBe` Just "1"
+
+        it "omits x-compaction-at after a local compaction checkpoint" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "continued")
+                    , completedEvent "resp-compacted" []
+                    ]
+                checkpoint = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [ OutputTextPart
+                            "Compacted conversation summary:\nretained state"
+                            Nothing
+                            Nothing
+                        ]
+                    , role = RoleAssistant
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Just InternalChatMetadata
+                        { turnId = Nothing
+                        , createTime = Nothing
+                        , contentItemKinds =
+                            Just [localCompactionSummaryContentItemKind]
+                        , executedToolCalls = Nothing
+                        }
+                    }
+                request = (helloRequest "continue")
+                    { model = Just "grok-4.6"
+                    , input = Just (ResponseInputItems [checkpoint])
+                    }
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith
+                    options
+                    (xaiCredential "token-a")
+                    request
+                void (expectRight result)
+
+            [sent] <- readIORef recorded
+            lookup "x-compaction-at" sent.headers `shouldBe` Nothing
+            lookup "x-compactions-remaining" sent.headers `shouldBe` Just "1"
+            BS.isInfixOf
+                (Text.encodeUtf8 localCompactionSummaryContentItemKind)
+                (LBS.toStrict sent.body)
+                `shouldBe` False
+
+        it "keeps x-compaction-at for ordinary assistant text with the summary heading" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "continued")
+                    , completedEvent "resp-ordinary-summary-heading" []
+                    ]
+                ordinaryReply = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [ OutputTextPart
+                            "Compacted conversation summary:\nuser-visible reply"
+                            Nothing
+                            Nothing
+                        ]
+                    , role = RoleAssistant
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+                request = (helloRequest "continue")
+                    { model = Just "grok-4.6"
+                    , input = Just (ResponseInputItems [ordinaryReply])
+                    }
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith
+                    options
+                    (xaiCredential "token-a")
+                    request
+                void (expectRight result)
+
+            [sent] <- readIORef recorded
+            lookup "x-compaction-at" sent.headers `shouldBe` Just "400000"
+            lookup "x-compactions-remaining" sent.headers `shouldBe` Just "1"
+
+        it "strips checkpoint provenance before sending the request" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "continued")
+                    , completedEvent "resp-origin-stripped" []
+                    ]
+                checkpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "xai-context"
+                        , encryptedContent = Just "opaque"
+                        }
+                obsolete =
+                    turnInputsToItems [UserMessage "obsolete history"]
+                retained =
+                    turnInputsToItems [UserMessage "post-checkpoint context"]
+                request = (helloRequest "continue")
+                    { model = Just "grok-4.6"
+                    , input = Just
+                        (ResponseInputItems
+                            ( obsolete
+                                <> [ checkpoint
+                                   , xaiCompactionCheckpointOriginItem
+                                   ]
+                                <> retained
+                            ))
+                    }
+                markerEncoding =
+                    LBS.toStrict
+                        (Aeson.encode
+                            xaiCompactionCheckpointOriginItem)
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith
+                    options
+                    (xaiCredential "token-a")
+                    request
+                void (expectRight result)
+
+            [sent] <- readIORef recorded
+            BS.isInfixOf markerEncoding (LBS.toStrict sent.body)
+                `shouldBe` False
+            BS.isInfixOf
+                "\"type\":\"context_compaction\""
+                (LBS.toStrict sent.body)
+                `shouldBe` True
+            BS.isInfixOf "obsolete history" (LBS.toStrict sent.body)
+                `shouldBe` False
+            BS.isInfixOf "post-checkpoint context" (LBS.toStrict sent.body)
+                `shouldBe` True
+            BS.isInfixOf "You are a test agent." (LBS.toStrict sent.body)
+                `shouldBe` True
+            lookup "x-compaction-at" sent.headers `shouldBe` Nothing
+
+        it "keeps x-compaction-at when a foreign checkpoint is projected out" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "continued")
+                    , completedEvent "resp-foreign-checkpoint" []
+                    ]
+                checkpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "openai-context"
+                        , encryptedContent = Just "opaque-openai"
+                        }
+                request = (helloRequest "continue")
+                    { model = Just "grok-4.6"
+                    , input = Just
+                        (ResponseInputItems
+                            [ checkpoint
+                            , compactionCheckpointOriginItem "openai"
+                            ])
+                    }
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith
+                    options
+                    (xaiCredential "token-a")
+                    request
+                void (expectRight result)
+
+            [sent] <- readIORef recorded
+            lookup "x-compaction-at" sent.headers `shouldBe` Just "400000"
+            BS.isInfixOf
+                "opaque-openai"
+                (LBS.toStrict sent.body)
+                `shouldBe` False
+
+        it "does not invent server compaction metadata for unknown Grok models" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "future")
+                    , completedEvent "resp-future" []
+                    ]
+                request = (helloRequest "hi")
+                    { model = Just "grok-future"
+                    , input = Just (ResponseInputText "hi")
+                    }
+            withMockGrok recorded handler \options -> do
+                result <- createResponseWith
+                    options
+                    (xaiCredential "token-a")
+                    request
+                void (expectRight result)
+
+            [sent] <- readIORef recorded
+            requestModel sent `shouldBe` Just "grok-future"
+            lookup "x-compaction-at" sent.headers `shouldBe` Nothing
+            lookup "x-compactions-remaining" sent.headers `shouldBe` Nothing
 
         it "streams callbacks before the response completes" do
             recorded <- newIORef []
@@ -112,6 +352,152 @@ spec = do
                         expectationFailure
                             ("expected a ConnectionError, got " <> show other))
                 `finally` putMVar serverRelease ()
+
+    describe "xaiBackendWith" do
+        it "marks newly emitted server checkpoints with xAI provenance" do
+            let checkpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "xai-context"
+                        , encryptedContent = Just "opaque"
+                        }
+                backend =
+                    xaiBackendWith
+                        (\_request _onEvent ->
+                            pure
+                                (Right
+                                    (responseWithTypedOutput [checkpoint])))
+                        (pure defaultResponseCreateParams)
+            result <- backend.submitTurn
+                emptyBackendSnapshot
+                Nothing
+                [UserMessage "continue"]
+                (const (pure ()))
+            fmap (.backendState.backendItems) result
+                `shouldBe`
+                    Right
+                        ( turnInputsToItems [UserMessage "continue"]
+                            <> [ checkpoint
+                               , xaiCompactionCheckpointOriginItem
+                               ]
+                        )
+
+        it "keeps portable history in state but sends only the xAI checkpoint suffix" do
+            let checkpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "xai-context"
+                        , encryptedContent = Just "opaque-xai"
+                        }
+                portableHistory =
+                    turnInputsToItems [UserMessage "portable history"]
+                snapshot =
+                    advanceBackendSnapshot
+                        emptyBackendSnapshot
+                        ( portableHistory
+                            <> [ checkpoint
+                               , xaiCompactionCheckpointOriginItem
+                               ]
+                        )
+                        Nothing
+            requests <- newIORef []
+            let backend =
+                    xaiBackendWith
+                        (\request _onEvent -> do
+                            modifyIORef' requests (<> [request])
+                            pure
+                                (Right
+                                    (responseWithTypedOutput
+                                        [assistantResponseItem "continued"])))
+                        (pure defaultResponseCreateParams)
+            result <- backend.submitTurn
+                snapshot
+                Nothing
+                [UserMessage "continue"]
+                (const (pure ()))
+            case result of
+                Left err ->
+                    expectationFailure
+                        ("expected Right, got Left " <> show err)
+                Right completed ->
+                    completed.backendState.backendItems
+                        `shouldSatisfy`
+                            \items -> all (`elem` items) portableHistory
+            readIORef requests >>= \case
+                [request] ->
+                    case request.input of
+                        Just (ResponseInputItems items) -> do
+                            items `shouldSatisfy` elem checkpoint
+                            items `shouldSatisfy`
+                                \sent ->
+                                    all (`notElem` sent) portableHistory
+                            items `shouldSatisfy`
+                                not
+                                    . any
+                                        isXaiCompactionCheckpointOriginItem
+                        other ->
+                            expectationFailure
+                                ("expected typed input, got " <> show other)
+                other ->
+                    expectationFailure
+                        ("expected one request, got " <> show other)
+
+        it "does not claim provenance for checkpoints retained from a request" do
+            let foreignCheckpoint =
+                    CompactionItemValue CompactionItem
+                        { itemId = Just "openai-checkpoint"
+                        , encryptedContent = Just "opaque-openai"
+                        }
+                answer = MessageItem ResponseMessage
+                    { messageId = Just "answer"
+                    , content = MessageContentParts
+                        [OutputTextPart "continued" Nothing Nothing]
+                    , role = RoleAssistant
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+            requests <- newIORef []
+            let
+                backend =
+                    xaiBackendWith
+                        (\request _onEvent -> do
+                            modifyIORef' requests (<> [request])
+                            pure
+                                (Right
+                                    (responseWithTypedOutput [answer])))
+                        (pure defaultResponseCreateParams)
+                snapshot =
+                    advanceBackendSnapshot
+                        emptyBackendSnapshot
+                        [foreignCheckpoint]
+                        Nothing
+            result <- backend.submitTurn
+                snapshot
+                Nothing
+                [UserMessage "continue"]
+                (const (pure ()))
+            case result of
+                Left err ->
+                    expectationFailure
+                        ("expected Right, got Left " <> show err)
+                Right completed -> do
+                    completed.backendState.backendItems
+                        `shouldSatisfy` elem foreignCheckpoint
+                    completed.backendState.backendItems
+                        `shouldSatisfy`
+                            not
+                                . any
+                                    isXaiCompactionCheckpointOriginItem
+            readIORef requests >>= \case
+                [request] ->
+                    case request.input of
+                        Just (ResponseInputItems items) ->
+                            items `shouldSatisfy` not . elem foreignCheckpoint
+                        other ->
+                            expectationFailure
+                                ("expected typed input, got " <> show other)
+                other ->
+                    expectationFailure
+                        ("expected one request, got " <> show other)
 
     describe "retry boundaries" do
         it "reports a terminal stream failure after one request" do
@@ -278,6 +664,15 @@ spec = do
                     >> pure (Left quota :: Either ApiError Text))
             result `shouldBe` Left quota
             readIORef attempts `shouldReturn` 1
+
+    describe "Grok automatic compaction policy" do
+        it "uses the current 80% model override and 85% fallback" do
+            grokAutoCompactTokenLimit "grok-4.6" 500_000
+                `shouldBe` 400_000
+            grokAutoCompactTokenLimit "grok-4.5" 500_000
+                `shouldBe` 400_000
+            grokAutoCompactTokenLimit "grok-future" 500_000
+                `shouldBe` 425_000
 
 --------------------------------------------------------------------------------
 -- Mock server
@@ -470,3 +865,29 @@ expectRight :: Show e => Either e a -> IO a
 expectRight = \case
     Left err -> expectationFailure ("expected Right, got Left " <> show err) >> fail "unreachable"
     Right value -> pure value
+
+assistantResponseItem :: Text -> ResponseItem
+assistantResponseItem text =
+    MessageItem ResponseMessage
+        { messageId = Just "answer"
+        , content = MessageContentParts
+            [OutputTextPart text Nothing Nothing]
+        , role = RoleAssistant
+        , status = Nothing
+        , phase = Nothing
+        , passthrough = Nothing
+        }
+
+responseWithTypedOutput :: [ResponseItem] -> Response
+responseWithTypedOutput output =
+    either error id
+        . ResponsesCodec.decodeResponse
+        . LBS.toStrict
+        . Aeson.encode
+        $ Aeson.object
+            [ "id" Aeson..= ("resp-backend" :: Text)
+            , "created_at" Aeson..= (0 :: Int)
+            , "model" Aeson..= ("grok-4.6" :: Text)
+            , "status" Aeson..= ("completed" :: Text)
+            , "output" Aeson..= output
+            ]

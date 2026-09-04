@@ -12,6 +12,8 @@ module Agent.Tools.TaskPlan
     , TaskPlanUpdate(..)
     , TaskPlanHooks(..)
     , TaskPlanEnv
+    , TaskPlanReminder
+    , taskPlanReminderText
     , taskPlanUpdateDecoder
     , validateTaskPlanUpdate
     , renderTaskPlanUpdate
@@ -31,7 +33,6 @@ module Agent.Tools.TaskPlan
 import qualified Agent.Json.Decode as Json
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Exception.Safe (mask)
-import Control.Monad (when)
 import Data.Int (Int64)
 import Data.IORef
 import Data.Text (Text)
@@ -75,9 +76,23 @@ data TaskPlanHooks = TaskPlanHooks
     , taskPlanPersistClear :: !(IO (Either Text ()))
     }
 
+data TaskPlanReminderState
+    = TaskPlanReminderInactive
+    | TaskPlanReminderPending
+    | TaskPlanReminderConsumed
+
+data TaskPlanMemory
+    = TaskPlanEmpty !Integer
+    | TaskPlanPresent
+        !Integer
+        !CurrentTaskPlan
+        !TaskPlanReminderState
+
+data TaskPlanReminder = TaskPlanReminder !Integer !CurrentTaskPlan
+    deriving (Eq, Show)
+
 data TaskPlanEnv = TaskPlanEnv
-    { taskPlanStateRef :: !(IORef (Maybe CurrentTaskPlan))
-    , taskPlanReminderPendingRef :: !(IORef Bool)
+    { taskPlanMemoryRef :: !(IORef TaskPlanMemory)
     , taskPlanHooks :: !(Maybe TaskPlanHooks)
     , taskPlanMutationLock :: !(MVar ())
     }
@@ -137,18 +152,17 @@ newTaskPlanEnv
     -> Maybe TaskPlanHooks
     -> IO TaskPlanEnv
 newTaskPlanEnv initial hooks = do
-    stateRef <- newIORef initial
-    reminderRef <- newIORef (maybe False (const True) initial)
+    memoryRef <- newIORef (initialTaskPlanMemory initial)
     mutationLock <- newMVar ()
     pure TaskPlanEnv
-        { taskPlanStateRef = stateRef
-        , taskPlanReminderPendingRef = reminderRef
+        { taskPlanMemoryRef = memoryRef
         , taskPlanHooks = hooks
         , taskPlanMutationLock = mutationLock
         }
 
 readTaskPlan :: TaskPlanEnv -> IO (Maybe CurrentTaskPlan)
-readTaskPlan env = readIORef env.taskPlanStateRef
+readTaskPlan env =
+    currentTaskPlan <$> readIORef env.taskPlanMemoryRef
 
 -- | Persist first, then publish in memory.  Async exceptions may interrupt the
 -- persistence operation, but cannot land between its success and publication.
@@ -161,14 +175,14 @@ replaceTaskPlan env plan =
         persisted <- restore $ case env.taskPlanHooks of
             Just hooks -> hooks.taskPlanPersistReplace plan
             Nothing -> do
-                current <- readIORef env.taskPlanStateRef
+                current <- readTaskPlan env
                 pure $ Right $ maybe 1 (\value -> value.currentTaskPlanRevision + 1) current
         case persisted of
             Left err -> pure (lock, Left err)
             Right revision -> do
                 let current = CurrentTaskPlan revision plan
-                writeIORef env.taskPlanStateRef (Just current)
-                writeIORef env.taskPlanReminderPendingRef False
+                modifyIORef' env.taskPlanMemoryRef
+                    (publishTaskPlanMemory current)
                 pure (lock, Right current)
 
 -- | Clear durable state before clearing the in-memory projection.
@@ -181,8 +195,7 @@ clearTaskPlan env =
         case persisted of
             Left err -> pure (lock, Left err)
             Right () -> do
-                writeIORef env.taskPlanStateRef Nothing
-                writeIORef env.taskPlanReminderPendingRef False
+                modifyIORef' env.taskPlanMemoryRef clearTaskPlanMemory
                 pure (lock, Right ())
 
 -- | Replace only the in-memory projection after the host switches the
@@ -194,9 +207,8 @@ resetTaskPlanState
     -> IO ()
 resetTaskPlanState env current =
     modifyMVar env.taskPlanMutationLock \lock -> do
-        writeIORef env.taskPlanStateRef current
-        writeIORef env.taskPlanReminderPendingRef
-            (maybe False (const True) current)
+        modifyIORef' env.taskPlanMemoryRef
+            (resumeTaskPlanMemory current)
         pure (lock, ())
 
 taskPlanContextMarker :: Text
@@ -229,19 +241,97 @@ currentTaskPlanContextText :: TaskPlanEnv -> IO (Maybe Text)
 currentTaskPlanContextText env =
     fmap taskPlanContextText <$> readTaskPlan env
 
+taskPlanReminderText :: TaskPlanReminder -> Text
+taskPlanReminderText (TaskPlanReminder _ current) =
+    taskPlanContextText current
+
 -- | Consume the one-shot reminder used when a runtime resumes persisted state.
-takeTaskPlanReminder :: TaskPlanEnv -> IO (Maybe Text)
-takeTaskPlanReminder env = do
-    pending <- atomicModifyIORef' env.taskPlanReminderPendingRef (\value -> (False, value))
-    if pending then currentTaskPlanContextText env else pure Nothing
+takeTaskPlanReminder :: TaskPlanEnv -> IO (Maybe TaskPlanReminder)
+takeTaskPlanReminder env =
+    atomicModifyIORef' env.taskPlanMemoryRef takeTaskPlanReminderStep
 
 -- | Requeue a consumed resume reminder when prompt preparation fails before
--- the corresponding input can become part of canonical history.
-restoreTaskPlanReminder :: TaskPlanEnv -> IO ()
-restoreTaskPlanReminder env = do
-    current <- readTaskPlan env
-    when (maybe False (const True) current) $
-        writeIORef env.taskPlanReminderPendingRef True
+-- the corresponding input can become part of canonical history.  The token
+-- identifies both the plan and its installation generation, so a delayed
+-- failure cannot requeue a replacement plan or an identical plan from a
+-- different session.
+restoreTaskPlanReminder :: TaskPlanEnv -> TaskPlanReminder -> IO ()
+restoreTaskPlanReminder env reminder =
+    atomicModifyIORef' env.taskPlanMemoryRef \memory ->
+        (restoreTaskPlanReminderStep reminder memory, ())
+
+initialTaskPlanMemory :: Maybe CurrentTaskPlan -> TaskPlanMemory
+initialTaskPlanMemory = \case
+    Nothing -> TaskPlanEmpty 0
+    Just current ->
+        TaskPlanPresent 0 current TaskPlanReminderPending
+
+resumeTaskPlanMemory
+    :: Maybe CurrentTaskPlan
+    -> TaskPlanMemory
+    -> TaskPlanMemory
+resumeTaskPlanMemory current memory =
+    let generation = nextTaskPlanGeneration memory
+    in case current of
+        Nothing -> TaskPlanEmpty generation
+        Just value ->
+            TaskPlanPresent generation value TaskPlanReminderPending
+
+publishTaskPlanMemory
+    :: CurrentTaskPlan
+    -> TaskPlanMemory
+    -> TaskPlanMemory
+publishTaskPlanMemory current memory =
+    TaskPlanPresent
+        (nextTaskPlanGeneration memory)
+        current
+        TaskPlanReminderInactive
+
+clearTaskPlanMemory :: TaskPlanMemory -> TaskPlanMemory
+clearTaskPlanMemory memory =
+    TaskPlanEmpty (nextTaskPlanGeneration memory)
+
+nextTaskPlanGeneration :: TaskPlanMemory -> Integer
+nextTaskPlanGeneration memory =
+    taskPlanGeneration memory + 1
+
+taskPlanGeneration :: TaskPlanMemory -> Integer
+taskPlanGeneration = \case
+    TaskPlanEmpty generation -> generation
+    TaskPlanPresent generation _ _ -> generation
+
+currentTaskPlan :: TaskPlanMemory -> Maybe CurrentTaskPlan
+currentTaskPlan = \case
+    TaskPlanEmpty _ -> Nothing
+    TaskPlanPresent _ current _ -> Just current
+
+takeTaskPlanReminderStep
+    :: TaskPlanMemory
+    -> (TaskPlanMemory, Maybe TaskPlanReminder)
+takeTaskPlanReminderStep = \case
+    TaskPlanPresent generation current TaskPlanReminderPending ->
+        ( TaskPlanPresent
+            generation
+            current
+            TaskPlanReminderConsumed
+        , Just (TaskPlanReminder generation current)
+        )
+    memory -> (memory, Nothing)
+
+restoreTaskPlanReminderStep
+    :: TaskPlanReminder
+    -> TaskPlanMemory
+    -> TaskPlanMemory
+restoreTaskPlanReminderStep
+        (TaskPlanReminder consumedGeneration consumed) = \case
+    TaskPlanPresent generation current TaskPlanReminderConsumed
+        | generation == consumedGeneration
+        , current == consumed ->
+            TaskPlanPresent
+                generation
+                current
+                TaskPlanReminderPending
+    memory -> memory
 
 isTaskPlanContextText :: Text -> Bool
 isTaskPlanContextText =

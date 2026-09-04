@@ -1,5 +1,13 @@
-module Agent.MCP.Supervisor where
-
+module Agent.MCP.Supervisor
+    ( newMcpSupervisor
+    , newMcpSupervisorWith
+    , acquireMcpFleet
+    , acquireMcpFleetWithProgress
+    , acquireMcpFleetProgressive
+    , releaseMcpFleetLease
+    , closeMcpSupervisor
+    , restartMcpSupervisor
+    ) where
 
 import Agent.MCP.Client (exceptionSummary)
 import Agent.Concurrent (forConcurrentlyBounded_)
