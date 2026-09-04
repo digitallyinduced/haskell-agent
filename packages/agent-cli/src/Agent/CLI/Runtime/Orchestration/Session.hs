@@ -20,6 +20,7 @@ import Agent.CLI.CodeModeRuntime
     ( CodeModeSessionRuntime(..),
       CodexCatalogSession(..),
       codeModeSessionRuntimeFor,
+      filterStartupUnavailableTools,
       imageGenerationCodeModeRuntimeFor,
       loadCodexCatalogModelInfo )
 import Agent.CLI.Command ()
@@ -136,7 +137,7 @@ import Agent.CLI.Session.Runtime.Types
                      gatewayModelsRef, modelInfo,
                      connectionId, gatewayIdentity,
                      options, provider, dialect, commitAttributionModel,
-                     commitAttributionEffort, policyRef, allTools,
+                     commitAttributionEffort, policyRef, allTools, refreshTools,
                      claudeRuntimeSlot, claudeBridgeTools,
                      recordImageGenerationInputs, clearImageGenerationHistory,
                      suspendGhci, resetToolSessionTemp, grokRuntime,
@@ -213,7 +214,6 @@ import Agent.Loop
     , emptyTokenUsage
     )
 import Agent.OpenAI.Compaction ()
-import Agent.OpenAI.ImageGeneration ( imageGenerationToolName )
 import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient ()
 import Agent.OpenAI.Models.Types ( ModelInfo, resolvedContextWindow )
@@ -390,6 +390,7 @@ data SessionCodeRuntime = SessionCodeRuntime
     , sessionCodeModeRuntime :: Maybe CodeModeSessionRuntime
     , sessionCatalogSession :: Maybe CodexCatalogSession
     , sessionRegistryTools :: [AppTool]
+    , sessionRefreshTools :: [AppTool]
     , sessionBaseParams :: ResponseCreateParams
     , sessionReservedId :: Maybe Text
     , sessionEnvironmentContext :: Maybe Text
@@ -710,12 +711,16 @@ prepareSessionCodeRuntime AgentSessionRequest
     writeIORef codeModeCloseRef
         (maybe (pure ()) (.codeModeClose) sessionCodeModeRuntime)
     sessionReservedId <- reservedSessionId persist
-    let providerTools
-            | suppressDirectImageGeneration =
-                filter
-                    ((/= imageGenerationToolName) . (.appToolName))
-                    tools
-            | otherwise = tools
+    let providerTools =
+            filterStartupUnavailableTools
+                suppressDirectImageGeneration
+                tools
+        -- Keep toggle-disabled tools available for later refreshes, but never
+        -- re-advertise a tool whose startup runtime failed to initialize.
+        sessionRefreshTools =
+            filterStartupUnavailableTools
+                suppressDirectImageGeneration
+                allTools
         sessionCatalogSession = sessionModelInfo <&> \info ->
             CodexCatalogSession
                 { catalogInstructionsFor = \toolNames sessionTmpDir ->
@@ -1164,6 +1169,8 @@ buildProviderSessionRequest
             , policyRef = promptRuntime.sessionPolicyRef
             , allTools =
                 promptRuntime.sessionCodeRuntime.sessionRegistryTools
+            , refreshTools =
+                promptRuntime.sessionCodeRuntime.sessionRefreshTools
             , recordImageGenerationInputs =
                 request.recordImageGenerationInputs
             , clearImageGenerationHistory =

@@ -5,6 +5,7 @@ import Agent.CLI.ComputerUse (computerUseTool)
 import Agent.CLI.CodeModeRuntime
     ( CodeModeProjectionStrategy(..)
     , CodeModeToolProjection(..)
+    , filterStartupUnavailableTools
     , imageGenerationCodeModeProjection
     , projectCodeModeTools
     , projectCodeModeToolsFor
@@ -134,6 +135,17 @@ spec = describe "schemasFromAppTools" do
             `shouldBe` ["read_file", "shell_command"]
         directNames ImageGenerationOnlyCodeModeProjection withComputer
             `shouldBe` ["read_file", "shell_command", "computer"]
+
+    it "retains toggleable computer use when imagegen fails at startup" do
+        let refreshTools =
+                filterStartupUnavailableTools
+                    True
+                    [ testTool "read_file"
+                    , testTool "imagegen"
+                    , computerUseTool
+                    ]
+        map (.appToolName) refreshTools
+            `shouldBe` ["read_file", "computer"]
 
     it "nests only imagegen for code-only models when full code mode is off" do
         let tools = map testTool ["read_file", "imagegen", "shell_command"]

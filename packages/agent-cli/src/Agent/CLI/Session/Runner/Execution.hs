@@ -380,7 +380,7 @@ newSessionControlRuntime host SessionRequest{..} = do
             && isJust
                 (lookupAppTool
                     computerToolName
-                    (sessionDirectTools allTools codeModeRuntime))
+                    (sessionDirectTools refreshTools codeModeRuntime))
     lastAssistantRef <- newIORef Nothing
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     unavailableProvidersRef <- newIORef unavailableProviders
@@ -887,7 +887,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
   where
     nativeCapabilities = host.hostNativeCapabilities
     computerUseEnabledRef = controls.controlComputerUseEnabledRef
-    sessionTools = sessionDirectTools allTools codeModeRuntime
+    sessionTools = sessionDirectTools refreshTools codeModeRuntime
     computerUseAvailable =
         isJust (lookupAppTool computerToolName sessionTools)
     toolDisabledReason call = do

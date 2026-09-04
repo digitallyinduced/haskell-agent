@@ -120,6 +120,9 @@ data SessionRequest = SessionRequest
     , commitAttributionEffort :: !Text
     , policyRef :: !(IORef ApprovalPolicy)
     , allTools :: ![AppTool]
+      -- | Full toggleable tool surface, minus tools unavailable at startup.
+      -- Unlike allTools, this list governs provider availability and refreshes.
+    , refreshTools :: ![AppTool]
     , recordImageGenerationInputs :: !([ImageAttachment] -> IO ())
     , clearImageGenerationHistory :: !(IO ())
     , suspendGhci :: !(IO ())

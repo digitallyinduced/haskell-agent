@@ -21,6 +21,7 @@ module Agent.CLI.CodeModeRuntime
     , codeModeSessionRuntimeFor
     , imageGenerationCodeModeRuntimeFor
     , imageGenerationCodeModeProjection
+    , filterStartupUnavailableTools
     ) where
 
 import Agent.CLI.Models (modelsCacheFilePath)
@@ -316,6 +317,12 @@ imageGenerationCodeModeProjection mode tools
   where
     isImageGenerationTool tool =
         tool.appToolName == imageGenerationToolName
+
+filterStartupUnavailableTools :: Bool -> [AppTool] -> [AppTool]
+filterStartupUnavailableTools suppressDirectImageGeneration
+    | suppressDirectImageGeneration =
+        filter ((/= imageGenerationToolName) . (.appToolName))
+    | otherwise = id
 
 buildRuntime
     :: ModelInfo
