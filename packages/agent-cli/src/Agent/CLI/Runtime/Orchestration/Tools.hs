@@ -313,6 +313,7 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , appToolsFromGroups
     , setToolSessionTmp
+    , withToolHumanInputWait
     )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
@@ -1460,6 +1461,7 @@ acquireMcpRuntime request@AgentToolsRequest
     , isTty
     , escPaused
     , uiRuntimeRef
+    , baseToolEnv
     , mcpSupervisor
     } toolStartup ToolModelRuntime
     { toolDialectId = dialectId
@@ -1476,7 +1478,9 @@ acquireMcpRuntime request@AgentToolsRequest
     writeIORef processRuntime.processMcpElicitation
         (if isOneShot options || not isTty
             then Nothing
-            else Just (cliMcpElicitation escPaused uiRuntimeRef))
+            else Just \elicitation ->
+                withToolHumanInputWait baseToolEnv $
+                    cliMcpElicitation escPaused uiRuntimeRef elicitation)
     let enqueueMcpSnapshot statuses =
             unless (null statuses) do
                 instructions <-

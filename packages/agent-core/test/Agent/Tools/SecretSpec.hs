@@ -12,8 +12,10 @@ import Agent.Tools.Secret
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolEnv
     , defaultToolEnv
     , jsonToolParameters
+    , setToolHumanInputWaitHooks
     , setToolSessionTmp
     )
 import Control.Exception.Safe (bracket, throwString)
@@ -103,13 +105,21 @@ spec = describe "Agent.Tools.Secret" do
                 listDirectory temp `shouldReturn` []
 
     it "does not expose host prompt exceptions" do
-        withStore
-            (const (throwString "host detail that must stay private"))
-            \_ tool temp -> do
-                output <- runTool tool "{\"prompt\":\"Token\"}"
-                output `shouldBe` "ERR Secure secret entry failed."
-                output `shouldNotSatisfy` Text.isInfixOf "host detail"
-                listDirectory temp `shouldReturn` []
+        events <- newIORef ([] :: [Text])
+        let record event = modifyIORef' events (<> [event])
+            hook _ = do
+                record "prompt"
+                throwString "host detail that must stay private"
+        withStoreEnv hook \env _ tool temp -> do
+            setToolHumanInputWaitHooks
+                env
+                (record "begin")
+                (record "end")
+            output <- runTool tool "{\"prompt\":\"Token\"}"
+            output `shouldBe` "ERR Secure secret entry failed."
+            output `shouldNotSatisfy` Text.isInfixOf "host detail"
+            readIORef events `shouldReturn` ["begin", "prompt", "end"]
+            listDirectory temp `shouldReturn` []
 
     it "requires a configured session temporary directory" do
         root <- getTemporaryDirectory
@@ -138,7 +148,15 @@ withStoreManual
     :: (SecretPrompt -> IO (Either Text (Maybe Text)))
     -> (SecretStore -> AppTool -> FilePath -> IO a)
     -> IO a
-withStoreManual hook action = do
+withStoreManual hook action =
+    withStoreEnv hook \_ store tool temp ->
+        action store tool temp
+
+withStoreEnv
+    :: (SecretPrompt -> IO (Either Text (Maybe Text)))
+    -> (ToolEnv -> SecretStore -> AppTool -> FilePath -> IO a)
+    -> IO a
+withStoreEnv hook action = do
     root <- getTemporaryDirectory
     bracket
         (mkdtemp (root </> "agent-secret-test-"))
@@ -150,7 +168,7 @@ withStoreManual hook action = do
             bracket
                 (newSecretStore env (SecretPromptHooks hook))
                 closeSecretStore
-                (\store -> action store (askSecretTool store) temp)
+                (\store -> action env store (askSecretTool store) temp)
 
 runTool :: AppTool -> Text -> IO Text
 runTool tool arguments = do
