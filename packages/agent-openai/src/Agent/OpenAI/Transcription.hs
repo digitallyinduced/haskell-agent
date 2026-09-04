@@ -13,7 +13,10 @@ module Agent.OpenAI.Transcription
     , transcribePcmWithOpenAIAt
     ) where
 
-import Agent.Error (ApiError(..))
+import Agent.Error
+    ( ApiError(..)
+    , isInlineRetryableProviderError
+    )
 import qualified Agent.Json.Decode as Json
 import Agent.Provider
     ( BillingMode(..)
@@ -26,6 +29,7 @@ import Agent.Provider
     , tokenProviderBillingMode
     )
 import Control.Applicative ((<|>))
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( cancel
     , waitCatch
@@ -952,47 +956,64 @@ postChatGPTTranscription
     -> BS.ByteString
     -> LBS.ByteString
     -> IO (Either ApiError Text)
-postChatGPTTranscription baseUrl credential boundary body = do
-    let contentType = "multipart/form-data; boundary=" <> boundary
-        endpoint =
-            Text.unpack
-                (Text.dropWhileEnd (== '/') baseUrl <> "/transcribe")
-        accountHeader request
-            | Text.null (Text.strip credential.accountId) = request
-            | otherwise =
-                setRequestHeader
-                    "ChatGPT-Account-Id"
-                    [Text.encodeUtf8 credential.accountId]
-                    request
-    tryAny
-        (do
-            request <- parseRequest endpoint
-            httpLBS
-                $ setRequestMethod "POST"
-                $ setRequestBodyLBS body
-                $ setRequestHeader "Content-Type" [contentType]
-                $ setRequestHeader "Accept" ["application/json"]
-                $ setRequestHeader "Originator" ["haskell-agent"]
-                $ setRequestHeader "User-Agent" ["haskell-agent"]
-                $ setRequestHeader
-                    "Authorization"
-                    ["Bearer " <> Text.encodeUtf8 credential.accessToken]
-                $ accountHeader request) >>= \case
-                    Left err
-                        | isSyncException err ->
-                            pure $ Left $ ConnectionError
-                                ("ChatGPT transcription request failed: "
-                                    <> Text.pack (displayException err))
-                        | otherwise ->
-                            throwIO err
-                    Right response -> do
-                        let status = getResponseStatusCode response
-                            responseBody = getResponseBody response
-                        pure $
-                            if status >= 200 && status < 300
-                                then decodeTranscriptionResponse responseBody
-                                else Left $ HttpError status
-                                    (responseBodyPreview responseBody)
+postChatGPTTranscription baseUrl credential boundary body =
+    retryTransientTranscription [3_000_000, 6_000_000] sendRequest
+  where
+    sendRequest = do
+        let contentType = "multipart/form-data; boundary=" <> boundary
+            endpoint =
+                Text.unpack
+                    (Text.dropWhileEnd (== '/') baseUrl <> "/transcribe")
+            accountHeader request
+                | Text.null (Text.strip credential.accountId) = request
+                | otherwise =
+                    setRequestHeader
+                        "ChatGPT-Account-Id"
+                        [Text.encodeUtf8 credential.accountId]
+                        request
+        tryAny
+            (do
+                request <- parseRequest endpoint
+                httpLBS
+                    $ setRequestMethod "POST"
+                    $ setRequestBodyLBS body
+                    $ setRequestHeader "Content-Type" [contentType]
+                    $ setRequestHeader "Accept" ["application/json"]
+                    $ setRequestHeader "Originator" ["haskell-agent"]
+                    $ setRequestHeader "User-Agent" ["haskell-agent"]
+                    $ setRequestHeader
+                        "Authorization"
+                        ["Bearer " <> Text.encodeUtf8 credential.accessToken]
+                    $ accountHeader request) >>= \case
+                        Left err
+                            | isSyncException err ->
+                                pure $ Left $ ConnectionError
+                                    ("ChatGPT transcription request failed: "
+                                        <> Text.pack (displayException err))
+                            | otherwise ->
+                                throwIO err
+                        Right response -> do
+                            let status = getResponseStatusCode response
+                                responseBody = getResponseBody response
+                            pure $
+                                if status >= 200 && status < 300
+                                    then decodeTranscriptionResponse responseBody
+                                    else Left $ HttpError status
+                                        (responseBodyPreview responseBody)
+
+retryTransientTranscription
+    :: [Int]
+    -> IO (Either ApiError Text)
+    -> IO (Either ApiError Text)
+retryTransientTranscription retryDelays action =
+    action >>= \result ->
+        case (retryDelays, result) of
+            (delay : remaining, Left err)
+                | isInlineRetryableProviderError err -> do
+                    threadDelay delay
+                    retryTransientTranscription remaining action
+            _ ->
+                pure result
 
 transcriptionBoundary :: IO BS.ByteString
 transcriptionBoundary = do
