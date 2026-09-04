@@ -63,6 +63,14 @@ library
                     , Agent.CLI.Clipboard.MacOS
                     , Agent.CLI.McpStatus
                     , Agent.CLI.Input.Approval
+                    , Agent.CLI.Login.Internal.Accounts
+                    , Agent.CLI.Login.Internal.Browser
+                    , Agent.CLI.Login.Internal.Dashboard
+                    , Agent.CLI.Login.Internal.Device
+                    , Agent.CLI.Login.Internal.Formatting
+                    , Agent.CLI.Login.Internal.Gateway
+                    , Agent.CLI.Login.Internal.Manager
+                    , Agent.CLI.Login.Internal.ProviderConnection
                     , Agent.CLI.Login.Types
                     , Agent.CLI.Lsp.Capabilities
                     , Agent.CLI.Lsp.Formatting
