@@ -42,7 +42,7 @@ import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Exception.Safe (tryIO)
-import Control.Monad (unless, when)
+import Control.Monad (unless)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlpha, isAlphaNum, isSpace)
 import Data.Foldable (traverse_)
@@ -417,12 +417,52 @@ mergeConfigFiles defaults (Just user) = do
         , configModels = replacedDefaults <> appendedModels
         }
 
+-- | A deliberately small applicative validator. Configuration syntax and
+-- references still use 'Either' for dependent, fail-fast resolution; this is
+-- only for independent constraints that can be reported together.
+data Validation errors value
+    = ValidationFailure !errors
+    | ValidationSuccess !value
+
+instance Functor (Validation errors) where
+    fmap transform = \case
+        ValidationFailure errors -> ValidationFailure errors
+        ValidationSuccess value -> ValidationSuccess (transform value)
+
+instance Semigroup errors => Applicative (Validation errors) where
+    pure = ValidationSuccess
+    ValidationFailure left <*> ValidationFailure right =
+        ValidationFailure (left <> right)
+    ValidationFailure errors <*> _ = ValidationFailure errors
+    _ <*> ValidationFailure errors = ValidationFailure errors
+    ValidationSuccess transform <*> ValidationSuccess value =
+        ValidationSuccess (transform value)
+
+validationFailure :: Text -> Validation [Text] value
+validationFailure = ValidationFailure . pure
+
+validationFromEither :: Either Text value -> Validation [Text] value
+validationFromEither = \case
+    Left err -> validationFailure err
+    Right value -> pure value
+
+validationToEither :: Validation [Text] value -> Either Text value
+validationToEither = \case
+    ValidationFailure errors -> Left (Text.intercalate "\n" errors)
+    ValidationSuccess value -> Right value
+
+validationCheck :: Bool -> Text -> Validation [Text] ()
+validationCheck valid err
+    | valid = pure ()
+    | otherwise = validationFailure err
+
 validateConfig :: Text -> ConfigFile -> Either Text ModelCatalog
 validateConfig source config = do
     ensureUniqueModelRoutes source config.configModels
-    connections <- Map.traverseWithKey validateModelConnection
-        config.configConnections
-    models <- traverse (validateCatalogModel connections) config.configModels
+    connections <- validationToEither $
+        Map.traverseWithKey validateModelConnection config.configConnections
+    models <- validationToEither $
+        traverse (validateCatalogModel connections) config.configModels
     traverse_ (validateBuiltinDefault models) allBuiltinProviders
     pure ModelCatalog
         { catalogConnections = connections
@@ -446,195 +486,225 @@ validateConfig source config = do
 validateModelConnection
     :: Text
     -> ConnectionFile
-    -> Either Text ModelConnection
-validateModelConnection connectionId raw = do
-    validateConnectionId connectionId
-    kind <- case Text.toLower (Text.strip raw.connectionApi) of
-        "builtin" -> do
-            providerText <- maybe
-                (Left ("connection " <> connectionId
-                    <> " with api=builtin requires provider"))
-                Right
-                raw.connectionProvider
-            provider <- maybe
-                (Left ("connection " <> connectionId
-                    <> " has unknown provider " <> providerText))
-                Right
-                (parseProvider (Text.toLower (Text.strip providerText)))
-            when (connectionId /= builtinConnectionId provider) $
-                Left
-                    ( "builtin connection " <> connectionId
-                        <> " must use its provider id "
-                        <> builtinConnectionId provider
+    -> Validation [Text] ModelConnection
+validateModelConnection connectionId raw =
+        case validateConnectionId connectionId of
+            Left err -> validationFailure err
+            Right () ->
+                ModelConnection connectionId
+                    <$> validateConnectionKind connectionId raw
+
+  where
+    validateConnectionKind connectionId raw =
+        case Text.toLower (Text.strip raw.connectionApi) of
+            "builtin" ->
+                case raw.connectionProvider of
+                    Nothing ->
+                        validationFailure ("connection " <> connectionId
+                            <> " with api=builtin requires provider")
+                    Just providerText ->
+                        case parseProvider
+                            (Text.toLower (Text.strip providerText)) of
+                            Nothing ->
+                                validationFailure ("connection " <> connectionId
+                                    <> " has unknown provider " <> providerText)
+                            Just provider ->
+                                BuiltinConnection provider
+                                    <$ validationCheck
+                                        (connectionId == builtinConnectionId provider)
+                                        ( "builtin connection " <> connectionId
+                                            <> " must use its provider id "
+                                            <> builtinConnectionId provider
+                                        )
+            "responses" ->
+                CustomResponsesConnection
+                    <$> ( ResponsesConnection
+                            <$> maybe
+                                (validationFailure
+                                    ("connection " <> connectionId
+                                        <> " with api=responses requires base_url"))
+                                (validationFromEither . validateBaseUrl connectionId)
+                                raw.connectionBaseUrl
+                            <*> pure (nonEmptyText =<< raw.connectionApiKeyEnv)
+                            <*> pure raw.connectionApiKeyOptional
+                            <*> ( raw.connectionRequestTimeoutSeconds
+                                <$ ( validationCheck
+                                        ( raw.connectionApiKeyEnv /= Nothing
+                                            || raw.connectionApiKeyOptional
+                                        )
+                                        ( "connection " <> connectionId
+                                            <> " requires api_key_env unless "
+                                            <> "api_key_optional is true"
+                                        )
+                                    *> validationCheck
+                                        (raw.connectionRequestTimeoutSeconds > 0)
+                                        ( "connection " <> connectionId
+                                            <> " request_timeout_seconds must be positive"
+                                        )
+                                    *> maybe
+                                        (pure ())
+                                        (validationFromEither . validateEnvName connectionId)
+                                        raw.connectionApiKeyEnv
+                                )
+                            )
                     )
-            pure (BuiltinConnection provider)
-        "responses" -> do
-            baseUrl <- maybe
-                (Left ("connection " <> connectionId
-                    <> " with api=responses requires base_url"))
-                (validateBaseUrl connectionId)
-                raw.connectionBaseUrl
-            when
-                ( raw.connectionApiKeyEnv == Nothing
-                    && not raw.connectionApiKeyOptional
-                ) $
-                Left
-                    ( "connection " <> connectionId
-                        <> " requires api_key_env unless "
-                        <> "api_key_optional is true"
-                    )
-            when (raw.connectionRequestTimeoutSeconds <= 0) $
-                Left ("connection " <> connectionId
-                    <> " request_timeout_seconds must be positive")
-            traverse_ (validateEnvName connectionId)
-                raw.connectionApiKeyEnv
-            pure $ CustomResponsesConnection ResponsesConnection
-                { responsesBaseUrl = baseUrl
-                , responsesApiKeyEnv =
-                    nonEmptyText =<< raw.connectionApiKeyEnv
-                , responsesApiKeyOptional =
-                    raw.connectionApiKeyOptional
-                , responsesRequestTimeoutSeconds =
-                    raw.connectionRequestTimeoutSeconds
-                }
-        "gateway" -> do
-            when (connectionId /= organizationGatewayConnectionId) $
-                Left
-                    ( "gateway connection " <> connectionId
-                        <> " must use the reserved id "
-                        <> organizationGatewayConnectionId
-                    )
-            pure OrganizationGatewayConnection
-        other ->
-            Left ("connection " <> connectionId
-                <> " has unsupported api " <> other)
-    pure ModelConnection{connectionId, connectionKind = kind}
+            "gateway" ->
+                OrganizationGatewayConnection
+                    <$ validationCheck
+                        (connectionId == organizationGatewayConnectionId)
+                        ( "gateway connection " <> connectionId
+                            <> " must use the reserved id "
+                            <> organizationGatewayConnectionId
+                        )
+            other ->
+                validationFailure ("connection " <> connectionId
+                    <> " has unsupported api " <> other)
 
 validateCatalogModel
     :: Map Text ModelConnection
     -> ModelFile
-    -> Either Text CatalogModel
-validateCatalogModel connections raw = do
-    let modelId = Text.strip raw.modelFileId
-        connectionId = Text.strip raw.modelFileConnection
-        wireId = Text.strip (fromMaybe modelId raw.modelFileWireId)
-        reasoningEfforts = fmap
-            (map (Text.toLower . Text.strip))
-            raw.modelFileReasoningEfforts
-        defaultReasoningEffort =
-            Text.toLower . Text.strip
-                <$> raw.modelFileDefaultReasoningEffort
-    when (Text.null modelId || Text.any isSpace modelId) $
-        Left ("model id must be nonempty and contain no whitespace: "
-            <> raw.modelFileId)
-    when (Text.null wireId) $
-        Left ("model " <> modelId <> " has an empty wire model name")
-    connection <- maybe
-        (Left ("model " <> modelId
-            <> " references unknown connection " <> connectionId))
-        Right
-        (Map.lookup connectionId connections)
-    dialect <- maybe
-        (Left ("model " <> modelId <> " has unknown dialect "
-            <> raw.modelFileDialect))
-        Right
-        (parseDialect raw.modelFileDialect)
-    case connection.connectionKind of
-        BuiltinConnection provider -> do
-            when (wireId /= modelId) $
-                Left
-                    ( "model " <> modelId
-                        <> " cannot override its wire model on built-in connection "
-                        <> connectionId
-                        <> "; use the wire model as id or define a custom responses connection"
-                    )
-            unless (providerSupportsDialect provider dialect) $
-                Left
-                    ( "model " <> modelId <> " uses dialect "
-                        <> raw.modelFileDialect
-                        <> " which is incompatible with connection "
-                        <> connectionId
-                    )
-        CustomResponsesConnection _ -> pure ()
-        OrganizationGatewayConnection -> do
-            when (wireId /= modelId) $
-                Left
-                    ( "model " <> modelId
-                        <> " cannot override its wire model on organization gateway connection "
-                        <> connectionId
-                    )
-            unless
-                (connectionSupportsDialect
-                    connectionId
-                    OpenAIProvider
-                    dialect
-                    || connectionSupportsDialect
-                        connectionId
-                        ClaudeCodeProvider
-                        dialect) $
-                Left
-                    ( "model " <> modelId <> " uses dialect "
-                        <> raw.modelFileDialect
-                        <> " which is incompatible with connection "
-                        <> connectionId
-                    )
-    traverse_
-        (\priority -> when (priority < 0) $
-            Left ("model " <> modelId
-                <> " fallback_priority must not be negative"))
-        raw.modelFileFallbackPriority
-    traverse_
-        (\contextWindow -> when (contextWindow <= 0) $
-            Left ("model " <> modelId
-                <> " context_window must be positive"))
-        raw.modelFileContextWindow
-    unless
-        ( maybe True
-            (all (`elem` supportedReasoningEfforts))
+    -> Validation [Text] CatalogModel
+validateCatalogModel connections raw =
+        let modelId = Text.strip raw.modelFileId
+            connectionId = Text.strip raw.modelFileConnection
+            wireId = Text.strip (fromMaybe modelId raw.modelFileWireId)
+            reasoningEfforts = fmap
+                (map (Text.toLower . Text.strip))
+                raw.modelFileReasoningEfforts
+            defaultReasoningEffort =
+                Text.toLower . Text.strip
+                    <$> raw.modelFileDefaultReasoningEffort
+        in if Text.null modelId || Text.any isSpace modelId
+            then validationFailure
+                ("model id must be nonempty and contain no whitespace: "
+                    <> raw.modelFileId)
+            else if Text.null wireId
+                then validationFailure
+                    ("model " <> modelId <> " has an empty wire model name")
+            else case Map.lookup connectionId connections of
+                Nothing ->
+                    validationFailure ("model " <> modelId
+                        <> " references unknown connection " <> connectionId)
+                Just connection ->
+                    case parseDialect raw.modelFileDialect of
+                        Nothing ->
+                            validationFailure ("model " <> modelId
+                                <> " has unknown dialect "
+                                <> raw.modelFileDialect)
+                        Just dialect ->
+                            validateResolvedModel
+                                connection
+                                dialect
+                                modelId
+                                connectionId
+                                wireId
+                                reasoningEfforts
+                                defaultReasoningEffort
+  where
+        validateResolvedModel
+            connection
+            dialect
+            modelId
+            connectionId
+            wireId
             reasoningEfforts
-        ) $
-        Left
-            ( "model " <> modelId
-                <> " has unsupported reasoning_efforts; expected "
-                <> Text.intercalate ", " supportedReasoningEfforts
-            )
-    traverse_
-        (\efforts -> do
-            when (null efforts) $
-                Left
-                    ( "model " <> modelId
-                        <> " reasoning_efforts must not be empty"
-                    )
-            when (length efforts /= length (nub efforts)) $
-                Left
-                    ( "model " <> modelId
-                        <> " reasoning_efforts must not contain duplicates"
-                    ))
-        reasoningEfforts
-    traverse_
-        (\effort -> unless (maybe False (effort `elem`) reasoningEfforts) $
-            Left
-                ( "model " <> modelId
-                    <> " default_reasoning_effort must be listed in "
-                    <> "reasoning_efforts"
-                ))
-        defaultReasoningEffort
-    pure CatalogModel
-        { catalogModelId = modelId
-        , catalogModelConnectionId = connectionId
-        , catalogModelWireId = wireId
-        , catalogModelDialect = dialect
-        , catalogModelContextWindow =
-            raw.modelFileContextWindow
-        , catalogModelLabel =
-            nonEmptyText =<< raw.modelFileLabel
-        , catalogModelReasoningEfforts = reasoningEfforts
-        , catalogModelDefaultReasoningEffort =
-            defaultReasoningEffort
-        , catalogModelDefault = raw.modelFileDefault
-        , catalogModelFallbackPriority =
-            raw.modelFileFallbackPriority
-        }
+            defaultReasoningEffort =
+            let connectionValidation =
+                    case connection.connectionKind of
+                        BuiltinConnection provider ->
+                            validationCheck
+                                (wireId == modelId)
+                                ( "model " <> modelId
+                                    <> " cannot override its wire model on built-in connection "
+                                    <> connectionId
+                                    <> "; use the wire model as id or define a custom responses connection"
+                                )
+                                *> validationCheck
+                                    (providerSupportsDialect provider dialect)
+                                    ( "model " <> modelId <> " uses dialect "
+                                        <> raw.modelFileDialect
+                                        <> " which is incompatible with connection "
+                                        <> connectionId
+                                    )
+                        CustomResponsesConnection _ -> pure ()
+                        OrganizationGatewayConnection ->
+                            validationCheck
+                                (wireId == modelId)
+                                ( "model " <> modelId
+                                    <> " cannot override its wire model on organization gateway connection "
+                                    <> connectionId
+                                )
+                                *> validationCheck
+                                    (connectionSupportsDialect
+                                        connectionId
+                                        OpenAIProvider
+                                        dialect
+                                        || connectionSupportsDialect
+                                            connectionId
+                                            ClaudeCodeProvider
+                                            dialect)
+                                    ( "model " <> modelId <> " uses dialect "
+                                        <> raw.modelFileDialect
+                                        <> " which is incompatible with connection "
+                                        <> connectionId
+                                    )
+                modelValidation =
+                    validationCheck
+                        (maybe True (>= 0) raw.modelFileFallbackPriority)
+                        ( "model " <> modelId
+                            <> " fallback_priority must not be negative"
+                        )
+                    *> validationCheck
+                        (maybe True (> 0) raw.modelFileContextWindow)
+                        ( "model " <> modelId
+                            <> " context_window must be positive"
+                        )
+                    *> validationCheck
+                        (maybe True
+                            (all (`elem` supportedReasoningEfforts))
+                            reasoningEfforts)
+                        ( "model " <> modelId
+                            <> " has unsupported reasoning_efforts; expected "
+                            <> Text.intercalate ", " supportedReasoningEfforts
+                        )
+                    *> validationCheck
+                        (maybe True (not . null) reasoningEfforts)
+                        ( "model " <> modelId
+                            <> " reasoning_efforts must not be empty"
+                        )
+                    *> validationCheck
+                        (maybe True
+                            (\efforts -> length efforts == length (nub efforts))
+                            reasoningEfforts)
+                        ( "model " <> modelId
+                            <> " reasoning_efforts must not contain duplicates"
+                        )
+                    *> validationCheck
+                        (maybe True
+                            (\effort ->
+                                maybe False (effort `elem`) reasoningEfforts)
+                            defaultReasoningEffort)
+                        ( "model " <> modelId
+                            <> " default_reasoning_effort must be listed in "
+                            <> "reasoning_efforts"
+                        )
+            in CatalogModel
+                { catalogModelId = modelId
+                , catalogModelConnectionId = connectionId
+                , catalogModelWireId = wireId
+                , catalogModelDialect = dialect
+                , catalogModelContextWindow =
+                    raw.modelFileContextWindow
+                , catalogModelLabel =
+                    nonEmptyText =<< raw.modelFileLabel
+                , catalogModelReasoningEfforts = reasoningEfforts
+                , catalogModelDefaultReasoningEffort =
+                    defaultReasoningEffort
+                , catalogModelDefault = raw.modelFileDefault
+                , catalogModelFallbackPriority =
+                    raw.modelFileFallbackPriority
+                }
+                <$ (connectionValidation *> modelValidation)
 
 supportedReasoningEfforts :: [Text]
 supportedReasoningEfforts =

@@ -63,6 +63,12 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (forM, forM_, unless, void, when)
+import Control.Monad.Trans.Class (lift)
+import Control.Monad.Trans.Except
+    ( ExceptT(..)
+    , runExceptT
+    , throwE
+    )
 import Data.Aeson
     ( Series
     , ToJSON(toJSON)
@@ -251,8 +257,7 @@ newClientRecord
     -> McpClientTransport
     -> IO McpClient
 newClientRecord hooks eraHint config transport = do
-    nextId <- newIORef 1
-    pending <- newTVarIO IntMap.empty
+    requestRegistry <- newTVarIO emptyRequestRegistry
     failure <- newTVarIO Nothing
     closed <- newMVar False
     lifecycle <- newTVarIO ClientPending
@@ -264,8 +269,7 @@ newClientRecord hooks eraHint config transport = do
         { clientConfig = config
         , clientHooks = hooks
         , clientTransport = transport
-        , clientNextId = nextId
-        , clientPending = pending
+        , clientRequestRegistry = requestRegistry
         , clientFailure = failure
         , clientWorkers = workers
         , clientClosed = closed
@@ -615,6 +619,44 @@ startupFailure client err = do
 
 -- * Discovery
 
+-- | Private error effect used to keep request/decode pipelines linear. Public
+-- entry points continue to return their existing @Either@ types.
+type McpCall = ExceptT McpError IO
+
+requestMcpT :: McpClient -> McpRequest -> McpCall RawJson
+requestMcpT client = ExceptT . requestMcpFull client
+
+decodeMcpPayload
+    :: Text
+    -> Json.Decoder a
+    -> RawJson
+    -> McpCall a
+decodeMcpPayload context decoder raw =
+    case Json.decodeEither decoder (rawJsonBytes raw) of
+        Left err ->
+            throwE . McpTransportError $
+                "invalid " <> context <> ": " <> err.jsonErrorMessage
+        Right value -> pure value
+
+requestAndDecode
+    :: McpClient
+    -> McpRequest
+    -> Text
+    -> Json.Decoder a
+    -> McpCall a
+requestAndDecode client request context decoder =
+    requestMcpT client request >>= decodeMcpPayload context decoder
+
+-- | Preserve the historical error text of APIs which predate 'McpError':
+-- decode errors were already labelled but RPC/transport errors were rendered.
+renderTextMcpResult :: Text -> Either McpError a -> Either Text a
+renderTextMcpResult decodeContext = \case
+    Left (McpTransportError err)
+        | ("invalid " <> decodeContext <> ": ") `Text.isPrefixOf` err ->
+            Left err
+    Left err -> Left (renderMcpError err)
+    Right value -> Right value
+
 discoverMcpTools :: McpClient -> IO ([McpTool], [Text])
 discoverMcpTools client = do
     tools <- paginate client "tools/list" "tools" mcpToolDecoder
@@ -641,23 +683,20 @@ paginate
     -> Text
     -> Json.Decoder a
     -> IO (Either McpError [a])
-paginate client method key itemDecoder = go Nothing []
+paginate client method key itemDecoder = runExceptT (go Nothing [])
   where
     go cursor collected = do
         let parameters = maybe mempty
                 (\value -> AesonEncoding.pair "cursor" (rawJsonEncoding value))
                 cursor
-        requestMcpFull client (clientRequest client method parameters) >>= \case
-            Left err -> pure (Left err)
-            Right result ->
-                case Json.decodeEither pageDecoder (rawJsonBytes result) of
-                    Left err ->
-                        pure . Left . McpTransportError $
-                            "invalid " <> method <> " response: " <> err.jsonErrorMessage
-                    Right (items, nextCursor) ->
-                        case nextCursor of
-                            Just next -> go (Just next) (collected <> items)
-                            Nothing -> pure (Right (collected <> items))
+        (items, nextCursor) <-
+            requestAndDecode client
+                (clientRequest client method parameters)
+                (method <> " response")
+                pageDecoder
+        case nextCursor of
+            Just next -> go (Just next) (collected <> items)
+            Nothing -> pure (collected <> items)
 
     pageDecoder = Json.object $
         (,)
@@ -674,6 +713,8 @@ discoverMcpSkills client = do
         Nothing -> pure []
         Just _ -> go Nothing []
   where
+    -- Skill discovery is deliberately not expressed as one McpCall: catalog
+    -- failures are warnings and already decoded pages remain usable.
     go cursor warnings = do
         let parameters = maybe mempty
                 (\value -> AesonEncoding.pair "cursor" (rawJsonEncoding value))
@@ -722,36 +763,29 @@ getMcpSkill client uri = do
         Nothing -> pure (Left ("MCP server "
             <> client.clientConfig.mcpServerName
             <> " does not support io.modelcontextprotocol/skills"))
-        Just _ ->
-            requestMcpFull client (clientRequest client "skills/get" ("uri" .= uri)) >>= \case
-                Left err -> pure (Left (renderMcpError err))
-                Right result ->
-                    case Json.decodeEither
-                            (Json.object (Json.atKey "skill" mcpSkillEntryDecoder))
-                            (rawJsonBytes result) of
-                        Left err -> pure (Left ("invalid skills/get response: "
-                            <> err.jsonErrorMessage))
-                        Right skill -> pure (Right skill)
+        Just _ -> do
+            result <- runExceptT $
+                requestAndDecode client
+                    (clientRequest client "skills/get" ("uri" .= uri))
+                    "skills/get response"
+                    (Json.object (Json.atKey "skill" mcpSkillEntryDecoder))
+            pure (renderTextMcpResult "skills/get response" result)
 
 -- | Read one or more resource contents using the standard MCP resources/read
 -- method.  This does not activate a skill; callers must perform their own
 -- approval, frontmatter, and manifest verification.
 readMcpResource :: McpClient -> Text -> IO (Either Text [McpResourceContent])
-readMcpResource client uri =
-    invokeWithInputRounds client
-        (clientRequest client "resources/read" ("uri" .= uri))
-            { requestName = Just uri }
-        >>= \case
-        Left err -> pure (Left (renderMcpError err))
-        Right result ->
-            case Json.decodeEither
-                    (Json.object
-                        (Json.defaultKey [] "contents"
-                            (Json.list mcpResourceContentDecoder)))
-                    (rawJsonBytes result) of
-                Left err -> pure (Left ("invalid resources/read response: "
-                    <> err.jsonErrorMessage))
-                Right contents -> pure (Right contents)
+readMcpResource client uri = do
+    result <- runExceptT do
+        raw <- invokeWithInputRoundsT client
+            (clientRequest client "resources/read" ("uri" .= uri))
+                { requestName = Just uri }
+        decodeMcpPayload "resources/read response"
+            (Json.object
+                (Json.defaultKey [] "contents"
+                    (Json.list mcpResourceContentDecoder)))
+            raw
+    pure (renderTextMcpResult "resources/read response" result)
 
 listMcpResources :: McpClient -> IO (Either McpError [McpResource])
 listMcpResources client =
@@ -773,18 +807,14 @@ getMcpPrompt
     -> [(Text, Text)]
     -> IO (Either McpError McpPromptResult)
 getMcpPrompt client name arguments =
-    invokeWithInputRounds client
-        (clientRequest client "prompts/get"
-            ("name" .= name
-                <> "arguments" .= object [Key.fromText key .= value | (key, value) <- arguments]))
-            { requestName = Just name }
-        >>= \case
-        Left err -> pure (Left err)
-        Right result ->
-            pure . either
-                (\err -> Left (McpTransportError ("invalid prompts/get response: " <> err.jsonErrorMessage)))
-                Right $
-                Json.decodeEither mcpPromptResultDecoder (rawJsonBytes result)
+    runExceptT do
+        raw <- invokeWithInputRoundsT client
+            (clientRequest client "prompts/get"
+                ("name" .= name
+                    <> "arguments" .= object
+                        [Key.fromText key .= value | (key, value) <- arguments]))
+                { requestName = Just name }
+        decodeMcpPayload "prompts/get response" mcpPromptResultDecoder raw
 
 data McpCompletionRef
     = McpCompletePrompt !Text
@@ -814,13 +844,11 @@ completeMcpArgument client ref argumentName partial context = do
                             [ "arguments" .= object
                                 [Key.fromText key .= value | (key, value) <- context]
                             ])
-    requestMcpFull client (clientRequest client "completion/complete" parameters) >>= \case
-        Left err -> pure (Left err)
-        Right result ->
-            pure . either
-                (\err -> Left (McpTransportError ("invalid completion/complete response: " <> err.jsonErrorMessage)))
-                Right $
-                Json.decodeEither mcpCompletionDecoder (rawJsonBytes result)
+    runExceptT $
+        requestAndDecode client
+            (clientRequest client "completion/complete" parameters)
+            "completion/complete response"
+            mcpCompletionDecoder
 
 -- * Tools
 
@@ -1211,18 +1239,23 @@ requestMcp client timeoutMicros method parameters =
 
 requestMcpFull :: McpClient -> McpRequest -> IO (Either McpError RawJson)
 requestMcpFull client request = do
-    failed <- readTVarIO client.clientFailure
-    case failed of
-        Just err -> pure (Left (McpTransportError err))
-        Nothing -> do
-            era <- case request.requestEra of
-                Just era -> pure (Just era)
-                Nothing -> mcpClientEra client
-            requestId <- atomicModifyIORef' client.clientNextId \current ->
-                (current + 1, current)
-            pending <- newPendingRequest request
-            atomically $
-                modifyTVar' client.clientPending (IntMap.insert requestId pending)
+    era <- case request.requestEra of
+        Just era -> pure (Just era)
+        Nothing -> mcpClientEra client
+    pending <- newPendingRequest request
+    registration <- atomically do
+        failed <- readTVar client.clientFailure
+        case failed of
+            Just err -> pure (Left err)
+            Nothing -> do
+                registry <- readTVar client.clientRequestRegistry
+                let (nextRegistry, requestId) =
+                        registerPending pending registry
+                writeTVar client.clientRequestRegistry nextRegistry
+                pure (Right requestId)
+    case registration of
+        Left err -> pure (Left (McpTransportError err))
+        Right requestId -> do
             elicitEnabled <-
                 if request.requestMeta && era == Just McpEraModern
                     then isJust <$> client.clientHooks.mcpHostElicit
@@ -1245,7 +1278,36 @@ requestMcpFull client request = do
                                 `finally` unregister requestId
   where
     unregister requestId =
-        atomically $ modifyTVar' client.clientPending (IntMap.delete requestId)
+        atomically do
+            registry <- readTVar client.clientRequestRegistry
+            writeTVar client.clientRequestRegistry
+                (registry
+                    { requestRegistryPending =
+                        IntMap.delete requestId registry.requestRegistryPending
+                    })
+
+emptyRequestRegistry :: RequestRegistry
+emptyRequestRegistry = RequestRegistry
+    { requestRegistryNextId = 1
+    , requestRegistryPending = IntMap.empty
+    }
+
+-- | Allocate an id and install its response destination as one pure state
+-- transition. The caller applies it to 'clientRequestRegistry' atomically.
+registerPending
+    :: PendingRequest
+    -> RequestRegistry
+    -> (RequestRegistry, Int)
+registerPending pending registry =
+    ( registry
+        { requestRegistryNextId = requestId + 1
+        , requestRegistryPending =
+            IntMap.insert requestId pending registry.requestRegistryPending
+        }
+    , requestId
+    )
+  where
+    requestId = registry.requestRegistryNextId
 
 newPendingRequest :: McpRequest -> IO PendingRequest
 newPendingRequest request = do
@@ -1348,36 +1410,37 @@ resultKind raw =
 -- | Issue a request that may return @input_required@ or @task@ results and
 -- drive it to completion.
 invokeWithInputRounds :: McpClient -> McpRequest -> IO (Either McpError RawJson)
-invokeWithInputRounds client request = go (0 :: Int) mempty
+invokeWithInputRounds client request =
+    runExceptT (invokeWithInputRoundsT client request)
+
+invokeWithInputRoundsT :: McpClient -> McpRequest -> McpCall RawJson
+invokeWithInputRoundsT client request = go (0 :: Int) mempty
   where
-    go rounds extra =
-        requestMcpFull client request { requestParams = request.requestParams <> extra }
-            >>= \case
-            Left err -> pure (Left err)
-            Right raw -> case resultKind raw of
-                ResultComplete -> pure (Right raw)
-                ResultTask -> awaitTask client request raw
-                ResultUnknown kind ->
-                    pure (Left (McpTransportError ("unrecognized resultType \"" <> kind <> "\"")))
-                ResultInputRequired
-                    | rounds >= maxInputRounds ->
-                        pure (Left (McpTransportError
-                            ("MCP server kept requesting input after "
-                                <> Text.pack (show maxInputRounds) <> " rounds")))
-                    | otherwise ->
-                        case Json.decodeEither inputRequiredDecoder (rawJsonBytes raw) of
-                            Left err ->
-                                pure (Left (McpTransportError
-                                    ("invalid input_required result: " <> err.jsonErrorMessage)))
-                            Right (requests, requestState) ->
-                                fulfilInputRequests client requests >>= \case
-                                    Left err -> pure (Left err)
-                                    Right responses ->
-                                        go (rounds + 1)
-                                            (inputResponsesSeries responses
-                                                <> maybe mempty
-                                                    (\state -> AesonEncoding.pair "requestState" (rawJsonEncoding state))
-                                                    requestState)
+    go rounds extra = do
+        raw <- requestMcpT client
+            request { requestParams = request.requestParams <> extra }
+        case resultKind raw of
+            ResultComplete -> pure raw
+            ResultTask -> awaitTaskT client request raw
+            ResultUnknown kind ->
+                throwE (McpTransportError
+                    ("unrecognized resultType \"" <> kind <> "\""))
+            ResultInputRequired
+                | rounds >= maxInputRounds ->
+                    throwE (McpTransportError
+                        ("MCP server kept requesting input after "
+                            <> Text.pack (show maxInputRounds) <> " rounds"))
+                | otherwise -> do
+                    (requests, requestState) <-
+                        decodeMcpPayload "input_required result"
+                            inputRequiredDecoder raw
+                    responses <- ExceptT (fulfilInputRequests client requests)
+                    go (rounds + 1)
+                        (inputResponsesSeries responses
+                            <> maybe mempty
+                                (\state -> AesonEncoding.pair
+                                    "requestState" (rawJsonEncoding state))
+                                requestState)
 
 inputResponsesSeries :: [(Text, RawJson)] -> Series
 inputResponsesSeries responses =
@@ -1457,14 +1520,14 @@ decodeElicitRequest serverName raw =
 
 -- | Poll a task returned by a task-augmented request until it settles.
 awaitTask :: McpClient -> McpRequest -> RawJson -> IO (Either McpError RawJson)
-awaitTask client request raw =
-    case Json.decodeEither taskDecoder (rawJsonBytes raw) of
-        Left err ->
-            pure (Left (McpTransportError ("invalid task result: " <> err.jsonErrorMessage)))
-        Right task -> do
-            start <- getMonotonicTimeNSec
-            report 0 task
-            poll' start (1 :: Int) task.taskPollIntervalMs
+awaitTask client request raw = runExceptT (awaitTaskT client request raw)
+
+awaitTaskT :: McpClient -> McpRequest -> RawJson -> McpCall RawJson
+awaitTaskT client request raw = do
+    task <- decodeMcpPayload "task result" taskDecoder raw
+    start <- lift getMonotonicTimeNSec
+    lift (report 0 task)
+    poll' start (1 :: Int) task.taskPollIntervalMs
   where
     slice = max 1 request.requestTimeoutMicros
     report :: Int -> TaskState -> IO ()
@@ -1478,52 +1541,49 @@ awaitTask client request raw =
                         <> maybe "" (": " <>) task.taskStatusMessage)
                 }
     poll' start count intervalMs = do
-        threadDelay (max 100 intervalMs * 1000)
-        now <- getMonotonicTimeNSec
+        lift (threadDelay (max 100 intervalMs * 1000))
+        now <- lift getMonotonicTimeNSec
         if request.requestTimeoutMicros > 0 && pastHardDeadline start now slice
             then do
-                _ <- requestMcpFull client
+                -- Cancellation is best-effort; preserve the timeout as the
+                -- primary error if the server rejects the cancel request.
+                _ <- lift $ requestMcpFull client
                     (clientRequest client "tasks/cancel" ("taskId" .= taskIdOf))
-                pure (Left (timeoutError (request.requestMethod <> " task") slice))
-            else
-                requestMcpFull client
+                throwE (timeoutError (request.requestMethod <> " task") slice)
+            else do
+                task <- requestAndDecode client
                     (clientRequest client "tasks/get" ("taskId" .= taskIdOf))
-                    >>= \case
-                    Left err -> pure (Left err)
-                    Right state ->
-                        case Json.decodeEither taskDecoder (rawJsonBytes state) of
-                            Left err ->
-                                pure (Left (McpTransportError
-                                    ("invalid tasks/get result: " <> err.jsonErrorMessage)))
-                            Right task -> do
-                                report count task
-                                case task.taskStatus of
-                                    "completed" -> case task.taskResult of
-                                        Just result -> pure (Right result)
-                                        Nothing -> legacyTaskResult
-                                    "failed" ->
-                                        pure . Left $ fromMaybe
-                                            (McpTransportError "MCP task failed")
-                                            (task.taskError >>= decodeRpcError)
-                                    "cancelled" ->
-                                        pure (Left (McpTransportError "MCP task was cancelled"))
-                                    "input_required" ->
-                                        fulfilInputRequests client task.taskInputRequests
-                                            >>= \case
-                                            Left err -> pure (Left err)
-                                            Right responses -> do
-                                                _ <- requestMcpFull client
-                                                    (clientRequest client "tasks/update"
-                                                        ("taskId" .= taskIdOf
-                                                            <> inputResponsesSeries responses))
-                                                poll' start (count + 1) task.taskPollIntervalMs
-                                    _ -> poll' start (count + 1) task.taskPollIntervalMs
+                    "tasks/get result"
+                    taskDecoder
+                lift (report count task)
+                case task.taskStatus of
+                    "completed" -> case task.taskResult of
+                        Just result -> pure result
+                        Nothing -> legacyTaskResult
+                    "failed" ->
+                        throwE $ fromMaybe
+                            (McpTransportError "MCP task failed")
+                            (task.taskError >>= decodeRpcError)
+                    "cancelled" ->
+                        throwE (McpTransportError "MCP task was cancelled")
+                    "input_required" -> do
+                        responses <-
+                            ExceptT (fulfilInputRequests client task.taskInputRequests)
+                        -- tasks/update is best-effort: its successful response
+                        -- body is only an acknowledgement, and RPC errors are
+                        -- deliberately ignored. The next tasks/get is canonical.
+                        _ <- lift $ requestMcpFull client
+                            (clientRequest client "tasks/update"
+                                ("taskId" .= taskIdOf
+                                    <> inputResponsesSeries responses))
+                        poll' start (count + 1) task.taskPollIntervalMs
+                    _ -> poll' start (count + 1) task.taskPollIntervalMs
       where
         taskIdOf = initialTaskId
     initialTaskId =
         projectRawOr "" (Json.object (Json.defaultKey "" "taskId" Json.text)) raw
     legacyTaskResult =
-        requestMcpFull client
+        requestMcpT client
             (clientRequest client "tasks/result" ("taskId" .= initialTaskId))
 
 data TaskState = TaskState
@@ -1651,14 +1711,14 @@ sendMessage client transport message =
         >>= \case
             Left exception -> do
                 let err = "MCP write failed: " <> exceptionSummary exception
-                failPending client.clientPending client.clientFailure err
+                failPending client.clientRequestRegistry client.clientFailure err
                 pure (Left err)
             Right () -> pure (Right ())
 
 readerLoop :: McpClient -> Handle -> IO ()
 readerLoop client output =
     loop `finally`
-        failPending client.clientPending client.clientFailure
+        failPending client.clientRequestRegistry client.clientFailure
             "MCP server stdout closed"
   where
     loop = do
@@ -1666,7 +1726,7 @@ readerLoop client output =
         unless (BS.null (BS8.strip line)) $
             case Json.decodeEither inboundDecoder line of
                 Left err ->
-                    failPending client.clientPending client.clientFailure
+                    failPending client.clientRequestRegistry client.clientFailure
                         ("Invalid MCP JSON message: " <> err.jsonErrorMessage)
                 Right inbound ->
                     handleInbound client inbound
@@ -1705,9 +1765,14 @@ routeResponse client inbound =
         Nothing -> pure ()
         Just ident -> do
             destination <- atomically do
-                current <- readTVar client.clientPending
-                writeTVar client.clientPending (IntMap.delete ident current)
-                pure (IntMap.lookup ident current)
+                registry <- readTVar client.clientRequestRegistry
+                let pending = registry.requestRegistryPending
+                writeTVar client.clientRequestRegistry
+                    (registry
+                        { requestRegistryPending =
+                            IntMap.delete ident pending
+                        })
+                pure (IntMap.lookup ident pending)
             forM_ destination \pending ->
                 atomically . void . tryPutTMVar pending.pendingResponse $
                     case inbound.inboundError of
@@ -1765,7 +1830,9 @@ handleNotification client method params =
     case method of
         "notifications/progress" ->
             forM_ (params >>= decodeProgress) \(token, progress) -> do
-                pending <- IntMap.lookup token <$> readTVarIO client.clientPending
+                registry <- readTVarIO client.clientRequestRegistry
+                let pending =
+                        IntMap.lookup token registry.requestRegistryPending
                 forM_ pending \entry -> do
                     atomically $ modifyTVar' entry.pendingActivity (+ 1)
                     void (tryAny (entry.pendingOnProgress progress))
@@ -2235,14 +2302,14 @@ capturedStderrText captured =
 -- * Failure and shutdown
 
 failClient
-    :: TVar (IntMap.IntMap PendingRequest)
+    :: TVar RequestRegistry
     -> TVar (Maybe Text)
     -> Text
     -> IO ()
 failClient = failPending
 
 failPending
-    :: TVar (IntMap.IntMap PendingRequest)
+    :: TVar RequestRegistry
     -> TVar (Maybe Text)
     -> Text
     -> IO ()
@@ -2250,8 +2317,10 @@ failPending pending failure err =
     atomically do
         existing <- readTVar failure
         when (existing == Nothing) (writeTVar failure (Just err))
-        requests <- readTVar pending
-        writeTVar pending IntMap.empty
+        registry <- readTVar pending
+        let requests = registry.requestRegistryPending
+        writeTVar pending
+            (registry { requestRegistryPending = IntMap.empty })
         mapM_ (\entry -> void (tryPutTMVar entry.pendingResponse (Left (McpTransportError err))))
             (IntMap.elems requests)
 
@@ -2285,7 +2354,7 @@ closeMcpClient client =
                         readIORef transport.stdioStderrReader >>= mapM_ stopWorker
                     McpClientHttp transport ->
                         closeHttpSession client transport
-                failClient client.clientPending client.clientFailure
+                failClient client.clientRequestRegistry client.clientFailure
                     "MCP server closed"
                 pure True
 

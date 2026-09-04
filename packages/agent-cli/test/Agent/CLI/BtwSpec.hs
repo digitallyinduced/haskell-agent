@@ -102,8 +102,6 @@ spec = do
                         , tools = Just [tool]
                         , ..
                         }
-            mainParams <- newIORef originalParams
-            mainTranscript <- newIORef originalItems
             seenPrevious <- newIORef (Just "not-called")
             seenInputs <- newIORef []
             seenPrivateParams <- newIORef Nothing
@@ -121,7 +119,7 @@ spec = do
                             , backendState = privateTranscript
                             }
             result <- runBtwWithCancel (\_ action -> action)
-                factory mainParams mainTranscript "why?"
+                factory (sideCallSnapshot originalParams originalItems) "why?"
             result `shouldBe` Right "side answer"
             readIORef seenPrevious `shouldReturn` Nothing
             seen <- readIORef seenInputs
@@ -132,8 +130,6 @@ spec = do
                 _ -> False
             (.backendItems) <$> readIORef seenPrivateTranscript
                 `shouldReturn` originalItems
-            readIORef mainTranscript `shouldReturn` originalItems
-            readIORef mainParams `shouldReturn` originalParams
             captured <- readIORef seenPrivateParams
             fmap (.tools) captured `shouldBe` Just (Just [tool])
             fmap (.input) captured `shouldBe` Just Nothing
@@ -142,8 +138,6 @@ spec = do
                 `shouldBe` Just (Just (ToolChoiceMode ToolChoiceNone))
 
         it "rejects tool calls without a follow-up submission" do
-            params <- newIORef defaultResponseCreateParams
-            transcript <- newIORef []
             submissions <- newIORef (0 :: Int)
             let factory _ = Backend \state _ _ _ -> do
                     modifyIORef' submissions (+ 1)
@@ -153,13 +147,13 @@ spec = do
                         , backendState = state
                         }
             result <- runBtwWithCancel (\_ action -> action)
-                factory params transcript "do something"
+                factory
+                (sideCallSnapshot defaultResponseCreateParams [])
+                "do something"
             result `shouldBe` Left BtwUnexpectedToolCall
             readIORef submissions `shouldReturn` 1
 
         it "surfaces transport and empty-response failures" do
-            params <- newIORef defaultResponseCreateParams
-            transcript <- newIORef []
             let transport _ = Backend \_ _ _ _ ->
                     pure (Left (ConnectionError "offline"))
                 empty _ = Backend \state _ _ _ ->
@@ -169,10 +163,12 @@ spec = do
                         , backendState = state
                         }
             runBtwWithCancel (\_ action -> action)
-                transport params transcript "why?"
+                transport (sideCallSnapshot defaultResponseCreateParams [])
+                "why?"
                 `shouldReturn` Left (BtwTransport (ConnectionError "offline"))
             runBtwWithCancel (\_ action -> action)
-                empty params transcript "why?"
+                empty (sideCallSnapshot defaultResponseCreateParams [])
+                "why?"
                 `shouldReturn` Left BtwEmptyResponse
 
     describe "formatBtwError" do

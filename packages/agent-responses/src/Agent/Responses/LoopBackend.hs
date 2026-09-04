@@ -1,14 +1,21 @@
 -- | Provider-neutral loop adapters for Responses-compatible transports.
 module Agent.Responses.LoopBackend
     ( statelessResponsesBackend
+    , statelessResponsesBackendPreservingCheckpointHistory
+    , statelessResponsesBackendPreservingHistory
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
+    , tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
+    , tokenProviderStatelessResponsesBackendPreservingHistory
     , turnInputsToItems
     , responseToTurnOutput
     , responseItemToToolCall
     , responseTokenUsage
     , streamEventToLoopEvent
     , streamEventToLoopEventWithRawReasoning
+    , StreamProjectionState
+    , emptyStreamProjectionState
+    , streamEventToLoopEventsStep
     , newStreamEventToLoopEvents
     , toolArgumentActivityChunkChars
     , runawayToolArgumentWarningChars
@@ -19,6 +26,7 @@ module Agent.Responses.LoopBackend
     , toolResultToItem
     , withRequestInput
     , normalizeResponseInputItems
+    , isServerCompactionCheckpoint
     ) where
 
 import Agent.Error (ApiError)
@@ -50,7 +58,11 @@ import Agent.Provider
     , TokenProvider
     , runWithTokenProvider
     )
-import Agent.Responses.Request (stripReplayedItemStatus)
+import Agent.Responses.Request
+    ( filterCompactionCheckpointsByOrigin
+    , isServerCompactionCheckpoint
+    , stripReplayedItemStatus
+    )
 import Agent.Responses.Types
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -88,6 +100,40 @@ statelessResponsesBackend
 statelessResponsesBackend send getParams =
     statelessResponsesBackendWithRawReasoning True send getParams
 
+-- | Adapt a stateless transport whose opaque checkpoints are replayable, but
+-- only by that same provider. Keep the complete pre-checkpoint history in host
+-- state for later provider switches; the provider's wire projection must trim
+-- that portable prefix when it replays its checkpoint.
+statelessResponsesBackendPreservingCheckpointHistory
+    :: (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+statelessResponsesBackendPreservingCheckpointHistory send getParams =
+    statelessResponsesBackendWithMode
+        PreservePreCheckpointHistoryAndCheckpoint
+        True
+        send
+        getParams
+
+-- | Adapt a stateless transport that cannot safely replay opaque server
+-- checkpoints. Keep the complete request history even when a response
+-- contains a checkpoint, and omit the unusable checkpoint itself from the
+-- next snapshot so a later provider cannot mistake it for compatible state.
+statelessResponsesBackendPreservingHistory
+    :: (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+statelessResponsesBackendPreservingHistory send getParams =
+    statelessResponsesBackendWithMode
+        PreservePreCheckpointHistory
+        True
+        send
+        getParams
+
 -- | Adapt a stateless Responses transport while optionally exposing raw
 -- reasoning text. Reasoning summaries remain visible in either mode.
 statelessResponsesBackendWithRawReasoning
@@ -98,6 +144,30 @@ statelessResponsesBackendWithRawReasoning
     -> IO ResponseCreateParams
     -> Backend
 statelessResponsesBackendWithRawReasoning showRawReasoning send getParams =
+    statelessResponsesBackendWithMode
+        ReplacePreCheckpointHistory
+        showRawReasoning
+        send
+        getParams
+
+data ServerCheckpointMode
+    = ReplacePreCheckpointHistory
+    | PreservePreCheckpointHistory
+    | PreservePreCheckpointHistoryAndCheckpoint
+
+statelessResponsesBackendWithMode
+    :: ServerCheckpointMode
+    -> Bool
+    -> (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+statelessResponsesBackendWithMode
+        checkpointMode
+        showRawReasoning
+        send
+        getParams =
     Backend \snapshot _legacyPreviousResponseId inputs onEvent -> do
         baseParams <- getParams
         projectEvent <- newStreamEventToLoopEvents showRawReasoning
@@ -109,15 +179,42 @@ statelessResponsesBackendWithRawReasoning showRawReasoning send getParams =
         case result of
             Left err -> pure (Left err)
             Right response ->
+                let normalizedRequestItems =
+                        normalizeResponseInputItems requestItems
+                    completedItems =
+                        case checkpointMode of
+                            ReplacePreCheckpointHistory ->
+                                fromMaybe
+                                    (normalizedRequestItems <> response.output)
+                                    (latestServerCheckpointSuffix response.output)
+                            PreservePreCheckpointHistory ->
+                                normalizedRequestItems
+                                    <> filterCompactionCheckpointsByOrigin
+                                        (const False)
+                                        response.output
+                            PreservePreCheckpointHistoryAndCheckpoint ->
+                                normalizedRequestItems <> response.output
+                in
                 pure $ Right BackendResult
                     { backendOutput = responseToTurnOutput response
                     , backendState =
                         advanceBackendSnapshot snapshot
-                            ( normalizeResponseInputItems requestItems
-                                <> response.output
-                            )
+                            completedItems
                             Nothing
                     }
+
+-- Server compaction checkpoints replace everything that preceded them. Keep
+-- the checkpoint and later output in the stateless snapshot so subsequent
+-- requests do not replay the obsolete pre-compaction transcript.
+latestServerCheckpointSuffix
+    :: [ResponseItem]
+    -> Maybe [ResponseItem]
+latestServerCheckpointSuffix = go [] . reverse
+  where
+    go _ [] = Nothing
+    go after (item : before)
+        | isServerCompactionCheckpoint item = Just (item : after)
+        | otherwise = go (item : after) before
 
 -- | Adapt a credentialed stateless Responses transport to the loop.
 --
@@ -136,13 +233,47 @@ tokenProviderStatelessResponsesBackend provider send =
         runWithTokenProvider provider \credential ->
             send credential params onEvent
 
+-- | Credentialed counterpart to
+-- 'statelessResponsesBackendPreservingCheckpointHistory'.
+tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
+    :: TokenProvider
+    -> (Credential
+        -> ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
+        provider
+        send =
+    statelessResponsesBackendPreservingCheckpointHistory \params onEvent ->
+        runWithTokenProvider provider \credential ->
+            send credential params onEvent
+
+-- | Credentialed counterpart to
+-- 'statelessResponsesBackendPreservingHistory'.
+tokenProviderStatelessResponsesBackendPreservingHistory
+    :: TokenProvider
+    -> (Credential
+        -> ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+tokenProviderStatelessResponsesBackendPreservingHistory provider send =
+    statelessResponsesBackendPreservingHistory \params onEvent ->
+        runWithTokenProvider provider \credential ->
+            send credential params onEvent
+
 -- | 'input' is also a field on 'CustomToolCall', so a record update is
 -- ambiguous. Rebuild from the constructor instead.
 withRequestInput :: ResponseCreateParams -> [ResponseItem] -> ResponseCreateParams
 withRequestInput ResponseCreateParams{..} items =
     let prefix = requestInputPrefix input
-        -- Replayed transcript items are provider output; drop their lifecycle
-        -- status before they become input (see 'stripReplayedItemStatus').
+        -- Replayed transcript items are provider output. Keep checkpoint
+        -- provenance intact until the target provider can decide whether the
+        -- adjacent opaque checkpoint is compatible, then drop provider
+        -- lifecycle status (see 'stripReplayedItemStatus').
         normalizedItems =
             map stripReplayedItemStatus
                 (normalizeResponseInputItems items)
@@ -937,8 +1068,8 @@ codexRateLimitsWarning limits =
 
 -- | Stateful projection of one streamed response attempt into loop events.
 --
--- On top of 'streamEventToLoopEventWithRawReasoning' this surfaces streamed
--- shell arguments as a repaintable command preview and reports coarse activity
+-- On top of 'streamEventToLoopEventWithRawReasoning' this surfaces selected
+-- streamed arguments as repaintable tool previews and reports coarse activity
 -- for other tools. It also warns when a model gets stuck in a degenerate
 -- repetition loop inside one call (observed as multi-minute 128k-output-token
 -- samples whose arguments repeat @\\u0000@ or a hallucinated path segment).
@@ -949,15 +1080,41 @@ newStreamEventToLoopEvents
     :: Bool
     -> IO (ResponseStreamEvent -> IO [LoopEvent])
 newStreamEventToLoopEvents showRawReasoning = do
-    stateRef <- newIORef emptyToolArgumentStreamState
-    pure \event -> do
-        argumentEvents <- atomicModifyIORef' stateRef \state ->
-            toolArgumentStreamStep event state
-        pure $
-            maybeToList
-                (streamEventToLoopEventWithRawReasoning showRawReasoning event)
-                <> maybeToList (codexRateLimitsUpdate event)
-                <> argumentEvents
+    stateRef <- newIORef emptyStreamProjectionState
+    pure \event ->
+        atomicModifyIORef' stateRef \state ->
+            streamEventToLoopEventsStep showRawReasoning state event
+
+-- | Immutable state for projecting one response attempt.
+--
+-- The constructor is intentionally private so callers cannot accidentally
+-- carry only part of the projection state across an attempt boundary.
+data StreamProjectionState = StreamProjectionState
+    { streamToolArguments :: !ToolArgumentStreamState
+    }
+
+emptyStreamProjectionState :: StreamProjectionState
+emptyStreamProjectionState =
+    StreamProjectionState emptyToolArgumentStreamState
+
+-- | Pure projection of one provider event. The returned state belongs to the
+-- same response attempt; start from 'emptyStreamProjectionState' when a retry
+-- or reconnect begins a new sample.
+streamEventToLoopEventsStep
+    :: Bool
+    -> StreamProjectionState
+    -> ResponseStreamEvent
+    -> (StreamProjectionState, [LoopEvent])
+streamEventToLoopEventsStep showRawReasoning state event =
+    ( StreamProjectionState nextArguments
+    , maybeToList
+        (streamEventToLoopEventWithRawReasoning showRawReasoning event)
+        <> maybeToList (codexRateLimitsUpdate event)
+        <> argumentEvents
+    )
+  where
+    (nextArguments, argumentEvents) =
+        toolArgumentStreamStep event state.streamToolArguments
 
 codexRateLimitsUpdate :: ResponseStreamEvent -> Maybe LoopEvent
 codexRateLimitsUpdate = \case
@@ -994,10 +1151,18 @@ data ToolArgumentStreamState = ToolArgumentStreamState
     , toolCallsById :: !(Map Text ToolCall)
     , currentToolCall :: !(Maybe ToolCall)
     , shellPreviewsByCallId :: !(Map Text Text)
+    , rawPreviewsByCallId :: !(Map Text RawArgumentPreview)
     , currentToolName :: !(Maybe Text)
     , streamedArgumentChars :: !Int
     , announcedArgumentChars :: !Int
     , warnedArgumentChars :: !Int
+    }
+
+data RawArgumentPreview = RawArgumentPreview
+    { publishedRawArguments :: !Text
+    , pendingRawArgumentChunks :: ![Text]
+    , pendingRawArgumentChars :: !Int
+    , retainedRawArgumentChars :: !Int
     }
 
 emptyToolArgumentStreamState :: ToolArgumentStreamState
@@ -1006,6 +1171,7 @@ emptyToolArgumentStreamState = ToolArgumentStreamState
     , toolCallsById = Map.empty
     , currentToolCall = Nothing
     , shellPreviewsByCallId = Map.empty
+    , rawPreviewsByCallId = Map.empty
     , currentToolName = Nothing
     , streamedArgumentChars = 0
     , announcedArgumentChars = 0
@@ -1065,7 +1231,7 @@ announceToolCall maybeCall name identities state =
         , currentToolName = Just name
         }
     , [ ActivityUpdated (writingToolCallActivity name Nothing)
-      | not (isLiveShellTool name)
+      | not (isLiveArgumentTool name)
       ]
     )
 
@@ -1092,10 +1258,20 @@ resolveToolCall identities state =
   where
     firstJust = foldr (<|>) Nothing
 
--- Keep enough raw arguments to render a useful one-line shell preview without
--- accumulating an unbounded repeated strict Text value for runaway calls.
-liveToolArgumentPrefixChars :: Int
-liveToolArgumentPrefixChars = 4096
+-- Keep live previews useful without retaining unbounded repeated strict Text
+-- values for runaway calls. Shell previews only need one command line, while
+-- apply_patch needs enough source to show a representative multi-file diff.
+liveShellArgumentPrefixChars :: Int
+liveShellArgumentPrefixChars = 4096
+
+liveRawArgumentPrefixChars :: Int
+liveRawArgumentPrefixChars = 64 * 1024
+
+-- Publish the first raw fragment immediately, then batch very small provider
+-- deltas. Rebuilding a cumulative strict Text for every token is quadratic
+-- and can also make terminal repainting dominate a long patch stream.
+liveRawArgumentPublishChunkChars :: Int
+liveRawArgumentPublishChunkChars = 256
 
 updateToolArguments
     :: [Maybe Text]
@@ -1109,6 +1285,8 @@ updateToolArguments identities delta state =
             Just call
                 | isLiveShellTool call.name ->
                     updateLiveShellCall call delta state
+                | isLiveRawArgumentTool call.name ->
+                    updateLiveRawCall call delta state
             _ -> (state, [])
         (counted, activityEvents) =
             countToolArgumentChars name (Text.length delta) withDraft
@@ -1121,13 +1299,11 @@ updateLiveShellCall
     -> (ToolArgumentStreamState, [LoopEvent])
 updateLiveShellCall call delta state =
     let rawArguments =
-            Text.take liveToolArgumentPrefixChars (call.arguments <> delta)
+            appendArgumentPrefix
+                liveShellArgumentPrefixChars
+                call.arguments
+                delta
         updatedCall = withToolArguments call rawArguments
-        updatedCalls =
-            Map.map
-                (\known ->
-                    if known.callId == call.callId then updatedCall else known)
-                state.toolCallsById
         maybeCommand = jsonTextFieldPartial "command" rawArguments
         preview = Text.takeWhile (/= '\n') <$> maybeCommand
         previousPreview = Map.lookup call.callId state.shellPreviewsByCallId
@@ -1139,10 +1315,8 @@ updateLiveShellCall call delta state =
                 Text.decodeUtf8
                     (LBS.toStrict
                         (Aeson.encode (Aeson.object ["command" Aeson..= command])))
-        next = state
-            { toolCallsById = updatedCalls
-            , currentToolCall = Just updatedCall
-            , shellPreviewsByCallId =
+        next = (trackUpdatedToolCall updatedCall state)
+            { shellPreviewsByCallId =
                 maybe state.shellPreviewsByCallId
                     (\value -> Map.insert call.callId value
                         state.shellPreviewsByCallId)
@@ -1155,6 +1329,103 @@ updateLiveShellCall call delta state =
       , command <- maybeToList preview
       ]
     )
+
+updateLiveRawCall
+    :: ToolCall
+    -> Text
+    -> ToolArgumentStreamState
+    -> (ToolArgumentStreamState, [LoopEvent])
+updateLiveRawCall call delta state =
+    let preview = Map.findWithDefault
+            (initialRawArgumentPreview call)
+            call.callId
+            state.rawPreviewsByCallId
+        room =
+            liveRawArgumentPrefixChars - preview.retainedRawArgumentChars
+        retainedDelta = Text.copy (Text.take room delta)
+        retainedDeltaChars = Text.length retainedDelta
+        pendingChars =
+            preview.pendingRawArgumentChars + retainedDeltaChars
+        withDelta = preview
+            { pendingRawArgumentChunks =
+                [retainedDelta | retainedDeltaChars > 0]
+                    <> preview.pendingRawArgumentChunks
+            , pendingRawArgumentChars = pendingChars
+            , retainedRawArgumentChars =
+                preview.retainedRawArgumentChars + retainedDeltaChars
+            }
+        shouldPublish =
+            retainedDeltaChars > 0
+                && ( Text.null preview.publishedRawArguments
+                    || pendingChars >= liveRawArgumentPublishChunkChars
+                    || withDelta.retainedRawArgumentChars
+                        == liveRawArgumentPrefixChars
+                   )
+        rawArguments =
+            preview.publishedRawArguments
+                <> Text.concat (reverse withDelta.pendingRawArgumentChunks)
+        published = withDelta
+            { publishedRawArguments = rawArguments
+            , pendingRawArgumentChunks = []
+            , pendingRawArgumentChars = 0
+            }
+        nextPreview = if shouldPublish then published else withDelta
+        withPreview = state
+            { rawPreviewsByCallId =
+                Map.insert call.callId nextPreview state.rawPreviewsByCallId
+            }
+        updatedCall = withToolArguments call rawArguments
+    in if shouldPublish
+        then
+            ( trackUpdatedToolCall updatedCall withPreview
+            , [ToolArgumentsUpdated updatedCall]
+            )
+        else (withPreview, [])
+
+initialRawArgumentPreview :: ToolCall -> RawArgumentPreview
+initialRawArgumentPreview call =
+    let initial =
+            Text.copy
+                (Text.take liveRawArgumentPrefixChars call.arguments)
+    in RawArgumentPreview
+        { publishedRawArguments = initial
+        , pendingRawArgumentChunks = []
+        , pendingRawArgumentChars = 0
+        , retainedRawArgumentChars = Text.length initial
+        }
+
+trackUpdatedToolCall
+    :: ToolCall
+    -> ToolArgumentStreamState
+    -> ToolArgumentStreamState
+trackUpdatedToolCall updatedCall state =
+    state
+        { toolCallsById =
+            Map.map
+                (\known ->
+                    if known.callId == updatedCall.callId
+                        then updatedCall
+                        else known)
+                state.toolCallsById
+        , currentToolCall = Just updatedCall
+        }
+
+appendArgumentPrefix :: Int -> Text -> Text -> Text
+appendArgumentPrefix limit previous delta
+    | room <= 0 = previous
+    | Text.null previous = retainedDelta
+    | otherwise = previous <> retainedDelta
+  where
+    room = limit - Text.length previous
+    retainedDelta = Text.copy (Text.take room delta)
+
+isLiveArgumentTool :: Text -> Bool
+isLiveArgumentTool name =
+    isLiveShellTool name || isLiveRawArgumentTool name
+
+isLiveRawArgumentTool :: Text -> Bool
+isLiveRawArgumentTool name =
+    canonicalToolName name `elem` ["apply_patch"]
 
 isLiveShellTool :: Text -> Bool
 isLiveShellTool name =
@@ -1198,7 +1469,7 @@ countToolArgumentChars name deltaChars state =
         }
     , [ ActivityUpdated (writingToolCallActivity name (Just total))
       | announce
-      , not (isLiveShellTool name)
+      , not (isLiveArgumentTool name)
       ]
         <> [ WarningRaised (runawayToolArgumentWarning name total)
            | warn
