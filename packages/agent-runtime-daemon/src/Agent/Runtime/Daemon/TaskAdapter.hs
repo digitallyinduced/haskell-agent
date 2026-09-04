@@ -13,6 +13,7 @@ import Control.Concurrent.Async
     , asyncWithUnmask
     , cancel
     , concurrently_
+    , mapConcurrently_
     , race
     , wait
     , waitCatch
@@ -595,8 +596,7 @@ shutdownRegistry registry = do
         current <- readTVar registry
         writeTVar registry Map.empty
         pure (Map.elems current)
-    mapM_ (cancel . (.runningWorker)) running
-    mapM_ (waitCatch . (.runningWorker)) running
+    mapConcurrently_ (cancel . (.runningWorker)) running
 
 taskResult :: Text -> DurableTask -> Value
 taskResult state task =
