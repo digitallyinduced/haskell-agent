@@ -833,7 +833,7 @@ multiTenantTurnPersistence instanceId manager =
                     backend.backendTurnPersistence.turnPersistenceLoadHumanResponse
                         record
                         requestId
-        , turnPersistenceDeleteHumanRequest = \record requestId ->
+        , turnPersistenceDeleteHumanRequest = \record requestId disposition ->
             withBoundaryBackendText
                 instanceId
                 manager
@@ -842,6 +842,7 @@ multiTenantTurnPersistence instanceId manager =
                     backend.backendTurnPersistence.turnPersistenceDeleteHumanRequest
                         record
                         requestId
+                        disposition
         }
 
 gatewayApiError :: GatewayBoundaryError -> ApiError

@@ -13,6 +13,7 @@ module Agent.Server.Supervisor
     , TurnRunner
     , TurnBoundaryGuard
     , HumanRequestPersistenceResolution(..)
+    , HumanRequestCleanup(..)
     , TurnPersistence(..)
     , inMemoryTurnPersistence
     , newSupervisor
@@ -158,6 +159,11 @@ data HumanRequestPersistenceResolution
     | HumanRequestLocalOnly
     deriving (Eq, Show)
 
+data HumanRequestCleanup
+    = HumanRequestAbandoned
+    | HumanResponseConsumed
+    deriving (Eq, Show)
+
 data TurnPersistence = TurnPersistence
     { turnPersistenceStarted ::
         !(TurnRecord -> UTCTime -> IO (Either Text ()))
@@ -185,7 +191,11 @@ data TurnPersistence = TurnPersistence
            IO (Either Text (Maybe HumanResponse))
          )
     , turnPersistenceDeleteHumanRequest ::
-        !(TurnRecord -> RequestId -> IO (Either Text ()))
+        !( TurnRecord ->
+           RequestId ->
+           HumanRequestCleanup ->
+           IO (Either Text ())
+         )
     }
 
 inMemoryTurnPersistence :: TurnPersistence
@@ -204,7 +214,7 @@ inMemoryTurnPersistence =
             pure (Right HumanRequestLocalOnly)
         , turnPersistenceLoadHumanResponse = \_ _ ->
             pure (Right Nothing)
-        , turnPersistenceDeleteHumanRequest = \_ _ ->
+        , turnPersistenceDeleteHumanRequest = \_ _ _ ->
             pure (Right ())
         }
 
@@ -1620,17 +1630,30 @@ requestTurnInput supervisor turnId spec requestSpec =
                             request
                             >>= \case
                                 Left err -> pure (Left err)
-                                Right () ->
-                                    restore
-                                        (installAndWait record request reply)
-                                        `finally` cleanup record requestId
+                                Right () -> do
+                                    result <-
+                                        restore
+                                            (installAndWait record request reply)
+                                            `onException` cleanup
+                                                record
+                                                requestId
+                                                HumanRequestAbandoned
+                                    cleanup
+                                        record
+                                        requestId
+                                        ( case result of
+                                            Left _ -> HumanRequestAbandoned
+                                            Right _ -> HumanResponseConsumed
+                                        )
+                                    pure result
   where
-    cleanup record requestId =
+    cleanup record requestId disposition =
         void $
             timeout humanRequestCleanupTimeoutMicros $
                 supervisor.supervisorPersistence.turnPersistenceDeleteHumanRequest
                     record
                     requestId
+                    disposition
 
     installAndWait record request reply = do
         installed <- atomically do

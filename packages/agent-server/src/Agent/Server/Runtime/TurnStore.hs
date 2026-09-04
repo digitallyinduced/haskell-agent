@@ -12,7 +12,8 @@ where
 import Agent.Server.Backend (SessionMutationLease(..))
 import Agent.Server.Event (boundedPublicText)
 import Agent.Server.Supervisor
-    ( HumanRequestPersistenceResolution (..)
+    ( HumanRequestCleanup (..)
+    , HumanRequestPersistenceResolution (..)
     , TurnPersistence (..)
     )
 import Agent.Server.Types
@@ -340,14 +341,24 @@ productionTurnPersistence store owner =
                     instanceId
                     record
                     requestId
-        , turnPersistenceDeleteHumanRequest = \record requestId ->
-            first renderStoreError
-                <$> HumanRequestStore.deleteServerHumanRequest
-                    (trustedPool store)
-                    (storeBoundary record.turnRecordBoundary)
-                    instanceId
-                    record.turnRecordId.unTurnId
-                    requestId.unRequestId
+        , turnPersistenceDeleteHumanRequest =
+            \record requestId disposition ->
+                first renderStoreError
+                    <$> case disposition of
+                        HumanRequestAbandoned ->
+                            HumanRequestStore.deleteServerHumanRequest
+                                (trustedPool store)
+                                (storeBoundary record.turnRecordBoundary)
+                                instanceId
+                                record.turnRecordId.unTurnId
+                                requestId.unRequestId
+                        HumanResponseConsumed ->
+                            HumanRequestStore.deleteConsumedServerHumanRequest
+                                (trustedPool store)
+                                (storeBoundary record.turnRecordBoundary)
+                                instanceId
+                                record.turnRecordId.unTurnId
+                                requestId.unRequestId
         }
   where
     instanceId = owner.turnStoreOwnerInstanceId

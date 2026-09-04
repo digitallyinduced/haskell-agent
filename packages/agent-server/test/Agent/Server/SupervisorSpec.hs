@@ -616,12 +616,22 @@ spec = describe "turn supervisor" do
                             pure . Right $
                                 Map.lookup requestId requests
                                     >>= snd
-                    , turnPersistenceDeleteHumanRequest = \_ requestId -> do
-                        atomically $
-                            modifyTVar'
-                                sharedRequests
-                                (Map.delete requestId)
-                        pure (Right ())
+                    , turnPersistenceDeleteHumanRequest =
+                        \_ requestId disposition -> do
+                            atomically $
+                                modifyTVar'
+                                    sharedRequests
+                                    ( case disposition of
+                                        HumanRequestAbandoned ->
+                                            Map.update
+                                                ( \entry@(_, response) ->
+                                                    entry <$ response
+                                                )
+                                                requestId
+                                        HumanResponseConsumed ->
+                                            Map.delete requestId
+                                    )
+                            pure (Right ())
                     }
             ownerRunner control _ = do
                 answer <- control.turnControlRequestInput HumanRequestSpec
@@ -663,6 +673,8 @@ spec = describe "turn supervisor" do
                                         { humanResponseDecision = "approve"
                                         , humanResponseValue = Nothing
                                         }
+                        atomically (readTVar sharedRequests)
+                            `shouldReturn` Map.empty
 
     it "isolates replay buffers by exact access boundary and signals gaps" do
         withSupervisor (\_ _ -> pure (Right testOutput)) \supervisor -> do

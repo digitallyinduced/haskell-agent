@@ -16,6 +16,7 @@ module Agent.Store.Postgres.ServerHumanRequest
     , resolveServerHumanRequest
     , loadServerHumanResponse
     , deleteServerHumanRequest
+    , deleteConsumedServerHumanRequest
     )
 where
 
@@ -184,6 +185,28 @@ deleteServerHumanRequest pool boundary ownerInstanceId turnId requestId =
             Transaction.statement
                 (boundary, ownerInstanceId, turnId, requestId)
                 deleteServerHumanRequestStatement
+
+deleteConsumedServerHumanRequest ::
+    StorePool ->
+    ServerTurnBoundary ->
+    Text ->
+    Text ->
+    Text ->
+    IO (Either StoreError ())
+deleteConsumedServerHumanRequest
+    pool
+    boundary
+    ownerInstanceId
+    turnId
+    requestId =
+        withSession pool $
+            Transactions.transaction
+                Transactions.ReadCommitted
+                Transactions.Write
+                ( Transaction.statement
+                    (boundary, ownerInstanceId, turnId, requestId)
+                    deleteConsumedServerHumanRequestStatement
+                )
 
 resolvedRequest ::
     ServerHumanResponse ->
@@ -468,6 +491,33 @@ deleteServerHumanRequestStatement =
         \ AND server_turn.turn_id = $4::uuid\
         \ AND server_request.request_id = $5::uuid\
         \ AND server_request.resolved_at IS NULL"
+        ( boundaryEncoder (\(boundary, _, _, _) -> boundary)
+            <> ( (\(_, ownerInstanceId, _, _) -> ownerInstanceId)
+                    >$< Encoders.param (Encoders.nonNullable Encoders.text)
+               )
+            <> ( (\(_, _, turnId, _) -> turnId)
+                    >$< Encoders.param (Encoders.nonNullable Encoders.text)
+               )
+            <> ( (\(_, _, _, requestId) -> requestId)
+                    >$< Encoders.param (Encoders.nonNullable Encoders.text)
+               )
+        )
+        Decoders.noResult
+        True
+
+deleteConsumedServerHumanRequestStatement ::
+    Statement (ServerTurnBoundary, Text, Text, Text) ()
+deleteConsumedServerHumanRequestStatement =
+    mkStatement
+        "DELETE FROM harness.server_human_requests server_request\
+        \ USING harness.server_turns server_turn\
+        \ WHERE server_turn.turn_id = server_request.turn_id\
+        \ AND server_turn.tenant_id = $1\
+        \ AND server_turn.gateway_identity IS NOT DISTINCT FROM $2\
+        \ AND server_turn.owner_instance_id = $3::uuid\
+        \ AND server_turn.turn_id = $4::uuid\
+        \ AND server_request.request_id = $5::uuid\
+        \ AND server_request.resolved_at IS NOT NULL"
         ( boundaryEncoder (\(boundary, _, _, _) -> boundary)
             <> ( (\(_, ownerInstanceId, _, _) -> ownerInstanceId)
                     >$< Encoders.param (Encoders.nonNullable Encoders.text)
