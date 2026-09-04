@@ -783,7 +783,9 @@ loadToolStartup request@AgentToolsRequest
                 (.nativeCapabilities)
                 startup.startupNativeHooks
     toolOpenRouterOptions <- OpenRouter.clientOptionsFromEnv
-    markStartupStage startup "Loading tools…"
+    -- Tool resources and initial-context discovery now share one startup
+    -- frontier, so attribute the elapsed interval to both.
+    markStartupStage startup "Loading tools and context…"
     when (isGatewayLoadedAuth loaded /= isJust gatewayIdentity) $
         startupDie startup
             "gateway session binding and loaded credentials disagree"
