@@ -39,7 +39,9 @@ buildRequest
 buildRequest fallbackModel params = do
     (tools, customToolNames) <-
         projectTools (enabledTools params.toolChoice params.tools)
-    projection <- projectInput customToolNames params.input
+    projection <- projectInput
+        (declaredCustomToolNames params.tools)
+        params.input
     let model = normalizeModelId
             (fromMaybe fallbackModel params.model)
         systemTexts =
@@ -78,6 +80,16 @@ enabledTools
 enabledTools (Just (ToolChoiceMode ToolChoiceNone)) _ = Nothing
 enabledTools _ tools = tools
 
+declaredCustomToolNames :: Maybe [ResponseTool] -> Set Text
+declaredCustomToolNames =
+    maybe Set.empty (Set.unions . map customNames)
+  where
+    customNames = \case
+        CustomToolValue tool -> Set.singleton tool.name
+        NamespaceToolValue namespace ->
+            Set.unions (map customNames namespace.tools)
+        _ -> Set.empty
+
 data Projection = Projection
     { systemTexts :: ![Text]
     , contents :: ![Value]
@@ -114,11 +126,11 @@ projectItem projection = \case
     ReasoningItemValue reasoning ->
         pure (projectReasoning projection reasoning)
     FunctionCallItem call ->
-        pure (projectFunctionCall projection call)
+        projectFunctionCall projection call
     FunctionCallOutputItem callOutput ->
         pure (projectFunctionOutput projection callOutput)
     CustomToolCallItem call ->
-        pure (projectCustomToolCall projection call)
+        projectCustomToolCall projection call
     CustomToolCallOutputItem callOutput ->
         pure (projectCustomToolOutput projection callOutput)
     -- Local compaction snapshots are represented by ordinary messages. The
@@ -200,32 +212,41 @@ projectReasoning projection reasoning
         reasoning.encryptedContent
             <|> projection.pendingThoughtSignature
 
-projectFunctionCall :: Projection -> FunctionCall -> Projection
-projectFunctionCall projection call =
-    appendContent "model" [part] projection
+projectFunctionCall
+    :: Projection
+    -> FunctionCall
+    -> Either ApiError Projection
+projectFunctionCall projection call = do
+    args <-
+        if call.name `Set.member` projection.customToolNames
+            then pure (object ["input" .= call.arguments])
+            else case Aeson.eitherDecodeStrict' (encodeUtf8 call.arguments) of
+                Right value -> pure value
+                Left _ -> Left $ ProviderError InvalidRequestError
+                    ( "Gemini function call `" <> call.name
+                        <> "` arguments must be valid JSON"
+                    )
+                    Nothing
+    pure $ appendContent "model" [part args] projection
         { callNames = Map.insert call.callId call.name projection.callNames
         , pendingThoughtSignature = Nothing
         }
   where
-    args
-        | call.name `Set.member` projection.customToolNames =
-            object ["input" .= call.arguments]
-        | otherwise =
-            case Aeson.eitherDecodeStrict' (encodeUtf8 call.arguments) of
-                Right value -> value
-                Left _ -> Object KeyMap.empty
-    functionCall = object
+    functionCall args = object
         [ "id" .= call.callId
         , "name" .= call.name
         , "args" .= args
         ]
-    part = object $
-        ["functionCall" .= functionCall]
+    part args = object $
+        ["functionCall" .= functionCall args]
             <> maybe []
                 (\signature -> ["thoughtSignature" .= signature])
                 projection.pendingThoughtSignature
 
-projectCustomToolCall :: Projection -> CustomToolCall -> Projection
+projectCustomToolCall
+    :: Projection
+    -> CustomToolCall
+    -> Either ApiError Projection
 projectCustomToolCall projection call =
     projectFunctionCall projection FunctionCall
         { itemId = call.itemId

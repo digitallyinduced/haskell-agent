@@ -51,6 +51,13 @@ import Claude.Agent.SDK.Types
     , UserContentBlock(..)
     , messageSessionId
     )
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Except
+    ( ExceptT(..)
+    , except
+    , runExceptT
+    , throwE
+    )
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Exit (ExitCode)
@@ -241,30 +248,25 @@ queryTurnContentWithMessageValidatorAndProgress
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError QueryResult)
 queryTurnContentWithMessageValidatorAndProgress
-    turn content validateMessage onProgress onMessage = do
-    completed <-
-        timeout
-            (max 1 (turnTimeoutMicros turn))
-            do
-                sendQueryContent turn content >>= \case
-                    Left err -> pure (Left err)
-                    Right () ->
-                        receiveResponseWithMessageValidatorAndProgress
-                            turn
-                            validateMessage
-                            onProgress
-                            onMessage
-    case completed of
-        Nothing ->
-            Left <$> timeoutError
-                turn
-                ( "did not complete within the turn timeout; it may already "
-                    <> "have changed files or created remote side effects, so "
-                    <> "inspect the workspace, Git history, and pull requests "
-                    <> "before retrying"
+    turn content validateMessage onProgress onMessage =
+        runExceptT $
+            withSDKTimeout
+                (turnTimeoutMicros turn)
+                ( timeoutError
+                    turn
+                    ( "did not complete within the turn timeout; it may already "
+                        <> "have changed files or created remote side effects, so "
+                        <> "inspect the workspace, Git history, and pull requests "
+                        <> "before retrying"
+                    )
                 )
-        Just result ->
-            pure result
+                do
+                    ExceptT (sendQueryContent turn content)
+                    receiveResponseT
+                        turn
+                        validateMessage
+                        onProgress
+                        onMessage
 
 -- | Receive messages until the matching successful 'ResultMessage'.
 receiveResponse
@@ -301,77 +303,117 @@ receiveResponseWithMessageValidatorAndProgress
     -> IO (Either ClaudeSDKError QueryResult)
 receiveResponseWithMessageValidatorAndProgress
     turn validateMessage onProgress onMessage =
+        runExceptT $
+            receiveResponseT
+                turn
+                validateMessage
+                onProgress
+                onMessage
+
+receiveResponseT
+    :: ClaudeSDKTurn
+    -> (Message -> IO (Either ClaudeSDKError ()))
+    -> (QueryProgress -> IO ())
+    -> (Message -> IO ())
+    -> ExceptT ClaudeSDKError IO QueryResult
+receiveResponseT turn validateMessage onProgress onMessage =
     go emptyQueryAccumulator False
   where
     go
         :: QueryAccumulator
         -> Bool
-        -> IO (Either ClaudeSDKError QueryResult)
+        -> ExceptT ClaudeSDKError IO QueryResult
     go accumulator sawOutput = do
-        maybeMessage <-
-            timeout
-                ( max 1 $
-                    if sawOutput
-                        then
-                            turnStreamInactivityTimeoutMicros turn
-                        else
-                            turnStreamStartupTimeoutMicros turn
+        outcome <- liftIO (receiveOutcome turn sawOutput)
+        message <- messageFromReceiveOutcome turn sawOutput outcome
+        ExceptT (validateMessage message)
+        responseStep <- except (consumeResponseMessage accumulator message)
+        case responseStep of
+            ResponseContinues nextAccumulator progress -> do
+                validateLiveProgressSession turn message progress
+                liftIO (mapM_ onProgress progress)
+                go
+                    nextAccumulator
+                    (sawOutput || hasOwnOutputProgress progress)
+            ResponseCompleted progress messages result -> do
+                ExceptT (acceptTurnSessionId turn result.sessionId)
+                liftIO (mapM_ onProgress progress)
+                liftIO (mapM_ onMessage messages)
+                pure QueryResult
+                    { queryMessages = messages
+                    , queryResultMessage = result
+                    }
+
+data ReceiveOutcome
+    = ReceiveTimedOut
+    | ReceiveEOF
+    | ReceiveTransportError !ClaudeSDKError
+    | ReceivedMessage !Message
+
+receiveOutcome
+    :: ClaudeSDKTurn
+    -> Bool
+    -> IO ReceiveOutcome
+receiveOutcome turn sawOutput = do
+    received <-
+        timeout
+            (max 1 (streamTimeoutMicros turn sawOutput))
+            (receiveMessage turn)
+    pure case received of
+        Nothing -> ReceiveTimedOut
+        Just (Left err) -> ReceiveTransportError err
+        Just (Right Nothing) -> ReceiveEOF
+        Just (Right (Just message)) -> ReceivedMessage message
+
+streamTimeoutMicros :: ClaudeSDKTurn -> Bool -> Int
+streamTimeoutMicros turn sawOutput
+    | sawOutput = turnStreamInactivityTimeoutMicros turn
+    | otherwise = turnStreamStartupTimeoutMicros turn
+
+messageFromReceiveOutcome
+    :: ClaudeSDKTurn
+    -> Bool
+    -> ReceiveOutcome
+    -> ExceptT ClaudeSDKError IO Message
+messageFromReceiveOutcome turn sawOutput = \case
+    ReceiveTimedOut ->
+        liftIO
+            ( timeoutError
+                turn
+                ( if sawOutput
+                    then "stopped producing structured output"
+                    else "did not produce structured output"
                 )
-                (receiveMessage turn)
-        case maybeMessage of
-            Nothing ->
-                Left <$> timeoutError
-                    turn
-                    ( if sawOutput
-                        then "stopped producing structured output"
-                        else "did not produce structured output"
-                    )
-            Just (Left err) ->
-                pure (Left err)
-            Just (Right Nothing) ->
-                Left <$> prematureExitError turn
-            Just (Right (Just message)) -> do
-                validated <- validateMessage message
-                case validated of
-                    Left err ->
-                        pure (Left err)
-                    Right () ->
-                        case
-                            consumeQueryMessageWithProgress
-                                accumulator
-                                message
-                        of
-                            Left err ->
-                                pure (Left err)
-                            Right (nextAccumulator, progress, Nothing) -> do
-                                sessionAccepted <-
-                                    validateLiveProgressSession
-                                        turn
-                                        message
-                                        progress
-                                case sessionAccepted of
-                                    Left err -> pure (Left err)
-                                    Right () -> do
-                                        mapM_ onProgress progress
-                                        go
-                                            nextAccumulator
-                                            (sawOutput
-                                                || hasOwnOutputProgress progress)
-                            Right (_, progress, Just (messages, result)) -> do
-                                accepted <-
-                                    acceptTurnSessionId
-                                        turn
-                                        result.sessionId
-                                case accepted of
-                                    Left err ->
-                                        pure (Left err)
-                                    Right () -> do
-                                        mapM_ onProgress progress
-                                        mapM_ onMessage messages
-                                        pure $ Right QueryResult
-                                            { queryMessages = messages
-                                            , queryResultMessage = result
-                                            }
+            )
+            >>= throwE
+    ReceiveEOF ->
+        liftIO (prematureExitError turn) >>= throwE
+    ReceiveTransportError err ->
+        throwE err
+    ReceivedMessage message ->
+        pure message
+
+data ResponseStep
+    = ResponseContinues
+        !QueryAccumulator
+        ![QueryProgress]
+    | ResponseCompleted
+        ![QueryProgress]
+        ![Message]
+        !ResultMessage
+
+consumeResponseMessage
+    :: QueryAccumulator
+    -> Message
+    -> Either ClaudeSDKError ResponseStep
+consumeResponseMessage accumulator message = do
+    (nextAccumulator, progress, completion) <-
+        consumeQueryMessageWithProgress accumulator message
+    pure case completion of
+        Nothing ->
+            ResponseContinues nextAccumulator progress
+        Just (messages, result) ->
+            ResponseCompleted progress messages result
 
 queryResultOnly
     :: Either ClaudeSDKError QueryResult
@@ -383,16 +425,15 @@ validateLiveProgressSession
     :: ClaudeSDKTurn
     -> Message
     -> [QueryProgress]
-    -> IO (Either ClaudeSDKError ())
+    -> ExceptT ClaudeSDKError IO ()
 validateLiveProgressSession turn message progress
     | QueryConversationReset reset : _ <- progress = do
-        acceptConversationReset turn reset
-        pure (Right ())
-    | null progress = pure (Right ())
+        liftIO (acceptConversationReset turn reset)
+    | null progress = pure ()
     | otherwise =
         case messageSessionId message of
-            Nothing -> pure (Right ())
-            Just sessionId -> acceptTurnSessionId turn sessionId
+            Nothing -> pure ()
+            Just sessionId -> ExceptT (acceptTurnSessionId turn sessionId)
 
 hasOwnOutputProgress :: [QueryProgress] -> Bool
 hasOwnOutputProgress =
@@ -400,6 +441,21 @@ hasOwnOutputProgress =
         QueryMessageObserved{} -> True
         QueryMessagesRetracted{} -> True
         QueryConversationReset{} -> True
+
+withSDKTimeout
+    :: Int
+    -> IO ClaudeSDKError
+    -> ExceptT ClaudeSDKError IO a
+    -> ExceptT ClaudeSDKError IO a
+withSDKTimeout durationMicros timeoutFailure action =
+    ExceptT do
+        completed <-
+            timeout
+                (max 1 durationMicros)
+                (runExceptT action)
+        case completed of
+            Nothing -> Left <$> timeoutFailure
+            Just result -> pure result
 
 timeoutError :: ClaudeSDKTurn -> Text -> IO ClaudeSDKError
 timeoutError turn reason = do
