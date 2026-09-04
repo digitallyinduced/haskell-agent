@@ -133,10 +133,16 @@ jobs:
             --print-build-logs
 
           if [[ "$EVALUATE_FLAKE" == true ]]; then
-            # Building the CLI root first materialises the callCabal2nix
-            # import needed to evaluate every exported flake output on a
-            # fresh store. `--no-build` then checks their shape without
-            # duplicating the targeted builds above.
+            # The native CLI build materialises its GNU callCabal2nix
+            # imports, but packages.default uses a separate musl package set.
+            # Instantiate that derivation with builds enabled so its generated
+            # package expressions exist before `--no-build` checks every
+            # exported flake output.
+            "$nix_bin" eval \
+              --raw \
+              .#packages.x86_64-linux.default.drvPath \
+              --no-write-lock-file \
+              > /dev/null
             "$nix_bin" flake check \
               --no-build \
               --no-write-lock-file
