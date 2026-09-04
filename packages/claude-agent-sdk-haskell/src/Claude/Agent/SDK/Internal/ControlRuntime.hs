@@ -18,6 +18,7 @@ import Control.Concurrent.Async
     , asyncWithUnmask
     , cancel
     , mapConcurrently_
+    , waitCatch
     )
 import Control.Concurrent.Chan
     ( Chan
@@ -545,6 +546,10 @@ stopCore core reader = do
             timeout
                 core.coreHandlers.shutdownTimeoutMicros
                 (cancel reader)
+        void $
+            timeout
+                core.coreHandlers.shutdownTimeoutMicros
+                (waitCatch reader)
 
 controlException :: SomeException -> ClaudeSDKError
 controlException exception =

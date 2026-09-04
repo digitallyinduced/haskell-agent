@@ -25,6 +25,7 @@ import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef
     ( IORef
+    , atomicModifyIORef'
     , modifyIORef'
     , newIORef
     , readIORef
@@ -485,6 +486,57 @@ spec = describe "Claude SDK control protocol" do
                         pure ()
                 result `shouldBe` Just (Right ())
         takeMVar endInputObservedClosed `shouldReturn` False
+
+    it "joins reader cleanup past the shutdown timeout before transport close" do
+        factory <-
+            fakeTransportFactory \emit value ->
+                case request value of
+                    Just (requestId, "initialize", _) ->
+                        emit (successResponse requestId (Aeson.object []))
+                    _ -> pure ()
+        secondReadStarted <- newEmptyMVar
+        never <- newEmptyMVar
+        readerCleanupFinished <- newIORef False
+        closeSawFinishedCleanup <- newIORef False
+        let slowReaderFactory requestInfo = do
+                transport <- factory.transportFactory requestInfo
+                readCount <- newIORef (0 :: Int)
+                pure transport
+                    { transportRead = do
+                        current <-
+                            atomicModifyIORef' readCount \count ->
+                                (count + 1, count)
+                        if current == 0
+                            then transport.transportRead
+                            else
+                                finally
+                                    ( putMVar secondReadStarted ()
+                                        >> takeMVar never
+                                    )
+                                    ( uninterruptibleMask_ do
+                                        threadDelay 30_000
+                                        writeIORef readerCleanupFinished True
+                                    )
+                    , transportClose = do
+                        readIORef readerCleanupFinished
+                            >>= writeIORef closeSawFinishedCleanup
+                        transport.transportClose
+                    }
+            handlers =
+                defaultClaudeAgentHandlers
+                    { shutdownTimeoutMicros = 20_000
+                    }
+        result <-
+            withClaudeSDKClientWithTransportAndHandlers
+                testOptions
+                slowReaderFactory
+                handlers
+                \client ->
+                    withTurn client \_ -> do
+                        readMVar secondReadStarted
+                        pure (Right ((), pure ()))
+        result `shouldBe` Right ()
+        readIORef closeSawFinishedCleanup `shouldReturn` True
 
 permissionRequest :: Text -> Text -> Aeson.Value
 permissionRequest requestId toolName =
