@@ -2,7 +2,14 @@
 
 module Main (main) where
 import Agent.Json (RawJson, rawJsonFromEncoding)
+import Agent.JsonText (jsonTextFieldPartial)
+import Agent.Loop (LoopEvent(..))
 import qualified Agent.Responses.Codec as Codec
+import Agent.Responses.LoopBackend
+    ( newStreamEventToLoopEvents
+    , responseItemToToolCall
+    , streamEventToLoopEventWithRawReasoning
+    )
 import Agent.Responses.StreamAssembly
     ( StreamAssemblyConfig(..)
     , applyStreamEvent
@@ -13,15 +20,20 @@ import Agent.Responses.StreamAssembly
     )
 import Agent.Error (ApiError(..))
 import Agent.Responses.Types
+import Agent.ToolDispatch (ToolCall(..))
 import Control.Exception (evaluate)
-import Control.Monad (forM, (>=>))
+import Control.Monad (foldM, forM, (>=>))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (Pair)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef (atomicModifyIORef', newIORef)
 import Data.List (sort)
+import Data.Maybe (maybeToList)
+import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text.Encoding
 import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Stats
 import System.CPUTime (getCPUTime)
@@ -61,10 +73,36 @@ main = do
             samples <- forM [1 .. sampleCount] \_ ->
                 measure (runRequests iterations)
             report "request" iterations 0 samples
+        [mode, bodyArg, deltaArg, repeatArg, sampleArg]
+            | mode `elem`
+                ["tool-shell-baseline", "tool-shell", "tool-json"] -> do
+            bodyChars <- positive "argument body characters" bodyArg
+            deltaChars <- positive "delta characters" deltaArg
+            repetitions <- positive "repetition count" repeatArg
+            sampleCount <- positive "sample count" sampleArg
+            let events =
+                    toolArgumentEvents
+                        (mode /= "tool-json")
+                        bodyChars
+                        deltaChars
+            _ <- evaluate (sum (map argumentEventSize events))
+            samples <- forM [1 .. sampleCount] \_ ->
+                measure $
+                    if mode == "tool-shell-baseline"
+                        then runLegacyShellProjection repetitions events
+                        else runToolArgumentProjection repetitions events
+            report
+                (mode <> "-x" <> show repetitions)
+                bodyChars
+                deltaChars
+                samples
         _ -> die $
             "usage: responses-json-bench stream-online EVENTS DELTA_BYTES SAMPLES\n"
                 <> "   or: responses-json-bench stream-list EVENTS DELTA_BYTES SAMPLES\n"
-                <> "   or: responses-json-bench request ITERATIONS SAMPLES"
+                <> "   or: responses-json-bench request ITERATIONS SAMPLES\n"
+                <> "   or: responses-json-bench tool-shell-baseline BODY_CHARS DELTA_CHARS REPETITIONS SAMPLES\n"
+                <> "   or: responses-json-bench tool-shell BODY_CHARS DELTA_CHARS REPETITIONS SAMPLES\n"
+                <> "   or: responses-json-bench tool-json BODY_CHARS DELTA_CHARS REPETITIONS SAMPLES"
 positive :: String -> String -> IO Int
 positive label raw = case reads raw of
     [(value, "")] | value > 0 -> pure value
@@ -127,6 +165,217 @@ runRequests count = go count checksumSeed
                 (\value byte -> value * 33 + fromIntegral byte)
                 checksum bytes
         checksum' `seq` go (remaining - 1) checksum'
+
+runToolArgumentProjection :: Int -> [ResponseStreamEvent] -> IO Int
+runToolArgumentProjection repetitions events = go repetitions checksumSeed
+  where
+    go 0 !result = pure result
+    go remaining !result = do
+        project <- newStreamEventToLoopEvents False
+        next <- foldM (projectOne project) result events
+        go (remaining - 1) next
+    projectOne project !current event = do
+        projected <- project event
+        pure $! foldl' loopEventChecksum current projected
+
+-- Conservative compatibility baseline for the shell-preview hot path replaced
+-- by batching. Keep this local to the benchmark: each delta extends the
+-- previously published strict Text, reparses the entire prefix, and rebuilds
+-- the ToolArgumentsUpdated payload through the former per-event IORef shape.
+runLegacyShellProjection :: Int -> [ResponseStreamEvent] -> IO Int
+runLegacyShellProjection repetitions events =
+    go repetitions checksumSeed
+  where
+    go 0 !result = pure result
+    go remaining !result = do
+        project <- newLegacyShellProjector
+        next <- foldM (projectOne project) result events
+        go (remaining - 1) next
+
+    projectOne project !current event = do
+        projected <- project event
+        pure $! foldl' loopEventChecksum current projected
+
+newLegacyShellProjector
+    :: IO (ResponseStreamEvent -> IO [LoopEvent])
+newLegacyShellProjector = do
+    stateRef <- newIORef emptyLegacyShellState
+    pure \event -> do
+        argumentEvents <- atomicModifyIORef' stateRef \state ->
+            legacyShellStreamStep event state
+        pure $
+            maybeToList
+                (streamEventToLoopEventWithRawReasoning False event)
+                <> argumentEvents
+
+data LegacyShellState = LegacyShellState
+    { legacyShellCall :: !(Maybe ToolCall)
+    , legacyShellPreview :: !(Maybe Text)
+    }
+
+emptyLegacyShellState :: LegacyShellState
+emptyLegacyShellState = LegacyShellState
+    { legacyShellCall = Nothing
+    , legacyShellPreview = Nothing
+    }
+
+legacyShellStreamStep
+    :: ResponseStreamEvent
+    -> LegacyShellState
+    -> (LegacyShellState, [LoopEvent])
+legacyShellStreamStep event state = case event of
+    ResponseOutputItemAddedEvent { item = FunctionCallItem call } ->
+        ( state
+            { legacyShellCall =
+                responseItemToToolCall (FunctionCallItem call)
+            }
+        , []
+        )
+    ResponseFunctionCallArgumentsDeltaEvent { delta = Just deltaText } ->
+        maybe (state, [])
+            (\call -> publishLegacyShellCall
+                call
+                (appendLegacyArgumentPrefix call.arguments deltaText)
+                state)
+            state.legacyShellCall
+    ResponseFunctionCallArgumentsDoneEvent { arguments } ->
+        maybe (state, [])
+            (\call -> publishLegacyShellCall
+                call
+                (Text.copy
+                    (Text.take legacyShellArgumentPrefixChars
+                        (maybe call.arguments id arguments)))
+                state)
+            state.legacyShellCall
+    _ -> (state, [])
+
+legacyShellArgumentPrefixChars :: Int
+legacyShellArgumentPrefixChars = 4096
+
+appendLegacyArgumentPrefix :: Text -> Text -> Text
+appendLegacyArgumentPrefix previous delta
+    | room <= 0 = previous
+    | Text.null previous = retainedDelta
+    | otherwise = previous <> retainedDelta
+  where
+    room = legacyShellArgumentPrefixChars - Text.length previous
+    retainedDelta = Text.copy (Text.take room delta)
+
+publishLegacyShellCall
+    :: ToolCall
+    -> Text
+    -> LegacyShellState
+    -> (LegacyShellState, [LoopEvent])
+publishLegacyShellCall call rawArguments state =
+    let updatedCall = withLegacyToolArguments call rawArguments
+        maybeCommand =
+            Text.takeWhile (/= '\n')
+                <$> jsonTextFieldPartial "command" rawArguments
+        changed = maybe False
+            (\value ->
+                not (Text.null value)
+                    && Just value /= state.legacyShellPreview)
+            maybeCommand
+        displayCall command =
+            withLegacyToolArguments updatedCall $
+                Text.Encoding.decodeUtf8
+                    (LBS.toStrict
+                        (Aeson.encode
+                            (Aeson.object ["command" Aeson..= command])))
+        next = state
+            { legacyShellCall = Just updatedCall
+            , legacyShellPreview =
+                maybe state.legacyShellPreview Just maybeCommand
+            }
+    in
+    ( next
+    , [ ToolArgumentsUpdated (displayCall command)
+      | changed
+      , command <- maybeToList maybeCommand
+      ]
+    )
+
+withLegacyToolArguments :: ToolCall -> Text -> ToolCall
+withLegacyToolArguments ToolCall
+    { callId
+    , name
+    , callKind
+    , argumentsEncrypted
+    } arguments =
+    ToolCall
+        { callId
+        , name
+        , arguments
+        , callKind
+        , argumentsEncrypted
+        }
+
+toolArgumentEvents :: Bool -> Int -> Int -> [ResponseStreamEvent]
+toolArgumentEvents shell bodyChars deltaChars =
+    added : zipWith deltaEvent [1 ..] chunks <> [done]
+  where
+    name = if shell then "shell_command" else "grep"
+    field = if shell then "command" else "pattern"
+    arguments =
+        "{\"" <> field <> "\":\""
+            <> Text.replicate bodyChars "x"
+            <> "\"}"
+    chunks = Text.chunksOf deltaChars arguments
+    call = FunctionCall
+        { itemId = Just "benchmark-tool-item"
+        , callId = "benchmark-tool-call"
+        , name
+        , namespace = Nothing
+        , provider = Nothing
+        , arguments = ""
+        , encryptedFunctionArgs = Nothing
+        , status = Nothing
+        }
+    added = ResponseOutputItemAddedEvent
+        { item = FunctionCallItem call
+        , outputIndex = Just 0
+        , sequenceNumber = Just 0
+        }
+    deltaEvent sequenceNumber chunk =
+        ResponseFunctionCallArgumentsDeltaEvent
+            { delta = Just chunk
+            , streamItemId = call.itemId
+            , streamOutputIndex = Just 0
+            , sequenceNumber = Just sequenceNumber
+            }
+    done = ResponseFunctionCallArgumentsDoneEvent
+        { arguments = Just arguments
+        , functionName = Just name
+        , streamItemId = call.itemId
+        , streamOutputIndex = Just 0
+        , sequenceNumber = Just (length chunks + 1)
+        }
+
+argumentEventSize :: ResponseStreamEvent -> Int
+argumentEventSize = \case
+    ResponseOutputItemAddedEvent
+        { item = FunctionCallItem call } ->
+            Text.length call.name + Text.length call.arguments
+    ResponseFunctionCallArgumentsDeltaEvent { delta } ->
+        maybe 0 Text.length delta
+    ResponseFunctionCallArgumentsDoneEvent { arguments } ->
+        maybe 0 Text.length arguments
+    _ -> 0
+
+loopEventChecksum :: Int -> LoopEvent -> Int
+loopEventChecksum current event =
+    current * 33 + case event of
+        ToolStarted call -> callChecksum call
+        ToolUpdated call -> callChecksum call
+        ToolArgumentsUpdated call -> callChecksum call
+        ActivityUpdated text -> Text.length text
+        WarningRaised text -> Text.length text
+        _ -> 1
+  where
+    callChecksum call =
+        Text.length call.callId
+            + Text.length call.name
+            + Text.length call.arguments
 requestParams :: Int -> ResponseCreateParams
 requestParams iteration = defaultResponseCreateParams
     { model = Just "gpt-5"
