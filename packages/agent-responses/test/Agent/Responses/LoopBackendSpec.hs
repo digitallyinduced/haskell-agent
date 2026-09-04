@@ -21,7 +21,8 @@ import Agent.Provider
 import Agent.Json (rawJsonFromEncoding)
 import qualified Agent.Json.Decode as Json
 import Agent.Responses.LoopBackend
-    ( newStreamEventToLoopEvents
+    ( emptyStreamProjectionState
+    , newStreamEventToLoopEvents
     , statelessResponsesBackend
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
@@ -29,6 +30,7 @@ import Agent.Responses.LoopBackend
     , responseItemToToolCall
     , toolResultToItem
     , withRequestInput
+    , streamEventToLoopEventsStep
     )
 import Agent.Responses.Types
     ( MessageContent(..)
@@ -817,6 +819,33 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
 -- repaint the call, while other tools retain coarse activity updates.
 streamProjectionSpec :: Spec
 streamProjectionSpec = describe "newStreamEventToLoopEvents" do
+    it "starts a pure projection attempt without retaining reused tool ids" do
+        let (firstState, _) =
+                streamEventToLoopEventsStep False
+                    emptyStreamProjectionState
+                    (functionCallAdded "fc-1" "call-1" "shell_command")
+            (_, firstEvents) =
+                streamEventToLoopEventsStep False firstState
+                    (argumentsDelta "fc-1" "{\"command\":\"pwd\"}")
+            (secondState, _) =
+                streamEventToLoopEventsStep False
+                    emptyStreamProjectionState
+                    (functionCallAdded "fc-1" "call-2" "apply_patch")
+            (_, secondEvents) =
+                streamEventToLoopEventsStep False secondState
+                    (argumentsDelta "fc-1" "{}")
+        firstEvents `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    "{\"command\":\"pwd\"}")
+            ]
+        secondEvents `shouldSatisfy` \case
+            [ToolArgumentsUpdated call] ->
+                call.callId == "call-2" && call.name == "apply_patch"
+            _ -> False
+
     it "publishes Codex weekly capacity updates for retained prompt chrome" do
         projectEvent <- newStreamEventToLoopEvents False
         events <- projectEvent ResponseCodexRateLimitsEvent
