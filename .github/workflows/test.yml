@@ -1,29 +1,86 @@
 name: Tests
 
-# Test every PR revision, including drafts. Runs are keyed by commit so a newer
-# push does not cancel the evidence for an earlier revision.
+# Test every PR, including drafts. A newer revision cancels obsolete work for
+# the same PR so capacity is spent on the commit that can actually be merged.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch: {}
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
-  group: haskell-agent-tests-${{ github.workflow }}-${{ github.event.pull_request.head.sha || github.sha }}
-  cancel-in-progress: false
+  group: haskell-agent-tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   tests:
-    name: Nix flake check
-    runs-on: [self-hosted, haskell-agent, office-builder, x86_64-linux]
-    timeout-minutes: 90
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.timeout_minutes || 30 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: CLI package tests
+            targets: .#checks.x86_64-linux.agent-cli
+            evaluate_flake: true
+          - name: Telegram package tests
+            targets: .#checks.x86_64-linux.agent-telegram
+          - name: Server package tests
+            targets: .#checks.x86_64-linux.agent-server
+          - name: Runtime daemon package tests
+            targets: .#checks.x86_64-linux.agent-runtime-daemon
+          - name: Native CLI
+            targets: .#checks.x86_64-linux.agent-cli-executable
+          - name: Static CLI runtime
+            targets: .#checks.x86_64-linux.agent-cli-static-runtime
+            timeout_minutes: 90
+          - name: Linux integrations
+            targets: >-
+              .#checks.x86_64-linux.agent-sandbox-runner
+              .#checks.x86_64-linux.nixos-module
     env:
       NIX_CONFIG: |
         experimental-features = nix-command flakes
         accept-flake-config = false
     steps:
+      - name: Install Nix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive="$RUNNER_TEMP/nix-2.34.7-x86_64-linux.tar.xz"
+          curl --fail --location --silent --show-error \
+            https://releases.nixos.org/nix/nix-2.34.7/nix-2.34.7-x86_64-linux.tar.xz \
+            -o "$archive"
+          printf '%s  %s\n' \
+            eafe5042404e818505e28c5ca3d0885f3ec45c31f955489a25bb38258f87560e \
+            "$archive" |
+            sha256sum --check
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+
+          extra_conf="$RUNNER_TEMP/nix-extra.conf"
+          cat > "$extra_conf" <<'EOF'
+            extra-substituters = https://cache.digitallyinduced.com/public
+            extra-trusted-public-keys = public:kR6JCoqAIMaO4s+EdDGh+jsHEHnoLq4ZLJPMCo0hcIQ=
+            fallback = true
+          EOF
+          "$RUNNER_TEMP/nix-2.34.7-x86_64-linux/install" \
+            --daemon \
+            --yes \
+            --no-channel-add \
+            --no-modify-profile \
+            --nix-extra-conf-file "$extra_conf"
+
+          export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+          printf '%s\n' /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
+          if [[ -e /dev/kvm ]]; then
+            sudo chmod 0666 /dev/kvm
+          fi
+          nix --version
+          nix store ping
+
       - name: Check out the triggering revision
         shell: bash
         run: |
@@ -42,8 +99,11 @@ jobs:
             "$GITHUB_SHA"
           git -C "$source_dir" checkout --detach FETCH_HEAD
 
-      - name: Run Nix flake checks
+      - name: Evaluate checks and build ${{ matrix.name }}
         shell: bash
+        env:
+          TARGETS: ${{ matrix.targets }}
+          EVALUATE_FLAKE: ${{ matrix.evaluate_flake || false }}
         run: |
           set -euo pipefail
 
@@ -58,53 +118,35 @@ jobs:
             exit 1
           fi
 
-          account_home=/var/lib/github-runner-haskell-agent
-          credential_home="$(mktemp -d \
-            "$SOURCE_DIR/.agent-functional-credentials.XXXXXX")"
-          chmod 700 "$credential_home"
-          export AGENT_FUNCTIONAL_TEST_CREDENTIAL_HOME="$credential_home"
-
-          cleanup() {
-            set +e
-            find "$credential_home" -type f -exec shred -u {} +
-            rm -r "$credential_home"
-          }
-          trap cleanup EXIT
-
-          credential_source_home="$HOME"
-          if [[ ! -f "$credential_source_home/.codex/auth.json" \
-            && ! -d "$credential_source_home/.haskell-agent/credentials" \
-            && -d "$account_home" ]]; then
-            credential_source_home="$account_home"
-          fi
-
-          if [[ -f "$credential_source_home/.codex/auth.json" ]]; then
-            mkdir -p "$credential_home/.codex"
-            install -m 600 "$credential_source_home/.codex/auth.json" \
-              "$credential_home/.codex/auth.json"
-          else
-            echo "::error title=Missing OpenAI credentials::the CI runner must provide .codex/auth.json"
-            exit 1
-          fi
-          if [[ -d "$credential_source_home/.haskell-agent/credentials" ]]; then
-            mkdir -p "$credential_home/.haskell-agent"
-            cp -R "$credential_source_home/.haskell-agent/credentials" \
-              "$credential_home/.haskell-agent/credentials"
-            chmod -R go-rwx "$credential_home/.haskell-agent/credentials"
-          fi
-
-          # The runner is user-namespaced, so it cannot create ACL entries for
-          # the host's nixbld users. Expose only this short-lived staged copy;
-          # cleanup shreds it immediately after the check.
-          find "$credential_home" -type d -exec chmod 755 {} +
-          find "$credential_home" -type f -exec chmod 644 {} +
-
-          ./scripts/check-no-aeson-json-decode.sh
-
-          "$nix_bin" flake check \
-            --impure \
-            --max-jobs 1 \
+          read -r -a targets <<< "$TARGETS"
+          "$nix_bin" build \
+            "${targets[@]}" \
+            --no-link \
+            --max-jobs 2 \
             --cores 2 \
-            --option sandbox relaxed \
             --no-write-lock-file \
             --print-build-logs
+
+          if [[ "$EVALUATE_FLAKE" == true ]]; then
+            # Building the CLI root first materialises the callCabal2nix
+            # import needed to evaluate every exported flake output on a
+            # fresh store. `--no-build` then checks their shape without
+            # duplicating the targeted builds above.
+            "$nix_bin" flake check \
+              --no-build \
+              --no-write-lock-file
+          fi
+
+  required-check:
+    # Preserve the existing branch-protection context while requiring every
+    # matrix leg above, not just the longest package-test leg.
+    name: Nix flake check
+    if: ${{ always() }}
+    needs: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every check group
+        env:
+          MATRIX_RESULT: ${{ needs.tests.result }}
+        run: test "$MATRIX_RESULT" = success

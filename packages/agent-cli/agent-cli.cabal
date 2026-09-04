@@ -88,6 +88,13 @@ library
                     , Agent.CLI.Runtime.Orchestration.Flow
                     , Agent.CLI.Runtime.Orchestration.Initialized
                     , Agent.CLI.Runtime.Orchestration.Providers
+                    , Agent.CLI.Runtime.Orchestration.Providers.Claude
+                    , Agent.CLI.Runtime.Orchestration.Providers.Common
+                    , Agent.CLI.Runtime.Orchestration.Providers.Gemini
+                    , Agent.CLI.Runtime.Orchestration.Providers.OpenAI
+                    , Agent.CLI.Runtime.Orchestration.Providers.OpenRouter
+                    , Agent.CLI.Runtime.Orchestration.Providers.Types
+                    , Agent.CLI.Runtime.Orchestration.Providers.XAI
                     , Agent.CLI.Runtime.Orchestration.Restart
                     , Agent.CLI.Runtime.Orchestration.Session
                     , Agent.CLI.Runtime.Orchestration.Startup
@@ -343,6 +350,8 @@ executable agent-cli
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
+                    , directory
+                    , filepath
 
 foreign-library haskell-agent-bridge
     import:           common-options

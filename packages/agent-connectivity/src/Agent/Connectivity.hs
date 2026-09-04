@@ -22,7 +22,7 @@ import Agent.Error
     , apiErrorRetryAfter
     , isInlineRetryableProviderError
     )
-import Agent.Loop (Backend(..), LoopEvent(..))
+import Agent.Loop (Backend(..), BackendMiddleware, LoopEvent(..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race)
 import Control.Monad (when)
@@ -65,13 +65,13 @@ transientRetryDelayMicros apiError attempt =
 -- of times after their lower-level, replay-safe retry policy gives up.
 -- 'runLoopInputs' races every backend submission against the session cancel
 -- flag, so the sleep and all retries remain scoped to the current turn.
-withConnectionRecovery :: Backend -> Backend
+withConnectionRecovery :: BackendMiddleware
 withConnectionRecovery =
     withConnectionRecoveryUsingMaybeWatcher threadDelay Nothing
 
 -- | Retry as above, and also restart an in-flight provider submission as soon
 -- as macOS reports that an unavailable network path is satisfied again.
-withConnectionRecoveryOn :: Maybe NetworkRecovery -> Backend -> Backend
+withConnectionRecoveryOn :: Maybe NetworkRecovery -> BackendMiddleware
 withConnectionRecoveryOn recovery =
     withConnectionRecoveryUsingMaybeWatcher
         threadDelay
@@ -83,8 +83,7 @@ withConnectionRecoveryOn recovery =
 -- attempt visible rather than trying to splice or silently deduplicate it.
 withConnectionRecoveryUsing
     :: (Int -> IO ())
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 withConnectionRecoveryUsing waitMicros =
     withConnectionRecoveryUsingMaybeWatcher waitMicros Nothing
 
@@ -93,16 +92,14 @@ withConnectionRecoveryUsing waitMicros =
 withConnectionRecoveryUsingWatcher
     :: (Int -> IO ())
     -> RecoveryWatcher
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 withConnectionRecoveryUsingWatcher waitMicros watcher =
     withConnectionRecoveryUsingMaybeWatcher waitMicros (Just watcher)
 
 withConnectionRecoveryUsingMaybeWatcher
     :: (Int -> IO ())
     -> Maybe RecoveryWatcher
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 withConnectionRecoveryUsingMaybeWatcher
     waitMicros watcher (Backend submit) =
     Backend \state previous inputs onEvent ->

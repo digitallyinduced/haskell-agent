@@ -748,7 +748,7 @@ loadToolStartup request@AgentToolsRequest
             "gateway credential snapshot and session binding disagree"
     toolHarnessConfig <-
         loadHarnessConfig home >>= \case
-            Left err -> startupDie startup (Text.unpack err)
+            Left err -> startupDie startup err
             Right config -> pure config
     (toolGatewaySelection, toolGatewayAllowedChildModels) <-
         selectGatewayModels request
@@ -798,7 +798,7 @@ selectGatewayModels AgentToolsRequest
                                     Nothing ->
                                         startupDie startup $
                                             "Model '"
-                                                <> Text.unpack requested
+                                                <> requested
                                                 <> "' is not available through your organization gateway."
                                     Just selected -> pure selected
                             Nothing ->
@@ -1263,7 +1263,7 @@ prepareScratchRuntime AgentToolsRequest
         loadCurrentTaskPlan scratchPersistence >>= \case
             Left err ->
                 startupDie startup
-                    ("Failed to load current task plan: " <> Text.unpack err)
+                    ("Failed to load current task plan: " <> err)
             Right plan -> pure plan
     scratchTaskPlan <-
         newTaskPlanEnv
@@ -1316,7 +1316,7 @@ prepareScratchRuntime AgentToolsRequest
         acquireWorktreeLease (worktreeRoot home) cwd >>= \case
             Left err -> do
                 cleanupAllocatedScratch
-                startupDie startup (Text.unpack err)
+                startupDie startup err
             Right lease -> pure lease
     sessionTempLease <-
         (acquireSessionTempLease root scratchSessionTmp
@@ -1326,7 +1326,7 @@ prepareScratchRuntime AgentToolsRequest
                 Left err -> do
                     mapM_ releaseWorktreeLease worktreeLease
                     cleanupAllocatedScratch
-                    startupDie startup (Text.unpack err)
+                    startupDie startup err
                 Right lease -> pure lease
     let scratchCleanup =
             mapM_ releaseSessionTempLease sessionTempLease
@@ -1527,7 +1527,8 @@ acquireMcpRuntime request@AgentToolsRequest
                 >>= \case
                     Left exception ->
                         startupDie startup
-                            ("Failed to initialize MCP tools: " <> show exception)
+                            ("Failed to initialize MCP tools: "
+                                <> Text.pack (show exception))
                     Right lease -> pure lease
     bracketOnError
         acquireMcpLease
@@ -1634,7 +1635,7 @@ acquireCodingRuntime resourceScope AgentToolsRequest
                         Left err ->
                             startupDie startup
                                 ("Failed to initialize web_fetch: "
-                                    <> Text.unpack err)
+                                    <> err)
                         Right runtime -> pure runtime
         acquireLsp
             | not nativeCapabilities.nativeHostExtensions
