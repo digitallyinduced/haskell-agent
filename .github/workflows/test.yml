@@ -31,6 +31,11 @@ jobs:
             targets: .#checks.x86_64-linux.agent-server
           - name: Runtime daemon package tests
             targets: .#checks.x86_64-linux.agent-runtime-daemon
+          - name: Extracted package tests
+            targets: >-
+              .#checks.x86_64-linux.agent-repository
+              .#checks.x86_64-linux.agent-native-bridge
+              .#checks.x86_64-linux.package-boundaries
           - name: Native CLI
             targets: .#checks.x86_64-linux.agent-cli-executable
           - name: Static CLI runtime
