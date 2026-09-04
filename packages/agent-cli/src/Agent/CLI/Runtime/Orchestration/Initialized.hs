@@ -76,7 +76,8 @@ import Agent.CLI.Models
       ModelOption(modelTarget),
       ModelTarget(targetWireModelId, targetConnectionId, targetProvider,
                   targetModelId, targetDialect) )
-import Agent.CLI.Options ( CliOptions(optModel, optProvider, optYolo) )
+import Agent.CLI.Options
+    ( CliOptions(optModel, optProvider, optSkills, optYolo) )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
 import Agent.CLI.Project
@@ -146,7 +147,7 @@ import Agent.CLI.SessionEnv ()
 import Agent.CLI.SessionLock ( releaseSessionLock, SessionLock )
 import Agent.CLI.SessionState ()
 import Agent.CLI.SessionTitle ()
-import Agent.CLI.Skills ()
+import Agent.CLI.Skills ( loadSkillsCatalogQuiet )
 import Agent.CLI.Startup.Auth
     ( loadStartupAuth, loadStartupAuthFromResult, markStartupStage, startupDie )
 import Agent.CLI.StartupContext ()
@@ -192,7 +193,7 @@ import Agent.ReasoningEffort ()
 import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient ()
 import Agent.Responses.Types ()
-import Agent.Skills ()
+import Agent.Skills ( SkillCatalog(..) )
 import Agent.Store.Postgres ( trustedPool )
 import Agent.Store.Types ()
 import Agent.Subagents ()
@@ -284,6 +285,7 @@ data InitializedWorkspace = InitializedWorkspace
     , initializedDatabaseScopes :: DatabaseScopes
     , initializedProjectSettings :: ProjectSettings
     , initializedCatalog :: ModelCatalog
+    , initializedSkills :: SkillCatalog
     }
 
 data InitializedTargets = InitializedTargets
@@ -464,24 +466,40 @@ prepareInitializedWorkspace request = do
             projectRootPath >>= \case
             Left err -> startupDie startup err
             Right scopes -> pure scopes
-    ((projectSettings0, userSettings), (catalogResult, branch)) <-
-        concurrently
-            (concurrently
-                (maybe
-                    (loadProjectSettings projectRoot)
-                    (pure . (.nativeDiscoveryProjectSettings))
-                    preparedDiscovery)
-                (loadUserSettings home))
-            (concurrently
-                (loadModelCatalogAt home
+    let loadWorkspaceMetadata =
+            concurrently
+                (concurrently
                     (maybe
-                        cwd
-                        (.nativeDiscoveryCatalogRoot)
+                        (loadProjectSettings projectRoot)
+                        (pure . (.nativeDiscoveryProjectSettings))
+                        preparedDiscovery)
+                    (loadUserSettings home))
+                (concurrently
+                    (loadModelCatalogAt home
+                        (maybe
+                            cwd
+                            (.nativeDiscoveryCatalogRoot)
+                            preparedDiscovery))
+                    (maybe
+                        (detectGitBranch cwd)
+                        (pure . (.nativeDiscoveryGitBranch))
                         preparedDiscovery))
-                (maybe
-                    (detectGitBranch cwd)
-                    (pure . (.nativeDiscoveryGitBranch))
-                    preparedDiscovery))
+        loadInitialSkills =
+            loadSkillsCatalogQuiet
+                request.initializedOptions
+                home
+                projectRoot
+                cwd
+        shouldPreloadSkills =
+            request.initializedOptions.optSkills
+                && isNothing preparedDiscovery
+    (((projectSettings0, userSettings), (catalogResult, branch)),
+        initializedSkills) <-
+        if shouldPreloadSkills
+            then concurrently loadWorkspaceMetadata loadInitialSkills
+            else do
+                metadata <- loadWorkspaceMetadata
+                pure (metadata, SkillCatalog [] [])
     let projectSettings =
             withInheritedLastModel projectSettings0 userSettings
     catalog <- either
@@ -496,6 +514,7 @@ prepareInitializedWorkspace request = do
         , initializedDatabaseScopes = databaseScopes
         , initializedProjectSettings = projectSettings
         , initializedCatalog = catalog
+        , initializedSkills
         }
 
 resolveInitializedTargets
@@ -1248,6 +1267,7 @@ launchInitializedTools request workspace targets auth refs httpRuntime =
         refs.initializedActiveSelectionRef
         startup.startupToolEnv
         workspace.initializedCatalog
+        workspace.initializedSkills
         refs.initializedGatewayModelsRef
         targets.initializedGatewayIdentity
         ( targets.initializedCheckStartupUsageInBackground

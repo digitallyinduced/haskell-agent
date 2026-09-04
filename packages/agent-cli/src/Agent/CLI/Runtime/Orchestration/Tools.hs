@@ -185,7 +185,6 @@ import Agent.CLI.SessionLock
       sessionLockPath )
 import Agent.CLI.SessionState ( SessionState(sessionPreviewId) )
 import Agent.CLI.SessionTitle ()
-import Agent.CLI.Skills ( loadSkillsCatalogQuiet )
 import Agent.CLI.Startup.Auth
     ( markStartupStage, setStartupNotice, startupDie )
 import Agent.CLI.StartupContext ()
@@ -271,7 +270,7 @@ import Agent.ResourceScope
     , withResourceScope
     )
 import Agent.Skills
-    ( SkillCatalog(SkillCatalog)
+    ( SkillCatalog
     , SkillInvocation
     )
 import Agent.Store.Postgres ( trustedPool )
@@ -394,6 +393,7 @@ data AgentToolsRequest windowTitleResult = AgentToolsRequest
     , activeSelectionRef :: IORef Text
     , baseToolEnv :: ToolEnv
     , catalog :: ModelCatalog
+    , initialSkills :: SkillCatalog
     , gatewayModelsRef :: IORef (Maybe GatewayModelAccess)
     , gatewayIdentity :: Maybe Text
     , checkStartupUsageInBackground :: Bool
@@ -551,6 +551,7 @@ runAgentTools
     -> IORef Text
     -> ToolEnv
     -> ModelCatalog
+    -> SkillCatalog
     -> IORef (Maybe GatewayModelAccess)
     -> Maybe Text
     -> Bool
@@ -600,6 +601,7 @@ runAgentTools
     activeSelectionRef
     baseToolEnv
     catalog
+    initialSkills
     gatewayModelsRef
     gatewayIdentity
     checkStartupUsageInBackground
@@ -1567,10 +1569,7 @@ acquireLocalToolRuntime
 acquireLocalToolRuntime AgentToolsRequest
     { startup
     , baseToolEnv
-    , options
-    , home
-    , projectRoot
-    , cwd
+    , initialSkills
     } ToolModelRuntime
     { toolDialect = dialect
     } ToolHostHooks
@@ -1592,11 +1591,6 @@ acquireLocalToolRuntime AgentToolsRequest
                     baseToolEnv
                         { toolCwd = context.nativeDiscoveryProjectRoot }
                 Nothing -> baseToolEnv
-        acquireSkills =
-            case preparedDiscovery of
-                Nothing ->
-                    loadSkillsCatalogQuiet options home projectRoot cwd
-                Just _ -> pure (SkillCatalog [] [])
     bracketOnError
         (codingToolsForWithTypes
             dialect
@@ -1609,7 +1603,7 @@ acquireLocalToolRuntime AgentToolsRequest
             agentTypesRef)
         (.codingClose)
         \localCoding -> do
-            localInitialSkills <- acquireSkills
+            let localInitialSkills = initialSkills
             pure LocalToolRuntime{..}
 
 acquireCodingRuntime
