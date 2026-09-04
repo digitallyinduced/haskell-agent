@@ -144,7 +144,7 @@ stopManagedCommands session commands =
 startCodexShellCommand
     :: CodexShellSession
     -> OsPath
-    -> String
+    -> Text
     -> Int
     -> (Text -> Text -> IO ())
     -> IO (Either Text CodexShellResult)
@@ -303,7 +303,7 @@ takeRunningOutput task =
 startManagedCommand
     :: CodexShellSession
     -> OsPath
-    -> String
+    -> Text
     -> IO (Either Text (Int, ManagedCommand))
 startManagedCommand session workdir command =
     do
@@ -350,7 +350,7 @@ startManagedCommand session workdir command =
                                             session.sessionEnv
                                             (codexCompletionNotice
                                                 commandId
-                                                (Text.pack command)
+                                                command
                                                 result
                                                     { commandStdout = out
                                                     , commandStderr = err

@@ -51,9 +51,10 @@ mkDerivation {
     safe-exceptions stm text time transformers unix vty wai warp
   ];
   benchmarkHaskellDepends = [
-    aeson agent-core agent-json agent-responses agent-responses-types
-    agent-store async base brick bytestring containers deepseq
-    directory filepath JuicyPixels safe-exceptions text time vty
+    aeson agent-core agent-json agent-mcp agent-responses
+    agent-responses-types agent-store async base brick bytestring
+    containers deepseq directory filepath JuicyPixels safe-exceptions
+    text time vty
   ];
   description = "Command-line interface for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

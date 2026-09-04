@@ -955,13 +955,13 @@ receiveWsResponseWithActions modelHint actions onEvent =
                     failure.failureErrorCode
                     Nothing
 
-unparsedStreamEvent :: String -> LBS.ByteString -> ResponseStreamEvent
+unparsedStreamEvent :: Text -> LBS.ByteString -> ResponseStreamEvent
 unparsedStreamEvent err bytes =
     OtherResponseStreamEvent
         { otherEventType = StreamEventUnknown unparsedStreamEventTypeText
         , sequenceNumber = Nothing
         , eventDelta = Just
-            (Text.pack err <> ": " <> framePreview bytes)
+            (err <> ": " <> framePreview bytes)
         , streamItemId = Nothing
         , streamOutputIndex = Nothing
         , summaryIndex = Nothing

@@ -1,19 +1,53 @@
 module Agent.CLI.PromptSpec (spec) where
 
-import Agent.CLI.Prompt
+import Agent.CLI.Prompt hiding
+    ( systemPrompt
+    , systemPromptForTools
+    , systemPromptForToolsWithHostedSearch
+    )
+import qualified Agent.CLI.Prompt as Prompt
 import Agent.Dialect
-    ( claudeCodeDialect
+    ( Dialect
+    , claudeCodeDialect
     , codexDialect
     , genericResponsesDialect
     , grokBuildDialect
     )
-import System.OsPath (unsafeEncodeUtf)
 import Agent.Provider (BillingMode(..), Provider(..))
-import Data.Time.Calendar (fromGregorian)
+import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time.Calendar (Day, fromGregorian)
+import System.OsPath (OsPath, unsafeEncodeUtf)
 import Test.Hspec
 
+fromFilePath :: String -> OsPath
 fromFilePath = unsafeEncodeUtf
+
+systemPrompt
+    :: Dialect -> OsPath -> Maybe OsPath -> Day -> Bool -> Text
+systemPrompt dialect =
+    Prompt.systemPrompt dialect "gpt-5.6-sol" "high"
+
+systemPromptForTools
+    :: Dialect -> [Text] -> OsPath -> Maybe OsPath -> Day -> Bool -> Text
+systemPromptForTools dialect =
+    Prompt.systemPromptForTools dialect "gpt-5.6-sol" "high"
+
+systemPromptForToolsWithHostedSearch
+    :: Bool
+    -> Dialect
+    -> [Text]
+    -> OsPath
+    -> Maybe OsPath
+    -> Day
+    -> Bool
+    -> Text
+systemPromptForToolsWithHostedSearch includeHostedSearch dialect =
+    Prompt.systemPromptForToolsWithHostedSearch
+        includeHostedSearch
+        dialect
+        "gpt-5.6-sol"
+        "high"
 
 spec :: Spec
 spec = describe "systemPrompt" do
@@ -88,6 +122,8 @@ spec = describe "systemPrompt" do
         claude `shouldSatisfy` Text.isInfixOf "at most five minutes"
         claude `shouldSatisfy` Text.isInfixOf
             "report its current status and URL"
+        claude `shouldSatisfy` Text.isInfixOf
+            "Co-authored-by: Haskell Agent (gpt-5.6-sol, high) <agent@digitallyinduced.com>"
 
     it "uses a neutral identity for generic Responses models" do
         let generic =
@@ -327,6 +363,36 @@ spec = describe "systemPrompt" do
         bashOnly `shouldSatisfy` Text.isInfixOf "shell_command"
         bashOnly `shouldNotSatisfy` Text.isInfixOf "run_ghci"
         bashOnly `shouldNotSatisfy` Text.isInfixOf "Prefer ghci for scripting"
+        ghciOnly `shouldSatisfy` Text.isInfixOf
+            "Co-authored-by: Haskell Agent (gpt-5.6-sol, high) <agent@digitallyinduced.com>"
+        bashOnly `shouldSatisfy` Text.isInfixOf
+            "Co-authored-by: Haskell Agent (gpt-5.6-sol, high) <agent@digitallyinduced.com>"
+
+    it "uses the actual runtime model and reasoning effort in attribution" do
+        let prompt =
+                Prompt.systemPromptForTools
+                    codexDialect
+                    "gpt-5.6-terra"
+                    "xhigh"
+                    ["shell_command"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+        prompt `shouldSatisfy` Text.isInfixOf
+            "Co-authored-by: Haskell Agent (gpt-5.6-terra, xhigh) <agent@digitallyinduced.com>"
+
+    it "omits commit attribution when no command tool can create commits" do
+        let prompt =
+                systemPromptForTools
+                    genericResponsesDialect
+                    ["read_file", "grep", "apply_patch"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+        prompt `shouldNotSatisfy` Text.isInfixOf
+            "Co-authored-by: Haskell Agent"
 
     it "omits hidden Grok terminal names from ghci-only prompts" do
         let prompt =
