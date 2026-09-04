@@ -18,7 +18,7 @@ import Control.Concurrent.Async
     ( async
     , wait
     )
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, finally)
 import Control.Monad (void)
 import Data.Aeson (object)
 import Data.Text (Text)
@@ -143,6 +143,45 @@ spec = describe "turn supervisor" do
                 localAccessBoundary
                 "session-a"
                 `shouldReturn` False
+
+    it "cancels active workers concurrently during shutdown" do
+        firstStarted <- newEmptyMVar
+        secondStarted <- newEmptyMVar
+        firstCancelled <- newEmptyMVar
+        secondCancelled <- newEmptyMVar
+        releaseFirst <- newEmptyMVar
+        releaseSecond <- newEmptyMVar
+        never <- newEmptyMVar
+        let runner _ turn = do
+                let (started, cancelled, release)
+                        | turn.turnSpecSessionId == "session-a" =
+                            (firstStarted, firstCancelled, releaseFirst)
+                        | otherwise =
+                            (secondStarted, secondCancelled, releaseSecond)
+                (putMVar started () >> takeMVar never)
+                    `finally`
+                        (putMVar cancelled () >> takeMVar release)
+        withSupervisorConfig
+            defaultConfig
+                { supervisorMaxConcurrentTurns = 2
+                , supervisorMaxConcurrentTurnsPerTenant = 2
+                }
+            runner \supervisor -> do
+                void (submitTurn supervisor (turnSpec "session-a"))
+                void (submitTurn supervisor (turnSpec "session-b"))
+                takeWithin firstStarted
+                takeWithin secondStarted
+
+                shutdown <- async (closeSupervisor supervisor)
+                cancelledTogether <-
+                    timeout 500_000 do
+                        takeMVar firstCancelled
+                        takeMVar secondCancelled
+                putMVar releaseFirst ()
+                putMVar releaseSecond ()
+                wait shutdown
+
+                cancelledTogether `shouldBe` Just ()
 
     it "keeps queued turns from blocking work in another session" do
         firstStarted <- newEmptyMVar
