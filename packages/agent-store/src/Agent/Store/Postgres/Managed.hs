@@ -12,6 +12,7 @@
 -- start and recovery.
 module Agent.Store.Postgres.Managed
     ( ManagedPostgresStatus(..)
+    , prepareManagedPostgres
     , managedPostgresStatus
     , ensureManagedPostgres
     , stopManagedPostgres
@@ -27,6 +28,7 @@ import qualified Data.Text.Encoding as Text
 import System.Directory
     ( createDirectoryIfMissing
     , doesFileExist
+    , doesPathExist
     )
 import System.Exit (ExitCode(..))
 import qualified System.FileLock as FileLock
@@ -42,6 +44,25 @@ data ManagedPostgresStatus
     | PostgresStopped
     | PostgresRunning
     deriving (Eq, Show)
+
+-- | Perform the cheap, process-free checks required before either connecting
+-- to an already-running cluster or entering the lifecycle-managed fallback.
+--
+-- The result says whether the configured PostgreSQL Unix socket currently
+-- exists. Its presence is only a hint: callers must still validate a direct
+-- connection and fall back to 'ensureManagedPostgres' when that fails.
+prepareManagedPostgres
+    :: ManagedPostgresConfig
+    -> IO (Either StoreError Bool)
+prepareManagedPostgres config =
+    case validateConfig config of
+        Left err -> pure (Left err)
+        Right () -> do
+            prepareDirectories config
+            validateClusterVersion config >>= \case
+                Left err -> pure (Left err)
+                Right () ->
+                    Right <$> doesPathExist (postgresSocketPath config)
 
 managedPostgresStatus
     :: ManagedPostgresConfig

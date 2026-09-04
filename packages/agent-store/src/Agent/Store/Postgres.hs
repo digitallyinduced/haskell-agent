@@ -60,54 +60,74 @@ openStoreWithRuntimeRole
     -> Text
     -> IO (Either StoreError Store)
 openStoreWithRuntimeRole config runtimeRole = mask \restore ->
-    restore (ensureManagedPostgres config) >>= \case
+    restore (openStartupOwnerPool config) >>= \case
         Left err -> pure (Left err)
-        Right _ -> do
-            restore (openStorePool config defaultPoolConfig) >>= \case
-                Left err -> pure (Left err)
-                Right ownerPool -> do
-                    migrationResult <-
+        Right ownerPool -> do
+            migrationResult <-
+                restore
+                    (runCoreMigrationsForRuntimeRole ownerPool runtimeRole)
+                    `onException` closeStorePool ownerPool
+            case migrationResult of
+                Left err ->
+                    closeStorePool ownerPool >> pure (Left err)
+                Right () -> do
+                    runtimeResult <-
                         restore
-                            (runCoreMigrationsForRuntimeRole
-                                ownerPool runtimeRole)
+                            (openRoleStorePool
+                                config
+                                runtimeRole
+                                defaultPoolConfig)
                             `onException` closeStorePool ownerPool
-                    case migrationResult of
-                        Left err ->
-                            closeStorePool ownerPool >> pure (Left err)
-                        Right () -> do
-                            runtimeResult <-
-                                restore
-                                    (openRoleStorePool
+                    case runtimeResult of
+                        Left err -> do
+                            closeStorePool ownerPool
+                            pure (Left err)
+                        Right runtimePool -> do
+                            pools <- newPoolCache
+                                8
+                                storeClosedError
+                                storeExceptionError
+                                (\role ->
+                                    openRoleStorePool
                                         config
-                                        runtimeRole
-                                        defaultPoolConfig)
-                                    `onException` closeStorePool ownerPool
-                            case runtimeResult of
-                                    Left err -> do
-                                        closeStorePool ownerPool
-                                        pure (Left err)
-                                    Right runtimePool -> do
-                                        pools <- newPoolCache
-                                            8
-                                            storeClosedError
-                                            storeExceptionError
-                                            (\role ->
-                                                openRoleStorePool
-                                                    config
-                                                    role
-                                                    (defaultPoolConfig
-                                                        { poolSize = 2
-                                                        }))
-                                            closeStorePool
-                                        closeState <- newMVar StoreOpen
-                                        pure $ Right Store
-                                            { storeConfigInternal = config
-                                            , provisioningPoolInternal =
-                                                ownerPool
-                                            , trustedPoolInternal = runtimePool
-                                            , scopePoolsInternal = pools
-                                            , storeCloseInternal = closeState
-                                            }
+                                        role
+                                        (defaultPoolConfig
+                                            { poolSize = 2
+                                            }))
+                                closeStorePool
+                            closeState <- newMVar StoreOpen
+                            pure $ Right Store
+                                { storeConfigInternal = config
+                                , provisioningPoolInternal = ownerPool
+                                , trustedPoolInternal = runtimePool
+                                , scopePoolsInternal = pools
+                                , storeCloseInternal = closeState
+                                }
+
+-- | Reuse a direct owner connection when the managed cluster is already
+-- running. The socket check avoids paying even the short connection timeout
+-- on cold startup; any failed optimistic connection falls back to the existing
+-- lifecycle lock and provisioning commands.
+openStartupOwnerPool
+    :: ManagedPostgresConfig
+    -> IO (Either StoreError StorePool)
+openStartupOwnerPool config =
+    prepareManagedPostgres config >>= \case
+        Left err -> pure (Left err)
+        Right socketExists
+            | socketExists ->
+                openStorePoolWithConnectionTimeout
+                    config
+                    1
+                    defaultPoolConfig >>= \case
+                    Right pool -> pure (Right pool)
+                    Left _ -> ensureAndOpen
+            | otherwise -> ensureAndOpen
+  where
+    ensureAndOpen =
+        ensureManagedPostgres config >>= \case
+            Left err -> pure (Left err)
+            Right _ -> openStorePool config defaultPoolConfig
 
 closeStore :: Store -> IO ()
 closeStore store =

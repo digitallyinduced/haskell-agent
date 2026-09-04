@@ -9,6 +9,7 @@ module Agent.Store.Postgres.Config
     , defaultManagedPostgresConfig
     , managedPostgresConfigFromEnv
     , postgresExecutable
+    , postgresSocketPath
     , socketHost
     , postgresqlConf
     , pgHbaConf
@@ -85,6 +86,12 @@ postgresExecutable :: ManagedPostgresConfig -> FilePath -> FilePath
 postgresExecutable config executable
     | null config.postgresBinDirectory = executable
     | otherwise = config.postgresBinDirectory </> executable
+
+-- | Filesystem path used by PostgreSQL for this cluster's Unix socket.
+postgresSocketPath :: ManagedPostgresConfig -> FilePath
+postgresSocketPath config =
+    config.postgresPaths.postgresSocketDirectory
+        </> (".s.PGSQL." <> show config.postgresPort)
 
 socketHost :: ManagedPostgresConfig -> ByteString
 socketHost config =

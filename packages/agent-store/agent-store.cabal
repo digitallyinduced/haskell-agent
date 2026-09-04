@@ -162,6 +162,19 @@ benchmark real-session-load-bench
                     , time
                     , vector
 
+benchmark managed-startup-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ManagedStartup.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-store
+                    , base >= 4.14 && < 5
+                    , hasql
+                    , safe-exceptions
+                    , temporary
+                    , text
+
 test-suite agent-store-test
     import:           common-opts
     type:             exitcode-stdio-1.0

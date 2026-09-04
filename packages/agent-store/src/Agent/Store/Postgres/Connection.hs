@@ -11,6 +11,7 @@ module Agent.Store.Postgres.Connection
     , defaultPoolConfig
     , connectionSettingsForRole
     , openStorePool
+    , openStorePoolWithConnectionTimeout
     , openRoleStorePool
     , closeStorePool
     , withStorePool
@@ -60,12 +61,22 @@ connectionSettingsForRole
     -> Text
     -> ConnectionSettings.Settings
 connectionSettingsForRole config role =
+    connectionSettingsForRoleWithTimeout config role 10
+
+connectionSettingsForRoleWithTimeout
+    :: ManagedPostgresConfig
+    -> Text
+    -> Int
+    -> ConnectionSettings.Settings
+connectionSettingsForRoleWithTimeout config role timeoutSeconds =
     ConnectionSettings.hostAndPort
         (Text.pack config.postgresPaths.postgresSocketDirectory)
         config.postgresPort
         <> ConnectionSettings.user role
         <> ConnectionSettings.dbname config.postgresDatabase
-        <> ConnectionSettings.other "connect_timeout" "10"
+        <> ConnectionSettings.other
+            "connect_timeout"
+            (Text.pack (show timeoutSeconds))
         <> ConnectionSettings.applicationName "haskell-agent"
 
 openStorePool
@@ -75,19 +86,48 @@ openStorePool
 openStorePool config =
     openRoleStorePool config config.postgresOwnerRole
 
+-- | Open the owner pool with a bounded libpq connection attempt. This is used
+-- for an optimistic warm-start probe before lifecycle management takes over.
+openStorePoolWithConnectionTimeout
+    :: ManagedPostgresConfig
+    -> Int
+    -> PoolConfig
+    -> IO (Either StoreError StorePool)
+openStorePoolWithConnectionTimeout config timeoutSeconds =
+    openRoleStorePoolWithConnectionTimeout
+        config
+        config.postgresOwnerRole
+        timeoutSeconds
+
 openRoleStorePool
     :: ManagedPostgresConfig
     -> Text
     -> PoolConfig
     -> IO (Either StoreError StorePool)
-openRoleStorePool config role options = mask \restore -> do
+openRoleStorePool config role =
+    openRoleStorePoolWithConnectionTimeout config role 10
+
+openRoleStorePoolWithConnectionTimeout
+    :: ManagedPostgresConfig
+    -> Text
+    -> Int
+    -> PoolConfig
+    -> IO (Either StoreError StorePool)
+openRoleStorePoolWithConnectionTimeout
+    config
+    role
+    timeoutSeconds
+    options = mask \restore -> do
     pool <- Pool.acquire Pqi.adapter $ PoolConfig.settings
         [ PoolConfig.size options.poolSize
         , PoolConfig.acquisitionTimeout options.poolAcquisitionTimeout
         , PoolConfig.agingTimeout options.poolAgingTimeout
         , PoolConfig.idlenessTimeout options.poolIdlenessTimeout
         , PoolConfig.staticConnectionSettings
-            (connectionSettingsForRole config role)
+            (connectionSettingsForRoleWithTimeout
+                config
+                role
+                timeoutSeconds)
         ]
     validationResult <-
         restore (Pool.use pool (pure ()))
