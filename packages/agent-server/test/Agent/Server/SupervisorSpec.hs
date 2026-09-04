@@ -17,6 +17,7 @@ import Control.Concurrent.STM
 import Control.Concurrent.Async
     ( async
     , wait
+    , withAsync
     )
 import Control.Exception.Safe (bracket, finally)
 import Control.Monad (void)
@@ -172,16 +173,23 @@ spec = describe "turn supervisor" do
                 takeWithin firstStarted
                 takeWithin secondStarted
 
-                shutdown <- async (closeSupervisor supervisor)
-                cancelledTogether <-
-                    timeout 500_000 do
-                        takeMVar firstCancelled
-                        takeMVar secondCancelled
-                putMVar releaseFirst ()
-                putMVar releaseSecond ()
-                wait shutdown
+                withAsync (closeSupervisor supervisor) \shutdown ->
+                    finally
+                        (do
+                            cancelledTogether <-
+                                timeout 500_000 do
+                                    takeMVar firstCancelled
+                                    takeMVar secondCancelled
+                            putMVar releaseFirst ()
+                            putMVar releaseSecond ()
+                            wait shutdown
 
-                cancelledTogether `shouldBe` Just ()
+                            cancelledTogether `shouldBe` Just ()
+                        )
+                        (do
+                            void (tryPutMVar releaseFirst ())
+                            void (tryPutMVar releaseSecond ())
+                        )
 
     it "keeps queued turns from blocking work in another session" do
         firstStarted <- newEmptyMVar
