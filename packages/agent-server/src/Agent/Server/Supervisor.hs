@@ -35,6 +35,7 @@ import Control.Concurrent.Async
     ( Async
     , async
     , cancel
+    , mapConcurrently_
     , waitCatch
     )
 import Control.Concurrent.MVar
@@ -304,9 +305,8 @@ closeSupervisor supervisor = mask \restore -> do
                 void $
                     timeout cancelHookTimeoutMicros
                         (void (tryAny (restore action)))
-        stopWorkers = do
-            forM_ workers cancel
-            forM_ workers (void . waitCatch)
+        stopWorkers =
+            mapConcurrently_ cancel workers
         stopDispatcher = do
             dispatcher <- readMVar supervisor.supervisorDispatcher
             cancel dispatcher
