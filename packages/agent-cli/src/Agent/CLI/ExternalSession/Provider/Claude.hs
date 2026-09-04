@@ -12,7 +12,7 @@ import Agent.CLI.ExternalSession.SQLite
 import Agent.CLI.ExternalSession.Types
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
-import Control.Monad (filterM, when)
+import Control.Monad (filterM)
 import Data.Aeson (Value(..), decodeStrict', encode)
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
@@ -78,25 +78,29 @@ claudeMetadata
 claudeMetadata env path
     | not (isClaudeTranscript path) = pure Nothing
     | otherwise = do
-        stateRef <- newIORef ClaudeMetadataState
-            { metadataCwd = Nothing
-            , metadataSessionId = Text.pack (dropJsonl path)
-            , metadataFirstUser = ""
-            , metadataCustomTitle = ""
-            , metadataAiTitle = ""
-            , metadataSummary = ""
-            , metadataCreated = Nothing
-            , metadataUpdated = Nothing
-            }
         result <- tryAny $
-            consumeJsonl env path Nothing \record -> do
-                when (not (truthy (externalObjectValue "isSidechain" record))) $
-                    modifyIORef' stateRef (consumeClaudeMetadata record)
-                pure JsonlContinue
+            foldJsonl env path Nothing
+                ClaudeMetadataState
+                    { metadataCwd = Nothing
+                    , metadataSessionId = Text.pack (dropJsonl path)
+                    , metadataFirstUser = ""
+                    , metadataCustomTitle = ""
+                    , metadataAiTitle = ""
+                    , metadataSummary = ""
+                    , metadataCreated = Nothing
+                    , metadataUpdated = Nothing
+                    }
+                \state record ->
+                    pure
+                        ( if truthy
+                                (externalObjectValue "isSidechain" record)
+                            then state
+                            else consumeClaudeMetadata record state
+                        , JsonlContinue
+                        )
         case result of
             Left _ -> pure Nothing
-            Right _ -> do
-                state <- readIORef stateRef
+            Right (state, _) -> do
                 let title =
                         firstNonEmptyText
                             [ nonEmptyText state.metadataCustomTitle
@@ -179,20 +183,23 @@ readClaude env candidate maxToolChars =
         "resume-claude-chain.sqlite"
         \database -> do
             initializeClaudeIndex database
-            sequenceRef <- newIORef (0 :: Int)
-            unindexableRef <- newIORef (0 :: Int)
-            counters <- consumeJsonl env candidate.candidatePath Nothing
-                \record -> do
-                    indexClaudeRecord database candidate sequenceRef
-                        unindexableRef record
-                    pure JsonlContinue
-            unindexable <- readIORef unindexableRef
+            (indexState, counters) <-
+                foldJsonl env candidate.candidatePath Nothing
+                    (ClaudeIndexState 0 0)
+                    \indexState record -> do
+                        nextState <-
+                            indexClaudeRecord
+                                database
+                                candidate
+                                indexState
+                                record
+                        pure (nextState, JsonlContinue)
             leaf <- claudeLeaf database
             stateRef <- newIORef ClaudeReadState
                 { claudeTurnsFromLeaf = []
                 , claudeLastUser = Nothing
                 , claudeLastAssistant = Nothing
-                , claudeSkipped = unindexable
+                , claudeSkipped = indexState.claudeIndexUnindexable
                 , claudeOmissions = mempty
                 }
             mapM_ (walkClaudeChain database maxToolChars stateRef) leaf
@@ -230,22 +237,25 @@ initializeClaudeIndex database = do
         "CREATE TABLE claude_visited (uuid TEXT PRIMARY KEY)"
         []
 
+data ClaudeIndexState = ClaudeIndexState
+    { claudeIndexSequence :: !Int
+    , claudeIndexUnindexable :: !Int
+    }
+
 indexClaudeRecord
     :: Database
     -> ExternalCandidate
-    -> IORef Int
-    -> IORef Int
+    -> ClaudeIndexState
     -> Value
-    -> IO ()
-indexClaudeRecord database candidate sequenceRef unindexableRef record =
+    -> IO ClaudeIndexState
+indexClaudeRecord database candidate state record =
     case externalTextValue "uuid" record of
         Just uuid
             | externalTextValue "type" record
                 `elem` map Just ["user", "assistant", "system", "attachment"]
             , not (truthy (externalObjectValue "isSidechain" record)) -> do
-                modifyIORef' sequenceRef (+ 1)
-                sequenceNumber <- readIORef sequenceRef
-                let parent =
+                let nextSequence = state.claudeIndexSequence + 1
+                    parent =
                         firstNonEmptyText
                             [ externalTextValue "parentUuid" record
                             , externalTextValue "logicalParentUuid" record
@@ -264,13 +274,21 @@ indexClaudeRecord database candidate sequenceRef unindexableRef record =
                     \sort_time = excluded.sort_time, \
                     \payload = excluded.payload"
                     [ SQLText uuid
-                    , SQLInteger (fromIntegral sequenceNumber)
+                    , SQLInteger (fromIntegral nextSequence)
                     , SQLText parent
                     , SQLFloat sortTime
                     , SQLBlob (LBS.toStrict (encode record))
                     ]
-        _ -> pure ()
-  `catchAnyIndex` \_ -> modifyIORef' unindexableRef (+ 1)
+                pure state
+                    { claudeIndexSequence = nextSequence
+                    }
+        _ -> pure state
+  `catchAnyIndex` \_ ->
+        pure ClaudeIndexState
+            { claudeIndexSequence = state.claudeIndexSequence + 1
+            , claudeIndexUnindexable =
+                state.claudeIndexUnindexable + 1
+            }
 
 catchAnyIndex :: IO value -> (Text -> IO value) -> IO value
 catchAnyIndex action handle =

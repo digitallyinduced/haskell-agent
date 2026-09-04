@@ -30,7 +30,9 @@ import Agent.CLI.Compaction
       runProviderCompactWith,
       runBackendCompactHistoryWithLimits,
       runBackendCompactWithLimits,
-      runResponsesCompactWithContextWindow )
+      runResponsesCompactWithContextWindow,
+      runXaiBackendCompactHistoryWithContextWindow,
+      runXaiResponsesCompactWithContextWindow )
 import Agent.CLI.Config ()
 import Agent.Connectivity ( withConnectionRecoveryOn )
 import Agent.CLI.Database ()
@@ -168,6 +170,7 @@ import Agent.OpenAI.ModelMetadata (codexEffectiveContextWindowFor)
 import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..),
+      CodexConn,
       closeCodexConn,
       codexConnTurnState,
       codexConnUsesHttpFallback,
@@ -204,13 +207,13 @@ import Agent.Tools.Secret ()
 import Agent.Tools.Types ()
 import Agent.Tools.OutputArtifact (finalizeToolOutput)
 import Agent.ToolDispatch (ToolDispatchConfig(..))
-import Agent.XAI.LoopBackend ( xaiBackend )
+import Agent.XAI.LoopBackend ( xaiBackendWithClientOptions )
 import Control.Applicative ()
 import Control.Concurrent.Async ( link, withAsync )
 import Control.Concurrent.Chan
     ( Chan, newChan, readChan, writeChan )
 import Control.Concurrent.MVar
-    ( withMVar, newEmptyMVar, newMVar, putMVar, takeMVar, tryPutMVar )
+    ( MVar, withMVar, newEmptyMVar, newMVar, putMVar, takeMVar, tryPutMVar )
 import Control.Concurrent.STM (STM)
 import Control.Exception ()
 import Control.Exception.Safe ( catchAny, finally, try )
@@ -252,8 +255,10 @@ import qualified Agent.CLI.Session.Runner as SessionRunner
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text ( null, unpack )
 import qualified Agent.XAI.Options as XAI
-    ( ClientOptions(hostedXSearchEnabled)
+    ( ClientOptions(..)
     , clientOptionsFromEnv
+    , grokAutoCompactTokenLimit
+    , grokDefaultContextWindow
     )
 import qualified Agent.XAI.Client as XAIClient
     ( createResponseWith )
@@ -263,6 +268,68 @@ import qualified Agent.Gemini.Client as GeminiClient
     ( createResponseWith, createResponseWithEvents )
 import qualified Agent.Gemini.Options as Gemini
     ( clientOptionsFromEnv )
+
+data AgentProviderRequest = AgentProviderRequest
+    { modelSwitchScope :: ModelSwitchScope
+    , loaded :: LoadedAuth
+    , connectedGateway :: Maybe GatewayCredential
+    , sessionRequest
+        :: Maybe (STM ApiError)
+        -> Maybe TokenProvider
+        -> Maybe Pool
+        -> Maybe (Text -> IO (Either ApiError Text))
+        -> IO (Maybe Int)
+        -> (Maybe Text -> IO (Either Text CompactOutcome))
+        -> SessionRequest
+    , activeAccountIdRef :: IORef Text
+    , activeAccountRef :: IORef Text
+    , activeSelectionRef :: IORef Text
+    , catalog :: ModelCatalog
+    , claudeBypassEnabled :: Bool
+    , contextTokensRef :: IORef (Maybe OccupancySnapshot)
+    , contextWindowForParams
+        :: (Text -> Text)
+        -> Int
+        -> ResponseCreateParams
+        -> Int
+    , conversationRef :: IORef LiveConversation
+    , currentModelContextWindow
+        :: (Text -> Text)
+        -> IO (Maybe Int)
+    , customGenericOptions :: Maybe GenericResponses.GenericClientOptions
+    , cwd :: OsPath
+    , dialect :: Dialect
+    , fullscreen :: Maybe FullscreenRuntime
+    , automaticCompactionHookRef
+        :: IORef
+            (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
+    , taskPlan :: Maybe TaskPlanEnv
+    , home :: OsPath
+    , initialPrevious :: Maybe Text
+    , model :: Text
+    , multiCtx :: Maybe MultiAgentContext
+    , openRouterOptions :: ClientOptions
+    , options :: CliOptions
+    , paramsRef :: IORef ResponseCreateParams
+    , pendingNotices :: PendingInputs
+    , persist :: Persistence
+    , preferredOpenAiAccountRef :: IORef (Maybe Text)
+    , projectRoot :: OsPath
+    , provider :: Provider
+    , recordCompactionUsage :: TokenUsage -> IO ()
+    , resolveActiveAccountLabel :: Credential -> IO Text
+    , selectHttpAccount :: Text -> IO (Either ApiError Text)
+    , selectableTokenProvider :: TokenProvider
+    , shouldProbeAtStartup :: Bool
+    , startup :: StartupRuntime
+    , startupUnavailable :: Maybe (STM ApiError)
+    , stderrHandle :: Handle
+    , subagentRuntime :: SubagentRuntime
+    , tokenProvider :: TokenProvider
+    , transition :: Maybe ProviderTransition
+    , transportModel :: Text -> Text
+    , unavailableProviders :: Set Provider
+    }
 
 runAgentProviders
     :: ModelSwitchScope
@@ -364,6 +431,12 @@ runAgentProviders
     transportModel
     unavailableProviders
     =
+        runAgentProvidersRequest AgentProviderRequest{..}
+
+runAgentProvidersRequest
+    :: AgentProviderRequest
+    -> IO RunResult
+runAgentProvidersRequest request@AgentProviderRequest{provider, startup} =
         let nativeCapabilities =
                 maybe
                     fullNativeRunCapabilities
@@ -371,51 +444,81 @@ runAgentProviders
                     startup.startupNativeHooks
         in case provider of
                     OpenAIProvider ->
-                        try @_ @CodexAuthFailed
-                            (withCodexWsWithProviderOrHttpFallback tokenProvider \conn credential -> do
-                                wsLock <- newMVar ()
-                                let startsOnHttp =
-                                        codexConnUsesHttpFallback conn
-                                initialWsHealthy <- newIORef (not startsOnHttp)
-                                activeConnectionRef <- newIORef $
-                                    OpenAiPersistentConnection
-                                        credential
-                                        initialWsHealthy
-                                        conn
-                                httpFallbackActive <- newIORef startsOnHttp
+                        runOpenAiProvider request nativeCapabilities
+                    XAIProvider ->
+                        runXaiProvider request nativeCapabilities
+                    GeminiProvider ->
+                        runGeminiProvider request
+                    ClaudeCodeProvider
+                        | not
+                            nativeCapabilities.nativeProviderNativeTools ->
+                            startupDie startup
+                                "Claude Code is unavailable in this runtime"
+                        | otherwise ->
+                            runClaudeProvider request nativeCapabilities
+                    OpenRouterProvider ->
+                        runOpenRouterProvider request
+
+runOpenAiProvider
+    :: AgentProviderRequest
+    -> NativeRunCapabilities
+    -> IO RunResult
+runOpenAiProvider request@AgentProviderRequest{tokenProvider} nativeCapabilities =
+    try @_ @CodexAuthFailed
+        (withCodexWsWithProviderOrHttpFallback tokenProvider \conn credential ->
+            runConnectedOpenAiProvider request conn credential)
+        >>= handleOpenAiProviderResult request nativeCapabilities
+
+data OpenAiProviderRuntime = OpenAiProviderRuntime
+    { openAiWsLock :: MVar ()
+    , openAiActiveConnectionRef :: IORef OpenAiPersistentConnection
+    , openAiHttpFallbackActive :: IORef Bool
+    , openAiSelectablePool :: Maybe Pool
+    , openAiSelectAccount :: Maybe (Text -> IO (Either ApiError Text))
+    , openAiSwitchLoop :: IO ()
+    }
+
+data OpenAiConnectionState = OpenAiConnectionState
+    { openAiConnectionLock :: MVar ()
+    , openAiConnectionRef :: IORef OpenAiPersistentConnection
+    , openAiFallbackRef :: IORef Bool
+    }
+
+newOpenAiConnectionState
+    :: CodexConn
+    -> Credential
+    -> IO OpenAiConnectionState
+newOpenAiConnectionState conn credential = do
+    openAiConnectionLock <- newMVar ()
+    let startsOnHttp = codexConnUsesHttpFallback conn
+    initialWsHealthy <- newIORef (not startsOnHttp)
+    openAiConnectionRef <-
+        newIORef $
+            OpenAiPersistentConnection credential initialWsHealthy conn
+    openAiFallbackRef <- newIORef startsOnHttp
+    pure OpenAiConnectionState{..}
+
+newOpenAiProviderRuntime
+    :: AgentProviderRequest
+    -> CodexConn
+    -> Credential
+    -> IO OpenAiProviderRuntime
+newOpenAiProviderRuntime AgentProviderRequest{..} conn credential = do
+                                OpenAiConnectionState
+                                    { openAiConnectionLock = wsLock
+                                    , openAiConnectionRef =
+                                        activeConnectionRef
+                                    , openAiFallbackRef =
+                                        httpFallbackActive
+                                    } <- newOpenAiConnectionState conn credential
                                 switchRequests <-
                                     newChan :: IO (Chan AccountSwitchRequest)
                                 let selectableOpenAiPool
                                         | isGatewayLoadedAuth loaded = Nothing
                                         | otherwise = loaded.loadedOpenAiPool
-                                    selectAccount = case selectableOpenAiPool of
-                                            Nothing -> Nothing
-                                            Just pool ->
-                                                Just \selectedAccountId -> do
-                                                    _ <- OpenAI.discoverAccounts pool
-                                                    OpenAI.getAccessTokenForAccount
-                                                        pool
-                                                        selectedAccountId
-                                                        >>= \case
-                                                            Left err ->
-                                                                pure (Left err)
-                                                            Right
-                                                                ( accessToken
-                                                                , accountId
-                                                                ) -> do
-                                                                reply <- newEmptyMVar
-                                                                writeChan
-                                                                    switchRequests
-                                                                    (AccountSwitchRequest
-                                                                        Credential
-                                                                            { accessToken
-                                                                            , accountId
-                                                                            , leaseId = Nothing
-                                                                            , provider =
-                                                                                OpenAIProvider
-                                                                            }
-                                                                        reply)
-                                                                takeMVar reply
+                                    selectAccount =
+                                        selectOpenAiAccount switchRequests
+                                            <$> selectableOpenAiPool
                                     switchLoop = case selectableOpenAiPool of
                                         Nothing -> pure ()
                                         Just pool ->
@@ -579,6 +682,62 @@ runAgentProviders
                                                         failSwitch $
                                                             ConnectionError
                                                                 "account switch failed"
+                                pure
+                                    OpenAiProviderRuntime
+                                        { openAiWsLock = wsLock
+                                        , openAiActiveConnectionRef =
+                                            activeConnectionRef
+                                        , openAiHttpFallbackActive =
+                                            httpFallbackActive
+                                        , openAiSelectablePool =
+                                            selectableOpenAiPool
+                                        , openAiSelectAccount = selectAccount
+                                        , openAiSwitchLoop = switchLoop
+                                        }
+
+selectOpenAiAccount
+    :: Chan AccountSwitchRequest
+    -> Pool
+    -> Text
+    -> IO (Either ApiError Text)
+selectOpenAiAccount switchRequests pool selectedAccountId = do
+    _ <- OpenAI.discoverAccounts pool
+    OpenAI.getAccessTokenForAccount pool selectedAccountId >>= \case
+        Left err ->
+            pure (Left err)
+        Right (accessToken, accountId) -> do
+            reply <- newEmptyMVar
+            writeChan switchRequests $
+                AccountSwitchRequest
+                    Credential
+                        { accessToken
+                        , accountId
+                        , leaseId = Nothing
+                        , provider = OpenAIProvider
+                        }
+                    reply
+            takeMVar reply
+
+runConnectedOpenAiProvider
+    :: AgentProviderRequest
+    -> CodexConn
+    -> Credential
+    -> IO RunResult
+runConnectedOpenAiProvider request@AgentProviderRequest{..} conn credential = do
+                                OpenAiProviderRuntime
+                                    { openAiWsLock = wsLock
+                                    , openAiActiveConnectionRef =
+                                        activeConnectionRef
+                                    , openAiHttpFallbackActive =
+                                        httpFallbackActive
+                                    , openAiSelectablePool =
+                                        selectableOpenAiPool
+                                    , openAiSelectAccount = selectAccount
+                                    , openAiSwitchLoop = switchLoop
+                                    } <- newOpenAiProviderRuntime
+                                        request
+                                        conn
+                                        credential
                                 case multiCtx of
                                     Just ctx ->
                                         setSubagentRunner ctx.multiRegistry $
@@ -643,7 +802,7 @@ runAgentProviders
                                                                 paramsRef
                                                                 historyRef
                                                                 requestedFocus
-                                                                >>= decorateManualCompact
+                                                                >>= decorateManualCompact request
                                                                     (codexEffectiveContextWindowFor
                                                                         . (.model)))
                                                         focus
@@ -676,8 +835,14 @@ runAgentProviders
                                                         readIORef activeConnectionRef
                                                 resetCodexTurnState
                                                     (codexConnTurnState activeConn)
-                                            })
-                            >>= \case
+                                            }
+
+handleOpenAiProviderResult
+    :: AgentProviderRequest
+    -> NativeRunCapabilities
+    -> Either CodexAuthFailed RunResult
+    -> IO RunResult
+handleOpenAiProviderResult request@AgentProviderRequest{..} nativeCapabilities = \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
                                         Just active
@@ -704,11 +869,15 @@ runAgentProviders
                                                                 (RunSwitchProvider
                                                                     next)
                                                         Nothing ->
-                                                            startupFailure err
+                                                            startupFailure request err
                                         _ -> do
-                                            startupFailure err
+                                            startupFailure request err
                                 Right result -> pure result
-                    XAIProvider -> do
+runXaiProvider
+    :: AgentProviderRequest
+    -> NativeRunCapabilities
+    -> IO RunResult
+runXaiProvider request@AgentProviderRequest{..} nativeCapabilities = do
                         xaiOptions0 <- XAI.clientOptionsFromEnv
                         let xaiOptions =
                                 xaiOptions0
@@ -718,7 +887,31 @@ runAgentProviders
                         let xaiContextWindow =
                                 contextWindowForParams
                                     (XAIRequest.mapModel xaiOptions)
-                                    500_000
+                                    XAI.grokDefaultContextWindow
+                            xaiWireModel params =
+                                maybe xaiOptions.defaultModel
+                                    (XAIRequest.mapModel xaiOptions)
+                                    params.model
+                            xaiCompactThresholdFor currentParams =
+                                let contextWindow =
+                                        xaiContextWindow currentParams
+                                in max 1 $
+                                    min contextWindow $
+                                        fromMaybe
+                                            (XAI.grokAutoCompactTokenLimit
+                                                (xaiWireModel currentParams)
+                                                contextWindow)
+                                            options.optCompactThreshold
+                            xaiOptionsFor currentParams =
+                                xaiOptions
+                                    { XAI.autoCompactTokenLimit =
+                                        Just
+                                            (xaiCompactThresholdFor
+                                                currentParams)
+                                    }
+                            xaiCompactThreshold =
+                                xaiCompactThresholdFor
+                                    <$> readIORef paramsRef
                             protectXaiOverflow occupancy getParams backend =
                                 boundCompletedToolContinuations
                                     xaiContextWindow
@@ -732,47 +925,82 @@ runAgentProviders
                                         subagentRuntime
                                         dialect
                                         ctx.multiSendToRoot
+                                        xaiContextWindow
+                                        xaiCompactThresholdFor
                                         (\childParams ->
-                                            protectXaiOverflow
-                                                contextTokensRef
-                                                (pure childParams)
-                                                (xaiBackend xaiOptions tokenProvider
-                                                    (pure childParams)))
+                                            xaiBackendWithClientOptions
+                                                xaiOptionsFor
+                                                tokenProvider
+                                                (pure childParams))
                             Nothing -> pure ()
-                        let backend =
-                                withPendingInputs pendingNotices $
-                                    withConnectionRecoveryOn
-                                        startup.startupNetworkRecovery $
-                                        protectXaiOverflow
-                                            contextTokensRef
-                                            (readIORef paramsRef)
-                                            (xaiBackend xaiOptions tokenProvider
-                                                (readIORef paramsRef))
-                            btwBackend privateParams =
-                                xaiBackend xaiOptions tokenProvider
+                        let btwBackend privateParams =
+                                xaiBackendWithClientOptions
+                                    xaiOptionsFor
+                                    tokenProvider
                                     (pure privateParams)
+                            compactHistory history _inputs = do
+                                currentParams <- readIORef paramsRef
+                                runXaiBackendCompactHistoryWithContextWindow
+                                    (xaiContextWindow currentParams)
+                                    btwBackend
+                                    recordCompactionUsage
+                                    currentParams
+                                    history
+                                    Nothing
+                                    >>= decorateAutomaticCompact
+                                        request
+                                        xaiContextWindow
+                            -- Reconnection wraps only the continuation. Keeping
+                            -- automatic compaction outside it prevents a
+                            -- failed continuation from rerunning the summary.
+                            requestBackend =
+                                withConnectionRecoveryOn
+                                    startup.startupNetworkRecovery $
+                                    protectXaiOverflow
+                                        contextTokensRef
+                                        (readIORef paramsRef)
+                                        (xaiBackendWithClientOptions
+                                            xaiOptionsFor
+                                            tokenProvider
+                                            (readIORef paramsRef))
+                            compactingBackend =
+                                autoCompactBackendWith
+                                    xaiCompactThreshold
+                                    compactHistory
+                                    (\outcome inputs ->
+                                        readIORef automaticCompactionHookRef
+                                            >>= \hook ->
+                                                hook outcome inputs)
+                                    (readIORef paramsRef)
+                                    contextTokensRef
+                                    requestBackend
+                            backend =
+                                withPendingInputs pendingNotices
+                                    compactingBackend
                             compactRunner focus = do
                                 contextWindow <-
                                     currentModelContextWindow
                                         (XAIRequest.mapModel xaiOptions)
                                 historyRef <-
                                     newIORef =<< readLiveTranscript conversationRef
-                                installLiveCompactOutcome conversationRef Nothing
+                                installLiveCompactOutcome
+                                    conversationRef
+                                    (Just contextTokensRef)
                                     (\requestedFocus ->
-                                        runResponsesCompactWithContextWindow
+                                        runXaiResponsesCompactWithContextWindow
                                             contextWindow
                                             (\request ->
                                                 runWithTokenProvider tokenProvider
                                                     \credential ->
                                                         XAIClient.createResponseWith
-                                                            xaiOptions
+                                                            (xaiOptionsFor request)
                                                             credential
                                                             request)
                                             recordCompactionUsage
                                             paramsRef
                                             historyRef
                                             requestedFocus
-                                            >>= decorateManualCompact
+                                            >>= decorateManualCompact request
                                                 xaiContextWindow)
                                     focus
                         activeBackend <-
@@ -797,7 +1025,10 @@ runAgentProviders
                                 , interruptBackend = pure ()
                                 , resetBackendState = pure ()
                                 }
-                    GeminiProvider -> do
+runGeminiProvider
+    :: AgentProviderRequest
+    -> IO RunResult
+runGeminiProvider request@AgentProviderRequest{..} = do
                         geminiOptions <- Gemini.clientOptionsFromEnv
                         geminiOccupancy <- newIORef Nothing
                         let geminiContextWindow =
@@ -860,7 +1091,7 @@ runAgentProviders
                                             paramsRef
                                             historyRef
                                             requestedFocus
-                                            >>= decorateManualCompact
+                                            >>= decorateManualCompact request
                                                 geminiContextWindow)
                                     focus
                         activeBackend <-
@@ -884,12 +1115,12 @@ runAgentProviders
                                 , interruptBackend = pure ()
                                 , resetBackendState = pure ()
                                 }
-                    ClaudeCodeProvider
-                        | not
-                            nativeCapabilities.nativeProviderNativeTools ->
-                            startupDie startup
-                                "Claude Code is unavailable in this runtime"
-                        | otherwise -> withSelectedClaudeAuth
+runClaudeProvider
+    :: AgentProviderRequest
+    -> NativeRunCapabilities
+    -> IO RunResult
+runClaudeProvider request@AgentProviderRequest{..} nativeCapabilities =
+                        withSelectedClaudeAuth
                             connectedGateway
                             loaded
                             (startupDie startup . Text.unpack)
@@ -960,7 +1191,7 @@ runAgentProviders
                                             paramsRef
                                             historyRef
                                             requestedFocus
-                                            >>= decorateManualCompact
+                                            >>= decorateManualCompact request
                                                 (const contextWindow))
                                     focus
                             claudeRequest =
@@ -1046,7 +1277,7 @@ runAgentProviders
                                             currentParams
                                             history
                                             Nothing
-                                            >>= decorateAutomaticCompact
+                                            >>= decorateAutomaticCompact request
                                                 (const contextWindow)
                                     compactingBackend =
                                         autoCompactBackendWith
@@ -1075,7 +1306,10 @@ runAgentProviders
                                             writeIORef claudeTranscriptRef []
                                         }
                                 pure result
-                    OpenRouterProvider -> do
+runOpenRouterProvider
+    :: AgentProviderRequest
+    -> IO RunResult
+runOpenRouterProvider request@AgentProviderRequest{..} = do
                         let openRouterContextWindow =
                                 contextWindowForParams transportModel 1_048_576
                             makeBackend params =
@@ -1169,7 +1403,7 @@ runAgentProviders
                                                     paramsRef
                                                     historyRef)
                                             requestedFocus
-                                            >>= decorateManualCompact
+                                            >>= decorateManualCompact request
                                                 openRouterContextWindow)
                                     focus
                         activeBackend <-
@@ -1193,33 +1427,53 @@ runAgentProviders
                                 , interruptBackend = pure ()
                                 , resetBackendState = pure ()
                                 }
-          where
-            decorateManualCompact contextWindowForResult = \case
-                Left err -> pure (Left err)
-                Right outcome -> do
-                    currentParams <- readIORef paramsRef
-                    decorateCompactOutcomeWithTaskPlanWithin
-                        (contextWindowForResult currentParams)
-                        currentParams
-                        taskPlan
-                        outcome
-            decorateAutomaticCompact contextWindowForResult = \case
-                Left err -> pure (Left err)
-                Right outcome ->
-                    decorateManualCompact
-                        contextWindowForResult
-                        (Right outcome) >>= pure . \case
-                            Left message ->
-                                Left
-                                    (ProviderError
-                                        InvalidRequestError
-                                        message
-                                        Nothing)
-                            Right decorated -> Right decorated
-            startupFailure err = do
-                now <- getCurrentTime
-                startupDie startup
-                    (Text.unpack (formatApiErrorAt now err))
+decorateManualCompact
+    :: AgentProviderRequest
+    -> (ResponseCreateParams -> Int)
+    -> Either Text CompactOutcome
+    -> IO (Either Text CompactOutcome)
+decorateManualCompact
+    request
+    contextWindowForResult = \case
+        Left err -> pure (Left err)
+        Right outcome -> do
+            currentParams <- readIORef request.paramsRef
+            decorateCompactOutcomeWithTaskPlanWithin
+                (contextWindowForResult currentParams)
+                currentParams
+                request.taskPlan
+                outcome
+
+decorateAutomaticCompact
+    :: AgentProviderRequest
+    -> (ResponseCreateParams -> Int)
+    -> Either ApiError CompactOutcome
+    -> IO (Either ApiError CompactOutcome)
+decorateAutomaticCompact
+    request
+    contextWindowForResult = \case
+        Left err -> pure (Left err)
+        Right outcome ->
+            decorateManualCompact
+                request
+                contextWindowForResult
+                (Right outcome) >>= pure . \case
+                    Left message ->
+                        Left
+                            (ProviderError
+                                InvalidRequestError
+                                message
+                                Nothing)
+                    Right decorated -> Right decorated
+
+startupFailure
+    :: AgentProviderRequest
+    -> ApiError
+    -> IO RunResult
+startupFailure AgentProviderRequest{startup} err = do
+    now <- getCurrentTime
+    startupDie startup
+        (Text.unpack (formatApiErrorAt now err))
 
 
 withSelectedClaudeAuth

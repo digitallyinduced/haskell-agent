@@ -13,9 +13,12 @@ module Agent.CLI.Subagents.Runtime
 import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.CLI.Compaction
-    ( CompactionInstall(..)
+    ( CompactionInstall(CompactionNotInstalled)
+    , autoCompactBackendWith
     , autoCompactOpenAiBackendWithSenderHookAndDecorator
+    , boundCompletedToolContinuations
     , decorateCompactOutcomeWithTaskPlan
+    , runXaiBackendCompactHistoryWithContextWindow
     )
 import Agent.Connectivity (withConnectionRecoveryOn)
 import Agent.CLI.Options (CliOptions(..), defaultEffortFor)
@@ -438,9 +441,13 @@ runXaiParentSubagent
     :: SubagentRuntime
     -> Dialect
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
+    -> (ResponseCreateParams -> Int)
+    -> (ResponseCreateParams -> Int)
     -> (ResponseCreateParams -> Backend)
     -> RunSubagent
-runXaiParentSubagent runtime dialect sendToRoot mkBackend =
+runXaiParentSubagent
+        runtime dialect sendToRoot contextWindowFor compactThresholdFor
+        mkBackend =
     \env previous prompt onEvent -> do
         childModel <- lookupAgentModel runtime.subagentTypes env.subId
         sessions <- readIORef runtime.subagentSessions
@@ -475,16 +482,54 @@ runXaiParentSubagent runtime dialect sendToRoot mkBackend =
                         prompt
                         onEvent
             else
-                runHttpSubagent
+                runHttpSubagentWith
                     runtime
                     dialect
                     XAIProvider
                     sendToRoot
                     mkBackend
+                    (compactXaiChildBackend
+                        contextWindowFor
+                        compactThresholdFor
+                        mkBackend)
                     env
                     previous
                     prompt
                     onEvent
+
+compactXaiChildBackend
+    :: (ResponseCreateParams -> Int)
+    -> (ResponseCreateParams -> Int)
+    -> (ResponseCreateParams -> Backend)
+    -> SubagentSession
+    -> ResponseCreateParams
+    -> Backend
+    -> Backend
+compactXaiChildBackend contextWindowFor compactThresholdFor makeBackend
+        session params requestBackend =
+    autoCompactBackendWith
+        (pure (compactThresholdFor params))
+        compactHistory
+        (\_outcome _inputs -> pure CompactionNotInstalled)
+        (pure params)
+        session.subSessionContextTokens
+        protectedBackend
+  where
+    protectedBackend =
+        boundCompletedToolContinuations
+            contextWindowFor
+            (pure params)
+            session.subSessionContextTokens
+            requestBackend
+
+    compactHistory history _inputs =
+        runXaiBackendCompactHistoryWithContextWindow
+            (contextWindowFor params)
+            makeBackend
+            (const (pure ()))
+            params
+            history
+            Nothing
 
 -- | Child Codex agent: per-agent transcript retained across follow-ups,
 -- independently scoped WebSocket requests, and nested multi-agent tools.
@@ -729,6 +774,24 @@ runHttpSubagent
     -> (ResponseCreateParams -> Backend)
     -> RunSubagent
 runHttpSubagent runtime dialect provider sendToRoot mkBackend =
+    runHttpSubagentWith
+        runtime
+        dialect
+        provider
+        sendToRoot
+        mkBackend
+        (\_session _params backend -> backend)
+
+runHttpSubagentWith
+    :: SubagentRuntime
+    -> Dialect
+    -> Provider
+    -> Maybe (InterAgentMessage -> IO (Either Text Text))
+    -> (ResponseCreateParams -> Backend)
+    -> (SubagentSession -> ResponseCreateParams -> Backend -> Backend)
+    -> RunSubagent
+runHttpSubagentWith
+        runtime dialect provider sendToRoot mkBackend wrapBackend =
     \env previous prompt onEvent -> do
         agentType <-
             fromMaybe defaultSubagentType
@@ -868,10 +931,17 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                         childParams = requestParams provider model instructions
                             (schemasFromAppTools childDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
-                    let backend =
+                    let requestBackend =
                             withConnectionRecoveryOn
                                 runtime.subagentNetworkRecovery $
                                 mkBackend childParams
+                        -- Provider-specific wrappers stay outside recovery so
+                        -- reconnecting a continuation cannot rerun compaction.
+                        backend =
+                            wrapBackend
+                                prepared.preparedSession
+                                childParams
+                                requestBackend
                     runPreparedChild
                         runtime env prepared.preparedSession
                         prepared.preparedToolEnv toolRegistry

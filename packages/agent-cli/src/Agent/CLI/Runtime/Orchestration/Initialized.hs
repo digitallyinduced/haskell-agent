@@ -46,6 +46,7 @@ import Agent.CLI.GatewayClient
     , newGatewayModelAccess
     , refreshGatewayModels
     )
+import Agent.CLI.GatewayModels (gatewayProviderForStartup)
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt ()
@@ -434,6 +435,16 @@ runAgentInitializedWithLock
                 Right Nothing
             | otherwise = case fst <$> resumed of
             Nothing -> Right Nothing
+            Just meta
+                | isNothing connectedGateway
+                , meta.metaConnection == organizationGatewayConnectionId ->
+                    Right $
+                        case resolveConfiguredModel catalog meta.metaModel of
+                            Just option
+                                | option.modelTarget.targetConnectionId
+                                    /= organizationGatewayConnectionId ->
+                                    Just option.modelTarget
+                            _ -> Nothing
             Just meta ->
                 Just <$> resolveSavedModelTarget
                     catalog
@@ -501,10 +512,15 @@ runAgentInitializedWithLock
                     else Nothing
         requestedProvider
             | isJust connectedGateway =
-                options.optProvider <|> Just OpenAIProvider
+                Just $
+                    gatewayProviderForStartup
+                        targetHint
+                        options.optProvider
+                        ((.metaProvider) . fst <$> resumed)
             | otherwise =
                 (.targetProvider) <$> targetHint
                     <|> options.optProvider
+                    <|> ((.metaProvider) . fst <$> resumed)
                     <|> if isNothing options.optModel
                         then projectModelProvider projectSettings
                         else Nothing
@@ -684,13 +700,6 @@ runAgentInitializedWithLock
             , loaded.loadedProvider /= target.targetProvider ->
                 startupDie startup $ "provider transition requested "
                     <> Text.unpack (providerSlug target.targetProvider)
-                    <> " but auth resolved "
-                    <> Text.unpack (providerSlug loaded.loadedProvider)
-        (Nothing, Just (meta, _))
-            | not (isGatewayLoadedAuth loaded)
-            , loaded.loadedProvider /= meta.metaProvider ->
-                startupDie startup $ "session provider is "
-                    <> Text.unpack (providerSlug meta.metaProvider)
                     <> " but auth resolved "
                     <> Text.unpack (providerSlug loaded.loadedProvider)
         _ -> pure ()

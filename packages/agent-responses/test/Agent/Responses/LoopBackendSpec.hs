@@ -3,11 +3,14 @@ module Agent.Responses.LoopBackendSpec (spec) where
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( Backend(..)
+    , BackendResult(..)
+    , BackendSnapshot(..)
     , FileAttachment(..)
     , ImageAttachment(..)
     , LoopEvent(..)
     , TurnAttachment(..)
     , TurnInput(..)
+    , advanceBackendSnapshot
     , emptyBackendSnapshot
     , userMessageWithAttachments
     )
@@ -20,8 +23,11 @@ import Agent.Provider
     )
 import Agent.Json (rawJsonFromEncoding)
 import qualified Agent.Json.Decode as Json
+import qualified Agent.Responses.Codec as Codec
+import Agent.Responses.GenericBackend (genericResponsesBackendWith)
 import Agent.Responses.LoopBackend
-    ( newStreamEventToLoopEvents
+    ( emptyStreamProjectionState
+    , newStreamEventToLoopEvents
     , statelessResponsesBackend
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
@@ -29,10 +35,12 @@ import Agent.Responses.LoopBackend
     , responseItemToToolCall
     , toolResultToItem
     , withRequestInput
+    , streamEventToLoopEventsStep
     )
 import Agent.Responses.Types
     ( MessageContent(..)
     , CodexRateLimits(..)
+    , CompactionItem(..)
     , ComputerAction(..)
     , ComputerCall(..)
     , ComputerCallOutput(..)
@@ -48,6 +56,7 @@ import Agent.Responses.Types
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
+    , Response
     , ResponseStreamEvent(..)
     , StreamEventType(..)
     , ResponseInput(..)
@@ -55,6 +64,7 @@ import Agent.Responses.Types
     , TaggedObject(..)
     , computerFunctionNamespace
     , computerFunctionName
+    , compactionCheckpointOriginItem
     , defaultResponseCreateParams
     , legacyComputerFunctionName
     )
@@ -81,6 +91,25 @@ spec = do
 
 backendSpec :: Spec
 backendSpec = describe "tokenProviderStatelessResponsesBackend" do
+    it "preserves checkpoint provenance for provider-aware projection" do
+        let request =
+                withRequestInput
+                    defaultResponseCreateParams
+                    [ CompactionItemValue CompactionItem
+                        { itemId = Just "cmp-1"
+                        , encryptedContent = Just "opaque"
+                        }
+                    , compactionCheckpointOriginItem "xai"
+                    ]
+        request.input `shouldBe` Just
+            (ResponseInputItems
+                [ CompactionItemValue CompactionItem
+                    { itemId = Just "cmp-1"
+                    , encryptedContent = Just "opaque"
+                    }
+                , compactionCheckpointOriginItem "xai"
+                ])
+
     it "rejects computer coordinates outside the platform Int range" do
         let tooLarge = toInteger (maxBound :: Int) + 1
             payload = LBS.toStrict $ Aeson.encode $ Aeson.object
@@ -491,6 +520,116 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
         result `shouldBe` Left (ConnectionError "stopped after failover")
         readIORef attempts `shouldReturn` [first, second]
 
+    it "replaces obsolete history after a server compaction checkpoint" do
+        let oldItems = turnInputsToItems [UserMessage "old context"]
+            checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "compact-1"
+                , encryptedContent = Just "opaque"
+                }
+            answer = MessageItem ResponseMessage
+                { messageId = Just "message-1"
+                , content = MessageContentParts
+                    [OutputTextPart "continued" Nothing Nothing]
+                , role = RoleAssistant
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                }
+            send _params _onEvent =
+                pure (Right (responseWithOutput [checkpoint, answer]))
+            backend =
+                statelessResponsesBackend send
+                    (pure defaultResponseCreateParams)
+            snapshot =
+                advanceBackendSnapshot
+                    emptyBackendSnapshot
+                    oldItems
+                    Nothing
+
+        result <- backend.submitTurn
+            snapshot
+            Nothing
+            [UserMessage "new input"]
+            (const (pure ()))
+
+        fmap (.backendState.backendItems) result
+            `shouldBe` Right [checkpoint, answer]
+
+    it "retains generic history while dropping an unreplayable checkpoint" do
+        let oldItems = turnInputsToItems [UserMessage "old context"]
+            newItems = turnInputsToItems [UserMessage "new input"]
+            checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "compact-generic"
+                , encryptedContent = Just "opaque"
+                }
+            answer = MessageItem ResponseMessage
+                { messageId = Just "message-generic"
+                , content = MessageContentParts
+                    [OutputTextPart "continued" Nothing Nothing]
+                , role = RoleAssistant
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                }
+            send _params _onEvent =
+                pure (Right (responseWithOutput [checkpoint, answer]))
+            backend =
+                genericResponsesBackendWith send
+                    (pure defaultResponseCreateParams)
+            snapshot =
+                advanceBackendSnapshot
+                    emptyBackendSnapshot
+                    oldItems
+                    Nothing
+
+        result <- backend.submitTurn
+            snapshot
+            Nothing
+            [UserMessage "new input"]
+            (const (pure ()))
+
+        fmap (.backendState.backendItems) result
+            `shouldBe`
+                Right
+                    (oldItems <> newItems <> [answer])
+
+    it "preserves retained history when only the request has a checkpoint" do
+        let retained = turnInputsToItems [UserMessage "retained context"]
+            checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "compact-old"
+                , encryptedContent = Just "opaque"
+                }
+            existingItems = retained <> [checkpoint]
+            newItems = turnInputsToItems [UserMessage "new input"]
+            answer = MessageItem ResponseMessage
+                { messageId = Just "message-ordinary"
+                , content = MessageContentParts
+                    [OutputTextPart "continued" Nothing Nothing]
+                , role = RoleAssistant
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                }
+            send _params _onEvent =
+                pure (Right (responseWithOutput [answer]))
+            backend =
+                statelessResponsesBackend send
+                    (pure defaultResponseCreateParams)
+            snapshot =
+                advanceBackendSnapshot
+                    emptyBackendSnapshot
+                    existingItems
+                    Nothing
+
+        result <- backend.submitTurn
+            snapshot
+            Nothing
+            [UserMessage "new input"]
+            (const (pure ()))
+
+        fmap (.backendState.backendItems) result
+            `shouldBe` Right (existingItems <> newItems <> [answer])
+
     it "forwards raw provider reasoning text to the UI loop" do
         events <- newIORef []
         let send _params onStreamEvent = do
@@ -817,6 +956,33 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
 -- repaint the call, while sensitive tools retain coarse activity updates.
 streamProjectionSpec :: Spec
 streamProjectionSpec = describe "newStreamEventToLoopEvents" do
+    it "starts a pure projection attempt without retaining reused tool ids" do
+        let (firstState, _) =
+                streamEventToLoopEventsStep False
+                    emptyStreamProjectionState
+                    (functionCallAdded "fc-1" "call-1" "shell_command")
+            (_, firstEvents) =
+                streamEventToLoopEventsStep False firstState
+                    (argumentsDelta "fc-1" "{\"command\":\"pwd\"}")
+            (secondState, _) =
+                streamEventToLoopEventsStep False
+                    emptyStreamProjectionState
+                    (functionCallAdded "fc-1" "call-2" "apply_patch")
+            (_, secondEvents) =
+                streamEventToLoopEventsStep False secondState
+                    (argumentsDelta "fc-1" "{}")
+        firstEvents `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    "{\"command\":\"pwd\"}")
+            ]
+        secondEvents `shouldSatisfy` \case
+            [ToolArgumentsUpdated call] ->
+                call.callId == "call-2" && call.name == "apply_patch"
+            _ -> False
+
     it "publishes Codex weekly capacity updates for retained prompt chrome" do
         projectEvent <- newStreamEventToLoopEvents False
         events <- projectEvent ResponseCodexRateLimitsEvent
@@ -1462,6 +1628,17 @@ isUserMessage = \case
                     value == "hello"
                 _ -> False
     _ -> False
+
+responseWithOutput :: [ResponseItem] -> Response
+responseWithOutput output =
+    either error id . Codec.decodeResponse . LBS.toStrict . Aeson.encode $
+        Aeson.object
+            [ "id" Aeson..= ("resp-compacted" :: Text.Text)
+            , "created_at" Aeson..= (0 :: Int)
+            , "model" Aeson..= ("grok-4.6" :: Text.Text)
+            , "status" Aeson..= ("completed" :: Text.Text)
+            , "output" Aeson..= output
+            ]
 
 isEmptyAssistantFollowup :: ResponseItem -> Bool
 isEmptyAssistantFollowup = \case

@@ -1,14 +1,21 @@
 -- | Provider-neutral loop adapters for Responses-compatible transports.
 module Agent.Responses.LoopBackend
     ( statelessResponsesBackend
+    , statelessResponsesBackendPreservingCheckpointHistory
+    , statelessResponsesBackendPreservingHistory
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
+    , tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
+    , tokenProviderStatelessResponsesBackendPreservingHistory
     , turnInputsToItems
     , responseToTurnOutput
     , responseItemToToolCall
     , responseTokenUsage
     , streamEventToLoopEvent
     , streamEventToLoopEventWithRawReasoning
+    , StreamProjectionState
+    , emptyStreamProjectionState
+    , streamEventToLoopEventsStep
     , newStreamEventToLoopEvents
     , toolArgumentActivityChunkChars
     , runawayToolArgumentWarningChars
@@ -19,6 +26,7 @@ module Agent.Responses.LoopBackend
     , toolResultToItem
     , withRequestInput
     , normalizeResponseInputItems
+    , isServerCompactionCheckpoint
     ) where
 
 import Agent.Error (ApiError)
@@ -50,7 +58,11 @@ import Agent.Provider
     , TokenProvider
     , runWithTokenProvider
     )
-import Agent.Responses.Request (stripReplayedItemStatus)
+import Agent.Responses.Request
+    ( filterCompactionCheckpointsByOrigin
+    , isServerCompactionCheckpoint
+    , stripReplayedItemStatus
+    )
 import Agent.Responses.Types
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -90,6 +102,40 @@ statelessResponsesBackend
 statelessResponsesBackend send getParams =
     statelessResponsesBackendWithRawReasoning True send getParams
 
+-- | Adapt a stateless transport whose opaque checkpoints are replayable, but
+-- only by that same provider. Keep the complete pre-checkpoint history in host
+-- state for later provider switches; the provider's wire projection must trim
+-- that portable prefix when it replays its checkpoint.
+statelessResponsesBackendPreservingCheckpointHistory
+    :: (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+statelessResponsesBackendPreservingCheckpointHistory send getParams =
+    statelessResponsesBackendWithMode
+        PreservePreCheckpointHistoryAndCheckpoint
+        True
+        send
+        getParams
+
+-- | Adapt a stateless transport that cannot safely replay opaque server
+-- checkpoints. Keep the complete request history even when a response
+-- contains a checkpoint, and omit the unusable checkpoint itself from the
+-- next snapshot so a later provider cannot mistake it for compatible state.
+statelessResponsesBackendPreservingHistory
+    :: (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+statelessResponsesBackendPreservingHistory send getParams =
+    statelessResponsesBackendWithMode
+        PreservePreCheckpointHistory
+        True
+        send
+        getParams
+
 -- | Adapt a stateless Responses transport while optionally exposing raw
 -- reasoning text. Reasoning summaries remain visible in either mode.
 statelessResponsesBackendWithRawReasoning
@@ -100,6 +146,30 @@ statelessResponsesBackendWithRawReasoning
     -> IO ResponseCreateParams
     -> Backend
 statelessResponsesBackendWithRawReasoning showRawReasoning send getParams =
+    statelessResponsesBackendWithMode
+        ReplacePreCheckpointHistory
+        showRawReasoning
+        send
+        getParams
+
+data ServerCheckpointMode
+    = ReplacePreCheckpointHistory
+    | PreservePreCheckpointHistory
+    | PreservePreCheckpointHistoryAndCheckpoint
+
+statelessResponsesBackendWithMode
+    :: ServerCheckpointMode
+    -> Bool
+    -> (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+statelessResponsesBackendWithMode
+        checkpointMode
+        showRawReasoning
+        send
+        getParams =
     Backend \snapshot _legacyPreviousResponseId inputs onEvent -> do
         baseParams <- getParams
         projectEvent <- newStreamEventToLoopEvents showRawReasoning
@@ -111,15 +181,42 @@ statelessResponsesBackendWithRawReasoning showRawReasoning send getParams =
         case result of
             Left err -> pure (Left err)
             Right response ->
+                let normalizedRequestItems =
+                        normalizeResponseInputItems requestItems
+                    completedItems =
+                        case checkpointMode of
+                            ReplacePreCheckpointHistory ->
+                                fromMaybe
+                                    (normalizedRequestItems <> response.output)
+                                    (latestServerCheckpointSuffix response.output)
+                            PreservePreCheckpointHistory ->
+                                normalizedRequestItems
+                                    <> filterCompactionCheckpointsByOrigin
+                                        (const False)
+                                        response.output
+                            PreservePreCheckpointHistoryAndCheckpoint ->
+                                normalizedRequestItems <> response.output
+                in
                 pure $ Right BackendResult
                     { backendOutput = responseToTurnOutput response
                     , backendState =
                         advanceBackendSnapshot snapshot
-                            ( normalizeResponseInputItems requestItems
-                                <> response.output
-                            )
+                            completedItems
                             Nothing
                     }
+
+-- Server compaction checkpoints replace everything that preceded them. Keep
+-- the checkpoint and later output in the stateless snapshot so subsequent
+-- requests do not replay the obsolete pre-compaction transcript.
+latestServerCheckpointSuffix
+    :: [ResponseItem]
+    -> Maybe [ResponseItem]
+latestServerCheckpointSuffix = go [] . reverse
+  where
+    go _ [] = Nothing
+    go after (item : before)
+        | isServerCompactionCheckpoint item = Just (item : after)
+        | otherwise = go (item : after) before
 
 -- | Adapt a credentialed stateless Responses transport to the loop.
 --
@@ -138,13 +235,47 @@ tokenProviderStatelessResponsesBackend provider send =
         runWithTokenProvider provider \credential ->
             send credential params onEvent
 
+-- | Credentialed counterpart to
+-- 'statelessResponsesBackendPreservingCheckpointHistory'.
+tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
+    :: TokenProvider
+    -> (Credential
+        -> ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
+        provider
+        send =
+    statelessResponsesBackendPreservingCheckpointHistory \params onEvent ->
+        runWithTokenProvider provider \credential ->
+            send credential params onEvent
+
+-- | Credentialed counterpart to
+-- 'statelessResponsesBackendPreservingHistory'.
+tokenProviderStatelessResponsesBackendPreservingHistory
+    :: TokenProvider
+    -> (Credential
+        -> ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+tokenProviderStatelessResponsesBackendPreservingHistory provider send =
+    statelessResponsesBackendPreservingHistory \params onEvent ->
+        runWithTokenProvider provider \credential ->
+            send credential params onEvent
+
 -- | 'input' is also a field on 'CustomToolCall', so a record update is
 -- ambiguous. Rebuild from the constructor instead.
 withRequestInput :: ResponseCreateParams -> [ResponseItem] -> ResponseCreateParams
 withRequestInput ResponseCreateParams{..} items =
     let prefix = requestInputPrefix input
-        -- Replayed transcript items are provider output; drop their lifecycle
-        -- status before they become input (see 'stripReplayedItemStatus').
+        -- Replayed transcript items are provider output. Keep checkpoint
+        -- provenance intact until the target provider can decide whether the
+        -- adjacent opaque checkpoint is compatible, then drop provider
+        -- lifecycle status (see 'stripReplayedItemStatus').
         normalizedItems =
             map stripReplayedItemStatus
                 (normalizeResponseInputItems items)
@@ -952,15 +1083,41 @@ newStreamEventToLoopEvents
     :: Bool
     -> IO (ResponseStreamEvent -> IO [LoopEvent])
 newStreamEventToLoopEvents showRawReasoning = do
-    stateRef <- newIORef emptyToolArgumentStreamState
-    pure \event -> do
-        argumentEvents <- atomicModifyIORef' stateRef \state ->
-            toolArgumentStreamStep event state
-        pure $
-            maybeToList
-                (statefulStreamEventToLoopEvent showRawReasoning event)
-                <> maybeToList (codexRateLimitsUpdate event)
-                <> argumentEvents
+    stateRef <- newIORef emptyStreamProjectionState
+    pure \event ->
+        atomicModifyIORef' stateRef \state ->
+            streamEventToLoopEventsStep showRawReasoning state event
+
+-- | Immutable state for projecting one response attempt.
+--
+-- The constructor is intentionally private so callers cannot accidentally
+-- carry only part of the projection state across an attempt boundary.
+data StreamProjectionState = StreamProjectionState
+    { streamToolArguments :: !ToolArgumentStreamState
+    }
+
+emptyStreamProjectionState :: StreamProjectionState
+emptyStreamProjectionState =
+    StreamProjectionState emptyToolArgumentStreamState
+
+-- | Pure projection of one provider event. The returned state belongs to the
+-- same response attempt; start from 'emptyStreamProjectionState' when a retry
+-- or reconnect begins a new sample.
+streamEventToLoopEventsStep
+    :: Bool
+    -> StreamProjectionState
+    -> ResponseStreamEvent
+    -> (StreamProjectionState, [LoopEvent])
+streamEventToLoopEventsStep showRawReasoning state event =
+    ( StreamProjectionState nextArguments
+    , maybeToList
+        (statefulStreamEventToLoopEvent showRawReasoning event)
+        <> maybeToList (codexRateLimitsUpdate event)
+        <> argumentEvents
+    )
+  where
+    (nextArguments, argumentEvents) =
+        toolArgumentStreamStep event state.streamToolArguments
 
 -- Function and custom-tool done items are projected by
 -- 'toolArgumentStreamStep' so a sparse provider item can be reconciled with

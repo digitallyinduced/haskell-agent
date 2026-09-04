@@ -4,7 +4,11 @@ module Agent.OpenAI.Request
     ) where
 
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
-import Agent.Responses.Request (stripReplayedInputStatus)
+import Agent.Responses.Request
+    ( filterRequestCompactionCheckpointsByOrigin
+    , stripLocalCompactionMarker
+    , stripReplayedInputStatus
+    )
 import Agent.Responses.Types
 
 -- | Keep Codex-incompatible fields out of the serialized request.
@@ -35,16 +39,25 @@ sanitizeCodexRequest ResponseCreateParams
         , parallelToolCalls
         , ..
         } =
-    ResponseCreateParams
-        { promptCacheRetention = Nothing
-        , input =
-            fmap (stripReplayedInputStatus . stripContentItemKindsInput) input
-        , parallelToolCalls =
-            if maybe False isCodexResponsesLiteModel model
-                then Just False
-                else parallelToolCalls
-        , ..
-        }
+    stripLocalCompactionMarker $
+        filterRequestCompactionCheckpointsByOrigin
+            keepOpenAiOrLegacyCheckpoint $
+            ResponseCreateParams
+                { promptCacheRetention = Nothing
+                , input =
+                    fmap
+                        (stripReplayedInputStatus . stripContentItemKindsInput)
+                        input
+                , parallelToolCalls =
+                    if maybe False isCodexResponsesLiteModel model
+                        then Just False
+                        else parallelToolCalls
+                , ..
+                }
+  where
+    keepOpenAiOrLegacyCheckpoint = \case
+        Nothing -> True
+        Just origin -> origin == "openai"
 
 stripContentItemKindsInput :: ResponseInput -> ResponseInput
 stripContentItemKindsInput = \case

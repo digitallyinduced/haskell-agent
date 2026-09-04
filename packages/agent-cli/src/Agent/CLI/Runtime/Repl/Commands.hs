@@ -439,285 +439,51 @@ handleReplLine
                         requestUpdateAndRestart fullscreen persist
                     ReplMetaConsole request ->
                         runMetaConsoleRequest request
-                    ReplPrompt text -> do
-                        -- Native Cmd+V of a Finder image often pastes a path
-                        -- rather than bitmap bytes. Treat a prompt that is
-                        -- only image path(s) as an attach + in-terminal preview,
-                        -- matching Grok Build's paste chip.
-                        pastedImages <- loadImagesFromPastedText text
-                        case pastedImages of
-                            Just images@(_:_) -> do
-                                message <- queueAttachedImages
-                                    conversationRef
-                                    previewIdRef
-                                    color
-                                    (isNothing fullscreen)
-                                    images
-                                syncFullscreenImagePreviews
-                                displayInfo message $
-                                    Text.putStrLn
-                                        (roleMuted color
-                                            (glyphOk <> message))
-                                continue
-                            _ -> do
-                                pendingImages <- modifyLiveAttachments conversationRef \imgs -> ([], imgs)
-                                forM_ fullscreen \runtime ->
-                                    commitFullscreenImagePreviews runtime pendingImages
-                                resetRenderPrintedText render
-                                let turnInputs =
-                                        [ userMessageWithAttachments
-                                            text
-                                            (map
-                                                ImageAttachmentItem
-                                                pendingImages)
-                                        ]
-                                preparePromptSkillInputsWithPaste env pasted text turnInputs >>= \case
-                                    Left err -> do
-                                        displayError err $
-                                            Text.hPutStrLn stderr
-                                                (roleError color err)
-                                        continue
-                                    Right skillInputs -> do
-                                        fullscreenEvent (UiUserSubmitted text)
-                                        result <- runOneTurn env text skillInputs
-                                        finishTurn False result
+                    ReplPrompt text ->
+                        submitPrompt pasted continue color text
                     ReplExpandedPrompt original expanded ->
                         submitExpandedTurnWithPaste
                             pasted continue color original expanded
-                    ReplInit -> do
-                        let guidePath = cwd </> unsafeEncodeUtf "AGENTS.md"
-                        tryIO
-                            (getSymbolicLinkStatus
-                                (unsafeToFilePath guidePath)) >>= \case
-                            Left err
-                                | isDoesNotExistError err ->
-                                    submitExpandedTurn
-                                        continue
-                                        color
-                                        line
-                                        initInstruction
-                                | otherwise -> do
-                                    let message =
-                                            "could not check AGENTS.md: "
-                                                <> Text.pack
-                                                    (displayException err)
-                                    displayError message $
-                                        Text.hPutStrLn stderr
-                                            (roleError color message)
-                                    continue
-                            Right _ -> do
-                                let message =
-                                        "AGENTS.md already exists; left it unchanged."
-                                displayInfo message $
-                                    Text.putStrLn
-                                        (roleMuted color
-                                            (glyphSession <> message))
-                                continue
-                    ReplReview (Just instructions) ->
-                        submitExpandedTurn
-                            continue
-                            color
-                            line
-                            (reviewPrompt (ReviewCustom instructions))
-                    ReplReview Nothing ->
-                        chooseReviewTarget >>= \case
-                            Left err -> do
-                                displayError err $
-                                    Text.hPutStrLn stderr
-                                        (roleError color err)
-                                continue
-                            Right Nothing -> continue
-                            Right (Just target) ->
-                                submitExpandedTurn
-                                    continue
-                                    color
-                                    line
-                                    (reviewPrompt target)
-                    ReplDiff -> do
-                        result <-
-                            withReplActivity "Loading Git diff…" $
-                                getGitDiff cwd
-                        case result of
-                            Left err -> do
-                                displayError err $
-                                    Text.hPutStrLn stderr
-                                        (roleError color err)
-                                continue
-                            Right GitDiffNotRepository -> do
-                                let message = "not a Git repository"
-                                displayError message $
-                                    Text.hPutStrLn stderr
-                                        (roleError color message)
-                                continue
-                            Right (GitDiffOutput diff)
-                                | Text.null (Text.strip diff) -> do
-                                    let message =
-                                            "No working-tree changes."
-                                    displayInfo message $
-                                        Text.putStrLn
-                                            (roleMuted color
-                                                (glyphSession <> message))
-                                    continue
-                                | otherwise -> do
-                                    displayInfo diff $
-                                        Text.putStrLn
-                                            (colorizeGitDiff color diff)
-                                    continue
+                    ReplInit ->
+                        initializeProjectGuide continue color line
+                    ReplReview review ->
+                        submitReview continue color line review
+                    ReplDiff ->
+                        showWorkingTreeDiff continue color
                     ReplExport maybePath ->
                         handleTranscriptAction handlerContext
                             (ExportTranscript maybePath)
-                    ReplPermissions
-                        | provider == ClaudeCodeProvider -> do
-                            let message =
-                                    "Claude Code permissions are fixed for this provider session; restart with --yolo or --no-yolo."
-                            displayInfo message $
-                                Text.hPutStrLn stderr
-                                    (roleMuted color message)
-                            continue
-                        | otherwise -> do
-                            current <- readIORef policyRef
-                            requestChoice
-                                "Permissions"
-                                "Choose how mutating tools are handled."
-                                (approvalPolicyIndex current)
-                                approvalPolicyRows >>= \case
-                                    Nothing -> continue
-                                    Just index -> do
-                                        message <-
-                                            setApprovalPolicy
-                                                policyRef
-                                                projectRoot
-                                                (approvalPolicyAt index)
-                                        displayInfo message $
-                                            Text.hPutStrLn stderr
-                                                (roleMuted color
-                                                    (glyphOk <> message))
-                                        continue
+                    ReplPermissions ->
+                        choosePermissions continue color
                     ReplInvokeSkill invocationName arguments ->
-                        case resolveSkillInvocation
-                            skillInvocations invocationName of
-                            Left err -> do
-                                displayError err $
-                                    Text.hPutStrLn stderr
-                                        (roleError color err)
-                                continue
-                            Right invocation -> do
-                                pendingImages <-
-                                    modifyLiveAttachments conversationRef
-                                        \imgs -> ([], imgs)
-                                forM_ fullscreen \runtime ->
-                                    commitFullscreenImagePreviews runtime pendingImages
-                                let userText =
-                                        if Text.null arguments
-                                            then "Use the "
-                                                <> invocation.invocationSkill.skillName
-                                                <> " skill."
-                                            else arguments
-                                    userInput =
-                                        userMessageWithAttachments
-                                            userText
-                                            (map
-                                                ImageAttachmentItem
-                                                pendingImages)
-                                    skillInputs =
-                                        [ UserMessage
-                                            (formatSkillActivation
-                                                invocation arguments)
-                                        , userInput
-                                        ]
-                                resetRenderPrintedText render
-                                fullscreenEvent (UiUserSubmitted line)
-                                result <- runOneTurn env line skillInputs
-                                finishTurn False result
-                    ReplSkills reloadFirst -> do
-                        when reloadFirst (refreshSkills True)
-                        current <- readIORef skillsRef
-                        invocations <- readIORef skillInvocationsRef
-                        let listing =
-                                formatSkillsListing color current invocations
-                        displayInfo (formatSkillsListing False current invocations) $
-                            Text.putStrLn listing
-                        continue
-                    ReplShowShell -> do
-                        mode <- env.sessionShellMode
-                        let message = "shell tools: " <> case mode of
-                                ShellGhci -> "ghci"
-                                ShellBash -> "bash"
-                                ShellBoth -> "ghci + bash"
-                                ShellNone -> "none"
-                        displayInfo message $
-                            Text.putStrLn
-                                (roleMuted color (glyphSession <> message))
-                        continue
-                    ReplSetShell mode -> do
-                        message <- env.sessionSetShellMode mode
-                        displayInfo message $
-                            Text.putStrLn
-                                (roleMuted color (glyphOk <> message))
-                        continue
+                        submitSkillInvocation
+                            skillInvocations
+                            continue
+                            color
+                            line
+                            invocationName
+                            arguments
+                    ReplSkills reloadFirst ->
+                        showSkills continue color reloadFirst
+                    ReplShowShell ->
+                        showShellMode continue color
+                    ReplSetShell mode ->
+                        setShellMode continue color mode
                     action@ReplPaste{} -> handleAttachmentAction env finishTurn continue action
                     action@ReplShowAttachments -> handleAttachmentAction env finishTurn continue action
                     action@ReplClearAttachments -> handleAttachmentAction env finishTurn continue action
                     action@ReplRemoveAttachment{} -> handleAttachmentAction env finishTurn continue action
-                    ReplShowAgentLimit -> do
-                        limit <- env.sessionConcurrentLimit
-                        let message =
-                                "concurrent agent limit: "
-                                    <> Text.pack (show limit)
-                        color <- resolveColor stdout
-                        displayInfo message $
-                            Text.putStrLn
-                                (roleMuted color (glyphSession <> message))
-                        continue
-                    ReplSetAgentLimit limit -> do
-                        message <- env.sessionSetConcurrentLimit limit
-                        color <- resolveColor stdout
-                        displayInfo message $
-                            Text.putStrLn
-                                (roleMuted color (glyphOk <> message))
-                        continue
-                    ReplAgents -> do
-                        case agentViewport of
-                            Nothing -> continue
-                            Just viewport -> do
-                                entries <- viewport.viewportEntries
-                                selected <- readIORef viewport.viewportSelected
-                                color <- resolveColor stderr
-                                pickAgentChoice
-                                    fullscreen color selected entries >>= \case
-                                    Nothing -> pure ()
-                                    Just target ->
-                                        viewport.viewportSelect target
-                                continue
-                    ReplMcp -> do
-                        color <- resolveColor stderr
-                        restart <-
-                            legacy $
-                                runMcpManager
-                                    color
-                                    env.sessionHome
-                                    env.sessionMcpRegistrations
-                                    env.sessionMcpWarnings
-                        if restart
-                            then requestMcpRestart
-                                fullscreen persist
-                            else continue
-                    ReplMcpPrompt server name arguments -> do
-                        outcome <- case env.sessionMcpFleet of
-                            Nothing -> pure (Left "no MCP servers are configured")
-                            Just fleet ->
-                                MCP.mcpFleetGetPrompt fleet server name arguments
-                        case outcome of
-                            Left err -> do
-                                displayError err $
-                                    Text.hPutStrLn stderr (roleError color err)
-                                continue
-                            Right result ->
-                                submitExpandedTurn
-                                    continue
-                                    color
-                                    ("/mcp prompt " <> server <> " " <> name)
-                                    (MCP.renderMcpPromptResult result)
+                    ReplShowAgentLimit ->
+                        showAgentLimit continue
+                    ReplSetAgentLimit limit ->
+                        setAgentLimit continue limit
+                    ReplAgents ->
+                        chooseAgent continue
+                    ReplMcp ->
+                        manageMcpServers continue
+                    ReplMcpPrompt server name arguments ->
+                        submitMcpPrompt
+                            continue color server name arguments
                     action@ReplGoalStatus -> handleWorkflowAction env submitExpandedTurn color continue action
                     action@ReplGoalPause -> handleWorkflowAction env submitExpandedTurn color continue action
                     action@ReplGoalResume -> handleWorkflowAction env submitExpandedTurn color continue action
@@ -737,49 +503,12 @@ handleReplLine
                         handleTranscriptAction handlerContext CopyWorktreePath
                     ReplCopySession ->
                         handleTranscriptAction handlerContext CopySessionId
-                    ReplDesktop -> do
-                        currentSessionId persist >>= \case
-                            Nothing -> do
-                                let err =
-                                        "/desktop requires a persisted \
-                                        \conversation"
-                                color <- resolveColor stderr
-                                displayError err $
-                                    Text.hPutStrLn stderr (roleError color err)
-                            Just sessionId ->
-                                openDesktopConversation sessionId >>= \case
-                                    Left err -> do
-                                        color <- resolveColor stderr
-                                        displayError err $
-                                            Text.hPutStrLn stderr
-                                                (roleError color err)
-                                    Right () -> do
-                                        let message =
-                                                "opened conversation in \
-                                                \Haskell Agent"
-                                        color <- resolveColor stderr
-                                        displayInfo message $
-                                            Text.hPutStrLn stderr
-                                                (roleSuccess color
-                                                    (glyphOk <> message))
-                        continue
-                    ReplShowTerminal -> do
-                        let message = formatTerminalCapabilities terminal
-                        displayInfo message $
-                            Text.putStrLn (roleMuted color message)
-                        continue
-                    ReplChangelog -> do
-                        releaseNotes <- loadReleaseNotes
-                        case fullscreen of
-                            Just runtime -> do
-                                requestFullscreenDocument
-                                    runtime
-                                    "Release Notes"
-                                    releaseNotes
-                            Nothing ->
-                                displayInfo releaseNotes
-                                    (Text.putStrLn releaseNotes)
-                        continue
+                    ReplDesktop ->
+                        openDesktopSession continue
+                    ReplShowTerminal ->
+                        showTerminalCapabilities continue color
+                    ReplChangelog ->
+                        showChangelog continue
                     action@ReplShowEffort -> handleSelectionAction env continue action
                     action@ReplSetEffort{} -> handleSelectionAction env continue action
                     action@ReplToggleFast -> handleSelectionAction env continue action
@@ -789,196 +518,32 @@ handleReplLine
                     action@ReplSetTheme{} -> handleSelectionAction env continue action
                     ReplEnableCodeMode ->
                         requestCodeModeRestart fullscreen persist
-                    ReplToggleAlwaysApprove
-                        | provider == ClaudeCodeProvider -> do
-                            let message =
-                                    "Claude Code permissions are fixed for this provider session; restart with --yolo or --no-yolo."
-                            color <- resolveColor stderr
-                            displayInfo message $
-                                putTextLn stderr (roleMuted color message)
-                            continue
-                        | otherwise -> do
-                            message <- toggleAlwaysApprove policyRef projectRoot
-                            color <- resolveColor stderr
-                            displayInfo message $
-                                putTextLn stderr (roleMuted color message)
-                            continue
-                    ReplCompact focus -> do
-                        color <- resolveColor stderr
-                        result <-
-                            withReplActivity "Compacting context…" $
-                                compactRunner focus
-                        case result of
-                            Left err -> do
-                                displayError err $
-                                    Text.hPutStrLn stderr (roleError color err)
-                                continue
-                            Right outcome -> do
-                                let statsMessage =
-                                        "compacted "
-                                            <> Text.pack
-                                                (show outcome.compactBeforeTokens)
-                                            <> " → "
-                                            <> Text.pack
-                                                (show outcome.compactAfterTokens)
-                                            <> " tokens ("
-                                            <> Text.pack
-                                                (show (length outcome.compactHistory))
-                                            <> " items)"
-                                case persist of
-                                    PersistenceDisabled ->
-                                        fullscreenEvent
-                                            (UiSystemMessage
-                                                outcome.compactSummary)
-                                    PersistenceEnabled slotRef -> do
-                                        forM_ fullscreen
-                                            beginFullscreenLiveHistory
-                                        fullscreenEvent
-                                            (UiSystemMessage
-                                                outcome.compactSummary)
-                                        now <- getCurrentTime
-                                        handle <- ensureSession slotRef
-                                        let turn = SessionTurn
-                                                { turnAt = now
-                                                , turnUserText = compactSessionUserText focus
-                                                , turnAssistantText = Just outcome.compactSummary
-                                                , turnError = Nothing
-                                                , turnResponseId = Nothing
-                                                , turnEffect = TranscriptReplace
-                                                , turnItems = outcome.compactHistory
-                                                , turnDisplayItems = []
-                                                -- Compaction response usage is
-                                                -- recorded immediately by
-                                                -- compactRunner, including
-                                                -- response-level failures.
-                                                , turnUsage = Nothing
-                                                , turnProviderTelemetry = []
-                                                }
-                                        (handle', turnIndex) <-
-                                            appendTurnWithMetaUpdateIndexed handle turn
-                                                \meta -> meta
-                                                    { metaLastResponseId = Nothing
-                                                    }
-                                        writeIORef slotRef
-                                            (PersistenceActive handle')
-                                        forM_ fullscreen \runtime ->
-                                            commitFullscreenHistoryTurn
-                                                runtime
-                                                (sessionHistoryTurn turnIndex turn)
-                                                HistoryCommitAppend
-                                displayInfo statsMessage $
-                                    Text.hPutStrLn stderr
-                                        (roleMuted color
-                                            (glyphSession <> statsMessage))
-                                continue
-                    ReplViewPlan -> do
-                        markdown <- readPlanMarkdown planMode
-                        if Text.null (Text.strip markdown)
-                            then do
-                                let message =
-                                        "No saved plan is available for this session."
-                                displayInfo message (Text.putStrLn message)
-                            else
-                                displayInfo markdown (Text.putStrLn markdown)
-                        continue
-                    ReplPlan _
-                        | provider == ClaudeCodeProvider -> do
-                            let message =
-                                    "Outer plan mode is unavailable for Claude Code because its tools run inside the Claude CLI."
-                            color <- resolveColor stderr
-                            displayInfo message $
-                                putTextLn stderr (roleMuted color message)
-                            continue
+                    ReplToggleAlwaysApprove ->
+                        toggleApprovalMode continue
+                    ReplCompact focus ->
+                        compactContext continue focus
+                    ReplViewPlan ->
+                        showSavedPlan continue
                     ReplPlan maybeDescription ->
-                        enterPlanFromSlash env maybeDescription >>= \case
-                            Just providerSwitch ->
-                                pure (RunSwitchProvider providerSwitch)
-                            Nothing -> continue
-                    ReplQueue -> do
-                        prompts <- case fullscreen of
-                            Nothing -> pure []
-                            Just runtime ->
-                                toList
-                                    <$> queuedFullscreenInputDisplays
-                                        runtime.runtimeInput
-                        let message = formatQueuedPrompts prompts
-                        displayInfo message (Text.putStrLn message)
-                        continue
-                    ReplContext -> do
-                        currentParams <- readIORef env.sessionParams
-                        history <- readLiveTranscript conversationRef
-                        occupancy <- readIORef contextOccupancyRef
-                        contextWindow <- currentContextWindow
-                        activeTools <- env.sessionActiveToolNames
-                        let model = maybe "<unknown>" id currentParams.model
-                            message =
-                                formatContextReport
-                                    model
-                                    contextWindow
-                                    occupancy
-                                    currentParams
-                                    history
-                                    activeTools
-                        displayInfo message (Text.putStrLn message)
-                        continue
-                    ReplHistory -> do
-                        prompts <-
-                            filter
-                                ((/= "/history")
-                                    . Text.toCaseFold
-                                    . Text.strip)
-                                <$> readReplHistory
-                        case prompts of
-                            [] -> do
-                                let message =
-                                        "No prompt history is available."
-                                displayInfo message (Text.putStrLn message)
-                                continue
-                            _ -> do
-                                selected <- case fullscreen of
-                                    Just runtime ->
-                                        requestFullscreenFilterChoice
-                                            runtime
-                                            "Prompt history"
-                                            0
-                                            [ (historyLabel prompt, "")
-                                            | prompt <- prompts
-                                            ]
-                                            >>= pure . (>>= (`listAt` prompts))
-                                    Nothing ->
-                                        readChoiceSelection
-                                            (\active prompt ->
-                                                (if active
-                                                    then roleSuccess color
-                                                    else roleMuted color)
-                                                    (historyLabel prompt))
-                                            prompts
-                                maybe continue continueWith selected
+                        enterPlanCommand continue maybeDescription
+                    ReplQueue ->
+                        showQueuedPrompts continue
+                    ReplContext ->
+                        showContextReport continue
+                    ReplHistory ->
+                        showPromptHistory continue color
                     ReplTranscript ->
                         handleTranscriptAction handlerContext ShowTranscript
                     ReplFind maybeQuery ->
                         handleTranscriptAction handlerContext
                             (FindTranscript maybeQuery)
-                    ReplEditPrompt -> do
-                        legacy editPrompt >>= \case
-                            Left err -> do
-                                displayError err $
-                                    Text.hPutStrLn stderr
-                                        (roleError color err)
-                                continue
-                            Right edited -> continueWith edited
+                    ReplEditPrompt ->
+                        editCurrentPrompt continue color
                     ReplBtw question -> do
                         runBtwQuestion True env question
                         continue
                     ReplRecap ->
-                        case fullscreen of
-                            Just runtime -> do
-                                emitUiEvent runtime UiRecapStarted
-                                env.sessionQueueRecap (RecapSession RecapManual)
-                                continue
-                            Nothing -> do
-                                runSessionRecap True env RecapManual
-                                continue
+                        requestSessionRecap continue
                     ReplRetry ->
                         resumePendingTurnIfPresent
                             env.sessionLastFailedTurn
@@ -1002,62 +567,515 @@ handleReplLine
                     action@ReplWorktree -> handleSessionAction env slashCatalog continue action
                     action@ReplRename{} -> handleSessionAction env slashCatalog continue action
                     action@ReplRenameAuto -> handleSessionAction env slashCatalog continue action
-                    ReplLogin -> do
-                        gatewayBefore <- loadGatewayCredential
-                        case fullscreen of
-                            Just runtime ->
-                                runFullscreenLoginManager runtime
-                            Nothing -> do
-                                color <- resolveColor stderr
-                                runLoginManager color
-                        gatewayAfter <- loadGatewayCredential
-                        if gatewayRoutingChanged gatewayBefore gatewayAfter
-                            then requestGatewayRestart fullscreen cwd
-                            else continue
-                    ReplUsage -> do
-                        readIORef gatewayModelsRef >>= \case
-                            Just _ ->
-                                displayInfo
-                                    "usage: managed by the organization gateway"
-                                    (Text.putStrLn
-                                        (roleMuted stdoutColor
-                                            "usage: managed by the organization gateway"))
-                            Nothing ->
-                                case fullscreen of
-                                    Nothing ->
-                                        showAccountUsage
-                                            provider tokenProvider openAiPool
-                                    Just runtime ->
-                                        accountUsageText
-                                            False provider tokenProvider openAiPool
-                                            >>= emitUiEvent runtime
-                                                . UiSystemMessage
-                        continue
-                    ReplReloadAuth -> do
-                        reloadResult <- reloadAuth provider tokenProvider
-                        color <- resolveColor stderr
-                        case reloadResult of
-                            Left err ->
-                                displayError err $
-                                    putTextLn stderr (roleError color err)
-                            Right message ->
-                                displayInfo message $
-                                    putTextLn stderr (roleMuted color message)
-                        continue
-                    ReplHelp maybeName -> do
-                        color <- resolveColor stdout
-                        displayInfo
-                            (formatSlashHelpWithCatalog
-                                False slashCatalog maybeName) $
-                            Text.putStrLn
-                                (formatSlashHelpWithCatalog
-                                    color slashCatalog maybeName)
-                        continue
-                    ReplCommandError err -> do
+                    ReplLogin ->
+                        manageLogin continue
+                    ReplUsage ->
+                        showUsage continue
+                    ReplReloadAuth ->
+                        reloadProviderAuth continue
+                    ReplHelp maybeName ->
+                        showCommandHelp slashCatalog continue maybeName
+                    ReplCommandError err ->
+                        showCommandError continue err
+    showShellMode next color = do
+        mode <- env.sessionShellMode
+        let message = "shell tools: " <> case mode of
+                ShellGhci -> "ghci"
+                ShellBash -> "bash"
+                ShellBoth -> "ghci + bash"
+                ShellNone -> "none"
+        displayInfo message $
+            Text.putStrLn
+                (roleMuted color (glyphSession <> message))
+        next
+    setShellMode next color mode = do
+        message <- env.sessionSetShellMode mode
+        displayInfo message $
+            Text.putStrLn (roleMuted color (glyphOk <> message))
+        next
+    showAgentLimit next = do
+        limit <- env.sessionConcurrentLimit
+        let message =
+                "concurrent agent limit: " <> Text.pack (show limit)
+        color <- resolveColor stdout
+        displayInfo message $
+            Text.putStrLn
+                (roleMuted color (glyphSession <> message))
+        next
+    setAgentLimit next limit = do
+        message <- env.sessionSetConcurrentLimit limit
+        color <- resolveColor stdout
+        displayInfo message $
+            Text.putStrLn (roleMuted color (glyphOk <> message))
+        next
+    chooseAgent next =
+        case agentViewport of
+            Nothing -> next
+            Just viewport -> do
+                entries <- viewport.viewportEntries
+                selected <- readIORef viewport.viewportSelected
+                color <- resolveColor stderr
+                pickAgentChoice
+                    fullscreen color selected entries >>= \case
+                        Nothing -> pure ()
+                        Just target -> viewport.viewportSelect target
+                next
+    manageMcpServers next = do
+        color <- resolveColor stderr
+        restart <-
+            legacy $
+                runMcpManager
+                    color
+                    env.sessionHome
+                    env.sessionMcpRegistrations
+                    env.sessionMcpWarnings
+        if restart
+            then requestMcpRestart fullscreen persist
+            else next
+    submitMcpPrompt next color server name arguments = do
+        outcome <- case env.sessionMcpFleet of
+            Nothing -> pure (Left "no MCP servers are configured")
+            Just fleet ->
+                MCP.mcpFleetGetPrompt fleet server name arguments
+        case outcome of
+            Left err -> do
+                displayError err $
+                    Text.hPutStrLn stderr (roleError color err)
+                next
+            Right result ->
+                submitExpandedTurn
+                    next
+                    color
+                    ("/mcp prompt " <> server <> " " <> name)
+                    (MCP.renderMcpPromptResult result)
+    openDesktopSession next = do
+        currentSessionId persist >>= \case
+            Nothing -> do
+                let err = "/desktop requires a persisted conversation"
+                color <- resolveColor stderr
+                displayError err $
+                    Text.hPutStrLn stderr (roleError color err)
+            Just sessionId ->
+                openDesktopConversation sessionId >>= \case
+                    Left err -> do
                         color <- resolveColor stderr
                         displayError err $
                             Text.hPutStrLn stderr (roleError color err)
-                        continue
+                    Right () -> do
+                        let message =
+                                "opened conversation in Haskell Agent"
+                        color <- resolveColor stderr
+                        displayInfo message $
+                            Text.hPutStrLn stderr
+                                (roleSuccess color (glyphOk <> message))
+        next
+    showTerminalCapabilities next color = do
+        let message = formatTerminalCapabilities terminal
+        displayInfo message $
+            Text.putStrLn (roleMuted color message)
+        next
+    showChangelog next = do
+        releaseNotes <- loadReleaseNotes
+        case fullscreen of
+            Just runtime ->
+                requestFullscreenDocument
+                    runtime
+                    "Release Notes"
+                    releaseNotes
+            Nothing ->
+                displayInfo releaseNotes (Text.putStrLn releaseNotes)
+        next
+    toggleApprovalMode next
+        | provider == ClaudeCodeProvider = do
+            let message =
+                    "Claude Code permissions are fixed for this provider session; restart with --yolo or --no-yolo."
+            color <- resolveColor stderr
+            displayInfo message $
+                putTextLn stderr (roleMuted color message)
+            next
+        | otherwise = do
+            message <- toggleAlwaysApprove policyRef projectRoot
+            color <- resolveColor stderr
+            displayInfo message $
+                putTextLn stderr (roleMuted color message)
+            next
+    compactContext next focus = do
+        color <- resolveColor stderr
+        result <-
+            withReplActivity "Compacting context…" $
+                compactRunner focus
+        case result of
+            Left err -> do
+                displayError err $
+                    Text.hPutStrLn stderr (roleError color err)
+                next
+            Right outcome -> do
+                persistCompactOutcome focus outcome
+                let statsMessage =
+                        "compacted "
+                            <> Text.pack
+                                (show outcome.compactBeforeTokens)
+                            <> " → "
+                            <> Text.pack
+                                (show outcome.compactAfterTokens)
+                            <> " tokens ("
+                            <> Text.pack
+                                (show (length outcome.compactHistory))
+                            <> " items)"
+                displayInfo statsMessage $
+                    Text.hPutStrLn stderr
+                        (roleMuted color (glyphSession <> statsMessage))
+                next
+    persistCompactOutcome focus outcome =
+        case persist of
+            PersistenceDisabled ->
+                fullscreenEvent
+                    (UiSystemMessage outcome.compactSummary)
+            PersistenceEnabled slotRef -> do
+                forM_ fullscreen beginFullscreenLiveHistory
+                fullscreenEvent
+                    (UiSystemMessage outcome.compactSummary)
+                now <- getCurrentTime
+                handle <- ensureSession slotRef
+                let turn = SessionTurn
+                        { turnAt = now
+                        , turnUserText = compactSessionUserText focus
+                        , turnAssistantText = Just outcome.compactSummary
+                        , turnError = Nothing
+                        , turnResponseId = Nothing
+                        , turnEffect = TranscriptReplace
+                        , turnItems = outcome.compactHistory
+                        , turnDisplayItems = []
+                        -- Compaction response usage is recorded immediately
+                        -- by compactRunner, including response-level failures.
+                        , turnUsage = Nothing
+                        , turnProviderTelemetry = []
+                        }
+                (handle', turnIndex) <-
+                    appendTurnWithMetaUpdateIndexed handle turn
+                        \meta -> meta { metaLastResponseId = Nothing }
+                writeIORef slotRef (PersistenceActive handle')
+                forM_ fullscreen \runtime ->
+                    commitFullscreenHistoryTurn
+                        runtime
+                        (sessionHistoryTurn turnIndex turn)
+                        HistoryCommitAppend
+    showSavedPlan next = do
+        markdown <- readPlanMarkdown planMode
+        if Text.null (Text.strip markdown)
+            then do
+                let message =
+                        "No saved plan is available for this session."
+                displayInfo message (Text.putStrLn message)
+            else
+                displayInfo markdown (Text.putStrLn markdown)
+        next
+    enterPlanCommand next maybeDescription
+        | provider == ClaudeCodeProvider = do
+            let message =
+                    "Outer plan mode is unavailable for Claude Code because its tools run inside the Claude CLI."
+            color <- resolveColor stderr
+            displayInfo message $
+                putTextLn stderr (roleMuted color message)
+            next
+        | otherwise =
+            enterPlanFromSlash env maybeDescription >>= \case
+                Just providerSwitch ->
+                    pure (RunSwitchProvider providerSwitch)
+                Nothing -> next
+    showQueuedPrompts next = do
+        prompts <- case fullscreen of
+            Nothing -> pure []
+            Just runtime ->
+                toList
+                    <$> queuedFullscreenInputDisplays runtime.runtimeInput
+        let message = formatQueuedPrompts prompts
+        displayInfo message (Text.putStrLn message)
+        next
+    showContextReport next = do
+        currentParams <- readIORef env.sessionParams
+        history <- readLiveTranscript conversationRef
+        occupancy <- readIORef contextOccupancyRef
+        contextWindow <- currentContextWindow
+        activeTools <- env.sessionActiveToolNames
+        let model = maybe "<unknown>" id currentParams.model
+            message =
+                formatContextReport
+                    model
+                    contextWindow
+                    occupancy
+                    currentParams
+                    history
+                    activeTools
+        displayInfo message (Text.putStrLn message)
+        next
+    showPromptHistory next color = do
+        prompts <-
+            filter
+                ((/= "/history") . Text.toCaseFold . Text.strip)
+                <$> readReplHistory
+        case prompts of
+            [] -> do
+                let message = "No prompt history is available."
+                displayInfo message (Text.putStrLn message)
+                next
+            _ -> do
+                selected <- case fullscreen of
+                    Just runtime ->
+                        requestFullscreenFilterChoice
+                            runtime
+                            "Prompt history"
+                            0
+                            [ (historyLabel prompt, "")
+                            | prompt <- prompts
+                            ]
+                            >>= pure . (>>= (`listAt` prompts))
+                    Nothing ->
+                        readChoiceSelection
+                            (\active prompt ->
+                                (if active
+                                    then roleSuccess color
+                                    else roleMuted color)
+                                    (historyLabel prompt))
+                            prompts
+                maybe next continueWith selected
+    editCurrentPrompt next color =
+        legacy editPrompt >>= \case
+            Left err -> do
+                displayError err $
+                    Text.hPutStrLn stderr (roleError color err)
+                next
+            Right edited -> continueWith edited
+    requestSessionRecap next =
+        case fullscreen of
+            Just runtime -> do
+                emitUiEvent runtime UiRecapStarted
+                env.sessionQueueRecap (RecapSession RecapManual)
+                next
+            Nothing -> do
+                runSessionRecap True env RecapManual
+                next
+    manageLogin next = do
+        gatewayBefore <- loadGatewayCredential
+        case fullscreen of
+            Just runtime -> runFullscreenLoginManager runtime
+            Nothing -> do
+                color <- resolveColor stderr
+                runLoginManager color
+        gatewayAfter <- loadGatewayCredential
+        if gatewayRoutingChanged gatewayBefore gatewayAfter
+            then requestGatewayRestart fullscreen cwd
+            else next
+    showUsage next = do
+        readIORef gatewayModelsRef >>= \case
+            Just _ ->
+                displayInfo
+                    "usage: managed by the organization gateway"
+                    (Text.putStrLn
+                        (roleMuted stdoutColor
+                            "usage: managed by the organization gateway"))
+            Nothing ->
+                case fullscreen of
+                    Nothing ->
+                        showAccountUsage provider tokenProvider openAiPool
+                    Just runtime ->
+                        accountUsageText
+                            False provider tokenProvider openAiPool
+                            >>= emitUiEvent runtime . UiSystemMessage
+        next
+    reloadProviderAuth next = do
+        reloadResult <- reloadAuth provider tokenProvider
+        color <- resolveColor stderr
+        case reloadResult of
+            Left err ->
+                displayError err $
+                    putTextLn stderr (roleError color err)
+            Right message ->
+                displayInfo message $
+                    putTextLn stderr (roleMuted color message)
+        next
+    showCommandHelp catalog next maybeName = do
+        color <- resolveColor stdout
+        displayInfo
+            (formatSlashHelpWithCatalog False catalog maybeName) $
+            Text.putStrLn
+                (formatSlashHelpWithCatalog color catalog maybeName)
+        next
+    showCommandError next err = do
+        color <- resolveColor stderr
+        displayError err $
+            Text.hPutStrLn stderr (roleError color err)
+        next
+    submitPrompt pasted next color text = do
+        -- Native Cmd+V of a Finder image often pastes a path rather than
+        -- bitmap bytes. Treat a prompt that is only image path(s) as an attach
+        -- plus in-terminal preview, matching Grok Build's paste chip.
+        pastedImages <- loadImagesFromPastedText text
+        case pastedImages of
+            Just images@(_:_) -> do
+                message <- queueAttachedImages
+                    conversationRef
+                    previewIdRef
+                    color
+                    (isNothing fullscreen)
+                    images
+                syncFullscreenImagePreviews
+                displayInfo message $
+                    Text.putStrLn
+                        (roleMuted color (glyphOk <> message))
+                next
+            _ -> do
+                pendingImages <-
+                    modifyLiveAttachments conversationRef \imgs -> ([], imgs)
+                forM_ fullscreen \runtime ->
+                    commitFullscreenImagePreviews runtime pendingImages
+                resetRenderPrintedText render
+                let turnInputs =
+                        [ userMessageWithAttachments
+                            text
+                            (map ImageAttachmentItem pendingImages)
+                        ]
+                preparePromptSkillInputsWithPaste
+                    env pasted text turnInputs >>= \case
+                        Left err -> do
+                            displayError err $
+                                Text.hPutStrLn stderr (roleError color err)
+                            next
+                        Right skillInputs -> do
+                            fullscreenEvent (UiUserSubmitted text)
+                            result <- runOneTurn env text skillInputs
+                            finishTurn False result
+    initializeProjectGuide next color line = do
+        let guidePath = cwd </> unsafeEncodeUtf "AGENTS.md"
+        tryIO
+            (getSymbolicLinkStatus
+                (unsafeToFilePath guidePath)) >>= \case
+            Left err
+                | isDoesNotExistError err ->
+                    submitExpandedTurn next color line initInstruction
+                | otherwise -> do
+                    let message =
+                            "could not check AGENTS.md: "
+                                <> Text.pack (displayException err)
+                    displayError message $
+                        Text.hPutStrLn stderr (roleError color message)
+                    next
+            Right _ -> do
+                let message =
+                        "AGENTS.md already exists; left it unchanged."
+                displayInfo message $
+                    Text.putStrLn
+                        (roleMuted color (glyphSession <> message))
+                next
+    submitReview next color line = \case
+        Just instructions ->
+            submitExpandedTurn
+                next
+                color
+                line
+                (reviewPrompt (ReviewCustom instructions))
+        Nothing ->
+            chooseReviewTarget >>= \case
+                Left err -> do
+                    displayError err $
+                        Text.hPutStrLn stderr (roleError color err)
+                    next
+                Right Nothing -> next
+                Right (Just target) ->
+                    submitExpandedTurn
+                        next
+                        color
+                        line
+                        (reviewPrompt target)
+    showWorkingTreeDiff next color = do
+        result <-
+            withReplActivity "Loading Git diff…" $
+                getGitDiff cwd
+        case result of
+            Left err -> do
+                displayError err $
+                    Text.hPutStrLn stderr (roleError color err)
+                next
+            Right GitDiffNotRepository -> do
+                let message = "not a Git repository"
+                displayError message $
+                    Text.hPutStrLn stderr (roleError color message)
+                next
+            Right (GitDiffOutput diff)
+                | Text.null (Text.strip diff) -> do
+                    let message = "No working-tree changes."
+                    displayInfo message $
+                        Text.putStrLn
+                            (roleMuted color (glyphSession <> message))
+                    next
+                | otherwise -> do
+                    displayInfo diff $
+                        Text.putStrLn (colorizeGitDiff color diff)
+                    next
+    choosePermissions next color
+        | provider == ClaudeCodeProvider = do
+            let message =
+                    "Claude Code permissions are fixed for this provider session; restart with --yolo or --no-yolo."
+            displayInfo message $
+                Text.hPutStrLn stderr (roleMuted color message)
+            next
+        | otherwise = do
+            current <- readIORef policyRef
+            requestChoice
+                "Permissions"
+                "Choose how mutating tools are handled."
+                (approvalPolicyIndex current)
+                approvalPolicyRows >>= \case
+                    Nothing -> next
+                    Just index -> do
+                        message <-
+                            setApprovalPolicy
+                                policyRef
+                                projectRoot
+                                (approvalPolicyAt index)
+                        displayInfo message $
+                            Text.hPutStrLn stderr
+                                (roleMuted color (glyphOk <> message))
+                        next
+    submitSkillInvocation
+            invocations next color line invocationName arguments =
+        case resolveSkillInvocation invocations invocationName of
+            Left err -> do
+                displayError err $
+                    Text.hPutStrLn stderr (roleError color err)
+                next
+            Right invocation -> do
+                pendingImages <-
+                    modifyLiveAttachments conversationRef \imgs -> ([], imgs)
+                forM_ fullscreen \runtime ->
+                    commitFullscreenImagePreviews runtime pendingImages
+                let userText =
+                        if Text.null arguments
+                            then "Use the "
+                                <> invocation.invocationSkill.skillName
+                                <> " skill."
+                            else arguments
+                    userInput =
+                        userMessageWithAttachments
+                            userText
+                            (map ImageAttachmentItem pendingImages)
+                    skillInputs =
+                        [ UserMessage
+                            (formatSkillActivation invocation arguments)
+                        , userInput
+                        ]
+                resetRenderPrintedText render
+                fullscreenEvent (UiUserSubmitted line)
+                result <- runOneTurn env line skillInputs
+                finishTurn False result
+    showSkills next color reloadFirst = do
+        when reloadFirst (refreshSkills True)
+        current <- readIORef skillsRef
+        invocations <- readIORef skillInvocationsRef
+        let listing = formatSkillsListing color current invocations
+        displayInfo (formatSkillsListing False current invocations) $
+            Text.putStrLn listing
+        next
     submitExpandedTurn = submitExpandedTurnWithPaste False
     submitExpandedTurnWithPaste pasted next color original expanded = do
         pendingImages <-

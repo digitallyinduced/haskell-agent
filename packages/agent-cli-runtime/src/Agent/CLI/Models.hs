@@ -174,10 +174,9 @@ resolveSavedModelTarget
         , targetDialect = dialect
         }
 
--- | Keep direct-provider and organization-gateway sessions on their
--- respective routes. Gateway credentials are deliberately interchangeable
--- here: locally owned conversation history remains resumable after credential
--- rotation or when the user connects another organization gateway.
+-- | Persisted conversation history is portable across routing modes. Startup
+-- retargets a resumed session to the currently active direct or organization
+-- gateway route before the next turn.
 validateResumedGatewayBoundary
     :: Maybe Text
     -- ^ Identity of the currently connected gateway credential.
@@ -186,25 +185,7 @@ validateResumedGatewayBoundary
     -> Maybe Text
     -- ^ Persisted gateway identity.
     -> Either Text ()
-validateResumedGatewayBoundary currentIdentity connection savedIdentity =
-    case currentIdentity of
-        Nothing
-            | connection == organizationGatewayConnectionId ->
-                Left
-                    "This session belongs to an organization gateway. \
-                    \Reconnect the same gateway before resuming it."
-            | savedIdentity /= Nothing ->
-                Left
-                    "This session has inconsistent organization gateway \
-                    \routing metadata and cannot be resumed."
-            | otherwise -> Right ()
-        Just _
-            | connection /= organizationGatewayConnectionId ->
-                Left
-                    "This session was created outside the connected \
-                    \organization gateway. Start a new session or disconnect \
-                    \the gateway before resuming it."
-            | otherwise -> Right ()
+validateResumedGatewayBoundary _ _ _ = Right ()
 
 catalogModelIds :: ModelCatalog -> [Text]
 catalogModelIds =
