@@ -241,7 +241,7 @@ runShell env session emitOutput args
         startCodexShellCommand
             session
             dir
-            (Text.unpack args.command)
+            args.command
             yieldMs
             (\out err -> emitOutput (commandBody out err))
             >>= pure . fmap renderShellResult
@@ -251,7 +251,7 @@ runShell env session emitOutput args
         result <- runShellCommandStreaming
             env
             dir
-            (Text.unpack args.command)
+            args.command
             timeoutMs
             (\out err -> emitOutput (commandBody out err))
         if result.commandCancelled

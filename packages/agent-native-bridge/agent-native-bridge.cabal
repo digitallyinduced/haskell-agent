@@ -1,0 +1,146 @@
+cabal-version:      3.0
+name:               agent-native-bridge
+version:            0.1.0.0
+synopsis:           Native host integration for the agent harness
+description:        Host-administration helpers and the macOS native shared
+                    bridge used by the desktop application.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           System
+build-type:         Simple
+extra-source-files: include/HaskellAgentBridge.h
+
+common common-options
+    default-language: GHC2021
+    default-extensions: BlockArguments
+                      , OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , TypeApplications
+                      , ScopedTypeVariables
+    ghc-options:      -Wall
+                      -Wcompat
+                      -Widentities
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wincomplete-record-updates
+                      -Wpartial-fields
+                      -Wno-name-shadowing
+
+library
+    import:           common-options
+    hs-source-dirs:   src
+    exposed-modules:  Agent.CLI.BrowserTools
+                    , Agent.CLI.McpAdmin
+                    , Agent.CLI.ResourceAdmin
+    build-depends:    agent-cli >= 0.1 && < 0.2
+                    , agent-core >= 0.1 && < 0.2
+                    , agent-json >= 0.1 && < 0.2
+                    , agent-mcp >= 0.1 && < 0.2
+                    , agent-store >= 0.1 && < 0.2
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , filepath
+                    , network-uri
+                    , text >= 2.0 && < 2.2
+                    , time
+                    , transformers
+
+foreign-library haskell-agent-bridge
+    import:           common-options
+    if !os(darwin)
+        buildable:    False
+    type:             native-shared
+    options:          standalone
+    hs-source-dirs:   ffi
+    other-modules:    Agent.CLI.MacOS.Bridge
+                    , Agent.CLI.MacOS.EngineMailbox
+                    , Agent.CLI.MacOS.NativeLoopEvent
+                    , Agent.CLI.MacOS.ResourceAdmin
+    c-sources:        cbits/HaskellAgentBridgeRuntime.c
+    include-dirs:     include
+    includes:         HaskellAgentBridge.h
+    install-includes: HaskellAgentBridge.h
+    ghc-options:      -threaded
+    build-depends:    agent-native-bridge
+                    , agent-repository >= 0.1 && < 0.2
+                    , agent-cli >= 0.1 && < 0.2
+                    , agent-runtime-daemon >= 0.1 && < 0.2
+                    , agent-core >= 0.1 && < 0.2
+                    , agent-store >= 0.1 && < 0.2
+                    , agent-openai >= 0.1 && < 0.2
+                    , agent-xai >= 0.1 && < 0.2
+                    , agent-openrouter >= 0.1 && < 0.2
+                    , aeson >= 2.0
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , directory
+                    , filelock
+                    , filepath
+                    , safe-exceptions
+                    , stm
+                    , text >= 2.0 && < 2.2
+                    , time
+
+test-suite agent-native-bridge-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test ffi
+    main-is:          Spec.hs
+    ghc-options:      -threaded
+    other-modules:    Agent.CLI.BrowserToolsSpec
+                    , Agent.CLI.MacOS.EngineMailbox
+                    , Agent.CLI.MacOS.EngineMailboxSpec
+                    , Agent.CLI.MacOS.NativeLoopEvent
+                    , Agent.CLI.MacOS.NativeLoopEventSpec
+                    , Agent.CLI.MacOS.TaskSchedulerSpec
+                    , Agent.CLI.McpAdminSpec
+                    , Agent.CLI.ResourceAdminSpec
+    build-depends:    agent-native-bridge
+                    , agent-cli
+                    , agent-core
+                    , agent-mcp
+                    , agent-runtime-daemon
+                    , agent-store
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , directory
+                    , filepath
+                    , hspec >= 2.11 && < 2.12
+                    , safe-exceptions
+                    , stm
+                    , text
+                    , unix
+    if os(darwin)
+        c-sources:    test/cbits/HaskellAgentBridgeBrowserSmoke.c
+                    , test/cbits/HaskellAgentBridgeImageSmoke.c
+                    , test/cbits/HaskellAgentBridgeTaskSmoke.c
+                    , cbits/HaskellAgentBridgeRuntime.c
+        include-dirs: include
+        other-modules: Agent.CLI.MacOS.Bridge
+                     , Agent.CLI.MacOS.ResourceAdmin
+                     , Agent.CLI.MacOS.BrowserBridgeFFISpec
+                     , Agent.CLI.MacOS.BridgeSpec
+                     , Agent.CLI.MacOS.BridgeHeaderSpec
+                     , Agent.CLI.MacOS.BridgeFFISpec
+        build-depends: agent-repository
+                     , agent-cli-runtime
+                     , agent-openai
+                     , agent-openrouter
+                     , agent-xai
+                     , aeson
+                     , filelock
+                     , time

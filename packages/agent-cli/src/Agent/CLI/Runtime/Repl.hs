@@ -33,6 +33,7 @@ import Agent.CLI.Dictation
     ( dictationTargetForSession )
 import Agent.CLI.GatewayClient
     ( cachedGatewayModels
+    , fetchGatewayUsage
     , gatewayModelIds
     )
 import Agent.CLI.GatewayBridge ()
@@ -186,7 +187,7 @@ import Control.Exception.Safe ()
 import Control.Monad ( when, forM_ )
 import Data.IORef ( readIORef, writeIORef )
 import Data.List ()
-import Data.Maybe ( fromMaybe, isJust, isNothing )
+import Data.Maybe ( fromMaybe, isJust )
 import Data.Text ( Text )
 import Data.Time.Clock ()
 import System.Console.ANSI ( getTerminalSize )
@@ -340,7 +341,10 @@ replWithDraft env@SessionEnv
                         draft
                         wake
             withAsync
-                (refreshAccountLimit (isNothing gatewayAccess) runtime)
+                (refreshAccountLimit
+                    gatewayAccess
+                    (currentModel params)
+                    runtime)
                 \_ ->
                 readPrompt
         Nothing -> Right <$> withMVar render.renderLock \_ -> do
@@ -454,17 +458,21 @@ replWithDraft env@SessionEnv
                 policy
                 mline
   where
-    refreshAccountLimit allowOpenAi runtime =
-        case (provider, tokenProvider) of
-            (XAIProvider, Just tokens)
+    refreshAccountLimit gatewayAccess model runtime =
+        case (gatewayAccess, provider, tokenProvider) of
+            (Just access, _, _) ->
+                fetchGatewayUsage access model >>= \case
+                    Left _ -> pure ()
+                    Right snapshot ->
+                        publish (formatOpenAiLimitStatus snapshot)
+            (Nothing, XAIProvider, Just tokens)
                 | tokenProviderBillingMode tokens == SubscriptionBilled ->
                     refreshWith
                         tokens
                         XAIUsage.fetchGrokUsage
                         formatGrokLimitStatus
-            (OpenAIProvider, Just tokens)
-                | allowOpenAi
-                , tokenProviderBillingMode tokens == SubscriptionBilled ->
+            (Nothing, OpenAIProvider, Just tokens)
+                | tokenProviderBillingMode tokens == SubscriptionBilled ->
                     getNextToken tokens Nothing >>= \case
                         Left _ -> pure ()
                         Right credential
@@ -478,7 +486,7 @@ replWithDraft env@SessionEnv
                                         Right snapshot ->
                                             publish
                                                 (formatOpenAiLimitStatus snapshot)
-            (OpenRouterProvider, Just tokens) ->
+            (Nothing, OpenRouterProvider, Just tokens) ->
                 getNextToken tokens Nothing >>= \case
                     Left _ -> pure ()
                     Right credential ->

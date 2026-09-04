@@ -880,7 +880,7 @@ assistantResponseItem text =
 
 responseWithTypedOutput :: [ResponseItem] -> Response
 responseWithTypedOutput output =
-    either error id
+    either (error . Text.unpack) id
         . ResponsesCodec.decodeResponse
         . LBS.toStrict
         . Aeson.encode
