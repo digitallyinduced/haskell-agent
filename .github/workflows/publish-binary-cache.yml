@@ -26,7 +26,7 @@ jobs:
             install_nix: true
             trusted-rebuild: false
             build-cores: 4
-            timeout_minutes: 180
+            timeout_minutes: 240
           - system: aarch64-darwin
             runner: '["self-hosted", "haskell-agent", "ihp-ci-mac", "aarch64-darwin"]'
             install_nix: false
