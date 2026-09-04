@@ -7,6 +7,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , portalRequestPathForSender
     , requestResponseRule
     , sessionClosedRule
+    , withPortalCaptureReadiness
     ) where
 
 import Agent.CLI.ComputerUse.Backend
@@ -602,13 +603,14 @@ inspectPortalDisplay runtime =
     ensurePortalReady runtime >>= \case
         Left err -> pure (Left err)
         Right () ->
-            withPortalSessionOperation runtime "screen capture" \session -> do
-                frame <- capturePortalFrame runtime session
-                pure
-                    (portalDisplay
-                        session
-                        frame.portalFrameWidth
-                        frame.portalFrameHeight)
+            withPortalCaptureReadiness runtime.portalReadiness $
+                withPortalSessionOperation runtime "screen capture" \session -> do
+                    frame <- capturePortalFrame runtime session
+                    pure
+                        (portalDisplay
+                            session
+                            frame.portalFrameWidth
+                            frame.portalFrameHeight)
 
 capturePortalDisplay
     :: PortalRuntime
@@ -618,20 +620,34 @@ capturePortalDisplay runtime encoding =
     ensurePortalReady runtime >>= \case
         Left err -> pure (Left err)
         Right () ->
-            withPortalSessionOperation runtime "screen capture" \session -> do
-                frame <- capturePortalFrame runtime session
-                pure CapturedDisplay
-                    { capturedComputerDisplay =
-                        portalDisplay
-                            session
-                            frame.portalFrameWidth
-                            frame.portalFrameHeight
-                    , capturedComputerImage =
-                        encodePortalFrame
-                            encoding
-                            session.portalSessionStream
-                            frame.portalFrameImage
-                    }
+            withPortalCaptureReadiness runtime.portalReadiness $
+                withPortalSessionOperation runtime "screen capture" \session -> do
+                    frame <- capturePortalFrame runtime session
+                    pure CapturedDisplay
+                        { capturedComputerDisplay =
+                            portalDisplay
+                                session
+                                frame.portalFrameWidth
+                                frame.portalFrameHeight
+                        , capturedComputerImage =
+                            encodePortalFrame
+                                encoding
+                                session.portalSessionStream
+                                frame.portalFrameImage
+                        }
+
+withPortalCaptureReadiness
+    :: IO (Either Text ())
+    -> IO (Either Text value)
+    -> IO (Either Text value)
+withPortalCaptureReadiness readiness capture = do
+    result <- capture
+    case result of
+        Left err -> pure (Left err)
+        Right value ->
+            readiness >>= \case
+                Left err -> pure (Left err)
+                Right () -> pure (Right value)
 
 executePortalAction
     :: PortalRuntime

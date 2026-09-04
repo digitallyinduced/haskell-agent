@@ -2,6 +2,7 @@ module Agent.CLI.ComputerUse.Linux.X11
     ( XdotoolInvocation(..)
     , newX11Backend
     , parseXrandrDisplay
+    , withX11InputCleanup
     , x11KeyInvocation
     , x11PointerPosition
     , x11ScrollInvocations
@@ -38,8 +39,8 @@ import Codec.Picture
     , imageWidth
     )
 import Control.Concurrent (threadDelay)
-import Control.Exception.Safe (finally, tryAny)
-import Control.Monad (foldM, void)
+import Control.Exception.Safe (finally, generalBracket, tryAny)
+import Control.Monad (foldM)
 import Codec.Picture.Types (convertImage)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
@@ -307,14 +308,14 @@ dragPointer display (first : rest) = do
     moved <- movePoint first
     case moved of
         Left err -> pure (Left err)
-        Right () -> do
-            pressed <- runXdotool (arguments ["mousedown", "1"])
-            case pressed of
-                Left err -> pure (Left err)
-                Right () ->
-                    foldM moveResult (Right ()) rest
-                        `finally` void
-                            (runXdotool (arguments ["mouseup", "1"]))
+        Right () ->
+            withX11InputCleanup
+                (do
+                    pressed <- runXdotool (arguments ["mousedown", "1"])
+                    case pressed of
+                        Left err -> pure (Left err)
+                        Right () -> foldM moveResult (Right ()) rest)
+                (runXdotool (arguments ["mouseup", "1"]))
   where
     movePoint ComputerPoint{pointX, pointY} = do
         threadDelay 20000
@@ -327,21 +328,43 @@ withX11Modifiers
     -> IO (Either Text ())
     -> IO (Either Text ())
 withX11Modifiers [] action = action
-withX11Modifiers modifiers action = do
-    pressed <- runXdotoolInvocations
-        [ arguments ["keydown", Text.unpack (modifierName modifier)]
-        | modifier <- modifiers
-        ]
-    case pressed of
-        Left err -> cleanup >> pure (Left err)
-        Right () -> action `finally` cleanup
+withX11Modifiers modifiers action =
+    withX11InputCleanup
+        (do
+            pressed <- runXdotoolInvocations
+                [ arguments ["keydown", Text.unpack (modifierName modifier)]
+                | modifier <- modifiers
+                ]
+            case pressed of
+                Left err -> pure (Left err)
+                Right () -> action)
+        cleanup
   where
     cleanup =
-        runXdotoolInvocations
+        runXdotoolCleanupInvocations
             [ arguments ["keyup", Text.unpack (modifierName modifier)]
             | modifier <- reverse modifiers
             ]
-            >>= const (pure ())
+
+withX11InputCleanup
+    :: IO (Either Text ())
+    -> IO (Either Text ())
+    -> IO (Either Text ())
+withX11InputCleanup action cleanup = do
+    (actionResult, cleanupResult) <-
+        generalBracket
+            (pure ())
+            (\() _ -> cleanup)
+            (\() -> action)
+    pure case (actionResult, cleanupResult) of
+        (Right (), result) -> result
+        (Left err, Right ()) -> Left err
+        (Left err, Left cleanupErr) ->
+            Left
+                ( err
+                    <> " Input cleanup also failed: "
+                    <> cleanupErr
+                )
 
 movePointer :: ComputerDisplay -> Int -> Int -> IO (Either Text ())
 movePointer display x y =
@@ -355,6 +378,24 @@ runXdotoolInvocations =
   where
     step (Left err) _ = pure (Left err)
     step (Right ()) invocation = runXdotool invocation
+
+runXdotoolCleanupInvocations
+    :: [XdotoolInvocation]
+    -> IO (Either Text ())
+runXdotoolCleanupInvocations =
+    foldM step (Right ())
+  where
+    step previous invocation = do
+        current <- runXdotool invocation
+        pure case (previous, current) of
+            (Right (), result) -> result
+            (result, Right ()) -> result
+            (Left first, Left next) ->
+                Left
+                    ( first
+                        <> " Additional input cleanup failure: "
+                        <> next
+                    )
 
 runXdotool :: XdotoolInvocation -> IO (Either Text ())
 runXdotool invocation = do

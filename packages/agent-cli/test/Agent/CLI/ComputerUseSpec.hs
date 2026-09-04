@@ -34,10 +34,12 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , portalRequestPathForSender
     , requestResponseRule
     , sessionClosedRule
+    , withPortalCaptureReadiness
     )
 import Agent.CLI.ComputerUse.Linux.X11
     ( XdotoolInvocation(..)
     , parseXrandrDisplay
+    , withX11InputCleanup
     , x11KeyInvocation
     , x11PointerPosition
     , x11ScrollInvocations
@@ -239,6 +241,17 @@ spec = do
                     ""
                 ]
 
+        it "reports failures while releasing held input" do
+            calls <- newIORef ([] :: [Text.Text])
+            let record name result = do
+                    modifyIORef' calls (<> [name])
+                    pure result
+            withX11InputCleanup
+                (record "action" (Right ()))
+                (record "cleanup" (Left "release failed"))
+                `shouldReturn` Left "release failed"
+            readIORef calls `shouldReturn` ["action", "cleanup"]
+
     describe "Linux Wayland portal computer use" do
         it "derives race-free request paths from the unique bus name" do
             portalRequestPathForSender ":1.42" "request_ab12"
@@ -284,6 +297,17 @@ spec = do
             portalKeysym '\n' `shouldBe` 0xff0d
             portalMouseButtonCode MouseLeft `shouldBe` 0x110
             portalMouseButtonCode MouseForward `shouldBe` 0x114
+
+        it "rechecks session readiness after capture" do
+            calls <- newIORef ([] :: [Text.Text])
+            let record name result = do
+                    modifyIORef' calls (<> [name])
+                    pure result
+            withPortalCaptureReadiness
+                (record "ready" (Left "session locked"))
+                (record "capture" (Right ()))
+                `shouldReturn` Left "session locked"
+            readIORef calls `shouldReturn` ["capture", "ready"]
 
     describe "computer action validation" do
         it "preserves supported mouse buttons and modifiers" do
