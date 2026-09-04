@@ -36,6 +36,7 @@ import Agent.TextBuffer
 import Agent.Telemetry (TurnTelemetry(..))
 import Agent.TUI.Motion (MotionMode(..), foregroundIndicator)
 import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.Async (asyncThreadId, poll)
 import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Exception (finally)
 import Control.Monad (forM_)
@@ -44,7 +45,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Calendar (fromGregorian)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Time.Clock (UTCTime(..), addUTCTime, diffUTCTime, getCurrentTime)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (BufferMode(..), Handle, hClose, hSetBuffering, openTempFile)
@@ -660,7 +661,21 @@ spec = do
                 first <- readIORef config.renderThinkingSpinner
                 renderEvent config TurnStarted
                 second <- readIORef config.renderThinkingSpinner
-                second `shouldBe` first
+                fmap asyncThreadId second `shouldBe` fmap asyncThreadId first
+
+        it "joins the spinner worker before clearing its owner" do
+            withRenderConfig True False \config _handle _path -> do
+                renderEvent config TurnStarted
+                worker <-
+                    readIORef config.renderThinkingSpinner
+                        >>= maybe
+                            (expectationFailure "spinner worker was not started"
+                                >> fail "missing spinner worker")
+                            pure
+                clearThinking config
+                (isJust <$> readIORef config.renderThinkingSpinner)
+                    `shouldReturn` False
+                poll worker >>= (`shouldSatisfy` isJust)
 
         it "commits buffered reasoning before a continuation TurnStarted" do
             withRenderConfig True False \config handle path -> do

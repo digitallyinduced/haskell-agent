@@ -102,8 +102,7 @@ import Agent.Tools.MultiAgents
 import Agent.Tools.PlanMode
 import Agent.Tools.Types
 import Agent.OsPath
-import Control.Concurrent (ThreadId)
-import Control.Concurrent.Async (withAsync)
+import Control.Concurrent.Async (Async, withAsync)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM (STM)
@@ -336,7 +335,7 @@ withSessionTitleRuntime host SessionRequest{..} SessionBackend{..} =
 data SessionControlRuntime = SessionControlRuntime
     { controlToolRegistry :: !ToolRegistry
     , controlSteeringInputs :: !SteeringInputs
-    , controlSpinnerRef :: !(IORef (Maybe ThreadId))
+    , controlSpinnerRef :: !(IORef (Maybe (Async ())))
     , controlRenderStateRef :: !(IORef RenderState)
     , controlAllowedToolsRef :: !(IORef (Set.Set Text.Text))
     , controlComputerUseEnabledRef :: !(IORef Bool)
