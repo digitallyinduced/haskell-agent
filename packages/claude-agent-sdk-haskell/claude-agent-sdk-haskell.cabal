@@ -83,6 +83,16 @@ benchmark output-buffer-bench
                     , bytestring
                     , safe-exceptions
 
+benchmark control-shutdown-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ControlShutdown.hs
+    ghc-options:      -O2 -threaded -rtsopts
+    build-depends:    base >= 4.17 && < 5
+                    , async
+                    , safe-exceptions
+
 test-suite claude-agent-sdk-haskell-test
     import:           common-opts
     type:             exitcode-stdio-1.0
@@ -100,6 +110,7 @@ test-suite claude-agent-sdk-haskell-test
                     , claude-agent-sdk-haskell
                     , agent-json
                     , aeson
+                    , async
                     , bytestring
                     , containers
                     , directory

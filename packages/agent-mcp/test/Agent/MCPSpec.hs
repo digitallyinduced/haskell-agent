@@ -2,6 +2,8 @@ module Agent.MCPSpec (spec) where
 
 import Agent.Loop (defaultLoopDispatch)
 import Agent.MCP
+import Agent.MCP.Fleet (spawnFleetWorker)
+import Agent.MCP.Supervisor (acquireMcpFleetWith)
 import Agent.MCP.Client
     ( ProbeOutcome(..)
     , annotateHeaderParams
@@ -54,9 +56,16 @@ import Agent.Tools.Types
     , appToolHandlers
     , toolAllowsWithoutPrompt
     )
-import Control.Exception.Safe (bracket)
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (async, wait, waitCatch, withAsync)
+import Control.Exception.Safe (bracket, finally)
+import Control.Concurrent
+    ( newEmptyMVar
+    , putMVar
+    , takeMVar
+    , threadDelay
+    , tryPutMVar
+    )
+import Control.Concurrent.Async (async, cancel, wait, waitCatch, withAsync)
+import Control.Monad (void)
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson
 import qualified Data.ByteString as BS
@@ -845,6 +854,44 @@ spec = describe "Agent.MCP" do
                     `shouldReturn` Just ()
                 _ <- waitCatch acquiring
                 pure ()
+
+        it "cancels a startup interrupted while an obsolete fleet closes" do
+            supervisor <- newMcpSupervisor
+            obsoleteStarted <- newEmptyMVar
+            obsoleteCleanupStarted <- newEmptyMVar
+            obsoleteCleanupRelease <- newEmptyMVar
+            startupStarted <- newEmptyMVar
+            startupBlock <- newEmptyMVar
+            startupStopped <- newEmptyMVar
+            bracket (pure supervisor) closeMcpSupervisor \_ ->
+                (`finally` void (tryPutMVar obsoleteCleanupRelease ())) do
+                    oldLease <- acquireMcpFleet supervisor []
+                    spawnFleetWorker oldLease.mcpLeaseFleet $
+                        (putMVar obsoleteStarted () >> takeMVar startupBlock)
+                            `finally` do
+                                putMVar obsoleteCleanupStarted ()
+                                takeMVar obsoleteCleanupRelease
+                    takeMVar obsoleteStarted
+                    releaseMcpFleetLease oldLease
+                    let startReplacement _ =
+                            (putMVar startupStarted ()
+                                >> takeMVar startupBlock
+                                >> startMcpFleet [])
+                                `finally` putMVar startupStopped ()
+                        replacement =
+                            baseConfig "replacement" "/unused"
+                    withAsync
+                        (acquireMcpFleetWith
+                            supervisor
+                            False
+                            startReplacement
+                            [replacement])
+                        \acquiring -> do
+                            takeMVar startupStarted
+                            takeMVar obsoleteCleanupStarted
+                            cancel acquiring
+                            timeout 1000000 (takeMVar startupStopped)
+                                `shouldReturn` Just ()
 
         it "reconnects once and retries a meta-tool call after transport loss" $
             withCountingReconnectServer \script counter -> do
