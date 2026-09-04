@@ -33,7 +33,10 @@ module Agent.CLI.AgentViewport
     , selectedAgentEntry
     ) where
 
-import Agent.CLI.Render (summarizeToolCallRelative)
+import Agent.CLI.Render
+    ( renderToolOutputValue
+    , summarizeToolCallRelative
+    )
 import Agent.CLI.AgentViewport.Status
     ( agentStatusGlyph
     , formatAgentStatus
@@ -47,8 +50,6 @@ import Agent.CLI.TextLayout
     , renderSplitPaneFrame
     )
 import Agent.Loop (LoopEvent(..))
-import Agent.Json (RawJson, rawJsonBytes)
-import Agent.Json.Decode qualified as Hermes
 import Agent.Responses.LoopBackend (responseItemToToolCall)
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
@@ -77,7 +78,6 @@ import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
 import System.Console.ANSI (getTerminalSize)
 import System.IO (hFlush, hIsTerminalDevice, stderr, stdin)
@@ -826,15 +826,6 @@ agentMessagePlainText message =
             PlainTextPart{text} -> [text]
             _ -> []
         ]
-
-renderToolOutputValue :: RawJson -> Text
-renderToolOutputValue value =
-    case Hermes.decodeEither
-            (Hermes.nullable Hermes.text)
-            (rawJsonBytes value) of
-        Right (Just text) -> text
-        Right Nothing -> ""
-        Left _ -> TextEncoding.decodeUtf8 (rawJsonBytes value)
 
 normalizeTranscriptUi :: UiState -> UiState
 normalizeTranscriptUi state =

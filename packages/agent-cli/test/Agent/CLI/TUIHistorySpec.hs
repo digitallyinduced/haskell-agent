@@ -12,7 +12,13 @@ import Agent.CLI.TUI.History
 import Agent.Json (rawJsonFromEncoding)
 import Agent.CLI.TUI.Composer (composerScrollbackAvailable)
 import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
+import Agent.Responses.LoopBackend (toolResultToItem)
 import Agent.Responses.Types
+import Agent.ToolDispatch
+    ( ToolCallKind(..)
+    , ToolCallResult(..)
+    , ToolResultImage(..)
+    )
 import qualified Data.Aeson as Aeson
 import Data.Foldable (toList)
 import Agent.TUI.Model
@@ -377,6 +383,86 @@ spec = describe "bounded fullscreen history window" do
         map (.blockBody) blocks
             `shouldSatisfy`
                 all (not . Text.isInfixOf "Don't mention skills")
+
+    it "does not render persisted image payloads as tool output" do
+        let summary = "Viewed image file: example.png"
+            payloadMarker = "VERY_SECRET_IMAGE_BYTES"
+            imageOutput =
+                toolResultToItem
+                    (ToolCallResultWithImages
+                        "image-call"
+                        summary
+                        FunctionCallKind
+                        [ ToolResultImage
+                            ("data:image/png;base64," <> payloadMarker)
+                            (Just "high")
+                        ])
+            rendered = projectedToolResult imageOutput
+        rendered `shouldSatisfy` Text.isInfixOf summary
+        rendered `shouldSatisfy` (not . Text.isInfixOf payloadMarker)
+        rendered `shouldSatisfy` (not . Text.isInfixOf "base64")
+        rendered `shouldSatisfy` (not . Text.isInfixOf "\"input_image\"")
+
+    it "fails closed for schema-drifted persisted media output" do
+        let summary = "Viewed schema-drifted image"
+            payloadMarker = "SCHEMA_DRIFT_IMAGE_BYTES"
+            rendered =
+                projectedToolResult $
+                    toolOutputItem
+                        [ Aeson.object
+                            [ "type" Aeson..= ("input_image" :: Text.Text)
+                            , "image_url" Aeson..= (7 :: Int)
+                            , "payload" Aeson..=
+                                ("data:image/png;base64," <> payloadMarker)
+                            ]
+                        , Aeson.object
+                            [ "type" Aeson..= ("input_text" :: Text.Text)
+                            , "text" Aeson..= summary
+                            ]
+                        ]
+        rendered `shouldSatisfy` Text.isInfixOf summary
+        rendered `shouldSatisfy` (not . Text.isInfixOf payloadMarker)
+        rendered `shouldSatisfy` (not . Text.isInfixOf "base64")
+
+    it "fails closed for future persisted media content parts" do
+        let summary = "Viewed future image"
+            payloadMarker = "FUTURE_IMAGE_BYTES"
+            rendered =
+                projectedToolResult $
+                    toolOutputItem
+                        [ Aeson.object
+                            [ "type" Aeson..= ("future_media" :: Text.Text)
+                            , "payload" Aeson..=
+                                (" DATA:image/png;BASE64," <> payloadMarker)
+                            ]
+                        , Aeson.object
+                            [ "type" Aeson..= ("input_text" :: Text.Text)
+                            , "text" Aeson..= summary
+                            ]
+                        ]
+        rendered `shouldSatisfy` Text.isInfixOf summary
+        rendered `shouldSatisfy` (not . Text.isInfixOf payloadMarker)
+        rendered `shouldSatisfy` (not . Text.isInfixOf "BASE64")
+
+    it "does not trust text fields inside persisted media arrays" do
+        let payloadMarker = "TEXT_FIELD_IMAGE_BYTES"
+            rendered =
+                projectedToolResult $
+                    toolOutputItem
+                        [ Aeson.object
+                            [ "type" Aeson..= ("input_image" :: Text.Text)
+                            , "image_url" Aeson..=
+                                ("https://example.test/image.png" :: Text.Text)
+                            ]
+                        , Aeson.object
+                            [ "type" Aeson..= ("input_text" :: Text.Text)
+                            , "text" Aeson..=
+                                ("data:image/png;base64," <> payloadMarker)
+                            ]
+                        ]
+        rendered `shouldSatisfy` Text.isInfixOf "[image]"
+        rendered `shouldSatisfy` (not . Text.isInfixOf payloadMarker)
+        rendered `shouldSatisfy` (not . Text.isInfixOf "base64")
 
     it "preserves partial assistant output in a cancelled durable turn" do
         let turnValue =
@@ -744,6 +830,43 @@ assistantMessage text =
         , phase = Nothing
         , passthrough = Nothing
         }
+
+toolOutputItem :: [Aeson.Value] -> ResponseItem
+toolOutputItem parts =
+    FunctionCallOutputItem FunctionCallOutput
+        { itemId = Nothing
+        , callId = "image-call"
+        , name = Nothing
+        , namespace = Nothing
+        , provider = Nothing
+        , output = rawJsonFromEncoding (Aeson.toEncoding parts)
+        , status = Nothing
+        }
+
+projectedToolResult :: ResponseItem -> Text.Text
+projectedToolResult outputItem =
+    Text.intercalate "\n" $
+        map (.blockBody) (toList projected.historyTurnBlocks)
+  where
+    projected =
+        sessionHistoryTurn
+            (13 :: Int)
+            (sessionTurn
+                TranscriptAppend
+                "inspect the image"
+                [ userMessage "inspect the image"
+                , FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "image-call"
+                    , name = "view_image"
+                    , namespace = Nothing
+                    , provider = Nothing
+                    , arguments = "{\"path\":\"example.png\"}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Nothing
+                    }
+                , outputItem
+                ])
 
 fixedTime :: UTCTime
 fixedTime =
