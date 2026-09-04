@@ -64,7 +64,6 @@ import Data.Aeson ((.=))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Builder as Builder
-import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import qualified Data.Map.Strict as Map
@@ -73,14 +72,14 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as Text
-import Data.Unique (hashUnique, newUnique)
 import Data.Word (Word32)
+import qualified Network.HTTP.Client as Http
+import qualified Network.HTTP.Client.MultipartFormData as Multipart
 import Network.HTTP.Simple
     ( getResponseBody
     , getResponseStatusCode
     , httpLBS
     , parseRequest
-    , setRequestBodyLBS
     , setRequestHeader
     , setRequestMethod
     )
@@ -468,8 +467,6 @@ fallbackToChatGPTBatch
             Left err ->
                 pure (Left err)
             Right wav -> do
-                boundary <- transcriptionBoundary
-                let body = multipartWavBody boundary wav
                 seeded <- seedTokenProvider provider initial
                 runWithTokenProvider seeded \credential ->
                     if credential.provider /= OpenAIProvider
@@ -479,8 +476,7 @@ fallbackToChatGPTBatch
                             postChatGPTTranscription
                                 baseUrl
                                 credential
-                                boundary
-                                body >>= \case
+                                wav >>= \case
                                     Left err ->
                                         pure (Left err)
                                     Right transcript -> do
@@ -1065,53 +1061,67 @@ encodePcm16Wav sampleRate pcm
 postChatGPTTranscription
     :: Text
     -> Credential
-    -> BS.ByteString
     -> LBS.ByteString
     -> IO (Either ApiError Text)
-postChatGPTTranscription baseUrl credential boundary body =
-    retryTransientTranscription [3_000_000, 6_000_000] sendRequest
+postChatGPTTranscription baseUrl credential wav = do
+    let endpoint =
+            Text.unpack
+                (Text.dropWhileEnd (== '/') baseUrl <> "/transcribe")
+        accountHeader request
+            | Text.null (Text.strip credential.accountId) = request
+            | otherwise =
+                setRequestHeader
+                    "ChatGPT-Account-Id"
+                    [Text.encodeUtf8 credential.accountId]
+                    request
+    prepared <- tryAny
+        (do
+            request <- parseRequest endpoint
+            Multipart.formDataBody
+                [ (Multipart.partFileRequestBody
+                    "file"
+                    "audio.wav"
+                    (Http.RequestBodyLBS wav))
+                    { Multipart.partContentType = Just "audio/wav" }
+                ]
+                $ setRequestMethod "POST"
+                $ setRequestHeader "Accept" ["application/json"]
+                $ setRequestHeader "Originator" ["haskell-agent"]
+                $ setRequestHeader "User-Agent" ["haskell-agent"]
+                $ setRequestHeader
+                    "Authorization"
+                    ["Bearer " <> Text.encodeUtf8 credential.accessToken]
+                $ accountHeader request)
+    case prepared of
+        Left err
+            | isSyncException err ->
+                pure $ Left $ ConnectionError
+                    ("ChatGPT transcription request failed: "
+                        <> Text.pack (displayException err))
+            | otherwise ->
+                throwIO err
+        Right multipartRequest ->
+            retryTransientTranscription
+                [3_000_000, 6_000_000]
+                (sendRequest multipartRequest)
   where
-    sendRequest = do
-        let contentType = "multipart/form-data; boundary=" <> boundary
-            endpoint =
-                Text.unpack
-                    (Text.dropWhileEnd (== '/') baseUrl <> "/transcribe")
-            accountHeader request
-                | Text.null (Text.strip credential.accountId) = request
-                | otherwise =
-                    setRequestHeader
-                        "ChatGPT-Account-Id"
-                        [Text.encodeUtf8 credential.accountId]
-                        request
-        tryAny
-            (do
-                request <- parseRequest endpoint
-                httpLBS
-                    $ setRequestMethod "POST"
-                    $ setRequestBodyLBS body
-                    $ setRequestHeader "Content-Type" [contentType]
-                    $ setRequestHeader "Accept" ["application/json"]
-                    $ setRequestHeader "Originator" ["haskell-agent"]
-                    $ setRequestHeader "User-Agent" ["haskell-agent"]
-                    $ setRequestHeader
-                        "Authorization"
-                        ["Bearer " <> Text.encodeUtf8 credential.accessToken]
-                    $ accountHeader request) >>= \case
-                        Left err
-                            | isSyncException err ->
-                                pure $ Left $ ConnectionError
-                                    ("ChatGPT transcription request failed: "
-                                        <> Text.pack (displayException err))
-                            | otherwise ->
-                                throwIO err
-                        Right response -> do
-                            let status = getResponseStatusCode response
-                                responseBody = getResponseBody response
-                            pure $
-                                if status >= 200 && status < 300
-                                    then decodeTranscriptionResponse responseBody
-                                    else Left $ HttpError status
-                                        (responseBodyPreview responseBody)
+    sendRequest request =
+        tryAny (httpLBS request) >>= \case
+            Left err
+                | isSyncException err ->
+                    pure $ Left $ ConnectionError
+                        ("ChatGPT transcription request failed: "
+                            <> Text.pack (displayException err))
+                | otherwise ->
+                    throwIO err
+            Right response -> do
+                let status = getResponseStatusCode response
+                    responseBody = getResponseBody response
+                pure $
+                    if status >= 200 && status < 300
+                        then decodeTranscriptionResponse responseBody
+                        else Left $ HttpError status
+                            (responseBodyPreview responseBody)
 
 retryTransientTranscription
     :: [Int]
@@ -1126,24 +1136,6 @@ retryTransientTranscription retryDelays action =
                     retryTransientTranscription remaining action
             _ ->
                 pure result
-
-transcriptionBoundary :: IO BS.ByteString
-transcriptionBoundary = do
-    unique <- hashUnique <$> newUnique
-    pure $ BS8.pack
-        ("----haskell-agent-transcribe-"
-            <> show (abs (toInteger unique)))
-
-multipartWavBody :: BS.ByteString -> LBS.ByteString -> LBS.ByteString
-multipartWavBody boundary wav =
-    LBS.fromStrict
-        ( "--" <> boundary <> "\r\n"
-        <> "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n"
-        <> "Content-Type: audio/wav\r\n\r\n"
-        )
-        <> wav
-        <> LBS.fromStrict
-            ("\r\n--" <> boundary <> "--\r\n")
 
 transcriptionResponseDecoder :: Json.Decoder Text
 transcriptionResponseDecoder =
