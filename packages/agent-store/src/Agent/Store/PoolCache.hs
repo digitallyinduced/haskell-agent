@@ -9,11 +9,11 @@ module Agent.Store.PoolCache
     , closePoolCache
     ) where
 
-import Control.Concurrent.Async (replicateConcurrently_)
+import qualified Control.Concurrent.Stream as ConcurrentStream
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import qualified Control.Exception as Exception
-import Control.Monad (forM_, replicateM_, void)
+import Control.Monad (void)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 
@@ -207,7 +207,7 @@ closeOwned
     -> [TMVar (Either err resource)]
     -> IO ()
 closeOwned cache ready opening = do
-    outcomes <- mapConcurrentlyBounded
+    outcomes <- ConcurrentStream.mapConcurrentlyBounded
         cache.cacheCloseConcurrency
         run
         (map CloseResource ready <> map WaitOpening opening)
@@ -233,32 +233,3 @@ tryAnyException
     :: IO a
     -> IO (Either Exception.SomeException a)
 tryAnyException = Exception.try
-
-mapConcurrentlyBounded
-    :: Int
-    -> (a -> IO b)
-    -> [a]
-    -> IO [b]
-mapConcurrentlyBounded _ _ [] = pure []
-mapConcurrentlyBounded limit action values = do
-    let workerCount = min (max 1 limit) (length values)
-    queue <- newTQueueIO
-    results <- newTVarIO Map.empty
-    atomically do
-        forM_ (zip [0 :: Int ..] values) $
-            writeTQueue queue . Just
-        replicateM_ workerCount (writeTQueue queue Nothing)
-    let worker =
-            atomically (readTQueue queue) >>= \case
-                Nothing -> pure ()
-                Just (index, value) -> do
-                    result <- action value
-                    atomically $
-                        modifyTVar' results (Map.insert index result)
-                    worker
-    replicateConcurrently_ workerCount worker
-    completed <- readTVarIO results
-    pure
-        [ completed Map.! index
-        | index <- [0 .. length values - 1]
-        ]

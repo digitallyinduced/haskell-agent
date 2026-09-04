@@ -105,6 +105,8 @@ library
                     , transformers
                     , unix
                     , vector
+                    , wai
+                    , warp
 
 test-suite agent-cli-runtime-test
     import:           common-options
@@ -135,8 +137,12 @@ test-suite agent-cli-runtime-test
                     , directory
                     , filepath
                     , hspec >= 2.11 && < 2.12
+                    , http-client
+                    , http-types
                     , QuickCheck
                     , safe-exceptions
                     , text
                     , time
                     , unix
+                    , wai
+                    , warp

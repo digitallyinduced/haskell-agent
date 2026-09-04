@@ -100,6 +100,16 @@ spec = describe "Agent.Telegram" do
         it "runs the configured gateway by default" do
             parseTelegramArgs [] `shouldBe` Right TelegramRun
             parseTelegramArgs ["run"] `shouldBe` Right TelegramRun
+            parseTelegramArgs ["--help"] `shouldBe` Right TelegramHelp
+            parseTelegramArgs ["--version"] `shouldBe` Right TelegramVersion
+
+        it "parses user management commands" do
+            parseTelegramArgs ["users", "list"]
+                `shouldBe` Right (TelegramUsers TelegramUsersList)
+            parseTelegramArgs ["users", "add", "42"]
+                `shouldBe` Right (TelegramUsers (TelegramUsersAdd 42))
+            parseTelegramArgs ["users", "remove", "42"]
+                `shouldBe` Right (TelegramUsers (TelegramUsersRemove 42))
 
         it "parses non-secret setup options" do
             parseTelegramArgs
@@ -134,6 +144,10 @@ spec = describe "Agent.Telegram" do
                 `shouldSatisfy` isLeft
             parseTelegramArgs ["setup", "--workers", "65"]
                 `shouldSatisfy` isLeft
+            parseTelegramArgs ["setup", "--yolo", "--deny-mutations"]
+                `shouldBe` Right
+                    (TelegramSetup defaultTelegramSetupOptions
+                        { setupApprovalMode = TelegramApprovalDeny })
 
     describe "parseAllowedUsers" do
         it "parses and deduplicates numeric IDs" do

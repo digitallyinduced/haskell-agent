@@ -61,6 +61,7 @@ library
                     , http-client
                     , http-client-tls
                     , http-types
+                    , network-uri
                     , process
                     , safe-exceptions
                     , scientific

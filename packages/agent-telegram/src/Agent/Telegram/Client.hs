@@ -44,14 +44,13 @@ import Data.Aeson
     , (.=)
     )
 import qualified Data.Aeson.Key as Key
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
-import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import qualified Network.HTTP.Client as Http
+import qualified Network.HTTP.Client.MultipartFormData as Multipart
 import Network.HTTP.Types.Status (statusCode)
 import System.Directory (doesFileExist)
 import System.FilePath (takeFileName)
@@ -537,9 +536,7 @@ sendMultipartFile client key method fieldName path caption requestedName = do
     if not exists
         then pure (Left ("file does not exist: " <> Text.pack path))
         else do
-            bytes <- BS.readFile path
-            let boundary = "haskell-agent-telegram-boundary"
-                filename = fromMaybe (Text.pack (takeFileName path)) requestedName
+            let filename = fromMaybe (Text.pack (takeFileName path)) requestedName
                 fields =
                     [("chat_id", Text.pack (show key.chatId))]
                         <> maybe []
@@ -547,63 +544,32 @@ sendMultipartFile client key method fieldName path caption requestedName = do
                                 [("message_thread_id", Text.pack (show threadId))])
                             key.messageThreadId
                         <> maybe [] (\text -> [("caption", text)]) caption
-                body = multipartBody boundary fields fieldName filename bytes
+                textPart (name, value) =
+                    Multipart.partBS name (TextEncoding.encodeUtf8 value)
+                filePart =
+                    (Multipart.partFileSource fieldName path)
+                        { Multipart.partFilename =
+                            Just (Text.unpack (sanitizeFilename filename))
+                        , Multipart.partContentType =
+                            Just "application/octet-stream"
+                        }
             result <- runRetrying client do
                 base <- Http.parseRequest $
                     "https://api.telegram.org/bot"
                         <> Text.unpack client.clientToken
                         <> "/"
                         <> method
-                Http.httpLbs
+                request <- Multipart.formDataBody
+                    (map textPart fields <> [filePart])
                     base
                         { Http.method = "POST"
-                        , Http.requestHeaders =
-                            [ ( "Content-Type"
-                              , "multipart/form-data; boundary=" <> boundary
-                              )
-                            ]
-                        , Http.requestBody = Http.RequestBodyLBS body
                         , Http.responseTimeout =
                             Http.responseTimeoutMicro 60_000_000
                         }
-                    client.clientManager
+                Http.httpLbs request client.clientManager
             case result of
                 Left err -> pure (Left err)
                 Right response -> pure (decodeSentMessageId response)
-
-multipartBody
-    :: BS.ByteString
-    -> [(Text, Text)]
-    -> Text
-    -> Text
-    -> BS.ByteString
-    -> LBS.ByteString
-multipartBody boundary fields fileField filename fileBytes =
-    mconcat
-        (map textPart fields)
-        <> filePart
-        <> LBS8.pack ("--" <> BS8.unpack boundary <> "--\r\n")
-  where
-    delimiter = "--" <> BS8.unpack boundary <> "\r\n"
-    textPart (name, value) = LBS8.pack $
-        delimiter
-            <> "Content-Disposition: form-data; name=\""
-            <> Text.unpack name
-            <> "\"\r\n\r\n"
-            <> Text.unpack value
-            <> "\r\n"
-    filePart =
-        LBS8.pack
-            ( delimiter
-                <> "Content-Disposition: form-data; name=\""
-                <> Text.unpack fileField
-                <> "\"; filename=\""
-                <> Text.unpack (sanitizeFilename filename)
-                <> "\"\r\n"
-                <> "Content-Type: application/octet-stream\r\n\r\n"
-            )
-            <> LBS.fromStrict fileBytes
-            <> "\r\n"
 
 sanitizeFilename :: Text -> Text
 sanitizeFilename =
