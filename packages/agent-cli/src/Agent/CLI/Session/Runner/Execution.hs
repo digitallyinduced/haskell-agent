@@ -35,7 +35,7 @@ import Agent.CLI.Notification
     , notifyAttention
     )
 import Agent.CLI.Approval
-import Agent.CLI.Permission (promptRootAccess)
+import Agent.CLI.Permission (promptPermission, promptRootAccess)
 import Agent.CLI.ProviderTransition (PendingTurn)
 import Agent.CLI.Recap
 import Agent.CLI.CancelWatch
@@ -144,6 +144,7 @@ data SessionHostRuntime = SessionHostRuntime
     { hostInitialPrevious :: !(Maybe Text.Text)
     , hostGrokFirstTurnContextRef :: !(IORef (Maybe Text.Text))
     , hostIoLock :: !(MVar ())
+    , hostApprovalLock :: !(MVar ())
     , hostNativeCapabilities :: !NativeRunCapabilities
     , hostLoadsWorkspaceContext :: !Bool
     , hostPreparedWorkspaceEnvironment
@@ -164,6 +165,7 @@ newSessionHostRuntime SessionRequest{..} = do
     initialPrevious <- readLivePreviousResponseId conversationRef
     grokFirstTurnContextRef <- newIORef initialGrokContext
     ioLock <- newMVar ()
+    approvalLock <- newMVar ()
     let fullscreen = startup.startupFullscreen
         nativeCapabilities =
             maybe
@@ -193,33 +195,34 @@ newSessionHostRuntime SessionRequest{..} = do
         withIoLock action = withMVar ioLock (const action)
         requestRootAccess root =
             approveFilesystemRootAccess policyRef $
-                case startup.startupNativeHooks of
-                    Just hooks -> hooks.nativeRequestRootAccess root
-                    Nothing -> withMVar ioLock \_ ->
-                        case promptRequest of
-                            Just request
-                                | isJust request.managedTurnBridgeDirectory ->
-                                    requestManagedRootAccess request root
-                            _ -> case fullscreen of
-                                Just runtime -> do
-                                    notifyAttention
-                                        stderrHandle
-                                        PermissionRequested
-                                    maybe False (== 0)
-                                        <$> requestFullscreenChoiceWithBody
-                                            runtime
-                                            "Filesystem access requested"
-                                            ("Allow access to " <> toText root
-                                                <> " for this session?")
-                                            0
-                                            [ ( "Allow directory for this session"
-                                              , ""
-                                              )
-                                            , ("Deny", "")
-                                            ]
-                                Nothing ->
-                                    withStdinPaused escPaused
-                                        (promptRootAccess useColor root)
+                withToolHumanInputWait toolEnv $
+                    case startup.startupNativeHooks of
+                        Just hooks -> hooks.nativeRequestRootAccess root
+                        Nothing -> withMVar ioLock \_ ->
+                            case promptRequest of
+                                Just request
+                                    | isJust request.managedTurnBridgeDirectory ->
+                                        requestManagedRootAccess request root
+                                _ -> case fullscreen of
+                                    Just runtime -> do
+                                        notifyAttention
+                                            stderrHandle
+                                            PermissionRequested
+                                        maybe False (== 0)
+                                            <$> requestFullscreenChoiceWithBody
+                                                runtime
+                                                "Filesystem access requested"
+                                                ("Allow access to " <> toText root
+                                                    <> " for this session?")
+                                                0
+                                                [ ( "Allow directory for this session"
+                                                  , ""
+                                                  )
+                                                , ("Deny", "")
+                                                ]
+                                    Nothing ->
+                                        withStdinPaused escPaused
+                                            (promptRootAccess useColor root)
         reportSessionError message =
             case fullscreen of
                 Just runtime ->
@@ -233,6 +236,14 @@ newSessionHostRuntime SessionRequest{..} = do
         startupWindowTitle
         withIoLock
         writeWindowTitle
+    setPlanModeInputWaitHooks
+        planMode
+        windowTitle.windowTitleBeginInputWait
+        windowTitle.windowTitleEndInputWait
+    setToolHumanInputWaitHooks
+        toolEnv
+        windowTitle.windowTitleBeginInputWait
+        windowTitle.windowTitleEndInputWait
     setToolRootAccessRequest toolEnv (Just requestRootAccess)
     let showTitleEvent = \case
             SessionTitleGenerated SessionTitleResult{..} ->
@@ -275,6 +286,7 @@ newSessionHostRuntime SessionRequest{..} = do
         { hostInitialPrevious = initialPrevious
         , hostGrokFirstTurnContextRef = grokFirstTurnContextRef
         , hostIoLock = ioLock
+        , hostApprovalLock = approvalLock
         , hostNativeCapabilities = nativeCapabilities
         , hostLoadsWorkspaceContext = loadsHostWorkspaceContext
         , hostPreparedWorkspaceEnvironment = preparedWorkspaceEnvironment
@@ -750,48 +762,38 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
         }
   where
     approveToolWithClassification classifiedReadOnly call =
-        withMVar host.hostIoLock \_ ->
-            let classify = const (pure classifiedReadOnly)
-            in case startup.startupNativeHooks of
+        withMVar host.hostApprovalLock \_ ->
+            chooseApproval
+      where
+        chooseApproval =
+            case startup.startupNativeHooks of
                 Just hooks ->
-                    approveToolDecisionWithReporterAndPersistenceClassified
-                        classify
+                    approve
                         hooks.nativeRequestApproval
                         (const (pure ()))
                         (pure ())
-                        policyRef
-                        controls.controlAllowedToolsRef
-                        controls.controlToolRegistry
-                        planMode
-                        call
                 Nothing -> case promptRequest of
                     Just request
                         | isJust request.managedTurnBridgeDirectory ->
-                            approveToolDecisionWithReporterAndPersistenceClassified
-                                classify
+                            approve
                                 (requestManagedApproval request)
                                 (const (pure ()))
                                 (pure ())
-                                policyRef
-                                controls.controlAllowedToolsRef
-                                controls.controlToolRegistry
-                                planMode
-                                call
                     _ -> case host.hostFullscreen of
                         Nothing ->
-                            withStdinPaused escPaused $
-                                approveToolDecisionClassified
-                                    classify
-                                    policyRef
-                                    controls.controlAllowedToolsRef
-                                    controls.controlToolRegistry
-                                    planMode
-                                    projectRoot
-                                    cwd
-                                    call
+                            approve
+                                (\requested ->
+                                    withStdinPaused escPaused do
+                                        color <-
+                                            resolveColor host.hostStderrHandle
+                                        promptPermission
+                                            color
+                                            (toText cwd)
+                                            requested)
+                                reportLineApproval
+                                (saveProjectAutoApprove projectRoot True)
                         Just runtime ->
-                            approveToolDecisionWithReporterAndPersistenceClassified
-                                classify
+                            approve
                                 (requestFullscreenPermission
                                     runtime
                                     (toText cwd))
@@ -804,11 +806,30 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                                                     (successNotice
                                                         message))))
                                 (saveProjectAutoApprove projectRoot True)
-                                policyRef
-                                controls.controlAllowedToolsRef
-                                controls.controlToolRegistry
-                                planMode
-                                call
+        classify = const (pure classifiedReadOnly)
+        approve request report persist =
+            approveToolDecisionWithReporterAndPersistenceClassified
+                classify
+                (\requested ->
+                    withToolHumanInputWait toolEnv $
+                        withMVar host.hostIoLock \_ ->
+                            request requested)
+                (\notice ->
+                    withMVar host.hostIoLock \_ ->
+                        report notice)
+                persist
+                policyRef
+                controls.controlAllowedToolsRef
+                controls.controlToolRegistry
+                planMode
+                call
+        reportLineApproval = \case
+            ApprovalWarning message -> do
+                color <- resolveColor host.hostStderrHandle
+                putTextLn host.hostStderrHandle (roleWarn color message)
+            ApprovalSuccess message -> do
+                color <- resolveColor host.hostStderrHandle
+                putTextLn host.hostStderrHandle (roleSuccess color message)
     approveRegisteredTool =
         approveToolWithClassification Nothing
 
