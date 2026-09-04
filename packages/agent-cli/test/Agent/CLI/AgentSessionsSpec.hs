@@ -474,7 +474,7 @@ spec = describe "Agent.CLI.AgentSessions" do
                 args `shouldContain` ["--bash"]
                 closeSessionProcessManager manager
 
-    it "forwards ghci disablement to managed session turns" $
+    it "keeps terminal-only capabilities out of managed session turns" $
         withTempStoreDir "agent-session-runtime-" \pool root -> do
             let argsPath = toFilePath root FilePath.</> "agent-args"
             script <- writeFakeAgentBody root
@@ -490,6 +490,7 @@ spec = describe "Agent.CLI.AgentSessions" do
                     handle.sessionMeta.metaId
                     "completed"
                 args <- lines <$> readFile argsPath
+                args `shouldContain` ["--no-computer-use"]
                 args `shouldContain` ["--no-ghci", "--bash"]
                 closeSessionProcessManager manager
 

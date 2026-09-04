@@ -13,7 +13,7 @@ import Agent.CLI.Approval
     , resolveApprovalPrompt
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
-import Agent.CLI.ComputerUse (computerUseTool)
+import Agent.CLI.ComputerUse (computerToolName, computerUseTool)
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -218,6 +218,28 @@ spec = do
                     , ReportApprovalNotice
                         (ApprovalSuccess
                             "✓ always allow run_terminal_command this session")
+                    ]
+
+        it "preserves project-wide approval semantics for a computer workflow" do
+            let call = ToolCall
+                    { callId = "computer-1"
+                    , name = computerToolName
+                    , arguments = "{}"
+                    , callKind = ComputerCallKind
+                    , argumentsEncrypted = False
+                    }
+            resolveApprovalPrompt call (Just PermissionAllowAll)
+                `shouldBe` CompleteApproval
+                    (Right True)
+                    [ SetApprovalPolicy ApproveAll
+                    , PersistProjectAutoApprove
+                    , RememberToolForSession computerToolName
+                    , ReportApprovalNotice
+                        (ApprovalSuccess
+                            "✓ auto-approve on (saved for project)")
+                    , ReportApprovalNotice
+                        (ApprovalSuccess
+                            "✓ computer use approved until disabled")
                     ]
 
     describe "approveFilesystemRootAccess" do
@@ -528,34 +550,70 @@ spec = do
             readIORef permissionRequests `shouldReturn` 1
             readIORef allowed `shouldReturn` Set.singleton "run_terminal_cmd"
 
-        it "prompts for every computer call even under ApproveAll" do
+        it "prompts once for a computer-use workflow even under ApproveAll" do
             policy <- newIORef ApproveAll
             allowed <- newIORef Set.empty
             plan <- newPlanModeEnv
                 (unsafeEncodeUtf "/tmp/approval-test") Nothing
             permissionRequests <- newIORef (0 :: Int)
+            notices <- newIORef []
             let request _ = do
                     modifyIORef' permissionRequests (+ 1)
-                    pure (Just PermissionAllowTool)
+                    pure (Just PermissionAllowOnce)
                 computerCall kind = ToolCall
                     { callId = "computer-1"
-                    , name = "computer"
+                    , name = computerToolName
                     , arguments = "{}"
                     , callKind = kind
                     , argumentsEncrypted = False
                     }
                 approve kind = approveToolDecisionWithReporter
-                    request (\_ -> pure ()) policy allowed
-                    (registry [mutatingTool]) plan (computerCall kind)
+                    request
+                    (\notice -> modifyIORef' notices (<> [notice]))
+                    policy allowed
+                    (registry [computerUseTool]) plan (computerCall kind)
             mapM_ (\kind -> do
                 approve kind `shouldReturn` Right True
                 approve kind `shouldReturn` Right True)
                 [ComputerCallKind, ComputerFunctionCallKind]
-            readIORef permissionRequests `shouldReturn` 4
+            readIORef permissionRequests `shouldReturn` 1
             readIORef policy `shouldReturn` ApproveAll
-            readIORef allowed `shouldReturn` Set.empty
+            readIORef allowed `shouldReturn` Set.singleton computerToolName
+            readIORef notices `shouldReturn`
+                [ApprovalSuccess
+                    "✓ computer use approved until disabled"]
 
-        it "does not cache allow-tool for computer calls" do
+        it "prompts again when a computer call introduces safety checks" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef (Set.singleton computerToolName)
+            plan <- newPlanModeEnv
+                (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let call arguments = ToolCall
+                    { callId = "computer-1"
+                    , name = computerToolName
+                    , arguments
+                    , callKind = ComputerCallKind
+                    , argumentsEncrypted = False
+                    }
+                approve computerCall = approveToolDecisionWithReporter
+                    (\_ -> modifyIORef' permissionRequests (+ 1)
+                        >> pure (Just PermissionAllowOnce))
+                    (\_ -> pure ())
+                    policy allowed
+                    (registry [computerUseTool])
+                    plan computerCall
+            approve (call "{\"actions\":[{\"type\":\"screenshot\"}]}")
+                `shouldReturn` Right True
+            readIORef permissionRequests `shouldReturn` 0
+            approve
+                (call
+                    "{\"actions\":[{\"type\":\"screenshot\"}],\
+                    \\"pending_safety_checks\":[{\"id\":\"check-1\"}]}")
+                `shouldReturn` Right True
+            readIORef permissionRequests `shouldReturn` 1
+
+        it "prompts again after the computer-use workflow grant is cleared" do
             policy <- newIORef PromptMutating
             allowed <- newIORef Set.empty
             plan <- newPlanModeEnv
@@ -566,30 +624,32 @@ spec = do
                     pure (Just PermissionAllowTool)
                 computerCall kind = ToolCall
                     { callId = "computer-1"
-                    , name = "computer"
+                    , name = computerToolName
                     , arguments = "{}"
                     , callKind = kind
                     , argumentsEncrypted = False
                     }
                 approve kind = approveToolDecisionWithReporter
                     request (\_ -> pure ()) policy allowed
-                    (registry [mutatingTool]) plan (computerCall kind)
-            mapM_ (\kind -> do
-                approve kind `shouldReturn` Right True
-                approve kind `shouldReturn` Right True)
-                [ComputerCallKind, ComputerFunctionCallKind]
-            readIORef permissionRequests `shouldReturn` 4
-            readIORef allowed `shouldReturn` Set.empty
+                    (registry [computerUseTool]) plan (computerCall kind)
+            approve ComputerCallKind `shouldReturn` Right True
+            approve ComputerCallKind `shouldReturn` Right True
+            readIORef permissionRequests `shouldReturn` 1
+            modifyIORef' allowed (Set.delete computerToolName)
+            approve ComputerFunctionCallKind `shouldReturn` Right True
+            approve ComputerFunctionCallKind `shouldReturn` Right True
+            readIORef permissionRequests `shouldReturn` 2
+            readIORef allowed `shouldReturn` Set.singleton computerToolName
 
         it "rejects spoofed function/custom computer calls under ApproveAll" do
             policy <- newIORef ApproveAll
-            allowed <- newIORef (Set.singleton "computer")
+            allowed <- newIORef (Set.singleton computerToolName)
             plan <- newPlanModeEnv
                 (unsafeEncodeUtf "/tmp/approval-test") Nothing
             permissionRequests <- newIORef (0 :: Int)
             let spoof kind = ToolCall
                     { callId = "spoof-1"
-                    , name = "computer"
+                    , name = computerToolName
                     , arguments = "{}"
                     , callKind = kind
                     , argumentsEncrypted = False
@@ -630,7 +690,7 @@ spec = do
                     (computerCall kind)
                     `shouldReturn`
                         Left
-                            "Computer use requires an explicit parent approval for every call.")
+                            "Computer use must be approved in the interactive parent session.")
                 [ComputerCallKind, ComputerFunctionCallKind]
 
         it "allows only read-only tools under DenyMutating" do

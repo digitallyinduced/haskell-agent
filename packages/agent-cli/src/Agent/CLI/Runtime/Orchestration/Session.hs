@@ -155,7 +155,7 @@ import Agent.CLI.Session.Runtime.Types
                      escPaused, interrupt, multiCtx, rootTurnRef, subagentSessions,
                      pendingNotices, storeRoot, agentTypes, legacyTarget, usageRef,
                      accountRef, accountIdRef, selectionRef, accountLabel,
-                     selectAccount, onPersisted, compactRunner, codeModeNestedSlot),
+                     selectAccount, onPersisted, compactRunner, codeModeRuntime),
       StartupRuntime(startupBackground, startupDatabaseStore,
                      startupNetworkRecovery, startupSessionState,
                      startupNativeHooks) )
@@ -1239,9 +1239,8 @@ buildProviderSessionRequest
             , selectAccount = sessionSelectAccount
             , onPersisted = request.claimCurrentSession
             , compactRunner = sessionCompactRunner
-            , codeModeNestedSlot =
-                (.codeModeNestedSlot)
-                    <$> promptRuntime.sessionCodeRuntime.sessionCodeModeRuntime
+            , codeModeRuntime =
+                promptRuntime.sessionCodeRuntime.sessionCodeModeRuntime
             , codexCatalogSession =
                 promptRuntime.sessionCodeRuntime.sessionCatalogSession
             }

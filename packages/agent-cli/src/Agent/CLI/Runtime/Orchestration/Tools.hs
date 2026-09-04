@@ -1886,9 +1886,13 @@ assembleSessionToolsRuntime AgentToolsRequest
             maybe [] (.nativeToolGroups) startup.startupNativeHooks
         computerTools =
             [ ComputerUse.computerUseTool
-            | options.optComputerUse
-            , provider == OpenAIProvider
+            | provider == OpenAIProvider
             , os == "darwin"
+            ]
+        activeComputerTools =
+            [ tool
+            | options.optComputerUse
+            , tool <- computerTools
             ]
         imageGenerationTools =
             [ imageGenerationTool
@@ -1903,7 +1907,7 @@ assembleSessionToolsRuntime AgentToolsRequest
             , inferredTarget.targetConnectionId
                 == builtinConnectionId OpenAIProvider
             ]
-        surroundingToolGroups =
+        surroundingToolGroupsFor selectedComputerTools =
             [ ExecutionToolGroup extraTools
             , ExecutionToolGroup sessionMcpTools
             , HostToolGroup persistedSessionTools
@@ -1914,13 +1918,16 @@ assembleSessionToolsRuntime AgentToolsRequest
             ]
                 <> nativeToolGroups
                 <> [ HostToolGroup imageGenerationTools
-                   , ExecutionToolGroup computerTools
+                   , ExecutionToolGroup selectedComputerTools
                    ]
         allToolGroups =
-            coding.codingAppToolGroups <> surroundingToolGroups
+            coding.codingAppToolGroups
+                <> surroundingToolGroupsFor computerTools
         activeCodingGroups =
             map filterCodingExecution coding.codingAppToolGroups
-        activeToolGroups = activeCodingGroups <> surroundingToolGroups
+        activeToolGroups =
+            activeCodingGroups
+                <> surroundingToolGroupsFor activeComputerTools
         filterCodingExecution = \case
             ExecutionToolGroup appTools ->
                 ExecutionToolGroup $

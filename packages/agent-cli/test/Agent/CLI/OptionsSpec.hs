@@ -366,9 +366,12 @@ spec = do
             parseArgs ["--no-bash", "--bash"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optBash = True })
 
-        it "keeps computer use opt-in" do
-            defaultCliOptions.optComputerUse `shouldBe` False
-            parseArgs ["--computer-use"]
+        it "enables computer use by default and allows an explicit override" do
+            defaultCliOptions.optComputerUse `shouldBe` True
+            parseArgs ["--no-computer-use"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optComputerUse = False })
+            parseArgs ["--no-computer-use", "--computer-use"]
                 `shouldBe` Right (RunAgent defaultCliOptions
                     { optComputerUse = True })
             parseArgs ["--computer-use", "--no-computer-use"]

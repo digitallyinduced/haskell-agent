@@ -283,7 +283,7 @@ childApprove _ tools call
 childApprove _ _ call
     | isComputerToolCallKind call.callKind =
         pure $ Left
-            "Computer use requires an explicit parent approval for every call."
+            "Computer use must be approved in the interactive parent session."
 childApprove policy tools call = case policy of
     ApproveAll -> pure (Right True)
     DenyMutating -> do

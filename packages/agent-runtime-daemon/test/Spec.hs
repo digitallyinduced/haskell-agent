@@ -1051,6 +1051,7 @@ main = hspec $ do
                         , "hello agent"
                         , "--save-session"
                         , "--no-yolo"
+                        , "--no-computer-use"
                         , "--resume"
                         , "session-id"
                         , "--cwd"

@@ -15,7 +15,7 @@ import Agent.CLI.Claude (ClaudeSessionRuntimeSlot)
 import Agent.CLI.Session.History (LiveConversation)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.CodeModeRuntime
-    ( CodeModeNestedSlot
+    ( CodeModeSessionRuntime
     , CodexCatalogSession
     )
 import Agent.CLI.Compaction
@@ -180,9 +180,9 @@ data SessionRequest = SessionRequest
     , selectAccount :: !(Maybe (Text -> IO (Either ApiError Text)))
     , onPersisted :: !(SessionHandle -> IO ())
     , compactRunner :: !(Maybe Text -> IO (Either Text CompactOutcome))
-      -- | Late-bound nested dispatcher for code-mode sessions. The runner
-      -- installs the approval-aware invoke once its approval pipeline exists.
-    , codeModeNestedSlot :: !(Maybe CodeModeNestedSlot)
+      -- | Code-mode projection and late-bound nested dispatcher. The runner
+      -- uses the projection to rebuild direct schemas when tools are toggled.
+    , codeModeRuntime :: !(Maybe CodeModeSessionRuntime)
       -- | Catalog-instruction context for OpenAI models with a catalog entry.
     , codexCatalogSession :: !(Maybe CodexCatalogSession)
     }

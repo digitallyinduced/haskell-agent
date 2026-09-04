@@ -149,7 +149,9 @@ data CliOptions = CliOptions
     , optBash :: !Bool
       -- ^ Expose the provider's explicit shell execution tool (default: True).
     , optComputerUse :: !Bool
-      -- ^ Allow the model to control the local macOS desktop (default: False).
+      -- ^ Allow the model to request control of the local macOS desktop.
+      -- Terminal sessions default to 'True'; the first workflow after enabling
+      -- still requires explicit approval.
     , optCodeMode :: !Bool
       -- ^ Honor catalog-selected JavaScript code mode (default: False).
     , optScreenMode :: !ScreenMode
@@ -179,7 +181,7 @@ defaultCliOptions = CliOptions
     , optSkills = True
     , optGhci = False
     , optBash = True
-    , optComputerUse = False
+    , optComputerUse = True
     , optCodeMode = False
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
@@ -423,7 +425,7 @@ optionUpdateParser = asum
         pathReader (\value options -> options { optCwd = Just value })
     , flagUpdate "worktree" "Create a new git worktree"
         (\options -> options { optWorktree = True })
-    , flagUpdate "yolo" "Auto-approve every tool"
+    , flagUpdate "yolo" "Auto-approve tools (computer use still asks once)"
         (\options -> options { optYolo = True, optNoYolo = False })
     , flagUpdate "no-yolo" "Deny mutating tools without a TTY"
         (\options -> options { optNoYolo = True, optYolo = False })
@@ -482,7 +484,8 @@ optionUpdateParser = asum
         (\value options -> options { optBash = value })
     , boolFlagUpdate "no-bash" False "Disable shell execution tools"
         (\value options -> options { optBash = value })
-    , boolFlagUpdate "computer-use" True "Enable local macOS computer use"
+    , boolFlagUpdate "computer-use" True
+        "Enable local macOS computer use (default)"
         (\value options -> options { optComputerUse = value })
     , boolFlagUpdate "no-computer-use" False "Disable local computer use"
         (\value options -> options { optComputerUse = value })
@@ -676,12 +679,12 @@ usage = unlines
     , "      --no-ghci           Disable the persistent GHCi tool (default)"
     , "      --bash              Enable explicit shell execution tools (default)"
     , "      --no-bash           Disable explicit shell execution tools"
-    , "      --computer-use      Enable local macOS desktop control (opt-in)"
-    , "      --no-computer-use   Disable local desktop control (default)"
+    , "      --computer-use      Enable local macOS desktop control (default)"
+    , "      --no-computer-use   Disable local macOS desktop control"
     , "      --fullscreen        Use the retained full-screen TUI"
     , "      --minimal           Use terminal-native append-only rendering"
     , "      --motion MODE       Animation policy: full, reduced, or off"
-    , "      --yolo              Auto-approve every tool"
+    , "      --yolo              Auto-approve tools; computer use still asks once"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: "
         <> show defaultLoopMaxTurns <> ")"
@@ -721,6 +724,8 @@ usage = unlines
     , "the live concurrent subagent cap and saves it to project settings."
     , "/shell shows the active shell tools; /shell ghci or /shell bash switches"
     , "the current session. /shell both and /shell none are also available."
+    , "/computer-use toggles local macOS desktop control; on/off are explicit."
+    , "The first computer-use workflow after enabling asks for approval once."
     , "/always-approve (or :yolo) toggles auto-approve and saves it under"
     , "<project>/.haskell-agent/settings.json. Permission prompts offer Allow once"
     , "or Always this tool this session; /always-approve still enables project yolo."

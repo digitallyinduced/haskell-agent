@@ -103,6 +103,8 @@ data SessionEnv = SessionEnv
     , sessionGrokRuntime :: !(Maybe GrokRuntimeControl)
     , sessionShellMode :: !(IO ShellMode)
     , sessionSetShellMode :: !(ShellMode -> IO Text)
+    , sessionComputerUseEnabled :: !(IO Bool)
+    , sessionSetComputerUseEnabled :: !(Bool -> IO Text)
     , sessionBackground :: !Bool
     , sessionEscPaused :: !(IORef Bool)
     , sessionDraft :: !(IORef Text)

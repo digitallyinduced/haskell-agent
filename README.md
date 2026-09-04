@@ -185,6 +185,18 @@ Start an interactive session:
 agent-cli
 ```
 
+On macOS, supported OpenAI sessions can use the local desktop from the
+terminal by default. The first computer-use workflow after enabling requires
+explicit approval, including under `--yolo`; later actions in that workflow do
+not prompt again unless the provider raises a new safety check.
+`/computer-use` toggles the capability, while
+`/computer-use on` and `/computer-use off` set it explicitly. Disabling or
+re-enabling clears the workflow approval. Grant Screen Recording and
+Accessibility access to the terminal application in **System Settings →
+Privacy & Security** before using it. Start with
+`agent-cli --no-computer-use` to hide the tool from the model, then enable it
+later with `/computer-use`.
+
 To embed the runtime through a local REST and Server-Sent Events API, run
 `nix run .#agent-server`. It provides durable session management, concurrent
 turn supervision, approvals, cancellation, and an OpenAPI 3.1 document. See
