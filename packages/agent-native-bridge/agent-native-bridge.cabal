@@ -63,6 +63,7 @@ foreign-library haskell-agent-bridge
     options:          standalone
     hs-source-dirs:   ffi
     other-modules:    Agent.CLI.MacOS.Bridge
+                    , Agent.CLI.MacOS.ComputerBridge
                     , Agent.CLI.MacOS.EngineMailbox
                     , Agent.CLI.MacOS.NativeLoopEvent
                     , Agent.CLI.MacOS.ResourceAdmin
@@ -76,6 +77,7 @@ foreign-library haskell-agent-bridge
                     , agent-cli >= 0.1 && < 0.2
                     , agent-runtime-daemon >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
+                    , agent-responses-types >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
                     , agent-xai >= 0.1 && < 0.2
@@ -126,13 +128,16 @@ test-suite agent-native-bridge-test
                     , unix
     if os(darwin)
         c-sources:    test/cbits/HaskellAgentBridgeBrowserSmoke.c
+                    , test/cbits/HaskellAgentBridgeComputerSmoke.c
                     , test/cbits/HaskellAgentBridgeImageSmoke.c
                     , test/cbits/HaskellAgentBridgeTaskSmoke.c
                     , cbits/HaskellAgentBridgeRuntime.c
         include-dirs: include
         other-modules: Agent.CLI.MacOS.Bridge
+                     , Agent.CLI.MacOS.ComputerBridge
                      , Agent.CLI.MacOS.ResourceAdmin
                      , Agent.CLI.MacOS.BrowserBridgeFFISpec
+                     , Agent.CLI.MacOS.ComputerBridgeSpec
                      , Agent.CLI.MacOS.BridgeSpec
                      , Agent.CLI.MacOS.BridgeHeaderSpec
                      , Agent.CLI.MacOS.BridgeFFISpec
@@ -140,6 +145,7 @@ test-suite agent-native-bridge-test
                      , agent-cli-runtime
                      , agent-openai
                      , agent-openrouter
+                     , agent-responses-types
                      , agent-xai
                      , aeson
                      , filelock
