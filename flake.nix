@@ -413,19 +413,32 @@
                 skylightingSyntaxDirectory =
                     "${skylightingSyntaxes}/share/skylighting/xml";
 
-                mkHaskellPackages = baseHaskellPackages: checkLocalPackages:
+                mkHaskellPackages = baseHaskellPackages: packageMode:
                     baseHaskellPackages.extend (
                     final: previous:
                     let
-                        # User-facing builds only need the statically linked
-                        # executables. Keep the complete builds for the dev
-                        # shell and `nix flake check`.
+                        # Checks exercise unoptimised static libraries.
+                        # Optimisation, profiling/shared copies, and Haddock
+                        # output add compile work without adding test coverage.
+                        # User-facing builds remain optimised and only need the
+                        # statically linked executables. Development packages
+                        # retain the upstream defaults.
                         localPackage = package:
-                            if checkLocalPackages then package else
+                            if packageMode == "check"
+                            then
+                                pkgs.haskell.lib.dontHaddock
+                                    (pkgs.haskell.lib.disableSharedLibraries
+                                        (pkgs.haskell.lib.disableLibraryProfiling
+                                            (pkgs.haskell.lib.disableOptimization
+                                                package)))
+                            else if packageMode == "production"
+                            then
                                 pkgs.haskell.lib.dontHaddock
                                     (pkgs.haskell.lib.dontCheck
                                         (pkgs.haskell.lib.disableSharedLibraries
-                                            (pkgs.haskell.lib.disableLibraryProfiling package)));
+                                            (pkgs.haskell.lib.disableLibraryProfiling package)))
+                            else
+                                package;
                     in {
                         hermes-json =
                             pkgs.haskell.lib.overrideSrc previous.hermes-json {
@@ -625,7 +638,7 @@
                                     { })
                                 {
                                     src =
-                                        if checkLocalPackages
+                                        if packageMode != "production"
                                             then agentCliRuntimeCheckSource
                                             else agentCliRuntimeProductionSource;
                                 })
@@ -633,14 +646,22 @@
                         agent-cli = localPackage (pkgs.haskell.lib.addTestToolDepends
                             ((pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
                                 src =
-                                    if checkLocalPackages
+                                    if packageMode != "production"
                                         then agentCliCheckSource
                                         else agentCliProductionSource;
                             }).overrideAttrs (old: {
-                                configureFlags = (old.configureFlags or [ ]) ++ [
-                                    "--ghc-option=-DAGENT_BUILD_COMMIT=\"${agentBuildCommit}\""
-                                    "--ghc-option=-DAGENT_BUILD_DATE=\"${agentBuildDate}\""
-                                ];
+                                # Check packages use the source defaults for
+                                # build identity. Embedding every merge SHA in
+                                # them invalidates the test cache even when the
+                                # filtered package sources are unchanged.
+                                configureFlags =
+                                    (old.configureFlags or [ ])
+                                    ++ pkgs.lib.optionals
+                                        (packageMode != "check")
+                                        [
+                                            "--ghc-option=-DAGENT_BUILD_COMMIT=\"${agentBuildCommit}\""
+                                            "--ghc-option=-DAGENT_BUILD_DATE=\"${agentBuildDate}\""
+                                        ];
                                 # GHC's Darwin native-shared output is already
                                 # linked for runtime loading. Stripping it in
                                 # the parent package can turn it into an object
@@ -650,7 +671,17 @@
                                     ++ pkgs.lib.optionals
                                         pkgs.stdenv.hostPlatform.isDarwin
                                         [ "lib/libhaskell-agent-bridge.dylib" ];
-                            }))
+                            } // pkgs.lib.optionalAttrs
+                                (packageMode == "check"
+                                    && pkgs.stdenv.hostPlatform.isLinux)
+                                {
+                                    # Each shard is a separate process, so
+                                    # tests that temporarily modify
+                                    # process-global state remain isolated
+                                    # while the subprocess-heavy suite runs
+                                    # concurrently.
+                                    AGENT_CLI_TEST_SHARDS = "12";
+                                }))
                             [
                                 pkgs.bash
                                 pkgs.coreutils
@@ -663,7 +694,7 @@
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
                                 src =
-                                    if checkLocalPackages
+                                    if packageMode != "production"
                                         then agentTelegramCheckSource
                                         else agentTelegramProductionSource;
                             })
@@ -675,19 +706,24 @@
                                     { })
                                 {
                                     src =
-                                        if checkLocalPackages
+                                        if packageMode != "production"
                                             then agentServerCheckSource
                                             else agentServerProductionSource;
                                 });
                     }
                 );
 
-                haskellPackages = mkHaskellPackages pkgs.haskellPackages true;
+                haskellPackages =
+                    mkHaskellPackages pkgs.haskellPackages "check";
+                developmentHaskellPackages =
+                    mkHaskellPackages pkgs.haskellPackages "development";
                 productionHaskellPackages =
-                    mkHaskellPackages pkgs.haskellPackages false;
+                    mkHaskellPackages pkgs.haskellPackages "production";
                 staticHaskellPackages =
                     if pkgs.stdenv.hostPlatform.isLinux then
-                        mkHaskellPackages pkgs.pkgsStatic.haskellPackages false
+                        mkHaskellPackages
+                            pkgs.pkgsStatic.haskellPackages
+                            "production"
                     else
                         null;
                 agentCorePackage = productionHaskellPackages.agent-core;
@@ -1128,7 +1164,7 @@
                     exePath = "/bin/agent-openai-login";
                 };
 
-                devShells.default = haskellPackages.shellFor {
+                devShells.default = developmentHaskellPackages.shellFor {
                     packages = packages: [
                         packages.agent-cli
                         packages.agent-cli-runtime

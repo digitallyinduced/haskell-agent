@@ -2,7 +2,26 @@
 
 module Main (main) where
 
-import Test.Hspec (hspec)
+import Control.Concurrent.Async (mapConcurrently)
+import Control.Monad (unless)
+import Data.Char (ord)
+import Data.List (foldl')
+import System.Environment
+    ( getArgs
+    , getEnvironment
+    , getExecutablePath
+    , lookupEnv
+    )
+import System.Exit (ExitCode(..), die, exitFailure)
+import System.Process
+    ( CreateProcess(..)
+    , proc
+    , waitForProcess
+    , withCreateProcess
+    )
+import Test.Hspec (Spec, hspec)
+import Test.Hspec.Runner (Config(..), Path, defaultConfig, hspecWith)
+import Text.Read (readMaybe)
 
 import qualified Agent.CLI.AccountSelectionSpec as AccountSelectionSpec
 import qualified Agent.CLI.AgentSessionsSpec as AgentSessionsSpec
@@ -102,7 +121,39 @@ import qualified Agent.CLI.MacOS.BrowserBridgeFFISpec as BrowserBridgeFFISpec
 #endif
 
 main :: IO ()
-main = hspec do
+main = do
+    shard <- lookupEnv "AGENT_CLI_TEST_SHARD"
+    case shard of
+        Just value ->
+            case parseShard value of
+                Just (index, count) ->
+                    hspecWith
+                        defaultConfig
+                            { configFilterPredicate =
+                                Just (belongsToShard index count)
+                            }
+                        specs
+                Nothing ->
+                    die $
+                        "invalid AGENT_CLI_TEST_SHARD (expected INDEX/COUNT): "
+                            <> value
+        Nothing -> do
+            shardCount <- lookupEnv "AGENT_CLI_TEST_SHARDS"
+            case shardCount of
+                Nothing -> hspec specs
+                Just value ->
+                    case readMaybe value of
+                        Just 1 -> hspec specs
+                        Just count
+                            | validShardCount count -> runShards count
+                        _ ->
+                            die $
+                                "invalid AGENT_CLI_TEST_SHARDS "
+                                    <> "(expected an integer from 1 to 32): "
+                                    <> value
+
+specs :: Spec
+specs = do
     AccountSelectionSpec.spec
     AgentViewportSpec.spec
     AgentViewportRuntimeSpec.spec
@@ -199,3 +250,64 @@ main = hspec do
     EngineMailboxSpec.spec
     NativeLoopEventSpec.spec
     TaskSchedulerSpec.spec
+
+runShards :: Int -> IO ()
+runShards count = do
+    executable <- getExecutablePath
+    arguments <- getArgs
+    environment <- getEnvironment
+    exits <-
+        mapConcurrently
+            (runShard executable arguments environment count)
+            [0 .. count - 1]
+    unless (all (== ExitSuccess) exits) exitFailure
+
+runShard
+    :: FilePath
+    -> [String]
+    -> [(String, String)]
+    -> Int
+    -> Int
+    -> IO ExitCode
+runShard executable arguments environment count index =
+    withCreateProcess
+        (proc executable arguments)
+            { env =
+                Just $
+                    ("AGENT_CLI_TEST_SHARD", show index <> "/" <> show count)
+                        : filter
+                            ( \entry ->
+                                fst entry
+                                    `notElem`
+                                        [ "AGENT_CLI_TEST_SHARD"
+                                        , "AGENT_CLI_TEST_SHARDS"
+                                        ]
+                            )
+                            environment
+            }
+        \_ _ _ processHandle -> waitForProcess processHandle
+
+parseShard :: String -> Maybe (Int, Int)
+parseShard value =
+    case break (== '/') value of
+        (indexText, '/' : countText) -> do
+            index <- readMaybe indexText
+            count <- readMaybe countText
+            if validShardCount count && index >= 0 && index < count
+                then Just (index, count)
+                else Nothing
+        _ -> Nothing
+
+validShardCount :: Int -> Bool
+validShardCount count = count >= 1 && count <= 32
+
+belongsToShard :: Int -> Int -> Path -> Bool
+belongsToShard index count (groups, requirement) =
+    stablePathHash (groups <> [requirement]) `mod` count == index
+
+stablePathHash :: [String] -> Int
+stablePathHash =
+    foldl'
+        (\hash character -> (hash * 33 + ord character) `mod` 2_147_483_647)
+        5_381
+        . unlines

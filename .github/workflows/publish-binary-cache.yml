@@ -22,11 +22,13 @@ jobs:
       matrix:
         include:
           - system: x86_64-linux
-            runner: '["self-hosted", "haskell-agent", "office-builder", "x86_64-linux"]'
+            runner: '["ubuntu-24.04"]'
+            install_nix: true
             trusted-rebuild: false
-            build-cores: 1
+            build-cores: 2
           - system: aarch64-darwin
             runner: '["self-hosted", "haskell-agent", "ihp-ci-mac", "aarch64-darwin"]'
+            install_nix: false
             trusted-rebuild: true
             build-cores: 1
     runs-on: ${{ fromJSON(matrix.runner) }}
@@ -37,6 +39,40 @@ jobs:
       ATTIC_PACKAGE: github:NixOS/nixpkgs/afe3d8ac4395617bdcdac9f188ac8717a062e014#attic-client
       GIT_PACKAGE: github:NixOS/nixpkgs/afe3d8ac4395617bdcdac9f188ac8717a062e014#git
     steps:
+      - name: Install Nix
+        if: ${{ matrix.install_nix }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive="$RUNNER_TEMP/nix-2.34.7-x86_64-linux.tar.xz"
+          curl --fail --location --silent --show-error \
+            https://releases.nixos.org/nix/nix-2.34.7/nix-2.34.7-x86_64-linux.tar.xz \
+            -o "$archive"
+          printf '%s  %s\n' \
+            eafe5042404e818505e28c5ca3d0885f3ec45c31f955489a25bb38258f87560e \
+            "$archive" |
+            sha256sum --check
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+
+          extra_conf="$RUNNER_TEMP/nix-extra.conf"
+          cat > "$extra_conf" <<'EOF'
+            extra-substituters = https://cache.digitallyinduced.com/public
+            extra-trusted-public-keys = public:kR6JCoqAIMaO4s+EdDGh+jsHEHnoLq4ZLJPMCo0hcIQ=
+            fallback = true
+          EOF
+          "$RUNNER_TEMP/nix-2.34.7-x86_64-linux/install" \
+            --daemon \
+            --yes \
+            --no-channel-add \
+            --no-modify-profile \
+            --nix-extra-conf-file "$extra_conf"
+
+          export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+          printf '%s\n' /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
+          nix --version
+          nix store ping
+
       - name: Check out the triggering revision
         shell: bash
         run: |
@@ -69,7 +105,7 @@ jobs:
             "$GITHUB_SHA"
           "$git_bin" -C "$source_dir" checkout --detach FETCH_HEAD
 
-      - name: Build install and run closures
+      - name: Build release and Linux CI closures
         shell: bash
         env:
           SYSTEM: ${{ matrix.system }}
@@ -89,11 +125,32 @@ jobs:
             exit 1
           fi
 
-          build_args=(
+          build_targets=(
             # `nix profile add` installs packages.default, while `nix run`
             # executes apps.default, backed by packages.agent-cli. They are
             # different outputs on Linux, so publish both closures.
-            build .#default .#agent-cli
+            .#default
+            .#agent-cli
+          )
+          if [[ "$SYSTEM" == x86_64-linux ]]; then
+            # Seed the public cache with the same roots used by the secretless
+            # PR matrix. Source filtering lets a PR reuse every unchanged
+            # package test while rebuilding only its affected graph.
+            build_targets+=(
+              .#checks.x86_64-linux.agent-cli
+              .#checks.x86_64-linux.agent-telegram
+              .#checks.x86_64-linux.agent-server
+              .#checks.x86_64-linux.agent-runtime-daemon
+              .#checks.x86_64-linux.agent-cli-executable
+              .#checks.x86_64-linux.agent-cli-static-runtime
+              .#checks.x86_64-linux.agent-sandbox-runner
+              .#checks.x86_64-linux.nixos-module
+            )
+          fi
+
+          build_args=(
+            build
+            "${build_targets[@]}"
             --no-link
             --print-out-paths
             --max-jobs 1
@@ -139,7 +196,7 @@ jobs:
             exit 1
           fi
 
-      - name: Push install and run closures to the public Attic cache
+      - name: Push release and Linux CI closures to the public Attic cache
         shell: bash
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
