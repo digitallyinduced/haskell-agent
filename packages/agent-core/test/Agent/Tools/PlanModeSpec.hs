@@ -44,6 +44,22 @@ spec = describe "Agent.Tools.PlanMode" do
             deactivatePlanMode env
             isPlanModeActive env `shouldReturn` False
 
+    it "brackets questions with the configured input-wait hooks" do
+        events <- newIORef ([] :: [Text])
+        let record event = modifyIORef' events (<> [event])
+            hooks = testHooks \_ _ -> do
+                record "question"
+                pure (Just "answer")
+        withTempPlanHooks hooks \env -> do
+            setPlanModeInputWaitHooks
+                env
+                (record "begin wait")
+                (record "end wait")
+            env.planHooks.planAskQuestion "Question?" []
+                `shouldReturn` Just "answer"
+            readIORef events `shouldReturn`
+                ["begin wait", "question", "end wait"]
+
     it "writes and reads plan.md under the fallback directory" do
         withTempPlan \env -> do
             writePlanMarkdown env "# Hello\n" `shouldReturn` Right ()

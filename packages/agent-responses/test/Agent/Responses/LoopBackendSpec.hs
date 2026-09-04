@@ -195,6 +195,31 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             other -> expectationFailure
                 ("unexpected computer continuation: " <> show other)
 
+    it "returns native accessibility state beside the screenshot" do
+        let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "ignored"
+                    , screenshotDataUrl = "data:image/jpeg;base64,AA=="
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Nothing
+                    , computerOutputExtra = KeyMap.singleton
+                        "accessibility_state"
+                        (Aeson.String
+                            "app=\"TextEdit\"\n[1] AXButton \"Save\"")
+                    }
+            result = ToolCallResult
+                { callId = "call-native"
+                , output = encoded
+                , callKind = ComputerFunctionCallKind
+                }
+        case turnInputsToItems [CompletedTool result] of
+            FunctionCallOutputItem output : _ ->
+                Aeson.toJSON output.output `shouldBe` Aeson.String
+                    "Computer action completed.\n\nCurrent macOS accessibility state:\napp=\"TextEdit\"\n[1] AXButton \"Save\""
+            other -> expectationFailure
+                ("unexpected native computer continuation: " <> show other)
+
     it "keeps computer output before its observation in standard and Lite requests" do
         let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
                 ComputerCallOutput
@@ -983,7 +1008,7 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                 call.callId == "call-2" && call.name == "apply_patch"
             _ -> False
 
-    it "publishes Codex weekly capacity updates for retained prompt chrome" do
+    it "leaves Codex capacity display to the authoritative usage endpoint" do
         projectEvent <- newStreamEventToLoopEvents False
         events <- projectEvent ResponseCodexRateLimitsEvent
             { rateLimits = CodexRateLimits
@@ -994,12 +1019,7 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                 }
             , sequenceNumber = Nothing
             }
-        events `shouldBe`
-            [ ProviderLimitUpdated
-                { providerLimitText = "Weekly limit left: 21%"
-                , providerLimitWarning = False
-                }
-            ]
+        events `shouldBe` []
 
     it "publishes a streamed function call immediately" do
         projectEvent <- newStreamEventToLoopEvents False
@@ -1340,7 +1360,10 @@ isUserMessage = \case
 
 responseWithOutput :: [ResponseItem] -> Response
 responseWithOutput output =
-    either error id . Codec.decodeResponse . LBS.toStrict . Aeson.encode $
+    either (error . Text.unpack) id
+        . Codec.decodeResponse
+        . LBS.toStrict
+        . Aeson.encode $
         Aeson.object
             [ "id" Aeson..= ("resp-compacted" :: Text.Text)
             , "created_at" Aeson..= (0 :: Int)

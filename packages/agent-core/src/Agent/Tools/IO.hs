@@ -244,7 +244,7 @@ runningOutputSince running cursor = do
 runShellCommand
     :: ToolEnv
     -> OsPath
-    -> String
+    -> Text
     -> Int
     -> IO CommandResult
 runShellCommand env workdir command timeoutMs =
@@ -256,13 +256,13 @@ runShellCommand env workdir command timeoutMs =
 runShellCommandStreaming
     :: ToolEnv
     -> OsPath
-    -> String
+    -> Text
     -> Int
     -> (Text -> Text -> IO ())
     -> IO CommandResult
 runShellCommandStreaming env workdir command timeoutMs onSnapshot =
     mask \restore -> do
-    let baseSpec = (shell command)
+    let baseSpec = (shell (Text.unpack command))
             { cwd = Just (unsafeToFilePath workdir)
             , std_in = CreatePipe
             , std_out = CreatePipe
@@ -396,7 +396,7 @@ cancelledResult = CommandResult
 startShellCommand
     :: ToolEnv
     -> OsPath
-    -> String
+    -> Text
     -> IO (Either Text RunningCommand)
 startShellCommand env workdir command =
     startShellCommandWithStdin False env workdir command (\_ -> pure ())
@@ -406,7 +406,7 @@ startShellCommand env workdir command =
 startShellCommandWithCompletion
     :: ToolEnv
     -> OsPath
-    -> String
+    -> Text
     -> (CommandResult -> IO ())
     -> IO (Either Text RunningCommand)
 startShellCommandWithCompletion =
@@ -418,7 +418,7 @@ startShellCommandWithCompletion =
 startShellCommandWithInput
     :: ToolEnv
     -> OsPath
-    -> String
+    -> Text
     -> IO (Either Text RunningCommand)
 startShellCommandWithInput env workdir command =
     startShellCommandWithStdin True env workdir command (\_ -> pure ())
@@ -426,7 +426,7 @@ startShellCommandWithInput env workdir command =
 startShellCommandWithInputAndCompletion
     :: ToolEnv
     -> OsPath
-    -> String
+    -> Text
     -> (CommandResult -> IO ())
     -> IO (Either Text RunningCommand)
 startShellCommandWithInputAndCompletion =
@@ -436,11 +436,11 @@ startShellCommandWithStdin
     :: Bool
     -> ToolEnv
     -> OsPath
-    -> String
+    -> Text
     -> (CommandResult -> IO ())
     -> IO (Either Text RunningCommand)
 startShellCommandWithStdin keepStdin env workdir command onComplete = do
-    let baseSpec = (shell command)
+    let baseSpec = (shell (Text.unpack command))
             { cwd = Just (unsafeToFilePath workdir)
             , std_in = CreatePipe
             , std_out = CreatePipe

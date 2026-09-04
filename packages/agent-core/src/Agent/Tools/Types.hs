@@ -13,6 +13,7 @@ module Agent.Tools.Types
     , ToolEnv(..)
     , addToolAllowedRoot
     , defaultToolEnv
+    , setToolHumanInputWaitHooks
     , setToolRootAccessRequest
     , setToolSkillRoots
     , setToolSessionTmp
@@ -24,6 +25,7 @@ module Agent.Tools.Types
     , freeformApplyPatchAppTool
     , freeformApplyPatchAppToolWithExecution
     , freeformGrammarAppToolWithExecution
+    , withToolHumanInputWait
     , withToolResourceClaims
     , mkToolRegistry
     , toolRegistryTools
@@ -58,10 +60,16 @@ import Agent.Tools.Scheduling
     , ToolResourceClaim(..)
     , ToolSchedulingPlan(..)
     )
-import Control.Exception.Safe (tryAny)
+import Control.Exception.Safe (bracket_, tryAny)
 import Control.Monad (foldM)
 import Data.Aeson (Value)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, writeIORef)
+import Data.IORef
+    ( IORef
+    , atomicModifyIORef'
+    , newIORef
+    , readIORef
+    , writeIORef
+    )
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -175,6 +183,10 @@ data ToolEnv = ToolEnv
       -- | Optional session-local callback used when a path falls outside
       -- the configured roots. An approved path is added to
       -- 'toolAllowedRoots' by the filesystem resolver.
+    , toolHumanInputWaitHooks :: !(IORef (IO (), IO ()))
+      -- | Session-local callbacks that bracket tool-driven waits for human
+      -- input. Stored behind an IORef because the CLI title controller is
+      -- installed after the tool runtime is constructed.
     , toolSkillRoots :: !(IORef [OsPath])
       -- | Directories belonging to the currently discovered skill catalog.
       -- Kept separate so catalog refreshes can replace them without
@@ -197,6 +209,7 @@ defaultToolEnv cwd = do
     cancel <- newCancelFlag
     allowedRoots <- newIORef []
     rootAccessRequest <- newIORef Nothing
+    humanInputWaitHooks <- newIORef (pure (), pure ())
     skillRoots <- newIORef []
     sessionTmp <- newIORef Nothing
     backgroundTaskHooks <- newIORef noBackgroundTaskHooks
@@ -204,6 +217,7 @@ defaultToolEnv cwd = do
         { toolCwd = dropTrailingPathSeparator cwd
         , toolAllowedRoots = allowedRoots
         , toolRootAccessRequest = rootAccessRequest
+        , toolHumanInputWaitHooks = humanInputWaitHooks
         , toolSkillRoots = skillRoots
         , toolSessionTmp = sessionTmp
         , toolOutputInlineCap = 50 * 1024
@@ -219,6 +233,19 @@ defaultToolEnv cwd = do
 -- approval and return whether the requested root may be added.
 setToolRootAccessRequest :: ToolEnv -> Maybe (OsPath -> IO Bool) -> IO ()
 setToolRootAccessRequest env = writeIORef env.toolRootAccessRequest
+
+-- | Configure callbacks which bracket tool-driven waits for human input.
+-- The default callbacks are no-ops for non-interactive hosts.
+setToolHumanInputWaitHooks :: ToolEnv -> IO () -> IO () -> IO ()
+setToolHumanInputWaitHooks env beginWait endWait =
+    writeIORef env.toolHumanInputWaitHooks (beginWait, endWait)
+
+-- | Run a tool-driven human interaction within the current session hooks.
+-- Cleanup runs even when the interaction throws or is interrupted.
+withToolHumanInputWait :: ToolEnv -> IO a -> IO a
+withToolHumanInputWait env action = do
+    (beginWait, endWait) <- readIORef env.toolHumanInputWaitHooks
+    bracket_ beginWait endWait action
 
 -- | Add a canonical directory to the roots available for this session.
 -- Duplicate roots are ignored so repeated approvals remain idempotent.

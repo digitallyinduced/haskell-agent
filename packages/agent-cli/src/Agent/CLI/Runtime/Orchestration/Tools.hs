@@ -124,8 +124,6 @@ import Agent.CLI.Runtime.HistorySource
     ( emptyFullscreenHistoryPage, loadFullscreenHistoryPage )
 import Agent.CLI.Runtime.Orchestration.Background
     ( runInProcessSessionTurn )
-import Agent.CLI.Runtime.Orchestration.Concurrent
-    ( concurrentlyAcquire )
 import Agent.CLI.Runtime.Orchestration.Types
     ( AgentProcessRuntime(..)
     , AgentRunMode
@@ -185,7 +183,7 @@ import Agent.CLI.SessionLock
       sessionLockPath )
 import Agent.CLI.SessionState ( SessionState(sessionPreviewId) )
 import Agent.CLI.SessionTitle ()
-import Agent.CLI.Skills ()
+import Agent.CLI.Skills ( loadSkillsCatalogQuiet )
 import Agent.CLI.Startup.Auth
     ( markStartupStage, setStartupNotice, startupDie )
 import Agent.CLI.StartupContext ()
@@ -263,6 +261,13 @@ import Agent.ReasoningEffort
 import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient ( GenericClientOptions(..) )
 import Agent.Responses.Types ( ResponseItem )
+import Agent.ResourceScope
+    ( ResourceScope
+    , allocateResource
+    , allocateResourcesConcurrently
+    , releaseResource
+    , withResourceScope
+    )
 import Agent.Skills
     ( SkillCatalog(SkillCatalog)
     , SkillInvocation
@@ -308,6 +313,7 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , appToolsFromGroups
     , setToolSessionTmp
+    , withToolHumanInputWait
     )
 import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
@@ -317,7 +323,7 @@ import Control.Concurrent.MVar ()
 import Control.Concurrent.STM ()
 import Control.Exception ()
 import Control.Exception.Safe
-    ( SomeException, finally, onException, throwIO, try )
+    ( SomeException, bracketOnError, finally, onException, throwIO, try )
 import Control.Monad ( forM_, join, unless, when )
 import Data.Functor ()
 import Data.IORef
@@ -493,9 +499,14 @@ data ScratchRuntime = ScratchRuntime
 data McpRuntime = McpRuntime
     { runtimeMcpServerConfigs :: [MCP.McpServerConfig]
     , runtimeProgressiveMcp :: Bool
-    , runtimeMcpLease :: MCP.McpFleetLease
     , runtimeMcpFleet :: MCP.McpFleet
     , runtimeMcpInstructions :: [(Text, Text)]
+    , runtimeCloseMcp :: IO ()
+    }
+
+data LocalToolRuntime = LocalToolRuntime
+    { localCoding :: CodingTools
+    , localInitialSkills :: SkillCatalog
     }
 
 data CodingRuntime = CodingRuntime
@@ -630,35 +641,58 @@ runAgentTools
 runAgentToolsRequest
     :: AgentToolsRequest windowTitleResult
     -> IO RunResult
-runAgentToolsRequest request = do
+runAgentToolsRequest request = withResourceScope \resourceScope -> do
     toolStartup <- loadToolStartup request
     let toolModelRuntime = resolveToolModel request toolStartup
         toolHostHooks =
             buildToolHostHooks request toolStartup toolModelRuntime
     collaborationRuntime <-
         newCollaborationRuntime request toolStartup toolModelRuntime
-    scratchRuntime <-
-        prepareScratchRuntime
-            request
-            toolStartup
-            toolModelRuntime
-            collaborationRuntime
-    mcpRuntime <-
-        acquireMcpRuntime
-            request
-            toolStartup
-            toolModelRuntime
-            collaborationRuntime
-            scratchRuntime
+    (scratchKey, acquiredScratchRuntime) <-
+        allocateResource
+            resourceScope
+            (prepareScratchRuntime
+                request
+                toolStartup
+                toolModelRuntime
+                collaborationRuntime)
+            (.scratchCleanup)
+    let scratchRuntime =
+            acquiredScratchRuntime
+                { scratchCleanup = releaseResource scratchKey }
+    ((mcpKey, acquiredMcpRuntime), (localToolKey, acquiredLocalToolRuntime)) <-
+        allocateResourcesConcurrently
+            resourceScope
+            (acquireMcpRuntime
+                request
+                toolStartup
+                toolModelRuntime
+                collaborationRuntime
+                scratchRuntime)
+            (.runtimeCloseMcp)
+            (acquireLocalToolRuntime
+                request
+                toolModelRuntime
+                toolHostHooks
+                collaborationRuntime
+                scratchRuntime)
+            (.localCoding.codingClose)
+    let mcpRuntime =
+            acquiredMcpRuntime
+                { runtimeCloseMcp = releaseResource mcpKey }
+        localToolRuntime =
+            acquiredLocalToolRuntime
+                { localCoding =
+                    acquiredLocalToolRuntime.localCoding
+                        { codingClose = releaseResource localToolKey }
+                }
     codingRuntime <-
         acquireCodingRuntime
+            resourceScope
             request
             toolStartup
             toolModelRuntime
-            toolHostHooks
-            collaborationRuntime
-            scratchRuntime
-            mcpRuntime
+            localToolRuntime
     installCollaborationCallbacks request collaborationRuntime
     sessionControlRuntime <-
         newSessionControlRuntime
@@ -666,6 +700,7 @@ runAgentToolsRequest request = do
             toolStartup
             toolModelRuntime
             collaborationRuntime
+            localToolRuntime.localInitialSkills
     sessionToolsRuntime <-
         assembleSessionToolsRuntime
             request
@@ -714,7 +749,7 @@ loadToolStartup request@AgentToolsRequest
             "gateway credential snapshot and session binding disagree"
     toolHarnessConfig <-
         loadHarnessConfig home >>= \case
-            Left err -> startupDie startup (Text.unpack err)
+            Left err -> startupDie startup err
             Right config -> pure config
     (toolGatewaySelection, toolGatewayAllowedChildModels) <-
         selectGatewayModels request
@@ -764,7 +799,7 @@ selectGatewayModels AgentToolsRequest
                                     Nothing ->
                                         startupDie startup $
                                             "Model '"
-                                                <> Text.unpack requested
+                                                <> requested
                                                 <> "' is not available through your organization gateway."
                                     Just selected -> pure selected
                             Nothing ->
@@ -1229,7 +1264,7 @@ prepareScratchRuntime AgentToolsRequest
         loadCurrentTaskPlan scratchPersistence >>= \case
             Left err ->
                 startupDie startup
-                    ("Failed to load current task plan: " <> Text.unpack err)
+                    ("Failed to load current task plan: " <> err)
             Right plan -> pure plan
     scratchTaskPlan <-
         newTaskPlanEnv
@@ -1282,7 +1317,7 @@ prepareScratchRuntime AgentToolsRequest
         acquireWorktreeLease (worktreeRoot home) cwd >>= \case
             Left err -> do
                 cleanupAllocatedScratch
-                startupDie startup (Text.unpack err)
+                startupDie startup err
             Right lease -> pure lease
     sessionTempLease <-
         (acquireSessionTempLease root scratchSessionTmp
@@ -1292,7 +1327,7 @@ prepareScratchRuntime AgentToolsRequest
                 Left err -> do
                     mapM_ releaseWorktreeLease worktreeLease
                     cleanupAllocatedScratch
-                    startupDie startup (Text.unpack err)
+                    startupDie startup err
                 Right lease -> pure lease
     let scratchCleanup =
             mapM_ releaseSessionTempLease sessionTempLease
@@ -1426,6 +1461,7 @@ acquireMcpRuntime request@AgentToolsRequest
     , isTty
     , escPaused
     , uiRuntimeRef
+    , baseToolEnv
     , mcpSupervisor
     } toolStartup ToolModelRuntime
     { toolDialectId = dialectId
@@ -1433,7 +1469,6 @@ acquireMcpRuntime request@AgentToolsRequest
     { collaborationPendingNotices = pendingNotices
     } ScratchRuntime
     { scratchSessionTmp = sessionTmp
-    , scratchCleanup = cleanupScratch
     } = do
     let (runtimeMcpServerConfigs, runtimeProgressiveMcp) =
             mcpConfiguration request toolStartup
@@ -1443,7 +1478,9 @@ acquireMcpRuntime request@AgentToolsRequest
     writeIORef processRuntime.processMcpElicitation
         (if isOneShot options || not isTty
             then Nothing
-            else Just (cliMcpElicitation escPaused uiRuntimeRef))
+            else Just \elicitation ->
+                withToolHumanInputWait baseToolEnv $
+                    cliMcpElicitation escPaused uiRuntimeRef elicitation)
     let enqueueMcpSnapshot statuses =
             unless (null statuses) do
                 instructions <-
@@ -1471,65 +1508,69 @@ acquireMcpRuntime request@AgentToolsRequest
                 atomicModifyIORef' mcpStatusPhaseRef \previous ->
                     (Just isConnecting, previous == Just True && not isConnecting)
             when settled (enqueueMcpSnapshot statuses)
-    runtimeMcpLease <-
-        try @_ @SomeException
-            (if runtimeProgressiveMcp
-                then
-                    MCP.acquireMcpFleetProgressive
-                        mcpSupervisor
-                        reportProgressiveMcp
-                        runtimeMcpServerConfigs
-                else
-                    MCP.acquireMcpFleetWithProgress
-                        mcpSupervisor
-                        (\names ->
-                            setStartupNotice startup.startupFullscreen
-                                (if null names
-                                    then "Loading built-in tools…"
-                                    else
-                                        "Loading tools: "
-                                            <> Text.intercalate ", " names
-                                            <> "…"))
-                        runtimeMcpServerConfigs)
-            >>= \case
-                Left exception -> do
-                    cleanupScratch
-                    startupDie startup
-                        ("Failed to initialize MCP tools: " <> show exception)
-                Right lease -> pure lease
-    let runtimeMcpFleet = runtimeMcpLease.mcpLeaseFleet
-    writeIORef mcpFleetRef (Just runtimeMcpFleet)
-    when runtimeProgressiveMcp $
-        MCP.mcpFleetStatuses runtimeMcpFleet >>= enqueueMcpSnapshot
-    currentMcpInstructions <- MCP.mcpFleetInstructions runtimeMcpFleet
-    let runtimeMcpInstructions =
-            mcpInstructionsForRequest
-                runtimeProgressiveMcp
-                currentMcpInstructions
-    mapM_
-        (reportStartupWarning startup)
-        runtimeMcpFleet.mcpFleetWarnings
-    setStartupNotice startup.startupFullscreen "Loading built-in tools…"
-    pure McpRuntime{..}
+    let acquireMcpLease =
+            try @_ @SomeException
+                (if runtimeProgressiveMcp
+                    then
+                        MCP.acquireMcpFleetProgressive
+                            mcpSupervisor
+                            reportProgressiveMcp
+                            runtimeMcpServerConfigs
+                    else
+                        MCP.acquireMcpFleetWithProgress
+                            mcpSupervisor
+                            (\names ->
+                                setStartupNotice startup.startupFullscreen
+                                    (if null names
+                                        then "Loading built-in tools…"
+                                        else
+                                            "Loading tools: "
+                                                <> Text.intercalate ", " names
+                                                <> "…"))
+                            runtimeMcpServerConfigs)
+                >>= \case
+                    Left exception ->
+                        startupDie startup
+                            ("Failed to initialize MCP tools: "
+                                <> Text.pack (show exception))
+                    Right lease -> pure lease
+    bracketOnError
+        acquireMcpLease
+        MCP.releaseMcpFleetLease
+        \runtimeMcpLease -> do
+            let runtimeMcpFleet = runtimeMcpLease.mcpLeaseFleet
+                runtimeCloseMcp =
+                    MCP.releaseMcpFleetLease runtimeMcpLease
+            writeIORef mcpFleetRef (Just runtimeMcpFleet)
+            when runtimeProgressiveMcp $
+                MCP.mcpFleetStatuses runtimeMcpFleet >>= enqueueMcpSnapshot
+            currentMcpInstructions <- MCP.mcpFleetInstructions runtimeMcpFleet
+            let runtimeMcpInstructions =
+                    mcpInstructionsForRequest
+                        runtimeProgressiveMcp
+                        currentMcpInstructions
+            mapM_
+                (reportStartupWarning startup)
+                runtimeMcpFleet.mcpFleetWarnings
+            setStartupNotice startup.startupFullscreen "Loading built-in tools…"
+            pure McpRuntime{..}
 
-acquireCodingRuntime
+acquireLocalToolRuntime
     :: AgentToolsRequest windowTitleResult
-    -> ToolStartup
     -> ToolModelRuntime
     -> ToolHostHooks
     -> CollaborationRuntime
     -> ScratchRuntime
-    -> McpRuntime
-    -> IO CodingRuntime
-acquireCodingRuntime AgentToolsRequest
+    -> IO LocalToolRuntime
+acquireLocalToolRuntime AgentToolsRequest
     { startup
     , baseToolEnv
-    } ToolStartup
-    { toolNativeCapabilities = nativeCapabilities
-    , toolHarnessConfig = harnessConfig
+    , options
+    , home
+    , projectRoot
+    , cwd
     } ToolModelRuntime
-    { toolDialectId = dialectId
-    , toolDialect = dialect
+    { toolDialect = dialect
     } ToolHostHooks
     { toolPlanHooks = planHooks
     , toolSecretHooks = secretHooks
@@ -1539,19 +1580,23 @@ acquireCodingRuntime AgentToolsRequest
     , collaborationAgentTypes = agentTypesRef
     } ScratchRuntime
     { scratchTaskPlan = taskPlan
-    , scratchCleanup = cleanupScratch
-    } McpRuntime
-    { runtimeMcpLease = mcpLease
     } = do
-    let codingToolEnv =
-            case startup.startupNativeHooks
-                >>= nativePreparedDiscovery . (.nativeWorkspaceDiscovery) of
+    let preparedDiscovery =
+            startup.startupNativeHooks
+                >>= nativePreparedDiscovery . (.nativeWorkspaceDiscovery)
+        codingToolEnv =
+            case preparedDiscovery of
                 Just context ->
                     baseToolEnv
                         { toolCwd = context.nativeDiscoveryProjectRoot }
                 Nothing -> baseToolEnv
-    runtimeCoding <-
-        codingToolsForWithTypes
+        acquireSkills =
+            case preparedDiscovery of
+                Nothing ->
+                    loadSkillsCatalogQuiet options home projectRoot cwd
+                Just _ -> pure (SkillCatalog [] [])
+    bracketOnError
+        (codingToolsForWithTypes
             dialect
             codingToolEnv
             (Just planHooks)
@@ -1559,39 +1604,59 @@ acquireCodingRuntime AgentToolsRequest
             secretHooks
             imageHooks
             multiCtx
-            agentTypesRef
-            `onException`
-                (MCP.releaseMcpFleetLease mcpLease >> cleanupScratch)
-    let closeBeforeSession =
-            runtimeCoding.codingClose
-                `finally`
-                    (MCP.releaseMcpFleetLease mcpLease
-                        `finally` cleanupScratch)
-        acquireGrokExtras
+            agentTypesRef)
+        (.codingClose)
+        \localCoding -> do
+            localInitialSkills <- acquireSkills
+            pure LocalToolRuntime{..}
+
+acquireCodingRuntime
+    :: ResourceScope
+    -> AgentToolsRequest windowTitleResult
+    -> ToolStartup
+    -> ToolModelRuntime
+    -> LocalToolRuntime
+    -> IO CodingRuntime
+acquireCodingRuntime resourceScope AgentToolsRequest
+    { startup
+    , baseToolEnv
+    } ToolStartup
+    { toolNativeCapabilities = nativeCapabilities
+    , toolHarnessConfig = harnessConfig
+    } ToolModelRuntime
+    { toolDialectId = dialectId
+    } LocalToolRuntime
+    { localCoding = runtimeCoding
+    } = do
+    let acquireWebFetch
             | not nativeCapabilities.nativeHostExtensions
                 || dialectId /= GrokBuildDialect =
-                pure
-                    ( Nothing
-                    , LspStartup
-                        { lspStartupRuntime = Nothing
-                        , lspStartupWarnings = []
-                        }
-                    )
+                pure Nothing
             | otherwise =
-                concurrentlyAcquire
-                    (newWebFetchRuntime
-                        harnessConfig.configWebFetch
-                        baseToolEnv >>= \case
-                            Left err ->
-                                startupDie startup
-                                    ("Failed to initialize web_fetch: "
-                                        <> Text.unpack err)
-                            Right runtime -> pure runtime)
-                    (mapM_ closeWebFetchRuntime)
-                    (newLspRuntime harnessConfig.configLsp baseToolEnv)
-                    (mapM_ closeLspRuntime . (.lspStartupRuntime))
-    (webFetchRuntime, lspStartup) <-
-        acquireGrokExtras `onException` closeBeforeSession
+                newWebFetchRuntime
+                    harnessConfig.configWebFetch
+                    baseToolEnv >>= \case
+                        Left err ->
+                            startupDie startup
+                                ("Failed to initialize web_fetch: "
+                                    <> err)
+                        Right runtime -> pure runtime
+        acquireLsp
+            | not nativeCapabilities.nativeHostExtensions
+                || dialectId /= GrokBuildDialect =
+                pure LspStartup
+                    { lspStartupRuntime = Nothing
+                    , lspStartupWarnings = []
+                    }
+            | otherwise =
+                newLspRuntime harnessConfig.configLsp baseToolEnv
+    ((webFetchKey, webFetchRuntime), (lspKey, lspStartup)) <-
+        allocateResourcesConcurrently
+            resourceScope
+            acquireWebFetch
+            (mapM_ closeWebFetchRuntime)
+            acquireLsp
+            (mapM_ closeLspRuntime . (.lspStartupRuntime))
     mapM_ (reportStartupWarning startup) lspStartup.lspStartupWarnings
     let lspRuntime = lspStartup.lspStartupRuntime
         runtimeExtraTools =
@@ -1599,8 +1664,8 @@ acquireCodingRuntime AgentToolsRequest
                 <> maybe [] (pure . lspRuntimeTool) lspRuntime
         runtimeCloseExtraTools =
             concurrently_
-                (mapM_ closeLspRuntime lspRuntime)
-                (mapM_ closeWebFetchRuntime webFetchRuntime)
+                (releaseResource lspKey)
+                (releaseResource webFetchKey)
     pure CodingRuntime{..}
 
 installCollaborationCallbacks
@@ -1643,6 +1708,7 @@ newSessionControlRuntime
     -> ToolStartup
     -> ToolModelRuntime
     -> CollaborationRuntime
+    -> SkillCatalog
     -> IO SessionControlRuntime
 newSessionControlRuntime AgentToolsRequest
     { options
@@ -1666,10 +1732,10 @@ newSessionControlRuntime AgentToolsRequest
     { collaborationActiveSessionLock = activeSessionLock
     , collaborationPersistSlotRef = persistSlotRef
     , collaborationGatewayChildModelOption = gatewayChildModelOption
-    } = do
+    } initialSkills = do
     controlGhciEnabledRef <- newIORef options.optGhci
     controlBashEnabledRef <- newIORef options.optBash
-    controlSkillsRef <- newIORef (SkillCatalog [] [])
+    controlSkillsRef <- newIORef initialSkills
     controlSkillInvocationsRef <- newIORef []
     controlCodeModeCloseRef <- newIORef (pure ())
     let controlClaimCurrentSession handle = do
@@ -1780,8 +1846,8 @@ assembleSessionToolsRuntime AgentToolsRequest
     } McpRuntime
     { runtimeMcpServerConfigs = mcpServerConfigs
     , runtimeProgressiveMcp = progressiveMcp
-    , runtimeMcpLease = mcpLease
     , runtimeMcpFleet = mcpFleet
+    , runtimeCloseMcp = closeMcp
     } CodingRuntime
     { runtimeCoding = coding
     , runtimeExtraTools = extraTools
@@ -1884,7 +1950,7 @@ assembleSessionToolsRuntime AgentToolsRequest
                         `finally`
                             (closeExtraTools
                                 `finally`
-                                    (MCP.releaseMcpFleetLease mcpLease
+                                    (closeMcp
                                         `finally`
                                             (coding.codingClose
                                                 `finally`

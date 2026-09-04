@@ -611,7 +611,7 @@ responseFragmentWithOutput responseId output =
 
 decodeResponseValue :: Aeson.Value -> Response
 decodeResponseValue value =
-    either error id
+    either (error . Text.unpack) id
         (Codec.decodeResponse (LBS.toStrict (Aeson.encode value)))
 
 completedItemTrace :: Text -> [ResponseStreamEvent] -> [ResponseStreamEvent]

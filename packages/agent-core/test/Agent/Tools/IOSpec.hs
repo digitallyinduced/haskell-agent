@@ -677,7 +677,7 @@ checkTimeoutKillsProcessGroup dir = do
                 <> show heartbeatFile
                 <> "; sleep 0.02; done) & wait"
     env <- defaultToolEnv osDir
-    result <- runShellCommand env osDir command 200
+    result <- runShellCommand env osDir (Text.pack command) 200
     result.commandTimedOut `shouldBe` True
     threadDelay 200000
     before <- readFile heartbeatFile

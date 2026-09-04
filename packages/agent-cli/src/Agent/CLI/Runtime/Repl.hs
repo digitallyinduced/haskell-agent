@@ -32,7 +32,9 @@ import Agent.CLI.Error ()
 import Agent.CLI.Dictation
     ( dictationTargetForSession )
 import Agent.CLI.GatewayClient
-    ( cachedGatewayModels
+    ( GatewayModelAccess
+    , cachedGatewayModels
+    , fetchGatewayUsage
     , gatewayModelIds
     )
 import Agent.CLI.GatewayBridge ()
@@ -189,7 +191,7 @@ import Control.Exception.Safe ()
 import Control.Monad ( when, forM_ )
 import Data.IORef ( readIORef, writeIORef )
 import Data.List ()
-import Data.Maybe ( fromMaybe, isJust, isNothing )
+import Data.Maybe ( fromMaybe, isJust )
 import Data.Text ( Text )
 import Data.Time.Clock ()
 import System.Console.ANSI ( getTerminalSize )
@@ -322,7 +324,8 @@ replWithDraft env@SessionEnv
                 slashCatalog
                 promptState
                 draft
-                (isNothing gatewayAccess)
+                gatewayAccess
+                (currentModel params)
         Nothing -> Right <$> withMVar render.renderLock \_ -> do
             -- The inline editor redraws its ANSI frame with several writes.
             -- Keep the renderer out for the complete prompt lifetime so a
@@ -440,11 +443,19 @@ readFullscreenPrompt
     -> SlashCatalog
     -> PromptState
     -> Text
-    -> Bool
+    -> Maybe GatewayModelAccess
+    -> Text
     -> IO (Either ReplWake ReplLine)
-readFullscreenPrompt env runtime slashCatalog promptState draft allowOpenAi =
+readFullscreenPrompt
+    env
+    runtime
+    slashCatalog
+    promptState
+    draft
+    gatewayAccess
+    model =
     withAsync
-        (refreshPromptAccountLimit env allowOpenAi runtime)
+        (refreshPromptAccountLimit env gatewayAccess model runtime)
         \_ -> do
             startupUnavailable <- readIORef env.sessionStartupUnavailable
             failedTurn <- readIORef env.sessionLastFailedTurn
@@ -472,7 +483,8 @@ readFullscreenPrompt env runtime slashCatalog promptState draft allowOpenAi =
 
 refreshPromptAccountLimit
     :: SessionEnv
-    -> Bool
+    -> Maybe GatewayModelAccess
+    -> Text
     -> FullscreenRuntime
     -> IO ()
 refreshPromptAccountLimit
@@ -480,18 +492,23 @@ refreshPromptAccountLimit
         { sessionProvider = provider
         , sessionTokenProvider = tokenProvider
         }
-    allowOpenAi
+    gatewayAccess
+    model
     runtime =
-        case (provider, tokenProvider) of
-            (XAIProvider, Just tokens)
+        case (gatewayAccess, provider, tokenProvider) of
+            (Just access, _, _) ->
+                fetchGatewayUsage access model >>= \case
+                    Left _ -> pure ()
+                    Right snapshot ->
+                        publish (formatOpenAiLimitStatus snapshot)
+            (Nothing, XAIProvider, Just tokens)
                 | tokenProviderBillingMode tokens == SubscriptionBilled ->
                     refreshWith
                         tokens
                         XAIUsage.fetchGrokUsage
                         formatGrokLimitStatus
-            (OpenAIProvider, Just tokens)
-                | allowOpenAi
-                , tokenProviderBillingMode tokens == SubscriptionBilled ->
+            (Nothing, OpenAIProvider, Just tokens)
+                | tokenProviderBillingMode tokens == SubscriptionBilled ->
                     getNextToken tokens Nothing >>= \case
                         Left _ -> pure ()
                         Right credential
@@ -505,7 +522,7 @@ refreshPromptAccountLimit
                                         Right snapshot ->
                                             publish
                                                 (formatOpenAiLimitStatus snapshot)
-            (OpenRouterProvider, Just tokens) ->
+            (Nothing, OpenRouterProvider, Just tokens) ->
                 getNextToken tokens Nothing >>= \case
                     Left _ -> pure ()
                     Right credential ->

@@ -1,8 +1,31 @@
-{-# LANGUAGE CPP #-}
-
 module Main (main) where
 
-import Test.Hspec (hspec)
+import Control.Concurrent.Async (mapConcurrently)
+import Control.Monad (unless)
+import Data.Char (ord)
+import System.Environment
+    ( getArgs
+    , getEnvironment
+    , getExecutablePath
+    , lookupEnv
+    )
+import System.Exit (ExitCode(..), die, exitFailure)
+import System.Process
+    ( CreateProcess(..)
+    , proc
+    , waitForProcess
+    , withCreateProcess
+    )
+import Test.Hspec (Spec, hspec)
+import Test.Hspec.Runner
+    ( Config(..)
+    , Path
+    , defaultConfig
+    , evaluateSummary
+    , readConfig
+    , runSpec
+    )
+import Text.Read (readMaybe)
 
 import qualified Agent.CLI.AccountSelectionSpec as AccountSelectionSpec
 import qualified Agent.CLI.AgentSessionsSpec as AgentSessionsSpec
@@ -12,7 +35,6 @@ import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
 import qualified Agent.CLI.ArtifactSpec as ArtifactSpec
 import qualified Agent.CLI.AuthSpec as AuthSpec
 import qualified Agent.CLI.BtwSpec as BtwSpec
-import qualified Agent.CLI.BrowserToolsSpec as BrowserToolsSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.ClaudeGatewayProxySpec as ClaudeGatewayProxySpec
@@ -28,7 +50,6 @@ import qualified Agent.CLI.DialectsSpec as DialectsSpec
 import qualified Agent.CLI.DatabaseSpec as DatabaseSpec
 import qualified Agent.CLI.DesktopSpec as DesktopSpec
 import qualified Agent.CLI.ExternalProgramSpec as ExternalProgramSpec
-import qualified Agent.CLI.ExternalSessionSpec as ExternalSessionSpec
 import qualified Agent.CLI.FileUriSpec as FileUriSpec
 import qualified Agent.CLI.GatewayModelsSpec as GatewayModelsSpec
 import qualified Agent.CLI.GitDiffSpec as GitDiffSpec
@@ -42,7 +63,6 @@ import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
 import qualified Agent.CLI.MetaConsoleSpec as MetaConsoleSpec
 import qualified Agent.CLI.MetaConsoleRuntimeSpec as MetaConsoleRuntimeSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
-import qualified Agent.CLI.McpAdminSpec as McpAdminSpec
 import qualified Agent.CLI.NativeAgentsSpec as NativeAgentsSpec
 import qualified Agent.CLI.NativeRuntimeSpec as NativeRuntimeSpec
 import qualified Agent.CLI.NotificationSpec as NotificationSpec
@@ -59,9 +79,6 @@ import qualified Agent.CLI.ProviderFallbackSpec as ProviderFallbackSpec
 import qualified Agent.CLI.ProviderAvailabilitySpec as ProviderAvailabilitySpec
 import qualified Agent.CLI.ProviderTransitionSpec as ProviderTransitionSpec
 import qualified Agent.CLI.RequestSpec as RequestSpec
-import qualified Agent.CLI.RepositoryDeliverySpec as RepositoryDeliverySpec
-import qualified Agent.CLI.RepositoryReviewSpec as RepositoryReviewSpec
-import qualified Agent.CLI.ResourceAdminSpec as ResourceAdminSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
 import qualified Agent.CLI.ResumeSpec as ResumeSpec
@@ -91,18 +108,50 @@ import qualified Agent.CLI.TUITranscriptSpec as TUITranscriptSpec
 import qualified Agent.CLI.UsageSpec as UsageSpec
 import qualified Agent.CLI.WebLspSpec as WebLspSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
-import qualified Agent.CLI.MacOS.EngineMailboxSpec as EngineMailboxSpec
-import qualified Agent.CLI.MacOS.NativeLoopEventSpec as NativeLoopEventSpec
-import qualified Agent.CLI.MacOS.TaskSchedulerSpec as TaskSchedulerSpec
-#ifdef darwin_HOST_OS
-import qualified Agent.CLI.MacOS.BridgeFFISpec as BridgeFFISpec
-import qualified Agent.CLI.MacOS.BridgeHeaderSpec as BridgeHeaderSpec
-import qualified Agent.CLI.MacOS.BridgeSpec as BridgeSpec
-import qualified Agent.CLI.MacOS.BrowserBridgeFFISpec as BrowserBridgeFFISpec
-#endif
-
 main :: IO ()
-main = hspec do
+main = do
+    shard <- lookupEnv "AGENT_CLI_TEST_SHARD"
+    case shard of
+        Just value ->
+            case parseShard value of
+                Just (index, count) -> do
+                    arguments <- getArgs
+                    config <- readConfig defaultConfig arguments
+                    let requested path =
+                            case config.configFilterPredicate of
+                                Nothing -> True
+                                Just predicate -> predicate path
+                        shardConfig =
+                            config
+                                { configFilterPredicate =
+                                    Just
+                                        ( \path ->
+                                            belongsToShard index count path
+                                                && requested path
+                                        )
+                                }
+                    runSpec specs shardConfig >>= evaluateSummary
+                Nothing ->
+                    die $
+                        "invalid AGENT_CLI_TEST_SHARD (expected INDEX/COUNT): "
+                            <> value
+        Nothing -> do
+            shardCount <- lookupEnv "AGENT_CLI_TEST_SHARDS"
+            case shardCount of
+                Nothing -> hspec specs
+                Just value ->
+                    case readMaybe value of
+                        Just 1 -> hspec specs
+                        Just count
+                            | validShardCount count -> runShards count
+                        _ ->
+                            die $
+                                "invalid AGENT_CLI_TEST_SHARDS "
+                                    <> "(expected an integer from 1 to 32): "
+                                    <> value
+
+specs :: Spec
+specs = do
     AccountSelectionSpec.spec
     AgentViewportSpec.spec
     AgentViewportRuntimeSpec.spec
@@ -111,13 +160,6 @@ main = hspec do
     ArtifactSpec.spec
     AuthSpec.spec
     BtwSpec.spec
-    BrowserToolsSpec.spec
-#ifdef darwin_HOST_OS
-    BrowserBridgeFFISpec.spec
-    BridgeFFISpec.spec
-    BridgeHeaderSpec.spec
-    BridgeSpec.spec
-#endif
     CancelWatchSpec.spec
     ClipboardSpec.spec
     ClaudeGatewayProxySpec.spec
@@ -133,7 +175,6 @@ main = hspec do
     DatabaseSpec.spec
     DesktopSpec.spec
     ExternalProgramSpec.spec
-    ExternalSessionSpec.spec
     FileUriSpec.spec
     GatewayModelsSpec.spec
     GitDiffSpec.spec
@@ -143,7 +184,6 @@ main = hspec do
     LoginSpec.spec
     LearnedSkillsSpec.spec
     MarkdownSpec.spec
-    McpAdminSpec.spec
     McpManagerSpec.spec
     MetaConsoleSpec.spec
     MetaConsoleRuntimeSpec.spec
@@ -164,9 +204,6 @@ main = hspec do
     ProviderAvailabilitySpec.spec
     ProviderTransitionSpec.spec
     RequestSpec.spec
-    RepositoryDeliverySpec.spec
-    RepositoryReviewSpec.spec
-    ResourceAdminSpec.spec
     RenderSpec.spec
     ReplStatusSpec.spec
     ResumeSpec.spec
@@ -196,6 +233,64 @@ main = hspec do
     UsageSpec.spec
     WebLspSpec.spec
     WorktreeSpec.spec
-    EngineMailboxSpec.spec
-    NativeLoopEventSpec.spec
-    TaskSchedulerSpec.spec
+
+runShards :: Int -> IO ()
+runShards count = do
+    executable <- getExecutablePath
+    arguments <- getArgs
+    environment <- getEnvironment
+    exits <-
+        mapConcurrently
+            (runShard executable arguments environment count)
+            [0 .. count - 1]
+    unless (all (== ExitSuccess) exits) exitFailure
+
+runShard
+    :: FilePath
+    -> [String]
+    -> [(String, String)]
+    -> Int
+    -> Int
+    -> IO ExitCode
+runShard executable arguments environment count index =
+    withCreateProcess
+        (proc executable arguments)
+            { env =
+                Just $
+                    ("AGENT_CLI_TEST_SHARD", show index <> "/" <> show count)
+                        : filter
+                            ( \entry ->
+                                fst entry
+                                    `notElem`
+                                        [ "AGENT_CLI_TEST_SHARD"
+                                        , "AGENT_CLI_TEST_SHARDS"
+                                        ]
+                            )
+                            environment
+            }
+        \_ _ _ processHandle -> waitForProcess processHandle
+
+parseShard :: String -> Maybe (Int, Int)
+parseShard value =
+    case break (== '/') value of
+        (indexText, '/' : countText) -> do
+            index <- readMaybe indexText
+            count <- readMaybe countText
+            if validShardCount count && index >= 0 && index < count
+                then Just (index, count)
+                else Nothing
+        _ -> Nothing
+
+validShardCount :: Int -> Bool
+validShardCount count = count >= 1 && count <= 32
+
+belongsToShard :: Int -> Int -> Path -> Bool
+belongsToShard index count (groups, requirement) =
+    stablePathHash (groups <> [requirement]) `mod` count == index
+
+stablePathHash :: [String] -> Int
+stablePathHash =
+    foldl'
+        (\hash character -> (hash * 33 + ord character) `mod` 2_147_483_647)
+        5_381
+        . unlines

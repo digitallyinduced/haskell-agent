@@ -5,20 +5,23 @@
 module Agent.ResourceScope
     ( ResourceScope
     , ResourceKey
+    , withResourceScope
     , newResourceScope
     , closeResourceScope
     , allocateResource
+    , allocateResourcesConcurrently
     , registerResource
     , releaseResource
     ) where
 
+import Control.Concurrent.Async (concurrently)
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
     , newMVar
     , withMVar
     )
-import Control.Exception.Safe (throwIO)
+import Control.Exception.Safe (bracket, throwIO)
 import Control.Monad.Trans.Resource
     ( InternalState
     , ReleaseKey
@@ -34,6 +37,13 @@ import Control.Monad.Trans.Resource
 newtype ResourceScope = ResourceScope (MVar (Maybe InternalState))
 
 newtype ResourceKey = ResourceKey ReleaseKey
+
+-- | Run an action inside a lexical resource scope.
+--
+-- Resources which have not already been released are closed when the action
+-- returns or throws.
+withResourceScope :: (ResourceScope -> IO a) -> IO a
+withResourceScope = bracket newResourceScope closeResourceScope
 
 newResourceScope :: IO ResourceScope
 newResourceScope = do
@@ -55,6 +65,27 @@ allocateResource scope acquire cleanup =
     withOpenScope scope \state -> do
         (key, value) <- runInScope state (allocate acquire cleanup)
         pure (ResourceKey key, value)
+
+-- | Acquire two independently-owned resources concurrently.
+--
+-- Both resources are registered with the scope before this function returns.
+-- If either acquisition fails, or the caller is interrupted, the lexical
+-- scope remains responsible for every acquisition which completed.  This
+-- avoids transferring partially-acquired resources out of worker threads.
+allocateResourcesConcurrently
+    :: ResourceScope
+    -> IO a
+    -> (a -> IO ())
+    -> IO b
+    -> (b -> IO ())
+    -> IO ((ResourceKey, a), (ResourceKey, b))
+allocateResourcesConcurrently scope acquireLeft releaseLeft acquireRight releaseRight =
+    withOpenScope scope \state ->
+        concurrently
+            (wrap <$> runInScope state (allocate acquireLeft releaseLeft))
+            (wrap <$> runInScope state (allocate acquireRight releaseRight))
+  where
+    wrap (key, value) = (ResourceKey key, value)
 
 registerResource :: ResourceScope -> IO () -> IO ResourceKey
 registerResource scope cleanup =
