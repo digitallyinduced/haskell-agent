@@ -157,8 +157,10 @@ import Agent.Tools.PlanMode
     , writePlanMarkdown
     )
 import Agent.Tools.TaskPlan
-    ( restoreTaskPlanReminder
+    ( TaskPlanReminder
+    , restoreTaskPlanReminder
     , takeTaskPlanReminder
+    , taskPlanReminderText
     )
 import Agent.OsPath (toText, unsafeToFilePath)
 import Control.Monad (forM_, when)
@@ -280,7 +282,7 @@ data BusyTurnRequest = BusyTurnRequest
 data PreparedBusyTurn = PreparedBusyTurn
     { preparedInitialPlanState :: PlanModeState
     , preparedPreviousResponseId :: Maybe Text
-    , preparedTaskPlanReminder :: Maybe Text
+    , preparedTaskPlanReminder :: Maybe TaskPlanReminder
     , preparedConversationTurn :: PreparedTurn
     }
 
@@ -339,7 +341,7 @@ prepareBusyTurn request = do
     let turnInputs0 =
             turnInputsWithContext
                 planReminder
-                taskPlanReminder
+                (taskPlanReminderText <$> taskPlanReminder)
                 pendingStartup
                 request.busyInputs
     (conversationStartedAt, previousActivityAt) <-
@@ -400,7 +402,7 @@ restoreConsumedPromptContext
     :: BusyTurnRequest
     -> Maybe Text
     -> Maybe Text
-    -> Maybe Text
+    -> Maybe TaskPlanReminder
     -> IO ()
 restoreConsumedPromptContext
         request sentStartupContext pendingGrokContext taskPlanReminder = do
@@ -415,8 +417,9 @@ restoreConsumedPromptContext
                 Just _ -> current
             , ()
             )
-    forM_ taskPlanReminder \_ ->
-        mapM_ restoreTaskPlanReminder env.sessionTaskPlan
+    forM_ taskPlanReminder \reminder ->
+        forM_ env.sessionTaskPlan \taskPlan ->
+            restoreTaskPlanReminder taskPlan reminder
 
 persistTurnPromptSnapshot
     :: BusyTurnRequest
@@ -575,8 +578,9 @@ rollbackExceptionalTurn request preparation rootTurnId = do
                 preparation.preparedConversationTurn)
             ConversationInterrupted)
     when (isNothing boundary) $
-        forM_ preparation.preparedTaskPlanReminder \_ ->
-            mapM_ restoreTaskPlanReminder env.sessionTaskPlan
+        forM_ preparation.preparedTaskPlanReminder \reminder ->
+            forM_ env.sessionTaskPlan \taskPlan ->
+                restoreTaskPlanReminder taskPlan reminder
     restorePlanStateAfterIncomplete
         env.sessionPlanMode
         preparation.preparedInitialPlanState
@@ -690,10 +694,11 @@ restoreTaskPlanAfterUncompactedTurn executed =
     when (isNothing executed.executedAutomaticCompaction) $
         forM_
             executed.executedPreparation.preparedTaskPlanReminder
-            \_ ->
-                mapM_
-                    restoreTaskPlanReminder
+            \reminder ->
+                forM_
                     executed.executedRequest.busyEnv.sessionTaskPlan
+                    \taskPlan ->
+                        restoreTaskPlanReminder taskPlan reminder
 
 finishCancelledTurn :: ExecutedBusyTurn -> LoopError -> IO TurnResult
 finishCancelledTurn executed cancelled = do

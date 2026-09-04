@@ -72,6 +72,7 @@ preparePersistence
                 metadataChanged =
                     retargetResumed
                         && ( targetChanged
+                            || meta.metaGatewayIdentity /= gatewayIdentity
                             || meta.metaTransportModel
                                 /= Just target.targetWireModelId
                             || isNothing meta.metaLegacySubagentTarget
@@ -81,6 +82,7 @@ preparePersistence
                         meta
                             { metaProvider = target.targetProvider
                             , metaConnection = target.targetConnectionId
+                            , metaGatewayIdentity = gatewayIdentity
                             , metaModel = target.targetModelId
                             , metaTransportModel =
                                 Just target.targetWireModelId

@@ -2,7 +2,7 @@
 , base, base64-bytestring, bytestring, containers, directory
 , filelock, filepath, hspec, http-client, http-client-tls
 , http-types, lib, process, QuickCheck, safe-exceptions, scientific
-, stm, text, time, unix, vector
+, stm, text, time, transformers, unix, vector
 }:
 mkDerivation {
   pname = "agent-mcp";
@@ -12,7 +12,7 @@ mkDerivation {
     aeson agent-core agent-json agent-process async base
     base64-bytestring bytestring containers directory filelock filepath
     http-client http-client-tls http-types process safe-exceptions
-    scientific stm text time unix vector
+    scientific stm text time transformers unix vector
   ];
   testHaskellDepends = [
     aeson agent-core agent-json async base bytestring containers

@@ -2,8 +2,12 @@
 module Agent.CLI.Btw
     ( BtwBackendFactory
     , BtwError(..)
+    , SideCallSnapshot
     , formatBtwError
     , runBtwWithCancel
+    , sideCallSnapshotParams
+    , sideCallSnapshot
+    , sideCallSnapshotTranscript
     , sideQuestionPrompt
     , trimDanglingToolSuffix
     ) where
@@ -31,7 +35,6 @@ import Agent.Responses.Types
     , ToolChoiceMode(..)
     )
 import Control.Concurrent.Async (race)
-import Data.IORef (IORef, readIORef)
 import Data.List (findIndex)
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -41,6 +44,33 @@ import qualified Data.Text as Text
 -- | Construct a provider backend over private request parameters and transcript.
 type BtwBackendFactory =
     ResponseCreateParams -> Backend
+
+-- | Immutable provider parameters and transcript used by a one-shot side call.
+--
+-- Constructing the snapshot also removes request fields that belong to the
+-- parent turn and trims any incomplete live tool-call suffix.
+data SideCallSnapshot = SideCallSnapshot
+    { sideCallParams :: !ResponseCreateParams
+    , sideCallTranscript :: ![ResponseItem]
+    }
+
+sideCallSnapshot
+    :: ResponseCreateParams
+    -> [ResponseItem]
+    -> SideCallSnapshot
+sideCallSnapshot params transcript =
+    SideCallSnapshot
+        { sideCallParams = clearTurnSpecificParams params
+        , sideCallTranscript = trimDanglingToolSuffix transcript
+        }
+
+sideCallSnapshotParams :: SideCallSnapshot -> ResponseCreateParams
+sideCallSnapshotParams SideCallSnapshot{sideCallParams = params} = params
+
+sideCallSnapshotTranscript :: SideCallSnapshot -> [ResponseItem]
+sideCallSnapshotTranscript
+        SideCallSnapshot{sideCallTranscript = transcript} =
+    transcript
 
 data BtwError
     = BtwTransport !ApiError
@@ -161,13 +191,17 @@ runBtwWithCancel
         -> IO (Either BtwError Text)
         -> IO (Either BtwError Text))
     -> BtwBackendFactory
-    -> IORef ResponseCreateParams
-    -> IORef [ResponseItem]
+    -> SideCallSnapshot
     -> Text
     -> IO (Either BtwError Text)
-runBtwWithCancel withCancelScope makeBackend paramsRef transcriptRef question = do
-    params <- clearTurnSpecificParams <$> readIORef paramsRef
-    transcript <- trimDanglingToolSuffix <$> readIORef transcriptRef
+runBtwWithCancel
+        withCancelScope
+        makeBackend
+        SideCallSnapshot
+            { sideCallParams = params
+            , sideCallTranscript = transcript
+            }
+        question = do
     cancel <- newCancelFlag
     let Backend submit = makeBackend params
         request =

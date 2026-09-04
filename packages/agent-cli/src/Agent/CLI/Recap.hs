@@ -32,7 +32,9 @@ module Agent.CLI.Recap
 import Agent.Cancel (CancelFlag, newCancelFlag, waitCancel)
 import Agent.CLI.Btw
     ( BtwBackendFactory
-    , trimDanglingToolSuffix
+    , SideCallSnapshot
+    , sideCallSnapshotParams
+    , sideCallSnapshotTranscript
     )
 import Agent.CLI.Error (formatApiErrorInline)
 import Agent.Loop
@@ -45,16 +47,12 @@ import Agent.Loop
 import Agent.Responses.Types
     ( MessageContent(..)
     , ResponseContentPart(..)
-    , ResponseCreateParams(..)
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
-    , ToolChoice(..)
-    , ToolChoiceMode(..)
     )
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (race)
-import Data.IORef (IORef, readIORef)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -245,17 +243,15 @@ runRecapWithCancel
         -> IO (Either RecapError Text)
         -> IO (Either RecapError Text))
     -> BtwBackendFactory
-    -> IORef ResponseCreateParams
-    -> IORef [ResponseItem]
+    -> SideCallSnapshot
     -> RecapKind
     -> IO (Either RecapError RecapOutcome)
-runRecapWithCancel withCancelScope makeBackend paramsRef transcriptRef kind = do
+runRecapWithCancel withCancelScope makeBackend snapshot kind = do
     result <-
         runSideCallWithCancel
             withCancelScope
             makeBackend
-            paramsRef
-            transcriptRef
+            snapshot
             recapInstruction
     pure $ case result of
         Left err -> Left err
@@ -274,11 +270,12 @@ runTurnSummaryWithCancel
         -> IO (Either RecapError Text)
         -> IO (Either RecapError Text))
     -> BtwBackendFactory
-    -> IORef ResponseCreateParams
-    -> IORef [ResponseItem]
+    -> SideCallSnapshot
     -> IO (Either RecapError Text)
-runTurnSummaryWithCancel withCancelScope makeBackend paramsRef transcriptRef = do
-    transcript <- trimDanglingToolSuffix <$> readIORef transcriptRef
+runTurnSummaryWithCancel
+        withCancelScope
+        makeBackend
+        snapshot =
     case lastUserAnchor transcript of
         Nothing -> pure (Left RecapEmpty)
         Just anchor -> do
@@ -286,8 +283,7 @@ runTurnSummaryWithCancel withCancelScope makeBackend paramsRef transcriptRef = d
                 runSideCallWithCancel
                     withCancelScope
                     makeBackend
-                    paramsRef
-                    transcriptRef
+                    snapshot
                     (turnSummaryInstruction anchor)
             pure $ case result of
                 Left err -> Left err
@@ -296,19 +292,22 @@ runTurnSummaryWithCancel withCancelScope makeBackend paramsRef transcriptRef = d
                     in if Text.null summary
                         then Left RecapEmpty
                         else Right summary
+  where
+    transcript = sideCallSnapshotTranscript snapshot
 
 runSideCallWithCancel
     :: (CancelFlag
         -> IO (Either RecapError Text)
         -> IO (Either RecapError Text))
     -> BtwBackendFactory
-    -> IORef ResponseCreateParams
-    -> IORef [ResponseItem]
+    -> SideCallSnapshot
     -> Text
     -> IO (Either RecapError Text)
-runSideCallWithCancel withCancelScope makeBackend paramsRef transcriptRef instruction = do
-    params <- clearTurnSpecificParams <$> readIORef paramsRef
-    transcript <- trimDanglingToolSuffix <$> readIORef transcriptRef
+runSideCallWithCancel
+        withCancelScope
+        makeBackend
+        snapshot
+        instruction = do
     cancel <- newCancelFlag
     let Backend submit = makeBackend params
         request =
@@ -322,15 +321,9 @@ runSideCallWithCancel withCancelScope makeBackend paramsRef transcriptRef instru
                     Left (RecapTransport (formatApiErrorInline err))
                 Right (Right result) -> classifyTurn result.backendOutput
     withCancelScope cancel action
-
-clearTurnSpecificParams :: ResponseCreateParams -> ResponseCreateParams
-clearTurnSpecificParams ResponseCreateParams{..} =
-    ResponseCreateParams
-        { input = Nothing
-        , previousResponseId = Nothing
-        , toolChoice = Just (ToolChoiceMode ToolChoiceNone)
-        , ..
-        }
+  where
+    params = sideCallSnapshotParams snapshot
+    transcript = sideCallSnapshotTranscript snapshot
 
 classifyTurn :: TurnOutput -> Either RecapError Text
 classifyTurn turn

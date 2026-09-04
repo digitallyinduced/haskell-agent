@@ -448,6 +448,8 @@ pendingEventCoalesceKey = \case
         case loopEvent of
             ActivityUpdated _ -> Just CoalesceActivity
             ToolUpdated call -> Just (CoalesceToolUpdate call.callId)
+            ToolArgumentsUpdated call ->
+                Just (CoalesceToolUpdate call.callId)
             ToolOutputUpdated callId _ ->
                 Just (CoalesceToolOutput callId)
             _ -> Nothing
@@ -479,6 +481,7 @@ pendingEventBarrier event =
                 ReasoningDelta _ -> False
                 ActivityUpdated _ -> False
                 ToolUpdated _ -> False
+                ToolArgumentsUpdated _ -> False
                 ToolOutputUpdated _ _ -> False
                 _ -> True
         PendingUi (PendingExactUi _) -> True

@@ -482,6 +482,53 @@ spec = describe "runLoop" do
             , TurnFinished (emptyTurnOutput "resp-1" [] (Just "done"))
             ]
 
+    it "keeps only the latest adjacent tool-argument snapshot per call" do
+        sinkStarted <- newEmptyMVar
+        releaseSink <- newEmptyMVar
+        backendFinished <- newEmptyMVar
+        events <- newIORef []
+        let preview callId arguments =
+                ToolArgumentsUpdated
+                    (functionToolCall callId "apply_patch" arguments)
+            backend = Backend \_state _prev _inputs onEvent -> do
+                onEvent (preview "c1" "a")
+                onEvent (preview "c1" "ab")
+                onEvent (preview "c2" "x")
+                onEvent (preview "c2" "xy")
+                onEvent (preview "c1" "abc")
+                putMVar backendFinished ()
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = emptyBackendSnapshot
+                    }
+            onEvent event = do
+                modifyIORef' events (event :)
+                case event of
+                    TurnStarted -> do
+                        putMVar sinkStarted ()
+                        takeMVar releaseSink
+                    _ -> pure ()
+        config0 <- testConfig backend
+        let config = config0 { loopOnEvent = onEvent }
+        withAsync (runLoop config Nothing "go") \running -> do
+            takeMVar sinkStarted
+            takeMVar backendFinished
+            putMVar releaseSink ()
+            wait running `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-1"
+                , finalText = Just "done"
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                }
+        reverse <$> readIORef events `shouldReturn`
+            [ TurnStarted
+            , preview "c1" "ab"
+            , preview "c2" "xy"
+            , preview "c1" "abc"
+            , TurnFinished (emptyTurnOutput "resp-1" [] (Just "done"))
+            ]
+
     it "bounds a single oversized live tool-output snapshot" do
         delivered <- newIORef Nothing
         let oversized =
