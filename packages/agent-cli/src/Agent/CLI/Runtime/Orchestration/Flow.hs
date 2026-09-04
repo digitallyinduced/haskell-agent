@@ -85,7 +85,6 @@ import Agent.CLI.Request ()
 import Agent.CLI.Resume ( validateResumeMetaForBoundary )
 import Agent.CLI.Runtime.HistorySource ()
 import Agent.CLI.Runtime.Orchestration.Background ()
-import Agent.CLI.Runtime.Orchestration.Concurrent ()
 import Agent.CLI.Runtime.Orchestration.Initialized
     ( PreparedStartupAuthWorker
     , runAgentInitialized
@@ -756,7 +755,7 @@ prepareAgentIterationTracked
                 case activeFullscreen of
                     Nothing
                         | background -> throwIO (StartupFailure message)
-                        | otherwise -> die message
+                        | otherwise -> die (Text.unpack message)
                     Just _ -> throwIO (StartupFailure message)
     startedAt <- getCurrentTime
     startupTimingsRef <- newIORef []
@@ -767,7 +766,7 @@ prepareAgentIterationTracked
         Just path -> pure path
     configuredTheme <-
         loadHarnessConfig home >>= \case
-            Left err -> failPreparation (Text.unpack err)
+            Left err -> failPreparation err
             Right config -> pure config.configTheme
     let root = sessionsRoot home
     databaseStore <- case runMode.runNativeHooks >>= (.nativeDatabaseStore) of
@@ -775,7 +774,7 @@ prepareAgentIterationTracked
         Nothing -> do
             databaseConfig <- managedPostgresConfigForHome home
             openStore databaseConfig >>= \case
-                Left err -> failPreparation (Text.unpack (renderStoreError err))
+                Left err -> failPreparation (renderStoreError err)
                 Right store -> do
                     writeIORef databaseStoreRef (Just store)
                     pure store
@@ -784,7 +783,7 @@ prepareAgentIterationTracked
         loadGatewayCredentialAt home >>= \case
             Left err ->
                 failPreparation
-                    ("Could not load gateway credentials: " <> Text.unpack err)
+                    ("Could not load gateway credentials: " <> err)
             Right credential -> pure credential
     let connectedGatewayIdentity =
             gatewayCredentialIdentity <$> connectedGateway
@@ -794,24 +793,24 @@ prepareAgentIterationTracked
             dir <- either
                 (\err -> do
                     signalReady (Left err)
-                    failPreparation (Text.unpack err))
+                    failPreparation err)
                 pure
                 (sessionDirForId root sessionId)
             exists <- doesDirectoryExist dir
             when (not exists) do
                 let err = "session not found: " <> sessionId
                 signalReady (Left err)
-                failPreparation (Text.unpack err)
+                failPreparation err
             acquireSessionLock dir sessionId >>= \case
                 Left err -> do
                     signalReady (Left err)
-                    failPreparation (Text.unpack err)
+                    failPreparation err
                 Right lock -> do
                     writeIORef resumeLockRef (Just lock)
                     loadSessionMeta sessionPool root sessionId >>= \case
                         Left err -> do
                             signalReady (Left err)
-                            failPreparation (Text.unpack err)
+                            failPreparation err
                         Right meta ->
                             case
                                 validateResumeMetaForBoundary
@@ -820,7 +819,7 @@ prepareAgentIterationTracked
                             of
                                 Left err -> do
                                     signalReady (Left err)
-                                    failPreparation (Text.unpack err)
+                                    failPreparation err
                                 Right () ->
                                     loadActiveSession
                                         sessionPool
@@ -828,8 +827,7 @@ prepareAgentIterationTracked
                                         sessionId >>= \case
                                             Left err -> do
                                                 signalReady (Left err)
-                                                failPreparation
-                                                    (Text.unpack err)
+                                                failPreparation err
                                             Right loaded@(loadedMeta, _) ->
                                                 case
                                                     validateResumeMetaForBoundary
@@ -838,8 +836,7 @@ prepareAgentIterationTracked
                                                 of
                                                     Left err -> do
                                                         signalReady (Left err)
-                                                        failPreparation
-                                                            (Text.unpack err)
+                                                        failPreparation err
                                                     Right () -> do
                                                         signalReady (Right ())
                                                         pure (Just loaded)

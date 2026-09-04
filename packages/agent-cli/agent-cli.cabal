@@ -85,7 +85,6 @@ library
                     , Agent.CLI.Runtime.Internal
                     , Agent.CLI.Runtime.Orchestration
                     , Agent.CLI.Runtime.Orchestration.Background
-                    , Agent.CLI.Runtime.Orchestration.Concurrent
                     , Agent.CLI.Runtime.Orchestration.Flow
                     , Agent.CLI.Runtime.Orchestration.Initialized
                     , Agent.CLI.Runtime.Orchestration.Providers
@@ -463,6 +462,7 @@ benchmark concurrency-bench
     ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-cli
                     , agent-core
+                    , agent-mcp
                     , async
                     , base >= 4.17 && < 5
                     , bytestring
