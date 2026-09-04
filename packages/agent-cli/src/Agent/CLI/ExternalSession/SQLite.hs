@@ -1,6 +1,7 @@
 module Agent.CLI.ExternalSession.SQLite
     ( decodeJsonish
     , execute
+    , foldRows
     , forRows
     , queryRows
     , sqlDataText
@@ -22,7 +23,6 @@ import Data.Aeson (Value)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import Data.Char (digitToInt, isHexDigit)
-import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -108,12 +108,36 @@ forRows database sql parameters consume =
                     Done -> pure ()
         loop
 
+-- | Fold query rows in result order, forcing each accumulator before stepping
+-- the statement again.
+foldRows
+    :: Database
+    -> Text
+    -> [SQLData]
+    -> state
+    -> (state -> [SQLData] -> state)
+    -> IO state
+foldRows database sql parameters initialState consume =
+    SQLite.withStatement database sql \statement -> do
+        SQLite.bind statement parameters
+        let loop state =
+                SQLite.step statement >>= \case
+                    Row -> do
+                        row <- SQLite.columns statement
+                        let nextState = consume state row
+                        nextState `seq` loop nextState
+                    Done -> pure state
+        loop initialState
+
 queryRows :: Database -> Text -> [SQLData] -> IO [[SQLData]]
-queryRows database sql parameters = do
-    rowsRef <- newIORef []
-    forRows database sql parameters \row ->
-        modifyIORef' rowsRef (row :)
-    reverse <$> readIORef rowsRef
+queryRows database sql parameters =
+    reverse
+        <$> foldRows
+            database
+            sql
+            parameters
+            []
+            (\rows row -> row : rows)
 
 execute :: Database -> Text -> [SQLData] -> IO ()
 execute database sql parameters =

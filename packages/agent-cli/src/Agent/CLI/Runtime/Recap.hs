@@ -3,6 +3,7 @@ module Agent.CLI.Runtime.Recap
     , runSessionTurnSummary
     ) where
 
+import Agent.CLI.Btw (sideCallSnapshot)
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.Recap
@@ -35,7 +36,7 @@ import Agent.CLI.Terminal (resolveColor)
 import Agent.CLI.TUI.App (emitUiEvent)
 import Agent.TUI.Model (UiEvent(..))
 import Control.Monad (forM_, when)
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (readIORef, writeIORef)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import System.OsPath (takeDirectory)
@@ -44,9 +45,10 @@ runSessionRecap :: Bool -> SessionEnv -> RecapKind -> IO ()
 runSessionRecap registerCancel env kind = do
     let fullscreen = env.sessionFullscreen
         stdoutHandle = env.sessionRender.renderStdout
-    transcriptRef <- newIORef =<< readLiveTranscript env.sessionConversation
+    params <- readIORef env.sessionParams
+    transcript <- readLiveTranscript env.sessionConversation
+    let snapshot = sideCallSnapshot params transcript
     color <- resolveColor stdoutHandle
-    transcript <- readIORef transcriptRef
     let mainTurns = mainTurnCount transcript
         hasMessages = mainTurns > 0
     lastCommittedTurns <- recapWatermark env
@@ -83,8 +85,7 @@ runSessionRecap registerCancel env kind = do
                                         Just _ -> action
                             else action)
                     env.sessionBtwBackend
-                    env.sessionParams
-                    transcriptRef
+                    snapshot
                     kind
             case result of
                 Left err ->
@@ -165,13 +166,14 @@ recapFailed env message = do
 
 runSessionTurnSummary :: SessionEnv -> IO ()
 runSessionTurnSummary env = do
-    transcriptRef <- newIORef =<< readLiveTranscript env.sessionConversation
+    params <- readIORef env.sessionParams
+    transcript <- readLiveTranscript env.sessionConversation
+    let snapshot = sideCallSnapshot params transcript
     result <-
         runTurnSummaryWithCancel
             (\_ action -> action)
             env.sessionBtwBackend
-            env.sessionParams
-            transcriptRef
+            snapshot
     case result of
         Left _ -> pure ()
         Right summary ->

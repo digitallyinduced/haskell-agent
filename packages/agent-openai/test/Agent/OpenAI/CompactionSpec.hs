@@ -198,6 +198,29 @@ spec = do
             trimmed `shouldSatisfy` elem (checkpoint "compaction")
             trimmed `shouldSatisfy` elem typedContextCheckpoint
 
+        it "keeps checkpoint provenance adjacent while trimming" do
+            let params = defaultResponseCreateParams
+                opaqueCheckpoint =
+                    CompactionItemValue CompactionItem
+                        { itemId = Just "xai"
+                        , encryptedContent = Just "opaque"
+                        }
+                origin = compactionCheckpointOriginItem "xai"
+                trimmed =
+                    trimResponseHistoryToFit
+                        20
+                        params
+                        []
+                        [ user (Text.replicate 5_000 "old")
+                        , opaqueCheckpoint
+                        , origin
+                        , user (Text.replicate 5_000 "new")
+                        ]
+            dropWhile (/= opaqueCheckpoint) trimmed
+                `shouldSatisfy` \case
+                    _ : next : _ -> next == origin
+                    _ -> False
+
         it "rewrites the newest boundary after dropping older oversized items" do
             let history =
                     [ user (Text.replicate 20_000 "old")
@@ -1194,6 +1217,10 @@ spec = do
                 (buildLocalCompactedHistory 1 [user "old"] "local summary")
                 `shouldBe` True
             hasCompactionCheckpoint [assistant "ordinary response"]
+                `shouldBe` False
+            hasCompactionCheckpoint
+                [assistant
+                    "Compacted conversation summary:\nordinary response"]
                 `shouldBe` False
 
     describe "isCompactSessionTurn" do

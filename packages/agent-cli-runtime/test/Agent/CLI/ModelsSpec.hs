@@ -21,7 +21,6 @@ import Agent.Provider (Provider(..))
 import Control.Exception.Safe (bracket)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBS8
-import Data.Either (isLeft)
 import Data.List (find, nub)
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Text as Text
@@ -241,7 +240,7 @@ spec = do
                         "saved model organization-gateway/company-private requires an active organization gateway"
 
         describe "validateResumedGatewayBoundary" do
-            it "allows sessions that stay on their original routing boundary" do
+            it "allows resume across direct and gateway routing modes" do
                 validateResumedGatewayBoundary
                     Nothing
                     "local-openai"
@@ -252,35 +251,31 @@ spec = do
                     organizationGatewayConnectionId
                     (Just "gateway-a")
                     `shouldBe` Right ()
-
-            it "rejects local and legacy sessions entering a gateway" do
                 validateResumedGatewayBoundary
                     (Just "gateway-a")
                     "local-openai"
                     Nothing
-                    `shouldSatisfy` isLeft
+                    `shouldBe` Right ()
                 validateResumedGatewayBoundary
                     (Just "gateway-a")
                     organizationGatewayConnectionId
                     Nothing
-                    `shouldSatisfy` isLeft
-
-            it "rejects sessions crossing gateway credentials or disconnecting" do
+                    `shouldBe` Right ()
                 validateResumedGatewayBoundary
                     (Just "gateway-b")
                     organizationGatewayConnectionId
                     (Just "gateway-a")
-                    `shouldSatisfy` isLeft
+                    `shouldBe` Right ()
                 validateResumedGatewayBoundary
                     Nothing
                     organizationGatewayConnectionId
                     (Just "gateway-a")
-                    `shouldSatisfy` isLeft
+                    `shouldBe` Right ()
                 validateResumedGatewayBoundary
                     Nothing
                     "local-openai"
                     (Just "gateway-a")
-                    `shouldSatisfy` isLeft
+                    `shouldBe` Right ()
 
         it "loads only valid gateway-scoped alias metadata" do
             defaults <- readPackagedDefaults

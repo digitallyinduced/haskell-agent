@@ -223,6 +223,40 @@ spec = do
                 expectationFailure
                     ("expected input array, got " <> show other)
 
+    it "drops xAI checkpoint pairs from the Codex wire payload" do
+        let checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "cmp-xai"
+                , encryptedContent = Just "opaque"
+                }
+            request = withInputItems
+                [ checkpoint
+                , compactionCheckpointOriginItem "xai"
+                ]
+                sampleRequest
+            payload = buildWsPayloadWithOptions
+                defaultCodexWsOptions request Nothing
+        case field "input" payload of
+            Just (Aeson.Array items) ->
+                length items `shouldBe` 0
+            other ->
+                expectationFailure
+                    ("expected input array, got " <> show other)
+
+    it "keeps legacy unmarked OpenAI checkpoints in the Codex wire payload" do
+        let checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "cmp-openai"
+                , encryptedContent = Just "opaque"
+                }
+            request = withInputItems [checkpoint] sampleRequest
+            payload = buildWsPayloadWithOptions
+                defaultCodexWsOptions request Nothing
+        case field "input" payload of
+            Just (Aeson.Array items) ->
+                length items `shouldBe` 1
+            other ->
+                expectationFailure
+                    ("expected input array, got " <> show other)
+
     -- Responses Lite rejects @input[N].status@ on replayed reasoning items
     -- and Codex never sends the field on replayed transcript items, while
     -- items such as local shell calls keep the status Codex does send.

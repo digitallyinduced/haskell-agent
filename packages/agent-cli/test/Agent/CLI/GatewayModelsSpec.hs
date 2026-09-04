@@ -54,6 +54,24 @@ spec = describe "Agent.CLI.GatewayModels" do
         map (.modelTarget.targetDialect) options
             `shouldBe` [GenericResponsesDialect, ClaudeCodeDialect]
 
+    it "aligns gateway auth with a resumed Claude model target" do
+        let options =
+                modelOptionsForGatewayModels
+                    testCatalog
+                    [GatewayModel "sonnet" GatewayAnthropicProtocol]
+        case options of
+            [option] ->
+                gatewayProviderForStartup
+                    (Just option.modelTarget)
+                    Nothing
+                    (Just OpenAIProvider)
+                    `shouldBe` ClaudeCodeProvider
+            _ -> expectationFailure "expected one Claude gateway model"
+
+    it "defaults gateway auth to OpenAI without a target or provider hint" $
+        gatewayProviderForStartup Nothing Nothing Nothing
+            `shouldBe` OpenAIProvider
+
 testCatalog :: ModelCatalog
 testCatalog =
     ModelCatalog

@@ -129,7 +129,8 @@ data CliOptions = CliOptions
       -- ^ Concurrent subagent cap. 'Nothing' uses project, then harness, then
       -- 'defaultMaxConcurrent'.
     , optCompactThreshold :: !(Maybe Int)
-      -- ^ OpenAI automatic-compaction threshold in estimated context tokens.
+      -- ^ Provider/model-specific automatic-compaction threshold in estimated
+      -- context tokens.
     , optEffort :: !(Maybe ReasoningEffort)
       -- ^ 'Nothing' means use 'defaultEffortFor' once the provider is known.
     , optShowRawReasoning :: !Bool

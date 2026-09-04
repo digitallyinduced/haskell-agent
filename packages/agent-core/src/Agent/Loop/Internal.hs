@@ -1021,6 +1021,7 @@ visibleResponseActivity = \case
 data LoopEventCoalescingKey
     = AssistantTextDelta
     | AssistantReasoningDelta
+    | ToolArgumentsSnapshot !Text
     | ToolOutputSnapshot !Text
     | NativeAgentOutputDelta !Text
     deriving (Eq)
@@ -1033,6 +1034,13 @@ emitLoopEvent pump = \case
         emitAppendedText pump AssistantTextDelta TextDelta text
     ReasoningDelta text ->
         emitAppendedText pump AssistantReasoningDelta ReasoningDelta text
+    ToolArgumentsUpdated call ->
+        emitLatestText
+            pump
+            (ToolArgumentsSnapshot call.callId)
+            (\arguments ->
+                ToolArgumentsUpdated (call { arguments = arguments }))
+            call.arguments
     ToolOutputUpdated callId output ->
         emitLatestText
             pump
