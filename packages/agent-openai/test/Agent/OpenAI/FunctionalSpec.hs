@@ -85,7 +85,7 @@ runCodexTurn ::
     Maybe Text ->
     IO (OpenAI.Response, [OpenAI.ResponseStreamEvent])
 runCodexTurn conn request previousResponseId = do
-    eventsRef <- newIORef ([] :: [(Text, Either String OpenAI.ResponseStreamEvent)])
+    eventsRef <- newIORef ([] :: [(Text, Either Text OpenAI.ResponseStreamEvent)])
     result <- sendWsRequestWithRawEvents conn request previousResponseId \eventType value ->
         modifyIORef' eventsRef
             (( eventType
