@@ -1,7 +1,11 @@
 module Agent.CLI.ComputerUseSpec (spec) where
 
 import Agent.CLI.ComputerUse
-    ( computerApprovalPrompt
+    ( ComputerObservation(..)
+    , ComputerUseBackend(..)
+    , ScreenshotEncoding(..)
+    , computerApprovalPrompt
+    , executeComputerCallWithBackend
     , keyCombinationScript
     , parseDisplaySize
     , parseSessionLocked
@@ -12,10 +16,12 @@ import Agent.CLI.ComputerUse
     )
 import Agent.CLI.SessionAdmin (sessionToolEvent)
 import Agent.Json (rawJsonFromEncoding)
+import Agent.Loop (ImageAttachment(..))
 import Agent.Responses.Types
 import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -75,11 +81,15 @@ spec = do
             pointerScript (ClickAction 12 34 "left" [])
                 `shouldSatisfy` either
                     (const False)
-                    ("if(!d) throw new Error" `Text.isInfixOf`)
+                    (\script ->
+                        "if(!d||typeof d.CGSSessionScreenIsLocked!=='boolean')"
+                            `Text.isInfixOf` script)
             keyCombinationScript ["enter"]
                 `shouldSatisfy` either
                     (const False)
-                    ("if(!d) throw new Error" `Text.isInfixOf`)
+                    (\script ->
+                        "if(!d||typeof d.CGSSessionScreenIsLocked!=='boolean')"
+                            `Text.isInfixOf` script)
 
         it "validates logical main-display dimensions" do
             parseDisplaySize "2056,1329\n" `shouldBe` Just (2056, 1329)
@@ -143,9 +153,9 @@ spec = do
                     "Computer drag path exceeds 1024 points."
             validateComputerCall
                 exampleCall
-                    { computerActions = replicate 129 ScreenshotAction }
+                    { computerActions = replicate 11 WaitAction }
                 `shouldBe` Left
-                    "Computer call exceeds the 128-action limit."
+                    "Computer call exceeds the 10-action limit."
             validateComputerCall
                 exampleCall
                     { pendingSafetyChecks =
@@ -164,6 +174,122 @@ spec = do
                             (replicate 1024 (ComputerPoint 0 0))
                             []
                         ]
+                    }
+                `shouldBe` Right ()
+
+    describe "computer backend transaction" do
+        it "strips the terminal screenshot and returns one fresh observation" do
+            transactions <- newIORef
+                ([] :: [(ScreenshotEncoding, (Int, Int), [ComputerAction])])
+            let backend = ComputerUseBackend
+                    { computerRunTransaction =
+                        \encoding actions validateDisplay ->
+                            case validateDisplay (1440, 900) of
+                                Left err -> pure (Left err)
+                                Right () -> do
+                                    modifyIORef' transactions
+                                        (<> [( encoding
+                                             , (1440, 900)
+                                             , actions
+                                             )])
+                                    pure (Right
+                                        (ComputerObservation
+                                            (ImageAttachment
+                                                "image/jpeg"
+                                                "fresh-image")
+                                            Nothing))
+                    }
+                actions =
+                    [ ClickAction 20 30 "left" []
+                    , ScreenshotAction
+                    ]
+            result <- executeComputerCallWithBackend
+                backend
+                ScreenshotJpeg
+                exampleCall { computerActions = actions }
+            readIORef transactions `shouldReturn`
+                [ ( ScreenshotJpeg
+                  , (1440, 900)
+                  , [ClickAction 20 30 "left" []]
+                  )
+                ]
+            result `shouldSatisfy` either
+                (const False)
+                ("data:image/jpeg;base64,ZnJlc2gtaW1hZ2U="
+                    `Text.isInfixOf`)
+
+        it "captures a screenshot-only call without forwarding a fake action" do
+            observedActions <- newIORef Nothing
+            let backend = ComputerUseBackend
+                    { computerRunTransaction =
+                        \_ actions validateDisplay ->
+                            case validateDisplay (100, 100) of
+                                Left err -> pure (Left err)
+                                Right () -> do
+                                    modifyIORef'
+                                        observedActions
+                                        (const (Just actions))
+                                    pure (Right
+                                        (ComputerObservation
+                                            (ImageAttachment
+                                                "image/png"
+                                                "observation")
+                                            Nothing))
+                    }
+            result <- executeComputerCallWithBackend
+                backend
+                ScreenshotPng
+                exampleCall { computerActions = [ScreenshotAction] }
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef observedActions `shouldReturn` Just []
+
+        it "does not invoke a backend for an invalid batch" do
+            invocations <- newIORef (0 :: Int)
+            let backend = ComputerUseBackend
+                    { computerRunTransaction = \_ _ _ -> do
+                        modifyIORef' invocations (+ 1)
+                        pure (Right
+                            (ComputerObservation
+                                (ImageAttachment "image/png" "observation")
+                                Nothing))
+                    }
+            result <- executeComputerCallWithBackend
+                backend
+                ScreenshotPng
+                exampleCall
+                    { computerActions =
+                        [ScreenshotAction, ClickAction 1 2 "left" []]
+                    }
+            result `shouldBe` Left
+                "Computer screenshot must be the final action in a batch."
+            readIORef invocations `shouldReturn` 0
+
+        it "allows only a terminal screenshot marker" do
+            validateComputerCall
+                exampleCall
+                    { computerActions =
+                        [ScreenshotAction, ClickAction 1 2 "left" []]
+                    }
+                `shouldBe` Left
+                    "Computer screenshot must be the final action in a batch."
+            validateComputerCall
+                exampleCall
+                    { computerActions =
+                        [ClickAction 1 2 "left" [], ScreenshotAction]
+                    }
+                `shouldBe` Right ()
+            validateComputerCall
+                exampleCall { computerActions = [ScreenshotAction] }
+                `shouldBe` Right ()
+
+        it "accepts exactly ten actions" do
+            validateComputerCall
+                exampleCall { computerActions = replicate 10 WaitAction }
+                `shouldBe` Right ()
+            validateComputerCall
+                exampleCall
+                    { computerActions =
+                        replicate 10 WaitAction <> [ScreenshotAction]
                     }
                 `shouldBe` Right ()
 
