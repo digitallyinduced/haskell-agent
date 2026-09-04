@@ -4,7 +4,7 @@
 , agent-json, agent-mcp, agent-openai, agent-openrouter
 , agent-process, agent-responses, agent-responses-types
 , agent-store, agent-syntax, agent-tui, agent-xai, ansi-terminal
-, async, base, base64-bytestring, brick, bytestring, colour
+, async, base, base64-bytestring, brick, bytestring, colour, dbus
 , containers, crypton, deepseq, directory, entropy, filelock
 , filepath, haskeline, hasql-pool, hspec, http-client
 , http-client-tls, http-types, JuicyPixels, lib, memory, mtl
@@ -26,7 +26,7 @@ mkDerivation {
     agent-openrouter agent-process agent-responses
     agent-responses-types agent-store agent-syntax agent-tui agent-xai
     ansi-terminal async base base64-bytestring brick bytestring colour
-    containers crypton directory entropy filelock filepath haskeline
+    containers crypton dbus directory entropy filelock filepath haskeline
     hasql-pool http-client http-client-tls http-types JuicyPixels
     memory mtl network network-uri optparse-applicative process retry
     safe-exceptions scientific stm tagsoup text time transformers unix
@@ -42,7 +42,7 @@ mkDerivation {
     agent-connectivity agent-core agent-gemini agent-grok-build-dialect
     agent-json agent-mcp agent-openai agent-openrouter agent-responses
     agent-responses-types agent-store agent-tui agent-xai ansi-terminal
-    async base brick bytestring colour containers directory filepath
+    async base brick bytestring colour containers dbus directory filepath
     haskeline hspec http-client http-types JuicyPixels process
     QuickCheck safe-exceptions stm text time transformers unix vty wai
     warp

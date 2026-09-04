@@ -879,13 +879,26 @@
                     });
                 # Both installable CLI variants expose the same advertised
                 # runtime capabilities; only the harness linkage differs.
+                agentCliGstreamerPlugins =
+                    pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                        pkgs.gst_all_1.gst-plugins-base
+                        pkgs.gst_all_1.gst-plugins-good
+                        pkgs.gst_all_1.gst-plugins-bad
+                    ];
+                agentCliLinuxComputerUseTools =
+                    pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                        pkgs.gst_all_1.gstreamer
+                        pkgs.maim
+                        pkgs.xdotool
+                        pkgs.xrandr
+                    ];
                 agentCliRuntimeTools = [
                     pkgs.ffmpeg
                     bun_1_4
                     pkgs.postgresql_18
                     pkgs.ripgrep
                     pkgs.zstd
-                ];
+                ] ++ agentCliLinuxComputerUseTools;
                 prepareAgentCli = package:
                     package.overrideAttrs
                         (old: {
@@ -933,13 +946,27 @@
                             postInstall =
                                 (old.postInstall or "")
                                 + ''
+                                    computerUseWrapperArgs=()
+                                ''
+                                + pkgs.lib.optionalString
+                                    pkgs.stdenv.hostPlatform.isLinux
+                                    ''
+                                        computerUseWrapperArgs+=(
+                                            --prefix GST_PLUGIN_SYSTEM_PATH_1_0 :
+                                            "${pkgs.lib.makeSearchPath
+                                                "lib/gstreamer-1.0"
+                                                agentCliGstreamerPlugins}"
+                                        )
+                                    ''
+                                + ''
                                     wrapProgram "$out/bin/agent-cli" \
                                         --set-default AGENT_SYNTAX_DIR \
                                             "${skylightingSyntaxDirectory}" \
                                         --set-default AGENT_POSTGRES_BIN \
                                             "${pkgs.postgresql_18}/bin" \
                                         --prefix PATH : \
-                                            "${pkgs.lib.makeBinPath agentCliRuntimeTools}"
+                                            "${pkgs.lib.makeBinPath agentCliRuntimeTools}" \
+                                        "''${computerUseWrapperArgs[@]}"
                                 '';
                         });
                 agentCliBareExecutable =
@@ -990,6 +1017,19 @@
                                 run_agent storage stop || true
                             }
                             trap cleanup EXIT
+
+                            wrapper="${agentCliStaticExecutable}/bin/agent-cli"
+                            for dependency in \
+                                ${pkgs.gst_all_1.gstreamer} \
+                                ${pkgs.maim} \
+                                ${pkgs.xdotool} \
+                                ${pkgs.xrandr}
+                            do
+                                ${pkgs.gnugrep}/bin/grep -F \
+                                    "$dependency/bin" "$wrapper"
+                            done
+                            ${pkgs.gnugrep}/bin/grep -F \
+                                "GST_PLUGIN_SYSTEM_PATH_1_0" "$wrapper"
 
                             run_agent storage start
                             test "$(
@@ -1345,6 +1385,8 @@
                             ripgrep
                             zstd
                         ])
+                        ++ agentCliLinuxComputerUseTools
+                        ++ agentCliGstreamerPlugins
                         ++ [ agentRepl ];
                 };
 

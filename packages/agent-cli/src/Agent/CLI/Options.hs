@@ -149,7 +149,7 @@ data CliOptions = CliOptions
     , optBash :: !Bool
       -- ^ Expose the provider's explicit shell execution tool (default: True).
     , optComputerUse :: !Bool
-      -- ^ Allow the model to control the local macOS desktop (default: False).
+      -- ^ Allow the model to control the local Linux/macOS desktop (default: False).
     , optCodeMode :: !Bool
       -- ^ Honor catalog-selected JavaScript code mode (default: False).
     , optScreenMode :: !ScreenMode
@@ -482,7 +482,7 @@ optionUpdateParser = asum
         (\value options -> options { optBash = value })
     , boolFlagUpdate "no-bash" False "Disable shell execution tools"
         (\value options -> options { optBash = value })
-    , boolFlagUpdate "computer-use" True "Enable local macOS computer use"
+    , boolFlagUpdate "computer-use" True "Enable local Linux/macOS computer use"
         (\value options -> options { optComputerUse = value })
     , boolFlagUpdate "no-computer-use" False "Disable local computer use"
         (\value options -> options { optComputerUse = value })
@@ -676,7 +676,7 @@ usage = unlines
     , "      --no-ghci           Disable the persistent GHCi tool (default)"
     , "      --bash              Enable explicit shell execution tools (default)"
     , "      --no-bash           Disable explicit shell execution tools"
-    , "      --computer-use      Enable local macOS desktop control (opt-in)"
+    , "      --computer-use      Enable local Linux/macOS desktop control (opt-in)"
     , "      --no-computer-use   Disable local desktop control (default)"
     , "      --fullscreen        Use the retained full-screen TUI"
     , "      --minimal           Use terminal-native append-only rendering"

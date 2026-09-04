@@ -512,6 +512,7 @@ data LocalToolRuntime = LocalToolRuntime
 data CodingRuntime = CodingRuntime
     { runtimeCoding :: CodingTools
     , runtimeExtraTools :: [AppTool]
+    , runtimeComputerUse :: Maybe ComputerUse.ComputerUseRuntime
     , runtimeCloseExtraTools :: IO ()
     }
 
@@ -1620,11 +1621,13 @@ acquireCodingRuntime
 acquireCodingRuntime resourceScope AgentToolsRequest
     { startup
     , baseToolEnv
+    , options
     } ToolStartup
     { toolNativeCapabilities = nativeCapabilities
     , toolHarnessConfig = harnessConfig
     } ToolModelRuntime
-    { toolDialectId = dialectId
+    { toolProvider = provider
+    , toolDialectId = dialectId
     } LocalToolRuntime
     { localCoding = runtimeCoding
     } = do
@@ -1650,6 +1653,12 @@ acquireCodingRuntime resourceScope AgentToolsRequest
                     }
             | otherwise =
                 newLspRuntime harnessConfig.configLsp baseToolEnv
+        acquireComputerUse
+            | options.optComputerUse
+                && provider == OpenAIProvider
+                && os `elem` ["darwin", "linux"] =
+                Just <$> ComputerUse.newComputerUseRuntime
+            | otherwise = pure Nothing
     ((webFetchKey, webFetchRuntime), (lspKey, lspStartup)) <-
         allocateResourcesConcurrently
             resourceScope
@@ -1657,15 +1666,22 @@ acquireCodingRuntime resourceScope AgentToolsRequest
             (mapM_ closeWebFetchRuntime)
             acquireLsp
             (mapM_ closeLspRuntime . (.lspStartupRuntime))
+    (computerUseKey, runtimeComputerUse) <-
+        allocateResource
+            resourceScope
+            acquireComputerUse
+            (mapM_ ComputerUse.closeComputerUseRuntime)
     mapM_ (reportStartupWarning startup) lspStartup.lspStartupWarnings
     let lspRuntime = lspStartup.lspStartupRuntime
         runtimeExtraTools =
             maybe [] (pure . webFetchRuntimeTool) webFetchRuntime
                 <> maybe [] (pure . lspRuntimeTool) lspRuntime
-        runtimeCloseExtraTools =
+        closeProviderExtras =
             concurrently_
                 (releaseResource lspKey)
                 (releaseResource webFetchKey)
+        runtimeCloseExtraTools =
+            releaseResource computerUseKey `finally` closeProviderExtras
     pure CodingRuntime{..}
 
 installCollaborationCallbacks
@@ -1851,6 +1867,7 @@ assembleSessionToolsRuntime AgentToolsRequest
     } CodingRuntime
     { runtimeCoding = coding
     , runtimeExtraTools = extraTools
+    , runtimeComputerUse = computerUseRuntime
     , runtimeCloseExtraTools = closeExtraTools
     } SessionControlRuntime
     { controlSkillInvocationsRef = skillInvocationsRef
@@ -1885,11 +1902,8 @@ assembleSessionToolsRuntime AgentToolsRequest
         nativeToolGroups =
             maybe [] (.nativeToolGroups) startup.startupNativeHooks
         computerTools =
-            [ ComputerUse.computerUseTool
-            | options.optComputerUse
-            , provider == OpenAIProvider
-            , os == "darwin"
-            ]
+            maybe [] (pure . ComputerUse.computerUseRuntimeTool)
+                computerUseRuntime
         imageGenerationTools =
             [ imageGenerationTool
                 tokenProvider

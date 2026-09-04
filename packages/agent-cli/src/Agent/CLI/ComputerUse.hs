@@ -1,13 +1,18 @@
--- | Function-based computer use backed by macOS screen capture and input.
+-- | Function-based computer use backed by local desktop capture and input.
 module Agent.CLI.ComputerUse
     ( ComputerObservation(..)
     , ComputerUseBackend(..)
     , ScreenshotEncoding(..)
+    , ComputerUseRuntime
     , computerUseTool
     , computerUseToolWith
+    , computerUseRuntimeTool
+    , newComputerUseRuntime
+    , closeComputerUseRuntime
     , computerFunctionParameters
     , executeComputerCall
     , executeComputerCallWithBackend
+    , executeComputerCallWithDesktopBackend
     , screenshotMacOS
     , summarizeComputerCall
     , summarizeComputerToolCall
@@ -20,6 +25,15 @@ module Agent.CLI.ComputerUse
     , validateComputerCallForDisplay
     ) where
 
+import Agent.CLI.ComputerUse.Backend
+    ( CapturedDisplay(..)
+    , ComputerBackend(..)
+    , ComputerDisplay(..)
+    , ScreenshotEncoding(..)
+    , displayLogicalSize
+    )
+import qualified Agent.CLI.ComputerUse.Input as Input
+import qualified Agent.CLI.ComputerUse.Linux as Linux
 import qualified Agent.Json.Decode as Json
 import Agent.Loop (ImageAttachment(..))
 import Agent.Responses.Types
@@ -34,7 +48,6 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , isComputerToolCallKind
-    , noArgsTool
     , typedToolWithCall
     )
 import Agent.Tools.Types
@@ -44,9 +57,15 @@ import Agent.Tools.Types
     , ToolSchema(..)
     )
 import Control.Applicative ((<|>))
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
-import Control.Exception.Safe (finally, tryAny)
+import Control.Concurrent
+    ( MVar
+    , modifyMVar
+    , modifyMVar_
+    , newMVar
+    , threadDelay
+    , withMVar
+    )
+import Control.Exception.Safe (bracket, finally, tryAny)
 import Control.Monad (foldM)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -68,21 +87,51 @@ import Text.Read (readMaybe)
 
 -- | A dedicated internal schema marker, rather than a provider-native wire
 -- type, keeps this privileged handler separate from caller-defined functions.
+data ComputerUseRuntime = ComputerUseRuntime
+    { computerRuntimeState :: !(MVar ComputerUseRuntimeState)
+    }
+
+data ComputerUseRuntimeState
+    = ComputerRuntimeOpen !(Maybe (Either Text ManagedComputerBackend))
+    | ComputerRuntimeClosed
+
+data ManagedComputerBackend = ManagedComputerBackend
+    { managedComputerUseBackend :: !ComputerUseBackend
+    , managedComputerBackendClose :: !(IO ())
+    }
+
+newComputerUseRuntime :: IO ComputerUseRuntime
+newComputerUseRuntime =
+    ComputerUseRuntime <$> newMVar (ComputerRuntimeOpen Nothing)
+
+closeComputerUseRuntime :: ComputerUseRuntime -> IO ()
+closeComputerUseRuntime runtime =
+    modifyMVar_ runtime.computerRuntimeState \case
+        ComputerRuntimeClosed -> pure ComputerRuntimeClosed
+        ComputerRuntimeOpen backend -> do
+            case backend of
+                Just (Right value) -> value.managedComputerBackendClose
+                _ -> pure ()
+            pure ComputerRuntimeClosed
+
 computerUseTool :: AppTool
-computerUseTool
-    | os == "darwin" = computerUseToolWith localComputerUseBackend
-    | otherwise =
-        (computerUseToolWith localComputerUseBackend)
-            { appToolHandler = noArgsTool "computer"
-                (pure (Left
-                    "Local computer use is currently supported only on macOS."))
-            }
+computerUseTool = computerUseToolWithExecutor executeComputerCallWith
 
 computerUseToolWith :: ComputerUseBackend -> AppTool
-computerUseToolWith backend = AppTool
+computerUseToolWith backend =
+    computerUseToolWithExecutor (executeComputerCallWithBackend backend)
+
+computerUseRuntimeTool :: ComputerUseRuntime -> AppTool
+computerUseRuntimeTool runtime =
+    computerUseToolWithExecutor (executeComputerCallWithRuntime runtime)
+
+computerUseToolWithExecutor
+    :: (ScreenshotEncoding -> ComputerCall -> IO (Either Text Text))
+    -> AppTool
+computerUseToolWithExecutor executeCall = AppTool
     { appToolName = "computer"
     , appToolDescription =
-        "Start each computer session with a screenshot-only call. Then run up to 10 approved actions on the main macOS display and receive one fresh final screenshot. A screenshot marker is valid only at the end of a batch."
+        "Start each computer session with a screenshot-only call. Then run up to 10 approved actions on the selected local desktop display and receive one fresh final screenshot. A screenshot marker is valid only at the end of a batch."
     , appToolSchema = HostedComputerSchema
     , appToolHandler = handler
     , appToolApproval = AlwaysPrompt
@@ -92,8 +141,7 @@ computerUseToolWith backend = AppTool
   where
     handler =
         typedToolWithCall "computer" computerToolInputDecoder \call input ->
-            executeComputerCallWithBackend
-                backend
+            executeCall
                 (case call.callKind of
                     ComputerFunctionCallKind -> ScreenshotJpeg
                     _ -> ScreenshotPng)
@@ -126,7 +174,7 @@ computerFunctionParameters = Aeson.object
         [ "actions" Aeson..= Aeson.object
             [ "type" Aeson..= ("array" :: Text)
             , "description" Aeson..=
-                ("Ordered desktop actions. Coordinates are logical pixels on the main display." :: Text)
+                ("Ordered desktop actions. Coordinates are logical pixels on the selected display." :: Text)
             , "items" Aeson..= Aeson.object
                 [ "anyOf" Aeson..= computerActionSchemas ]
             , "minItems" Aeson..= (1 :: Int)
@@ -239,11 +287,6 @@ computerCallFromInput call input = ComputerCall
 executeComputerCall :: ComputerCall -> IO (Either Text Text)
 executeComputerCall = executeComputerCallWith ScreenshotPng
 
-data ScreenshotEncoding
-    = ScreenshotPng
-    | ScreenshotJpeg
-    deriving (Eq, Show)
-
 data ComputerObservation = ComputerObservation
     { computerObservationImage :: !ImageAttachment
     , computerObservationAccessibility :: !(Maybe Text)
@@ -266,8 +309,58 @@ executeComputerCallWith
     :: ScreenshotEncoding
     -> ComputerCall
     -> IO (Either Text Text)
-executeComputerCallWith =
-    executeComputerCallWithBackend localComputerUseBackend
+executeComputerCallWith encoding call =
+    bracket newComputerUseRuntime closeComputerUseRuntime \runtime ->
+        executeComputerCallWithRuntime runtime encoding call
+
+executeComputerCallWithRuntime
+    :: ComputerUseRuntime
+    -> ScreenshotEncoding
+    -> ComputerCall
+    -> IO (Either Text Text)
+executeComputerCallWithRuntime runtime encoding call
+    | Left err <- validateComputerCall call = pure (Left err)
+    | otherwise = do
+        ensureComputerBackend runtime
+        withMVar runtime.computerRuntimeState \case
+            ComputerRuntimeClosed ->
+                pure (Left "Computer use has been closed.")
+            ComputerRuntimeOpen Nothing ->
+                pure (Left "Computer use backend initialization failed.")
+            ComputerRuntimeOpen (Just (Left err)) -> pure (Left err)
+            ComputerRuntimeOpen (Just (Right backend)) ->
+                executeComputerCallWithBackend
+                    backend.managedComputerUseBackend
+                    encoding
+                    call
+
+ensureComputerBackend :: ComputerUseRuntime -> IO ()
+ensureComputerBackend runtime =
+    modifyMVar runtime.computerRuntimeState \case
+        state@ComputerRuntimeClosed -> pure (state, ())
+        state@(ComputerRuntimeOpen (Just _)) -> pure (state, ())
+        ComputerRuntimeOpen Nothing -> do
+            backend <- newManagedComputerBackend
+            pure (ComputerRuntimeOpen (Just backend), ())
+
+newManagedComputerBackend :: IO (Either Text ManagedComputerBackend)
+newManagedComputerBackend =
+    case os of
+        "darwin" ->
+            pure (Right (ManagedComputerBackend
+                { managedComputerUseBackend = localComputerUseBackend
+                , managedComputerBackendClose = pure ()
+                }))
+        "linux" ->
+            fmap (fmap manageDesktopComputerBackend) Linux.newLinuxBackend
+        _ ->
+            pure (Left "Local computer use is not supported on this platform.")
+
+manageDesktopComputerBackend :: ComputerBackend -> ManagedComputerBackend
+manageDesktopComputerBackend backend = ManagedComputerBackend
+    { managedComputerUseBackend = desktopComputerUseBackend backend
+    , managedComputerBackendClose = backend.computerBackendClose
+    }
 
 executeComputerCallWithBackend
     :: ComputerUseBackend
@@ -285,6 +378,78 @@ executeComputerCallWithBackend backend screenshotEncoding call
                 Left err -> pure (Left err)
                 Right observation ->
                     pure (Right (encodeComputerOutput call observation))
+
+-- | Adapt the display-identity backend used by Linux to the transaction API
+-- shared with native host integrations.
+executeComputerCallWithDesktopBackend
+    :: ComputerBackend
+    -> ScreenshotEncoding
+    -> ComputerCall
+    -> IO (Either Text Text)
+executeComputerCallWithDesktopBackend backend =
+    executeComputerCallWithBackend (desktopComputerUseBackend backend)
+
+desktopComputerUseBackend :: ComputerBackend -> ComputerUseBackend
+desktopComputerUseBackend backend = ComputerUseBackend
+    { computerRunTransaction = \encoding actions validateDisplay -> do
+        backend.computerBackendEnsureReady >>= \case
+            Left err -> pure (Left err)
+            Right () ->
+                backend.computerBackendInspectDisplay >>= \case
+                    Left err -> pure (Left err)
+                    Right display
+                        | Left err <-
+                            validateDisplay (displayLogicalSize display) ->
+                            pure (Left err)
+                        | otherwise -> do
+                            actionResult <-
+                                foldM (run display) (Right ()) actions
+                            case actionResult of
+                                Left err -> pure (Left err)
+                                Right () ->
+                                    ensureDisplayUnchanged display >>= \case
+                                        Left err -> pure (Left err)
+                                        Right () ->
+                                            backend.computerBackendCaptureDisplay
+                                                encoding
+                                                >>= \case
+                                                    Left err -> pure (Left err)
+                                                    Right CapturedDisplay
+                                                        { capturedComputerDisplay
+                                                        , capturedComputerImage
+                                                        }
+                                                        | capturedComputerDisplay
+                                                            /= display ->
+                                                            pure (Left
+                                                                "The selected display changed during computer use; take a fresh screenshot before continuing.")
+                                                        | otherwise ->
+                                                            pure (Right
+                                                                (ComputerObservation
+                                                                    { computerObservationImage =
+                                                                        capturedComputerImage
+                                                                    , computerObservationAccessibility =
+                                                                        Nothing
+                                                                    }))
+    }
+  where
+    run _ (Left err) _ = pure (Left err)
+    run display (Right ()) action =
+        ensureDisplayUnchanged display >>= \case
+            Left err -> pure (Left err)
+            Right () ->
+                backend.computerBackendExecuteAction display action
+
+    ensureDisplayUnchanged expected =
+        backend.computerBackendEnsureReady >>= \case
+            Left err -> pure (Left err)
+            Right () ->
+                backend.computerBackendInspectDisplay >>= \case
+                    Left err -> pure (Left err)
+                    Right current
+                        | current == expected -> pure (Right ())
+                        | otherwise ->
+                            pure (Left
+                                "The selected display changed during computer use; take a fresh screenshot before continuing.")
 
 localComputerUseBackend :: ComputerUseBackend
 localComputerUseBackend = ComputerUseBackend
@@ -319,9 +484,6 @@ localComputerUseBackend = ComputerUseBackend
                                                         encoding
                                                         display)
     }
-  where
-    run (Left err) _ = pure (Left err)
-    run (Right ()) action = executeAction action
 
 {-# NOINLINE localComputerUseLock #-}
 localComputerUseLock :: MVar ()
@@ -380,8 +542,8 @@ hasNonFinalScreenshot actions =
     isScreenshot _ = False
 
 -- | Validate all model-space coordinates before the first action in a batch.
--- The per-action JXA checks remain as a second line of defense if the display
--- configuration changes while the batch is executing.
+-- Backends recheck readiness and display identity as a second line of defense
+-- if the graphical session changes while the batch is executing.
 validateComputerCallForDisplay :: (Int, Int) -> ComputerCall -> Either Text ()
 validateComputerCallForDisplay (width, height) call = do
     validateComputerCall call
@@ -391,7 +553,7 @@ validateComputerCallForDisplay (width, height) call = do
   where
     validatePoint ComputerPoint{pointX, pointY}
         | pointX < 0 || pointY < 0 || pointX >= width || pointY >= height =
-            Just "Computer point is outside the main display."
+            Just "Computer point is outside the selected display."
         | otherwise = Nothing
 
 computerPoints :: [ComputerAction] -> [ComputerPoint]
@@ -419,24 +581,24 @@ validateAction = \case
     ClickAction { clickButton, clickKeys }
         | exceedsText 32 clickButton ->
             Just "Computer mouse button exceeds 32 characters."
-        | Just err <- validateKeys clickKeys -> Just err
-        | Left err <- buttonNumber clickButton -> Just err
-        | Left err <- modifierFlags clickKeys -> Just err
+        | Just err <- Input.validateKeys clickKeys -> Just err
+        | Left err <- Input.parseMouseButton clickButton -> Just err
+        | Left err <- Input.parseModifiers clickKeys -> Just err
         | otherwise -> Nothing
     DoubleClickAction { doubleClickKeys }
-        | Just err <- validateKeys doubleClickKeys -> Just err
-        | Left err <- modifierFlags doubleClickKeys -> Just err
+        | Just err <- Input.validateKeys doubleClickKeys -> Just err
+        | Left err <- Input.parseModifiers doubleClickKeys -> Just err
         | otherwise -> Nothing
     ScrollAction { scrollDx, scrollDy, scrollKeys }
         | any (\delta -> abs (toInteger delta) > 100000)
             [scrollDx, scrollDy] ->
             Just "Computer scroll delta exceeds 100000 pixels."
-        | Just err <- validateKeys scrollKeys -> Just err
-        | Left err <- modifierFlags scrollKeys -> Just err
+        | Just err <- Input.validateKeys scrollKeys -> Just err
+        | Left err <- Input.parseModifiers scrollKeys -> Just err
         | otherwise -> Nothing
     MoveAction { moveKeys }
-        | Just err <- validateKeys moveKeys -> Just err
-        | Left err <- modifierFlags moveKeys -> Just err
+        | Just err <- Input.validateKeys moveKeys -> Just err
+        | Left err <- Input.parseModifiers moveKeys -> Just err
         | otherwise -> Nothing
     DragAction { dragPath, dragKeys }
         | exceedsList 1024 dragPath ->
@@ -444,28 +606,21 @@ validateAction = \case
         | null dragPath -> Just "Computer drag path is empty."
         | null (drop 1 dragPath) ->
             Just "Computer drag path needs at least two points."
-        | Just err <- validateKeys dragKeys -> Just err
-        | Left err <- modifierFlags dragKeys -> Just err
+        | Just err <- Input.validateKeys dragKeys -> Just err
+        | Left err <- Input.parseModifiers dragKeys -> Just err
         | otherwise -> Nothing
     TypeAction value
         | exceedsText 8192 value ->
             Just "Computer text input exceeds the 8192-character limit."
         | otherwise -> Nothing
     KeypressAction keys ->
-        either Just (const Nothing) (keyCombinationScript keys)
+        either Just (const Nothing) (Input.parseComputerKeyCombination keys)
     UnknownComputerAction value
         | exceedsText 128 value.tag ->
             Just "Computer action type exceeds 128 characters."
         | otherwise ->
             Just ("Unsupported computer action: " <> safeQuoted 128 value.tag)
     _ -> Nothing
-
-validateKeys :: [Text] -> Maybe Text
-validateKeys keys
-    | exceedsList 16 keys = Just "Computer action exceeds the 16-key limit."
-    | any (exceedsText 64) keys =
-        Just "Computer key name exceeds 64 characters."
-    | otherwise = Nothing
 
 firstJust :: [Maybe value] -> Maybe value
 firstJust = foldr (<|>) Nothing
@@ -593,7 +748,7 @@ keyboardPrelude = Text.unlines
 keyCombinationScript :: [Text] -> Either Text Text
 keyCombinationScript [] = Left "Computer key combination is empty."
 keyCombinationScript rawKeys
-    | Just err <- validateKeys rawKeys = Left err
+    | Just err <- Input.validateKeys rawKeys = Left err
     | otherwise = do
         flags <- modifierFlags (init rawKeys)
         command <- keyCommand flags (Text.strip (last rawKeys))

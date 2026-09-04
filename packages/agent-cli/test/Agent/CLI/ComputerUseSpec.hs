@@ -6,6 +6,7 @@ import Agent.CLI.ComputerUse
     , ScreenshotEncoding(..)
     , computerApprovalPrompt
     , executeComputerCallWithBackend
+    , executeComputerCallWithDesktopBackend
     , keyCombinationScript
     , parseDisplaySize
     , parseSessionLocked
@@ -14,6 +15,33 @@ import Agent.CLI.ComputerUse
     , validateComputerCall
     , validateComputerCallForDisplay
     )
+import Agent.CLI.ComputerUse.Backend
+    ( CapturedDisplay(..)
+    , ComputerBackend(..)
+    , ComputerDisplay(..)
+    )
+import Agent.CLI.ComputerUse.Linux
+    ( LinuxSessionType(..)
+    , detectLinuxSessionType
+    )
+import Agent.CLI.ComputerUse.Linux.Logind (validateLogindState)
+import Agent.CLI.ComputerUse.Input (MouseButton(..))
+import Agent.CLI.ComputerUse.Linux.Portal
+    ( PortalStream(..)
+    , parsePortalStartResults
+    , portalKeysym
+    , portalMouseButtonCode
+    , portalRequestPathForSender
+    , requestResponseRule
+    , sessionClosedRule
+    )
+import Agent.CLI.ComputerUse.Linux.X11
+    ( XdotoolInvocation(..)
+    , parseXrandrDisplay
+    , x11KeyInvocation
+    , x11PointerPosition
+    , x11ScrollInvocations
+    )
 import Agent.CLI.SessionAdmin (sessionToolEvent)
 import Agent.Json (rawJsonFromEncoding)
 import Agent.Loop (ImageAttachment(..))
@@ -21,14 +49,242 @@ import Agent.Responses.Types
 import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
+import Data.Int (Int32)
+import Data.IORef
+    ( atomicModifyIORef'
+    , modifyIORef'
+    , newIORef
+    , readIORef
+    )
+import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
+import Data.Word (Word32, Word64)
+import DBus (Variant, busName_, objectPath_, toVariant)
+import DBus.Client (MatchRule(..))
 import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "computer backend executor" do
+        it "rejects a structurally invalid batch before touching the backend" do
+            backendCalls <- newIORef ([] :: [Text.Text])
+            let record name result = do
+                    modifyIORef' backendCalls (<> [name])
+                    pure result
+                backend = ComputerBackend
+                    { computerBackendEnsureReady =
+                        record "ready" (Right ())
+                    , computerBackendInspectDisplay =
+                        record "inspect" (Right x11Display)
+                    , computerBackendExecuteAction = \_ _ ->
+                        record "execute" (Right ())
+                    , computerBackendCaptureDisplay = \_ ->
+                        record "capture" (Left "unexpected capture")
+                    , computerBackendClose =
+                        modifyIORef' backendCalls (<> ["close"])
+                    }
+                call =
+                    exampleCall
+                        { computerActions =
+                            [ ScreenshotAction
+                            , UnknownComputerAction
+                                (TaggedObject "future_action")
+                            ]
+                        }
+            executeComputerCallWithDesktopBackend backend ScreenshotPng call
+                `shouldReturn` Left
+                    "Unsupported computer action: \"future_action\""
+            readIORef backendCalls `shouldReturn` []
+
+        it "prevalidates the entire batch before executing an action" do
+            actionCount <- newIORef (0 :: Int)
+            let backend =
+                    (testBackend x11Display)
+                        { computerBackendExecuteAction = \_ _ -> do
+                            modifyIORef' actionCount (+ 1)
+                            pure (Right ())
+                        }
+                call =
+                    exampleCall
+                        { computerActions =
+                            [ ClickAction 25 30 "left" []
+                            , MoveAction 1440 0 []
+                            ]
+                        }
+            executeComputerCallWithDesktopBackend backend ScreenshotPng call
+                `shouldReturn` Left
+                    "Computer point is outside the selected display."
+            readIORef actionCount `shouldReturn` 0
+
+        it "rechecks the complete display identity before every action" do
+            inspections <- newIORef
+                [ x11Display
+                , x11Display
+                , x11Display
+                    { computerDisplayOriginX =
+                        x11Display.computerDisplayOriginX + 1
+                    }
+                ]
+            actionCount <- newIORef (0 :: Int)
+            let inspect = atomicModifyIORef' inspections \case
+                    [] -> ([], Left "unexpected display inspection")
+                    display : rest -> (rest, Right display)
+                backend =
+                    (testBackend x11Display)
+                        { computerBackendInspectDisplay = inspect
+                        , computerBackendExecuteAction = \_ _ -> do
+                            modifyIORef' actionCount (+ 1)
+                            pure (Right ())
+                        }
+                call =
+                    exampleCall
+                        { computerActions =
+                            [ ClickAction 25 30 "left" []
+                            , MoveAction 30 40 []
+                            ]
+                        }
+            executeComputerCallWithDesktopBackend backend ScreenshotPng call
+                `shouldReturn` Left
+                    "The selected display changed during computer use; take a fresh screenshot before continuing."
+            readIORef actionCount `shouldReturn` 1
+
+        it "rejects a changed display identity after the batch" do
+            let changed =
+                    x11Display
+                        { computerDisplayFrameWidth =
+                            x11Display.computerDisplayFrameWidth + 1
+                        }
+                backend =
+                    (testBackend x11Display)
+                        { computerBackendCaptureDisplay =
+                            \_ -> pure (Right CapturedDisplay
+                                { capturedComputerDisplay = changed
+                                , capturedComputerImage = emptyImage
+                                })
+                        }
+            executeComputerCallWithDesktopBackend
+                backend
+                ScreenshotPng
+                exampleCall
+                `shouldReturn` Left
+                    "The selected display changed during computer use; take a fresh screenshot before continuing."
+
+    describe "Linux X11 computer use" do
+        it "prefers native Wayland over the XWayland DISPLAY" do
+            detectLinuxSessionType
+                (Just "wayland")
+                (Just "wayland-0")
+                (Just ":0")
+                `shouldBe` Right LinuxWayland
+            detectLinuxSessionType
+                (Just "x11")
+                Nothing
+                (Just ":1")
+                `shouldBe` Right LinuxX11
+
+        it "fails closed for inactive or locked logind state" do
+            validateLogindState True False `shouldBe` Right ()
+            validateLogindState True True
+                `shouldBe` Left
+                    "Computer use is unavailable while the Linux session is locked."
+            validateLogindState False False
+                `shouldBe` Left
+                    "Computer use is unavailable while the Linux session is inactive."
+
+        it "selects the primary monitor and preserves its signed origin" do
+            parseXrandrDisplay
+                "Monitors: 2\n\
+                \ 0: +DP-1 1920/520x1080/290+0+0  DP-1\n\
+                \ 1: +*eDP-1 1440/310x900/190-1440+80  eDP-1\n"
+                `shouldBe` Right x11Display
+
+        it "uses the sole monitor when xrandr has no primary" do
+            parseXrandrDisplay
+                "Monitors: 1\n\
+                \ 0: +Virtual-1 1280/300x720/170+0+0  Virtual-1\n"
+                `shouldSatisfy` either
+                    (const False)
+                    (\display ->
+                        display.computerDisplayWidth == 1280
+                            && display.computerDisplayHeight == 720)
+
+        it "fails closed on an ambiguous monitor layout" do
+            parseXrandrDisplay
+                "Monitors: 2\n\
+                \ 0: +DP-1 1920/520x1080/290+0+0  DP-1\n\
+                \ 1: +HDMI-1 1920/520x1080/290+1920+0  HDMI-1\n"
+                `shouldBe` Left
+                    "xrandr reported multiple active monitors but no primary monitor."
+
+        it "translates local coordinates without exposing typed text in argv" do
+            x11PointerPosition x11Display 25 30 `shouldBe` (-1415, 110)
+            x11KeyInvocation ["🙂"] `shouldBe`
+                Right
+                    (XdotoolInvocation
+                        [ "type", "--clearmodifiers", "--delay", "1"
+                        , "--file", "-"
+                        ]
+                        "🙂")
+
+        it "maps browser scroll signs to bounded X wheel clicks" do
+            x11ScrollInvocations 50 (-250) `shouldBe`
+                [ XdotoolInvocation
+                    ["click", "--repeat", "1", "7"]
+                    ""
+                , XdotoolInvocation
+                    ["click", "--repeat", "3", "4"]
+                    ""
+                ]
+
+    describe "Linux Wayland portal computer use" do
+        it "derives race-free request paths from the unique bus name" do
+            portalRequestPathForSender ":1.42" "request_ab12"
+                `shouldBe`
+                    "/org/freedesktop/portal/desktop/request/1_42/request_ab12"
+
+        it "pins portal signals to the resolved unique owner" do
+            let owner = busName_ ":1.24"
+                requestPath =
+                    objectPath_
+                        "/org/freedesktop/portal/desktop/request/1_42/request_ab12"
+                sessionPath =
+                    objectPath_
+                        "/org/freedesktop/portal/desktop/session/1_42/session_ab12"
+            matchSender (requestResponseRule owner requestPath)
+                `shouldBe` Just owner
+            matchSender (sessionClosedRule owner sessionPath)
+                `shouldBe` Just owner
+
+        it "requires one monitor stream and both input grants" do
+            parsePortalStartResults portalStartResults
+                `shouldBe` Right portalStream
+            parsePortalStartResults
+                (Map.insert
+                    "streams"
+                    (toVariant
+                        [ (77 :: Word32, portalStreamProperties)
+                        , (78 :: Word32, portalStreamProperties)
+                        ])
+                    portalStartResults)
+                `shouldBe` Left
+                    "The desktop portal returned more than one monitor stream."
+            parsePortalStartResults
+                (Map.insert "devices" (toVariant (1 :: Word32))
+                    portalStartResults)
+                `shouldBe` Left
+                    "The desktop portal did not grant both keyboard and pointer access."
+
+        it "maps Unicode keysyms and Linux evdev mouse buttons" do
+            portalKeysym 'A' `shouldBe` 0x41
+            portalKeysym 'ß' `shouldBe` 0xdf
+            portalKeysym '🙂' `shouldBe` 0x101f642
+            portalKeysym '\n' `shouldBe` 0xff0d
+            portalMouseButtonCode MouseLeft `shouldBe` 0x110
+            portalMouseButtonCode MouseForward `shouldBe` 0x114
+
     describe "computer action validation" do
         it "preserves supported mouse buttons and modifiers" do
             pointerScript (ClickAction 12 34 "back" ["shift"])
@@ -332,7 +588,7 @@ spec = do
                 `shouldBe` Left
                     "Unsupported computer action: \"future_action\""
 
-        it "prevalidates every coordinate against the main display" do
+        it "prevalidates every coordinate against the selected display" do
             validateComputerCallForDisplay
                 (1440, 900)
                 exampleCall
@@ -346,7 +602,7 @@ spec = do
                         ]
                     }
                 `shouldBe` Left
-                    "Computer point is outside the main display."
+                    "Computer point is outside the selected display."
             validateComputerCallForDisplay
                 (1440, 900)
                 exampleCall
@@ -496,4 +752,63 @@ exampleCall = ComputerCall
     , pendingSafetyChecks = []
     , computerCallStatus = Nothing
     , computerCallExtra = KeyMap.empty
+    }
+
+x11Display :: ComputerDisplay
+x11Display = ComputerDisplay
+    { computerDisplayId = "x11:eDP-1:(-1440,80,1440,900)"
+    , computerDisplayOriginX = -1440
+    , computerDisplayOriginY = 80
+    , computerDisplayWidth = 1440
+    , computerDisplayHeight = 900
+    , computerDisplayFrameWidth = 1440
+    , computerDisplayFrameHeight = 900
+    }
+
+testBackend :: ComputerDisplay -> ComputerBackend
+testBackend display = ComputerBackend
+    { computerBackendEnsureReady = pure (Right ())
+    , computerBackendInspectDisplay = pure (Right display)
+    , computerBackendExecuteAction = \_ _ -> pure (Right ())
+    , computerBackendCaptureDisplay = \_ -> pure (Right CapturedDisplay
+        { capturedComputerDisplay = display
+        , capturedComputerImage = emptyImage
+        })
+    , computerBackendClose = pure ()
+    }
+
+emptyImage :: ImageAttachment
+emptyImage = ImageAttachment
+    { imageMime = "image/png"
+    , imageBytes = BS.empty
+    }
+
+portalStartResults :: Map.Map Text.Text Variant
+portalStartResults = Map.fromList
+    [ ("devices", toVariant (3 :: Word32))
+    , ("streams",
+        toVariant [(77 :: Word32, portalStreamProperties)])
+    ]
+
+portalStreamProperties :: Map.Map Text.Text Variant
+portalStreamProperties = Map.fromList
+    [ ("id", toVariant ("monitor-1" :: Text.Text))
+    , ("position", toVariant ((-1920 :: Int32), (0 :: Int32)))
+    , ("size", toVariant ((1920 :: Int32), (1080 :: Int32)))
+    , ("source_type", toVariant (1 :: Word32))
+    , ("mapping_id", toVariant ("mapping-1" :: Text.Text))
+    , ("pipewire-serial", toVariant (1234 :: Word64))
+    ]
+
+portalStream :: PortalStream
+portalStream = PortalStream
+    { portalStreamNodeId = 77
+    , portalStreamId = Just "monitor-1"
+    , portalStreamPositionX = -1920
+    , portalStreamPositionY = 0
+    , portalStreamWidth = 1920
+    , portalStreamHeight = 1080
+    , portalStreamSourceType = Just 1
+    , portalStreamMappingId = Just "mapping-1"
+    , portalStreamPipeWireSerial = Just 1234
     }

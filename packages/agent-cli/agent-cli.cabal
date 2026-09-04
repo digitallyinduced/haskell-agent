@@ -163,6 +163,12 @@ library
                     , Agent.CLI.Context
                     , Agent.CLI.Command
                     , Agent.CLI.ComputerUse
+                    , Agent.CLI.ComputerUse.Backend
+                    , Agent.CLI.ComputerUse.Input
+                    , Agent.CLI.ComputerUse.Linux
+                    , Agent.CLI.ComputerUse.Linux.Logind
+                    , Agent.CLI.ComputerUse.Linux.Portal
+                    , Agent.CLI.ComputerUse.Linux.X11
                     , Agent.CLI.Config
                     , Agent.CLI.McpOAuthStore
                     , Agent.CLI.McpOAuth
@@ -297,6 +303,7 @@ library
                     , containers
                     , crypton
                     , directory
+                    , dbus >= 1.4 && < 1.5
                     , entropy
                     , filelock
                     , filepath
@@ -535,6 +542,7 @@ test-suite agent-cli-test
                     , colour
                     , containers
                     , directory
+                    , dbus >= 1.4 && < 1.5
                     , filepath
                     , haskeline >= 0.8 && < 0.9
                     , hspec >= 2.11 && < 2.12

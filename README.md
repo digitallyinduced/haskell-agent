@@ -204,6 +204,18 @@ agent with a Nix-provided GHC when enabling it:
 nix shell nixpkgs#ghc -c agent-cli --ghci
 ```
 
+Local desktop control is opt-in on Linux and macOS:
+
+```console
+agent-cli --computer-use
+```
+
+On Linux, native X11 uses `xrandr`, `maim`, and `xdotool`. Native Wayland uses
+the standard ScreenCast and RemoteDesktop portals with PipeWire. The Nix
+package includes the required command-line and GStreamer dependencies. See the
+[computer-use guide](docs/computer-use.md) for permissions, session behavior,
+non-Nix prerequisites, and desktop-specific checks.
+
 For GHCi-only operation, disable Bash explicitly:
 
 ```console
