@@ -983,7 +983,7 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                 call.callId == "call-2" && call.name == "apply_patch"
             _ -> False
 
-    it "publishes Codex weekly capacity updates for retained prompt chrome" do
+    it "leaves Codex capacity display to the authoritative usage endpoint" do
         projectEvent <- newStreamEventToLoopEvents False
         events <- projectEvent ResponseCodexRateLimitsEvent
             { rateLimits = CodexRateLimits
@@ -994,12 +994,7 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                 }
             , sequenceNumber = Nothing
             }
-        events `shouldBe`
-            [ ProviderLimitUpdated
-                { providerLimitText = "Weekly limit left: 21%"
-                , providerLimitWarning = False
-                }
-            ]
+        events `shouldBe` []
 
     it "publishes a streamed function call immediately" do
         projectEvent <- newStreamEventToLoopEvents False
@@ -1340,7 +1335,10 @@ isUserMessage = \case
 
 responseWithOutput :: [ResponseItem] -> Response
 responseWithOutput output =
-    either error id . Codec.decodeResponse . LBS.toStrict . Aeson.encode $
+    either (error . Text.unpack) id
+        . Codec.decodeResponse
+        . LBS.toStrict
+        . Aeson.encode $
         Aeson.object
             [ "id" Aeson..= ("resp-compacted" :: Text.Text)
             , "created_at" Aeson..= (0 :: Int)

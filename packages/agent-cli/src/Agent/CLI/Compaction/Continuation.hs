@@ -10,6 +10,7 @@ import Agent.CLI.Compaction.Projection
 import Agent.CLI.Compaction.Types
 import Agent.Loop
     ( Backend(..)
+    , BackendMiddleware
     , BackendSnapshot(..)
     , TurnInput(..)
     , advanceBackendSnapshot
@@ -40,8 +41,7 @@ boundCompletedToolContinuations
     :: (ResponseCreateParams -> Int)
     -> IO ResponseCreateParams
     -> IORef (Maybe OccupancySnapshot)
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Backend submit) =
     Backend \snapshot previous inputs onEvent ->
         if not (any isCompletedTool inputs)

@@ -436,10 +436,7 @@ runAgentWithRuntime processRuntime runMode options = do
                                         now <- getCurrentTime
                                         throwIO $
                                             StartupFailure
-                                                (Text.unpack
-                                                    (formatApiErrorAt
-                                                        now
-                                                        apiError))
+                                                (formatApiErrorAt now apiError)
                                     | otherwise -> do
                                         reportProviderUnavailable Nothing apiError
                                         pure DevQuit
@@ -448,8 +445,7 @@ runAgentWithRuntime processRuntime runMode options = do
                             now <- getCurrentTime
                             throwIO $
                                 StartupFailure
-                                    (Text.unpack
-                                        (formatApiErrorAt now apiError))
+                                    (formatApiErrorAt now apiError)
                         | otherwise -> pure DevQuit
             RunQuit -> pure DevQuit
             RunReload sessionId -> pure (DevReload sessionId)
@@ -692,7 +688,7 @@ runAgent
                 (\failure@(StartupFailure message) ->
                     if runMode.runInBackground
                         then throwIO failure
-                        else die message)
+                        else die (Text.unpack message))
                 pure
                 startupOutcome
     case (prepared.preparedFullscreen, result) of
@@ -974,8 +970,7 @@ prepareAgentIterationTracked
                                             Nothing -> die (Text.unpack err)
                                             Just _ ->
                                                 throwIO
-                                                    (StartupFailure
-                                                        (Text.unpack err)))
+                                                    (StartupFailure err))
                                     (\path -> do
                                         color <- resolveColor stderrHandle
                                         case fullscreen of

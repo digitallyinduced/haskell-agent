@@ -136,7 +136,8 @@ import Agent.CLI.Session.Runtime.Types
     ( SessionRequest(codexCatalogSession, SessionRequest, catalog,
                      gatewayModelsRef, modelInfo,
                      connectionId, gatewayIdentity,
-                     options, provider, dialect, policyRef, allTools,
+                     options, provider, dialect, commitAttributionModel,
+                     commitAttributionEffort, policyRef, allTools,
                      claudeRuntimeSlot, claudeBridgeTools,
                      recordImageGenerationInputs, clearImageGenerationHistory,
                      suspendGhci, resetToolSessionTemp, grokRuntime,
@@ -636,7 +637,7 @@ validateSessionMcpTools AgentSessionRequest
         of
             Just err ->
                 startupDie startup
-                    ("Failed to initialize MCP tools: " <> Text.unpack err)
+                    ("Failed to initialize MCP tools: " <> err)
             Nothing -> pure ()
 
 prepareSessionCodeRuntime
@@ -722,6 +723,8 @@ prepareSessionCodeRuntime AgentSessionRequest
                     systemPromptForCatalogModelWithHostedSearch
                         includeHostedSearch
                         dialect
+                        model
+                        effortText
                         info
                         toolNames
                         sessionTmpDir
@@ -738,6 +741,8 @@ prepareSessionCodeRuntime AgentSessionRequest
                     systemPromptForToolsWithHostedSearch
                         includeHostedSearch
                         dialect
+                        model
+                        effortText
                         (map (.appToolName) providerTools)
                         cwd
                         (Just sessionTmp)
@@ -1155,6 +1160,8 @@ buildProviderSessionRequest
             , options = request.options
             , provider = request.provider
             , dialect = request.dialect
+            , commitAttributionModel = request.model
+            , commitAttributionEffort = request.effortText
             , policyRef = promptRuntime.sessionPolicyRef
             , allTools =
                 promptRuntime.sessionCodeRuntime.sessionRegistryTools
