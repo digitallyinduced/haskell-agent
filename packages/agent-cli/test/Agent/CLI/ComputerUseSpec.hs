@@ -8,6 +8,7 @@ import Agent.CLI.ComputerUse
     , executeComputerCallWithBackend
     , executeComputerCallWithDesktopBackend
     , keyCombinationScript
+    , newLeasedDesktopComputerUseBackend
     , parseDisplaySize
     , parseSessionLocked
     , pointerScript
@@ -184,6 +185,103 @@ spec = do
                 exampleCall
                 `shouldReturn` Left
                     "The selected display changed during computer use; take a fresh screenshot before continuing."
+
+        it "requires an observation before a leased desktop action" do
+            backendCalls <- newIORef ([] :: [Text.Text])
+            let record name result = do
+                    modifyIORef' backendCalls (<> [name])
+                    pure result
+                backend = ComputerBackend
+                    { computerBackendEnsureReady =
+                        record "ready" (Right ())
+                    , computerBackendInspectDisplay =
+                        record "inspect" (Right x11Display)
+                    , computerBackendExecuteAction = \_ _ ->
+                        record "execute" (Right ())
+                    , computerBackendCaptureDisplay = \_ ->
+                        record "capture" (Right CapturedDisplay
+                            { capturedComputerDisplay = x11Display
+                            , capturedComputerImage = emptyImage
+                            })
+                    , computerBackendClose = pure ()
+                    }
+            leasedBackend <- newLeasedDesktopComputerUseBackend backend
+            executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                exampleCall
+                `shouldReturn` Left
+                    "Take a fresh computer screenshot before sending input actions."
+            readIORef backendCalls `shouldReturn` []
+
+        it "pins actions to the latest successful display observation" do
+            currentDisplay <- newIORef x11Display
+            captureFails <- newIORef False
+            executedDisplays <- newIORef ([] :: [ComputerDisplay])
+            let changedDisplay =
+                    x11Display
+                        { computerDisplayId =
+                            "x11:HDMI-1:(0,0,1440,900)"
+                        , computerDisplayOriginX = 0
+                        , computerDisplayOriginY = 0
+                        }
+                backend = ComputerBackend
+                    { computerBackendEnsureReady = pure (Right ())
+                    , computerBackendInspectDisplay =
+                        Right <$> readIORef currentDisplay
+                    , computerBackendExecuteAction = \display _ -> do
+                        modifyIORef' executedDisplays (<> [display])
+                        pure (Right ())
+                    , computerBackendCaptureDisplay = \_ -> do
+                        fails <- readIORef captureFails
+                        display <- readIORef currentDisplay
+                        pure $ if fails
+                            then Left "capture failed"
+                            else Right CapturedDisplay
+                                { capturedComputerDisplay = display
+                                , capturedComputerImage = emptyImage
+                                }
+                    , computerBackendClose = pure ()
+                    }
+                screenshotCall =
+                    exampleCall { computerActions = [ScreenshotAction] }
+                succeeds = either (const False) (const True)
+            leasedBackend <- newLeasedDesktopComputerUseBackend backend
+
+            firstObservation <- executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                screenshotCall
+            firstObservation `shouldSatisfy` succeeds
+
+            writeIORef currentDisplay changedDisplay
+            writeIORef captureFails True
+            executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                screenshotCall
+                `shouldReturn` Left "capture failed"
+            writeIORef captureFails False
+
+            executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                exampleCall
+                `shouldReturn` Left
+                    "The selected display changed during computer use; take a fresh screenshot before continuing."
+            readIORef executedDisplays `shouldReturn` []
+
+            refreshedObservation <- executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                screenshotCall
+            refreshedObservation `shouldSatisfy` succeeds
+            actionResult <- executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                exampleCall
+            actionResult `shouldSatisfy` succeeds
+            readIORef executedDisplays `shouldReturn` [changedDisplay]
 
     describe "Linux X11 computer use" do
         it "prefers native Wayland over the XWayland DISPLAY" do
@@ -780,7 +878,7 @@ spec = do
             summary `shouldSatisfy`
                 (not . ("top secret" `Text.isInfixOf`))
             prompt `shouldSatisfy`
-                maybe False ("Allow this computer action?"
+                maybe False ("Allow this computer-use request?"
                     `Text.isPrefixOf`)
 
         it "escapes control characters in untrusted summary fields" do

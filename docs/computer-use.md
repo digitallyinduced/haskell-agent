@@ -1,9 +1,10 @@
 # Local computer use
 
-`agent-cli --computer-use` opts the current process into local desktop capture
-and keyboard/pointer control. It is disabled by default, is exposed only by the
-OpenAI computer-tool integration, and every call still goes through the normal
-approval policy.
+Interactive terminal sessions expose local desktop capture and
+keyboard/pointer control by default for the OpenAI computer-tool integration.
+One-shot and non-interactive runs require an explicit `--computer-use`;
+`--no-computer-use` disables the capability. Every call still goes through the
+computer-use approval policy.
 
 Linux and macOS are supported. This guide describes the Linux backends.
 
@@ -12,6 +13,9 @@ Linux and macOS are supported. This guide describes the Linux backends.
 - Run the CLI as the logged-in desktop user. Do not run it as root or forward a
   desktop session into an unrelated account.
 - The complete action batch is validated before any input is injected.
+- A successful screenshot establishes the exact display lease for later
+  actions. Input is rejected before the first observation, and a changed
+  display requires another successful screenshot.
 - The selected display and the active, unlocked logind session are checked
   before every action. A changed monitor, resolution, scale, portal stream, or
   session state aborts the batch without retrying it.

@@ -90,8 +90,9 @@ import Agent.CLI.Options
       isOneShot,
       normalizeReasoningEffortForDialect,
       resolveApprovalPolicy,
+      resolveComputerUseEnabled,
       CliOptions(optYolo, optModel, optEffort, optMaxConcurrentAgents,
-                 optGhci, optBash, optComputerUse, optNoYolo, optSkills) )
+                 optGhci, optBash, optNoYolo, optSkills) )
 import Agent.CLI.PendingInputs
     ( PendingInputs
     , PendingNoticeKind(..)
@@ -170,7 +171,8 @@ import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupFullscreen, startupBackground,
                      startupFinished, startupDatabaseStore,
-                     startupSessionState, startupNativeHooks) )
+                     startupSessionState, startupNativeHooks,
+                     startupStdinTty) )
 import Agent.CLI.Session.Selection
     ( currentSessionId, loadPrompt, reservedSessionId )
 import Agent.CLI.SessionAdmin ()
@@ -183,7 +185,6 @@ import Agent.CLI.SessionLock
       sessionLockPath )
 import Agent.CLI.SessionState ( SessionState(sessionPreviewId) )
 import Agent.CLI.SessionTitle ()
-import Agent.CLI.Skills ( loadSkillsCatalogQuiet )
 import Agent.CLI.Startup.Auth
     ( markStartupStage, setStartupNotice, startupDie )
 import Agent.CLI.StartupContext ()
@@ -269,7 +270,7 @@ import Agent.ResourceScope
     , withResourceScope
     )
 import Agent.Skills
-    ( SkillCatalog(SkillCatalog)
+    ( SkillCatalog
     , SkillInvocation
     )
 import Agent.Store.Postgres ( trustedPool )
@@ -392,6 +393,7 @@ data AgentToolsRequest windowTitleResult = AgentToolsRequest
     , activeSelectionRef :: IORef Text
     , baseToolEnv :: ToolEnv
     , catalog :: ModelCatalog
+    , initialSkills :: SkillCatalog
     , gatewayModelsRef :: IORef (Maybe GatewayModelAccess)
     , gatewayIdentity :: Maybe Text
     , checkStartupUsageInBackground :: Bool
@@ -550,6 +552,7 @@ runAgentTools
     -> IORef Text
     -> ToolEnv
     -> ModelCatalog
+    -> SkillCatalog
     -> IORef (Maybe GatewayModelAccess)
     -> Maybe Text
     -> Bool
@@ -599,6 +602,7 @@ runAgentTools
     activeSelectionRef
     baseToolEnv
     catalog
+    initialSkills
     gatewayModelsRef
     gatewayIdentity
     checkStartupUsageInBackground
@@ -1566,10 +1570,7 @@ acquireLocalToolRuntime
 acquireLocalToolRuntime AgentToolsRequest
     { startup
     , baseToolEnv
-    , options
-    , home
-    , projectRoot
-    , cwd
+    , initialSkills
     } ToolModelRuntime
     { toolDialect = dialect
     } ToolHostHooks
@@ -1591,11 +1592,6 @@ acquireLocalToolRuntime AgentToolsRequest
                     baseToolEnv
                         { toolCwd = context.nativeDiscoveryProjectRoot }
                 Nothing -> baseToolEnv
-        acquireSkills =
-            case preparedDiscovery of
-                Nothing ->
-                    loadSkillsCatalogQuiet options home projectRoot cwd
-                Just _ -> pure (SkillCatalog [] [])
     bracketOnError
         (codingToolsForWithTypes
             dialect
@@ -1608,7 +1604,7 @@ acquireLocalToolRuntime AgentToolsRequest
             agentTypesRef)
         (.codingClose)
         \localCoding -> do
-            localInitialSkills <- acquireSkills
+            let localInitialSkills = initialSkills
             pure LocalToolRuntime{..}
 
 acquireCodingRuntime
@@ -1621,7 +1617,6 @@ acquireCodingRuntime
 acquireCodingRuntime resourceScope AgentToolsRequest
     { startup
     , baseToolEnv
-    , options
     } ToolStartup
     { toolNativeCapabilities = nativeCapabilities
     , toolHarnessConfig = harnessConfig
@@ -1654,8 +1649,7 @@ acquireCodingRuntime resourceScope AgentToolsRequest
             | otherwise =
                 newLspRuntime harnessConfig.configLsp baseToolEnv
         acquireComputerUse
-            | options.optComputerUse
-                && provider == OpenAIProvider
+            | provider == OpenAIProvider
                 && os `elem` ["darwin", "linux"] =
                 Just <$> ComputerUse.newComputerUseRuntime
             | otherwise = pure Nothing
@@ -1904,6 +1898,11 @@ assembleSessionToolsRuntime AgentToolsRequest
         computerTools =
             maybe [] (pure . ComputerUse.computerUseRuntimeTool)
                 computerUseRuntime
+        activeComputerTools =
+            [ tool
+            | resolveComputerUseEnabled options startup.startupStdinTty
+            , tool <- computerTools
+            ]
         imageGenerationTools =
             [ imageGenerationTool
                 tokenProvider
@@ -1917,7 +1916,7 @@ assembleSessionToolsRuntime AgentToolsRequest
             , inferredTarget.targetConnectionId
                 == builtinConnectionId OpenAIProvider
             ]
-        surroundingToolGroups =
+        surroundingToolGroupsFor selectedComputerTools =
             [ ExecutionToolGroup extraTools
             , ExecutionToolGroup sessionMcpTools
             , HostToolGroup persistedSessionTools
@@ -1928,13 +1927,16 @@ assembleSessionToolsRuntime AgentToolsRequest
             ]
                 <> nativeToolGroups
                 <> [ HostToolGroup imageGenerationTools
-                   , ExecutionToolGroup computerTools
+                   , ExecutionToolGroup selectedComputerTools
                    ]
         allToolGroups =
-            coding.codingAppToolGroups <> surroundingToolGroups
+            coding.codingAppToolGroups
+                <> surroundingToolGroupsFor computerTools
         activeCodingGroups =
             map filterCodingExecution coding.codingAppToolGroups
-        activeToolGroups = activeCodingGroups <> surroundingToolGroups
+        activeToolGroups =
+            activeCodingGroups
+                <> surroundingToolGroupsFor activeComputerTools
         filterCodingExecution = \case
             ExecutionToolGroup appTools ->
                 ExecutionToolGroup $

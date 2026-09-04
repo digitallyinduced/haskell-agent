@@ -3,9 +3,12 @@ module Agent.CLI.ToolsSpec (spec) where
 import Agent.CLI.Tools
 import Agent.CLI.ComputerUse (computerUseTool)
 import Agent.CLI.CodeModeRuntime
-    ( CodeModeToolProjection(..)
+    ( CodeModeProjectionStrategy(..)
+    , CodeModeToolProjection(..)
+    , filterStartupUnavailableTools
     , imageGenerationCodeModeProjection
     , projectCodeModeTools
+    , projectCodeModeToolsFor
     )
 import Agent.Dialect
     ( claudeCodeDialect
@@ -59,7 +62,7 @@ import Test.Hspec
 spec :: Spec
 spec = describe "schemasFromAppTools" do
     it "advertises computer use as an ordinary strict function" do
-        if os == "darwin"
+        if os `elem` ["darwin", "linux"]
             then case schemasFromAppTools codexDialect [computerUseTool] of
                 [_, FunctionToolValue function] -> do
                     function.name `shouldBe` computerFunctionName
@@ -115,6 +118,35 @@ spec = describe "schemasFromAppTools" do
             `shouldBe` ["shell_command", "computer"]
         map (.appToolName) projection.nestedCodeModeTools
             `shouldBe` ["read_file", "shell_command"]
+
+    it "reprojects direct computer use when a code-mode tool set changes" do
+        let withoutComputer =
+                map testTool ["read_file", "imagegen", "shell_command"]
+            withComputer = withoutComputer <> [computerUseTool]
+            directNames strategy =
+                map (.appToolName)
+                    . (.directCodeModeTools)
+                    . projectCodeModeToolsFor strategy
+        directNames FullCodeModeProjection withoutComputer
+            `shouldBe` ["shell_command"]
+        directNames FullCodeModeProjection withComputer
+            `shouldBe` ["shell_command", "computer"]
+        directNames ImageGenerationOnlyCodeModeProjection withoutComputer
+            `shouldBe` ["read_file", "shell_command"]
+        directNames ImageGenerationOnlyCodeModeProjection withComputer
+            `shouldBe` ["read_file", "shell_command", "computer"]
+
+    it "retains toggleable computer use when imagegen fails at startup" do
+        let refreshTools =
+                filterStartupUnavailableTools
+                    True
+                    [ testTool "read_file"
+                    , testTool "imagegen"
+                    , computerUseTool
+                    ]
+        map (.appToolName) refreshTools
+            `shouldBe` ["read_file", "computer"]
+
     it "nests only imagegen for code-only models when full code mode is off" do
         let tools = map testTool ["read_file", "imagegen", "shell_command"]
         case imageGenerationCodeModeProjection CodeOnlyToolMode tools of

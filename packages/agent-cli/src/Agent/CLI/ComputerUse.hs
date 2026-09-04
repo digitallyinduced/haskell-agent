@@ -4,6 +4,7 @@ module Agent.CLI.ComputerUse
     , ComputerUseBackend(..)
     , ScreenshotEncoding(..)
     , ComputerUseRuntime
+    , computerToolName
     , computerUseTool
     , computerUseToolWith
     , computerUseRuntimeTool
@@ -13,9 +14,11 @@ module Agent.CLI.ComputerUse
     , executeComputerCall
     , executeComputerCallWithBackend
     , executeComputerCallWithDesktopBackend
+    , newLeasedDesktopComputerUseBackend
     , screenshotMacOS
     , summarizeComputerCall
     , summarizeComputerToolCall
+    , computerToolCallHasPendingSafetyChecks
     , computerApprovalPrompt
     , pointerScript
     , keyCombinationScript
@@ -28,6 +31,7 @@ module Agent.CLI.ComputerUse
 import Agent.CLI.ComputerUse.Backend
     ( CapturedDisplay(..)
     , ComputerBackend(..)
+    , ComputerDisplay
     , ScreenshotEncoding(..)
     , displayLogicalSize
     )
@@ -84,6 +88,11 @@ import System.IO.Unsafe (unsafePerformIO)
 import System.Process (readProcessWithExitCode)
 import Text.Read (readMaybe)
 
+-- | Stable internal handler identity. The Codex wire schema is projected as
+-- @computer_use@, but incoming calls are normalized back to this name.
+computerToolName :: Text
+computerToolName = "computer"
+
 -- | A dedicated internal schema marker, rather than a provider-native wire
 -- type, keeps this privileged handler separate from caller-defined functions.
 data ComputerUseRuntime = ComputerUseRuntime
@@ -128,7 +137,7 @@ computerUseToolWithExecutor
     :: (ScreenshotEncoding -> ComputerCall -> IO (Either Text Text))
     -> AppTool
 computerUseToolWithExecutor executeCall = AppTool
-    { appToolName = "computer"
+    { appToolName = computerToolName
     , appToolDescription =
         "Start each computer session with a screenshot-only call. Then run up to 10 approved actions on the selected local desktop display and receive one fresh final screenshot. A screenshot marker is valid only at the end of a batch."
     , appToolSchema = HostedComputerSchema
@@ -139,7 +148,7 @@ computerUseToolWithExecutor executeCall = AppTool
     }
   where
     handler =
-        typedToolWithCall "computer" computerToolInputDecoder \call input ->
+        typedToolWithCall computerToolName computerToolInputDecoder \call input ->
             executeCall
                 (case call.callKind of
                     ComputerFunctionCallKind -> ScreenshotJpeg
@@ -351,15 +360,17 @@ newManagedComputerBackend =
                 , managedComputerBackendClose = pure ()
                 }))
         "linux" ->
-            fmap (fmap manageDesktopComputerBackend) Linux.newLinuxBackend
+            Linux.newLinuxBackend >>= traverse manageDesktopComputerBackend
         _ ->
             pure (Left "Local computer use is not supported on this platform.")
 
-manageDesktopComputerBackend :: ComputerBackend -> ManagedComputerBackend
-manageDesktopComputerBackend backend = ManagedComputerBackend
-    { managedComputerUseBackend = desktopComputerUseBackend backend
-    , managedComputerBackendClose = backend.computerBackendClose
-    }
+manageDesktopComputerBackend :: ComputerBackend -> IO ManagedComputerBackend
+manageDesktopComputerBackend backend = do
+    managedComputerUseBackend <- newLeasedDesktopComputerUseBackend backend
+    pure ManagedComputerBackend
+        { managedComputerUseBackend
+        , managedComputerBackendClose = backend.computerBackendClose
+        }
 
 executeComputerCallWithBackend
     :: ComputerUseBackend
@@ -390,47 +401,91 @@ executeComputerCallWithDesktopBackend backend =
 
 desktopComputerUseBackend :: ComputerBackend -> ComputerUseBackend
 desktopComputerUseBackend backend = ComputerUseBackend
-    { computerRunTransaction = \encoding actions validateDisplay -> do
+    { computerRunTransaction = \encoding actions validateDisplay ->
+        fmap (fmap snd) $
+            runDesktopComputerTransaction
+                backend
+                DiscoverCurrentDisplay
+                encoding
+                actions
+                validateDisplay
+    }
+
+-- | Adapt a display-identity backend while retaining the exact display from
+-- the latest successful observation. Mutating calls must use that lease;
+-- screenshot-only calls may establish or replace it.
+newLeasedDesktopComputerUseBackend
+    :: ComputerBackend
+    -> IO ComputerUseBackend
+newLeasedDesktopComputerUseBackend backend = do
+    displayLease <- newMVar Nothing
+    pure ComputerUseBackend
+        { computerRunTransaction = \encoding actions validateDisplay ->
+            modifyMVar displayLease \lease ->
+                runDesktopComputerTransaction
+                    backend
+                    (RequireDisplayLease lease)
+                    encoding
+                    actions
+                    validateDisplay
+                    >>= \case
+                        Left err -> pure (lease, Left err)
+                        Right (display, observation) ->
+                            pure (Just display, Right observation)
+        }
+
+data DesktopDisplayPolicy
+    = DiscoverCurrentDisplay
+    | RequireDisplayLease !(Maybe ComputerDisplay)
+
+runDesktopComputerTransaction
+    :: ComputerBackend
+    -> DesktopDisplayPolicy
+    -> ScreenshotEncoding
+    -> [ComputerAction]
+    -> ((Int, Int) -> Either Text ())
+    -> IO (Either Text (ComputerDisplay, ComputerObservation))
+runDesktopComputerTransaction backend displayPolicy encoding actions validateDisplay
+    | RequireDisplayLease Nothing <- displayPolicy
+    , not (null actions) =
+        pure (Left
+            "Take a fresh computer screenshot before sending input actions.")
+    | otherwise =
         backend.computerBackendEnsureReady >>= \case
             Left err -> pure (Left err)
             Right () ->
                 backend.computerBackendInspectDisplay >>= \case
                     Left err -> pure (Left err)
-                    Right display
-                        | Left err <-
-                            validateDisplay (displayLogicalSize display) ->
-                            pure (Left err)
-                        | otherwise -> do
-                            actionResult <-
-                                foldM (run display) (Right ()) actions
-                            case actionResult of
-                                Left err -> pure (Left err)
-                                Right () ->
-                                    ensureDisplayUnchanged display >>= \case
+                    Right currentDisplay ->
+                        case selectDisplay currentDisplay of
+                            Left err -> pure (Left err)
+                            Right display
+                                | Left err <-
+                                    validateDisplay
+                                        (displayLogicalSize display) ->
+                                    pure (Left err)
+                                | otherwise -> do
+                                    actionResult <-
+                                        foldM (run display) (Right ()) actions
+                                    case actionResult of
                                         Left err -> pure (Left err)
                                         Right () ->
-                                            backend.computerBackendCaptureDisplay
-                                                encoding
+                                            ensureDisplayUnchanged display
                                                 >>= \case
                                                     Left err -> pure (Left err)
-                                                    Right CapturedDisplay
-                                                        { capturedComputerDisplay
-                                                        , capturedComputerImage
-                                                        }
-                                                        | capturedComputerDisplay
-                                                            /= display ->
-                                                            pure (Left
-                                                                "The selected display changed during computer use; take a fresh screenshot before continuing.")
-                                                        | otherwise ->
-                                                            pure (Right
-                                                                (ComputerObservation
-                                                                    { computerObservationImage =
-                                                                        capturedComputerImage
-                                                                    , computerObservationAccessibility =
-                                                                        Nothing
-                                                                    }))
-    }
+                                                    Right () ->
+                                                        captureDisplay display
   where
+    selectDisplay currentDisplay
+        | null actions = Right currentDisplay
+        | DiscoverCurrentDisplay <- displayPolicy =
+            Right currentDisplay
+        | RequireDisplayLease (Just expected) <- displayPolicy
+        , currentDisplay == expected =
+            Right expected
+        | otherwise =
+            Left displayChangedMessage
+
     run _ (Left err) _ = pure (Left err)
     run display (Right ()) action =
         ensureDisplayUnchanged display >>= \case
@@ -446,9 +501,31 @@ desktopComputerUseBackend backend = ComputerUseBackend
                     Left err -> pure (Left err)
                     Right current
                         | current == expected -> pure (Right ())
-                        | otherwise ->
-                            pure (Left
-                                "The selected display changed during computer use; take a fresh screenshot before continuing.")
+                        | otherwise -> pure (Left displayChangedMessage)
+
+    captureDisplay display =
+        backend.computerBackendCaptureDisplay encoding >>= \case
+            Left err -> pure (Left err)
+            Right CapturedDisplay
+                { capturedComputerDisplay
+                , capturedComputerImage
+                }
+                | capturedComputerDisplay /= display ->
+                    pure (Left displayChangedMessage)
+                | otherwise ->
+                    pure (Right
+                        ( capturedComputerDisplay
+                        , ComputerObservation
+                            { computerObservationImage =
+                                capturedComputerImage
+                            , computerObservationAccessibility =
+                                Nothing
+                            }
+                        ))
+
+displayChangedMessage :: Text
+displayChangedMessage =
+    "The selected display changed during computer use; take a fresh screenshot before continuing."
 
 localComputerUseBackend :: ComputerUseBackend
 localComputerUseBackend = ComputerUseBackend
@@ -1065,7 +1142,7 @@ safeQuoted limit value =
 
 summarizeComputerToolCall :: ToolCall -> Maybe Text
 summarizeComputerToolCall call
-    | call.name /= "computer"
+    | call.name /= computerToolName
         || not (isComputerToolCallKind call.callKind) = Nothing
     | otherwise =
         case Json.decodeText computerToolInputDecoder call.arguments of
@@ -1078,9 +1155,17 @@ summarizeComputerToolCall call
                         then "Computer action"
                         else "Computer: " <> detail
 
+computerToolCallHasPendingSafetyChecks :: ToolCall -> Bool
+computerToolCallHasPendingSafetyChecks call
+    | not (isComputerToolCallKind call.callKind) = False
+    | otherwise =
+        case Json.decodeText computerToolInputDecoder call.arguments of
+            Left _ -> False
+            Right input -> not (null input.toolPendingSafetyChecks)
+
 computerApprovalPrompt :: ToolCall -> Maybe Text
 computerApprovalPrompt call =
-    fmap ("Allow this computer action?\n\n" <>) $
+    fmap ("Allow this computer-use request?\n\n" <>) $
         summarizeComputerToolCall call
 
 dataUrl :: Text -> BS.ByteString -> Text
