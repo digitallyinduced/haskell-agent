@@ -23,8 +23,18 @@ The `tool-shell` and `tool-json` modes measure the production live tool-argument
 projector. They split a fixed-size argument into configurable deltas and replay
 the complete added/delta/done sequence through a fresh
 `newStreamEventToLoopEvents` projector for every repetition. `tool-shell`
-exercises semantic shell-command previews; `tool-json` is the generic safe JSON
-control workload.
+exercises batched semantic shell-command previews; `tool-json` is the generic
+safe JSON control workload.
+
+`tool-shell-baseline` replays the same shell event sequence through a retained
+pre-batching hot-path baseline. That compatibility path uses the former
+per-event `IORef` shape, extends the previously published strict `Text`,
+reparses the whole command prefix, and rebuilds a preview after every delta.
+It intentionally omits shared routing and accounting that both implementations
+perform, so it is a conservative baseline for the work replaced by
+`tool-shell`, not a second production projector. It lives only in this
+benchmark so future changes can compare against the removed behavior without
+restoring legacy runtime code.
 
 Build with optimisation and enable allocation statistics:
 
@@ -37,6 +47,7 @@ bin=$(nix develop -c cabal list-bin -O2 \
 "$bin" stream 1000 16 9 +RTS -T
 "$bin" stream 1000 1024 9 +RTS -T
 "$bin" request 10000 9 +RTS -T
+"$bin" tool-shell-baseline 4096 1 3 9 +RTS -T
 "$bin" tool-shell 4096 1 3 9 +RTS -T
 "$bin" tool-json 65536 1 3 9 +RTS -T
 ```
@@ -53,6 +64,8 @@ are reflected in RTS `allocated_bytes`.
 
 For the tool modes, `count` is the argument-body size and the mode suffix records
 the number of complete projector repetitions (for example, `tool-shell-x3`).
+Compare `tool-shell-baseline` and `tool-shell` only when all three workload
+dimensions match.
 
 ## Representative result
 
@@ -69,6 +82,29 @@ Apple M3 Max, 36 GiB RAM, macOS 26.6.1, GHC 9.10.3, `-O2`,
 
 These are regression reference points, not cross-mode comparisons. Machine
 load, compiler, and dependency changes can move them.
+
+### Retained shell-projector comparison
+
+The same machine and toolchain produced these paired results on 2026-09-04.
+Each baseline/production pair consumed the same generated events:
+
+| Body / delta / repetitions | Mode | Median wall | Median CPU | Median Haskell allocation |
+|:---|:---|---:|---:|---:|
+| 128 / 1 / 20 | Baseline | 9.766 ms | 9.748 ms | 63,573,672 B |
+| 128 / 1 / 20 | Production | 9.843 ms | 9.827 ms | 63,526,112 B |
+| 1,024 / 1 / 10 | Baseline | 101.656 ms | 101.487 ms | 860,381,160 B |
+| 1,024 / 1 / 10 | Production | 9.732 ms | 9.719 ms | 67,035,784 B |
+| 4,096 / 1 / 3 | Baseline | 375.094 ms | 374.415 ms | 3,541,654,080 B |
+| 4,096 / 1 / 3 | Production | 11.622 ms | 11.610 ms | 95,951,048 B |
+| 4,096 / 16 / 20 | Baseline | 158.810 ms | 158.554 ms | 1,493,003,688 B |
+| 4,096 / 16 / 20 | Production | 43.812 ms | 43.746 ms | 399,118,544 B |
+
+The baseline checksums match those produced by the pre-batching projector for
+all four workloads. Production checksums intentionally differ because batching
+emits fewer intermediate repaint events; both paths force every event they do
+emit. Repeating the 4,096 / 1 / 3 pair produced 377.797 ms baseline and
+11.571 ms production wall time with identical allocation counts to the first
+run.
 
 ## Historical context
 

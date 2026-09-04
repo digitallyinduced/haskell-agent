@@ -2,9 +2,14 @@
 
 module Main (main) where
 import Agent.Json (RawJson, rawJsonFromEncoding)
+import Agent.JsonText (jsonTextFieldPartial)
 import Agent.Loop (LoopEvent(..))
 import qualified Agent.Responses.Codec as Codec
-import Agent.Responses.LoopBackend (newStreamEventToLoopEvents)
+import Agent.Responses.LoopBackend
+    ( newStreamEventToLoopEvents
+    , responseItemToToolCall
+    , streamEventToLoopEventWithRawReasoning
+    )
 import Agent.Responses.StreamAssembly
     ( StreamAssemblyConfig(..)
     , applyStreamEvent
@@ -23,8 +28,12 @@ import Data.Aeson.Types (Pair)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef (atomicModifyIORef', newIORef)
 import Data.List (sort)
+import Data.Maybe (maybeToList)
+import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text.Encoding
 import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Stats
 import System.CPUTime (getCPUTime)
@@ -65,19 +74,23 @@ main = do
                 measure (runRequests iterations)
             report "request" iterations 0 samples
         [mode, bodyArg, deltaArg, repeatArg, sampleArg]
-            | mode `elem` ["tool-shell", "tool-json"] -> do
+            | mode `elem`
+                ["tool-shell-baseline", "tool-shell", "tool-json"] -> do
             bodyChars <- positive "argument body characters" bodyArg
             deltaChars <- positive "delta characters" deltaArg
             repetitions <- positive "repetition count" repeatArg
             sampleCount <- positive "sample count" sampleArg
             let events =
                     toolArgumentEvents
-                        (mode == "tool-shell")
+                        (mode /= "tool-json")
                         bodyChars
                         deltaChars
             _ <- evaluate (sum (map argumentEventSize events))
             samples <- forM [1 .. sampleCount] \_ ->
-                measure (runToolArgumentProjection repetitions events)
+                measure $
+                    if mode == "tool-shell-baseline"
+                        then runLegacyShellProjection repetitions events
+                        else runToolArgumentProjection repetitions events
             report
                 (mode <> "-x" <> show repetitions)
                 bodyChars
@@ -87,6 +100,7 @@ main = do
             "usage: responses-json-bench stream-online EVENTS DELTA_BYTES SAMPLES\n"
                 <> "   or: responses-json-bench stream-list EVENTS DELTA_BYTES SAMPLES\n"
                 <> "   or: responses-json-bench request ITERATIONS SAMPLES\n"
+                <> "   or: responses-json-bench tool-shell-baseline BODY_CHARS DELTA_CHARS REPETITIONS SAMPLES\n"
                 <> "   or: responses-json-bench tool-shell BODY_CHARS DELTA_CHARS REPETITIONS SAMPLES\n"
                 <> "   or: responses-json-bench tool-json BODY_CHARS DELTA_CHARS REPETITIONS SAMPLES"
 positive :: String -> String -> IO Int
@@ -163,6 +177,138 @@ runToolArgumentProjection repetitions events = go repetitions checksumSeed
     projectOne project !current event = do
         projected <- project event
         pure $! foldl' loopEventChecksum current projected
+
+-- Conservative compatibility baseline for the shell-preview hot path replaced
+-- by batching. Keep this local to the benchmark: each delta extends the
+-- previously published strict Text, reparses the entire prefix, and rebuilds
+-- the ToolArgumentsUpdated payload through the former per-event IORef shape.
+runLegacyShellProjection :: Int -> [ResponseStreamEvent] -> IO Int
+runLegacyShellProjection repetitions events =
+    go repetitions checksumSeed
+  where
+    go 0 !result = pure result
+    go remaining !result = do
+        project <- newLegacyShellProjector
+        next <- foldM (projectOne project) result events
+        go (remaining - 1) next
+
+    projectOne project !current event = do
+        projected <- project event
+        pure $! foldl' loopEventChecksum current projected
+
+newLegacyShellProjector
+    :: IO (ResponseStreamEvent -> IO [LoopEvent])
+newLegacyShellProjector = do
+    stateRef <- newIORef emptyLegacyShellState
+    pure \event -> do
+        argumentEvents <- atomicModifyIORef' stateRef \state ->
+            legacyShellStreamStep event state
+        pure $
+            maybeToList
+                (streamEventToLoopEventWithRawReasoning False event)
+                <> argumentEvents
+
+data LegacyShellState = LegacyShellState
+    { legacyShellCall :: !(Maybe ToolCall)
+    , legacyShellPreview :: !(Maybe Text)
+    }
+
+emptyLegacyShellState :: LegacyShellState
+emptyLegacyShellState = LegacyShellState
+    { legacyShellCall = Nothing
+    , legacyShellPreview = Nothing
+    }
+
+legacyShellStreamStep
+    :: ResponseStreamEvent
+    -> LegacyShellState
+    -> (LegacyShellState, [LoopEvent])
+legacyShellStreamStep event state = case event of
+    ResponseOutputItemAddedEvent { item = FunctionCallItem call } ->
+        ( state
+            { legacyShellCall =
+                responseItemToToolCall (FunctionCallItem call)
+            }
+        , []
+        )
+    ResponseFunctionCallArgumentsDeltaEvent { delta = Just deltaText } ->
+        maybe (state, [])
+            (\call -> publishLegacyShellCall
+                call
+                (appendLegacyArgumentPrefix call.arguments deltaText)
+                state)
+            state.legacyShellCall
+    ResponseFunctionCallArgumentsDoneEvent { arguments } ->
+        maybe (state, [])
+            (\call -> publishLegacyShellCall
+                call
+                (Text.copy
+                    (Text.take legacyShellArgumentPrefixChars
+                        (maybe call.arguments id arguments)))
+                state)
+            state.legacyShellCall
+    _ -> (state, [])
+
+legacyShellArgumentPrefixChars :: Int
+legacyShellArgumentPrefixChars = 4096
+
+appendLegacyArgumentPrefix :: Text -> Text -> Text
+appendLegacyArgumentPrefix previous delta
+    | room <= 0 = previous
+    | Text.null previous = retainedDelta
+    | otherwise = previous <> retainedDelta
+  where
+    room = legacyShellArgumentPrefixChars - Text.length previous
+    retainedDelta = Text.copy (Text.take room delta)
+
+publishLegacyShellCall
+    :: ToolCall
+    -> Text
+    -> LegacyShellState
+    -> (LegacyShellState, [LoopEvent])
+publishLegacyShellCall call rawArguments state =
+    let updatedCall = withLegacyToolArguments call rawArguments
+        maybeCommand =
+            Text.takeWhile (/= '\n')
+                <$> jsonTextFieldPartial "command" rawArguments
+        changed = maybe False
+            (\value ->
+                not (Text.null value)
+                    && Just value /= state.legacyShellPreview)
+            maybeCommand
+        displayCall command =
+            withLegacyToolArguments updatedCall $
+                Text.Encoding.decodeUtf8
+                    (LBS.toStrict
+                        (Aeson.encode
+                            (Aeson.object ["command" Aeson..= command])))
+        next = state
+            { legacyShellCall = Just updatedCall
+            , legacyShellPreview =
+                maybe state.legacyShellPreview Just maybeCommand
+            }
+    in
+    ( next
+    , [ ToolArgumentsUpdated (displayCall command)
+      | changed
+      , command <- maybeToList maybeCommand
+      ]
+    )
+
+withLegacyToolArguments :: ToolCall -> Text -> ToolCall
+withLegacyToolArguments ToolCall
+    { callId
+    , name
+    , callKind
+    , argumentsEncrypted
+    } arguments =
+    ToolCall
+        { callId
+        , name
+        , arguments
+        , callKind
+        , argumentsEncrypted
+        }
 
 toolArgumentEvents :: Bool -> Int -> Int -> [ResponseStreamEvent]
 toolArgumentEvents shell bodyChars deltaChars =
