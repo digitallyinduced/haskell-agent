@@ -330,8 +330,10 @@ For Grok models, dictation uses the configured xAI subscription or API-key
 credential; set `XAI_STT_LANGUAGE` to override xAI's default `en`.
 When an organization gateway is connected, the recording is sent only to the
 gateway's authenticated `/v1/audio/transcriptions` endpoint. The gateway uses
-its organization-managed transcription pool and returns a final transcript
-after recording stops; it never falls back to local provider credentials.
+its organization-managed transcription pool and streams partial transcripts
+into the composer while recording. Compatible older gateways and interrupted
+streams use the final-only upload on the same endpoint with the already
+captured recording; dictation never falls back to local provider credentials.
 Dictation is currently unavailable for OpenRouter and Gemini models.
 
 ### Claude Code subscription
@@ -443,6 +445,18 @@ CLI and gateways. Interactive parsing, rendering, and TTY state remain in
 the terminal frontend. The packaged Telegram service still carries the
 `agent-cli` executable as a runtime dependency because managed child sessions
 launch that executable.
+
+Repository review/delivery and process-hardening code lives in the independent
+`agent-repository` package. Native administration helpers and the Darwin
+foreign-library bridge live in `agent-native-bridge`, which depends on the CLI
+rather than making the production CLI depend on native-only integration code.
+The resulting production rebuild change is recorded in the
+[`package-split benchmark`](docs/package-split-benchmark.md).
+
+Discovery and bounded import of Codex, Claude, Cursor, and Grok histories lives
+in `agent-external-session`. The CLI re-exports its public facade while keeping
+the provider-specific parsers independently testable and reusable by future
+frontends.
 
 `agent-claude` delegates its generic process transport, protocol decoding, and
 session client to

@@ -119,14 +119,14 @@ report mode count bytes samples =
 median :: Ord value => [value] -> value
 median values = sort values !! (length values `div` 2)
 runStream
-    :: (BS.ByteString -> IO (Either String ResponseStreamEvent))
+    :: (BS.ByteString -> IO (Either Text.Text ResponseStreamEvent))
     -> [BS.ByteString]
     -> IO Int
 runStream decode = go emptyStreamAssemblyState
   where
     go !_ [] = error "stream has no terminal event"
     go !state (payload : rest) = do
-        event <- decode payload >>= either error pure
+        event <- decode payload >>= either (error . Text.unpack) pure
         let !next = applyStreamEvent state event
         case event of
             ResponseCompletedEvent{} -> case finishStreamResponse Nothing next event of
@@ -137,11 +137,11 @@ runStream decode = go emptyStreamAssemblyState
 -- Compatibility/list baseline: decode and retain every event before assembly,
 -- matching the former shared HTTP transport's memory shape.
 runStreamList
-    :: (BS.ByteString -> IO (Either String ResponseStreamEvent))
+    :: (BS.ByteString -> IO (Either Text.Text ResponseStreamEvent))
     -> [BS.ByteString]
     -> IO Int
 runStreamList decode payloads = do
-    events <- mapM (decode >=> either error pure) payloads
+    events <- mapM (decode >=> either (error . Text.unpack) pure) payloads
     case buildStreamResponse benchmarkAssemblyConfig events of
         Left err -> error (show err)
         Right response -> evaluate (responseChecksum response)

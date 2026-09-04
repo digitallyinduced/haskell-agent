@@ -78,10 +78,11 @@ import Agent.Dialect
      dialectChildAgentProtocol, dialectForId, dialectId, dialectIdForModel)
 import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
 import Agent.Loop
-    (Backend(..), BackendSnapshot(..), BackendStateStore(..), LoopConfig(..),
-     LoopError(..), LoopEvent(..), LoopResult(..), TurnInput(..),
-     advanceBackendSnapshot, defaultLoopDispatch, emptyBackendSnapshot,
-     initialBackendSnapshot, runLoop, runLoopInputs)
+    (Backend(..), BackendMiddleware, BackendSnapshot(..),
+     BackendStateStore(..), LoopConfig(..), LoopError(..), LoopEvent(..),
+     LoopResult(..), TurnInput(..), advanceBackendSnapshot,
+     defaultLoopDispatch, emptyBackendSnapshot, initialBackendSnapshot,
+     runLoop, runLoopInputs)
 import Agent.ToolDispatch (ToolDispatchConfig(..))
 import Agent.Tools.OutputArtifact (finalizeToolOutput)
 import Agent.Tools.Background (setBackgroundTaskHooks)
@@ -508,8 +509,7 @@ compactXaiChildBackend
     -> (ResponseCreateParams -> Backend)
     -> SubagentSession
     -> ResponseCreateParams
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 compactXaiChildBackend contextWindowFor compactThresholdFor makeBackend
         session params requestBackend =
     autoCompactBackendWith
@@ -804,7 +804,7 @@ runHttpSubagentWith
     -> Provider
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
     -> (ResponseCreateParams -> Backend)
-    -> (SubagentSession -> ResponseCreateParams -> Backend -> Backend)
+    -> (SubagentSession -> ResponseCreateParams -> BackendMiddleware)
     -> RunSubagent
 runHttpSubagentWith
         runtime dialect provider sendToRoot mkBackend wrapBackend =

@@ -2130,7 +2130,7 @@ testResponseWithUsage responseId output usage =
     , "output" Aeson..= output
     ] <> usageField))) of
         Right response -> response
-        Left err -> error err
+        Left err -> error (Text.unpack err)
   where
     usageField = case usage of
         Aeson.Null -> []

@@ -89,7 +89,6 @@ import Agent.CLI.Request
 import Agent.CLI.Resume ( resumeNeedsGeneratedContext )
 import Agent.CLI.Runtime.HistorySource ()
 import Agent.CLI.Runtime.Orchestration.Background ()
-import Agent.CLI.Runtime.Orchestration.Concurrent ()
 import Agent.CLI.Runtime.Orchestration.Providers
     ( runAgentProviders )
 import Agent.CLI.Runtime.Orchestration.Restart ()
@@ -637,7 +636,7 @@ validateSessionMcpTools AgentSessionRequest
         of
             Just err ->
                 startupDie startup
-                    ("Failed to initialize MCP tools: " <> Text.unpack err)
+                    ("Failed to initialize MCP tools: " <> err)
             Nothing -> pure ()
 
 prepareSessionCodeRuntime

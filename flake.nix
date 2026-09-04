@@ -279,11 +279,8 @@
                     root = ./packages/agent-cli;
                     include = [
                         "app"
-                        "cbits"
                         "data"
                         "eval"
-                        "ffi"
-                        "include"
                         "skills"
                         "src"
                         "agent-cli.cabal"
@@ -295,15 +292,75 @@
                     root = ./packages/agent-cli;
                     include = [
                         "app"
-                        "cbits"
                         "data"
                         "eval"
-                        "ffi"
-                        "include"
                         "skills"
                         "src"
                         "test"
                         "agent-cli.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentExternalSessionProductionSource = nix-filter.lib {
+                    root = ./packages/agent-external-session;
+                    include = [
+                        "src"
+                        "agent-external-session.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentExternalSessionCheckSource = nix-filter.lib {
+                    root = ./packages/agent-external-session;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-external-session.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentRepositoryProductionSource = nix-filter.lib {
+                    root = ./packages/agent-repository;
+                    include = [
+                        "src"
+                        "agent-repository.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentRepositoryCheckSource = nix-filter.lib {
+                    root = ./packages/agent-repository;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-repository.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentNativeBridgeProductionSource = nix-filter.lib {
+                    root = ./packages/agent-native-bridge;
+                    include = [
+                        "cbits"
+                        "ffi"
+                        "include"
+                        "src"
+                        "agent-native-bridge.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentNativeBridgeCheckSource = nix-filter.lib {
+                    root = ./packages/agent-native-bridge;
+                    include = [
+                        "cbits"
+                        "ffi"
+                        "include"
+                        "src"
+                        "test"
+                        "agent-native-bridge.cabal"
                         "LICENSE"
                     ];
                 };
@@ -643,6 +700,37 @@
                                             else agentCliRuntimeProductionSource;
                                 })
                             [ pkgs.postgresql_18 ]);
+                        agent-external-session = localPackage
+                            (pkgs.haskell.lib.addTestToolDepends
+                                (pkgs.haskell.lib.overrideSrc
+                                    (final.callPackage
+                                        ./packages/agent-external-session/package.nix
+                                        { })
+                                    {
+                                        src =
+                                            if packageMode != "production"
+                                                then agentExternalSessionCheckSource
+                                                else agentExternalSessionProductionSource;
+                                    })
+                                [ pkgs.zstd ]);
+                        agent-repository = localPackage
+                            (pkgs.haskell.lib.addTestToolDepends
+                                (pkgs.haskell.lib.overrideSrc
+                                    (final.callPackage
+                                        ./packages/agent-repository/package.nix
+                                        { })
+                                    {
+                                        src =
+                                            if packageMode != "production"
+                                                then agentRepositoryCheckSource
+                                                else agentRepositoryProductionSource;
+                                    })
+                                [
+                                    pkgs.bash
+                                    pkgs.coreutils
+                                    pkgs.git
+                                    pkgs.python3
+                                ]);
                         agent-cli = localPackage (pkgs.haskell.lib.addTestToolDepends
                             ((pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
                                 src =
@@ -662,15 +750,6 @@
                                             "--ghc-option=-DAGENT_BUILD_COMMIT=\"${agentBuildCommit}\""
                                             "--ghc-option=-DAGENT_BUILD_DATE=\"${agentBuildDate}\""
                                         ];
-                                # GHC's Darwin native-shared output is already
-                                # linked for runtime loading. Stripping it in
-                                # the parent package can turn it into an object
-                                # file, so exclude only the bridge dylib.
-                                stripExclude =
-                                    (old.stripExclude or [ ])
-                                    ++ pkgs.lib.optionals
-                                        pkgs.stdenv.hostPlatform.isDarwin
-                                        [ "lib/libhaskell-agent-bridge.dylib" ];
                             } // pkgs.lib.optionalAttrs
                                 (packageMode == "check"
                                     && pkgs.stdenv.hostPlatform.isLinux)
@@ -691,6 +770,28 @@
                                 pkgs.python3
                                 pkgs.zstd
                             ]);
+                        agent-native-bridge = localPackage
+                            ((pkgs.haskell.lib.overrideSrc
+                                (final.callPackage
+                                    ./packages/agent-native-bridge/package.nix
+                                    { })
+                                {
+                                    src =
+                                        if packageMode != "production"
+                                            then agentNativeBridgeCheckSource
+                                            else agentNativeBridgeProductionSource;
+                                }).overrideAttrs (old: {
+                                    # GHC's Darwin native-shared output is
+                                    # already linked for runtime loading.
+                                    # Stripping it in the package can turn it
+                                    # into an object file, so exclude only the
+                                    # bridge dylib.
+                                    stripExclude =
+                                        (old.stripExclude or [ ])
+                                        ++ pkgs.lib.optionals
+                                            pkgs.stdenv.hostPlatform.isDarwin
+                                            [ "lib/libhaskell-agent-bridge.dylib" ];
+                                }));
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
                                 src =
@@ -749,7 +850,13 @@
                 agentStorePackage = productionHaskellPackages.agent-store;
                 agentCliRuntimePackage =
                     productionHaskellPackages.agent-cli-runtime;
+                agentExternalSessionPackage =
+                    productionHaskellPackages.agent-external-session;
+                agentRepositoryPackage =
+                    productionHaskellPackages.agent-repository;
                 agentCliPackage = productionHaskellPackages.agent-cli;
+                agentNativeBridgeHaskellPackage =
+                    productionHaskellPackages.agent-native-bridge;
                 agentTelegramPackage = productionHaskellPackages.agent-telegram;
                 agentServerPackage = productionHaskellPackages.agent-server;
                 # Exercise these packages' own test suites against the
@@ -761,6 +868,11 @@
                     (pkgs.haskell.lib.overrideSrc agentTelegramPackage {
                         src = agentTelegramCheckSource;
                     });
+                agentNativeBridgeCheckPackage = pkgs.haskell.lib.doCheck
+                    (pkgs.haskell.lib.overrideSrc
+                        agentNativeBridgeHaskellPackage {
+                            src = agentNativeBridgeCheckSource;
+                        });
                 agentServerCheckPackage = pkgs.haskell.lib.doCheck
                     (pkgs.haskell.lib.overrideSrc agentServerPackage {
                         src = agentServerCheckSource;
@@ -959,17 +1071,17 @@
                 agentNativeBridgePackage = pkgs.runCommand
                     "haskell-agent-native-bridge-0.1.0"
                     {
-                        # The bridge was already excluded from the parent
+                        # The bridge was already excluded from its Cabal
                         # package's strip pass; do not strip it after copying.
                         dontStrip = true;
                     }
                     ''
                         bridge="$(${pkgs.findutils}/bin/find \
-                            ${agentCliPackage}/lib \
+                            ${agentNativeBridgeHaskellPackage}/lib \
                             -name libhaskell-agent-bridge.dylib \
                             -print -quit)"
                         header="$(${pkgs.findutils}/bin/find \
-                            ${agentCliPackage}/lib \
+                            ${agentNativeBridgeHaskellPackage}/lib \
                             -name HaskellAgentBridge.h \
                             -print -quit)"
                         test -n "$bridge"
@@ -1120,6 +1232,11 @@
                     then "agent-cli-macos-archive" else null} =
                     agentCliMacosRelease.archive;
                 packages.agent-cli-runtime = agentCliRuntimePackage;
+                packages.agent-external-session =
+                    agentExternalSessionPackage;
+                packages.agent-repository = agentRepositoryPackage;
+                packages.agent-native-bridge-library =
+                    agentNativeBridgeHaskellPackage;
                 packages.agent-core = agentCorePackage;
                 packages.agent-mcp = agentMcpPackage;
                 packages.agent-json = agentJsonPackage;
@@ -1173,6 +1290,9 @@
                     packages = packages: [
                         packages.agent-cli
                         packages.agent-cli-runtime
+                        packages.agent-external-session
+                        packages.agent-repository
+                        packages.agent-native-bridge
                         packages.agent-telegram
                         packages.agent-server
                         packages.agent-core
@@ -1233,7 +1353,24 @@
                     # justStaticExecutables output or its requisite assertions.
                     agent-cli-executable = agentCliExecutable;
                     agent-cli-runtime = haskellPackages.agent-cli-runtime;
+                    agent-external-session =
+                        haskellPackages.agent-external-session;
+                    agent-repository = haskellPackages.agent-repository;
+                    agent-native-bridge = agentNativeBridgeCheckPackage;
                     agent-cli = haskellPackages.agent-cli;
+                    package-boundaries = pkgs.runCommand
+                        "agent-package-boundaries"
+                        {
+                            nativeBuildInputs = [
+                                pkgs.bash
+                                pkgs.ripgrep
+                            ];
+                        }
+                        ''
+                            bash ${./scripts/check-package-boundaries.sh} \
+                                ${./.}
+                            touch "$out"
+                        '';
                     agent-telegram = agentTelegramCheckPackage;
                     agent-server = agentServerCheckPackage;
                     agent-core = haskellPackages.agent-core;

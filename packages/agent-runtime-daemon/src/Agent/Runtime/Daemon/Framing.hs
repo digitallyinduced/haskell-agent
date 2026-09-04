@@ -10,6 +10,8 @@ import Data.Aeson (FromJSON, ToJSON, eitherDecodeStrict', encode)
 import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
+import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Word (Word32, Word8)
 import Network.Socket (Socket)
 import qualified Network.Socket.ByteString as Socket
@@ -17,7 +19,7 @@ import qualified Network.Socket.ByteString as Socket
 data FrameError
     = FrameClosed
     | FrameTooLarge Int Int
-    | FrameInvalidJSON String
+    | FrameInvalidJSON Text
     deriving stock (Eq, Show)
 
 instance Exception FrameError
@@ -41,7 +43,7 @@ receiveJSONFrame maximumBytes socket = do
         then throwIO (FrameTooLarge bodyLength maximumBytes)
         else do
             body <- receiveExactly socket bodyLength
-            either (throwIO . FrameInvalidJSON) pure (eitherDecodeStrict' body)
+            either (throwIO . FrameInvalidJSON . Text.pack) pure (eitherDecodeStrict' body)
 
 receiveExactly :: Socket -> Int -> IO BS.ByteString
 receiveExactly socket expected = go [] expected

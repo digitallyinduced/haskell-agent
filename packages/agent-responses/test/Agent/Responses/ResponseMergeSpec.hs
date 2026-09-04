@@ -76,7 +76,7 @@ spec = describe "typed response merging" do
 
 baseResponse :: Response
 baseResponse =
-    either error id $ decodeResponse $ BS.pack
+    either (error . Text.unpack) id $ decodeResponse $ BS.pack
         "{\"id\":\"resp-1\",\"created_at\":0,\"model\":\"\",\
         \\"status\":\"in_progress\",\"output\":[]}"
 

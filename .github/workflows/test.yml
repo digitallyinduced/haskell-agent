@@ -31,6 +31,12 @@ jobs:
             targets: .#checks.x86_64-linux.agent-server
           - name: Runtime daemon package tests
             targets: .#checks.x86_64-linux.agent-runtime-daemon
+          - name: Extracted package tests
+            targets: >-
+              .#checks.x86_64-linux.agent-external-session
+              .#checks.x86_64-linux.agent-repository
+              .#checks.x86_64-linux.agent-native-bridge
+              .#checks.x86_64-linux.package-boundaries
           - name: Native CLI
             targets: .#checks.x86_64-linux.agent-cli-executable
           - name: Static CLI runtime
@@ -128,10 +134,16 @@ jobs:
             --print-build-logs
 
           if [[ "$EVALUATE_FLAKE" == true ]]; then
-            # Building the CLI root first materialises the callCabal2nix
-            # import needed to evaluate every exported flake output on a
-            # fresh store. `--no-build` then checks their shape without
-            # duplicating the targeted builds above.
+            # The native CLI build materialises its GNU callCabal2nix
+            # imports, but packages.default uses a separate musl package set.
+            # Instantiate that derivation with builds enabled so its generated
+            # package expressions exist before `--no-build` checks every
+            # exported flake output.
+            "$nix_bin" eval \
+              --raw \
+              .#packages.x86_64-linux.default.drvPath \
+              --no-write-lock-file \
+              > /dev/null
             "$nix_bin" flake check \
               --no-build \
               --no-write-lock-file
