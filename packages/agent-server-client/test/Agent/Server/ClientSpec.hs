@@ -92,8 +92,8 @@ spec = describe "agent-server HTTP client" do
                     }
         case result of
             Left (AgentServerProtocolError message) ->
-                message `shouldBe`
-                    "plaintext agent-server URLs must use a literal loopback host"
+                message
+                    `shouldBe` "plaintext agent-server URLs must use a literal loopback host"
             Left other ->
                 expectationFailure
                     ("unexpected plaintext URL error: " <> show other)
@@ -156,8 +156,7 @@ spec = describe "agent-server HTTP client" do
                     [ "id" Aeson..= validTurnId
                     , "sessionId" Aeson..= ("opaque-session" :: Text)
                     , "clientRequestId"
-                        Aeson..=
-                            ("01991f6d-7200-7000-8000-000000000003" :: Text)
+                        Aeson..= ("01991f6d-7200-7000-8000-000000000003" :: Text)
                     , "status" Aeson..= ("failed" :: Text)
                     , "createdAt"
                         Aeson..= ("2026-09-03T00:00:00Z" :: Text)
@@ -316,6 +315,36 @@ spec = describe "agent-server HTTP client" do
             result
                 `shouldBe` Just (Right AgentServerStreamNeedsRefetch)
 
+    it "refetches when another instance deletes the turn" do
+        let application request respond
+                | rawPathInfo request == "/v1/events" =
+                    respond $
+                        responseStream
+                            status200
+                            [(hContentType, "text/event-stream")]
+                            \write flush -> do
+                                write ": keepalive\n\n"
+                                flush
+                                threadDelay (10 * 1000 * 1000)
+                | otherwise =
+                    respond $
+                        responseLBS
+                            status404
+                            [(hContentType, "application/json")]
+                            ""
+        withTestClient application \client -> do
+            result <-
+                timeout
+                    (3 * 1000 * 1000)
+                    ( streamAgentServerTurn
+                        client
+                        validTurnId
+                        Nothing
+                        (\_ -> pure (Right ()))
+                    )
+            result
+                `shouldBe` Just (Right AgentServerStreamNeedsRefetch)
+
     it "refetches when another instance durably requests human input" do
         requestQuery <- newEmptyMVar
         let application request respond
@@ -355,8 +384,7 @@ spec = describe "agent-server HTTP client" do
             result
                 `shouldBe` Just (Right AgentServerStreamNeedsRefetch)
             takeMVar requestQuery
-                `shouldReturn`
-                    "?turnId=01991f6d-7200-7000-8000-000000000001"
+                `shouldReturn` "?turnId=01991f6d-7200-7000-8000-000000000001"
 
     it "bounds an unterminated SSE frame" do
         let application _ respond =

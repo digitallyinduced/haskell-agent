@@ -1,26 +1,26 @@
 {- | Bounded, redirect-free HTTP and SSE client for the versioned agent-server
 API. Deployment-specific routing and authorization policy belong to callers.
 -}
-module Agent.Server.Client
-    ( module Agent.Server.Client.GatewayIdentity
-    , module Agent.Server.Client.Protocol
-    , AgentServerClient
-    , AgentServerClientConfig (..)
-    , AgentServerClientError (..)
-    , AgentServerStreamResult (..)
-    , newAgentServerClient
-    , createAgentServerSession
-    , createAgentServerTurn
-    , getAgentServerTurn
-    , getAgentServerTurnResult
-    , listAgentServerTurns
-    , cancelAgentServerTurn
-    , listAgentServerRequests
-    , listAgentServerRequestsForTurn
-    , resolveAgentServerRequest
-    , getAgentServerHistory
-    , streamAgentServerTurn
-    )
+module Agent.Server.Client (
+    module Agent.Server.Client.GatewayIdentity,
+    module Agent.Server.Client.Protocol,
+    AgentServerClient,
+    AgentServerClientConfig (..),
+    AgentServerClientError (..),
+    AgentServerStreamResult (..),
+    newAgentServerClient,
+    createAgentServerSession,
+    createAgentServerTurn,
+    getAgentServerTurn,
+    getAgentServerTurnResult,
+    listAgentServerTurns,
+    cancelAgentServerTurn,
+    listAgentServerRequests,
+    listAgentServerRequestsForTurn,
+    resolveAgentServerRequest,
+    getAgentServerHistory,
+    streamAgentServerTurn,
+)
 where
 
 import Agent.Server.Client.GatewayIdentity
@@ -46,27 +46,27 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
-import Network.HTTP.Types.Header
-    ( hAccept
-    , hAuthorization
-    , hContentType
-    )
+import Network.HTTP.Types.Header (
+    hAccept,
+    hAuthorization,
+    hContentType,
+ )
 import Network.HTTP.Types.Status (statusCode)
 import Network.HTTP.Types.URI (urlEncode)
 import System.IO.Error (isEOFError)
-import System.Posix.Files
-    ( fileMode
-    , fileOwner
-    , getFdStatus
-    , isRegularFile
-    )
-import System.Posix.IO
-    ( OpenFileFlags (..)
-    , OpenMode (ReadOnly)
-    , closeFd
-    , defaultFileFlags
-    , openFd
-    )
+import System.Posix.Files (
+    fileMode,
+    fileOwner,
+    getFdStatus,
+    isRegularFile,
+ )
+import System.Posix.IO (
+    OpenFileFlags (..),
+    OpenMode (ReadOnly),
+    closeFd,
+    defaultFileFlags,
+    openFd,
+ )
 import System.Posix.IO.ByteString qualified as Posix
 import System.Posix.Types (Fd)
 import System.Posix.User (getEffectiveUserID)
@@ -295,6 +295,8 @@ streamAgentServerTurn client expectedTurnId lastEventId onEvent =
             Right turn
                 | isTerminalTurnStatus turn.agentServerTurnStatus ->
                     pure (Right AgentServerStreamNeedsRefetch)
+            Left (AgentServerHttpError 404 _ _) ->
+                pure (Right AgentServerStreamNeedsRefetch)
             _ ->
                 listAgentServerRequestsForTurn client expectedTurnId >>= \case
                     Right requests
@@ -485,23 +487,27 @@ validateAgentServerBaseUrl raw = do
     pure case parsed of
         Left _ ->
             Left
-                (AgentServerProtocolError
-                    "agent-server base URL is invalid")
+                ( AgentServerProtocolError
+                    "agent-server base URL is invalid"
+                )
         Right request
             | request.path /= "/"
                 || not (ByteString.null request.queryString) ->
                 Left
-                    (AgentServerProtocolError
-                        "agent-server base URL must not contain a path or query")
+                    ( AgentServerProtocolError
+                        "agent-server base URL must not contain a path or query"
+                    )
             | lookup hAuthorization request.requestHeaders /= Nothing ->
                 Left
-                    (AgentServerProtocolError
-                        "agent-server base URL must not contain user info")
+                    ( AgentServerProtocolError
+                        "agent-server base URL must not contain user info"
+                    )
             | not request.secure
                 && not (isLiteralLoopback request.host) ->
                 Left
-                    (AgentServerProtocolError
-                        "plaintext agent-server URLs must use a literal loopback host")
+                    ( AgentServerProtocolError
+                        "plaintext agent-server URLs must use a literal loopback host"
+                    )
             | otherwise ->
                 Right (Text.dropWhileEnd (== '/') (Text.strip raw))
 

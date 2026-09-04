@@ -5,34 +5,34 @@
 {-# LANGUAGE NoFieldSelectors #-}
 
 -- | Durable admission and terminal results for externally submitted turns.
-module Agent.Store.Postgres.ServerTurn
-    ( ServerTurnBoundary (..)
-    , ServerTurnStatus (..)
-    , StoredServerTurn (..)
-    , ReserveServerTurn (..)
-    , ServerTurnReservation (..)
-    , ServerTurnTerminal (..)
-    , ServerSessionMutation (..)
-    , ServerSessionMutationReservation (..)
-    , ServerTurnOwnerLease
-    , ServerTurnOwnerActionFence
-    , openServerTurnOwnerLease
-    , abandonServerTurnOwnerLease
-    , openServerTurnOwnerActionFence
-    , checkServerTurnOwnerActionFence
-    , closeServerTurnOwnerActionFence
-    , reserveServerTurn
-    , reserveServerSessionMutation
-    , releaseServerSessionMutation
-    , requestServerTurnCancellation
-    , shouldCancelServerTurn
-    , markServerTurnRunning
-    , finishServerTurn
-    , heartbeatServerTurnOwner
-    , releaseServerTurnOwner
-    , loadServerTurn
-    , listServerTurns
-    )
+module Agent.Store.Postgres.ServerTurn (
+    ServerTurnBoundary (..),
+    ServerTurnStatus (..),
+    StoredServerTurn (..),
+    ReserveServerTurn (..),
+    ServerTurnReservation (..),
+    ServerTurnTerminal (..),
+    ServerSessionMutation (..),
+    ServerSessionMutationReservation (..),
+    ServerTurnOwnerLease,
+    ServerTurnOwnerActionFence,
+    openServerTurnOwnerLease,
+    abandonServerTurnOwnerLease,
+    openServerTurnOwnerActionFence,
+    checkServerTurnOwnerActionFence,
+    closeServerTurnOwnerActionFence,
+    reserveServerTurn,
+    reserveServerSessionMutation,
+    releaseServerSessionMutation,
+    requestServerTurnCancellation,
+    shouldCancelServerTurn,
+    markServerTurnRunning,
+    finishServerTurn,
+    heartbeatServerTurnOwner,
+    releaseServerTurnOwner,
+    loadServerTurn,
+    listServerTurns,
+)
 where
 
 import Agent.Store.Postgres.Connection (
@@ -116,6 +116,7 @@ data ServerTurnReservation
     | ServerTurnIdempotencyConflict !StoredServerTurn
     | ServerTurnSessionBusy !StoredServerTurn
     | ServerTurnSessionMutating
+    | ServerTurnSessionMissing
     | ServerTurnOwnerUnavailable
     deriving (Eq, Show)
 
@@ -284,24 +285,24 @@ checkServerTurnOwnerActionFence ::
     ServerTurnOwnerActionFence ->
     IO (Either StoreError ())
 checkServerTurnOwnerActionFence
-        (ServerTurnOwnerActionFence state) =
-    withMVar state \case
-        ServerTurnOwnerActionFenceClosed ->
-            pure . Left . StoreDataError $
-                "server turn owner action fence is closed"
-        ServerTurnOwnerActionFenceOpen connection ->
-            withConnectionSession connection $
-                Session.statement () checkServerTurnOwnerActionFenceStatement
+    (ServerTurnOwnerActionFence state) =
+        withMVar state \case
+            ServerTurnOwnerActionFenceClosed ->
+                pure . Left . StoreDataError $
+                    "server turn owner action fence is closed"
+            ServerTurnOwnerActionFenceOpen connection ->
+                withConnectionSession connection $
+                    Session.statement () checkServerTurnOwnerActionFenceStatement
 
 closeServerTurnOwnerActionFence :: ServerTurnOwnerActionFence -> IO ()
 closeServerTurnOwnerActionFence
-        (ServerTurnOwnerActionFence state) =
-    modifyMVar_ state \case
-        ServerTurnOwnerActionFenceClosed ->
-            pure ServerTurnOwnerActionFenceClosed
-        ServerTurnOwnerActionFenceOpen connection -> do
-            closeStoreConnection connection
-            pure ServerTurnOwnerActionFenceClosed
+    (ServerTurnOwnerActionFence state) =
+        modifyMVar_ state \case
+            ServerTurnOwnerActionFenceClosed ->
+                pure ServerTurnOwnerActionFenceClosed
+            ServerTurnOwnerActionFenceOpen connection -> do
+                closeStoreConnection connection
+                pure ServerTurnOwnerActionFenceClosed
 
 reserveServerTurn ::
     StorePool ->
@@ -346,10 +347,23 @@ reserveServerTurn pool request = do
                                                         pure . Just $
                                                             ServerTurnReserved inserted
                                                     Nothing ->
-                                                        fmap ServerTurnSessionBusy
-                                                            <$> Transaction.statement
-                                                                request
-                                                                loadActiveServerTurnStatement
+                                                        Transaction.statement
+                                                            request
+                                                            loadActiveServerTurnStatement
+                                                            >>= \case
+                                                                Just active ->
+                                                                    pure . Just $
+                                                                        ServerTurnSessionBusy active
+                                                                Nothing ->
+                                                                    Transaction.statement
+                                                                        request
+                                                                        serverSessionExistsForTurnStatement
+                                                                        >>= \case
+                                                                            False ->
+                                                                                pure
+                                                                                    (Just ServerTurnSessionMissing)
+                                                                            True ->
+                                                                                pure Nothing
     pure $
         result
             >>= maybe
@@ -483,10 +497,11 @@ heartbeatServerTurnOwner lease =
                 "server turn owner lease has been revoked"
             )
 
--- | Retire an owner during an orderly shutdown.
---
--- The supervisor normally terminalizes all admitted turns first. This final
--- fence covers reservations which were persisted but never admitted locally.
+{- | Retire an owner during an orderly shutdown.
+
+The supervisor normally terminalizes all admitted turns first. This final
+fence covers reservations which were persisted but never admitted locally.
+-}
 releaseServerTurnOwner ::
     ServerTurnOwnerLease ->
     IO (Either StoreError ())
@@ -748,6 +763,25 @@ serverSessionMutationExistsForTurnStatement =
         \ AND gateway_identity IS NOT DISTINCT FROM $2\
         \ AND session_key = $3)"
         ( boundaryEncoder (.reserveServerTurnBoundary)
+            <> ( (.reserveServerTurnSessionId)
+                    >$< Encoders.param (Encoders.nonNullable Encoders.text)
+               )
+        )
+        (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.bool)))
+        True
+
+serverSessionExistsForTurnStatement ::
+    Statement ReserveServerTurn Bool
+serverSessionExistsForTurnStatement =
+    mkStatement
+        "SELECT EXISTS (\
+        \ SELECT 1 FROM harness.sessions\
+        \ WHERE gateway_identity IS NOT DISTINCT FROM $1\
+        \ AND session_key = $2\
+        \ AND deleted_at IS NULL)"
+        ( ( ((.serverTurnGatewayIdentity) . (.reserveServerTurnBoundary))
+                >$< Encoders.param (Encoders.nullable Encoders.text)
+          )
             <> ( (.reserveServerTurnSessionId)
                     >$< Encoders.param (Encoders.nonNullable Encoders.text)
                )

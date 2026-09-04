@@ -1,45 +1,46 @@
 -- | Durable externally submitted turn storage for the production server.
-module Agent.Server.Runtime.TurnStore
-    ( TurnStoreBackend (..)
-    , TurnStoreOwner
-    , openTurnStoreOwner
-    , closeTurnStoreOwner
-    , withTurnStoreOwnerFence
-    , newTurnStoreBackend
-    )
+module Agent.Server.Runtime.TurnStore (
+    TurnStoreBackend (..),
+    TurnStoreOwner,
+    openTurnStoreOwner,
+    closeTurnStoreOwner,
+    withTurnStoreOwnerFence,
+    newTurnStoreBackend,
+    takeRotatingPendingBatch,
+)
 where
 
-import Agent.Server.Backend (SessionMutationLease(..))
+import Agent.Server.Backend (SessionMutationLease (..))
 import Agent.Server.Event (boundedPublicText)
-import Agent.Server.Supervisor
-    ( HumanRequestCleanup (..)
-    , HumanRequestPersistenceResolution (..)
-    , TurnPersistence (..)
-    )
+import Agent.Server.Supervisor (
+    HumanRequestCleanup (..),
+    HumanRequestPersistenceResolution (..),
+    TurnPersistence (..),
+ )
 import Agent.Server.Types
 import Agent.Store.Postgres (Store, trustedPool)
 import Agent.Store.Postgres.ServerHumanRequest qualified as HumanRequestStore
 import Agent.Store.Postgres.ServerTurn qualified as ServerTurnStore
 import Agent.Store.Types (StoreError (..), renderStoreError)
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async
-    ( Async
-    , async
-    , mapConcurrently_
-    , race
-    , waitCatch
-    , withAsync
-    )
-import Control.Concurrent.STM
-    ( TVar
-    , atomically
-    , check
-    , modifyTVar'
-    , newTVarIO
-    , readTVar
-    , readTVarIO
-    , writeTVar
-    )
+import Control.Concurrent.Async (
+    Async,
+    async,
+    mapConcurrently_,
+    race,
+    waitCatch,
+    withAsync,
+ )
+import Control.Concurrent.STM (
+    TVar,
+    atomically,
+    check,
+    modifyTVar',
+    newTVarIO,
+    readTVar,
+    readTVarIO,
+    writeTVar,
+ )
 import Control.Exception.Safe (finally, mask, onException, tryAny)
 import Control.Monad (void)
 import Crypto.Hash (Digest, SHA256, hash)
@@ -51,10 +52,10 @@ import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
-import Data.Time.Clock
-    ( UTCTime
-    , getCurrentTime
-    )
+import Data.Time.Clock (
+    UTCTime,
+    getCurrentTime,
+ )
 import System.Timeout (timeout)
 
 data TurnStoreOwner = TurnStoreOwner
@@ -66,8 +67,12 @@ data TurnStoreOwner = TurnStoreOwner
     , turnStoreOwnerLifecycle :: !(Async ())
     , turnStoreOwnerPendingMutationReleases ::
         !(TVar (Map MutationReleaseKey ServerTurnStore.ServerSessionMutation))
+    , turnStoreOwnerPendingMutationReleaseCursor ::
+        !(TVar (Maybe MutationReleaseKey))
     , turnStoreOwnerPendingHumanRequestCleanups ::
         !(TVar (Map HumanRequestCleanupKey PendingHumanRequestCleanup))
+    , turnStoreOwnerPendingHumanRequestCleanupCursor ::
+        !(TVar (Maybe HumanRequestCleanupKey))
     }
 
 type MutationReleaseKey = (Text, Maybe Text, Text)
@@ -95,7 +100,9 @@ openTurnStoreOwner store instanceId = mask \restore -> do
             healthy <- newTVarIO True
             stopping <- newTVarIO False
             pendingMutationReleases <- newTVarIO Map.empty
+            pendingMutationReleaseCursor <- newTVarIO Nothing
             pendingHumanRequestCleanups <- newTVarIO Map.empty
+            pendingHumanRequestCleanupCursor <- newTVarIO Nothing
             lifecycle <-
                 async
                     ( restore
@@ -105,7 +112,9 @@ openTurnStoreOwner store instanceId = mask \restore -> do
                             healthy
                             stopping
                             pendingMutationReleases
+                            pendingMutationReleaseCursor
                             pendingHumanRequestCleanups
+                            pendingHumanRequestCleanupCursor
                         )
                     )
                     `onException` ServerTurnStore.releaseServerTurnOwner lease
@@ -120,8 +129,12 @@ openTurnStoreOwner store instanceId = mask \restore -> do
                         , turnStoreOwnerLifecycle = lifecycle
                         , turnStoreOwnerPendingMutationReleases =
                             pendingMutationReleases
+                        , turnStoreOwnerPendingMutationReleaseCursor =
+                            pendingMutationReleaseCursor
                         , turnStoreOwnerPendingHumanRequestCleanups =
                             pendingHumanRequestCleanups
+                        , turnStoreOwnerPendingHumanRequestCleanupCursor =
+                            pendingHumanRequestCleanupCursor
                         }
 
 closeTurnStoreOwner :: TurnStoreOwner -> IO ()
@@ -140,7 +153,9 @@ ownerLifecycle ::
     TVar Bool ->
     TVar Bool ->
     TVar (Map MutationReleaseKey ServerTurnStore.ServerSessionMutation) ->
+    TVar (Maybe MutationReleaseKey) ->
     TVar (Map HumanRequestCleanupKey PendingHumanRequestCleanup) ->
+    TVar (Maybe HumanRequestCleanupKey) ->
     IO ()
 ownerLifecycle
     store
@@ -148,37 +163,41 @@ ownerLifecycle
     healthy
     stopping
     pendingMutationReleases
-    pendingHumanRequestCleanups =
-    ( withAsync
-        ( ownerHeartbeatLoop
-            store
-            lease
-            healthy
-            pendingMutationReleases
-            pendingHumanRequestCleanups
+    pendingMutationReleaseCursor
+    pendingHumanRequestCleanups
+    pendingHumanRequestCleanupCursor =
+        ( withAsync
+            ( ownerHeartbeatLoop
+                store
+                lease
+                healthy
+                pendingMutationReleases
+                pendingMutationReleaseCursor
+                pendingHumanRequestCleanups
+                pendingHumanRequestCleanupCursor
+            )
+            \heartbeat ->
+                void $
+                    race
+                        ( atomically do
+                            shouldStop <- readTVar stopping
+                            check shouldStop
+                        )
+                        (void (waitCatch heartbeat))
         )
-        \heartbeat ->
-            void $
-                race
-                    ( atomically do
-                        shouldStop <- readTVar stopping
-                        check shouldStop
-                    )
-                    (void (waitCatch heartbeat))
-    )
-        `finally` do
-            atomically (writeTVar healthy False)
-            retireTurnStoreOwnerLease lease
+            `finally` do
+                atomically (writeTVar healthy False)
+                retireTurnStoreOwnerLease lease
 
 retireTurnStoreOwnerLease ::
     ServerTurnStore.ServerTurnOwnerLease ->
     IO ()
 retireTurnStoreOwnerLease lease =
     ( void $
-            timeout ownerHeartbeatTimeoutMicroseconds $
-                ServerTurnStore.releaseServerTurnOwner
-                    lease
-        )
+        timeout ownerHeartbeatTimeoutMicroseconds $
+            ServerTurnStore.releaseServerTurnOwner
+                lease
+    )
         `finally` ServerTurnStore.abandonServerTurnOwnerLease
             lease
 
@@ -195,42 +214,50 @@ ownerHeartbeatLoop ::
     ServerTurnStore.ServerTurnOwnerLease ->
     TVar Bool ->
     TVar (Map MutationReleaseKey ServerTurnStore.ServerSessionMutation) ->
+    TVar (Maybe MutationReleaseKey) ->
     TVar (Map HumanRequestCleanupKey PendingHumanRequestCleanup) ->
+    TVar (Maybe HumanRequestCleanupKey) ->
     IO ()
 ownerHeartbeatLoop
     store
     lease
     healthy
     pendingMutationReleases
-    pendingHumanRequestCleanups = do
-    threadDelay ownerHeartbeatIntervalMicroseconds
-    result <-
-        tryAny do
-            heartbeat <- heartbeatOwnerWithinDeadline lease
-            case heartbeat of
-                Left err -> pure (Left err)
-                Right () -> do
-                    retryPendingMutationReleases
-                        store
-                        pendingMutationReleases
-                    retryPendingHumanRequestCleanups
-                        store
-                        pendingHumanRequestCleanups
-                    pure (Right ())
-    case result of
-        Right (Right ()) ->
-            ownerHeartbeatLoop
-                store
-                lease
-                healthy
-                pendingMutationReleases
-                pendingHumanRequestCleanups
-        _ -> do
-            -- Losing the connection-lifetime fence is irreversible for this
-            -- process identity. Never try to revive it after another server
-            -- may have recovered its turns.
-            atomically (writeTVar healthy False)
-            ServerTurnStore.abandonServerTurnOwnerLease lease
+    pendingMutationReleaseCursor
+    pendingHumanRequestCleanups
+    pendingHumanRequestCleanupCursor = do
+        threadDelay ownerHeartbeatIntervalMicroseconds
+        result <-
+            tryAny do
+                heartbeat <- heartbeatOwnerWithinDeadline lease
+                case heartbeat of
+                    Left err -> pure (Left err)
+                    Right () -> do
+                        retryPendingMutationReleases
+                            store
+                            pendingMutationReleases
+                            pendingMutationReleaseCursor
+                        retryPendingHumanRequestCleanups
+                            store
+                            pendingHumanRequestCleanups
+                            pendingHumanRequestCleanupCursor
+                        pure (Right ())
+        case result of
+            Right (Right ()) ->
+                ownerHeartbeatLoop
+                    store
+                    lease
+                    healthy
+                    pendingMutationReleases
+                    pendingMutationReleaseCursor
+                    pendingHumanRequestCleanups
+                    pendingHumanRequestCleanupCursor
+            _ -> do
+                -- Losing the connection-lifetime fence is irreversible for this
+                -- process identity. Never try to revive it after another server
+                -- may have recovered its turns.
+                atomically (writeTVar healthy False)
+                ServerTurnStore.abandonServerTurnOwnerLease lease
 
 heartbeatOwnerWithinDeadline ::
     ServerTurnStore.ServerTurnOwnerLease ->
@@ -636,9 +663,8 @@ withTurnStoreOwnerActionFence owner action = mask \restore ->
                         fence
                         action
                     )
-                    `finally`
-                        ServerTurnStore.closeServerTurnOwnerActionFence
-                            fence
+                    `finally` ServerTurnStore.closeServerTurnOwnerActionFence
+                        fence
 
 runWhileOwnerAndActionFenceHealthy ::
     TurnStoreOwner ->
@@ -703,12 +729,14 @@ requestSessionMutationRelease store owner mutation =
 retryPendingMutationReleases ::
     Store ->
     TVar (Map MutationReleaseKey ServerTurnStore.ServerSessionMutation) ->
+    TVar (Maybe MutationReleaseKey) ->
     IO ()
-retryPendingMutationReleases store pending = do
+retryPendingMutationReleases store pending cursor = do
     mutations <-
-        take maximumMutationReleaseBatch
-            . Map.elems
-            <$> readTVarIO pending
+        takeRotatingPendingBatch
+            maximumMutationReleaseBatch
+            pending
+            cursor
     mapConcurrently_
         (attemptPendingMutationRelease store pending)
         mutations
@@ -781,12 +809,14 @@ requestHumanRequestCleanup store owner record requestId disposition =
 retryPendingHumanRequestCleanups ::
     Store ->
     TVar (Map HumanRequestCleanupKey PendingHumanRequestCleanup) ->
+    TVar (Maybe HumanRequestCleanupKey) ->
     IO ()
-retryPendingHumanRequestCleanups store pending = do
+retryPendingHumanRequestCleanups store pending cursor = do
     cleanups <-
-        take maximumHumanRequestCleanupBatch
-            . Map.elems
-            <$> readTVarIO pending
+        takeRotatingPendingBatch
+            maximumHumanRequestCleanupBatch
+            pending
+            cursor
     mapConcurrently_
         (void . attemptPendingHumanRequestCleanup store pending)
         cleanups
@@ -865,6 +895,35 @@ humanRequestCleanupKey cleanup =
 
 maximumHumanRequestCleanupBatch :: Int
 maximumHumanRequestCleanupBatch = 4
+
+takeRotatingPendingBatch ::
+    (Ord key) =>
+    Int ->
+    TVar (Map key value) ->
+    TVar (Maybe key) ->
+    IO [value]
+takeRotatingPendingBatch limit pending cursor =
+    atomically do
+        entries <- readTVar pending
+        previous <- readTVar cursor
+        let ordered =
+                case previous of
+                    Nothing -> Map.toAscList entries
+                    Just previousKey ->
+                        let (before, atPrevious, after) =
+                                Map.splitLookup previousKey entries
+                            previousEntry =
+                                maybe [] (\value -> [(previousKey, value)]) atPrevious
+                         in Map.toAscList after
+                                <> Map.toAscList before
+                                <> previousEntry
+            selected = take limit ordered
+            nextCursor =
+                case reverse selected of
+                    [] -> Nothing
+                    (key, _) : _ -> Just key
+        writeTVar cursor nextCursor
+        pure (snd <$> selected)
 
 requestTurnCancellation ::
     Store ->
@@ -979,6 +1038,8 @@ reserveTurn store tenantId instanceId boundary sessionId clientRequestId prompt 
                             "the session has an active mutation"
                         , apiErrorDetails = Nothing
                         }
+            Right ServerTurnStore.ServerTurnSessionMissing ->
+                Left notFoundApiError
             Right ServerTurnStore.ServerTurnOwnerUnavailable ->
                 Left unhealthyOwnerApiError
             Right (ServerTurnStore.ServerTurnIdempotencyConflict _) ->
@@ -1085,10 +1146,12 @@ finishStoredTurn store instanceId record finishedAt outcome = do
         Left err -> pure (Left err)
         Right (Just stored) ->
             pure
-                (Right
-                    (storedTurnRecord
+                ( Right
+                    ( storedTurnRecord
                         record.turnRecordBoundary
-                        stored))
+                        stored
+                    )
+                )
         Right Nothing ->
             ServerTurnStore.loadServerTurn
                 (trustedPool store)
@@ -1102,9 +1165,10 @@ finishStoredTurn store instanceId record finishedAt outcome = do
                                 stored.storedServerTurnStatus
                             ) ->
                             Right
-                                (storedTurnRecord
+                                ( storedTurnRecord
                                     record.turnRecordBoundary
-                                    stored)
+                                    stored
+                                )
                     _ ->
                         Left
                             ( StoreDataError

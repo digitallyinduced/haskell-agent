@@ -1,28 +1,29 @@
 module Agent.Server.SupervisorSpec (spec) where
 
+import Agent.Server.Runtime.TurnStore (takeRotatingPendingBatch)
 import Agent.Server.Supervisor
 import Agent.Server.Types
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async
-    ( async
-    , wait
-    , withAsync
-    )
-import Control.Concurrent.MVar
-    ( MVar
-    , newEmptyMVar
-    , putMVar
-    , takeMVar
-    , tryPutMVar
-    )
-import Control.Concurrent.STM
-    ( atomically
-    , modifyTVar'
-    , newTVarIO
-    , readTBQueue
-    , readTVar
-    , writeTVar
-    )
+import Control.Concurrent.Async (
+    async,
+    wait,
+    withAsync,
+ )
+import Control.Concurrent.MVar (
+    MVar,
+    newEmptyMVar,
+    putMVar,
+    takeMVar,
+    tryPutMVar,
+ )
+import Control.Concurrent.STM (
+    atomically,
+    modifyTVar',
+    newTVarIO,
+    readTBQueue,
+    readTVar,
+    writeTVar,
+ )
 import Control.Exception.Safe (bracket, finally)
 import Control.Monad (forM_, void)
 import Data.Aeson (object)
@@ -36,6 +37,26 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "turn supervisor" do
+    it "rotates bounded durable cleanup retry batches" do
+        let entries :: Map.Map Int Int
+            entries =
+                Map.fromList
+                    [ (1, 1)
+                    , (2, 2)
+                    , (3, 3)
+                    , (4, 4)
+                    , (5, 5)
+                    ]
+        pending <- newTVarIO entries
+        cursor <- newTVarIO Nothing
+        takeRotatingPendingBatch 4 pending cursor
+            `shouldReturn` [1, 2, 3, 4]
+        takeRotatingPendingBatch 4 pending cursor
+            `shouldReturn` [5, 1, 2, 3]
+        atomically (modifyTVar' pending (Map.delete 3))
+        takeRotatingPendingBatch 4 pending cursor
+            `shouldReturn` [4, 5, 1, 2]
+
     it "enforces one active turn per session" do
         release <- newEmptyMVar
         let runner _ _ = takeMVar release >> pure (Right testOutput)
@@ -63,13 +84,16 @@ spec = describe "turn supervisor" do
                 { supervisorMaxConcurrentTurns = 2
                 , supervisorMaxConcurrentTurnsPerTenant = 2
                 }
-            runner \supervisor -> do
+            runner
+            \supervisor -> do
                 first <-
-                    submitTurn supervisor
+                    submitTurn
+                        supervisor
                         (turnSpecFor tenantA "same-session")
                 first `shouldSatisfy` isRight
                 second <-
-                    submitTurn supervisor
+                    submitTurn
+                        supervisor
                         (turnSpecFor tenantB "same-session")
                 second `shouldSatisfy` isRight
                 takeWithin firstStarted
@@ -205,12 +229,14 @@ spec = describe "turn supervisor" do
                         >> fail "unreachable"
                 Right accepted -> pure accepted
             takeWithin started
-            cancelled <- timeout
-                (2 * 1000 * 1000)
-                (cancelTurn
-                    supervisor
-                    localAccessBoundary
-                    turn.turnRecordId)
+            cancelled <-
+                timeout
+                    (2 * 1000 * 1000)
+                    ( cancelTurn
+                        supervisor
+                        localAccessBoundary
+                        turn.turnRecordId
+                    )
             case cancelled of
                 Just (Right record) ->
                     record.turnRecordStatus `shouldBe` TurnCancelled
@@ -238,14 +264,14 @@ spec = describe "turn supervisor" do
                         | otherwise =
                             (secondStarted, secondCancelled, releaseSecond)
                 (putMVar started () >> takeMVar never)
-                    `finally`
-                        (putMVar cancelled () >> takeMVar release)
+                    `finally` (putMVar cancelled () >> takeMVar release)
         withSupervisorConfig
             defaultConfig
                 { supervisorMaxConcurrentTurns = 2
                 , supervisorMaxConcurrentTurnsPerTenant = 2
                 }
-            runner \supervisor -> do
+            runner
+            \supervisor -> do
                 void (submitTurn supervisor (turnSpec "session-a"))
                 void (submitTurn supervisor (turnSpec "session-b"))
                 takeWithin firstStarted
@@ -253,7 +279,7 @@ spec = describe "turn supervisor" do
 
                 withAsync (closeSupervisor supervisor) \shutdown ->
                     finally
-                        (do
+                        ( do
                             cancelledTogether <-
                                 timeout 500_000 do
                                     takeMVar firstCancelled
@@ -264,7 +290,7 @@ spec = describe "turn supervisor" do
 
                             cancelledTogether `shouldBe` Just ()
                         )
-                        (do
+                        ( do
                             void (tryPutMVar releaseFirst ())
                             void (tryPutMVar releaseSecond ())
                         )
@@ -283,11 +309,13 @@ spec = describe "turn supervisor" do
                     , turnPersistenceTerminal = \record finishedAt outcome -> do
                         putMVar terminal (record.turnRecordId, outcome)
                         pure
-                            (Right
-                                (testTerminalRecord
+                            ( Right
+                                ( testTerminalRecord
                                     finishedAt
                                     outcome
-                                    record))
+                                    record
+                                )
+                            )
                     , turnPersistenceShouldCancel = \_ ->
                         pure (Right False)
                     }
@@ -364,8 +392,9 @@ spec = describe "turn supervisor" do
         terminal <- newEmptyMVar
         failControlCheck <- newIORef False
         let runner control _ = do
-                _ <- control.turnControlRegisterCancel
-                    (void (tryPutMVar cancellationDelivered ()))
+                _ <-
+                    control.turnControlRegisterCancel
+                        (void (tryPutMVar cancellationDelivered ()))
                 putMVar started ()
                 _ <- takeMVar never
                 pure (Right testOutput)
@@ -484,11 +513,13 @@ spec = describe "turn supervisor" do
                             else do
                                 putMVar persisted ()
                                 pure
-                                    (Right
-                                        (testTerminalRecord
+                                    ( Right
+                                        ( testTerminalRecord
                                             finishedAt
                                             outcome
-                                            record))
+                                            record
+                                        )
+                                    )
                     , turnPersistenceShouldCancel = \_ ->
                         pure (Right False)
                     }
@@ -529,7 +560,8 @@ spec = describe "turn supervisor" do
                 { supervisorMaxConcurrentTurns = 2
                 , supervisorMaxConcurrentTurnsPerTenant = 2
                 }
-            runner \supervisor -> do
+            runner
+            \supervisor -> do
                 void (submitTurn supervisor (turnSpec "session-a"))
                 takeWithin firstStarted
                 void (submitTurn supervisor (turnSpec "session-b"))
@@ -539,12 +571,14 @@ spec = describe "turn supervisor" do
     it "waits for and resolves structured human input" do
         resolved <- newEmptyMVar
         let runner control _ = do
-                answer <- control.turnControlRequestInput HumanRequestSpec
-                    { humanRequestSpecKind = PlanExitRequest
-                    , humanRequestSpecPrompt = "Approve?"
-                    , humanRequestSpecOptions =
-                        ["approve", "request_changes", "cancel"]
-                    }
+                answer <-
+                    control.turnControlRequestInput
+                        HumanRequestSpec
+                            { humanRequestSpecKind = PlanExitRequest
+                            , humanRequestSpecPrompt = "Approve?"
+                            , humanRequestSpecOptions =
+                                ["approve", "request_changes", "cancel"]
+                            }
                 putMVar resolved answer
                 pure (Right testOutput)
         withSupervisor runner \supervisor -> do
@@ -560,8 +594,8 @@ spec = describe "turn supervisor" do
                     }
                 `shouldReturn` Right request
             takeWithin resolved
-                `shouldReturn`
-                    Right HumanResponse
+                `shouldReturn` Right
+                    HumanResponse
                         { humanResponseDecision = "request_changes"
                         , humanResponseValue = Just "add tests"
                         }
@@ -570,21 +604,21 @@ spec = describe "turn supervisor" do
         result <- newEmptyMVar
         let runner control _ = do
                 answer <-
-                    control.turnControlRequestInput HumanRequestSpec
-                        { humanRequestSpecKind = PlanQuestionRequest
-                        , humanRequestSpecPrompt = "Choose"
-                        , humanRequestSpecOptions =
-                            replicate
-                                100
-                                (Text.replicate (16 * 1024) "x")
-                        }
+                    control.turnControlRequestInput
+                        HumanRequestSpec
+                            { humanRequestSpecKind = PlanQuestionRequest
+                            , humanRequestSpecPrompt = "Choose"
+                            , humanRequestSpecOptions =
+                                replicate
+                                    100
+                                    (Text.replicate (16 * 1024) "x")
+                            }
                 putMVar result answer
                 pure (Right testOutput)
         withSupervisor runner \supervisor -> do
             void (submitTurn supervisor (turnSpec "session-a"))
             takeWithin result
-                `shouldReturn`
-                    Left "human request exceeds the public size limit"
+                `shouldReturn` Left "human request exceeds the public size limit"
             listHumanRequests supervisor localAccessBoundary Nothing
                 `shouldReturn` Right []
 
@@ -659,11 +693,13 @@ spec = describe "turn supervisor" do
                             pure (Right ())
                     }
             ownerRunner control _ = do
-                answer <- control.turnControlRequestInput HumanRequestSpec
-                    { humanRequestSpecKind = ToolApprovalRequest
-                    , humanRequestSpecPrompt = "Run the tool?"
-                    , humanRequestSpecOptions = ["approve", "cancel"]
-                    }
+                answer <-
+                    control.turnControlRequestInput
+                        HumanRequestSpec
+                            { humanRequestSpecKind = ToolApprovalRequest
+                            , humanRequestSpecPrompt = "Run the tool?"
+                            , humanRequestSpecOptions = ["approve", "cancel"]
+                            }
                 putMVar resolved answer
                 pure (Right testOutput)
             newWith runner =
@@ -692,12 +728,11 @@ spec = describe "turn supervisor" do
                                 }
                             `shouldReturn` Right request
                         takeWithin resolved
-                            `shouldReturn`
-                                Right
-                                    HumanResponse
-                                        { humanResponseDecision = "approve"
-                                        , humanResponseValue = Nothing
-                                        }
+                            `shouldReturn` Right
+                                HumanResponse
+                                    { humanResponseDecision = "approve"
+                                    , humanResponseValue = Nothing
+                                    }
                         atomically (readTVar sharedRequests)
                             `shouldReturn` Map.empty
 
@@ -722,10 +757,11 @@ spec = describe "turn supervisor" do
             subscription.subscriptionClose
 
     it "bounds event subscribers globally and by tenant" do
-        let config = defaultConfig
-                { supervisorMaxEventSubscribers = 2
-                , supervisorMaxEventSubscribersPerTenant = 1
-                }
+        let config =
+                defaultConfig
+                    { supervisorMaxEventSubscribers = 2
+                    , supervisorMaxEventSubscribersPerTenant = 1
+                    }
             tenantA = testBoundary tenantAId (Just "gateway-a")
             tenantAOtherGateway =
                 testBoundary tenantAId (Just "gateway-b")
@@ -759,16 +795,25 @@ spec = describe "turn supervisor" do
                 | otherwise =
                     putMVar staleRan () >> pure (Right testOutput)
         bracket
-            (newSupervisorWithBoundaryGuard
+            ( newSupervisorWithBoundaryGuard
                 defaultConfig
-                    { supervisorMaxConcurrentTurns = 1 }
+                    { supervisorMaxConcurrentTurns = 1
+                    }
                 guard
-                runner)
-            closeSupervisor \supervisor -> do
-                void (submitTurn supervisor
-                    (turnSpecFor tenantA "first"))
-                void (submitTurn supervisor
-                    (turnSpecFor tenantA "stale"))
+                runner
+            )
+            closeSupervisor
+            \supervisor -> do
+                void
+                    ( submitTurn
+                        supervisor
+                        (turnSpecFor tenantA "first")
+                    )
+                void
+                    ( submitTurn
+                        supervisor
+                        (turnSpecFor tenantA "stale")
+                    )
                 _ <- takeMVar current
                 putMVar current tenantB
                 putMVar releaseFirst ()
@@ -776,30 +821,31 @@ spec = describe "turn supervisor" do
                 timeout 50000 (takeMVar staleRan)
                     `shouldReturn` Nothing
 
-withSupervisor
-    :: TurnRunner
-    -> (Supervisor -> IO value)
-    -> IO value
+withSupervisor ::
+    TurnRunner ->
+    (Supervisor -> IO value) ->
+    IO value
 withSupervisor = withSupervisorConfig defaultConfig
 
-withSupervisorConfig
-    :: SupervisorConfig
-    -> TurnRunner
-    -> (Supervisor -> IO value)
-    -> IO value
+withSupervisorConfig ::
+    SupervisorConfig ->
+    TurnRunner ->
+    (Supervisor -> IO value) ->
+    IO value
 withSupervisorConfig config runner =
     bracket (newSupervisor config runner) closeSupervisor
 
 defaultConfig :: SupervisorConfig
-defaultConfig = SupervisorConfig
-    { supervisorMaxConcurrentTurns = 1
-    , supervisorMaxConcurrentTurnsPerTenant = 1
-    , supervisorMaxQueuedTurns = 10
-    , supervisorMaxQueuedTurnsPerTenant = 10
-    , supervisorMaxEventSubscribers = 10
-    , supervisorMaxEventSubscribersPerTenant = 5
-    , supervisorEventReplayLimit = 2
-    }
+defaultConfig =
+    SupervisorConfig
+        { supervisorMaxConcurrentTurns = 1
+        , supervisorMaxConcurrentTurnsPerTenant = 1
+        , supervisorMaxQueuedTurns = 10
+        , supervisorMaxQueuedTurnsPerTenant = 10
+        , supervisorMaxEventSubscribers = 10
+        , supervisorMaxEventSubscribersPerTenant = 5
+        , supervisorEventReplayLimit = 2
+        }
 
 turnSpec :: Text -> TurnSpec
 turnSpec = turnSpecFor localAccessBoundary
@@ -864,7 +910,8 @@ awaitRequest supervisor = go (100 :: Int)
             listHumanRequests
                 supervisor
                 localAccessBoundary
-                Nothing >>= \case
+                Nothing
+                >>= \case
                     Right (request : _) -> pure request
                     Right [] -> threadDelay 10000 >> go (attempts - 1)
                     Left err ->
@@ -883,7 +930,7 @@ isRight = \case
     Right _ -> True
     Left _ -> False
 
-expectRight :: Show left => Either left right -> IO right
+expectRight :: (Show left) => Either left right -> IO right
 expectRight = \case
     Right value -> pure value
     Left err ->

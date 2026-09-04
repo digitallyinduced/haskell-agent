@@ -1,25 +1,25 @@
 module Agent.Server.ApplicationSpec (spec) where
 
-import Agent.Server.Application
-    ( ApplicationConfig (..)
-    , newApplication
-    )
+import Agent.Server.Application (
+    ApplicationConfig (..),
+    newApplication,
+ )
 import Agent.Server.Auth
-import Agent.Server.Backend (Backend(..), SessionMutationLease(..))
+import Agent.Server.Backend (Backend (..), SessionMutationLease (..))
 import Agent.Server.Supervisor
 import Agent.Server.Types
 import Control.Concurrent.Async (cancel, wait, waitCatch, withAsync)
-import Control.Concurrent.MVar
-    ( MVar
-    , modifyMVar
-    , modifyMVar_
-    , newEmptyMVar
-    , newMVar
-    , putMVar
-    , readMVar
-    , takeMVar
-    , tryPutMVar
-    )
+import Control.Concurrent.MVar (
+    MVar,
+    modifyMVar,
+    modifyMVar_,
+    newEmptyMVar,
+    newMVar,
+    putMVar,
+    readMVar,
+    takeMVar,
+    tryPutMVar,
+ )
 import Control.Exception.Safe (bracket, finally)
 import Control.Monad (void)
 import Data.Aeson (Value (..), eitherDecode, object, (.=))
@@ -31,37 +31,37 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Time.Clock (getCurrentTime)
-import Network.HTTP.Types
-    ( Header
-    , Method
-    , methodGet
-    , methodPatch
-    , methodPost
-    , status200
-    , status202
-    , status400
-    , status403
-    , status404
-    , status409
-    , status413
-    , status415
-    , status422
-    , status503
-    )
-import Network.Wai
-    ( Application
-    , defaultRequest
-    , pathInfo
-    , queryString
-    , requestHeaders
-    , requestMethod
-    )
-import Network.Wai.Test
-    ( SRequest (..)
-    , SResponse (..)
-    , runSession
-    , srequest
-    )
+import Network.HTTP.Types (
+    Header,
+    Method,
+    methodGet,
+    methodPatch,
+    methodPost,
+    status200,
+    status202,
+    status400,
+    status403,
+    status404,
+    status409,
+    status413,
+    status415,
+    status422,
+    status503,
+ )
+import Network.Wai (
+    Application,
+    defaultRequest,
+    pathInfo,
+    queryString,
+    requestHeaders,
+    requestMethod,
+ )
+import Network.Wai.Test (
+    SRequest (..),
+    SResponse (..),
+    runSession,
+    srequest,
+ )
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -69,31 +69,36 @@ spec :: Spec
 spec = describe "agent-server WAI application" do
     it "rejects requests without the strict loopback Host" do
         withApplication immediateRunner \application -> do
-            response <- perform application
-                methodGet
-                ["healthz"]
-                []
-                ""
+            response <-
+                perform
+                    application
+                    methodGet
+                    ["healthz"]
+                    []
+                    ""
             response.simpleStatus `shouldBe` status403
             LBS8.unpack response.simpleBody
                 `shouldContain` "\"requestId\":\""
 
     it "keeps allowed CORS headers on authentication failures" do
-        let auth = AuthConfig
-                { authMode =
-                    LoopbackHostAuth
-                        (Set.fromList ["127.0.0.1:4096"])
-                , authCorsOrigins =
-                    Set.fromList ["https://client.example"]
-                }
+        let auth =
+                AuthConfig
+                    { authMode =
+                        LoopbackHostAuth
+                            (Set.fromList ["127.0.0.1:4096"])
+                    , authCorsOrigins =
+                        Set.fromList ["https://client.example"]
+                    }
         withApplicationAuth auth immediateRunner \application -> do
-            response <- perform application
-                methodGet
-                ["healthz"]
-                [ ("Host", "attacker.example")
-                , ("Origin", "https://client.example")
-                ]
-                ""
+            response <-
+                perform
+                    application
+                    methodGet
+                    ["healthz"]
+                    [ ("Host", "attacker.example")
+                    , ("Origin", "https://client.example")
+                    ]
+                    ""
             response.simpleStatus `shouldBe` status403
             lookup
                 "Access-Control-Allow-Origin"
@@ -102,11 +107,13 @@ spec = describe "agent-server WAI application" do
 
     it "serves health and attaches a request id" do
         withApplication immediateRunner \application -> do
-            response <- perform application
-                methodGet
-                ["healthz"]
-                validHeaders
-                ""
+            response <-
+                perform
+                    application
+                    methodGet
+                    ["healthz"]
+                    validHeaders
+                    ""
             response.simpleStatus `shouldBe` status200
             lookup "X-Request-ID" response.simpleHeaders
                 `shouldSatisfy` (/= Nothing)
@@ -124,22 +131,26 @@ spec = describe "agent-server WAI application" do
 
     it "rejects media types that only prefix-match application/json" do
         withApplication immediateRunner \application -> do
-            response <- perform application
-                methodPost
-                ["v1", "sessions"]
-                [ ("Host", "127.0.0.1:4096")
-                , ("Content-Type", "application/json-patch")
-                ]
-                "{}"
+            response <-
+                perform
+                    application
+                    methodPost
+                    ["v1", "sessions"]
+                    [ ("Host", "127.0.0.1:4096")
+                    , ("Content-Type", "application/json-patch")
+                    ]
+                    "{}"
             response.simpleStatus `shouldBe` status415
 
     it "rejects request fields outside the published schema" do
         withApplication immediateRunner \application -> do
-            response <- perform application
-                methodPost
-                ["v1", "sessions"]
-                validHeaders
-                "{\"unexpected\":true}"
+            response <-
+                perform
+                    application
+                    methodPost
+                    ["v1", "sessions"]
+                    validHeaders
+                    "{\"unexpected\":true}"
             response.simpleStatus `shouldBe` status400
 
     it "filters pending human requests by turn id" do
@@ -159,20 +170,23 @@ spec = describe "agent-server WAI application" do
         withBackendApplication backend immediateRunner \application -> do
             response <-
                 runSession
-                    (srequest
-                        (SRequest
+                    ( srequest
+                        ( SRequest
                             defaultRequest
                                 { requestMethod = methodGet
                                 , pathInfo = ["v1", "requests"]
                                 , queryString =
-                                    [ ( "turnId"
-                                      , Just
+                                    [
+                                        ( "turnId"
+                                        , Just
                                             "01999999-1111-7111-8111-111111111120"
-                                      )
+                                        )
                                     ]
                                 , requestHeaders = validHeaders
                                 }
-                            ""))
+                            ""
+                        )
+                    )
                     application
             response.simpleStatus `shouldBe` status200
             takeMVar observed `shouldReturn` Just expectedTurnId
@@ -201,9 +215,11 @@ spec = describe "agent-server WAI application" do
                     { backendReserveTurn =
                         \boundary _ _ _ _ _ ->
                             pure
-                                (Right
-                                    (TurnReservationExistingOwned
-                                        (reserved boundary)))
+                                ( Right
+                                    ( TurnReservationExistingOwned
+                                        (reserved boundary)
+                                    )
+                                )
                     }
             runner _ _ =
                 putMVar ran () >> pure (Right successfulOutput)
@@ -431,13 +447,45 @@ spec = describe "agent-server WAI application" do
             LBS8.unpack response.simpleBody
                 `shouldContain` "\"clientRequestId\":"
 
+    it "returns 404 when a session disappears before turn reservation" do
+        ran <- newEmptyMVar
+        let backend =
+                fakeBackend
+                    { backendReserveTurn =
+                        \_ _ _ _ _ _ ->
+                            pure . Left $
+                                ApiError
+                                    { apiErrorStatus = 404
+                                    , apiErrorCode = "not_found"
+                                    , apiErrorMessage = "resource not found"
+                                    , apiErrorDetails = Nothing
+                                    }
+                    }
+            runner _ _ =
+                putMVar ran () >> pure (Right successfulOutput)
+        withBackendApplication backend runner \application -> do
+            response <-
+                perform
+                    application
+                    methodPost
+                    ["v1", "sessions", "session-a", "turns"]
+                    validHeaders
+                    "{\"input\":\"hello\"}"
+            response.simpleStatus `shouldBe` status404
+            LBS8.unpack response.simpleBody
+                `shouldContain` "\"code\":\"not_found\""
+            timeout (100 * 1000) (takeMVar ran)
+                `shouldReturn` Nothing
+
     it "rejects a non-atomic multi-field session patch" do
         withApplication immediateRunner \application -> do
-            response <- perform application
-                methodPatch
-                ["v1", "sessions", "session-a"]
-                validHeaders
-                "{\"title\":\"new\",\"archived\":true}"
+            response <-
+                perform
+                    application
+                    methodPatch
+                    ["v1", "sessions", "session-a"]
+                    validHeaders
+                    "{\"title\":\"new\",\"archived\":true}"
             response.simpleStatus `shouldBe` status422
 
     it "returns 409 for mutation while a session turn is active" do
@@ -457,11 +505,13 @@ spec = describe "agent-server WAI application" do
                     "{\"clientRequestId\":\"01999999-1111-7111-8111-111111111111\",\"input\":\"hello\"}"
             created.simpleStatus `shouldBe` status202
             takeMVar started
-            patched <- perform application
-                methodPatch
-                ["v1", "sessions", "session-a"]
-                validHeaders
-                "{\"title\":\"new title\"}"
+            patched <-
+                perform
+                    application
+                    methodPatch
+                    ["v1", "sessions", "session-a"]
+                    validHeaders
+                    "{\"title\":\"new title\"}"
             patched.simpleStatus `shouldBe` status409
             putMVar release ()
 
@@ -810,12 +860,13 @@ withApplication ::
     IO value
 withApplication = withApplicationAuth auth
   where
-    auth = AuthConfig
-        { authMode =
-            LoopbackHostAuth
-                (Set.fromList ["127.0.0.1:4096"])
-        , authCorsOrigins = Set.empty
-        }
+    auth =
+        AuthConfig
+            { authMode =
+                LoopbackHostAuth
+                    (Set.fromList ["127.0.0.1:4096"])
+            , authCorsOrigins = Set.empty
+            }
 
 withDurableApplication ::
     TurnRunner ->
@@ -928,15 +979,16 @@ withApplicationAuth auth runner action =
                     supervisor
             action application
   where
-    supervisorConfig = SupervisorConfig
-        { supervisorMaxConcurrentTurns = 1
-        , supervisorMaxConcurrentTurnsPerTenant = 1
-        , supervisorMaxQueuedTurns = 10
-        , supervisorMaxQueuedTurnsPerTenant = 10
-        , supervisorMaxEventSubscribers = 10
-        , supervisorMaxEventSubscribersPerTenant = 5
-        , supervisorEventReplayLimit = 10
-        }
+    supervisorConfig =
+        SupervisorConfig
+            { supervisorMaxConcurrentTurns = 1
+            , supervisorMaxConcurrentTurnsPerTenant = 1
+            , supervisorMaxQueuedTurns = 10
+            , supervisorMaxQueuedTurnsPerTenant = 10
+            , supervisorMaxEventSubscribers = 10
+            , supervisorMaxEventSubscribersPerTenant = 5
+            , supervisorEventReplayLimit = 10
+            }
 
 fakeBackend :: Backend
 fakeBackend =
@@ -971,13 +1023,15 @@ fakeBackend =
         , backendReserveSessionMutation =
             \_ _ _ ->
                 pure
-                    (Right
-                        (Just
+                    ( Right
+                        ( Just
                             SessionMutationLease
                                 { runSessionMutationLease =
                                     \action -> Right <$> action
                                 , releaseSessionMutationLease = pure ()
-                                }))
+                                }
+                        )
+                    )
         , backendReserveTurn =
             \boundary sessionId clientRequestId _ turnId createdAt ->
                 pure . Right . TurnReservationCreated $
@@ -1001,9 +1055,10 @@ fakeBackend =
         , backendRunTurn = immediateRunner
         }
   where
-    sessionValue = object
-        [ "id" .= ("session-a" :: String)
-        ]
+    sessionValue =
+        object
+            [ "id" .= ("session-a" :: String)
+            ]
 
 data TestStoredTurn = TestStoredTurn
     { testStoredInput :: !Text
@@ -1129,9 +1184,9 @@ durableBackend ledger terminal runner =
                                 }
                     updateStoredTurn ledger record.turnRecordId \entry ->
                         entry
-                                { testStoredRecord = canonical
-                                , testStoredOutput = output
-                                }
+                            { testStoredRecord = canonical
+                            , testStoredOutput = output
+                            }
                     void (tryPutMVar terminal ())
                     pure (Right canonical)
                 , turnPersistenceShouldCancel = \_ ->
@@ -1184,23 +1239,25 @@ successfulOutput =
         , turnExecutionCompletion = TurnCompletionComplete
         }
 
-perform
-    :: Application
-    -> Method
-    -> [Text]
-    -> [Header]
-    -> LBS8.ByteString
-    -> IO SResponse
+perform ::
+    Application ->
+    Method ->
+    [Text] ->
+    [Header] ->
+    LBS8.ByteString ->
+    IO SResponse
 perform application method path headers body =
     runSession
-        (srequest
-            (SRequest
+        ( srequest
+            ( SRequest
                 defaultRequest
                     { requestMethod = method
                     , pathInfo = path
                     , requestHeaders = headers
                     }
-                body))
+                body
+            )
+        )
         application
 
 responseTurnId :: SResponse -> IO Text

@@ -5,24 +5,28 @@
 
 module Agent.Store.Postgres.ServerTurnSpec (spec) where
 
-import Agent.Store.Postgres
-    ( StoreError (..)
-    , closeStore
-    , defaultManagedPostgresConfig
-    , openStore
-    , trustedPool
-    )
-import Agent.Store.Postgres.Connection
-    ( StorePool
-    , closeStoreConnection
-    , openStoreConnection
-    , withConnectionSession
-    , withSession
-    )
+import Agent.Store.Postgres (
+    StoreError (..),
+    closeStore,
+    defaultManagedPostgresConfig,
+    openStore,
+    trustedPool,
+ )
+import Agent.Store.Postgres.Connection (
+    StorePool,
+    closeStoreConnection,
+    openStoreConnection,
+    withConnectionSession,
+    withSession,
+ )
 import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import qualified Agent.Store.Postgres.ServerHumanRequest as HumanRequest
 import Agent.Store.Postgres.ServerTurn
-import Agent.Store.Postgres.Session (SessionMetadata (..), createSession)
+import Agent.Store.Postgres.Session (
+    SessionMetadata (..),
+    createSession,
+    deleteSession,
+ )
 import Control.Exception.Safe (bracket, finally)
 import Control.Monad (void)
 import Data.Text (Text)
@@ -119,8 +123,36 @@ exerciseTurnStoreWithOwners pool ownerOne ownerTwo = do
                     "01999999-0000-7000-8000-000000000010"
                 }
     wrongBoundaryReservation `shouldSatisfy` \case
-        Left (StoreDataError _) -> True
+        Right ServerTurnSessionMissing -> True
         _ -> False
+
+    let deletedSessionId = "session-deleted-before-turn"
+        deletedMutation =
+            mutation
+                { serverSessionMutationSessionId = deletedSessionId
+                }
+        deletedRequest =
+            request
+                { reserveServerTurnId =
+                    "01999999-0000-7000-8000-000000000023"
+                , reserveServerTurnSessionId = deletedSessionId
+                , reserveServerTurnClientRequestId =
+                    "01999999-0000-7000-8000-000000000024"
+                }
+    createSession
+        pool
+        (testMetadata createdAt)
+            { sessionMetadataKey = deletedSessionId
+            }
+        `shouldReturn` Right True
+    reserveServerSessionMutation pool deletedMutation
+        `shouldReturn` Right ServerSessionMutationReserved
+    deleteSession pool deletedSessionId (addUTCTime 1 createdAt)
+        `shouldReturn` Right True
+    releaseServerSessionMutation pool deletedMutation
+        `shouldReturn` Right ()
+    reserveServerTurn pool deletedRequest
+        `shouldReturn` Right ServerTurnSessionMissing
 
     shouldCancelServerTurn
         pool
