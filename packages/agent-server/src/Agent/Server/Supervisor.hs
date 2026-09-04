@@ -28,6 +28,7 @@ module Agent.Server.Supervisor
     , lookupTurn
     , listTurns
     , sessionHasActiveTurn
+    , withSessionCleanup
     , withSessionMutation
     , listHumanRequests
     , resolveHumanRequest
@@ -795,6 +796,18 @@ withSessionMutation
     -> IO (Either SessionMutationError value)
 withSessionMutation =
     withSessionReservation False
+
+-- | Wait behind a transient reservation before cleaning up durable state.
+--
+-- An admitted turn still rejects cleanup so its live execution wins.
+withSessionCleanup
+    :: Supervisor
+    -> AccessBoundary
+    -> Text
+    -> IO value
+    -> IO (Either SessionMutationError value)
+withSessionCleanup =
+    withSessionReservation True
 
 withSessionReservation
     :: Bool

@@ -98,6 +98,31 @@ spec = describe "turn supervisor" do
             putMVar release ()
             wait mutation `shouldReturn` Right ()
 
+    it "waits to clean up behind a transient session reservation" do
+        entered <- newEmptyMVar
+        release <- newEmptyMVar
+        cleaned <- newEmptyMVar
+        withSupervisor (\_ _ -> pure (Right testOutput)) \supervisor -> do
+            mutation <-
+                async $
+                    withSessionMutation
+                        supervisor
+                        localAccessBoundary
+                        "session-a"
+                        (putMVar entered () >> takeMVar release)
+            takeWithin entered
+            cleanup <-
+                async $
+                    withSessionCleanup
+                        supervisor
+                        localAccessBoundary
+                        "session-a"
+                        (putMVar cleaned ())
+            timeout 50000 (takeMVar cleaned) `shouldReturn` Nothing
+            putMVar release ()
+            wait mutation `shouldReturn` Right ()
+            wait cleanup `shouldReturn` Right ()
+
     it "admits a durable winner after a losing local mutation unwinds" do
         entered <- newEmptyMVar
         release <- newEmptyMVar

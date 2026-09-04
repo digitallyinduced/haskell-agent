@@ -331,6 +331,14 @@ exerciseTurnStoreWithOwners pool ownerOne ownerTwo = do
     HumanRequest.listServerHumanRequests pool boundary
         `shouldReturn` Right []
 
+    let terminalHumanRequest =
+            humanRequest
+                { HumanRequest.createServerHumanRequestId =
+                    "01999999-0000-7000-8000-000000000014"
+                }
+    HumanRequest.createServerHumanRequest pool terminalHumanRequest
+        `shouldReturn` Right True
+
     requestedCancellation <-
         requestServerTurnCancellation
             pool
@@ -377,6 +385,10 @@ exerciseTurnStoreWithOwners pool ownerOne ownerTwo = do
                 && not stored.storedServerTurnAssistantTextTruncated
                 && stored.storedServerTurnResponseId == Just "response-a"
         _ -> False
+    humanRequestExists
+        pool
+        terminalHumanRequest.createServerHumanRequestId
+        `shouldReturn` Right False
 
     -- Wall-clock staleness cannot revoke a process which still owns its
     -- connection-lifetime advisory lock. In particular, a paused mutation
@@ -426,6 +438,15 @@ exerciseTurnStoreWithOwners pool ownerOne ownerTwo = do
     interruptedReservation `shouldSatisfy` \case
         Right (ServerTurnReserved _) -> True
         _ -> False
+    let interruptedHumanRequest =
+            humanRequest
+                { HumanRequest.createServerHumanRequestId =
+                    "01999999-0000-7000-8000-000000000015"
+                , HumanRequest.createServerHumanRequestTurnId =
+                    interruptedRequest.reserveServerTurnId
+                }
+    HumanRequest.createServerHumanRequest pool interruptedHumanRequest
+        `shouldReturn` Right True
 
     -- Another live instance may inspect and heartbeat without changing a
     -- paused owner's turn, even though its timestamp is arbitrarily old.
@@ -508,6 +529,10 @@ exerciseTurnStoreWithOwners pool ownerOne ownerTwo = do
                     == Just
                         "agent server owner disconnected before the turn completed"
         _ -> False
+    humanRequestExists
+        pool
+        interruptedHumanRequest.createServerHumanRequestId
+        `shouldReturn` Right False
     replay <-
         reserveServerTurn
             pool
@@ -570,6 +595,36 @@ exerciseTurnStoreWithOwners pool ownerOne ownerTwo = do
             { serverSessionMutationOwnerInstanceId = instanceOne
             }
         `shouldReturn` Right ServerSessionMutationOwnerUnavailable
+
+    let releasedHumanRequest =
+            humanRequest
+                { HumanRequest.createServerHumanRequestId =
+                    "01999999-0000-7000-8000-000000000022"
+                , HumanRequest.createServerHumanRequestTurnId =
+                    recoveredRequest.reserveServerTurnId
+                , HumanRequest.createServerHumanRequestOwnerInstanceId =
+                    instanceTwo
+                }
+    HumanRequest.createServerHumanRequest pool releasedHumanRequest
+        `shouldReturn` Right True
+    releaseServerTurnOwner ownerTwo
+        `shouldReturn` Right ()
+    released <-
+        loadServerTurn
+            pool
+            boundary
+            recoveredRequest.reserveServerTurnId
+    released `shouldSatisfy` \case
+        Right (Just stored) ->
+            stored.storedServerTurnStatus == ServerTurnFailed
+                && stored.storedServerTurnError
+                    == Just
+                        "agent server stopped before the turn completed"
+        _ -> False
+    humanRequestExists
+        pool
+        releasedHumanRequest.createServerHumanRequestId
+        `shouldReturn` Right False
 
     listed <-
         listServerTurns
@@ -683,6 +738,21 @@ ageServerTurnOwnerStatement =
         \ WHERE instance_id = $1::uuid"
         (Encoders.param (Encoders.nonNullable Encoders.text))
         Decoders.noResult
+
+humanRequestExists :: StorePool -> Text -> IO (Either StoreError Bool)
+humanRequestExists pool requestId =
+    withSession pool $
+        Session.statement requestId humanRequestExistsStatement
+
+humanRequestExistsStatement :: Statement Text Bool
+humanRequestExistsStatement =
+    Statement.preparable
+        "SELECT EXISTS (\
+        \ SELECT 1\
+        \ FROM harness.server_human_requests\
+        \ WHERE request_id = $1::uuid)"
+        (Encoders.param (Encoders.nonNullable Encoders.text))
+        (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.bool)))
 
 testMetadata :: UTCTime -> SessionMetadata
 testMetadata now =

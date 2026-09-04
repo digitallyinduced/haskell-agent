@@ -20,7 +20,7 @@ import Control.Concurrent.MVar
     , takeMVar
     , tryPutMVar
     )
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, finally)
 import Control.Monad (void)
 import Data.Aeson (Value (..), eitherDecode, object, (.=))
 import Data.Aeson.KeyMap qualified as KeyMap
@@ -29,6 +29,7 @@ import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (find)
 import Data.Set qualified as Set
 import Data.Text (Text)
+import Data.Text qualified as Text
 import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Types
     ( Header
@@ -318,6 +319,94 @@ spec = describe "agent-server WAI application" do
                 LBS8.unpack retry.simpleBody
                     `shouldContain` "\"status\":\"cancelled\""
 
+    it "fences interrupted reservation cleanup against an identical retry" do
+        ledger <- newMVar []
+        terminal <- newEmptyMVar
+        checkedValidationStarted <- newEmptyMVar
+        neverValidation <- newEmptyMVar
+        cleanupStarted <- newEmptyMVar
+        releaseCleanup <- newEmptyMVar
+        ran <- newEmptyMVar
+        neverRunner <- newEmptyMVar
+        validationCalls <- newIORef (0 :: Int)
+        let runner _ _ =
+                putMVar ran ()
+                    >> takeMVar neverRunner
+                    >> pure (Right successfulOutput)
+            baseBackend = durableBackend ledger terminal runner
+            basePersistence = baseBackend.backendTurnPersistence
+            backend =
+                baseBackend
+                    { backendGetSession = \_ _ -> do
+                        call <-
+                            atomicModifyIORef' validationCalls \count ->
+                                let next = count + 1
+                                 in (next, next)
+                        if call == 2
+                            then
+                                putMVar checkedValidationStarted ()
+                                    >> takeMVar neverValidation
+                            else pure ()
+                        pure
+                            ( Right
+                                (object ["id" .= ("session-a" :: String)])
+                            )
+                    , backendTurnPersistence =
+                        basePersistence
+                            { turnPersistenceTerminal =
+                                \record finishedAt outcome ->
+                                    case outcome of
+                                        TurnWasCancelled -> do
+                                            void (tryPutMVar cleanupStarted ())
+                                            takeMVar releaseCleanup
+                                            basePersistence.turnPersistenceTerminal
+                                                record
+                                                finishedAt
+                                                outcome
+                                        _ ->
+                                            basePersistence.turnPersistenceTerminal
+                                                record
+                                                finishedAt
+                                                outcome
+                            }
+                    }
+            body =
+                "{\"clientRequestId\":\"01999999-1111-7111-8111-111111111121\",\"input\":\"hello\"}"
+            create application =
+                perform
+                    application
+                    methodPost
+                    ["v1", "sessions", "session-a", "turns"]
+                    validHeaders
+                    body
+        withBackendApplication backend runner \application ->
+            withAsync (create application) \original -> do
+                takeMVar checkedValidationStarted
+                withAsync (cancel original) \canceller -> do
+                    takeMVar cleanupStarted
+
+                    duplicate <- create application
+                    duplicate.simpleStatus `shouldBe` status202
+                    LBS8.unpack duplicate.simpleBody
+                        `shouldContain` "\"status\":\"queued\""
+                    timeout (250 * 1000) (takeMVar ran)
+                        `shouldReturn` Nothing
+
+                    putMVar releaseCleanup ()
+                    wait canceller
+                void (waitCatch original)
+
+                stored <- readMVar ledger
+                case stored of
+                    [entry] ->
+                        entry.testStoredRecord.turnRecordStatus
+                            `shouldBe` TurnCancelled
+                    entries ->
+                        expectationFailure
+                            ( "expected one durable turn, got "
+                                <> show (length entries)
+                            )
+
     it "rejects malformed turn identifiers before storage lookup" do
         withApplication immediateRunner \application -> do
             response <-
@@ -581,6 +670,90 @@ spec = describe "agent-server WAI application" do
             cancelled.simpleStatus `shouldBe` status200
             LBS8.unpack cancelled.simpleBody
                 `shouldContain` "\"status\":\"cancelled\""
+
+    it "canonicalizes an uppercase turn id before local cancellation" do
+        createdAt <- getCurrentTime
+        started <- newEmptyMVar
+        stopped <- newEmptyMVar
+        never <- newEmptyMVar
+        fallbackCalls <- newIORef (0 :: Int)
+        let turnId =
+                TurnId "0199abcd-abcd-7abc-8abc-abcdefabcdef"
+            reserved boundary sessionId clientRequestId =
+                TurnRecord
+                    { turnRecordId = turnId
+                    , turnRecordSessionId = sessionId
+                    , turnRecordClientRequestId = clientRequestId
+                    , turnRecordBoundary = boundary
+                    , turnRecordStatus = TurnQueued
+                    , turnRecordCreatedAt = createdAt
+                    , turnRecordStartedAt = Nothing
+                    , turnRecordFinishedAt = Nothing
+                    , turnRecordError = Nothing
+                    }
+            runner _ _ =
+                (putMVar started () >> takeMVar never)
+                    `finally` putMVar stopped ()
+                    >> pure (Right successfulOutput)
+            storedRecord boundary =
+                reserved
+                    boundary
+                    "session-a"
+                    ( ClientRequestId
+                        "01999999-1111-7111-8111-111111111122"
+                    )
+            lookupRecord boundary requestedId =
+                storedRecord boundary <$ guardTurnId requestedId
+            backend =
+                fakeBackend
+                    { backendReserveTurn =
+                        \boundary sessionId clientRequestId _ _ _ ->
+                            pure . Right . TurnReservationCreated $
+                                reserved boundary sessionId clientRequestId
+                    , backendLookupTurn =
+                        \boundary requestedId ->
+                            pure (Right (lookupRecord boundary requestedId))
+                    , backendRequestTurnCancellation =
+                        \boundary requestedId _ -> do
+                            atomicModifyIORef' fallbackCalls \count ->
+                                (count + 1, ())
+                            pure . Right $
+                                fmap
+                                    (\record -> (True, record))
+                                    (lookupRecord boundary requestedId)
+                    }
+            body =
+                "{\"clientRequestId\":\"01999999-1111-7111-8111-111111111122\",\"input\":\"hello\"}"
+            guardTurnId requestedId
+                | Text.toLower requestedId.unTurnId == turnId.unTurnId =
+                    Just ()
+                | otherwise = Nothing
+        withBackendApplication backend runner \application -> do
+            created <-
+                perform
+                    application
+                    methodPost
+                    ["v1", "sessions", "session-a", "turns"]
+                    validHeaders
+                    body
+            created.simpleStatus `shouldBe` status202
+            takeMVar started
+
+            cancelled <-
+                perform
+                    application
+                    methodPost
+                    [ "v1"
+                    , "turns"
+                    , Text.toUpper turnId.unTurnId
+                    , "cancel"
+                    ]
+                    validHeaders
+                    ""
+            cancelled.simpleStatus `shouldBe` status200
+            timeout (2 * 1000 * 1000) (takeMVar stopped)
+                `shouldReturn` Just ()
+            readIORef fallbackCalls `shouldReturn` 0
 
     it "durably requests cancellation from another owning instance" do
         createdAt <- getCurrentTime

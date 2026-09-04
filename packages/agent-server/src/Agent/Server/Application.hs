@@ -31,6 +31,7 @@ import Agent.Server.Supervisor
     , submitReservedTurnChecked
     , subscribeEvents
     , trySubmitReservedTurnChecked
+    , withSessionCleanup
     , withSessionMutation
     )
 import Agent.Server.Types
@@ -47,7 +48,7 @@ import Control.Exception.Safe
     , onException
     , tryAny
     )
-import Control.Monad (foldM)
+import Control.Monad (foldM, void)
 import Data.Aeson
     ( FromJSON
     , Value
@@ -528,18 +529,18 @@ turnAgentsResponse
     -> [Header]
     -> IO (Either ApiError Response)
 turnAgentsResponse supervisor boundary rawTurnId headers =
-    lookupTurnAgents
-        supervisor
-        boundary
-        (TurnId rawTurnId) >>= \case
-            Nothing -> pure (Left turnNotFound)
-            Just agents ->
-                pure $
-                    Right $
-                        jsonResponse
-                            status200
-                            headers
-                            (object ["data" .= agents])
+    case canonicalTurnId rawTurnId of
+        Nothing -> pure (Left turnNotFound)
+        Just turnId ->
+            lookupTurnAgents supervisor boundary turnId >>= \case
+                Nothing -> pure (Left turnNotFound)
+                Just agents ->
+                    pure $
+                        Right $
+                            jsonResponse
+                                status200
+                                headers
+                                (object ["data" .= agents])
 
 humanRequestsResponse
     :: Supervisor
@@ -592,7 +593,7 @@ resolveHumanRequestResponse
                 resolveHumanRequest
                     supervisor
                     boundary
-                    (RequestId rawRequestId)
+                    (RequestId (Text.toLower rawRequestId))
                     response >>= \case
                         Left message ->
                             pure $
@@ -715,21 +716,26 @@ createTurn backend supervisor boundary sessionId request
             >>= completeAdmission reserved
 
     abandonCreatedReservation reserved =
-        lookupTurn
-            supervisor
-            boundary
-            reserved.turnRecordId
-            >>= \case
-                Just _ -> pure ()
-                Nothing -> do
-                    cancelledAt <- getCurrentTime
-                    _ <-
-                        persistTurnTerminalEventually
-                            backend
-                            reserved
-                            cancelledAt
-                            TurnWasCancelled
-                    pure ()
+        void $
+            withSessionCleanup
+                supervisor
+                reserved.turnRecordBoundary
+                reserved.turnRecordSessionId
+                ( lookupTurn
+                    supervisor
+                    boundary
+                    reserved.turnRecordId
+                    >>= \case
+                        Just _ -> pure ()
+                        Nothing -> do
+                            cancelledAt <- getCurrentTime
+                            void $
+                                persistTurnTerminalEventually
+                                    backend
+                                    reserved
+                                    cancelledAt
+                                    TurnWasCancelled
+                )
 
     completeAdmission reserved result =
         case firstCheckedSubmitError result of
@@ -816,10 +822,9 @@ findTurn
     -> Text
     -> IO (Either ApiError TurnRecord)
 findTurn backend supervisor boundary rawTurnId = do
-    if not (isUUIDText rawTurnId)
-        then pure (Left turnNotFound)
-        else do
-            let turnId = TurnId rawTurnId
+    case canonicalTurnId rawTurnId of
+        Nothing -> pure (Left turnNotFound)
+        Just turnId -> do
             backend.backendLookupTurn boundary turnId >>= \case
                 Left err -> pure (Left err)
                 Right Nothing -> pure (Left turnNotFound)
@@ -874,9 +879,7 @@ cancelKnownTurn
     -> Text
     -> IO (Either ApiError (Status, TurnRecord))
 cancelKnownTurn backend supervisor boundary rawTurnId
-    | not (isUUIDText rawTurnId) =
-        pure (Left turnNotFound)
-    | otherwise =
+    | Just turnId <- canonicalTurnId rawTurnId =
         cancelTurn supervisor boundary turnId >>= \case
             Right turn -> pure (Right (status200, turn))
             Left "turn not found" ->
@@ -924,8 +927,9 @@ cancelKnownTurn backend supervisor boundary rawTurnId
                                                         )
             Left message ->
                 pure (Left (cancellationError message))
+    | otherwise =
+        pure (Left turnNotFound)
   where
-    turnId = TurnId rawTurnId
     cancellationError message =
         ApiError
             { apiErrorStatus = 503
@@ -940,12 +944,12 @@ findTurnResult
     -> Text
     -> IO (Either ApiError TurnResult)
 findTurnResult backend boundary rawTurnId =
-    if not (isUUIDText rawTurnId)
-        then pure (Left turnNotFound)
-        else
+    case canonicalTurnId rawTurnId of
+        Nothing -> pure (Left turnNotFound)
+        Just turnId ->
             backend.backendLookupTurnResult
                 boundary
-                (TurnId rawTurnId)
+                turnId
                 >>= \case
                     Left err -> pure (Left err)
                     Right Nothing -> pure (Left turnNotFound)
@@ -1415,7 +1419,7 @@ queryOptionalTurnId request =
     queryOptionalText "turnId" request >>= \case
         Nothing -> Right Nothing
         Just raw
-            | isUUIDText raw -> Right (Just (TurnId raw))
+            | Just turnId <- canonicalTurnId raw -> Right (Just turnId)
             | otherwise ->
                 Left ApiError
                     { apiErrorStatus = 400
@@ -1423,6 +1427,11 @@ queryOptionalTurnId request =
                     , apiErrorMessage = "turnId must be a UUID"
                     , apiErrorDetails = Nothing
                     }
+
+canonicalTurnId :: Text -> Maybe TurnId
+canonicalTurnId raw
+    | isUUIDText raw = Just (TurnId (Text.toLower raw))
+    | otherwise = Nothing
 
 queryOptionalInteger
     :: ByteString

@@ -1034,7 +1034,8 @@ finishServerTurnStatement ::
         (Maybe StoredServerTurn)
 finishServerTurnStatement =
     mkStatement
-        ( "UPDATE harness.server_turns AS server_turn\
+        ( "WITH finished_turn AS (\
+          \ UPDATE harness.server_turns AS server_turn\
           \ SET status = CASE WHEN status IN ('queued', 'running')\
           \   THEN $5 ELSE status END,\
           \ finished_at = CASE WHEN status IN ('queued', 'running')\
@@ -1056,8 +1057,16 @@ finishServerTurnStatement =
           \ WHERE turn_id = $1::uuid AND tenant_id = $2\
           \ AND gateway_identity IS NOT DISTINCT FROM $3\
           \ AND owner_instance_id = $4::uuid\
-          \ RETURNING "
+          \ RETURNING turn_id AS durable_turn_id, "
             <> serverTurnColumns
+            <> "\
+               \ ), deleted_request AS (\
+               \ DELETE FROM harness.server_human_requests AS request\
+               \ USING finished_turn\
+               \ WHERE request.turn_id = finished_turn.durable_turn_id)\
+               \ SELECT "
+            <> serverTurnColumns
+            <> " FROM finished_turn AS server_turn"
         )
         ( ( (\(turnId, _, _, _) -> turnId)
                 >$< Encoders.param (Encoders.nonNullable Encoders.text)
@@ -1241,13 +1250,17 @@ interruptDisconnectedServerTurnsStatement =
         \ DELETE FROM harness.server_session_mutations AS mutation\
         \ USING revoked_owner AS owner\
         \ WHERE mutation.owner_instance_id = owner.instance_id\
-        \ )\
+        \ ), interrupted_turn AS (\
         \ UPDATE harness.server_turns AS turn\
         \ SET status = 'failed', finished_at = clock_timestamp(),\
         \ error_text =\
         \   'agent server owner disconnected before the turn completed'\
         \ WHERE status IN ('queued', 'running')\
-        \ AND owner_instance_id IN (SELECT instance_id FROM revoked_owner)"
+        \ AND owner_instance_id IN (SELECT instance_id FROM revoked_owner)\
+        \ RETURNING turn.turn_id)\
+        \ DELETE FROM harness.server_human_requests AS request\
+        \ USING interrupted_turn AS turn\
+        \ WHERE request.turn_id = turn.turn_id"
         (Encoders.param (Encoders.nonNullable Encoders.text))
         Decoders.noResult
         True
@@ -1256,13 +1269,18 @@ interruptReleasedServerTurnsStatement ::
     Statement Text ()
 interruptReleasedServerTurnsStatement =
     mkStatement
-        "UPDATE harness.server_turns\
+        "WITH interrupted_turn AS (\
+        \ UPDATE harness.server_turns AS turn\
         \ SET status = 'failed', finished_at = clock_timestamp(),\
         \ error_text = CASE WHEN status IN ('queued', 'running')\
         \   THEN 'agent server stopped before the turn completed'\
         \   ELSE error_text END\
         \ WHERE owner_instance_id = $1::uuid\
-        \ AND status IN ('queued', 'running')"
+        \ AND status IN ('queued', 'running')\
+        \ RETURNING turn.turn_id)\
+        \ DELETE FROM harness.server_human_requests AS request\
+        \ USING interrupted_turn AS turn\
+        \ WHERE request.turn_id = turn.turn_id"
         (Encoders.param (Encoders.nonNullable Encoders.text))
         Decoders.noResult
         True

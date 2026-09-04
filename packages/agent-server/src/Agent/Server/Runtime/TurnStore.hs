@@ -66,9 +66,21 @@ data TurnStoreOwner = TurnStoreOwner
     , turnStoreOwnerLifecycle :: !(Async ())
     , turnStoreOwnerPendingMutationReleases ::
         !(TVar (Map MutationReleaseKey ServerTurnStore.ServerSessionMutation))
+    , turnStoreOwnerPendingHumanRequestCleanups ::
+        !(TVar (Map HumanRequestCleanupKey PendingHumanRequestCleanup))
     }
 
 type MutationReleaseKey = (Text, Maybe Text, Text)
+
+type HumanRequestCleanupKey = (AccessBoundary, TurnId, RequestId)
+
+data PendingHumanRequestCleanup = PendingHumanRequestCleanup
+    { pendingHumanRequestCleanupRecord :: !TurnRecord
+    , pendingHumanRequestCleanupRequestId :: !RequestId
+    , pendingHumanRequestCleanupDisposition :: !HumanRequestCleanup
+    , pendingHumanRequestCleanupOwnerInstanceId :: !Text
+    }
+    deriving (Eq)
 
 openTurnStoreOwner :: Store -> Text -> IO (Either Text TurnStoreOwner)
 openTurnStoreOwner store instanceId = mask \restore -> do
@@ -83,6 +95,7 @@ openTurnStoreOwner store instanceId = mask \restore -> do
             healthy <- newTVarIO True
             stopping <- newTVarIO False
             pendingMutationReleases <- newTVarIO Map.empty
+            pendingHumanRequestCleanups <- newTVarIO Map.empty
             lifecycle <-
                 async
                     ( restore
@@ -92,6 +105,7 @@ openTurnStoreOwner store instanceId = mask \restore -> do
                             healthy
                             stopping
                             pendingMutationReleases
+                            pendingHumanRequestCleanups
                         )
                     )
                     `onException` ServerTurnStore.releaseServerTurnOwner lease
@@ -106,6 +120,8 @@ openTurnStoreOwner store instanceId = mask \restore -> do
                         , turnStoreOwnerLifecycle = lifecycle
                         , turnStoreOwnerPendingMutationReleases =
                             pendingMutationReleases
+                        , turnStoreOwnerPendingHumanRequestCleanups =
+                            pendingHumanRequestCleanups
                         }
 
 closeTurnStoreOwner :: TurnStoreOwner -> IO ()
@@ -124,14 +140,22 @@ ownerLifecycle ::
     TVar Bool ->
     TVar Bool ->
     TVar (Map MutationReleaseKey ServerTurnStore.ServerSessionMutation) ->
+    TVar (Map HumanRequestCleanupKey PendingHumanRequestCleanup) ->
     IO ()
-ownerLifecycle store lease healthy stopping pendingMutationReleases =
+ownerLifecycle
+    store
+    lease
+    healthy
+    stopping
+    pendingMutationReleases
+    pendingHumanRequestCleanups =
     ( withAsync
         ( ownerHeartbeatLoop
             store
             lease
             healthy
             pendingMutationReleases
+            pendingHumanRequestCleanups
         )
         \heartbeat ->
             void $
@@ -171,8 +195,14 @@ ownerHeartbeatLoop ::
     ServerTurnStore.ServerTurnOwnerLease ->
     TVar Bool ->
     TVar (Map MutationReleaseKey ServerTurnStore.ServerSessionMutation) ->
+    TVar (Map HumanRequestCleanupKey PendingHumanRequestCleanup) ->
     IO ()
-ownerHeartbeatLoop store lease healthy pendingMutationReleases = do
+ownerHeartbeatLoop
+    store
+    lease
+    healthy
+    pendingMutationReleases
+    pendingHumanRequestCleanups = do
     threadDelay ownerHeartbeatIntervalMicroseconds
     result <-
         tryAny do
@@ -183,10 +213,18 @@ ownerHeartbeatLoop store lease healthy pendingMutationReleases = do
                     retryPendingMutationReleases
                         store
                         pendingMutationReleases
+                    retryPendingHumanRequestCleanups
+                        store
+                        pendingHumanRequestCleanups
                     pure (Right ())
     case result of
         Right (Right ()) ->
-            ownerHeartbeatLoop store lease healthy pendingMutationReleases
+            ownerHeartbeatLoop
+                store
+                lease
+                healthy
+                pendingMutationReleases
+                pendingHumanRequestCleanups
         _ -> do
             -- Losing the connection-lifetime fence is irreversible for this
             -- process identity. Never try to revive it after another server
@@ -343,22 +381,12 @@ productionTurnPersistence store owner =
                     requestId
         , turnPersistenceDeleteHumanRequest =
             \record requestId disposition ->
-                first renderStoreError
-                    <$> case disposition of
-                        HumanRequestAbandoned ->
-                            HumanRequestStore.deleteServerHumanRequest
-                                (trustedPool store)
-                                (storeBoundary record.turnRecordBoundary)
-                                instanceId
-                                record.turnRecordId.unTurnId
-                                requestId.unRequestId
-                        HumanResponseConsumed ->
-                            HumanRequestStore.deleteConsumedServerHumanRequest
-                                (trustedPool store)
-                                (storeBoundary record.turnRecordBoundary)
-                                instanceId
-                                record.turnRecordId.unTurnId
-                                requestId.unRequestId
+                requestHumanRequestCleanup
+                    store
+                    owner
+                    record
+                    requestId
+                    disposition
         }
   where
     instanceId = owner.turnStoreOwnerInstanceId
@@ -725,6 +753,118 @@ mutationReleaseKey mutation =
 
 maximumMutationReleaseBatch :: Int
 maximumMutationReleaseBatch = 4
+
+requestHumanRequestCleanup ::
+    Store ->
+    TurnStoreOwner ->
+    TurnRecord ->
+    RequestId ->
+    HumanRequestCleanup ->
+    IO (Either Text ())
+requestHumanRequestCleanup store owner record requestId disposition =
+    mask \restore -> do
+        let cleanup =
+                PendingHumanRequestCleanup
+                    { pendingHumanRequestCleanupRecord = record
+                    , pendingHumanRequestCleanupRequestId = requestId
+                    , pendingHumanRequestCleanupDisposition = disposition
+                    , pendingHumanRequestCleanupOwnerInstanceId =
+                        owner.turnStoreOwnerInstanceId
+                    }
+            pending = owner.turnStoreOwnerPendingHumanRequestCleanups
+        atomically $
+            modifyTVar'
+                pending
+                (Map.insert (humanRequestCleanupKey cleanup) cleanup)
+        restore (attemptPendingHumanRequestCleanup store pending cleanup)
+
+retryPendingHumanRequestCleanups ::
+    Store ->
+    TVar (Map HumanRequestCleanupKey PendingHumanRequestCleanup) ->
+    IO ()
+retryPendingHumanRequestCleanups store pending = do
+    cleanups <-
+        take maximumHumanRequestCleanupBatch
+            . Map.elems
+            <$> readTVarIO pending
+    mapConcurrently_
+        (void . attemptPendingHumanRequestCleanup store pending)
+        cleanups
+
+attemptPendingHumanRequestCleanup ::
+    Store ->
+    TVar (Map HumanRequestCleanupKey PendingHumanRequestCleanup) ->
+    PendingHumanRequestCleanup ->
+    IO (Either Text ())
+attemptPendingHumanRequestCleanup store pending cleanup = do
+    attempted <-
+        tryAny $
+            timeout ownerHeartbeatTimeoutMicroseconds $
+                performHumanRequestCleanup store cleanup
+    case attempted of
+        Right (Just (Right ())) -> do
+            atomically $
+                modifyTVar'
+                    pending
+                    ( Map.update
+                        ( \current ->
+                            if current == cleanup
+                                then Nothing
+                                else Just current
+                        )
+                        (humanRequestCleanupKey cleanup)
+                    )
+            pure (Right ())
+        Right (Just (Left err)) ->
+            pure (Left (renderStoreError err))
+        Right Nothing ->
+            pure (Left "human request cleanup timed out")
+        Left err ->
+            pure
+                ( Left
+                    ( "human request cleanup failed: "
+                        <> Text.pack (show err)
+                    )
+                )
+
+performHumanRequestCleanup ::
+    Store ->
+    PendingHumanRequestCleanup ->
+    IO (Either StoreError ())
+performHumanRequestCleanup store cleanup =
+    case cleanup.pendingHumanRequestCleanupDisposition of
+        HumanRequestAbandoned ->
+            HumanRequestStore.deleteServerHumanRequest
+                (trustedPool store)
+                boundary
+                cleanup.pendingHumanRequestCleanupOwnerInstanceId
+                record.turnRecordId.unTurnId
+                requestId.unRequestId
+        HumanResponseConsumed ->
+            HumanRequestStore.deleteConsumedServerHumanRequest
+                (trustedPool store)
+                boundary
+                cleanup.pendingHumanRequestCleanupOwnerInstanceId
+                record.turnRecordId.unTurnId
+                requestId.unRequestId
+  where
+    record = cleanup.pendingHumanRequestCleanupRecord
+    requestId = cleanup.pendingHumanRequestCleanupRequestId
+    boundary = storeBoundary record.turnRecordBoundary
+
+humanRequestCleanupKey ::
+    PendingHumanRequestCleanup ->
+    HumanRequestCleanupKey
+humanRequestCleanupKey cleanup =
+    ( record.turnRecordBoundary
+    , record.turnRecordId
+    , cleanup.pendingHumanRequestCleanupRequestId
+    )
+  where
+    record = cleanup.pendingHumanRequestCleanupRecord
+
+maximumHumanRequestCleanupBatch :: Int
+maximumHumanRequestCleanupBatch = 4
 
 requestTurnCancellation ::
     Store ->
