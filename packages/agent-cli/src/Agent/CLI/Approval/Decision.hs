@@ -15,6 +15,8 @@ module Agent.CLI.Approval.Decision
 
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Permission (PermissionChoice(..))
+import Agent.CLI.ComputerUse
+    ( computerToolCallHasPendingSafetyChecks )
 import Agent.CLI.Style (glyphOk, glyphWarn)
 import Agent.JsonText (jsonTextFieldDefault)
 import Agent.OsPath (fromText)
@@ -102,7 +104,12 @@ planApproval facts =
                     facts.planActive facts.planPath facts.call ->
                         approved
                 | isComputerToolCallKind facts.call.callKind ->
-                    NeedPermissionPrompt
+                    if computerToolCallHasPendingSafetyChecks facts.call
+                        then NeedPermissionPrompt
+                        else case facts.allowedForSession of
+                            Nothing -> NeedSessionAllowance
+                            Just True -> approved
+                            Just False -> NeedPermissionPrompt
                 | otherwise -> case facts.allowedForSession of
                     Nothing -> NeedSessionAllowance
                     Just True -> approved
@@ -117,7 +124,26 @@ resolveApprovalPrompt call choice
         case choice of
             Nothing -> denied
             Just PermissionDeny -> denied
-            Just _ -> approved
+            Just PermissionAllowAll ->
+                CompleteApproval
+                    (Right True)
+                    [ SetApprovalPolicy ApproveAll
+                    , PersistProjectAutoApprove
+                    , RememberToolForSession
+                        (canonicalToolName call.name)
+                    , ReportApprovalNotice
+                        (ApprovalSuccess
+                            (glyphOk <> "auto-approve on (saved for project)"))
+                    , computerWorkflowNotice
+                    ]
+            Just PermissionAllowOnce -> approved
+            Just PermissionAllowTool ->
+                CompleteApproval
+                    (Right True)
+                    [ RememberToolForSession
+                        (canonicalToolName call.name)
+                    , computerWorkflowNotice
+                    ]
     | otherwise = resolveOrdinary choice
   where
     resolveOrdinary = \case
@@ -146,6 +172,10 @@ resolveApprovalPrompt call choice
                 ]
     approved = CompleteApproval (Right True) []
     denied = CompleteApproval (Right False) []
+    computerWorkflowNotice =
+        ReportApprovalNotice
+            (ApprovalSuccess
+                (glyphOk <> "computer use approved until disabled"))
 
 policyPlan :: ApprovalPolicy -> Bool -> ApprovalPlan
 policyPlan policy readOnly = case policy of

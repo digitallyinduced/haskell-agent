@@ -20,6 +20,7 @@ import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
 import Agent.CLI.Context (contextUsageTokens, formatContextReport)
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types (ResponseCreateParams(model))
+import Agent.CLI.ComputerUse (computerToolName)
 import Agent.CLI.Session.Runner.Types
     ( SessionRunnerContinuation(..) )
 import Agent.CLI.AgentViewport (AgentViewportEnv)
@@ -135,6 +136,23 @@ formatQueuedPrompts prompts =
         Text.pack (show index)
             <> ". "
             <> Text.replace "\n" "\n   " prompt
+
+sessionDirectTools
+    :: [AppTool]
+    -> Maybe CodeModeSessionRuntime
+    -> [AppTool]
+sessionDirectTools allTools codeModeRuntime =
+    filter
+        (\tool ->
+            canonicalToolName tool.appToolName
+                `Set.notMember` codeModeWireNames)
+        allTools
+  where
+    codeModeWireNames =
+        Set.fromList $
+            map
+                (canonicalToolName . (.appToolName))
+                (maybe [] (.codeModeWireTools) codeModeRuntime)
 
 -- | Host-facing session resources that are established before the title and
 -- turn runtimes. Keeping these together makes the outer session runner a
@@ -321,6 +339,7 @@ data SessionControlRuntime = SessionControlRuntime
     , controlSpinnerRef :: !(IORef (Maybe ThreadId))
     , controlRenderStateRef :: !(IORef RenderState)
     , controlAllowedToolsRef :: !(IORef (Set.Set Text.Text))
+    , controlComputerUseEnabledRef :: !(IORef Bool)
     , controlLastAssistantRef :: !(IORef (Maybe Text.Text))
     , controlModelRef :: !(IORef Text.Text)
     , controlUnavailableProvidersRef :: !(IORef (Set.Set Provider))
@@ -356,6 +375,12 @@ newSessionControlRuntime host SessionRequest{..} = do
     spinnerRef <- newIORef Nothing
     renderStateRef <- newIORef emptyRenderState
     allowedToolsRef <- newIORef Set.empty
+    computerUseEnabledRef <- newIORef $
+        resolveComputerUseEnabled options startup.startupStdinTty
+            && isJust
+                (lookupAppTool
+                    computerToolName
+                    (sessionDirectTools refreshTools codeModeRuntime))
     lastAssistantRef <- newIORef Nothing
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     unavailableProvidersRef <- newIORef unavailableProviders
@@ -444,6 +469,7 @@ newSessionControlRuntime host SessionRequest{..} = do
         , controlSpinnerRef = spinnerRef
         , controlRenderStateRef = renderStateRef
         , controlAllowedToolsRef = allowedToolsRef
+        , controlComputerUseEnabledRef = computerUseEnabledRef
         , controlLastAssistantRef = lastAssistantRef
         , controlModelRef = modelRef
         , controlUnavailableProvidersRef = unavailableProvidersRef
@@ -834,37 +860,69 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
         approveToolWithClassification Nothing
 
 data SessionShellRuntime = SessionShellRuntime
-    { shellToolAllowed :: !(ToolCall -> IO Bool)
+    { shellToolDisabledReason :: !(ToolCall -> IO (Maybe Text.Text))
     , shellActiveToolNames :: !(IO [Text.Text])
     , shellCurrentMode :: !(IO ShellMode)
     , shellSetMode :: !(ShellMode -> IO Text.Text)
+    , shellComputerUseEnabled :: !(IO Bool)
+    , shellSetComputerUseEnabled :: !(Bool -> IO Text.Text)
     , shellSetTempDir :: !(OsPath -> IO ())
     }
 
 buildSessionShellRuntime
     :: SessionHostRuntime
+    -> SessionControlRuntime
     -> SessionRequest
     -> SessionShellRuntime
-buildSessionShellRuntime host SessionRequest{..} =
+buildSessionShellRuntime host controls SessionRequest{..} =
     SessionShellRuntime
-        { shellToolAllowed = shellToolAllowed
+        { shellToolDisabledReason = toolDisabledReason
         , shellActiveToolNames = currentActiveToolNames
         , shellCurrentMode = currentShellMode
         , shellSetMode = setShellMode
+        , shellComputerUseEnabled = readIORef computerUseEnabledRef
+        , shellSetComputerUseEnabled = setComputerUse
         , shellSetTempDir = setSessionTempDir
         }
   where
     nativeCapabilities = host.hostNativeCapabilities
-    shellToolAllowed call = do
+    computerUseEnabledRef = controls.controlComputerUseEnabledRef
+    sessionTools = sessionDirectTools refreshTools codeModeRuntime
+    computerUseAvailable =
+        isJust (lookupAppTool computerToolName sessionTools)
+    toolDisabledReason call = do
         ghciEnabled <- readIORef ghciEnabledRef
         bashEnabled <- readIORef bashEnabledRef
+        computerUseEnabled <- readIORef computerUseEnabledRef
         let toolName = canonicalToolName call.name
         pure $
-            (not (isGhciToolName toolName) || ghciEnabled)
-                && (not (isBashToolName toolName) || bashEnabled)
-    activeShellTools ghciEnabled bashEnabled =
-        filterGhciTools ghciEnabled
-            (filterBashTools bashEnabled allTools)
+            if isComputerToolCallKind call.callKind
+                && not computerUseEnabled
+                then Just
+                    "Computer use is disabled. Run /computer-use to enable it."
+            else if (isGhciToolName toolName && not ghciEnabled)
+                || (isBashToolName toolName && not bashEnabled)
+                then Just
+                    ("Tool " <> call.name
+                        <> " is disabled by the current /shell setting.")
+            else Nothing
+    activeSessionTools ghciEnabled bashEnabled computerUseEnabled =
+        filterComputerUseTools computerUseEnabled $
+            filterGhciTools ghciEnabled
+                (filterBashTools bashEnabled sessionTools)
+    providerVisibleTools enabledTools =
+        case codeModeRuntime of
+            Nothing -> enabledTools
+            Just runtime ->
+                runtime.codeModeWireTools
+                    <> (projectCodeModeToolsFor
+                            runtime.codeModeProjectionStrategy
+                            enabledTools
+                        ).directCodeModeTools
+    filterComputerUseTools True = id
+    filterComputerUseTools False =
+        filter \tool ->
+            canonicalToolName tool.appToolName /= computerToolName
     currentShellMode = do
         ghciEnabled <- readIORef ghciEnabledRef
         bashEnabled <- readIORef bashEnabledRef
@@ -876,9 +934,16 @@ buildSessionShellRuntime host SessionRequest{..} =
     currentActiveToolNames = do
         ghciEnabled <- readIORef ghciEnabledRef
         bashEnabled <- readIORef bashEnabledRef
+        computerUseEnabled <- readIORef computerUseEnabledRef
         let active =
-                activeShellTools ghciEnabled bashEnabled
-            internalNames = map (.appToolName) active
+                activeSessionTools
+                    ghciEnabled
+                    bashEnabled
+                    computerUseEnabled
+            reportTools =
+                active
+                    <> maybe [] (.codeModeWireTools) codeModeRuntime
+            internalNames = map (.appToolName) reportTools
             projectedNames =
                 case dialectToolLayout dialect of
                     NoHostToolLayout -> []
@@ -911,45 +976,75 @@ buildSessionShellRuntime host SessionRequest{..} =
         ShellBash -> "bash"
         ShellBoth -> "ghci + bash"
         ShellNone -> "none"
-    refreshShellParams ghciEnabled bashEnabled
-        | isJust codeModeNestedSlot = pure ()
-        | otherwise = do
-            sessionTmp <- readIORef toolEnv.toolSessionTmp
-            today <- utctDay <$> getCurrentTime
-            let enabledTools = activeShellTools ghciEnabled bashEnabled
-                enabledNames = map (.appToolName) enabledTools
-                instructionText =
-                    appendMcpInstructions mcpInstructions case codexCatalogSession of
-                        Just catalog ->
-                            catalog.catalogInstructionsFor
-                                enabledNames sessionTmp
-                        Nothing ->
-                            systemPromptForToolsWithHostedSearch
-                                nativeCapabilities.nativeProviderHostedTools
-                                dialect
-                                commitAttributionModel
-                                commitAttributionEffort
-                                enabledNames
-                                cwd
-                                sessionTmp
-                                today
-                                (isOneShot options)
-                toolSchemas =
-                    schemasFromAppToolsWithHostedSearch
-                        nativeCapabilities.nativeProviderHostedTools
-                        dialect
-                        enabledTools
-            modifyIORef' paramsRef
-                (setRequestInstructionsAndTools
-                    instructionText
-                    (Just toolSchemas))
+    refreshSessionParams ghciEnabled bashEnabled computerUseEnabled = do
+        sessionTmp <- readIORef toolEnv.toolSessionTmp
+        today <- utctDay <$> getCurrentTime
+        let enabledTools =
+                activeSessionTools
+                    ghciEnabled
+                    bashEnabled
+                    computerUseEnabled
+            enabledNames = map (.appToolName) enabledTools
+            instructionText =
+                appendMcpInstructions mcpInstructions case codexCatalogSession of
+                    Just catalog ->
+                        catalog.catalogInstructionsFor
+                            enabledNames sessionTmp
+                    Nothing ->
+                        systemPromptForToolsWithHostedSearch
+                            nativeCapabilities.nativeProviderHostedTools
+                            dialect
+                            commitAttributionModel
+                            commitAttributionEffort
+                            enabledNames
+                            cwd
+                            sessionTmp
+                            today
+                            (isOneShot options)
+            toolSchemas =
+                case codeModeRuntime of
+                    Just _ ->
+                        schemasFromAppToolsCodeModeWithHostedSearch
+                            nativeCapabilities.nativeProviderHostedTools
+                            dialect
+                            (providerVisibleTools enabledTools)
+                    Nothing ->
+                        schemasFromAppToolsWithHostedSearch
+                            nativeCapabilities.nativeProviderHostedTools
+                            dialect
+                            enabledTools
+        modifyIORef' paramsRef
+            (setRequestInstructionsAndTools
+                instructionText
+                (Just toolSchemas))
     setShellMode mode = do
         let (ghciEnabled, bashEnabled) = shellModeFlags mode
         writeIORef ghciEnabledRef ghciEnabled
         writeIORef bashEnabledRef bashEnabled
         unless ghciEnabled suspendGhci
-        refreshShellParams ghciEnabled bashEnabled
+        computerUseEnabled <- readIORef computerUseEnabledRef
+        refreshSessionParams
+            ghciEnabled
+            bashEnabled
+            computerUseEnabled
         pure ("shell tools: " <> shellModeLabel mode)
+    setComputerUse enabled
+        | enabled && not computerUseAvailable =
+            pure
+                "computer use is unavailable for this provider or platform"
+        | otherwise = do
+            writeIORef computerUseEnabledRef enabled
+            modifyIORef' controls.controlAllowedToolsRef
+                (Set.delete computerToolName)
+            ghciEnabled <- readIORef ghciEnabledRef
+            bashEnabled <- readIORef bashEnabledRef
+            refreshSessionParams ghciEnabled bashEnabled enabled
+            pure $
+                if enabled
+                    then
+                        "computer use: on \
+                        \(approval required before control)"
+                    else "computer use: off"
     setSessionTempDir tempDir = do
         -- Persistent tool runtimes capture temp-backed state at startup.
         -- Reset them before publishing the new root so no process or state
@@ -958,7 +1053,11 @@ buildSessionShellRuntime host SessionRequest{..} =
         setToolSessionTmp toolEnv (Just tempDir)
         ghciEnabled <- readIORef ghciEnabledRef
         bashEnabled <- readIORef bashEnabledRef
-        refreshShellParams ghciEnabled bashEnabled
+        computerUseEnabled <- readIORef computerUseEnabledRef
+        refreshSessionParams
+            ghciEnabled
+            bashEnabled
+            computerUseEnabled
 
 data SessionSubagentRuntime = SessionSubagentRuntime
     { subagentBeginTurn :: !(IO (Maybe RootTurnId))
@@ -1038,12 +1137,9 @@ buildSessionLoopConfig
         , loopMaxTurns = options.optMaxTurns
         , loopOnEvent = eventRuntime.loopEventEmit
         , loopApprove = \call ->
-            shellRuntime.shellToolAllowed call >>= \case
-                False ->
-                    pure (Left
-                        ("Tool " <> call.name
-                            <> " is disabled by the current /shell setting."))
-                True -> approvalRuntime.approvalApproveRegistered call
+            shellRuntime.shellToolDisabledReason call >>= \case
+                Just reason -> pure (Left reason)
+                Nothing -> approvalRuntime.approvalApproveRegistered call
         , loopReadSteering =
             readSteeringInputs controls.controlSteeringInputs
         , loopCommitSteering = \count ->
@@ -1073,14 +1169,11 @@ installSessionToolRuntimes
         , providerNativeToolsEnabled =
             host.hostNativeCapabilities.nativeProviderNativeTools
         }
-    forM_ codeModeNestedSlot \slot ->
+    forM_ ((.codeModeNestedSlot) <$> codeModeRuntime) \slot ->
         setCodeModeNestedInvoke slot \call -> do
-            allowed <- shellRuntime.shellToolAllowed call
-            if not allowed
-                then pure $ Left $
-                    "Tool " <> call.name
-                        <> " is disabled by the current /shell setting."
-                else
+            shellRuntime.shellToolDisabledReason call >>= \case
+                Just reason -> pure (Left reason)
+                Nothing ->
                     approvalRuntime.approvalApproveRegistered call >>= \case
                         Left denial -> pure (Left denial)
                         Right False ->
@@ -1118,7 +1211,7 @@ newSessionLoopRuntime host controls request@SessionRequest{..} sessionBackend = 
     let eventRuntime =
             buildSessionLoopEventRuntime
                 host controls request managedLoopPublisher
-        shellRuntime = buildSessionShellRuntime host request
+        shellRuntime = buildSessionShellRuntime host controls request
         approvalRuntime =
             buildSessionApprovalRuntime host controls request
         subagentRuntime = buildSessionSubagentRuntime request
@@ -1372,6 +1465,10 @@ buildSessionEnv
             loopRuntime.loopRuntimeShell.shellCurrentMode
         , sessionSetShellMode =
             loopRuntime.loopRuntimeShell.shellSetMode
+        , sessionComputerUseEnabled =
+            loopRuntime.loopRuntimeShell.shellComputerUseEnabled
+        , sessionSetComputerUseEnabled =
+            loopRuntime.loopRuntimeShell.shellSetComputerUseEnabled
         , sessionBackground = startup.startupBackground
         , sessionEscPaused = escPaused
         , sessionDraft = startup.startupSessionState.sessionDraft
