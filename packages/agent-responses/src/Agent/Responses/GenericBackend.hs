@@ -10,7 +10,9 @@ import Agent.Responses.GenericClient
     ( GenericClientOptions
     , createResponseWithEvents
     )
-import Agent.Responses.LoopBackend (statelessResponsesBackend)
+import Agent.Responses.LoopBackend
+    ( statelessResponsesBackendPreservingHistory
+    )
 import Agent.Responses.Types
 
 genericResponsesBackend
@@ -18,7 +20,8 @@ genericResponsesBackend
     -> IO ResponseCreateParams
     -> Backend
 genericResponsesBackend options =
-    statelessResponsesBackend (createResponseWithEvents options)
+    statelessResponsesBackendPreservingHistory
+        (createResponseWithEvents options)
 
 genericResponsesBackendWith
     :: (ResponseCreateParams
@@ -26,4 +29,5 @@ genericResponsesBackendWith
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
     -> Backend
-genericResponsesBackendWith = statelessResponsesBackend
+genericResponsesBackendWith =
+    statelessResponsesBackendPreservingHistory

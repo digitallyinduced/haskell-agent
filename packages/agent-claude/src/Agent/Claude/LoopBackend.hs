@@ -54,6 +54,9 @@ import Agent.Loop
     , turnInputImages
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Responses.Request
+    ( filterCompactionCheckpointsByOrigin
+    )
 import Agent.Telemetry
     ( ModelTelemetry(..)
     , TurnTelemetry(..)
@@ -626,6 +629,7 @@ renderPriorConversation =
     Text.intercalate "\n\n"
         . catMaybes
         . map renderResponseItem
+        . filterCompactionCheckpointsByOrigin (const False)
 
 renderResponseItem :: ResponseItem -> Maybe Text
 renderResponseItem = \case

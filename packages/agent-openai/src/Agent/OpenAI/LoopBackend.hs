@@ -712,12 +712,15 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                 backendContinuationToken "openai.responses" snapshot
                     <|> legacyPreviousResponseId
             newItems = turnInputsToItems inputs
-            deltaRequest = withRequestInput baseParams newItems
+            deltaRequest =
+                sanitizeCodexRequest (withRequestInput baseParams newItems)
             -- Live and resumed transcripts already apply compaction snapshots
             -- as full replacements. Remote v2 intentionally keeps retained
             -- messages before its opaque checkpoint, so replay the complete
             -- replacement instead of trimming that retained prefix.
-            fullRequest = withRequestInput baseParams (history <> newItems)
+            fullRequest =
+                sanitizeCodexRequest
+                    (withRequestInput baseParams (history <> newItems))
             (initialRequest, initialPrevious) =
                 case previousResponseId of
                     _ | hasLegacyComputerContinuation history inputs ->

@@ -14,7 +14,11 @@ import Agent.OpenAI.Compaction (userTextItem)
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
     ( CompactionItem(..)
+    , MessageContent(..)
+    , ResponseContentPart(..)
     , ResponseItem(..)
+    , ResponseMessage(..)
+    , ResponseRole(..)
     )
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
 import Data.IORef (newIORef, readIORef, writeIORef)
@@ -133,7 +137,14 @@ spec = do
             map
                 (\marker ->
                     resumeNeedsGeneratedContext
-                        [sampleTurn { turnUserText = marker }])
+                        [sampleTurn
+                            { turnUserText = marker
+                            , turnEffect =
+                                if marker == "/compact"
+                                    then TranscriptReplace
+                                    else TranscriptReset
+                            }
+                        ])
                 ["/compact", "/clear", "/new"]
                 `shouldBe` [True, True, True]
 
@@ -144,11 +155,18 @@ spec = do
                         , encryptedContent = Nothing
                         }
             resumeNeedsGeneratedContext
-                [sampleTurn { turnItems = [checkpoint] }]
+                [sampleTurn
+                    { turnItems = [checkpoint]
+                    , turnEffect = TranscriptReplace
+                    }
+                ]
                 `shouldBe` True
 
         it "repairs old compacted sessions until regenerated context persists" do
-            let boundary = sampleTurn { turnUserText = "/compact" }
+            let boundary = sampleTurn
+                    { turnUserText = "/compact"
+                    , turnEffect = TranscriptReplace
+                    }
                 ordinary = sampleTurn
                     { turnUserText = "continue"
                     , turnItems = [userTextItem "ordinary input"]
@@ -165,7 +183,10 @@ spec = do
                 `shouldBe` False
 
         it "does not mistake ephemeral harness context for a reload" do
-            let boundary = sampleTurn { turnUserText = "/compact" }
+            let boundary = sampleTurn
+                    { turnUserText = "/compact"
+                    , turnEffect = TranscriptReplace
+                    }
                 ephemeral text = sampleTurn
                     { turnUserText = "continue"
                     , turnItems = [userTextItem text]
@@ -181,6 +202,28 @@ spec = do
 
         it "does not requeue context without a transcript boundary" do
             resumeNeedsGeneratedContext [sampleTurn] `shouldBe` False
+
+        it "does not infer a boundary from current assistant text" do
+            let ordinarySummaryHeading = sampleTurn
+                    { turnItems =
+                        [ MessageItem ResponseMessage
+                            { messageId = Nothing
+                            , content = MessageContentParts
+                                [ OutputTextPart
+                                    "Compacted conversation summary:\nordinary reply"
+                                    Nothing
+                                    Nothing
+                                ]
+                            , role = RoleAssistant
+                            , status = Nothing
+                            , phase = Nothing
+                            , passthrough = Nothing
+                            }
+                        ]
+                    , turnEffect = TranscriptAppend
+                    }
+            resumeNeedsGeneratedContext [ordinarySummaryHeading]
+                `shouldBe` False
 
     describe "applyResumeKey" do
         let entries =
