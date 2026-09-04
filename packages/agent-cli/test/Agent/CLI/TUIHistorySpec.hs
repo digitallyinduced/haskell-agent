@@ -300,6 +300,26 @@ spec = describe "bounded fullscreen history window" do
             `shouldBe` Seq.singleton (HistoryCursor 2)
         historyWindowLoadedBytes window `shouldSatisfy` (<= 180)
 
+    it "keeps an oversized completed turn visible after archiving its live blocks" do
+        let generation = HistoryGeneration 6
+            initial = emptyHistoryWindow generation 100 100 180
+            page =
+                HistoryPage
+                    { historyPageGeneration = generation
+                    , historyPageDirection = HistoryNewer
+                    , historyPageTurns = Seq.singleton (turn 1 1)
+                    , historyPageGenerationStart = HistoryCursor 0
+                    , historyPageTotalTurns = 2
+                    , historyPageHasOlder = True
+                    , historyPageHasNewer = False
+                    }
+        loaded <- expectRight (applyHistoryPage page initial)
+        let completed = appendHistoryTurn (turn 2 2) loaded
+        historyWindowCursors completed
+            `shouldBe` Seq.singleton (HistoryCursor 2)
+        historyWindowLoadedBytes completed `shouldSatisfy` (> 180)
+        historyWindowOlderAvailable completed `shouldBe` True
+
     it "omits persisted reasoning while projecting tool and assistant history" do
         let projected =
                 sessionHistoryTurn
