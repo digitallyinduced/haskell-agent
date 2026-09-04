@@ -58,6 +58,7 @@ import Agent.CLI.LearnedSkills ( learnedSkillTools )
 import Agent.CLI.LearnedSkills.Store
     ( learnedSkillToolsEnvForStore
     , loadApplicableLearnedSkillsForStore
+    , successfulLearnedSkillsPreload
     )
 import Agent.CLI.Login ()
 import Agent.CLI.Lsp
@@ -1737,11 +1738,10 @@ prepareInitialContextPreload AgentToolsRequest
         | otherwise = pure Nothing
     preloadLearnedSkills
         | contextRequirements.initialContextNeeded =
-            loadApplicableLearnedSkillsForStore
-                startup.startupDatabaseStore
-                databaseScopes >>= \case
-                    Left _ -> pure Nothing
-                    Right learnedSkills -> pure (Just learnedSkills)
+            successfulLearnedSkillsPreload
+                <$> loadApplicableLearnedSkillsForStore
+                    startup.startupDatabaseStore
+                    databaseScopes
         | otherwise = pure Nothing
 
 installCollaborationCallbacks

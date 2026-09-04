@@ -3,6 +3,10 @@ module Agent.CLI.LearnedSkillsSpec (spec) where
 import Agent.CLI (learnAboutUserOnboardingPrompt)
 import Agent.CLI.Database (DatabaseScope(..))
 import Agent.CLI.LearnedSkills
+import Agent.CLI.LearnedSkills.Store
+    ( loadLearnedSkillsWithPreload
+    , successfulLearnedSkillsPreload
+    )
 import Agent.Skills
     ( Skill(..)
     , SkillContextMode(..)
@@ -186,6 +190,33 @@ spec = do
                     \\"evidence\":\"Evidence\"}")
             readIORef called `shouldReturn` False
             noOp.output `shouldContainText` "must change at least one field"
+
+    describe "learned skill startup preload" do
+        it "retries a failed preload at the normal initialization boundary" do
+            attempts <- newIORef (0 :: Int)
+            let expected = skill "retry" SkillRelevant
+                load = do
+                    attempt <- readIORef attempts
+                    writeIORef attempts (attempt + 1)
+                    pure $
+                        if attempt == 0
+                            then Left "transient preload failure"
+                            else Right [expected]
+            preload <- successfulLearnedSkillsPreload <$> load
+            result <- loadLearnedSkillsWithPreload preload load
+            result `shouldBe` Right [expected]
+            readIORef attempts `shouldReturn` 2
+
+        it "reuses a successful empty preload without querying again" do
+            attempts <- newIORef (0 :: Int)
+            let load = do
+                    attempt <- readIORef attempts
+                    writeIORef attempts (attempt + 1)
+                    pure (Right [])
+            preload <- successfulLearnedSkillsPreload <$> load
+            result <- loadLearnedSkillsWithPreload preload load
+            result `shouldBe` Right []
+            readIORef attempts `shouldReturn` 1
 
     describe "formatLearnedSkillContext" do
         it "includes always instructions but only indexes relevant/manual skills" do

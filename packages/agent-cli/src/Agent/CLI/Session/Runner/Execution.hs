@@ -521,10 +521,12 @@ buildSkillContextRuntime
             ( omitted
             , max 0 (contextLength after - contextLength before)
             )
-    installLearnedSkills context maximum queueContext =
+    loadLearnedSkills =
         loadApplicableLearnedSkillsForStore
             startup.startupDatabaseStore
             databaseScopes
+    installLearnedSkills context maximum queueContext =
+        loadLearnedSkills
             >>= installLearnedSkillResult context maximum queueContext
     installLearnedSkillResult context maximum queueContext = \case
         Left err -> do
@@ -676,19 +678,16 @@ buildSkillContextRuntime
         reportSkillCatalog (isNothing fullscreen) skills omitted
         learnedSkills <-
             if needsInitialContext
-                then
-                    case initialContextPreload.preloadedLearnedSkills of
-                        Just preloaded ->
-                            installLearnedSkillResult
-                                startupContext
-                                defaultLearnedSkillContextMaxChars
-                                queueInitialContext
-                                (Right preloaded)
-                        Nothing ->
-                            installLearnedSkills
-                                startupContext
-                                defaultLearnedSkillContextMaxChars
-                                queueInitialContext
+                then do
+                    loaded <-
+                        loadLearnedSkillsWithPreload
+                            initialContextPreload.preloadedLearnedSkills
+                            loadLearnedSkills
+                    installLearnedSkillResult
+                        startupContext
+                        defaultLearnedSkillContextMaxChars
+                        queueInitialContext
+                        loaded
                 else pure []
         callbacks.runnerFinishStartup startup
         pure learnedSkills
