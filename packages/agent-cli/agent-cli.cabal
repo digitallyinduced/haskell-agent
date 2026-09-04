@@ -80,7 +80,6 @@ library
                     , Agent.CLI.PromptHooks
                     , Agent.CLI.Provider.OpenAI
                     , Agent.CLI.Provider.Switch
-                    , Agent.CLI.ProcessSecurity
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Internal
                     , Agent.CLI.Runtime.Orchestration
@@ -163,7 +162,6 @@ library
                     , Agent.CLI.Approval
                     , Agent.CLI.Artifact
                     , Agent.CLI.Afk
-                    , Agent.CLI.BrowserTools
                     , Agent.CLI.Btw
                     , Agent.CLI.CancelWatch
                     , Agent.CLI.Clipboard
@@ -206,7 +204,6 @@ library
                     , Agent.CLI.MetaConsole
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.McpElicitation
-                    , Agent.CLI.McpAdmin
                     , Agent.CLI.McpManager
                     , Agent.CLI.NativeAgents
                     , Agent.CLI.Notification
@@ -221,9 +218,6 @@ library
                     , Agent.CLI.Project
                     , Agent.CLI.Prompt
                     , Agent.CLI.Recap
-                    , Agent.CLI.RepositoryDelivery
-                    , Agent.CLI.RepositoryReview
-                    , Agent.CLI.ResourceAdmin
                     , Agent.CLI.Review
                     , Agent.CLI.ProviderFallback
                     , Agent.CLI.ProviderAvailability
@@ -353,42 +347,6 @@ executable agent-cli
                     , directory
                     , filepath
 
-foreign-library haskell-agent-bridge
-    import:           common-options
-    if !os(darwin)
-        buildable:    False
-    type:             native-shared
-    options:          standalone
-    hs-source-dirs:   ffi
-    other-modules:    Agent.CLI.MacOS.Bridge
-                    , Agent.CLI.MacOS.EngineMailbox
-                    , Agent.CLI.MacOS.NativeLoopEvent
-                    , Agent.CLI.MacOS.ResourceAdmin
-    c-sources:        cbits/HaskellAgentBridgeRuntime.c
-    include-dirs:     include
-    includes:         HaskellAgentBridge.h
-    install-includes: HaskellAgentBridge.h
-    ghc-options:      -threaded
-    build-depends:    agent-cli
-                    , agent-runtime-daemon
-                    , agent-core >= 0.1 && < 0.2
-                    , agent-store >= 0.1 && < 0.2
-                    , agent-openai >= 0.1 && < 0.2
-                    , agent-xai >= 0.1 && < 0.2
-                    , agent-openrouter >= 0.1 && < 0.2
-                    , aeson >= 2.0
-                    , async
-                    , base >= 4.17 && < 5
-                    , bytestring
-                    , containers
-                    , directory
-                    , filelock
-                    , filepath
-                    , safe-exceptions
-                    , stm
-                    , text >= 2.0 && < 2.2
-                    , time
-
 executable eval-ghci-vs-bash
     import:           common-options
     hs-source-dirs:   eval
@@ -477,23 +435,15 @@ test-suite agent-cli-test
     import:           common-options
     type:             exitcode-stdio-1.0
     ghc-options:      -threaded
-    hs-source-dirs:   test ffi
+    hs-source-dirs:   test
     main-is:          Spec.hs
-    include-dirs:     include
     other-modules:    Agent.CLI.AccountSelectionSpec
-                    , Agent.CLI.MacOS.EngineMailboxSpec
-                    , Agent.CLI.MacOS.EngineMailbox
-                    , Agent.CLI.MacOS.NativeLoopEventSpec
-                    , Agent.CLI.MacOS.NativeLoopEvent
-                    , Agent.CLI.MacOS.TaskSchedulerSpec
-                    , Agent.CLI.ResourceAdminSpec
                     , Agent.CLI.ApprovalSpec
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec
                     , Agent.CLI.AgentViewportSpec
                     , Agent.CLI.AgentViewportRuntimeSpec
                     , Agent.CLI.AuthSpec
-                    , Agent.CLI.BrowserToolsSpec
                     , Agent.CLI.BtwSpec
                     , Agent.CLI.CancelWatchSpec
                     , Agent.CLI.ClipboardSpec
@@ -520,7 +470,6 @@ test-suite agent-cli-test
                     , Agent.CLI.LoginSpec
                     , Agent.CLI.LearnedSkillsSpec
                     , Agent.CLI.MarkdownSpec
-                    , Agent.CLI.McpAdminSpec
                     , Agent.CLI.McpManagerSpec
                     , Agent.CLI.MetaConsoleSpec
                     , Agent.CLI.MetaConsoleRuntimeSpec
@@ -541,8 +490,6 @@ test-suite agent-cli-test
                     , Agent.CLI.ProviderAvailabilitySpec
                     , Agent.CLI.ProviderTransitionSpec
                     , Agent.CLI.RequestSpec
-                    , Agent.CLI.RepositoryDeliverySpec
-                    , Agent.CLI.RepositoryReviewSpec
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec
                     , Agent.CLI.ResumeSpec
@@ -575,7 +522,6 @@ test-suite agent-cli-test
     build-depends:    agent-cli
                     , agent-cli-runtime
                     , agent-connectivity
-                    , agent-runtime-daemon
                     , agent-core
                     , agent-mcp
                     , agent-json
@@ -617,18 +563,6 @@ test-suite agent-cli-test
                     , vty >= 6.4 && < 7
                     , wai
                     , warp
-    if os(darwin)
-        c-sources:    test/cbits/HaskellAgentBridgeBrowserSmoke.c
-                    , test/cbits/HaskellAgentBridgeImageSmoke.c
-                    , test/cbits/HaskellAgentBridgeTaskSmoke.c
-                    , cbits/HaskellAgentBridgeRuntime.c
-        other-modules: Agent.CLI.MacOS.Bridge
-                     , Agent.CLI.MacOS.ResourceAdmin
-                     , Agent.CLI.MacOS.BrowserBridgeFFISpec
-                     , Agent.CLI.MacOS.BridgeSpec
-                     , Agent.CLI.MacOS.BridgeHeaderSpec
-                     , Agent.CLI.MacOS.BridgeFFISpec
-
 benchmark image-preview-latency-bench
     import:           common-options
     type:             exitcode-stdio-1.0

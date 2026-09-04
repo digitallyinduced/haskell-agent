@@ -50,6 +50,8 @@ nix develop
 cabal repl \
   agent-cli:lib:agent-cli \
   agent-cli-runtime:lib:agent-cli-runtime \
+  agent-repository:lib:agent-repository \
+  agent-native-bridge:lib:agent-native-bridge \
   agent-telegram:lib:agent-telegram \
   agent-core:lib:agent-core \
   agent-connectivity:lib:agent-connectivity \

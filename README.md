@@ -444,6 +444,13 @@ the terminal frontend. The packaged Telegram service still carries the
 `agent-cli` executable as a runtime dependency because managed child sessions
 launch that executable.
 
+Repository review/delivery and process-hardening code lives in the independent
+`agent-repository` package. Native administration helpers and the Darwin
+foreign-library bridge live in `agent-native-bridge`, which depends on the CLI
+rather than making the production CLI depend on native-only integration code.
+The resulting production rebuild change is recorded in the
+[`package-split benchmark`](docs/package-split-benchmark.md).
+
 `agent-claude` delegates its generic process transport, protocol decoding, and
 session client to
 [`claude-agent-sdk-haskell`](packages/claude-agent-sdk-haskell/README.md),
