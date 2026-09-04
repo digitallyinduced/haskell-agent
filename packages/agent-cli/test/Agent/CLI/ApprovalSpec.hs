@@ -242,6 +242,25 @@ spec = do
                             "✓ computer use approved until disabled")
                     ]
 
+        it "keeps Allow once distinct from a computer workflow grant" do
+            let call = ToolCall
+                    { callId = "computer-1"
+                    , name = computerToolName
+                    , arguments = "{}"
+                    , callKind = ComputerCallKind
+                    , argumentsEncrypted = False
+                    }
+            resolveApprovalPrompt call (Just PermissionAllowOnce)
+                `shouldBe` CompleteApproval (Right True) []
+            resolveApprovalPrompt call (Just PermissionAllowTool)
+                `shouldBe` CompleteApproval
+                    (Right True)
+                    [ RememberToolForSession computerToolName
+                    , ReportApprovalNotice
+                        (ApprovalSuccess
+                            "✓ computer use approved until disabled")
+                    ]
+
     describe "approveFilesystemRootAccess" do
         it "bypasses the prompt whenever the live policy is yolo" do
             policy <- newIORef PromptMutating
@@ -559,7 +578,7 @@ spec = do
             notices <- newIORef []
             let request _ = do
                     modifyIORef' permissionRequests (+ 1)
-                    pure (Just PermissionAllowOnce)
+                    pure (Just PermissionAllowTool)
                 computerCall kind = ToolCall
                     { callId = "computer-1"
                     , name = computerToolName
@@ -582,6 +601,34 @@ spec = do
             readIORef notices `shouldReturn`
                 [ApprovalSuccess
                     "✓ computer use approved until disabled"]
+
+        it "prompts for each computer call after an Allow once choice" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv
+                (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            notices <- newIORef []
+            let request _ = do
+                    modifyIORef' permissionRequests (+ 1)
+                    pure (Just PermissionAllowOnce)
+                call = ToolCall
+                    { callId = "computer-1"
+                    , name = computerToolName
+                    , arguments = "{}"
+                    , callKind = ComputerCallKind
+                    , argumentsEncrypted = False
+                    }
+                approve = approveToolDecisionWithReporter
+                    request
+                    (\notice -> modifyIORef' notices (<> [notice]))
+                    policy allowed
+                    (registry [computerUseTool]) plan call
+            approve `shouldReturn` Right True
+            approve `shouldReturn` Right True
+            readIORef permissionRequests `shouldReturn` 2
+            readIORef allowed `shouldReturn` Set.empty
+            readIORef notices `shouldReturn` []
 
         it "prompts again when a computer call introduces safety checks" do
             policy <- newIORef ApproveAll

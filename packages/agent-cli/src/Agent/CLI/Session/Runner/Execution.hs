@@ -376,7 +376,7 @@ newSessionControlRuntime host SessionRequest{..} = do
     renderStateRef <- newIORef emptyRenderState
     allowedToolsRef <- newIORef Set.empty
     computerUseEnabledRef <- newIORef $
-        options.optComputerUse
+        resolveComputerUseEnabled options startup.startupStdinTty
             && isJust
                 (lookupAppTool
                     computerToolName
@@ -1043,7 +1043,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
                 if enabled
                     then
                         "computer use: on \
-                        \(approval required for the next workflow)"
+                        \(approval required before control)"
                     else "computer use: off"
     setSessionTempDir tempDir = do
         -- Persistent tool runtimes capture temp-backed state at startup.

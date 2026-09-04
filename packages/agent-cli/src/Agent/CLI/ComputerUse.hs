@@ -938,7 +938,7 @@ computerToolCallHasPendingSafetyChecks call
 
 computerApprovalPrompt :: ToolCall -> Maybe Text
 computerApprovalPrompt call =
-    fmap ("Allow this computer-use workflow until disabled?\n\n" <>) $
+    fmap ("Allow this computer-use request?\n\n" <>) $
         summarizeComputerToolCall call
 
 dataUrl :: Text -> BS.ByteString -> Text

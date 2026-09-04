@@ -77,7 +77,7 @@ spec = do
                 prompt = approvalToolCallPromptRelative "/repo" call
             prompt `shouldSatisfy`
                 Text.isPrefixOf
-                    "Allow this computer-use workflow until disabled?"
+                    "Allow this computer-use request?"
             prompt `shouldNotSatisfy` Text.isInfixOf "\"actions\""
 
     describe "approval policy picker" do

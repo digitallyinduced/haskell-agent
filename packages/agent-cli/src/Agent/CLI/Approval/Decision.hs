@@ -136,7 +136,8 @@ resolveApprovalPrompt call choice
                             (glyphOk <> "auto-approve on (saved for project)"))
                     , computerWorkflowNotice
                     ]
-            Just _ ->
+            Just PermissionAllowOnce -> approved
+            Just PermissionAllowTool ->
                 CompleteApproval
                     (Right True)
                     [ RememberToolForSession

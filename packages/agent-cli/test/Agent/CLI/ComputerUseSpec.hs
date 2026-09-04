@@ -389,7 +389,7 @@ spec = do
             summary `shouldSatisfy`
                 (not . ("top secret" `Text.isInfixOf`))
             prompt `shouldSatisfy`
-                maybe False ("Allow this computer-use workflow until disabled?"
+                maybe False ("Allow this computer-use request?"
                     `Text.isPrefixOf`)
 
         it "escapes control characters in untrusted summary fields" do

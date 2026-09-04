@@ -90,8 +90,9 @@ import Agent.CLI.Options
       isOneShot,
       normalizeReasoningEffortForDialect,
       resolveApprovalPolicy,
+      resolveComputerUseEnabled,
       CliOptions(optYolo, optModel, optEffort, optMaxConcurrentAgents,
-                 optGhci, optBash, optComputerUse, optNoYolo, optSkills) )
+                 optGhci, optBash, optNoYolo, optSkills) )
 import Agent.CLI.PendingInputs
     ( PendingInputs
     , PendingNoticeKind(..)
@@ -170,7 +171,8 @@ import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupFullscreen, startupBackground,
                      startupFinished, startupDatabaseStore,
-                     startupSessionState, startupNativeHooks) )
+                     startupSessionState, startupNativeHooks,
+                     startupStdinTty) )
 import Agent.CLI.Session.Selection
     ( currentSessionId, loadPrompt, reservedSessionId )
 import Agent.CLI.SessionAdmin ()
@@ -1891,7 +1893,7 @@ assembleSessionToolsRuntime AgentToolsRequest
             ]
         activeComputerTools =
             [ tool
-            | options.optComputerUse
+            | resolveComputerUseEnabled options startup.startupStdinTty
             , tool <- computerTools
             ]
         imageGenerationTools =
