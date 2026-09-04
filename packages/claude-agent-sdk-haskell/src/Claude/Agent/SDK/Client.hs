@@ -77,6 +77,7 @@ import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( Async
+    , cancel
     , poll
     , withAsyncWithUnmask
     )
@@ -1082,25 +1083,24 @@ subprocessTransportFactory options request =
 
 stopRunningClient :: RunningClient -> IO ()
 stopRunningClient running =
-    withAsyncWithUnmask
+    ( withAsyncWithUnmask
         (\unmask -> unmask running.runningTransport.transportEndInput)
-        \endInputWorker ->
-            (do
-                endInputResult <-
-                    pollAsyncUntil
-                        running.runningShutdownTimeoutMicros
-                        endInputWorker
-                case endInputResult of
-                    Nothing ->
-                        pure ()
-                    Just (Left exception) ->
-                        throwIO exception
-                    Just (Right ()) ->
-                        pure ()
-                waitForTransportExit
+        \endInputWorker -> do
+            endInputResult <-
+                pollAsyncUntil
                     running.runningShutdownTimeoutMicros
-                    running.runningTransport
-            ) `finally` forceCloseRunningClient running
+                    endInputWorker
+            case endInputResult of
+                Nothing ->
+                    cancel endInputWorker
+                Just (Left exception) ->
+                    throwIO exception
+                Just (Right ()) ->
+                    pure ()
+            waitForTransportExit
+                running.runningShutdownTimeoutMicros
+                running.runningTransport
+    ) `finally` forceCloseRunningClient running
 
 pollAsyncUntil
     :: Int

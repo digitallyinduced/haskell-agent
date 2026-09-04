@@ -5,12 +5,15 @@ import Control.Concurrent
     ( forkIO
     , newChan
     , newEmptyMVar
+    , newMVar
     , putMVar
     , readChan
     , takeMVar
     , threadDelay
+    , withMVar
     , writeChan
     )
+import Control.Concurrent.Async (wait, withAsync)
 import Control.Exception.Safe (finally)
 import Control.Monad (void)
 import qualified Data.Aeson as Aeson
@@ -359,25 +362,30 @@ spec = describe "Claude SDK control protocol" do
                         emit (successResponse requestId (Aeson.object []))
                     _ -> pure ()
         block <- newEmptyMVar
+        endInputStarted <- newEmptyMVar
+        lifecycleLock <- newMVar ()
         closed <- newIORef False
         endInputObservedClosed <- newEmptyMVar
         let blockedFactory requestInfo = do
                 transport <- factory.transportFactory requestInfo
                 pure transport
                     { transportClose =
-                        writeIORef closed True
-                            >> transport.transportClose
+                        withMVar lifecycleLock \_ ->
+                            writeIORef closed True
+                                >> transport.transportClose
                     , transportEndInput =
-                        takeMVar block
-                            `finally`
-                                (readIORef closed
-                                    >>= putMVar endInputObservedClosed)
+                        withMVar lifecycleLock \_ -> do
+                            putMVar endInputStarted ()
+                            takeMVar block
+                                `finally`
+                                    (readIORef closed
+                                        >>= putMVar endInputObservedClosed)
                     }
             handlers =
                 defaultClaudeAgentHandlers
                     { shutdownTimeoutMicros = 20_000
                     }
-        timeout 500_000
+        withAsync
             (withClaudeSDKClientWithTransportAndHandlers
                 testOptions
                 blockedFactory
@@ -385,8 +393,19 @@ spec = describe "Claude SDK control protocol" do
                 \client ->
                     withTurn client \_ ->
                         pure (Right ((), pure ())))
-            `shouldReturn` Just (Right ())
-        takeMVar endInputObservedClosed `shouldReturn` True
+            \shutdown -> do
+                takeMVar endInputStarted
+                result <- timeout 500_000 (wait shutdown)
+                case result of
+                    Nothing -> do
+                        -- Keep a regression failure from leaking the blocked
+                        -- shutdown worker into the rest of the suite.
+                        putMVar block ()
+                        void (wait shutdown)
+                    Just _ ->
+                        pure ()
+                result `shouldBe` Just (Right ())
+        takeMVar endInputObservedClosed `shouldReturn` False
 
 data FakeTransport = FakeTransport
     { transportFactory :: !TransportFactory
