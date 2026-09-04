@@ -81,7 +81,16 @@ import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
 import Agent.OsPath (unsafeToFilePath)
 import Control.Concurrent (ThreadId, myThreadId, threadDelay)
 import Control.Concurrent.Async (race)
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Control.Concurrent.MVar
+    ( MVar
+    , newEmptyMVar
+    , newMVar
+    , putMVar
+    , readMVar
+    , takeMVar
+    , tryPutMVar
+    , withMVar
+    )
 import Control.Concurrent.STM
     ( TVar
     , atomically
@@ -99,7 +108,7 @@ import Control.Exception.Safe
     , throwString
     , tryAny
     )
-import Control.Monad (unless, when)
+import Control.Monad (unless, void, when)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson ((.=), (.:))
 import Data.Aeson qualified as Aeson
@@ -123,23 +132,34 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Network.HTTP.Client qualified as HTTP
+import Network.HTTP.Client.MultipartFormData qualified as Multipart
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types
     ( hAccept
     , hAuthorization
+    , hCacheControl
+    , hConnection
+    , hContentLength
     , hContentType
+    , methodGet
+    , status200
     , statusCode
     , statusIsSuccessful
     )
-import Network.HTTP.Types.URI (parseQueryText, renderQueryText)
+import Network.HTTP.Types.URI
+    ( parseQueryText
+    , queryToQueryText
+    , renderQueryText
+    )
 import Network.URI qualified as URI
+import Network.Wai qualified as Wai
+import Network.Wai.Handler.Warp qualified as Warp
 import Network.Socket
     ( Family(AF_INET)
     , SockAddr(SockAddrInet)
     , Socket
     , SocketOption(ReuseAddr)
     , SocketType(Stream)
-    , accept
     , bind
     , close
     , defaultProtocol
@@ -149,7 +169,6 @@ import Network.Socket
     , socket
     , tupleToHostAddress
     )
-import Network.Socket.ByteString qualified as Socket
 import System.Directory.OsPath qualified as Directory
 import System.Entropy (getEntropy)
 import System.Exit (ExitCode (..))
@@ -683,15 +702,14 @@ postGatewayTranscription credential wav =
         Left _ -> pure (Left "Gateway credential is invalid.")
         Right () -> do
             boundary <- gatewayTranscriptionBoundary
-            let body = gatewayTranscriptionBody boundary wav
-                endpoint =
+            let endpoint =
                     Text.dropWhileEnd (== '/')
                         (Text.strip credential.gatewayBaseUrl)
                         <> "/v1/audio/transcriptions"
             outcome <- tryAny do
                 manager <- newTlsManager
                 initial <- HTTP.parseRequest (Text.unpack endpoint)
-                let request =
+                let baseRequest =
                         initial
                             { HTTP.method = "POST"
                             , HTTP.requestHeaders =
@@ -700,12 +718,8 @@ postGatewayTranscription credential wav =
                                         <> TextEncoding.encodeUtf8
                                             credential.gatewayAccessToken
                                   )
-                                , ( hContentType
-                                  , "multipart/form-data; boundary=" <> boundary
-                                  )
                                 , (hAccept, "application/json")
                                 ]
-                            , HTTP.requestBody = HTTP.RequestBodyLBS body
                             , HTTP.checkResponse = \_ _ -> pure ()
                             -- Never forward the gateway bearer to a redirect.
                             , HTTP.redirectCount = 0
@@ -713,6 +727,18 @@ postGatewayTranscription credential wav =
                                 HTTP.responseTimeoutMicro
                                     (2 * 60 * 1_000_000)
                             }
+                    audioPart =
+                        (Multipart.partFileRequestBody
+                            "file"
+                            "audio.wav"
+                            (HTTP.RequestBodyLBS wav))
+                            { Multipart.partContentType = Just "audio/wav" }
+                request <- Multipart.formDataBodyWithBoundary
+                    boundary
+                    [ Multipart.partBS "model" "dictation"
+                    , audioPart
+                    ]
+                    baseRequest
                 HTTP.withResponse request manager \response -> do
                     responseBody <-
                         readBoundedBody
@@ -762,23 +788,6 @@ gatewayTranscriptionBoundary =
     ("----haskell-agent-gateway-" <>)
         . Base64Url.encodeUnpadded
         <$> getEntropy 18
-
-gatewayTranscriptionBody
-    :: BS.ByteString
-    -> LBS.ByteString
-    -> LBS.ByteString
-gatewayTranscriptionBody boundary wav =
-    LBS.fromStrict
-        ( "--" <> boundary <> "\r\n"
-        <> "Content-Disposition: form-data; name=\"model\"\r\n\r\n"
-        <> "dictation\r\n"
-        <> "--" <> boundary <> "\r\n"
-        <> "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n"
-        <> "Content-Type: audio/wav\r\n\r\n"
-        )
-        <> wav
-        <> LBS.fromStrict
-            ("\r\n--" <> boundary <> "--\r\n")
 
 newtype GatewayTranscript =
     GatewayTranscript { gatewayTranscriptText :: Text }
@@ -1581,17 +1590,40 @@ validateGatewayAuthorizationCallback
     -> BS.ByteString
     -> Either Text Text
 validateGatewayAuthorizationCallback expectedState request = do
-    target <- case BS8.words requestLine of
-        method : rawTarget : _
-            | method == "GET" -> Right rawTarget
-            | otherwise -> Left "Gateway OAuth callback must use GET."
+    (method, target) <- case BS8.words requestLine of
+        requestMethod : rawTarget : _ -> Right (requestMethod, rawTarget)
         _ -> Left "Gateway OAuth callback request is malformed."
     let (path, rawQuery) = BS.break (== 63) target
+    validateGatewayAuthorizationParameters
+        expectedState
+        method
+        path
+        (not (BS.null rawQuery))
+        (parseQueryText (BS.drop 1 rawQuery))
+  where
+    requestLine = BS8.takeWhile (/= '\r') request
+
+validateGatewayAuthorizationParameters
+    :: Text
+    -> BS.ByteString
+    -> BS.ByteString
+    -> Bool
+    -> [(Text, Maybe Text)]
+    -> Either Text Text
+validateGatewayAuthorizationParameters
+    expectedState
+    method
+    path
+    hasQuery
+    parameters = do
+    whenEither
+        (method /= methodGet)
+        "Gateway OAuth callback must use GET."
     whenEither
         (path /= TextEncoding.encodeUtf8 gatewayBrowserRedirectPath)
         "Gateway OAuth callback path is invalid."
     whenEither
-        (BS.null rawQuery)
+        (not hasQuery)
         "Gateway OAuth callback query is missing."
     state <- singletonParameter "state" parameters
         >>= maybe
@@ -1616,13 +1648,6 @@ validateGatewayAuthorizationCallback expectedState request = do
                 (Text.null code || Text.length code > 4096)
                 "Gateway OAuth callback authorization code is invalid."
             pure code
-  where
-    requestLine = BS8.takeWhile (/= '\r') request
-    parameters = parseQueryText (BS.drop 1 rawQueryBytes)
-    (_, rawQueryBytes) =
-        case BS8.words requestLine of
-            _ : target : _ -> BS.break (== 63) target
-            _ -> ("", "")
 
 validateGatewayAuthorizationCodeResponse
     :: Text
@@ -2085,50 +2110,43 @@ receiveGatewayAuthorizationCallback
     :: Socket
     -> Text
     -> IO (Either Text Text)
-receiveGatewayAuthorizationCallback listener expectedState =
-    bracket (fst <$> accept listener) close \connection -> do
-        request <- receiveGatewayCallbackHeaders connection
-        let result =
-                request >>= validateGatewayAuthorizationCallback expectedState
-            page = gatewayCallbackPage result
-            response =
-                "HTTP/1.1 200 OK\r\n\
-                \Content-Type: text/html; charset=utf-8\r\n\
-                \Cache-Control: no-store\r\n\
-                \Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'\r\n\
-                \X-Content-Type-Options: nosniff\r\n\
-                \Connection: close\r\n\
-                \Content-Length: "
-                    <> BS8.pack (show (BS.length page))
-                    <> "\r\n\r\n"
-                    <> page
-        Socket.sendAll connection response
-        pure result
-
-receiveGatewayCallbackHeaders
-    :: Socket
-    -> IO (Either Text BS.ByteString)
-receiveGatewayCallbackHeaders connection = go BS.empty
-  where
-    maximumHeaderBytes = 16_384
-    delimiter = "\r\n\r\n"
-
-    go accumulated
-        | delimiter `BS.isInfixOf` accumulated =
-            pure (Right accumulated)
-        | BS.length accumulated >= maximumHeaderBytes =
-            pure (Left "Gateway OAuth callback headers were too large.")
-        | otherwise = do
-            chunk <-
-                Socket.recv
-                    connection
-                    (maximumHeaderBytes - BS.length accumulated)
-            if BS.null chunk
-                then
-                    pure
-                        (Left
-                            "Gateway OAuth callback closed before sending headers.")
-                else go (accumulated <> chunk)
+receiveGatewayAuthorizationCallback listener expectedState = do
+    resultVar <- newEmptyMVar
+    shutdownVar <- newEmptyMVar
+    let settings =
+            Warp.setHost "127.0.0.1"
+                $ Warp.setMaxTotalHeaderLength 16_384
+                $ Warp.setInstallShutdownHandler
+                    (\shutdown -> putMVar shutdownVar shutdown)
+                $ Warp.defaultSettings
+        application request respond = do
+            let result =
+                    validateGatewayAuthorizationParameters
+                        expectedState
+                        (Wai.requestMethod request)
+                        (Wai.rawPathInfo request)
+                        (not (BS.null (Wai.rawQueryString request)))
+                        (queryToQueryText (Wai.queryString request))
+                page = gatewayCallbackPage result
+                finish = do
+                    void (tryPutMVar resultVar result)
+                    readMVar shutdownVar >>= id
+            respond
+                (Wai.responseLBS
+                    status200
+                    [ (hContentType, "text/html; charset=utf-8")
+                    , (hCacheControl, "no-store")
+                    , (hConnection, "close")
+                    , ( "Content-Security-Policy"
+                      , "default-src 'none'; style-src 'unsafe-inline'"
+                      )
+                    , ("X-Content-Type-Options", "nosniff")
+                    , (hContentLength, BS8.pack (show (BS.length page)))
+                    ]
+                    (LBS.fromStrict page))
+                `finally` finish
+    Warp.runSettingsSocket settings listener application
+    takeMVar resultVar
 
 gatewayCallbackPage :: Either Text Text -> BS.ByteString
 gatewayCallbackPage result =
