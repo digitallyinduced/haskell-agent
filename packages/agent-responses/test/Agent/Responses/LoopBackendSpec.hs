@@ -195,6 +195,31 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             other -> expectationFailure
                 ("unexpected computer continuation: " <> show other)
 
+    it "returns native accessibility state beside the screenshot" do
+        let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "ignored"
+                    , screenshotDataUrl = "data:image/jpeg;base64,AA=="
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Nothing
+                    , computerOutputExtra = KeyMap.singleton
+                        "accessibility_state"
+                        (Aeson.String
+                            "app=\"TextEdit\"\n[1] AXButton \"Save\"")
+                    }
+            result = ToolCallResult
+                { callId = "call-native"
+                , output = encoded
+                , callKind = ComputerFunctionCallKind
+                }
+        case turnInputsToItems [CompletedTool result] of
+            FunctionCallOutputItem output : _ ->
+                Aeson.toJSON output.output `shouldBe` Aeson.String
+                    "Computer action completed.\n\nCurrent macOS accessibility state:\napp=\"TextEdit\"\n[1] AXButton \"Save\""
+            other -> expectationFailure
+                ("unexpected native computer continuation: " <> show other)
+
     it "keeps computer output before its observation in standard and Lite requests" do
         let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
                 ComputerCallOutput

@@ -749,8 +749,16 @@ computerFunctionTextOutput :: Text -> Text
 computerFunctionTextOutput rawOutput =
     case Hermes.decodeEither computerCallOutputDecoder
             (Text.encodeUtf8 rawOutput) of
-        Right ComputerCallOutput{} ->
-            "Computer action completed."
+        Right output ->
+            case KeyMap.lookup
+                    "accessibility_state"
+                    output.computerOutputExtra of
+                Just (Aeson.String state)
+                    | not (Text.null (Text.strip state)) ->
+                        "Computer action completed.\n\n"
+                            <> "Current macOS accessibility state:\n"
+                            <> state
+                _ -> "Computer action completed."
         Left _ -> rawOutput
 
 latestComputerScreenshot :: [TurnInput] -> Maybe Text
