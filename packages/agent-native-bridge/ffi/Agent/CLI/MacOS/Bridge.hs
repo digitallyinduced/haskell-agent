@@ -8,6 +8,7 @@ module Agent.CLI.MacOS.Bridge
     , browserOutputCapacity
     , browserStatusMessage
     , browserToolsWhenEnabled
+    , composeNativeTools
     , invokeBrowserCommand
     , repositoryCancelAllAdmissionSmoke
     , repositoryCancelClassificationSmoke
@@ -32,6 +33,13 @@ module Agent.CLI.MacOS.Bridge
     ) where
 
 import Agent.CLI.MacOS.ResourceAdmin ()
+import Agent.CLI.MacOS.ComputerBridge
+    ( ComputerCallback
+    , ComputerHost(..)
+    , ComputerRegistration(..)
+    , computerToolWhenEnabled
+    , newComputerHost
+    )
 import qualified Agent.CLI.AgentViewport as Viewport
 import Agent.CLI.BrowserTools
     ( BrowserCommand(..)
@@ -237,7 +245,7 @@ import Agent.Tools.PlanMode
     , PlanModeHooks(..)
     )
 import Agent.Tools.Types
-    ( AppTool
+    ( AppTool(..)
     , AppToolGroup(..)
     , appToolsFromGroups
     )
@@ -1047,6 +1055,7 @@ data Engine = Engine
     , engineDone :: !(MVar ())
     , engineStagedImages :: !(TVar (Map Text [ImageAttachment]))
     , engineBrowser :: !BrowserHost
+    , engineComputer :: !ComputerHost
     , engineStagedTurnOptions :: !(TVar (Map Text NativeTurnOptions))
     , engineInteractions :: !InteractionRuntime
     }
@@ -1119,6 +1128,9 @@ foreign export ccall ha_engine_stage_turn_images
 
 foreign export ccall ha_engine_set_browser_callback
     :: Ptr () -> FunPtr BrowserCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_engine_set_computer_callback
+    :: Ptr () -> FunPtr ComputerCallback -> Ptr () -> IO CInt
 
 foreign export ccall ha_engine_cancel_task
     :: Ptr () -> Ptr Word8 -> CSize -> IO CInt
@@ -4088,6 +4100,7 @@ ha_engine_create callback context
             done <- newEmptyMVar
             stagedImages <- newTVarIO Map.empty
             browser <- BrowserHost <$> newMVar Nothing
+            computer <- newComputerHost
             stagedTurnOptions <- newTVarIO Map.empty
             interactionTarget <- newTVarIO Nothing
             interactionLock <- newMVar ()
@@ -4106,6 +4119,7 @@ ha_engine_create callback context
                     commands
                     stagedImages
                     browser
+                    computer
                     stagedTurnOptions
                     interactions)
                 (const (putMVar done ()))
@@ -4114,6 +4128,7 @@ ha_engine_create callback context
                 , engineDone = done
                 , engineStagedImages = stagedImages
                 , engineBrowser = browser
+                , engineComputer = computer
                 , engineStagedTurnOptions = stagedTurnOptions
                 , engineInteractions = interactions
                 }
@@ -4167,6 +4182,26 @@ ha_engine_set_browser_callback pointer callback context
                         else Just BrowserRegistration
                             { browserCallback = callback
                             , browserContext = context
+                            }
+        pure $ case updated of
+            Left _ -> 2
+            Right () -> 0
+
+ha_engine_set_computer_callback
+    :: Ptr () -> FunPtr ComputerCallback -> Ptr () -> IO CInt
+ha_engine_set_computer_callback pointer callback context
+    | pointer == nullPtr = pure 1
+    | otherwise = do
+        updated <- tryAny do
+            let stable = castPtrToStablePtr pointer :: StablePtr Engine
+            engine <- deRefStablePtr stable
+            modifyMVar_ engine.engineComputer.computerRegistration $ \_ ->
+                pure
+                    if callback == nullFunPtr
+                        then Nothing
+                        else Just ComputerRegistration
+                            { computerCallback = callback
+                            , computerContext = context
                             }
         pure $ case updated of
             Left _ -> 2
@@ -4546,6 +4581,9 @@ ha_engine_destroy pointer
         let stable = castPtrToStablePtr pointer :: StablePtr Engine
         (do
             engine <- deRefStablePtr stable
+            modifyMVar_
+                engine.engineComputer.computerRegistration
+                (const (pure Nothing))
             _ <- atomically
                 (closeEngineMailbox engine.engineCommands EngineStop)
             readMVar engine.engineDone)
@@ -4559,11 +4597,12 @@ workerLifecycle
     -> EngineMailbox EngineCommand
     -> TVar (Map Text [ImageAttachment])
     -> BrowserHost
+    -> ComputerHost
     -> TVar (Map Text NativeTurnOptions)
     -> InteractionRuntime
     -> IO ()
 workerLifecycle
-        callback context config root commands stagedImages browser
+        callback context config root commands stagedImages browser computer
         stagedTurnOptions interactions =
     (do
         store <- newMVar Nothing
@@ -4583,6 +4622,7 @@ workerLifecycle
             commands
             stagedImages
             browser
+            computer
             stagedTurnOptions
             interactions
             workerRegistry
@@ -4620,13 +4660,15 @@ supervisorLoop
     -> EngineMailbox EngineCommand
     -> TVar (Map Text [ImageAttachment])
     -> BrowserHost
+    -> ComputerHost
     -> TVar (Map Text NativeTurnOptions)
     -> InteractionRuntime
     -> TVar (Map Text RunningTurn)
     -> TaskSupervisor
     -> IO ()
 supervisorLoop
-        callback context config store root processRuntime commands stagedImages browser
+        callback context config store root processRuntime commands stagedImages
+        browser computer
         stagedTurnOptions interactions workerRegistry =
     go
   where
@@ -4955,6 +4997,7 @@ supervisorLoop
             start.turnStartSessionId
             interactions
         nativeBrowserTools <- browserToolsWhenEnabled browser
+        nativeComputerTool <- computerToolWhenEnabled computer
         worker <- launchTrackedWorker start.turnStartId do
             withGatewayCredentialTurnLease $
                 ensureNativeGatewayIdentity
@@ -4988,6 +5031,7 @@ supervisorLoop
                                     processRuntime
                                     control
                                     nativeBrowserTools
+                                    nativeComputerTool
                                     start
                                     pending.pendingTurnImages
                                     pending.pendingTurnOptions
@@ -5298,6 +5342,23 @@ browserToolsWhenEnabled host =
         Nothing -> pure []
         Just _ -> pure (browserTools (invokeBrowserCommand host))
 
+-- | Replace, rather than append, the generic desktop backend. This keeps the
+-- command-line computer-use flag authoritative and guarantees a single
+-- model-visible @computer@ tool.
+composeNativeTools :: Maybe AppTool -> [AppToolGroup] -> [AppTool]
+composeNativeTools Nothing = appToolsFromGroups
+composeNativeTools (Just nativeComputer) =
+    replaceFirst False . appToolsFromGroups
+  where
+    replaceFirst _ [] = []
+    replaceFirst found (tool : tools)
+        | tool.appToolName /= "computer" =
+            tool : replaceFirst found tools
+        | found =
+            replaceFirst True tools
+        | otherwise =
+            nativeComputer : replaceFirst True tools
+
 invokeBrowserCommand
     :: BrowserHost
     -> BrowserCommand
@@ -5397,6 +5458,7 @@ runNativeTurn
     -> NativeProcessRuntime
     -> TurnControl
     -> [AppTool]
+    -> Maybe AppTool
     -> TurnStart
     -> [ImageAttachment]
     -> NativeTurnOptions
@@ -5404,7 +5466,7 @@ runNativeTurn
     -> IO TurnOutcome
 runNativeTurn
         callback context commands processRuntime control nativeBrowserTools
-        start images turnOptions interactions = do
+        nativeComputerTool start images turnOptions interactions = do
     sessionIdRef <- newIORef start.turnStartSessionId
     completedRef <- newIORef False
     usageRef <- newIORef emptyTokenUsage
@@ -5444,7 +5506,8 @@ runNativeTurn
             , nativeRequestRootAccess =
                 requestRootAccessFromClient callback context control
             , nativeToolGroups = [HostToolGroup nativeBrowserTools]
-            , nativeComposeTools = appToolsFromGroups
+            , nativeComposeTools =
+                composeNativeTools nativeComputerTool
             , nativePlanHooks =
                 nativePlanModeHooks control interactions
             , nativeInteractionMode =

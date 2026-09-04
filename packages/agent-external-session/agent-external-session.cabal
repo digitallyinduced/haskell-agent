@@ -1,0 +1,88 @@
+cabal-version:      3.0
+name:               agent-external-session
+version:            0.1.0.0
+synopsis:           Import sessions from external agent harnesses
+description:        Discovery and bounded import of Codex, Claude, Cursor,
+                    and Grok session histories.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Development
+build-type:         Simple
+
+common common-options
+    default-language: GHC2021
+    default-extensions: BlockArguments
+                      , OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , TypeApplications
+                      , ScopedTypeVariables
+    ghc-options:      -Wall
+                      -Wcompat
+                      -Widentities
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wincomplete-record-updates
+                      -Wpartial-fields
+                      -Wno-name-shadowing
+
+library
+    import:           common-options
+    hs-source-dirs:   src
+    exposed-modules:  Agent.CLI.ExternalSession
+    other-modules:    Agent.CLI.ExternalSession.Content
+                    , Agent.CLI.ExternalSession.JSONL
+                    , Agent.CLI.ExternalSession.Paths
+                    , Agent.CLI.ExternalSession.Provider.Claude
+                    , Agent.CLI.ExternalSession.Provider.Codex
+                    , Agent.CLI.ExternalSession.Provider.Cursor
+                    , Agent.CLI.ExternalSession.Provider.Grok
+                    , Agent.CLI.ExternalSession.SQLite
+                    , Agent.CLI.ExternalSession.Types
+    build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-json >= 0.1 && < 0.2
+                    , aeson >= 2.0
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , crypton
+                    , direct-sqlite >= 2.3 && < 2.4
+                    , directory
+                    , filepath
+                    , network-uri
+                    , process >= 1.6.26
+                    , safe-exceptions
+                    , scientific
+                    , text >= 2.0 && < 2.2
+                    , time
+                    , unix
+                    , vector
+
+test-suite agent-external-session-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    ghc-options:      -threaded
+    other-modules:    Agent.CLI.ExternalSessionSpec
+    build-depends:    agent-external-session
+                    , agent-core
+                    , aeson
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , direct-sqlite >= 2.3 && < 2.4
+                    , directory
+                    , filepath
+                    , hspec >= 2.11 && < 2.12
+                    , process
+                    , safe-exceptions
+                    , text

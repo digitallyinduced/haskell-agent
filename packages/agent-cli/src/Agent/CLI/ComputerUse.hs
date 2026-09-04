@@ -1,8 +1,13 @@
 -- | Function-based computer use backed by macOS screen capture and input.
 module Agent.CLI.ComputerUse
-    ( computerUseTool
+    ( ComputerObservation(..)
+    , ComputerUseBackend(..)
+    , ScreenshotEncoding(..)
+    , computerUseTool
+    , computerUseToolWith
     , computerFunctionParameters
     , executeComputerCall
+    , executeComputerCallWithBackend
     , screenshotMacOS
     , summarizeComputerCall
     , summarizeComputerToolCall
@@ -40,6 +45,7 @@ import Agent.Tools.Types
     )
 import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception.Safe (finally, tryAny)
 import Control.Monad (foldM)
 import qualified Data.Aeson as Aeson
@@ -56,16 +62,27 @@ import System.Directory (getTemporaryDirectory, removeFile)
 import System.Exit (ExitCode(..))
 import System.Info (os)
 import System.IO (hClose, openBinaryTempFile)
+import System.IO.Unsafe (unsafePerformIO)
 import System.Process (readProcessWithExitCode)
 import Text.Read (readMaybe)
 
 -- | A dedicated internal schema marker, rather than a provider-native wire
 -- type, keeps this privileged handler separate from caller-defined functions.
 computerUseTool :: AppTool
-computerUseTool = AppTool
+computerUseTool
+    | os == "darwin" = computerUseToolWith localComputerUseBackend
+    | otherwise =
+        (computerUseToolWith localComputerUseBackend)
+            { appToolHandler = noArgsTool "computer"
+                (pure (Left
+                    "Local computer use is currently supported only on macOS."))
+            }
+
+computerUseToolWith :: ComputerUseBackend -> AppTool
+computerUseToolWith backend = AppTool
     { appToolName = "computer"
     , appToolDescription =
-        "Run one or more approved actions on the main macOS display and receive a fresh screenshot. Start with screenshot when the UI state is unknown."
+        "Start each computer session with a screenshot-only call. Then run up to 10 approved actions on the main macOS display and receive one fresh final screenshot. A screenshot marker is valid only at the end of a batch."
     , appToolSchema = HostedComputerSchema
     , appToolHandler = handler
     , appToolApproval = AlwaysPrompt
@@ -73,16 +90,14 @@ computerUseTool = AppTool
     , appToolResourceClaims = Nothing
     }
   where
-    handler
-        | os == "darwin" =
-            typedToolWithCall "computer" computerToolInputDecoder \call input ->
-                executeComputerCallWith
-                    (case call.callKind of
-                        ComputerFunctionCallKind -> ScreenshotJpeg
-                        _ -> ScreenshotPng)
-                    (computerCallFromInput call input)
-        | otherwise = noArgsTool "computer"
-            (pure (Left "Local computer use is currently supported only on macOS."))
+    handler =
+        typedToolWithCall "computer" computerToolInputDecoder \call input ->
+            executeComputerCallWithBackend
+                backend
+                (case call.callKind of
+                    ComputerFunctionCallKind -> ScreenshotJpeg
+                    _ -> ScreenshotPng)
+                (computerCallFromInput call input)
 
 data ComputerToolInput = ComputerToolInput
     { toolComputerActions :: ![ComputerAction]
@@ -115,7 +130,8 @@ computerFunctionParameters = Aeson.object
             , "items" Aeson..= Aeson.object
                 [ "anyOf" Aeson..= computerActionSchemas ]
             , "minItems" Aeson..= (1 :: Int)
-            , "maxItems" Aeson..= (128 :: Int)
+            -- The optional terminal screenshot marker is not executed.
+            , "maxItems" Aeson..= (11 :: Int)
             ]
         ]
     , "required" Aeson..= ["actions" :: Text]
@@ -226,55 +242,99 @@ executeComputerCall = executeComputerCallWith ScreenshotPng
 data ScreenshotEncoding
     = ScreenshotPng
     | ScreenshotJpeg
+    deriving (Eq, Show)
+
+data ComputerObservation = ComputerObservation
+    { computerObservationImage :: !ImageAttachment
+    , computerObservationAccessibility :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+-- | One computer-use transaction. The backend owns display discovery,
+-- display-specific validation, action execution, settling, and observation as
+-- one serialized critical section. It must run the supplied validator before
+-- the first input side effect.
+data ComputerUseBackend = ComputerUseBackend
+    { computerRunTransaction ::
+        !( ScreenshotEncoding
+            -> [ComputerAction]
+            -> ((Int, Int) -> Either Text ())
+            -> IO (Either Text ComputerObservation)
+         )
+    }
 
 executeComputerCallWith
     :: ScreenshotEncoding
     -> ComputerCall
     -> IO (Either Text Text)
-executeComputerCallWith screenshotEncoding call
+executeComputerCallWith =
+    executeComputerCallWithBackend localComputerUseBackend
+
+executeComputerCallWithBackend
+    :: ComputerUseBackend
+    -> ScreenshotEncoding
+    -> ComputerCall
+    -> IO (Either Text Text)
+executeComputerCallWithBackend backend screenshotEncoding call
     | Left err <- validateComputerCall call = pure (Left err)
-    | otherwise = do
-        unlocked <- ensureUnlockedSession
-        case unlocked of
-            Left err -> pure (Left err)
-            Right () -> do
-                dimensions <- mainDisplayLogicalSize
-                case dimensions of
-                    Left err -> pure (Left err)
-                    Right display
-                        | Left err <-
-                            validateComputerCallForDisplay display call ->
-                            pure (Left err)
-                        | otherwise -> do
-                            actionResult <-
-                                foldM run (Right ()) call.computerActions
-                            case actionResult of
-                                Left err -> pure (Left err)
-                                Right () -> do
-                                    currentDisplay <- mainDisplayLogicalSize
-                                    case currentDisplay of
-                                        Left err -> pure (Left err)
-                                        Right value
-                                            | value /= display ->
-                                                pure (Left
-                                                    "The main display changed during computer use; take a fresh screenshot before continuing.")
-                                            | otherwise ->
-                                                screenshotMainDisplayWith
-                                                    screenshotEncoding
-                                                    display
-                                                    >>= \case
-                                                        Left err ->
-                                                            pure (Left err)
-                                                        Right image ->
-                                                            pure (Right
-                                                                (encodeComputerOutput
-                                                                    call image))
+    | otherwise =
+        backend.computerRunTransaction
+            screenshotEncoding
+            (actionsBeforeObservation call.computerActions)
+            (\display -> validateComputerCallForDisplay display call)
+            >>= \case
+                Left err -> pure (Left err)
+                Right observation ->
+                    pure (Right (encodeComputerOutput call observation))
+
+localComputerUseBackend :: ComputerUseBackend
+localComputerUseBackend = ComputerUseBackend
+    { computerRunTransaction = \encoding actions validateDisplay ->
+        withMVar localComputerUseLock \_ -> do
+            ensureUnlockedSession >>= \case
+                Left err -> pure (Left err)
+                Right () ->
+                    mainDisplayLogicalSize >>= \case
+                        Left err -> pure (Left err)
+                        Right display
+                            | Left err <- validateDisplay display ->
+                                pure (Left err)
+                            | otherwise -> do
+                                actionResult <- foldM run (Right ()) actions
+                                case actionResult of
+                                    Left err -> pure (Left err)
+                                    Right () ->
+                                        mainDisplayLogicalSize >>= \case
+                                            Left err -> pure (Left err)
+                                            Right value
+                                                | value /= display ->
+                                                    pure (Left
+                                                        "The main display changed during computer use; take a fresh screenshot before continuing.")
+                                                | otherwise -> fmap
+                                                    (fmap
+                                                        (\image ->
+                                                            ComputerObservation
+                                                                image
+                                                                Nothing))
+                                                    (screenshotMainDisplayWith
+                                                        encoding
+                                                        display)
+    }
   where
     run (Left err) _ = pure (Left err)
     run (Right ()) action = executeAction action
 
-encodeComputerOutput :: ComputerCall -> ImageAttachment -> Text
-encodeComputerOutput call ImageAttachment{imageMime, imageBytes} =
+{-# NOINLINE localComputerUseLock #-}
+localComputerUseLock :: MVar ()
+localComputerUseLock = unsafePerformIO (newMVar ())
+
+actionsBeforeObservation :: [ComputerAction] -> [ComputerAction]
+actionsBeforeObservation actions =
+    case reverse actions of
+        ScreenshotAction : earlier -> reverse earlier
+        _ -> actions
+
+encodeComputerOutput :: ComputerCall -> ComputerObservation -> Text
+encodeComputerOutput call observation =
     TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $
         ComputerCallOutput
             { computerOutputItemId = Nothing
@@ -283,22 +343,41 @@ encodeComputerOutput call ImageAttachment{imageMime, imageBytes} =
             -- Reaching the handler means this exact call was approved.
             , acknowledgedChecks = call.pendingSafetyChecks
             , computerOutputStatus = Nothing
-            , computerOutputExtra = KeyMap.empty
+            , computerOutputExtra = maybe
+                KeyMap.empty
+                (KeyMap.singleton "accessibility_state" . Aeson.String)
+                observation.computerObservationAccessibility
             }
+  where
+    ImageAttachment{imageMime, imageBytes} =
+        observation.computerObservationImage
 
 validateComputerCall :: ComputerCall -> Either Text ()
 validateComputerCall call
     | null call.computerActions =
         Left "Computer call requires at least one action."
-    | exceedsList 128 call.computerActions =
-        Left "Computer call exceeds the 128-action limit."
+    | exceedsList 11 call.computerActions =
+        Left "Computer call exceeds the 10-action limit."
     | exceedsList 64 call.pendingSafetyChecks =
         Left "Computer call exceeds the 64-safety-check limit."
     | Just err <- firstJust
         (map validateSafetyCheck call.pendingSafetyChecks
             <> map validateAction call.computerActions) =
         Left err
+    | hasNonFinalScreenshot call.computerActions =
+        Left "Computer screenshot must be the final action in a batch."
+    | exceedsList 10 (actionsBeforeObservation call.computerActions) =
+        Left "Computer call exceeds the 10-action limit."
     | otherwise = Right ()
+
+hasNonFinalScreenshot :: [ComputerAction] -> Bool
+hasNonFinalScreenshot actions =
+    case reverse actions of
+        [] -> False
+        _finalAction : earlier -> any isScreenshot earlier
+  where
+    isScreenshot ScreenshotAction = True
+    isScreenshot _ = False
 
 -- | Validate all model-space coordinates before the first action in a batch.
 -- The per-action JXA checks remain as a second line of defense if the display
@@ -399,7 +478,8 @@ exceedsText limit = not . Text.null . Text.drop limit
 
 executeAction :: ComputerAction -> IO (Either Text ())
 executeAction = \case
-    ScreenshotAction -> pure (Right ())
+    ScreenshotAction ->
+        pure (Left "Computer screenshot must be the final action in a batch.")
     WaitAction -> do
         threadDelay 2000000
         pure (Right ())
@@ -479,7 +559,7 @@ pointerPrelude = Text.unlines
     , "ObjC.import('Foundation');"
     , "ObjC.import('ApplicationServices');"
     , "const tap=$.kCGHIDEventTap, left=0;"
-    , "function assertReady(){const d=ObjC.deepUnwrap($.CGSessionCopyCurrentDictionary()); if(!d) throw new Error('macOS GUI session state is unavailable'); if(Boolean(d.CGSSessionScreenIsLocked)) throw new Error('macOS session is locked'); if(!Boolean($.AXIsProcessTrusted())) throw new Error('Accessibility permission is required');}"
+    , "function assertReady(){const d=ObjC.deepUnwrap($.CGSessionCopyCurrentDictionary()); if(!d||typeof d.CGSSessionScreenIsLocked!=='boolean') throw new Error('macOS GUI session state is unavailable'); if(d.CGSSessionScreenIsLocked) throw new Error('macOS session is locked'); if(!Boolean($.AXIsProcessTrusted())) throw new Error('Accessibility permission is required');}"
     , "assertReady();"
     , "const bounds=$.CGDisplayBounds($.CGMainDisplayID());"
     , "let last=$.CGPointMake(0,0);"
@@ -502,7 +582,7 @@ keyboardPrelude = Text.unlines
     , "ObjC.import('Foundation');"
     , "ObjC.import('ApplicationServices');"
     , "const tap=$.kCGHIDEventTap;"
-    , "function assertReady(){const d=ObjC.deepUnwrap($.CGSessionCopyCurrentDictionary()); if(!d) throw new Error('macOS GUI session state is unavailable'); if(Boolean(d.CGSSessionScreenIsLocked)) throw new Error('macOS session is locked'); if(!Boolean($.AXIsProcessTrusted())) throw new Error('Accessibility permission is required');}"
+    , "function assertReady(){const d=ObjC.deepUnwrap($.CGSessionCopyCurrentDictionary()); if(!d||typeof d.CGSSessionScreenIsLocked!=='boolean') throw new Error('macOS GUI session state is unavailable'); if(d.CGSSessionScreenIsLocked) throw new Error('macOS session is locked'); if(!Boolean($.AXIsProcessTrusted())) throw new Error('Accessibility permission is required');}"
     , "assertReady();"
     , "function key(code,flags){const d=$.CGEventCreateKeyboardEvent(null,code,true),u=$.CGEventCreateKeyboardEvent(null,code,false); $.CGEventSetFlags(d,flags); $.CGEventSetFlags(u,flags); $.CGEventPost(tap,d); $.CGEventPost(tap,u);}"
     -- Keep each Unicode payload small enough for Quartz and avoid splitting a
@@ -604,6 +684,8 @@ modifierFlags rawKeys =
         "alt" -> Right "$.kCGEventFlagMaskAlternate"
         "option" -> Right "$.kCGEventFlagMaskAlternate"
         "shift" -> Right "$.kCGEventFlagMaskShift"
+        "fn" -> Right "$.kCGEventFlagMaskSecondaryFn"
+        "function" -> Right "$.kCGEventFlagMaskSecondaryFn"
         unsupported ->
             Left ("Unsupported computer modifier: " <> unsupported)
     render [] = "0"
@@ -727,8 +809,8 @@ ensureUnlockedSession = do
     let script = Text.unlines
             [ "ObjC.import('CoreGraphics');"
             , "const d=ObjC.deepUnwrap($.CGSessionCopyCurrentDictionary());"
-            , "if(!d) throw new Error('macOS GUI session state is unavailable');"
-            , "String(Boolean(d && d.CGSSessionScreenIsLocked));"
+            , "if(!d||typeof d.CGSSessionScreenIsLocked!=='boolean') throw new Error('macOS GUI session state is unavailable');"
+            , "String(d.CGSSessionScreenIsLocked);"
             ]
     attempted <- tryAny $ readProcessWithExitCode
         "/usr/bin/osascript" ["-l", "JavaScript"] (Text.unpack script)
@@ -771,7 +853,7 @@ runScript arguments script = do
 summarizeComputerCall :: ComputerCall -> Text
 summarizeComputerCall call =
     Text.intercalate "; " $
-        map summary (take 128 call.computerActions)
+        map summary (take 10 call.computerActions)
             <> map safety (take 64 call.pendingSafetyChecks)
   where
     summary = \case
