@@ -160,6 +160,80 @@ spec = do
                                 , transport = ClaudeCodeLocalSubscription
                                 }
 
+        it "drains noisy stderr concurrently with the auth response" $
+            withScratchDirectory "agent-claude-auth-noisy" \root -> do
+                let executable = root </> "fake-claude"
+                writeFile executable fakeNoisyAuthScript
+                setFileMode executable $
+                    ownerReadMode
+                        `unionFileModes` ownerWriteMode
+                        `unionFileModes` ownerExecuteMode
+                withEnvironmentVariables
+                    [("CLAUDE_CODE_EXECUTABLE", Just executable)]
+                    do
+                        loadClaudeCodeAuth `shouldReturn`
+                            Right ClaudeCodeAuth
+                                { executable
+                                , accountLabel = "noisy@example.com"
+                                , subscriptionType = Just "max"
+                                , transport = ClaudeCodeLocalSubscription
+                                }
+
+        it "uses one deadline while joining both pipe drainers" $
+            withScratchDirectory "agent-claude-auth-open-pipes" \root -> do
+                let executable = root </> "fake-claude"
+                writeFile executable fakeAuthScriptWithOpenPipes
+                setFileMode executable $
+                    ownerReadMode
+                        `unionFileModes` ownerWriteMode
+                        `unionFileModes` ownerExecuteMode
+                withEnvironmentVariables
+                    [("CLAUDE_CODE_EXECUTABLE", Just executable)]
+                    do
+                        result <- timeout 1_750_000 loadClaudeCodeAuth
+                        result `shouldBe`
+                            Just
+                                (Left
+                                    "Claude Code returned an unreadable authentication status.")
+
+        it "preserves completed stdout when stderr remains open" $
+            withScratchDirectory "agent-claude-auth-open-stderr" \root -> do
+                let executable = root </> "fake-claude"
+                writeFile executable fakeAuthScriptWithOpenStderr
+                setFileMode executable $
+                    ownerReadMode
+                        `unionFileModes` ownerWriteMode
+                        `unionFileModes` ownerExecuteMode
+                withEnvironmentVariables
+                    [("CLAUDE_CODE_EXECUTABLE", Just executable)]
+                    do
+                        result <- timeout 1_750_000 loadClaudeCodeAuth
+                        result `shouldBe`
+                            Just
+                                (Right ClaudeCodeAuth
+                                    { executable
+                                    , accountLabel = "open-stderr@example.com"
+                                    , subscriptionType = Just "max"
+                                    , transport = ClaudeCodeLocalSubscription
+                                    })
+
+        it "preserves completed stderr when stdout remains open" $
+            withScratchDirectory "agent-claude-auth-open-stdout" \root -> do
+                let executable = root </> "fake-claude"
+                writeFile executable fakeAuthScriptWithOpenStdout
+                setFileMode executable $
+                    ownerReadMode
+                        `unionFileModes` ownerWriteMode
+                        `unionFileModes` ownerExecuteMode
+                withEnvironmentVariables
+                    [("CLAUDE_CODE_EXECUTABLE", Just executable)]
+                    do
+                        result <- timeout 1_750_000 loadClaudeCodeAuth
+                        result `shouldBe`
+                            Just
+                                (Left
+                                    "Claude Code authentication status failed (exit 17): retained diagnostic")
+
         it "uses explicit gateway credentials without requiring a local Claude login" $
             withScratchDirectory "agent-claude-gateway-auth" \root -> do
                 let executable = root </> "fake-claude"
@@ -245,6 +319,44 @@ fakeAuthScriptReadsStdin =
         [ "#!/bin/sh"
         , "cat >/dev/null"
         , "printf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"email\":\"stdin@example.com\",\"subscriptionType\":\"max\"}'"
+        ]
+
+fakeNoisyAuthScript :: String
+fakeNoisyAuthScript =
+    unlines
+        [ "#!/bin/sh"
+        , "i=0"
+        , "while [ \"$i\" -lt 2048 ]; do"
+        , "  printf '%s' '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' >&2"
+        , "  i=$((i + 1))"
+        , "done"
+        , "printf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"email\":\"noisy@example.com\",\"subscriptionType\":\"max\"}'"
+        ]
+
+fakeAuthScriptWithOpenPipes :: String
+fakeAuthScriptWithOpenPipes =
+    unlines
+        [ "#!/bin/sh"
+        , "(while :; do printf ' '; sleep 1; done) &"
+        , "(while :; do printf x >&2; sleep 1; done) &"
+        , "printf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"email\":\"open-pipes@example.com\",\"subscriptionType\":\"max\"}'"
+        ]
+
+fakeAuthScriptWithOpenStderr :: String
+fakeAuthScriptWithOpenStderr =
+    unlines
+        [ "#!/bin/sh"
+        , "(exec 1>&-; while :; do printf x >&2; sleep 1; done) &"
+        , "printf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"email\":\"open-stderr@example.com\",\"subscriptionType\":\"max\"}'"
+        ]
+
+fakeAuthScriptWithOpenStdout :: String
+fakeAuthScriptWithOpenStdout =
+    unlines
+        [ "#!/bin/sh"
+        , "(exec 2>&-; while :; do printf ' '; sleep 1; done) &"
+        , "printf '%s\\n' 'retained diagnostic' >&2"
+        , "exit 17"
         ]
 
 withScratchDirectory :: String -> (FilePath -> IO a) -> IO a

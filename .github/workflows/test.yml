@@ -37,11 +37,16 @@ jobs:
               .#checks.x86_64-linux.agent-repository
               .#checks.x86_64-linux.agent-native-bridge
               .#checks.x86_64-linux.package-boundaries
+            # Repository integration tests deliberately exercise Git and gh
+            # process timeouts; after their extraction they run in one suite.
+            timeout_minutes: 60
           - name: Native CLI
             targets: .#checks.x86_64-linux.agent-cli-executable
           - name: Static CLI runtime
             targets: .#checks.x86_64-linux.agent-cli-static-runtime
-            timeout_minutes: 90
+            # A cold static package graph can exceed 90 minutes before the
+            # protected-ref publisher has populated the binary cache.
+            timeout_minutes: 120
           - name: Linux integrations
             targets: >-
               .#checks.x86_64-linux.agent-sandbox-runner

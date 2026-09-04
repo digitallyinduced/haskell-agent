@@ -22,6 +22,7 @@ module Agent.CLI.Options
     , reasoningEfforts
     , reasoningEffortsForDialect
     , resolveApprovalPolicy
+    , resolveComputerUseEnabled
     , usage
     ) where
 
@@ -149,7 +150,11 @@ data CliOptions = CliOptions
     , optBash :: !Bool
       -- ^ Expose the provider's explicit shell execution tool (default: True).
     , optComputerUse :: !Bool
-      -- ^ Allow the model to control the local macOS desktop (default: False).
+      -- ^ Allow the model to request control of the local macOS desktop.
+      -- Interactive terminal sessions default to 'True'.
+    , optComputerUseExplicit :: !Bool
+      -- ^ Whether a computer-use flag was supplied explicitly. This lets
+      -- native clients opt in while non-interactive defaults stay safe.
     , optCodeMode :: !Bool
       -- ^ Honor catalog-selected JavaScript code mode (default: False).
     , optScreenMode :: !ScreenMode
@@ -179,7 +184,8 @@ defaultCliOptions = CliOptions
     , optSkills = True
     , optGhci = False
     , optBash = True
-    , optComputerUse = False
+    , optComputerUse = True
+    , optComputerUseExplicit = False
     , optCodeMode = False
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
@@ -211,6 +217,17 @@ isOneShot options =
     isJust options.optPrompt
         || isJust options.optPromptFile
         || isJust options.optManagedTurnFile
+
+-- | Resolve the provider-visible computer-use capability. It is enabled by
+-- default only for an interactive terminal session that keeps reading input,
+-- while explicit flags remain authoritative for native clients and deliberate
+-- one-shot or non-interactive runs.
+resolveComputerUseEnabled :: CliOptions -> Bool -> Bool
+resolveComputerUseEnabled options stdinTty =
+    options.optComputerUse
+        && ( options.optComputerUseExplicit
+                || (stdinTty && not (isOneShot options))
+           )
 
 -- | One-shot without a TTY auto-approves so scripts do not hang, unless
 -- @--no-yolo@ is set. Interactive sessions prompt on mutating tools, unless
@@ -423,7 +440,7 @@ optionUpdateParser = asum
         pathReader (\value options -> options { optCwd = Just value })
     , flagUpdate "worktree" "Create a new git worktree"
         (\options -> options { optWorktree = True })
-    , flagUpdate "yolo" "Auto-approve every tool"
+    , flagUpdate "yolo" "Auto-approve tools (computer use asks separately)"
         (\options -> options { optYolo = True, optNoYolo = False })
     , flagUpdate "no-yolo" "Deny mutating tools without a TTY"
         (\options -> options { optNoYolo = True, optYolo = False })
@@ -482,10 +499,17 @@ optionUpdateParser = asum
         (\value options -> options { optBash = value })
     , boolFlagUpdate "no-bash" False "Disable shell execution tools"
         (\value options -> options { optBash = value })
-    , boolFlagUpdate "computer-use" True "Enable local macOS computer use"
-        (\value options -> options { optComputerUse = value })
+    , boolFlagUpdate "computer-use" True
+        "Enable local macOS computer use (default with a TTY)"
+        (\value options -> options
+            { optComputerUse = value
+            , optComputerUseExplicit = True
+            })
     , boolFlagUpdate "no-computer-use" False "Disable local computer use"
-        (\value options -> options { optComputerUse = value })
+        (\value options -> options
+            { optComputerUse = value
+            , optComputerUseExplicit = True
+            })
     , boolFlagUpdate "code-mode" True "Enable catalog-selected code mode"
         (\value options -> options { optCodeMode = value })
     , boolFlagUpdate "no-code-mode" False "Use conventional tool calling"
@@ -676,12 +700,13 @@ usage = unlines
     , "      --no-ghci           Disable the persistent GHCi tool (default)"
     , "      --bash              Enable explicit shell execution tools (default)"
     , "      --no-bash           Disable explicit shell execution tools"
-    , "      --computer-use      Enable local macOS desktop control (opt-in)"
-    , "      --no-computer-use   Disable local desktop control (default)"
+    , "      --computer-use      Enable local macOS desktop control"
+    , "                          (default only with an interactive TTY)"
+    , "      --no-computer-use   Disable local macOS desktop control"
     , "      --fullscreen        Use the retained full-screen TUI"
     , "      --minimal           Use terminal-native append-only rendering"
     , "      --motion MODE       Animation policy: full, reduced, or off"
-    , "      --yolo              Auto-approve every tool"
+    , "      --yolo              Auto-approve tools; computer use asks separately"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: "
         <> show defaultLoopMaxTurns <> ")"
@@ -721,6 +746,8 @@ usage = unlines
     , "the live concurrent subagent cap and saves it to project settings."
     , "/shell shows the active shell tools; /shell ghci or /shell bash switches"
     , "the current session. /shell both and /shell none are also available."
+    , "/computer-use toggles local macOS desktop control; on/off are explicit."
+    , "Choose Always this tool to approve the current computer-use workflow."
     , "/always-approve (or :yolo) toggles auto-approve and saves it under"
     , "<project>/.haskell-agent/settings.json. Permission prompts offer Allow once"
     , "or Always this tool this session; /always-approve still enables project yolo."

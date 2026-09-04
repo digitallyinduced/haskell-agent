@@ -8,6 +8,7 @@
 -- closed.
 module Agent.CLI.CodeModeRuntime
     ( CodeModeSessionRuntime(..)
+    , CodeModeProjectionStrategy(..)
     , CodeModeToolProjection(..)
     , CodeModeNestedSlot
     , CodexCatalogSession(..)
@@ -16,9 +17,11 @@ module Agent.CLI.CodeModeRuntime
     , loadCodexCatalogModelInfo
     , codexCatalogDefaultEffort
     , projectCodeModeTools
+    , projectCodeModeToolsFor
     , codeModeSessionRuntimeFor
     , imageGenerationCodeModeRuntimeFor
     , imageGenerationCodeModeProjection
+    , filterStartupUnavailableTools
     ) where
 
 import Agent.CLI.Models (modelsCacheFilePath)
@@ -119,11 +122,19 @@ data CodexCatalogSession = CodexCatalogSession
     , catalogEnvironmentContext :: !Text
     }
 
+data CodeModeProjectionStrategy
+    = FullCodeModeProjection
+    | ImageGenerationOnlyCodeModeProjection
+    deriving (Eq, Show)
+
 data CodeModeSessionRuntime = CodeModeSessionRuntime
     { codeModeWireTools :: ![AppTool]
       -- ^ The @exec@ and @wait@ code-mode entry points.
     , codeModeDirectTools :: ![AppTool]
       -- ^ Conventional tools that remain provider-visible alongside code mode.
+    , codeModeProjectionStrategy :: !CodeModeProjectionStrategy
+      -- ^ How to rebuild the provider-visible direct surface when tools are
+      -- enabled or disabled during the session.
     , codeModeNestedSlot :: !CodeModeNestedSlot
     , codeModeNestedToolNames :: ![Text]
     , codeModeClose :: !(IO ())
@@ -158,6 +169,19 @@ projectCodeModeTools mode tools = case mode of
         case tool.appToolSchema of
             HostedComputerSchema -> True
             _ -> False
+
+projectCodeModeToolsFor
+    :: CodeModeProjectionStrategy
+    -> [AppTool]
+    -> CodeModeToolProjection
+projectCodeModeToolsFor strategy tools =
+    case strategy of
+        FullCodeModeProjection ->
+            projectCodeModeTools CodeOnlyToolMode tools
+        ImageGenerationOnlyCodeModeProjection ->
+            case imageGenerationCodeModeProjection CodeOnlyToolMode tools of
+                Just projection -> projection
+                Nothing -> CodeModeToolProjection tools []
 
 -- | Resolve catalog metadata for the active model. With ChatGPT credentials
 -- the live @/models@ catalog is fetched at session start (Codex parity:
@@ -251,6 +275,7 @@ codeModeSessionRuntimeFor maybeInfo tools =
                     buildRuntime
                         info
                         CodeOnlyToolMode
+                        FullCodeModeProjection
                         (projectCodeModeTools CodeOnlyToolMode tools)
 
 -- | Catalog @code_mode_only@ models reserve @image_gen.imagegen@ but expect it
@@ -271,6 +296,7 @@ imageGenerationCodeModeRuntimeFor maybeInfo tools =
                 buildRuntime
                     info
                     CodeOnlyToolMode
+                    ImageGenerationOnlyCodeModeProjection
                     projection
         _ -> pure (Right Nothing)
 
@@ -292,12 +318,19 @@ imageGenerationCodeModeProjection mode tools
     isImageGenerationTool tool =
         tool.appToolName == imageGenerationToolName
 
+filterStartupUnavailableTools :: Bool -> [AppTool] -> [AppTool]
+filterStartupUnavailableTools suppressDirectImageGeneration
+    | suppressDirectImageGeneration =
+        filter ((/= imageGenerationToolName) . (.appToolName))
+    | otherwise = id
+
 buildRuntime
     :: ModelInfo
     -> ToolMode
+    -> CodeModeProjectionStrategy
     -> CodeModeToolProjection
     -> IO (Either Text (Maybe CodeModeSessionRuntime))
-buildRuntime info mode projection = do
+buildRuntime info mode strategy projection = do
     slot <- newCodeModeNestedSlot
     workerPath <- codeModeWorkerPath
     built <- newCodeModeToolSet
@@ -311,6 +344,7 @@ buildRuntime info mode projection = do
         Right toolSet -> Right $ Just CodeModeSessionRuntime
             { codeModeWireTools = toolSet.codeModeTools
             , codeModeDirectTools = projection.directCodeModeTools
+            , codeModeProjectionStrategy = strategy
             , codeModeNestedSlot = slot
             , codeModeNestedToolNames = toolSet.codeModeNestedToolNames
             , codeModeClose = toolSet.closeCodeModeToolSet
