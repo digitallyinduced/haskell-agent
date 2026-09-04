@@ -3,7 +3,13 @@ module Agent.CLI.GatewayClientSpec (spec) where
 import Agent.CLI.GatewayClient
 import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Agent.Json.Decode qualified as Hermes
-import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Concurrent
+    ( newEmptyMVar
+    , putMVar
+    , readMVar
+    , takeMVar
+    , threadDelay
+    )
 import Control.Concurrent.Async (cancel, poll, wait, waitCatch, withAsync)
 import Control.Exception.Safe (bracket, throwString, tryAny)
 import Control.Monad (forM_, void)
@@ -15,6 +21,12 @@ import Data.Either (isLeft)
 import Data.IORef (atomicModifyIORef', newIORef)
 import Data.Maybe (isNothing)
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TextEncoding
+import Network.HTTP.Client qualified as HTTP
+import Network.HTTP.Types (hConnection, hContentType, status200)
+import Network.HTTP.Types.URI (parseQueryText)
+import Network.Wai qualified as Wai
+import Network.Wai.Handler.Warp qualified as Warp
 import System.Directory
     ( createDirectory
     , createDirectoryIfMissing
@@ -308,6 +320,85 @@ spec = describe "gateway device authorization" do
             (pure ())
             `shouldReturn`
                 Left "Gateway browser authorization was cancelled."
+
+    it "serves and shuts down a successful loopback callback" do
+        baseUrlVar <- newEmptyMVar
+        let gatewayApplication _request respond = do
+                baseUrl <- readMVar baseUrlVar
+                let websocketUrl =
+                        Text.replace "http://" "ws://" baseUrl
+                            <> "/v1/responses"
+                respond $
+                    Wai.responseLBS
+                        status200
+                        [ (hContentType, "application/json")
+                        , (hConnection, "close")
+                        ]
+                        (Aeson.encode $
+                            Aeson.object
+                                [ "access_token"
+                                    Aeson..= ("loopback-secret" :: Text.Text)
+                                , "token_type" Aeson..= ("Bearer" :: Text.Text)
+                                , "base_url" Aeson..= baseUrl
+                                , "websocket_url" Aeson..= websocketUrl
+                                ])
+        Warp.testWithApplication (pure gatewayApplication) \port ->
+            withTempHome \home ->
+                withHomeEnvironment home do
+                    let baseUrl =
+                            "http://127.0.0.1:"
+                                <> Text.pack (show port)
+                    putMVar baseUrlVar baseUrl
+                    manager <-
+                        HTTP.newManager HTTP.defaultManagerSettings
+                    authorizationUrlVar <- newEmptyMVar
+                    withAsync
+                        (connectGatewayBrowser
+                            baseUrl
+                            "Haskell Agent CLI"
+                            (\url -> putMVar authorizationUrlVar url >> pure True))
+                        \connection -> do
+                            maybeAuthorizationUrl <-
+                                timeout 1_000_000
+                                    (takeMVar authorizationUrlVar)
+                            authorizationUrl <-
+                                case maybeAuthorizationUrl of
+                                    Nothing -> do
+                                        expectationFailure
+                                            "timed out waiting for the authorization URL"
+                                        pure ""
+                                    Just url -> pure url
+                            redirectUri <-
+                                requiredAuthorizationParameter
+                                    "redirect_uri"
+                                    authorizationUrl
+                            state <-
+                                requiredAuthorizationParameter
+                                    "state"
+                                    authorizationUrl
+                            callbackRequest <-
+                                HTTP.parseRequest $
+                                    Text.unpack
+                                        (redirectUri
+                                            <> "?code=hac_loopback_test&state="
+                                            <> state)
+                            callbackResponse <-
+                                HTTP.httpLbs callbackRequest manager
+                            HTTP.responseStatus callbackResponse
+                                `shouldBe` status200
+                            LBS.toStrict (HTTP.responseBody callbackResponse)
+                                `shouldSatisfy`
+                                    BS.isInfixOf "Authorization received"
+                            timeout 5_000_000 (wait connection)
+                                `shouldReturn` Just (Right ())
+                    let expected =
+                            GatewayCredential
+                                baseUrl
+                                (Text.replace "http://" "ws://" baseUrl
+                                    <> "/v1/responses")
+                                "loopback-secret"
+                    loadGatewayCredentialAt home
+                        `shouldReturn` Right (Just expected)
 
     it "accepts only the exact IPv4 loopback redirect contract" do
         let authorize redirect =
@@ -1087,3 +1178,18 @@ withHomeEnvironment home action =
             setEnv "HOME" $
                 either (error . show) id (decodeUtf home)
             action
+
+requiredAuthorizationParameter :: Text.Text -> Text.Text -> IO Text.Text
+requiredAuthorizationParameter name authorizationUrl =
+    case lookup name parameters >>= id of
+        Just value -> pure value
+        Nothing -> do
+            expectationFailure $
+                "authorization URL is missing " <> Text.unpack name
+            pure ""
+  where
+    parameters =
+        parseQueryText $
+            TextEncoding.encodeUtf8 $
+                Text.drop 1 $
+                    snd (Text.breakOn "?" authorizationUrl)
