@@ -40,7 +40,6 @@ import Data.Text (Text)
 import Data.Time.Clock (getCurrentTime)
 import qualified Agent.CLI.Session.Runner as SessionRunner
 import qualified Agent.CLI.Startup.Auth as Startup
-import qualified Data.Text as Text
 
 decorateManualCompact
     :: AgentProviderRequest
@@ -88,7 +87,7 @@ startupFailure
 startupFailure AgentProviderRequest{startup} err = do
     now <- getCurrentTime
     Startup.startupDie startup
-        (Text.unpack (formatApiErrorAt now err))
+        (formatApiErrorAt now err)
 
 sessionRunnerContinuation :: SessionRunner.SessionRunnerContinuation
 sessionRunnerContinuation =

@@ -1335,7 +1335,10 @@ isUserMessage = \case
 
 responseWithOutput :: [ResponseItem] -> Response
 responseWithOutput output =
-    either error id . Codec.decodeResponse . LBS.toStrict . Aeson.encode $
+    either (error . Text.unpack) id
+        . Codec.decodeResponse
+        . LBS.toStrict
+        . Aeson.encode $
         Aeson.object
             [ "id" Aeson..= ("resp-compacted" :: Text.Text)
             , "created_at" Aeson..= (0 :: Int)

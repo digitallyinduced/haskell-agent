@@ -15,6 +15,7 @@ import Data.Foldable (toList)
 import Data.Either (isLeft)
 import Data.IORef
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 spec :: Spec
 spec = do
@@ -783,4 +784,4 @@ responseWithOutput output =
             , "output" Aeson..= output
             ] of
         Right response -> response
-        Left err -> error err
+        Left err -> error (Text.unpack err)

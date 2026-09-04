@@ -463,7 +463,7 @@ prepareInitializedWorkspace request = do
             scopeNamespace
             stateDirectory
             projectRootPath >>= \case
-            Left err -> startupDie startup (Text.unpack err)
+            Left err -> startupDie startup err
             Right scopes -> pure scopes
     ((projectSettings0, userSettings), (catalogResult, branch)) <-
         concurrently
@@ -486,7 +486,7 @@ prepareInitializedWorkspace request = do
     let projectSettings =
             withInheritedLastModel projectSettings0 userSettings
     catalog <- either
-        (startupDie startup . Text.unpack)
+        (startupDie startup)
         pure
         catalogResult
     setStartupRepository fullscreen home branch cwd
@@ -584,7 +584,7 @@ resolveInitializedTargets request workspace = do
                         meta.metaId
                         sessionUiPageSize >>= \case
                             Left err ->
-                                startupDie startup (Text.unpack err)
+                                startupDie startup err
                             Right page ->
                                 setFullscreenHistorySource
                                     runtime
@@ -598,11 +598,11 @@ resolveInitializedTargets request workspace = do
                                         (HistoryGeneration 0)
                                         HistoryNewer
                                         page)
-    either (startupDie startup . Text.unpack) pure resumedHistoryResult
+    either (startupDie startup) pure resumedHistoryResult
     resumedTarget <-
-        either (startupDie startup . Text.unpack) pure resumedTargetResult
+        either (startupDie startup) pure resumedTargetResult
     projectTarget <-
-        either (startupDie startup . Text.unpack) pure projectTargetResult
+        either (startupDie startup) pure projectTargetResult
     let targetHint =
             transitionTarget
                 <|> configuredOptionTarget
@@ -671,7 +671,7 @@ loadInitializedAuth request targets =
                 request.initializedPreparedAuth
             exactLoaded <-
                 either
-                    (startupDie startup . Text.unpack)
+                    (startupDie startup)
                     pure
                     (gatewayLoadedAuthForProvider requestedProvider gateway)
             pure RoutedStartupAuth
@@ -723,7 +723,7 @@ loadCustomResponsesAuth startup connectionId responses = do
             | otherwise ->
                 startupDie startup $
                     "custom connection "
-                        <> Text.unpack connectionId
+                        <> connectionId
                         <> " requires api_key_env or api_key_optional=true"
         Just envName ->
             lookupEnv (Text.unpack envName) >>= \case
@@ -734,9 +734,9 @@ loadCustomResponsesAuth startup connectionId responses = do
                     | otherwise ->
                         startupDie startup $
                             "custom connection "
-                                <> Text.unpack connectionId
+                                <> connectionId
                                 <> " requires environment variable "
-                                <> Text.unpack envName
+                                <> envName
     let credential = Credential
             { accessToken = token
             , accountId = connectionId
@@ -845,14 +845,14 @@ selectInitializedStartupAccount request workspace targets routed = do
                         rememberedIds
         selectStartupAccount >>= \case
             Left err ->
-                startupDie startup (Text.unpack err)
+                startupDie startup err
             Right selected ->
                 loadSelectedAccountAuth
                     provider
                     selected.selectedSelectionId
                     selected.selectedAccountId
                     >>= either
-                        (startupDie startup . Text.unpack)
+                        (startupDie startup)
                         (\selectedLoaded ->
                             pure
                                 ( selectedLoaded
@@ -882,9 +882,9 @@ validateInitializedAuth request targets loaded = do
             | not (isGatewayLoadedAuth loaded)
             , loaded.loadedProvider /= target.targetProvider ->
                 startupDie startup $ "provider transition requested "
-                    <> Text.unpack (providerSlug target.targetProvider)
+                    <> providerSlug target.targetProvider
                     <> " but auth resolved "
-                    <> Text.unpack (providerSlug loaded.loadedProvider)
+                    <> providerSlug loaded.loadedProvider
         _ -> pure ()
     case request.initializedTransition
         >>= (.transitionAutomaticBilling) of
@@ -911,7 +911,7 @@ newInitializedAccountRefs request auth = do
         loadGatewayModelAccess
             request.initializedConnectedGateway
             loaded >>= either
-                (startupDie request.initializedStartup . Text.unpack)
+                (startupDie request.initializedStartup)
                 pure
     gatewayModelsRef <- newIORef initialGatewayModels
     activeAccountRef <- newIORef ""

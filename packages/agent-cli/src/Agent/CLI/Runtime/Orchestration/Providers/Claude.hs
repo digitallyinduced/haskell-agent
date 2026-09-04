@@ -73,7 +73,6 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Agent.MCP as MCP
 import qualified Data.Aeson as Aeson
-import qualified Data.Text as Text
 
 runClaudeProvider
     :: AgentProviderRequest
@@ -83,7 +82,7 @@ runClaudeProvider request@AgentProviderRequest{..} nativeCapabilities =
     withSelectedClaudeAuth
         connectedGateway
         loaded
-        (startupDie startup . Text.unpack)
+        (startupDie startup)
         \claudeAuth -> do
             let permission =
                     ClaudeCodeManual
@@ -177,7 +176,7 @@ runClaudeProvider request@AgentProviderRequest{..} nativeCapabilities =
                     (approveClaudeRegisteredTool
                         claudeRequest.claudeRuntimeSlot)
                     claudeRequest.claudeBridgeTools of
-                    Left err -> startupDie startup (Text.unpack err)
+                    Left err -> startupDie startup err
                     Right server -> pure server
             let hostHandlers =
                     defaultClaudeCodeHostHandlers

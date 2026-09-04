@@ -1558,7 +1558,7 @@ runSessionInteraction
                         request.managedTurnText
                         inputs
                         >>= either
-                            (startupDie startup . Text.unpack)
+                            (startupDie startup)
                             pure
                 result <- runOneTurn env request.managedTurnText skillInputs
                 callbacks.runnerFinishTurn env True result
@@ -1589,7 +1589,7 @@ runSessionInteraction
                 text
                 [UserMessage text]
                 >>= either
-                    (startupDie startup . Text.unpack)
+                    (startupDie startup)
                     pure
         forM_ host.hostFullscreen \runtime ->
             emitUiEvent runtime (UiUserSubmitted text)

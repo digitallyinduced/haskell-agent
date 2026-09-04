@@ -637,7 +637,7 @@ validateSessionMcpTools AgentSessionRequest
         of
             Just err ->
                 startupDie startup
-                    ("Failed to initialize MCP tools: " <> Text.unpack err)
+                    ("Failed to initialize MCP tools: " <> err)
             Nothing -> pure ()
 
 prepareSessionCodeRuntime
