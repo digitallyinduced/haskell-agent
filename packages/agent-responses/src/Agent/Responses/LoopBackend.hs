@@ -1112,7 +1112,6 @@ streamEventToLoopEventsStep showRawReasoning state event =
     ( StreamProjectionState nextArguments
     , maybeToList
         (statefulStreamEventToLoopEvent showRawReasoning event)
-        <> maybeToList (codexRateLimitsUpdate event)
         <> argumentEvents
     )
   where
@@ -1131,24 +1130,6 @@ statefulStreamEventToLoopEvent showRawReasoning event = case event of
     ResponseOutputItemDoneEvent { item = FunctionCallItem _ } -> Nothing
     ResponseOutputItemDoneEvent { item = CustomToolCallItem _ } -> Nothing
     _ -> streamEventToLoopEventWithRawReasoning showRawReasoning event
-
-codexRateLimitsUpdate :: ResponseStreamEvent -> Maybe LoopEvent
-codexRateLimitsUpdate = \case
-    ResponseCodexRateLimitsEvent { rateLimits = limits } ->
-        case limits.secondaryUsedPercent of
-            Just used -> Just (limitUpdate "Weekly limit left" used)
-            Nothing ->
-                limitUpdate "5h limit left" <$> limits.primaryUsedPercent
-    _ -> Nothing
-  where
-    limitUpdate label used =
-        let remaining :: Int
-            remaining = max 0 (min 100 (round (100 - used)))
-        in ProviderLimitUpdated
-            { providerLimitText =
-                label <> ": " <> Text.pack (show remaining) <> "%"
-            , providerLimitWarning = remaining <= 10
-            }
 
 -- | Emit an updated argument-streaming activity after this many additional
 -- streamed argument characters.
