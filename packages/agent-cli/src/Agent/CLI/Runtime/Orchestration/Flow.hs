@@ -25,7 +25,8 @@ import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
 import Agent.CLI.Error ( formatApiErrorAt )
 import Agent.CLI.GatewayClient
-    ( GatewayModelAccess
+    ( GatewayCredential
+    , GatewayModelAccess
     , gatewayCredentialIdentity
     , loadGatewayCredential
     , loadGatewayCredentialAt
@@ -132,7 +133,8 @@ import Agent.CLI.Session
       loadSessionMeta,
       sessionDirForId,
       sessionsRoot,
-      SessionMeta(metaCwd) )
+      SessionMeta(metaCwd),
+      SessionTurn )
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.ModelPicker
     ( ModelPickerSelection(modelPickerEffort, modelPickerOption) )
@@ -223,6 +225,7 @@ import Agent.TUI.Model
       UiEvent(UiSystemMessage, UiSetRepository, UiSetNotice),
       UiState(uiQueuedInputs) )
 import Agent.TUI.Motion ( nativeProgressAnimationEnabled )
+import Agent.TUI.Theme ( ThemeKind )
 import Agent.Tools.MultiAgents ()
 import Agent.Tools.PlanMode ()
 import Agent.Tools.Secret ()
@@ -231,7 +234,7 @@ import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar
-    ( newEmptyMVar, newMVar, readMVar, tryPutMVar )
+    ( MVar, newEmptyMVar, newMVar, readMVar, tryPutMVar )
 import Control.Concurrent.STM ()
 import Control.Exception ()
 import Control.Exception.Safe
@@ -243,7 +246,7 @@ import Data.IORef
 import Data.List ()
 import Data.Maybe ( fromMaybe, isJust, isNothing )
 import Data.Text ( Text )
-import Data.Time.Clock ( getCurrentTime )
+import Data.Time.Clock ( NominalDiffTime, UTCTime, getCurrentTime )
 import System.Console.ANSI ()
 import System.Console.ANSI.Codes ()
 import System.Directory.OsPath
@@ -729,6 +732,42 @@ prepareAgentIteration
         `onException`
             releasePreparationResources resumeLockRef databaseStoreRef
 
+data AgentIterationRequest = AgentIterationRequest
+    { iterationResumeLockRef :: IORef (Maybe SessionLock)
+    , iterationDatabaseStoreRef :: IORef (Maybe Store)
+    , iterationProcessRuntime :: AgentProcessRuntime
+    , iterationRunMode :: AgentRunMode
+    , iterationFullscreenInputs :: FullscreenInputBuffer
+    , iterationSessionState :: SessionState
+    , iterationActiveFullscreen :: Maybe FullscreenRuntime
+    , iterationOptions :: CliOptions
+    , iterationTransition :: Maybe ProviderTransition
+    }
+
+data AgentIterationResources = AgentIterationResources
+    { iterationStartedAt :: UTCTime
+    , iterationStartupTimings :: IORef [(Text, NominalDiffTime)]
+    , iterationSyntaxLoadDuration :: IORef (Maybe NominalDiffTime)
+    , iterationStartupFinished :: IORef Bool
+    , iterationConfiguredTheme :: ThemeKind
+    , iterationHome :: OsPath
+    , iterationRoot :: OsPath
+    , iterationDatabaseStore :: Store
+    , iterationConnectedGateway :: Maybe GatewayCredential
+    , iterationResumed :: Maybe (SessionMeta, [SessionTurn])
+    , iterationSource :: OsPath
+    }
+
+data AgentIterationInterface = AgentIterationInterface
+    { iterationFullscreen :: Maybe FullscreenRuntime
+    , iterationFirstFrameReady :: MVar ()
+    , iterationTerminal :: TerminalCapabilities
+    , iterationUiRuntimeRef :: IORef (Maybe FullscreenRuntime)
+    , iterationCancelToolRef :: IORef (IO ())
+    , iterationInstallToolRuntime :: ToolEnv -> IO ()
+    , iterationBuildStartupRuntime :: ToolEnv -> StartupRuntime
+    }
+
 prepareAgentIterationTracked
     :: IORef (Maybe SessionLock)
     -> IORef (Maybe Store)
@@ -743,74 +782,143 @@ prepareAgentIterationTracked
 prepareAgentIterationTracked
         resumeLockRef databaseStoreRef
         processRuntime runMode
-        fullscreenInputs sessionState activeFullscreen options transition = do
-    forM_ activeFullscreen resetFullscreenSessionActions
-    let stdoutHandle = runMode.runStdout
-        stderrHandle = runMode.runStderr
-        background = runMode.runInBackground
-        signalReady result =
-            unless background (signalManagedSessionReady result)
-        failPreparation message =
-            releasePreparationResources resumeLockRef databaseStoreRef >>
-                case activeFullscreen of
-                    Nothing
-                        | background -> throwIO (StartupFailure message)
-                        | otherwise -> die (Text.unpack message)
-                    Just _ -> throwIO (StartupFailure message)
+        fullscreenInputs sessionState activeFullscreen options transition =
+    prepareTrackedAgentIteration AgentIterationRequest
+        { iterationResumeLockRef = resumeLockRef
+        , iterationDatabaseStoreRef = databaseStoreRef
+        , iterationProcessRuntime = processRuntime
+        , iterationRunMode = runMode
+        , iterationFullscreenInputs = fullscreenInputs
+        , iterationSessionState = sessionState
+        , iterationActiveFullscreen = activeFullscreen
+        , iterationOptions = options
+        , iterationTransition = transition
+        }
+
+prepareTrackedAgentIteration
+    :: AgentIterationRequest
+    -> IO PreparedAgent
+prepareTrackedAgentIteration request = do
+    forM_
+        request.iterationActiveFullscreen
+        resetFullscreenSessionActions
+    resources <- prepareAgentIterationResources request
+    interface <- prepareAgentIterationInterface request resources
+    resumeLock <- readIORef request.iterationResumeLockRef
+    let action =
+            prepareAgentIterationAction
+                request
+                resources
+                interface
+                resumeLock
+        cleanup =
+            cleanupAgentIteration request resources interface
+    pure PreparedAgent
+        { preparedFullscreen = interface.iterationFullscreen
+        , preparedRun = action `finally` cleanup
+        }
+
+prepareAgentIterationResources
+    :: AgentIterationRequest
+    -> IO AgentIterationResources
+prepareAgentIterationResources request = do
     startedAt <- getCurrentTime
     startupTimingsRef <- newIORef []
     syntaxLoadDurationRef <- newIORef Nothing
     startupFinishedRef <- newIORef False
-    home <- case nativeRunHomeHint runMode of
+    home <- case nativeRunHomeHint request.iterationRunMode of
         Nothing -> getHomeDirectory
         Just path -> pure path
     configuredTheme <-
         loadHarnessConfig home >>= \case
-            Left err -> failPreparation err
+            Left err ->
+                failAgentIterationPreparation request err
             Right config -> pure config.configTheme
     let root = sessionsRoot home
-    databaseStore <- case runMode.runNativeHooks >>= (.nativeDatabaseStore) of
+    databaseStore <-
+        case
+            request.iterationRunMode.runNativeHooks
+                >>= (.nativeDatabaseStore)
+        of
         Just borrowed -> pure borrowed
         Nothing -> do
             databaseConfig <- managedPostgresConfigForHome home
             openStore databaseConfig >>= \case
-                Left err -> failPreparation (renderStoreError err)
+                Left err ->
+                    failAgentIterationPreparation request
+                        (renderStoreError err)
                 Right store -> do
-                    writeIORef databaseStoreRef (Just store)
+                    writeIORef request.iterationDatabaseStoreRef (Just store)
                     pure store
-    let sessionPool = trustedPool databaseStore
     connectedGateway <-
         loadGatewayCredentialAt home >>= \case
             Left err ->
-                failPreparation
+                failAgentIterationPreparation request
                     ("Could not load gateway credentials: " <> err)
             Right credential -> pure credential
     let connectedGatewayIdentity =
             gatewayCredentialIdentity <$> connectedGateway
-    resumed <- case options.optResume of
+    resumed <-
+        loadAgentIterationResume
+            request
+            root
+            databaseStore
+            connectedGatewayIdentity
+    source <- case request.iterationOptions.optCwd of
+        Just requestedCwd -> makeAbsolute requestedCwd
+        Nothing -> case resumed of
+            Just (meta, _) -> makeAbsolute meta.metaCwd
+            Nothing ->
+                maybe
+                    getCurrentDirectory
+                    makeAbsolute
+                    request.iterationRunMode.runCwdHint
+    pure AgentIterationResources
+        { iterationStartedAt = startedAt
+        , iterationStartupTimings = startupTimingsRef
+        , iterationSyntaxLoadDuration = syntaxLoadDurationRef
+        , iterationStartupFinished = startupFinishedRef
+        , iterationConfiguredTheme = configuredTheme
+        , iterationHome = home
+        , iterationRoot = root
+        , iterationDatabaseStore = databaseStore
+        , iterationConnectedGateway = connectedGateway
+        , iterationResumed = resumed
+        , iterationSource = source
+        }
+
+loadAgentIterationResume
+    :: AgentIterationRequest
+    -> OsPath
+    -> Store
+    -> Maybe Text
+    -> IO (Maybe (SessionMeta, [SessionTurn]))
+loadAgentIterationResume request root databaseStore connectedGatewayIdentity =
+    case request.iterationOptions.optResume of
         Nothing -> pure Nothing
         Just sessionId -> do
+            let sessionPool = trustedPool databaseStore
             dir <- either
                 (\err -> do
-                    signalReady (Left err)
-                    failPreparation err)
+                    signalAgentIterationReady request (Left err)
+                    failAgentIterationPreparation request err)
                 pure
                 (sessionDirForId root sessionId)
             exists <- doesDirectoryExist dir
             when (not exists) do
                 let err = "session not found: " <> sessionId
-                signalReady (Left err)
-                failPreparation err
+                signalAgentIterationReady request (Left err)
+                failAgentIterationPreparation request err
             acquireSessionLock dir sessionId >>= \case
                 Left err -> do
-                    signalReady (Left err)
-                    failPreparation err
+                    signalAgentIterationReady request (Left err)
+                    failAgentIterationPreparation request err
                 Right lock -> do
-                    writeIORef resumeLockRef (Just lock)
+                    writeIORef request.iterationResumeLockRef (Just lock)
                     loadSessionMeta sessionPool root sessionId >>= \case
                         Left err -> do
-                            signalReady (Left err)
-                            failPreparation err
+                            signalAgentIterationReady request (Left err)
+                            failAgentIterationPreparation request err
                         Right meta ->
                             case
                                 validateResumeMetaForBoundary
@@ -818,16 +926,20 @@ prepareAgentIterationTracked
                                     meta
                             of
                                 Left err -> do
-                                    signalReady (Left err)
-                                    failPreparation err
+                                    signalAgentIterationReady request (Left err)
+                                    failAgentIterationPreparation request err
                                 Right () ->
                                     loadActiveSession
                                         sessionPool
                                         root
                                         sessionId >>= \case
                                             Left err -> do
-                                                signalReady (Left err)
-                                                failPreparation err
+                                                signalAgentIterationReady
+                                                    request
+                                                    (Left err)
+                                                failAgentIterationPreparation
+                                                    request
+                                                    err
                                             Right loaded@(loadedMeta, _) ->
                                                 case
                                                     validateResumeMetaForBoundary
@@ -835,19 +947,53 @@ prepareAgentIterationTracked
                                                         loadedMeta
                                                 of
                                                     Left err -> do
-                                                        signalReady (Left err)
-                                                        failPreparation err
+                                                        signalAgentIterationReady
+                                                            request
+                                                            (Left err)
+                                                        failAgentIterationPreparation
+                                                            request
+                                                            err
                                                     Right () -> do
-                                                        signalReady (Right ())
+                                                        signalAgentIterationReady
+                                                            request
+                                                            (Right ())
                                                         pure (Just loaded)
 
-    source <- case options.optCwd of
-        Just requestedCwd -> makeAbsolute requestedCwd
-        Nothing -> case resumed of
-            Just (meta, _) -> makeAbsolute meta.metaCwd
-            Nothing ->
-                maybe getCurrentDirectory makeAbsolute runMode.runCwdHint
-    let initialCwd = source
+signalAgentIterationReady
+    :: AgentIterationRequest
+    -> Either Text ()
+    -> IO ()
+signalAgentIterationReady request result =
+    unless
+        request.iterationRunMode.runInBackground
+        (signalManagedSessionReady result)
+
+failAgentIterationPreparation
+    :: AgentIterationRequest
+    -> Text
+    -> IO a
+failAgentIterationPreparation request message =
+    releasePreparationResources
+        request.iterationResumeLockRef
+        request.iterationDatabaseStoreRef >>
+        case request.iterationActiveFullscreen of
+            Nothing
+                | request.iterationRunMode.runInBackground ->
+                    throwIO (StartupFailure message)
+                | otherwise -> die (Text.unpack message)
+            Just _ -> throwIO (StartupFailure message)
+
+prepareAgentIterationInterface
+    :: AgentIterationRequest
+    -> AgentIterationResources
+    -> IO AgentIterationInterface
+prepareAgentIterationInterface request resources = do
+    let runMode = request.iterationRunMode
+        options = request.iterationOptions
+        stdoutHandle = runMode.runStdout
+        stderrHandle = runMode.runStderr
+        background = runMode.runInBackground
+        initialCwd = resources.iterationSource
     uiRuntimeRef <- newIORef Nothing
     cancelToolRef <- newIORef (pure ())
     interrupt <- newInterruptState \msg -> do
@@ -873,7 +1019,8 @@ prepareAgentIterationTracked
     agentSnapshotRef <- newIORef (pure (AgentRoot, []))
     agentSelectRef <- newIORef (\_ -> pure ())
     restartEffortActionRef <- newIORef (\_ -> pure ())
-    queuedInputDisplays <- queuedFullscreenInputDisplays fullscreenInputs
+    queuedInputDisplays <-
+        queuedFullscreenInputDisplays request.iterationFullscreenInputs
     let fullscreenEnabled =
             stdinTty
                 && stdoutTty
@@ -896,16 +1043,16 @@ prepareAgentIterationTracked
                     initialUiState))
                         { uiQueuedInputs = queuedInputDisplays }
     firstFrameReady <-
-        if isJust activeFullscreen || not fullscreenEnabled
+        if isJust request.iterationActiveFullscreen || not fullscreenEnabled
             then newMVar ()
             else newEmptyMVar
-    fullscreen <- case activeFullscreen of
+    fullscreen <- case request.iterationActiveFullscreen of
         Just runtime -> pure (Just runtime)
         Nothing
             | fullscreenEnabled ->
                 Just <$> newFullscreenRuntimeWithTheme
-                    configuredTheme
-                    fullscreenInputs
+                    resources.iterationConfiguredTheme
+                    request.iterationFullscreenInputs
                     (readIORef cancelToolRef >>= id)
                     (\level ->
                         readIORef restartEffortActionRef >>= ($ level))
@@ -922,9 +1069,12 @@ prepareAgentIterationTracked
                     (\target -> readIORef agentSelectRef >>= ($ target))
                     (do
                         recordStartupTiming
-                            startedAt startupTimingsRef "first frame"
+                            resources.iterationStartedAt
+                            resources.iterationStartupTimings
+                            "first frame"
                         void (tryPutMVar firstFrameReady ()))
-                    (writeIORef syntaxLoadDurationRef . Just)
+                    (writeIORef
+                        resources.iterationSyntaxLoadDuration . Just)
                     options.optMotionMode
                     useColor
                     initialFullscreenState
@@ -933,150 +1083,197 @@ prepareAgentIterationTracked
     -- history is revalidated and installed for this preparation snapshot.
     forM_ fullscreen clearFullscreenHistorySource
     writeIORef uiRuntimeRef fullscreen
-    resumeLock <- readIORef resumeLockRef
-    let runAction
-            :: Maybe PreparedStartupAuthWorker
-            -> IO RunResult
-        runAction preparedAuth =
-            do
-                cwd <- case resumed of
-                    Just _ -> pure initialCwd
-                    Nothing
-                        | options.optWorktree -> do
-                            readMVar firstFrameReady
-                            let reportWorktreeProgress progress = do
-                                    let message =
-                                            worktreeProgressMessage progress
-                                    case fullscreen of
-                                        Nothing ->
-                                            putTextLn stderrHandle message
-                                        Just runtime ->
-                                            emitUiEvent runtime
-                                                (UiSetNotice
-                                                    (Just
-                                                        (progressNotice
-                                                            message)))
-                            createManagedWorktreeWithProgress
-                                reportWorktreeProgress
-                                home
-                                source
-                                >>= either
-                                    (\err -> do
-                                        mapM_ releaseSessionLock resumeLock
-                                        case fullscreen of
-                                            Nothing -> die (Text.unpack err)
-                                            Just _ ->
-                                                throwIO
-                                                    (StartupFailure err))
-                                    (\path -> do
-                                        color <- resolveColor stderrHandle
-                                        case fullscreen of
-                                            Nothing ->
-                                                putTextLn stderrHandle
-                                                    (roleMuted color
-                                                        (glyphSession
-                                                            <> "worktree: "
-                                                            <> toText path))
-                                            Just runtime ->
-                                                emitUiEvent runtime
-                                                    (UiSystemMessage
-                                                        (glyphSession
-                                                            <> "worktree: "
-                                                            <> toText path))
-                                        setStartupNotice fullscreen
-                                            "Loading project…"
-                                        pure path)
-                        | otherwise -> pure initialCwd
-                unless background (setCurrentDirectory cwd)
-                terminalCwd <- decodeFS cwd
-                reportTerminalCwd terminal stdoutHandle terminalCwd
-                toolEnv <- defaultToolEnv cwd
-                writeIORef cancelToolRef (requestCancel toolEnv.toolCancel)
-                forM_ runMode.runNativeHooks \hooks ->
-                    hooks.nativeRegisterCancel
-                        (requestCancel toolEnv.toolCancel)
-                forM_ fullscreen \runtime ->
-                    setFullscreenSessionActions
-                        runtime
-                        Nothing
-                        (requestCancel toolEnv.toolCancel)
-                        (\_ _ -> pure (Right ()))
-                        (const (pure ()))
-                        (const (pure ()))
-                        (pure ())
-                        (\level ->
-                            readIORef restartEffortActionRef >>= ($ level))
-                        (noteFullscreenCtrlC interrupt)
-                        (readIORef agentSnapshotRef >>= id)
-                        (\target -> readIORef agentSelectRef >>= ($ target))
-                let startup = StartupRuntime
-                        { startupToolEnv = toolEnv
-                        , startupNetworkRecovery =
-                            processRuntime.processNetworkRecovery
-                        , startupDatabaseStore = databaseStore
-                        , startupInterrupt = interrupt
-                        , startupEscPaused = escPaused
-                        , startupUiRuntimeRef = uiRuntimeRef
-                        , startupFullscreen = fullscreen
-                        , startupTerminal = terminal
-                        , startupStdout = stdoutHandle
-                        , startupStderr = stderrHandle
-                        , startupBackground = background
-                        , startupUseColor = useColor
-                        , startupStderrTty = stderrTty
-                        , startupStdinTty = stdinTty
-                        , startupStdoutTty = stdoutTty
-                        , startupFullscreenReused = isJust activeFullscreen
-                        , startupAgentSnapshot = agentSnapshotRef
-                        , startupAgentSelect = agentSelectRef
-                        , startupRestartEffort = restartEffortActionRef
-                        , startupStartedAt = startedAt
-                        , startupTimings = startupTimingsRef
-                        , startupSyntaxLoadDuration = syntaxLoadDurationRef
-                        , startupFinished = startupFinishedRef
-                        , startupSessionState = sessionState
-                        , startupNativeHooks = runMode.runNativeHooks
-                        }
-                runAgentInitialized
-                    (runAgentWithRuntime processRuntime)
-                    processRuntime
-                    options
-                    transition
-                    home
-                    root
-                    resumed
-                    resumeLock
-                    cwd
-                    startup
-                    connectedGateway
-                    preparedAuth
-        action
-            | options.optWorktree
-            , isNothing resumed
-            , isNothing transition = do
-                let prepareAccountUsage =
-                        options.optYolo
-                            || isNothing fullscreen
-                            || isJust options.optProvider
-                            || isJust options.optModel
-                withPreparedStartupAuth
-                    prepareAccountUsage
-                    options.optProvider
-                    (runAction . Just)
-            | otherwise = runAction Nothing
-        cleanup = do
+    let installToolRuntime toolEnv = do
+            writeIORef cancelToolRef (requestCancel toolEnv.toolCancel)
             forM_ runMode.runNativeHooks \hooks ->
-                hooks.nativeRegisterCancel (pure ())
-            writeIORef uiRuntimeRef Nothing
-            writeIORef cancelToolRef (pure ())
-            forM_ fullscreen resetFullscreenSessionActions
-            case runMode.runNativeHooks >>= (.nativeDatabaseStore) of
-                Just _ -> pure ()
-                Nothing -> closeStore databaseStore
-    pure PreparedAgent
-        { preparedFullscreen = fullscreen
-        , preparedRun = action `finally` cleanup
+                hooks.nativeRegisterCancel
+                    (requestCancel toolEnv.toolCancel)
+            forM_ fullscreen \runtime ->
+                setFullscreenSessionActions
+                    runtime
+                    Nothing
+                    (requestCancel toolEnv.toolCancel)
+                    (\_ _ -> pure (Right ()))
+                    (const (pure ()))
+                    (const (pure ()))
+                    (pure ())
+                    (\level ->
+                        readIORef restartEffortActionRef >>= ($ level))
+                    (noteFullscreenCtrlC interrupt)
+                    (readIORef agentSnapshotRef >>= id)
+                    (\target -> readIORef agentSelectRef >>= ($ target))
+        buildStartupRuntime toolEnv = StartupRuntime
+            { startupToolEnv = toolEnv
+            , startupNetworkRecovery =
+                request.iterationProcessRuntime.processNetworkRecovery
+            , startupDatabaseStore = resources.iterationDatabaseStore
+            , startupInterrupt = interrupt
+            , startupEscPaused = escPaused
+            , startupUiRuntimeRef = uiRuntimeRef
+            , startupFullscreen = fullscreen
+            , startupTerminal = terminal
+            , startupStdout = stdoutHandle
+            , startupStderr = stderrHandle
+            , startupBackground = background
+            , startupUseColor = useColor
+            , startupStderrTty = stderrTty
+            , startupStdinTty = stdinTty
+            , startupStdoutTty = stdoutTty
+            , startupFullscreenReused =
+                isJust request.iterationActiveFullscreen
+            , startupAgentSnapshot = agentSnapshotRef
+            , startupAgentSelect = agentSelectRef
+            , startupRestartEffort = restartEffortActionRef
+            , startupStartedAt = resources.iterationStartedAt
+            , startupTimings = resources.iterationStartupTimings
+            , startupSyntaxLoadDuration =
+                resources.iterationSyntaxLoadDuration
+            , startupFinished = resources.iterationStartupFinished
+            , startupSessionState = request.iterationSessionState
+            , startupNativeHooks = runMode.runNativeHooks
+            }
+    pure AgentIterationInterface
+        { iterationFullscreen = fullscreen
+        , iterationFirstFrameReady = firstFrameReady
+        , iterationTerminal = terminal
+        , iterationUiRuntimeRef = uiRuntimeRef
+        , iterationCancelToolRef = cancelToolRef
+        , iterationInstallToolRuntime = installToolRuntime
+        , iterationBuildStartupRuntime = buildStartupRuntime
         }
+
+prepareAgentIterationAction
+    :: AgentIterationRequest
+    -> AgentIterationResources
+    -> AgentIterationInterface
+    -> Maybe SessionLock
+    -> IO RunResult
+prepareAgentIterationAction request resources interface resumeLock
+    | request.iterationOptions.optWorktree
+    , isNothing resources.iterationResumed
+    , isNothing request.iterationTransition = do
+        let options = request.iterationOptions
+            prepareAccountUsage =
+                options.optYolo
+                    || isNothing interface.iterationFullscreen
+                    || isJust options.optProvider
+                    || isJust options.optModel
+        withPreparedStartupAuth
+            prepareAccountUsage
+            options.optProvider
+            (runAction . Just)
+    | otherwise = runAction Nothing
+  where
+    runAction =
+        runPreparedAgentIteration
+            request
+            resources
+            interface
+            resumeLock
+
+runPreparedAgentIteration
+    :: AgentIterationRequest
+    -> AgentIterationResources
+    -> AgentIterationInterface
+    -> Maybe SessionLock
+    -> Maybe PreparedStartupAuthWorker
+    -> IO RunResult
+runPreparedAgentIteration
+        request resources interface resumeLock preparedAuth = do
+    let runMode = request.iterationRunMode
+    cwd <-
+        resolveAgentIterationCwd
+            request
+            resources
+            interface
+            resumeLock
+    unless runMode.runInBackground (setCurrentDirectory cwd)
+    terminalCwd <- decodeFS cwd
+    reportTerminalCwd
+        interface.iterationTerminal
+        runMode.runStdout
+        terminalCwd
+    toolEnv <- defaultToolEnv cwd
+    interface.iterationInstallToolRuntime toolEnv
+    let startup = interface.iterationBuildStartupRuntime toolEnv
+    runAgentInitialized
+        (runAgentWithRuntime request.iterationProcessRuntime)
+        request.iterationProcessRuntime
+        request.iterationOptions
+        request.iterationTransition
+        resources.iterationHome
+        resources.iterationRoot
+        resources.iterationResumed
+        resumeLock
+        cwd
+        startup
+        resources.iterationConnectedGateway
+        preparedAuth
+
+resolveAgentIterationCwd
+    :: AgentIterationRequest
+    -> AgentIterationResources
+    -> AgentIterationInterface
+    -> Maybe SessionLock
+    -> IO OsPath
+resolveAgentIterationCwd request resources interface resumeLock =
+    case resources.iterationResumed of
+        Just _ -> pure resources.iterationSource
+        Nothing
+            | request.iterationOptions.optWorktree -> do
+                readMVar interface.iterationFirstFrameReady
+                createManagedWorktreeWithProgress
+                    reportWorktreeProgress
+                    resources.iterationHome
+                    resources.iterationSource
+                    >>= either worktreeFailed worktreeCreated
+            | otherwise -> pure resources.iterationSource
+  where
+    stderrHandle = request.iterationRunMode.runStderr
+    fullscreen = interface.iterationFullscreen
+    reportWorktreeProgress progress = do
+        let message = worktreeProgressMessage progress
+        case fullscreen of
+            Nothing -> putTextLn stderrHandle message
+            Just runtime ->
+                emitUiEvent runtime
+                    (UiSetNotice (Just (progressNotice message)))
+    worktreeFailed err = do
+        mapM_ releaseSessionLock resumeLock
+        case fullscreen of
+            Nothing -> die (Text.unpack err)
+            Just _ -> throwIO (StartupFailure err)
+    worktreeCreated path = do
+        color <- resolveColor stderrHandle
+        case fullscreen of
+            Nothing ->
+                putTextLn stderrHandle
+                    (roleMuted color
+                        (glyphSession <> "worktree: " <> toText path))
+            Just runtime ->
+                emitUiEvent runtime
+                    (UiSystemMessage
+                        (glyphSession <> "worktree: " <> toText path))
+        setStartupNotice fullscreen "Loading project…"
+        pure path
+
+cleanupAgentIteration
+    :: AgentIterationRequest
+    -> AgentIterationResources
+    -> AgentIterationInterface
+    -> IO ()
+cleanupAgentIteration request resources interface = do
+    let runMode = request.iterationRunMode
+    forM_ runMode.runNativeHooks \hooks ->
+        hooks.nativeRegisterCancel (pure ())
+    writeIORef interface.iterationUiRuntimeRef Nothing
+    writeIORef interface.iterationCancelToolRef (pure ())
+    forM_
+        interface.iterationFullscreen
+        resetFullscreenSessionActions
+    case runMode.runNativeHooks >>= (.nativeDatabaseStore) of
+        Just _ -> pure ()
+        Nothing -> closeStore resources.iterationDatabaseStore
 
 releasePreparationResources
     :: IORef (Maybe SessionLock)
