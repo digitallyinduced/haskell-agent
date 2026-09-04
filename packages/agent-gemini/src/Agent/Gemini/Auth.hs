@@ -27,13 +27,22 @@ module Agent.Gemini.Auth
     ) where
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar
+    ( newEmptyMVar
+    , putMVar
+    , readMVar
+    , takeMVar
+    , tryPutMVar
+    )
 import Control.Exception.Safe
     ( IOException
     , SomeException
     , bracket
+    , finally
     , fromException
     , tryAny
     )
+import Control.Monad (void)
 import Crypto.Hash (Digest, SHA256, hash)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.:), (.:?), (.!=))
@@ -44,6 +53,7 @@ import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import Data.Bifunctor (first)
+import Data.Char (isDigit, toLower)
 import Data.List (find)
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
@@ -51,14 +61,28 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Network.HTTP.Simple
-import Network.HTTP.Types.URI (parseQueryText, renderQueryText)
+import Network.HTTP.Types
+    ( hCacheControl
+    , hContentLength
+    , hLocation
+    , methodGet
+    , status302
+    )
+import Network.HTTP.Types.URI
+    ( parseQueryText
+    , queryToQueryText
+    , renderQueryText
+    )
 import qualified Network.HTTP.Client as HttpClient
 import qualified Network.Socket as Net
-import qualified Network.Socket.ByteString as Net
+import qualified Network.URI as URI
+import qualified Network.Wai as Wai
+import qualified Network.Wai.Handler.Warp as Warp
 import System.Environment (lookupEnv)
 import System.Entropy (getEntropy)
 import System.IO.Error (ioeGetErrorString)
 import System.Timeout (timeout)
+import Text.Read (readMaybe)
 
 data OAuthOptions = OAuthOptions
     { authorizationEndpoint :: !String
@@ -261,8 +285,16 @@ authorizationUrl options redirectUri state challenge =
 validateOAuthCallback :: Text -> BS.ByteString -> Either Text Text
 validateOAuthCallback expectedState requestTarget = do
     let (_, queryWithQuestion) = BS8.break (== '?') requestTarget
-        parameters = parseQueryText (BS.drop 1 queryWithQuestion)
-        parameter key = lookup key parameters >>= id
+    validateOAuthParameters
+        expectedState
+        (parseQueryText (BS.drop 1 queryWithQuestion))
+
+validateOAuthParameters
+    :: Text
+    -> [(Text, Maybe Text)]
+    -> Either Text Text
+validateOAuthParameters expectedState parameters = do
+    let parameter key = lookup key parameters >>= id
     actualState <- maybe
         (Left "Google OAuth callback did not include state")
         Right
@@ -453,46 +485,43 @@ loopbackRedirectUri socket = Net.getSocketName socket >>= \case
     _ -> fail "Google OAuth loopback listener did not bind an IPv4 address"
 
 receiveOAuthCallback :: Net.Socket -> Text -> IO (Either Text Text)
-receiveOAuthCallback listener expectedState =
-    bracket (Net.accept listener) (Net.close . fst) \(connection, _) -> do
-        received <- receiveRequestHeaders connection
-        let result = case received of
-                Left err -> Left err
-                Right bytes ->
-                    case BS8.words (BS8.takeWhile (/= '\r') bytes) of
-                        _method : target : _ ->
-                            validateOAuthCallback expectedState target
-                        _ ->
-                            Left
-                                "Malformed HTTP request received by Google OAuth callback"
-            location = case result of
-                Right _ ->
-                    "https://developers.google.com/gemini-code-assist/auth_success_gemini"
-                Left _ ->
-                    "https://developers.google.com/gemini-code-assist/auth_failure_gemini"
-        Net.sendAll connection
-            ("HTTP/1.1 302 Found\r\nLocation: " <> location
-                <> "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-        pure result
-
-receiveRequestHeaders :: Net.Socket -> IO (Either Text BS.ByteString)
-receiveRequestHeaders connection = go BS.empty
-  where
-    maxHeaderBytes = 16_384
-    delimiter = "\r\n\r\n"
-
-    go accumulated
-        | delimiter `BS.isInfixOf` accumulated = pure (Right accumulated)
-        | BS.length accumulated >= maxHeaderBytes =
-            pure (Left "Google OAuth callback request headers were too large")
-        | otherwise = do
-            chunk <- Net.recv connection
-                (maxHeaderBytes - BS.length accumulated)
-            if BS.null chunk
-                then pure
-                    (Left
-                        "Google OAuth callback connection closed before the request headers completed")
-                else go (accumulated <> chunk)
+receiveOAuthCallback listener expectedState = do
+    resultVar <- newEmptyMVar
+    shutdownVar <- newEmptyMVar
+    let settings =
+            Warp.setHost "127.0.0.1"
+                $ Warp.setMaxTotalHeaderLength 16_384
+                $ Warp.setInstallShutdownHandler (putMVar shutdownVar)
+                $ Warp.defaultSettings
+        application request respond = do
+            let result
+                    | Wai.requestMethod request /= methodGet =
+                        Left "Google OAuth callback must use GET"
+                    | Wai.rawPathInfo request /= "/oauth2callback" =
+                        Left "Google OAuth callback used an unexpected path"
+                    | otherwise =
+                        validateOAuthParameters
+                            expectedState
+                            (queryToQueryText (Wai.queryString request))
+                location = case result of
+                    Right _ ->
+                        "https://developers.google.com/gemini-code-assist/auth_success_gemini"
+                    Left _ ->
+                        "https://developers.google.com/gemini-code-assist/auth_failure_gemini"
+                finish = do
+                    void (tryPutMVar resultVar result)
+                    readMVar shutdownVar >>= id
+            respond
+                (Wai.responseLBS
+                    status302
+                    [ (hLocation, location)
+                    , (hContentLength, "0")
+                    , (hCacheControl, "no-store")
+                    ]
+                    "")
+                `finally` finish
+    Warp.runSettingsSocket settings listener application
+    takeMVar resultVar
 
 --------------------------------------------------------------------------------
 -- HTTP and Code Assist JSON
@@ -763,12 +792,26 @@ validationRequirement response = do
         )
 
 requireHttpsValidationUrl :: Text -> IO Text
-requireHttpsValidationUrl url
-    | "https://" `Text.isPrefixOf` Text.toLower url
-    , not (Text.null (Text.drop 8 url)) =
-        pure url
-    | otherwise =
-        fail "Google account validation returned an invalid non-HTTPS URL"
+requireHttpsValidationUrl url =
+    case URI.parseURI (Text.unpack url) of
+        Just uri
+            | map toLower (URI.uriScheme uri) == "https:"
+            , Just authority <- URI.uriAuthority uri
+            , null (URI.uriUserInfo authority)
+            , not (null (URI.uriRegName authority))
+            , validUriPort (URI.uriPort authority) ->
+                pure url
+        _ ->
+            fail "Google account validation returned an invalid non-HTTPS URL"
+
+validUriPort :: String -> Bool
+validUriPort "" = True
+validUriPort (':' : digits)
+    | not (null digits)
+    , all isDigit digits
+    , Just port <- readMaybe digits =
+        port > (0 :: Int) && port < 65_536
+validUriPort _ = False
 
 validateConfiguredProject :: Maybe Text -> IO ()
 validateConfiguredProject = \case
