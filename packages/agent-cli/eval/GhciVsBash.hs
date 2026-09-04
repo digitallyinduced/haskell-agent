@@ -426,6 +426,7 @@ runOne config trial task mode = do
                   , "--save-session"
                   , "--no-agents-md"
                   , "--no-skills"
+                  , "--no-computer-use"
                   , "--max-turns", "30"
                   ]
                     <> modeFlags mode
@@ -633,6 +634,7 @@ validateForwardedArgs = go
 
     reservedFlags =
         [ "--ghci", "--no-ghci", "--bash", "--no-bash"
+        , "--computer-use", "--no-computer-use"
         , "--cwd", "--prompt", "-p", "--prompt-file"
         , "--save-session", "--agents-md", "--no-agents-md", "--skills"
         , "--no-skills", "--max-turns", "--worktree", "--resume"

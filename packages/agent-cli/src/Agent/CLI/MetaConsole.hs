@@ -426,6 +426,10 @@ validateSessionCommand raw =
         ["/shell", mode]
             | Text.toLower mode `elem` ["ghci", "bash", "both", "none"] ->
                 pure ()
+        ["/computer-use"] -> pure ()
+        ["/computer-use", mode]
+            | Text.toLower mode `elem` ["on", "off"] ->
+                pure ()
         ["/codemod"] -> pure ()
         ["/always-approve"] -> pure ()
         ["/agents", "limit", limit]
@@ -910,7 +914,7 @@ metaConsolePrompt context request =
         , "Secret environment actions carry only name and key; the host securely prompts for the value. Never add a value field."
         , "select_account must be the plan's only action. Omit account to show every connected account for that provider."
         , "A supplied account is matched exactly (case-insensitively) against its label or id. If it could refer to multiple accounts, use clarify rather than guessing."
-        , "Allowed session_command forms: /model MODEL, /effort LEVEL, /fast, /shell MODE, /codemod, /always-approve, /agents limit N, /skills reload."
+        , "Allowed session_command forms: /model MODEL, /effort LEVEL, /fast, /shell MODE, /computer-use [on|off], /codemod, /always-approve, /agents limit N, /skills reload."
         ]
 
 renderJson :: Aeson.Value -> Text
