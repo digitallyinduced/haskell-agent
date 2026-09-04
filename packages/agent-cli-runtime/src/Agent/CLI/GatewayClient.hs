@@ -64,8 +64,10 @@ module Agent.CLI.GatewayClient
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OpenAI.Transcription
-    ( encodePcm16Wav
+    ( ChatGPTDictationStreamFailure(..)
+    , encodePcm16Wav
     , openAITranscriptionSampleRate
+    , transcribePcmWithChatGPTStreamAt
     )
 import Agent.CLI.Runtime.Options (GatewayCommand (..))
 import Agent.CLI.PrivateFileLock
@@ -543,18 +545,104 @@ transcribeGatewayPcmWith admitted produceAudio onTranscript =
         loadGatewayCredential >>= \case
             Right (Just current)
                 | current == admitted ->
-                    captureGatewayWav produceAudio >>= \case
+                    case gatewayDictationWebSocketUrl current of
                         Left err -> pure (Left err)
-                        Right wav ->
-                            postGatewayTranscription current wav >>= \case
-                                Left err -> pure (Left err)
-                                Right transcript -> do
-                                    onTranscript transcript
-                                    pure (Right transcript)
+                        Right websocketUrl -> do
+                            chunks <- newIORef []
+                            capturedBytes <- newIORef 0
+                            let captureAndBuffer sendAudio =
+                                    produceAudio \chunk ->
+                                        unless (BS.null chunk) do
+                                            total <-
+                                                (+ BS.length chunk)
+                                                    <$> readIORef capturedBytes
+                                            when
+                                                (total > gatewayMaxPcmBytes)
+                                                (throwString
+                                                    "gateway dictation audio exceeded the client limit")
+                                            writeIORef capturedBytes total
+                                            modifyIORef' chunks (chunk :)
+                                            sendAudio chunk
+                            transcribePcmWithChatGPTStreamAt
+                                websocketUrl
+                                [ ( "Authorization"
+                                  , "Bearer "
+                                        <> TextEncoding.encodeUtf8
+                                            current.gatewayAccessToken
+                                  )
+                                ]
+                                captureAndBuffer
+                                onTranscript >>= \case
+                                    Left ChatGPTDictationCaptureFailed{} ->
+                                        pure $
+                                            Left
+                                                "Gateway dictation audio capture failed."
+                                    Left ChatGPTDictationStreamUnavailable{} -> do
+                                        pcm <-
+                                            BS.concat . reverse
+                                                <$> readIORef chunks
+                                        wavResult <-
+                                            if BS.null pcm
+                                                then
+                                                    captureGatewayWav
+                                                        produceAudio
+                                                else
+                                                    pure $
+                                                        case encodePcm16Wav
+                                                            openAITranscriptionSampleRate
+                                                            pcm of
+                                                                Left _ ->
+                                                                    Left
+                                                                        "Gateway dictation streaming failed."
+                                                                Right wav ->
+                                                                    Right wav
+                                        case wavResult of
+                                            Left err -> pure (Left err)
+                                            Right wav ->
+                                                loadGatewayCredential >>= \case
+                                                    Right (Just latest)
+                                                        | latest == current ->
+                                                            postGatewayTranscription
+                                                                latest
+                                                                wav >>= \case
+                                                                    Left err ->
+                                                                        pure
+                                                                            (Left
+                                                                                err)
+                                                                    Right transcript -> do
+                                                                        onTranscript
+                                                                            transcript
+                                                                        pure
+                                                                            (Right
+                                                                                transcript)
+                                                    _ ->
+                                                        pure $
+                                                            Left
+                                                                "The organization gateway changed during dictation."
+                                    Right transcript ->
+                                        pure (Right transcript)
             _ ->
                 pure $
                     Left
                         "The organization gateway changed before dictation started."
+
+gatewayDictationWebSocketUrl
+    :: GatewayCredential
+    -> Either Text Text
+gatewayDictationWebSocketUrl credential = do
+    uri <-
+        maybe
+            (Left "Gateway WebSocket URL is invalid.")
+            Right
+            (URI.parseURI (Text.unpack credential.gatewayWebSocketUrl))
+    pure $
+        Text.pack $
+            show
+                uri
+                    { URI.uriPath = "/v1/audio/transcriptions"
+                    , URI.uriQuery = ""
+                    , URI.uriFragment = ""
+                    }
 
 captureGatewayWav
     :: ((BS.ByteString -> IO ()) -> IO ())
