@@ -48,7 +48,7 @@ spec = describe "GatewayBoundary" do
         firstBoundary `shouldNotBe` replacementBoundary
         gatewayBoundariesMatch firstBoundary firstBoundary `shouldBe` True
 
-    it "keeps persisted sessions route-bound across gateway credentials" do
+    it "allows persisted sessions to move across gateway routes" do
         let credential = testCredential "secret"
             replacement = testCredential "replacement-secret"
             boundary = gatewayBoundaryFromCredential (Just credential)
@@ -69,7 +69,7 @@ spec = describe "GatewayBoundary" do
             (gatewayBoundaryFromCredential Nothing)
             organizationGatewayConnectionId
             identity
-            `shouldSatisfy` isSessionRejection
+            `shouldBe` Right ()
 
     it "rejects stale turn admission without executing the turn" $
         withTempHome \home -> do
@@ -155,11 +155,6 @@ spec = describe "GatewayBoundary" do
                 (writeIORef emitted True)
                 `shouldReturn` Left GatewayBoundaryChanged
             readIORef emitted `shouldReturn` False
-
-isSessionRejection :: Either GatewayBoundaryError () -> Bool
-isSessionRejection = \case
-    Left (GatewayBoundarySessionRejected _) -> True
-    _ -> False
 
 testCredential :: String -> GatewayCredential
 testCredential secret =

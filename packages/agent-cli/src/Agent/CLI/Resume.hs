@@ -157,8 +157,8 @@ resumeEntriesFrom = map (uncurry entryFrom)
 resumeEntryFromMeta :: SessionMeta -> ResumeEntry
 resumeEntryFromMeta meta = entryFromWith False meta []
 
--- | Keep the resume surface on the same direct/gateway route as the active
--- session. Gateway sessions remain portable across gateway credentials.
+-- | Conversation history is portable across direct and gateway routes. The
+-- selected session is retargeted to the active route during startup.
 filterResumeSessionsForBoundary
     :: Maybe Text
     -> [SessionMeta]
@@ -169,8 +169,8 @@ filterResumeSessionsForBoundary gatewayIdentity =
             Right () -> True
             Left _ -> False
 
--- | Validate loaded resume metadata before any of its cwd, repository, model,
--- or transcript state is allowed to reach startup surfaces.
+-- | Apply the resume admission policy before loaded metadata reaches startup
+-- surfaces.
 validateResumeMetaForBoundary
     :: Maybe Text
     -> SessionMeta
@@ -181,9 +181,8 @@ validateResumeMetaForBoundary gatewayIdentity meta =
         meta.metaConnection
         meta.metaGatewayIdentity
 
--- | Keep transcript publication behind the same route validation used by
--- startup. In particular, a fullscreen resume must not enqueue direct-provider
--- history into a gateway-routed session (or vice versa).
+-- | Keep transcript publication behind the same admission hook used by
+-- startup.
 publishResumeHistoryAfterBoundary
     :: Either Text ()
     -> IO ()

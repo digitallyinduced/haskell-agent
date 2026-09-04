@@ -251,7 +251,7 @@ spec = describe "Agent.CLI.AgentSessions" do
             selfResult `shouldSatisfy`
                 Text.isInfixOf "cannot message the current agent session"
 
-    it "keeps gateway sessions private from direct mode but portable across gateways" $
+    it "keeps persisted gateway sessions portable across direct and gateway modes" $
         withTempEnv \env launched -> do
             let gatewayCreate =
                     (testCreate env.toolsPool env.toolsRoot)
@@ -299,7 +299,11 @@ spec = describe "Agent.CLI.AgentSessions" do
                         }
             directRead <- runTool env "read_agent_session" payload
             directRead `shouldSatisfy`
-                Text.isInfixOf "Reconnect the same gateway"
+                Text.isInfixOf "tenant A secret"
+            directSend <-
+                runTool env "send_agent_session_message" messagePayload
+            directSend `shouldSatisfy`
+                Text.isInfixOf "Status: running"
             otherRead <- runTool otherGateway "read_agent_session" payload
             otherRead `shouldSatisfy`
                 Text.isInfixOf "tenant A secret"
@@ -307,10 +311,14 @@ spec = describe "Agent.CLI.AgentSessions" do
                 runTool otherGateway "send_agent_session_message" messagePayload
             otherSend `shouldSatisfy`
                 Text.isInfixOf "Status: running"
-            [(launchedHandle, message)] <- readIORef launched
-            launchedHandle.sessionMeta.metaId
+            [(directHandle, directMessage), (gatewayHandle, gatewayMessage)] <-
+                readIORef launched
+            directHandle.sessionMeta.metaId
                 `shouldBe` handle.sessionMeta.metaId
-            message `shouldBe` "continue"
+            directMessage `shouldBe` "continue"
+            gatewayHandle.sessionMeta.metaId
+                `shouldBe` handle.sessionMeta.metaId
+            gatewayMessage `shouldBe` "continue"
             sameRead <- runTool sameGateway "read_agent_session" payload
             sameRead `shouldSatisfy` Text.isInfixOf "tenant A secret"
 
