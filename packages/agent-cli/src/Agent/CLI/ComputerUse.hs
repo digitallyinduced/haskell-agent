@@ -28,7 +28,6 @@ module Agent.CLI.ComputerUse
 import Agent.CLI.ComputerUse.Backend
     ( CapturedDisplay(..)
     , ComputerBackend(..)
-    , ComputerDisplay(..)
     , ScreenshotEncoding(..)
     , displayLogicalSize
     )
@@ -484,6 +483,9 @@ localComputerUseBackend = ComputerUseBackend
                                                         encoding
                                                         display)
     }
+  where
+    run (Left err) _ = pure (Left err)
+    run (Right ()) action = executeAction action
 
 {-# NOINLINE localComputerUseLock #-}
 localComputerUseLock :: MVar ()

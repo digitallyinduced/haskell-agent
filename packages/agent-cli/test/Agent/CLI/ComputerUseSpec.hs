@@ -422,6 +422,13 @@ spec = do
                         "click(12,34,3," `Text.isInfixOf` script
                             && "kCGEventFlagMaskShift"
                                 `Text.isInfixOf` script)
+            pointerScript (ClickAction 12 34 "left" ["fn"])
+                `shouldSatisfy` either
+                    (const False)
+                    ("kCGEventFlagMaskSecondaryFn" `Text.isInfixOf`)
+            x11KeyInvocation ["function", "a"]
+                `shouldBe` Right (XdotoolInvocation
+                    ["key", "--clearmodifiers", "XF86Fn+a"] "")
 
         it "preflights every drag point before pressing the mouse button" do
             pointerScript
