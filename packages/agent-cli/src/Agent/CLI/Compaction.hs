@@ -54,6 +54,7 @@ import qualified Agent.Gemini.Client as Gemini
 import qualified Agent.Gemini.Options as Gemini
 import Agent.Loop
     ( Backend(..)
+    , BackendMiddleware
     , BackendResult(..)
     , BackendSnapshot(..)
     , LoopEvent(..)
@@ -1078,8 +1079,7 @@ autoCompactOpenAiBackend
     :: TokenProvider
     -> IO ResponseCreateParams
     -> IORef (Maybe OccupancySnapshot)
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 autoCompactOpenAiBackend =
     autoCompactOpenAiBackendWithThreshold Nothing
 
@@ -1090,8 +1090,7 @@ autoCompactOpenAiBackendWithThreshold
     -> TokenProvider
     -> IO ResponseCreateParams
     -> IORef (Maybe OccupancySnapshot)
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 autoCompactOpenAiBackendWithThreshold configuredThreshold tokenProvider
         getParams contextTokensRef backend =
     autoCompactOpenAiBackendWithSender
@@ -1111,8 +1110,7 @@ autoCompactOpenAiBackendWithSender
     -> (TokenUsage -> IO ())
     -> IO ResponseCreateParams
     -> IORef (Maybe OccupancySnapshot)
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 autoCompactOpenAiBackendWithSender configuredThreshold send recordUsage
         getParams contextTokensRef backend =
     autoCompactOpenAiBackendWithSenderAndHook
@@ -1135,8 +1133,7 @@ autoCompactOpenAiBackendWithSenderAndHook
     -> IO ResponseCreateParams
     -> (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
     -> IORef (Maybe OccupancySnapshot)
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
         getParams onCompacted contextTokensRef backend =
     autoCompactOpenAiBackendWithSenderHookAndDecorator
@@ -1159,8 +1156,7 @@ autoCompactOpenAiBackendWithSenderHookAndDecorator
     -> (CompactOutcome -> IO CompactOutcome)
     -> (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
     -> IORef (Maybe OccupancySnapshot)
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 autoCompactOpenAiBackendWithSenderHookAndDecorator
         configuredThreshold send recordUsage getParams decorateOutcome
         onCompacted contextTokensRef backend =
@@ -1295,8 +1291,7 @@ autoCompactOpenAiBackendWithSenderHookAndDecorator
 
 rejectOversizedInitialRequest
     :: IO ResponseCreateParams
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 rejectOversizedInitialRequest getParams (Backend submit) =
     Backend \snapshot previous inputs onEvent ->
         if null snapshot.backendItems
@@ -1319,8 +1314,7 @@ rejectOversizedInitialRequest getParams (Backend submit) =
 autoCompactOpenAiBackendWith
     :: IO (Either Text CompactOutcome)
     -> IORef (Maybe OccupancySnapshot)
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 autoCompactOpenAiBackendWith compactAction =
     autoCompactOpenAiBackendWithLimit
         (pure codexAutoCompactTokenLimit)
@@ -1339,8 +1333,7 @@ autoCompactOpenAiBackendWith compactAction =
 autoCompactOpenAiBackendWithApi
     :: IO (Either ApiError CompactOutcome)
     -> IORef (Maybe OccupancySnapshot)
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 autoCompactOpenAiBackendWithApi compactAction =
     autoCompactOpenAiBackendWithLimit
         (pure codexAutoCompactTokenLimit)
@@ -1360,8 +1353,7 @@ autoCompactBackendWith
     -> (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
     -> IO ResponseCreateParams
     -> IORef (Maybe OccupancySnapshot)
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 autoCompactBackendWith getLimit compactAction onCompacted getParams =
     autoCompactOpenAiBackendWithLimit
         getLimit
@@ -1385,8 +1377,7 @@ autoCompactOpenAiBackendWithLimit
     -> (Maybe OccupancySnapshot -> [ResponseItem] -> [TurnInput] -> IO Int)
     -> (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
     -> IORef (Maybe OccupancySnapshot)
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
         recordUsage estimateProjected
         onCompacted

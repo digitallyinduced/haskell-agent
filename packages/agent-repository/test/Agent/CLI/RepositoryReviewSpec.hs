@@ -197,7 +197,9 @@ spec = describe "repository review service" do
             removeFile repositoryExclude
             createNamedPipe repositoryExclude
                 (ownerReadMode `unionFileModes` ownerWriteMode)
-            result <- timeout 2_000_000 (repositorySnapshot root)
+            -- Keep an outer deadlock guard, but leave enough headroom for
+            -- repository setup when six CI shards share two cores.
+            result <- timeout 10_000_000 (repositorySnapshot root)
             result `shouldSatisfy` \case
                 Just (Left (RepositoryCommandFailed _ _ _)) -> True
                 _ -> False
