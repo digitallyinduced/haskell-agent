@@ -244,7 +244,7 @@ nativeSessionBoundarySpec =
                 (Just "gateway-a")
                 `shouldBe` False
 
-        it "allows only the exact connected gateway identity" do
+        it "allows every gateway session while a gateway is connected" do
             nativeSessionRouteMatchesBoundary
                 (Just "gateway-a")
                 "organization-gateway"
@@ -254,7 +254,12 @@ nativeSessionBoundarySpec =
                 (Just "gateway-a")
                 "organization-gateway"
                 (Just "gateway-b")
-                `shouldBe` False
+                `shouldBe` True
+            nativeSessionRouteMatchesBoundary
+                (Just "gateway-a")
+                "organization-gateway"
+                Nothing
+                `shouldBe` True
             nativeSessionRouteMatchesBoundary
                 (Just "gateway-a")
                 "openai"

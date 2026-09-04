@@ -13,6 +13,7 @@ import Agent.CLI.Session.StoreCodec
     ( fromStoredResponseItem
     , toStoredResponseItem
     )
+import Agent.CLI.Session.Types (restoreLegacyLocalCompactionMarker)
 import Agent.CLI.Models (ModelTarget(..))
 import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
 import Agent.Dialect (DialectId(..))
@@ -616,6 +617,29 @@ spec = describe "Agent.CLI.Session" do
                         , computerOutputStatus = Nothing
                         , computerOutputExtra = KeyMap.empty
                         }
+                    ]
+            traverse fromStoredResponseItem (map toStoredResponseItem items)
+                `shouldBe` Right items
+
+        it "persists local summary and checkpoint provenance markers" do
+            let summaryItem = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [OutputTextPart "summary" Nothing Nothing]
+                    , role = RoleAssistant
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Just InternalChatMetadata
+                        { turnId = Nothing
+                        , createTime = Nothing
+                        , contentItemKinds =
+                            Just [localCompactionSummaryContentItemKind]
+                        , executedToolCalls = Nothing
+                        }
+                    }
+                items =
+                    [ summaryItem
+                    , compactionCheckpointOriginItem "xai"
                     ]
             traverse fromStoredResponseItem (map toStoredResponseItem items)
                 `shouldBe` Right items
@@ -1972,23 +1996,54 @@ spec = describe "Agent.CLI.Session" do
                 `shouldBe` Right (meta { metaGatewayIdentity = Nothing })
 
         it "infers transcript effects when importing legacy JSON turns" do
-            let legacy userText = Aeson.object
+            let legacy userText items = Aeson.object
                     [ "at" Aeson..= fixedTime
                     , "userText" Aeson..= (userText :: Text.Text)
                     , "assistantText" Aeson..= (Nothing :: Maybe Text.Text)
                     , "error" Aeson..= (Nothing :: Maybe Text.Text)
                     , "responseId" Aeson..= (Nothing :: Maybe Text.Text)
-                    , "items" Aeson..= ([] :: [ResponseItem])
+                    , "items" Aeson..= (items :: [ResponseItem])
                     , "usage" Aeson..= (Nothing :: Maybe TokenUsage)
                     ]
-                effect userText =
-                    fmap
-                        (.turnEffect)
-                        (Hermes.decodeEither sessionTurnDecoder
-                            (LBS.toStrict (Aeson.encode (legacy userText))))
-            effect "/compact focus"
+                decoded userText items =
+                    Hermes.decodeEither sessionTurnDecoder
+                        (LBS.toStrict
+                            (Aeson.encode (legacy userText items)))
+                oldLocalSummary = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [ OutputTextPart
+                            "Compacted conversation summary:\nlegacy state"
+                            Nothing
+                            Nothing
+                        ]
+                    , role = RoleAssistant
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+                hasLocalMarker = any \case
+                    MessageItem message ->
+                        responseMessageHasContentItemKind
+                            localCompactionSummaryContentItemKind
+                            message
+                    _ -> False
+            fmap (.turnEffect) (decoded "/compact focus" [])
                 `shouldBe` Right TranscriptReplace
-            effect "/rewind" `shouldBe` Right TranscriptReset
+            fmap (.turnEffect) (decoded "/rewind" [])
+                `shouldBe` Right TranscriptReset
+            fmap
+                (\turn ->
+                    ( turn.turnEffect
+                    , hasLocalMarker turn.turnItems
+                    ))
+                (decoded "continue" [oldLocalSummary])
+                `shouldBe` Right (TranscriptReplace, True)
+            hasLocalMarker
+                (restoreLegacyLocalCompactionMarker
+                    TranscriptAppend
+                    [oldLocalSummary])
+                `shouldBe` False
 
 sampleTaskPlan :: TaskPlan
 sampleTaskPlan = TaskPlan

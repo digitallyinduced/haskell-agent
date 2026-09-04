@@ -167,9 +167,10 @@ loadSessionMetadata pool sessionKey =
         Transactions.transaction Transactions.RepeatableRead Transactions.Read $
             Transaction.statement sessionKey loadMetadataStatement
 
--- | Load metadata only when the row belongs to the caller's exact routing
--- boundary. The authorization predicate is part of the SQL statement, so an
--- unauthorized row is never returned to the application for post-filtering.
+-- | Load metadata only when the row belongs to the caller's direct or gateway
+-- route. Gateway credentials share locally owned gateway conversation history.
+-- The predicate is part of the SQL statement, so a row from the other route is
+-- never returned to the application for post-filtering.
 loadSessionMetadataForBoundary
     :: StorePool
     -> Text
@@ -445,13 +446,13 @@ listSessionMetadata pool =
         Transactions.transaction Transactions.RepeatableRead Transactions.Read $
             Transaction.statement () listMetadataStatement
 
--- | List sessions inside the caller's exact organization-gateway boundary.
+-- | List sessions inside the caller's direct or organization-gateway route.
 --
--- Gateway mode admits only rows for the reserved gateway connection whose
--- stored credential identity exactly matches the supplied identity. Direct
--- mode admits only identity-less rows outside the reserved gateway
--- connection. Both the boundary and cursor predicates are applied before
--- ordering and LIMIT so unauthorized rows cannot displace authorized results.
+-- Gateway mode admits every row for the reserved gateway connection,
+-- including rows written by another or legacy gateway credential. Direct mode
+-- admits only identity-less rows outside the reserved gateway connection.
+-- Both the route and cursor predicates are applied before ordering and LIMIT
+-- so rows from the other route cannot displace authorized results.
 listSessionMetadataForBoundary
     :: StorePool
     -> Text
@@ -568,9 +569,9 @@ searchNativeConversations pool query limit =
             )
             searchNativeConversationsStatement
 
--- | Native/sidebar search with the same exact credential boundary as CLI
+-- | Native/sidebar search with the same direct/gateway route boundary as CLI
 -- search. The predicate is part of both candidate branches before ordering
--- and LIMIT, so another organization cannot displace or expose results.
+-- and LIMIT, so rows from the other route cannot displace or expose results.
 searchNativeConversationsForBoundary
     :: StorePool
     -> Text
@@ -720,7 +721,7 @@ searchNativeConversationsStatement = mkStatement
     \ FROM harness.sessions s CROSS JOIN query WHERE s.deleted_at IS NULL\
     \ AND ($2 IS NULL OR (\
     \   ($3 IS NULL AND s.connection_id <> $2 AND s.gateway_identity IS NULL)\
-    \   OR ($3 IS NOT NULL AND s.connection_id = $2 AND s.gateway_identity = $3)))\
+    \   OR ($3 IS NOT NULL AND s.connection_id = $2)))\
     \ AND (\
     \ s.title ILIKE '%' || $1 || '%' OR s.cwd ILIKE '%' || $1 || '%' OR\
     \ s.provider ILIKE '%' || $1 || '%' OR s.model_id ILIKE '%' || $1 || '%')\
@@ -736,7 +737,7 @@ searchNativeConversationsStatement = mkStatement
     \ CROSS JOIN query WHERE s.deleted_at IS NULL\
     \ AND ($2 IS NULL OR (\
     \   ($3 IS NULL AND s.connection_id <> $2 AND s.gateway_identity IS NULL)\
-    \   OR ($3 IS NOT NULL AND s.connection_id = $2 AND s.gateway_identity = $3)))\
+    \   OR ($3 IS NOT NULL AND s.connection_id = $2)))\
     \ AND (\
     \ t.search_vector @@ query.ts OR t.user_text ILIKE '%' || $1 || '%' OR\
     \ t.assistant_text ILIKE '%' || $1 || '%'))\
@@ -841,8 +842,7 @@ loadMetadataForBoundaryStatement = mkStatement
            \     AND connection_id <> $2\
            \     AND gateway_identity IS NULL)\
            \   OR ($3 IS NOT NULL\
-           \     AND connection_id = $2\
-           \     AND gateway_identity = $3)\
+           \     AND connection_id = $2)\
            \ )")
     ( ((\(sessionKey, _, _) -> sessionKey)
         >$< Encoders.param (Encoders.nonNullable Encoders.text))
@@ -875,8 +875,7 @@ listMetadataForBoundaryStatement = mkStatement
            \     AND connection_id <> $1\
            \     AND gateway_identity IS NULL)\
            \   OR ($2 IS NOT NULL\
-           \     AND connection_id = $1\
-           \     AND gateway_identity = $2)\
+           \     AND connection_id = $1)\
            \ )\
            \ AND (\
            \   ($3 = 'active' AND archived_at IS NULL)\
@@ -1289,8 +1288,7 @@ searchTurnsForBoundaryStatement = mkStatement
     \     AND s.connection_id <> $2\
     \     AND s.gateway_identity IS NULL)\
     \   OR ($3 IS NOT NULL\
-    \     AND s.connection_id = $2\
-    \     AND s.gateway_identity = $3)\
+    \     AND s.connection_id = $2)\
     \ )\
     \ AND (\
     \   t.search_vector @@ query.value\
