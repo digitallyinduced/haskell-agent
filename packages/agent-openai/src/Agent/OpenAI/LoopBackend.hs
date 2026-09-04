@@ -523,50 +523,29 @@ openAiBackendWithTransportFallback fallbackActive primary fallback =
             else tryPrimary state legacyPreviousResponseId inputs onEvent
   where
     tryPrimary state legacyPreviousResponseId inputs onEvent = do
-        emittedModelOutput <- newIORef False
-        announcedToolCall <- newIORef False
-        let resetAttempt = do
-                writeIORef emittedModelOutput False
-                writeIORef announcedToolCall False
+        observationRef <- newIORef emptyAttemptObservation
         result <-
             primary.submitTurn state legacyPreviousResponseId inputs \event -> do
-                case event of
-                    -- The primary already closed that attempt; only activity
-                    -- from its newest attempt still needs a boundary before a
-                    -- replay.
-                    ResponseRestarted _ -> resetAttempt
-                    ResponseAttemptDiscarded -> resetAttempt
-                    _ -> do
-                        when (isModelOutput event) $
-                            writeIORef emittedModelOutput True
-                        when (isToolAnnouncement event) $
-                            writeIORef announcedToolCall True
+                -- Commit before forwarding so exceptions from the outer
+                -- callback cannot leave retry bookkeeping stale.
+                atomicModifyIORef' observationRef \observation ->
+                    (observeFallbackLoopEvent event observation, ())
                 onEvent event
         case result of
             Left err
                 | isOpenAiWebSocketTransportFailure err -> do
                     writeIORef fallbackActive True
-                    emitted <- readIORef emittedModelOutput
-                    announced <- readIORef announcedToolCall
-                    if emitted
+                    observation <- readIORef observationRef
+                    if observation.observedVisibleOutput
                         then onEvent (ResponseRestarted fallbackRestartMessage)
                         else
                             -- A tool block the dead socket announced must not
                             -- linger as running next to the replayed attempt.
-                            when announced (onEvent ResponseAttemptDiscarded)
+                            when observation.observedToolOutput
+                                (onEvent ResponseAttemptDiscarded)
                     fallback.submitTurn
                         state legacyPreviousResponseId inputs onEvent
             _ -> pure result
-
-    isModelOutput = \case
-        TextDelta {} -> True
-        ReasoningDelta {} -> True
-        _ -> False
-
-    isToolAnnouncement = \case
-        ToolStarted {} -> True
-        ToolUpdated {} -> True
-        _ -> False
 
 hasLegacyComputerContinuation :: [ResponseItem] -> [TurnInput] -> Bool
 hasLegacyComputerContinuation history inputs =
@@ -733,12 +712,15 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                 backendContinuationToken "openai.responses" snapshot
                     <|> legacyPreviousResponseId
             newItems = turnInputsToItems inputs
-            deltaRequest = withRequestInput baseParams newItems
+            deltaRequest =
+                sanitizeCodexRequest (withRequestInput baseParams newItems)
             -- Live and resumed transcripts already apply compaction snapshots
             -- as full replacements. Remote v2 intentionally keeps retained
             -- messages before its opaque checkpoint, so replay the complete
             -- replacement instead of trimming that retained prefix.
-            fullRequest = withRequestInput baseParams (history <> newItems)
+            fullRequest =
+                sanitizeCodexRequest
+                    (withRequestInput baseParams (history <> newItems))
             (initialRequest, initialPrevious) =
                 case previousResponseId of
                     _ | hasLegacyComputerContinuation history inputs ->
@@ -772,27 +754,34 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                     }
   where
     sendRetrying onLoopEvent request previousResponseId = do
-        emittedRawOutput <- newIORef False
-        emittedVisibleOutput <- newIORef False
-        go emittedRawOutput emittedVisibleOutput
-            defaultRetryStatus defaultRetryStatus
+        go defaultRetryStatus defaultRetryStatus
       where
-        go emittedRawOutput emittedVisibleOutput transientStatus
-                reconnectStatus = do
+        go transientStatus reconnectStatus = do
             -- One projector per attempt: argument-progress counters must
             -- describe a single provider sample, not the whole retry chain.
-            projectEvent <-
-                Responses.newStreamEventToLoopEvents showRawReasoning
+            attemptState <- newIORef OpenAiAttemptState
+                { attemptProjection = Responses.emptyStreamProjectionState
+                , attemptObservation = emptyAttemptObservation
+                }
             result <- send request previousResponseId \event -> do
-                if streamOutputObserved event
-                    then writeIORef emittedRawOutput True
-                    else pure ()
-                projectEvent event
-                    >>= mapM_ \loopEvent -> do
-                        when (isVisibleModelOutput loopEvent) $
-                            writeIORef emittedVisibleOutput True
-                        onLoopEvent loopEvent
-            emitted <- readIORef emittedRawOutput
+                loopEvents <- atomicModifyIORef' attemptState $
+                    openAiAttemptStep showRawReasoning event
+                mapM_ (\loopEvent -> do
+                    -- Observe only events that are about to be delivered:
+                    -- a failed callback must not pre-record later events in
+                    -- the same projected batch.
+                    atomicModifyIORef' attemptState \state ->
+                        ( state
+                            { attemptObservation =
+                                observeLoopEvent loopEvent
+                                    state.attemptObservation
+                            }
+                        , ()
+                        )
+                    onLoopEvent loopEvent
+                    ) loopEvents
+            observation <- (.attemptObservation) <$> readIORef attemptState
+            let emitted = observation.observedRawOutput
             case result of
                 Left apiError
                     -- A pre-output connection failure is handled by the
@@ -801,9 +790,8 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                     | emitted
                     , isReconnectableTransportFailure apiError ->
                         applyPolicy reconnectPolicy reconnectStatus >>= \case
-                            Nothing -> settle apiError result
+                            Nothing -> settle observation apiError result
                             Just nextStatus -> do
-                                visible <- readIORef emittedVisibleOutput
                                 let delayMicros =
                                         fromMaybe 0 nextStatus.rsPreviousDelay
                                     attempt = nextStatus.rsIterNumber
@@ -816,7 +804,7 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                                 -- partial output stays on screen marked as
                                 -- failed; hidden activity such as an announced
                                 -- tool call is removed.
-                                if visible
+                                if observation.observedVisibleOutput
                                     then onLoopEvent
                                         (ResponseRestarted
                                             connectionRestartMessage)
@@ -824,10 +812,7 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                                 onLoopEvent $ ActivityUpdated $
                                     "Reconnecting to Codex (attempt "
                                         <> Text.pack (show attempt) <> ")…"
-                                writeIORef emittedRawOutput False
-                                writeIORef emittedVisibleOutput False
-                                go emittedRawOutput emittedVisibleOutput
-                                    transientStatus nextStatus
+                                go transientStatus nextStatus
                     | not emitted
                     , isInlineRetryableProviderResponseError apiError ->
                         applyPolicy transientPolicy transientStatus >>= \case
@@ -842,24 +827,94 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                                 onLoopEvent $ ActivityUpdated $
                                     "Retrying Codex request (attempt "
                                         <> Text.pack (show attempt) <> ")…"
-                                go emittedRawOutput emittedVisibleOutput
-                                    nextStatus reconnectStatus
-                    | emitted -> settle apiError result
+                                go nextStatus reconnectStatus
+                    | emitted -> settle observation apiError result
                 _ -> pure result
           where
             -- The transport fallback may still replay a dropped connection
             -- after this backend gives up; every other failure after output
             -- is terminal because the provider may have committed the sample.
-            settle apiError result = do
-                visible <- readIORef emittedVisibleOutput
-                pure $ if visible || isReconnectableTransportFailure apiError
+            settle observation apiError result = do
+                pure $ if observation.observedVisibleOutput
+                        || isReconnectableTransportFailure apiError
                     then result
                     else Left (replayUnsafeError "model output" apiError)
 
-    isVisibleModelOutput = \case
-        TextDelta{} -> True
-        ReasoningDelta{} -> True
-        _ -> False
+data AttemptObservation = AttemptObservation
+    { observedRawOutput :: !Bool
+    , observedVisibleOutput :: !Bool
+    , observedToolOutput :: !Bool
+    }
+
+emptyAttemptObservation :: AttemptObservation
+emptyAttemptObservation = AttemptObservation
+    { observedRawOutput = False
+    , observedVisibleOutput = False
+    , observedToolOutput = False
+    }
+
+observeRawOutput
+    :: ResponseStreamEvent
+    -> AttemptObservation
+    -> AttemptObservation
+observeRawOutput event observation
+    | streamOutputObserved event =
+        observation { observedRawOutput = True }
+    | otherwise = observation
+
+observeLoopEvent :: LoopEvent -> AttemptObservation -> AttemptObservation
+observeLoopEvent event observation = case event of
+    TextDelta{} -> observation { observedVisibleOutput = True }
+    ReasoningDelta{} -> observation { observedVisibleOutput = True }
+    ToolArgumentsUpdated{} ->
+        observation { observedVisibleOutput = True }
+    ToolStarted{} -> observation { observedToolOutput = True }
+    ToolUpdated{} -> observation { observedToolOutput = True }
+    ResponseRestarted{} -> emptyAttemptObservation
+    ResponseAttemptDiscarded -> emptyAttemptObservation
+    _ -> observation
+
+-- The outer transport fallback only distinguishes durable model deltas from
+-- an in-flight tool block. Argument previews belong to the latter and are
+-- removed rather than retained when HTTP replays the attempt.
+observeFallbackLoopEvent
+    :: LoopEvent
+    -> AttemptObservation
+    -> AttemptObservation
+observeFallbackLoopEvent event observation = case event of
+    TextDelta{} -> observation { observedVisibleOutput = True }
+    ReasoningDelta{} -> observation { observedVisibleOutput = True }
+    ToolStarted{} -> observation { observedToolOutput = True }
+    ToolUpdated{} -> observation { observedToolOutput = True }
+    ResponseRestarted{} -> emptyAttemptObservation
+    ResponseAttemptDiscarded -> emptyAttemptObservation
+    _ -> observation
+
+data OpenAiAttemptState = OpenAiAttemptState
+    { attemptProjection :: !Responses.StreamProjectionState
+    , attemptObservation :: !AttemptObservation
+    }
+
+openAiAttemptStep
+    :: Bool
+    -> ResponseStreamEvent
+    -> OpenAiAttemptState
+    -> (OpenAiAttemptState, [LoopEvent])
+openAiAttemptStep showRawReasoning event state =
+    ( OpenAiAttemptState
+        { attemptProjection = nextProjection
+        , attemptObservation = nextObservation
+        }
+    , loopEvents
+    )
+  where
+    (nextProjection, loopEvents) =
+        Responses.streamEventToLoopEventsStep
+            showRawReasoning
+            state.attemptProjection
+            event
+    nextObservation =
+        observeRawOutput event state.attemptObservation
 
 transientStreamingResultPolicy :: RetryPolicyM IO
 transientStreamingResultPolicy =

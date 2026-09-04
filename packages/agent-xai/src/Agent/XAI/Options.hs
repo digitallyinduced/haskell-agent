@@ -4,8 +4,13 @@ module Agent.XAI.Options
     , defaultClientOptions
     , clientOptionsFromEnv
     , defaultGrokClientVersion
+    , grokAutoCompactThresholdPercent
+    , grokAutoCompactTokenLimit
     , grokAuthenticateResponseValue
     , grokClientIdentifier
+    , grokDefaultContextWindow
+    , grokServerCompactionAtTokens
+    , grokServerCompactionsRemaining
     , grokTokenAuthValue
     , grokUserAgent
     ) where
@@ -30,6 +35,39 @@ grokClientIdentifier = "grok-shell"
 -- version-gates on @x-grok-client-version@.
 defaultGrokClientVersion :: Text
 defaultGrokClientVersion = "1.0.8"
+
+-- | Context window advertised by the current Grok 4.5/4.6 model catalog.
+grokDefaultContextWindow :: Int
+grokDefaultContextWindow = 500_000
+
+-- | Grok 4.5/4.6 override the Grok Build global 85% fallback with 80%.
+grokAutoCompactThresholdPercent :: Text -> Int
+grokAutoCompactThresholdPercent model
+    | model `elem` ["grok-4.5", "grok-4.6"] = 80
+    | otherwise = 85
+
+-- | Resolve the client-side automatic compaction threshold for a model.
+grokAutoCompactTokenLimit :: Text -> Int -> Int
+grokAutoCompactTokenLimit model contextWindow =
+    max 1 $
+        contextWindow * grokAutoCompactThresholdPercent model `div` 100
+
+-- | Baseline server hint enabled by the current Grok model catalog. Callers
+-- with a resolved catalog context window override this through
+-- 'ClientOptions.autoCompactTokenLimit'. Unknown future models keep the
+-- global client-side fallback but do not receive metadata that their server
+-- configuration has not opted into.
+grokServerCompactionAtTokens :: Text -> Maybe Int
+grokServerCompactionAtTokens model
+    | model `elem` ["grok-4.5", "grok-4.6"] =
+        Just (grokAutoCompactTokenLimit model grokDefaultContextWindow)
+    | otherwise = Nothing
+
+-- | Current Grok metadata uses a fixed integer, rather than the dynamic
+-- boolean mode that changes from one to zero after a compaction.
+grokServerCompactionsRemaining :: Text -> Maybe Int
+grokServerCompactionsRemaining model =
+    1 <$ grokServerCompactionAtTokens model
 
 -- | Value Grok Build injects as @X-XAI-Token-Auth@ on cli-chat-proxy.
 grokTokenAuthValue :: Text
@@ -69,6 +107,9 @@ data ClientOptions = ClientOptions
       -- ^ Exact-match request-model to xAI-model overrides.
     , defaultModel :: !Text
       -- ^ Target for non-Grok model names without an explicit override.
+    , autoCompactTokenLimit :: !(Maybe Int)
+      -- ^ Explicit automatic-compaction threshold. 'Nothing' uses the
+      -- model-specific Grok Build default.
     , requestTimeoutSeconds :: !Int
       -- ^ Full-response timeout. Reasoning turns can stream for minutes.
     , clientVersion :: !Text
@@ -82,6 +123,7 @@ defaultClientOptions = ClientOptions
     { baseUrl = "https://cli-chat-proxy.grok.com/v1"
     , modelOverrides = Map.empty
     , defaultModel = "grok-4.6"
+    , autoCompactTokenLimit = Nothing
     , requestTimeoutSeconds = 600
     , clientVersion = defaultGrokClientVersion
     , hostedXSearchEnabled = True
@@ -99,6 +141,7 @@ clientOptionsFromEnv = do
         { baseUrl = Maybe.fromMaybe defaultClientOptions.baseUrl baseUrl
         , modelOverrides = maybe Map.empty (parseModelOverrides . Text.pack) modelMap
         , defaultModel = maybe defaultClientOptions.defaultModel Text.pack defaultModel
+        , autoCompactTokenLimit = Nothing
         , requestTimeoutSeconds = Maybe.fromMaybe defaultClientOptions.requestTimeoutSeconds
             timeoutSeconds
         , clientVersion = maybe defaultClientOptions.clientVersion Text.pack clientVersion

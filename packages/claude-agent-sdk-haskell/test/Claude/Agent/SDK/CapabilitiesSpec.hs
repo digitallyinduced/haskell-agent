@@ -59,6 +59,15 @@ spec = describe "Claude Code capabilities" do
                     capabilities.supportsStreaming
                 Left _ -> False
 
+    it "returns a cached successful capability probe without re-running help" $
+        withFakeClaude cacheHitProbeScript \directory executable -> do
+            first <- probeClaudeCapabilitiesIn executable directory
+            first `shouldSatisfy` \case
+                Right capabilities -> capabilities.supportsStreaming
+                Left _ -> False
+            second <- probeClaudeCapabilitiesIn executable directory
+            second `shouldBe` first
+
     it "fails the probe when a descendant keeps stdout open" $
         withFakeClaude heldOpenHelpOutputScript \directory executable -> do
             result <-
@@ -137,6 +146,32 @@ failFirstHelpProbeScript =
         , "      printf 'failed' > \"$0.help-probed\""
         , "      exit 1"
         , "    fi"
+        , "    printf '%s\\n' \\"
+        , "      'Usage: claude [options]' \\"
+        , "      '  -p, --print' \\"
+        , "      '  --input-format <format> (choices: text, stream-json)' \\"
+        , "      '  --output-format <format> (choices: text, json, stream-json)' \\"
+        , "      '  --verbose' \\"
+        , "      '  --safe-mode' \\"
+        , "      '  --strict-mcp-config' \\"
+        , "      '  --permission-mode <mode> (choices: acceptEdits, auto, bypassPermissions, manual, dontAsk, plan)'"
+        , "    ;;"
+        , "esac"
+        ]
+
+cacheHitProbeScript :: String
+cacheHitProbeScript =
+    unlines
+        [ "#!/bin/sh"
+        , "case \"$1\" in"
+        , "  --version)"
+        , "    printf '%s\\n' '2.1.254 (Claude Code)'"
+        , "    ;;"
+        , "  --help)"
+        , "    if [ -e \"$0.help-probed\" ]; then"
+        , "      exit 1"
+        , "    fi"
+        , "    printf 'succeeded' > \"$0.help-probed\""
         , "    printf '%s\\n' \\"
         , "      'Usage: claude [options]' \\"
         , "      '  -p, --print' \\"
