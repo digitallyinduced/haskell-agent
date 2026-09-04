@@ -76,7 +76,7 @@ import System.Console.ANSI
 import System.Console.ANSI.Codes (setSGRCode)
 import System.Environment (lookupEnv)
 import System.OsPath (OsPath)
-import System.IO (Handle)
+import System.IO (Handle, hFlush)
 import System.IO.Unsafe (unsafePerformIO)
 
 terminalCyan, terminalMagenta, terminalYellow, terminalRed :: SGR
@@ -332,4 +332,8 @@ cliWindowTitle _cwd sessionTitle =
 setCliWindowTitle :: Bool -> Handle -> Text -> IO ()
 setCliWindowTitle tty handle title
     | not tty = pure ()
-    | otherwise = hSetTitle handle (Text.unpack title)
+    | otherwise = do
+        hSetTitle handle (Text.unpack title)
+        -- OSC titles contain no newline, so publish a final static title even
+        -- when the animation worker pauses before another stdout write.
+        hFlush handle
