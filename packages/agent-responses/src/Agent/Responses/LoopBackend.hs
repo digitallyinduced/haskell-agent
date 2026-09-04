@@ -958,9 +958,22 @@ newStreamEventToLoopEvents showRawReasoning = do
             toolArgumentStreamStep event state
         pure $
             maybeToList
-                (streamEventToLoopEventWithRawReasoning showRawReasoning event)
+                (statefulStreamEventToLoopEvent showRawReasoning event)
                 <> maybeToList (codexRateLimitsUpdate event)
                 <> argumentEvents
+
+-- Function and custom-tool done items are projected by
+-- 'toolArgumentStreamStep' so a sparse provider item can be reconciled with
+-- arguments accumulated from deltas. Every other event retains the pure
+-- projection used by stateless callers.
+statefulStreamEventToLoopEvent
+    :: Bool
+    -> ResponseStreamEvent
+    -> Maybe LoopEvent
+statefulStreamEventToLoopEvent showRawReasoning event = case event of
+    ResponseOutputItemDoneEvent { item = FunctionCallItem _ } -> Nothing
+    ResponseOutputItemDoneEvent { item = CustomToolCallItem _ } -> Nothing
+    _ -> streamEventToLoopEventWithRawReasoning showRawReasoning event
 
 codexRateLimitsUpdate :: ResponseStreamEvent -> Maybe LoopEvent
 codexRateLimitsUpdate = \case
@@ -1068,6 +1081,33 @@ toolArgumentStreamStep event state = case event of
                 <> [ToolStreamCallId CustomToolStream call.callId]
             )
             state
+    ResponseOutputItemDoneEvent
+        { item = FunctionCallItem responseCall, outputIndex }
+        | Just call <- responseItemToToolCall (FunctionCallItem responseCall) ->
+            finishOutputItemToolCall
+                outputIndex
+                [ ToolStreamItemId FunctionToolStream <$> responseCall.itemId
+                , Just
+                    (ToolStreamCallId
+                        FunctionToolStream
+                        responseCall.callId)
+                ]
+                call
+                state
+    ResponseOutputItemDoneEvent
+        { item = CustomToolCallItem responseCall, outputIndex }
+        | Just call <- responseItemToToolCall
+            (CustomToolCallItem responseCall) ->
+            finishOutputItemToolCall
+                outputIndex
+                [ ToolStreamItemId CustomToolStream <$> responseCall.itemId
+                , Just
+                    (ToolStreamCallId
+                        CustomToolStream
+                        responseCall.callId)
+                ]
+                call
+                state
     ResponseFunctionCallArgumentsDeltaEvent
         { delta = Just deltaText, streamItemId, streamOutputIndex } ->
         updateToolArguments
@@ -1140,6 +1180,40 @@ announceToolCall maybeCall name outputIndex identities state =
       | maybe True (not . supportsLiveArgumentPreview) maybeCall
       ]
     )
+
+finishOutputItemToolCall
+    :: Maybe Int
+    -> [Maybe ToolStreamIdentity]
+    -> ToolCall
+    -> ToolArgumentStreamState
+    -> (ToolArgumentStreamState, [LoopEvent])
+finishOutputItemToolCall outputIndex identities call state =
+    let previousCall = resolveToolCall outputIndex identities state
+        canRecover =
+            supportsLiveArgumentPreview call
+                && maybe True supportsLiveArgumentPreview previousCall
+        baseCall
+            | canRecover
+            , Text.null call.arguments
+            , Just previous <- previousCall =
+                withToolArguments call previous.arguments
+            | otherwise = call
+        (next, completedCall)
+            | canRecover
+            , Text.null call.arguments =
+                let prefixChars
+                        | isLiveShellTool call.name =
+                            liveShellArgumentPrefixChars
+                        | otherwise = liveRawArgumentPrefixChars
+                    (finished, recovered, _) =
+                        finishBufferedLiveCall
+                            prefixChars
+                            baseCall
+                            Nothing
+                            state
+                in (finished, recovered)
+            | otherwise = (trackUpdatedToolCall call state, call)
+    in (next, [ToolUpdated completedCall])
 
 resolveToolName
     :: Maybe Int

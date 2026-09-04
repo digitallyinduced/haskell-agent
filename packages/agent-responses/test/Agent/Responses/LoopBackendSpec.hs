@@ -999,6 +999,21 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                     "{\"command\":\"git status\"}")
             ]
 
+    it "preserves streamed arguments across a sparse function done item" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "read_file")
+        let prefix = Text.replicate 128 "p"
+            tailText = "tail"
+        _ <- projectEvent (argumentsDelta "fc-1" prefix)
+        quiet <- projectEvent (argumentsDelta "fc-1" tailText)
+        quiet `shouldBe` []
+        events <- projectEvent
+            (functionCallDone "fc-1" "call-1" "read_file" "")
+        events `shouldBe`
+            [ ToolUpdated
+                (functionToolCall "call-1" "read_file" (prefix <> tailText))
+            ]
+
     it "publishes a streamed custom tool call immediately" do
         projectEvent <- newStreamEventToLoopEvents False
         events <- projectEvent
@@ -1102,6 +1117,45 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
             [ ToolUpdated
                 (customToolCall "call-9" "apply_patch" "*** Begin Patch")
             ]
+
+    it "preserves streamed input across a sparse custom done item" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        let prefix = "*** Begin Patch\n"
+            tailText = "*** End Patch\n"
+        _ <- projectEvent (customInputDelta "ct-1" "call-9" prefix)
+        quiet <- projectEvent
+            (customInputDelta "ct-1" "call-9" tailText)
+        quiet `shouldBe` []
+        events <- projectEvent
+            (customToolCallDone "ct-1" "call-9" "apply_patch" "")
+        events `shouldBe`
+            [ ToolUpdated
+                (customToolCall
+                    "call-9"
+                    "apply_patch"
+                    (prefix <> tailText))
+            ]
+
+    it "retains the ordinary done projection for native computer calls" do
+        projectEvent <- newStreamEventToLoopEvents False
+        let item = ComputerCallItem ComputerCall
+                { computerCallItemId = Just "native-item"
+                , computerCallId = "native-call"
+                , computerActions = [TypeAction "secret"]
+                , pendingSafetyChecks = []
+                , computerCallStatus = Just ItemCompleted
+                , computerCallExtra = KeyMap.empty
+                }
+        events <- projectEvent ResponseOutputItemDoneEvent
+            { item
+            , outputIndex = Just 0
+            , sequenceNumber = Just 2
+            }
+        case responseItemToToolCall item of
+            Just call -> events `shouldBe` [ToolUpdated call]
+            Nothing -> expectationFailure "native computer call was not projected"
 
     it "does not replace a shell preview with coarse argument activity" do
         projectEvent <- newStreamEventToLoopEvents False
