@@ -1,6 +1,7 @@
 -- | Discover repository instructions for fresh or regenerated context.
 module Agent.CLI.StartupContext
     ( AgentsContextNotice(..)
+    , appendGeneratedContext
     , loadAgentsContext
     ) where
 
@@ -72,7 +73,7 @@ loadAgentsContext
         stderrHandle fullscreen notice options dialect home cwd
         initialItems initialPrevious extraContext
     | not (null initialItems) || isJust initialPrevious = newIORef Nothing
-    | not options.optAgentsMd = newIORef extraContext
+    | not options.optAgentsMd = newIORef combinedContext
     | otherwise = do
         let discoverOptions = DiscoverOptions
                 { discoverMaxBytes = defaultDiscoverOptions.discoverMaxBytes
@@ -84,7 +85,7 @@ loadAgentsContext
             (loadedInstructionWarnings loaded)
         let files = loadedInstructionFiles loaded
         case formatAgentsMdForDialect dialect cwd loaded of
-            Nothing -> newIORef extraContext
+            Nothing -> newIORef combinedContext
             Just text -> do
                 case notice of
                     SuppressAgentsContextLoaded -> pure ()
@@ -101,7 +102,18 @@ loadAgentsContext
                             Just runtime ->
                                 emitUiEvent runtime (UiSystemMessage message)
                 newIORef
-                    (Just (text <> maybe "" ("\n\n" <>) extraContext))
+                    (Just (text <> maybe "" ("\n\n" <>) combinedContext))
+  where
+    combinedContext =
+        appendGeneratedContext extraContext options.optBundleContext
+
+appendGeneratedContext :: Maybe Text -> Maybe Text -> Maybe Text
+appendGeneratedContext first second =
+    case (first, second) of
+        (Nothing, Nothing) -> Nothing
+        (Just text, Nothing) -> Just text
+        (Nothing, Just text) -> Just text
+        (Just before, Just after) -> Just (before <> "\n\n" <> after)
 
 reportInstructionWarning
     :: Handle

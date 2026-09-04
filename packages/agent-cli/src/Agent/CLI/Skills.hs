@@ -96,8 +96,14 @@ loadSkillsCatalogQuiet options home projectRoot cwd
             , skillsProjectRoot = projectRoot
             , skillsCwd = cwd
             , skillsMaxDepth = 6
+            , skillsIncludeAmbient = options.optAmbientSkills
             , skillsBuiltinRoots =
-                [(AgentSkills, unsafeEncodeUtf builtinRoot)]
+                [ (AgentSkills, unsafeEncodeUtf builtinRoot)
+                | options.optAmbientSkills
+                ]
+                    <> [ (AgentSkills, root)
+                       | root <- options.optBundleSkillRoots
+                       ]
             }
 
 packagedSkillsRoot :: OsPath -> IO FilePath

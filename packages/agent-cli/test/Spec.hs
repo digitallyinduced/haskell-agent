@@ -38,6 +38,7 @@ import qualified Agent.CLI.ArtifactSpec as ArtifactSpec
 import qualified Agent.CLI.AuthSpec as AuthSpec
 import qualified Agent.CLI.BtwSpec as BtwSpec
 import qualified Agent.CLI.BrowserToolsSpec as BrowserToolsSpec
+import qualified Agent.CLI.BundleSpec as BundleSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.ClaudeGatewayProxySpec as ClaudeGatewayProxySpec
@@ -179,6 +180,7 @@ specs = do
     AuthSpec.spec
     BtwSpec.spec
     BrowserToolsSpec.spec
+    BundleSpec.spec
 #ifdef darwin_HOST_OS
     BrowserBridgeFFISpec.spec
     BridgeFFISpec.spec

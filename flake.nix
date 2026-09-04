@@ -1229,6 +1229,9 @@
                 };
 
                 checks = {
+                    agent-bundle = import ./nix/tests/agent-bundle.nix {
+                        inherit self pkgs;
+                    };
                     # The package check does not exercise the wrapped
                     # justStaticExecutables output or its requisite assertions.
                     agent-cli-executable = agentCliExecutable;
@@ -1280,6 +1283,9 @@
             }
         )
         // {
+            lib.mkAgentBundle = import ./nix/lib/mk-agent-bundle.nix {
+                inherit self;
+            };
             nixosModules.telegram = import ./nix/modules/telegram.nix {
                 inherit self;
             };

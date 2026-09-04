@@ -167,6 +167,9 @@ noBackgroundTaskHooks = BackgroundTaskHooks
 
 data ToolEnv = ToolEnv
     { toolCwd :: !OsPath
+    , toolPathPrefix :: !(Maybe FilePath)
+      -- | Session-local PATH prefix for child processes. This never mutates
+      -- the parent process environment.
     , toolAllowedRoots :: !(IORef [OsPath])
       -- | Additional non-session filesystem roots. The current
       -- 'toolSessionTmp' is always allowed implicitly and receives absolute
@@ -202,6 +205,7 @@ defaultToolEnv cwd = do
     backgroundTaskHooks <- newIORef noBackgroundTaskHooks
     pure ToolEnv
         { toolCwd = dropTrailingPathSeparator cwd
+        , toolPathPrefix = Nothing
         , toolAllowedRoots = allowedRoots
         , toolRootAccessRequest = rootAccessRequest
         , toolSkillRoots = skillRoots

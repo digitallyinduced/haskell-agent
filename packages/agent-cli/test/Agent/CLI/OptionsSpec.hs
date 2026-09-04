@@ -3,12 +3,13 @@ module Agent.CLI.OptionsSpec (spec) where
 import Agent.CLI.Options
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (defaultLoopMaxTurns)
-import System.OsPath (unsafeEncodeUtf)
+import System.OsPath (OsPath, unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Agent.ReasoningEffort (ReasoningEffort(..))
 import Agent.TUI.Motion (MotionMode(..))
 import Test.Hspec
 
+fromFilePath :: FilePath -> OsPath
 fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
@@ -39,6 +40,25 @@ spec = do
             fresh.optManagedTurnFile `shouldBe` Nothing
             fresh.optResume `shouldBe` Nothing
 
+        it "retains bundle declarations across a gateway reconnect" do
+            let cwd = fromFilePath "/tmp/company-work"
+                skillRoot = fromFilePath "/nix/store/skill"
+                previous = defaultCliOptions
+                    { optModel = Just "review"
+                    , optEffort = Just EffortHigh
+                    , optBundleContext = Just "bundle instructions"
+                    , optBundleSkillRoots = [skillRoot]
+                    , optBundlePathPrefix = Just "/nix/store/tools/bin"
+                    , optAmbientSkills = False
+                    }
+                fresh = freshSessionOptions previous cwd
+            fresh.optModel `shouldBe` Just "review"
+            fresh.optEffort `shouldBe` Just EffortHigh
+            fresh.optBundleContext `shouldBe` Just "bundle instructions"
+            fresh.optBundleSkillRoots `shouldBe` [skillRoot]
+            fresh.optBundlePathPrefix `shouldBe` Just "/nix/store/tools/bin"
+            fresh.optAmbientSkills `shouldBe` False
+
         it "detects gateway changes from recovery account management" do
             let gatewayA = Just ("gateway-a" :: String)
                 gatewayB = Just ("gateway-b" :: String)
@@ -54,6 +74,44 @@ spec = do
             gatewayRoutingChanged gatewayA Nothing `shouldBe` True
 
     describe "parseArgs" do
+        it "parses bundle inspection and runs" do
+            parseArgs ["bundle", "inspect", "./result", "--json"]
+                `shouldBe` Right
+                    (Bundle
+                        (BundleInspect
+                            (BundleInspectOptions
+                                (fromFilePath "./result")
+                                True)))
+            parseArgs
+                [ "bundle", "run", "./result"
+                , "--agent", "reviewer"
+                , "--cwd", "/tmp/work"
+                , "--prompt-file", "/tmp/prompt"
+                , "--no-yolo"
+                ]
+                `shouldBe` Right
+                    (Bundle
+                        (BundleRun
+                            (BundleRunOptions
+                                (fromFilePath "./result")
+                                (Just "reviewer")
+                                Nothing
+                                (Just (fromFilePath "/tmp/prompt"))
+                                (Just (fromFilePath "/tmp/work"))
+                                False
+                                True)))
+
+        it "rejects conflicting bundle run options" do
+            parseArgs
+                [ "bundle", "run", "./result"
+                , "-p", "hello"
+                , "--prompt-file", "/tmp/prompt"
+                ]
+                `shouldSatisfy` isLeft
+            parseArgs
+                [ "bundle", "run", "./result", "--yolo", "--no-yolo" ]
+                `shouldSatisfy` isLeft
+
         it "parses gateway account commands" do
             parseArgs ["gateway", "connect", "--url", "https://gateway.example"]
                 `shouldBe` Right

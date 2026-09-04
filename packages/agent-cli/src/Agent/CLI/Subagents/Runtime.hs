@@ -1002,6 +1002,8 @@ prepareChild
         pure freshEnv
             { toolAllowedRoots = runtime.subagentAllowedRoots
             , toolRootAccessRequest = runtime.subagentRootAccessRequest
+            , toolPathPrefix =
+                runtime.subagentOptions.optBundlePathPrefix
             }
     skillRoots <- readIORef runtime.subagentSkillRoots
     writeIORef childEnv.toolSkillRoots skillRoots

@@ -6,6 +6,7 @@ module Agent.CLI.GatewayModels
     , loadGatewayModelOptionsWithCredentialAt
     , modelOptionsForGatewayModels
     , modelOptionsForGatewayState
+    , resolveGatewayModelTarget
     ) where
 
 import Agent.CLI.GatewayClient
@@ -21,10 +22,11 @@ import Agent.CLI.ModelConfig
     , loadModelCatalogAt
     )
 import Agent.CLI.Models
-    ( ModelOption
+    ( ModelOption(modelTarget)
     , ModelTarget(targetProvider)
     , gatewayModelOptions
     , modelCatalog
+    , resolveModelOptionById
     )
 import Agent.Provider
     ( Provider (ClaudeCodeProvider, OpenAIProvider) )
@@ -110,6 +112,28 @@ modelOptionsForGatewayModels catalog models =
     publicAlias modelId =
         not ("router-" `Text.isPrefixOf` modelId)
             && modelId /= "traumimmo-translation"
+
+-- | Resolve an exact alias from the live organization gateway catalog.
+--
+-- Local model configuration may add presentation metadata, but it cannot make
+-- an unadvertised alias selectable or change the gateway-pinned transport.
+resolveGatewayModelTarget
+    :: ModelCatalog
+    -> [GatewayModel]
+    -> Text
+    -> Either Text ModelTarget
+resolveGatewayModelTarget catalog models modelId =
+    case
+        resolveModelOptionById
+            (modelOptionsForGatewayModels catalog models)
+            modelId
+    of
+        Nothing ->
+            Left $
+                "Model alias \""
+                    <> modelId
+                    <> "\" is not offered by the active organization gateway."
+        Just option -> Right option.modelTarget
 
 modelOptionsForGatewayState
     :: ModelCatalog

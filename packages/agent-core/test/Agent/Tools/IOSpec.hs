@@ -13,12 +13,13 @@ import Agent.FileRetry
     , retryOnFileBusy
     , writeLazyFileAtomically
     )
-import System.OsPath (equalFilePath, unsafeEncodeUtf)
+import System.OsPath (OsPath, equalFilePath, unsafeEncodeUtf)
 import Agent.Tools.IO
     ( CommandResult(..)
     , RunningCommand(..)
     , combineCommandOutput
     , commandResultOutput
+    , configuredProcessEnv
     , formatCommandResult
     , readTextFile
     , resolveUnderCwd
@@ -52,17 +53,21 @@ import Data.IORef
 import Data.List (sort)
 import qualified Data.Text as Text
 import System.Directory
-    ( canonicalizePath
+    ( Permissions(executable)
+    , canonicalizePath
     , createDirectory
     , createDirectoryIfMissing
     , createDirectoryLink
     , doesFileExist
+    , getPermissions
     , getTemporaryDirectory
     , listDirectory
     , removeDirectoryRecursive
+    , setPermissions
     )
 import System.Exit (ExitCode(..))
-import System.FilePath ((</>), takeFileName)
+import System.Environment (lookupEnv)
+import System.FilePath ((</>), searchPathSeparator, takeFileName)
 import System.IO (IOMode(..), hClose, openFile)
 import System.IO.Error
     ( alreadyInUseErrorType
@@ -76,6 +81,7 @@ import System.Posix.Files (deviceID, fileID, getFileStatus)
 import System.Process (readProcessWithExitCode)
 import Test.Hspec
 
+fromFilePath :: FilePath -> OsPath
 fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
@@ -517,6 +523,41 @@ spec = describe "Agent.Tools.IO" do
                 5000
             result.commandStdout `shouldBe`
                 Text.pack scratch <> "\n" <> Text.pack scratch <> "\nunset"
+
+    it "prepends PATH in one tool environment without mutating the host" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                binDir = dir </> "bin"
+            createDirectory workspace
+            createDirectory binDir
+            hostPath <- lookupEnv "PATH"
+            base <- defaultToolEnv (fromFilePath workspace)
+            let env = base { toolPathPrefix = Just binDir }
+                expectedPath =
+                    binDir
+                        <> maybe "" (searchPathSeparator :) hostPath
+            processEnv <- configuredProcessEnv env
+            (processEnv >>= lookup "PATH") `shouldBe` Just expectedPath
+            lookupEnv "PATH" `shouldReturn` hostPath
+
+    it "resolves commands from a tool environment PATH prefix" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+                binDir = dir </> "bin"
+                command = binDir </> "bundle-command"
+            createDirectory workspace
+            createDirectory binDir
+            writeFile command "#!/bin/sh\nprintf bundled"
+            permissions <- getPermissions command
+            setPermissions command permissions { executable = True }
+            base <- defaultToolEnv (fromFilePath workspace)
+            let env = base { toolPathPrefix = Just binDir }
+            result <- runShellCommand env (fromFilePath workspace)
+                "bundle-command"
+                5000
+            result.commandExitCode `shouldBe` Just 0
+            result.commandStdout `shouldBe` "bundled"
 
     it "isolates managed sibling scratch directories at the process boundary" do
         if os /= "darwin"
