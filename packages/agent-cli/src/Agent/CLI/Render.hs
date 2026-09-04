@@ -147,9 +147,10 @@ import Agent.TextBuffer
     )
 import Agent.Telemetry (telemetrySummary)
 import Control.Applicative ((<|>))
-import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (Async, asyncWithUnmask, cancel)
 import Control.Concurrent.MVar (MVar, withMVar)
-import Control.Exception.Safe (tryIO)
+import Control.Exception.Safe (mask_, tryIO)
 import Control.Monad (forM_, unless, void, when)
 import Data.IORef
 import qualified Data.Map.Strict as Map
@@ -185,7 +186,7 @@ summarizeToolCallRelative workspace call =
 
 data RenderConfig = RenderConfig
     { renderShowThinking :: !Bool
-    , renderThinkingSpinner :: !(IORef (Maybe ThreadId))
+    , renderThinkingSpinner :: !(IORef (Maybe (Async ())))
     , renderState :: !(IORef RenderState)
     , renderColor :: !Bool
     , renderLock :: !(MVar ())
@@ -699,17 +700,19 @@ startThinkingSpinnerUnlocked config
                     (state{stateThinkingVisible = True}, ())
                 paintThinkingFrame config
                 started <- getMonotonicTimeNSec
-                tid <- forkIO (spinnerLoop config started 0)
-                writeIORef config.renderThinkingSpinner (Just tid)
+                mask_ do
+                    worker <- asyncWithUnmask \unmask ->
+                        unmask (spinnerLoop config started 0)
+                    writeIORef config.renderThinkingSpinner (Just worker)
 
 -- | Stop the spinner and erase its in-place status line. Does not commit a
 -- reasoning block; callers that need that use 'commitThinkingUnlocked'.
 stopThinkingSpinnerUnlocked :: RenderConfig -> IO ()
 stopThinkingSpinnerUnlocked config = do
-    mtid <- atomicModifyIORef' config.renderThinkingSpinner \mt -> (Nothing, mt)
-    case mtid of
-        Just tid -> killThread tid
-        Nothing -> pure ()
+    mworker <-
+        atomicModifyIORef' config.renderThinkingSpinner \worker ->
+            (Nothing, worker)
+    forM_ mworker cancel
     visible <- (.stateThinkingVisible) <$> readRenderState config
     when visible do
         void $ tryIO do
