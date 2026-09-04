@@ -11,6 +11,7 @@ import Control.Concurrent
     , threadDelay
     , writeChan
     )
+import Control.Exception.Safe (finally)
 import Control.Monad (void)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -350,7 +351,7 @@ spec = describe "Claude SDK control protocol" do
                 readIORef closes `shouldReturn` 1
         readIORef closes `shouldReturn` 2
 
-    it "bounds a blocked endInput during shutdown" do
+    it "bounds and joins a blocked endInput during shutdown" do
         factory <-
             fakeTransportFactory \emit value ->
                 case request value of
@@ -358,10 +359,19 @@ spec = describe "Claude SDK control protocol" do
                         emit (successResponse requestId (Aeson.object []))
                     _ -> pure ()
         block <- newEmptyMVar
+        closed <- newIORef False
+        endInputObservedClosed <- newEmptyMVar
         let blockedFactory requestInfo = do
                 transport <- factory.transportFactory requestInfo
                 pure transport
-                    { transportEndInput = takeMVar block
+                    { transportClose =
+                        writeIORef closed True
+                            >> transport.transportClose
+                    , transportEndInput =
+                        takeMVar block
+                            `finally`
+                                (readIORef closed
+                                    >>= putMVar endInputObservedClosed)
                     }
             handlers =
                 defaultClaudeAgentHandlers
@@ -376,6 +386,7 @@ spec = describe "Claude SDK control protocol" do
                     withTurn client \_ ->
                         pure (Right ((), pure ())))
             `shouldReturn` Just (Right ())
+        takeMVar endInputObservedClosed `shouldReturn` True
 
 data FakeTransport = FakeTransport
     { transportFactory :: !TransportFactory
