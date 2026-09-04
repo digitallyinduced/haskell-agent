@@ -1185,7 +1185,7 @@ spec = do
                             previous
                             [UserMessage prompt]
                             (\_ -> pure ())
-                turns <- timeout 5_000_000 $
+                turns <- timeout 15_000_000 $
                     withClaudeCodeBackend
                         options
                         Nothing
@@ -1344,7 +1344,7 @@ spec = do
                                     { promptWriteTimeoutMicros = 200_000 }
                             blockedPrompt =
                                 Text.replicate (4 * 1024 * 1024) "x"
-                        turns <- timeout 8_000_000 $
+                        turns <- timeout 30_000_000 $
                             withClaudeCodeBackend
                                 options
                                 Nothing

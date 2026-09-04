@@ -5,7 +5,6 @@ module Main (main) where
 import Control.Concurrent.Async (mapConcurrently)
 import Control.Monad (unless)
 import Data.Char (ord)
-import Data.List (foldl')
 import System.Environment
     ( getArgs
     , getEnvironment
@@ -20,7 +19,14 @@ import System.Process
     , withCreateProcess
     )
 import Test.Hspec (Spec, hspec)
-import Test.Hspec.Runner (Config(..), Path, defaultConfig, hspecWith)
+import Test.Hspec.Runner
+    ( Config(..)
+    , Path
+    , defaultConfig
+    , evaluateSummary
+    , readConfig
+    , runSpec
+    )
 import Text.Read (readMaybe)
 
 import qualified Agent.CLI.AccountSelectionSpec as AccountSelectionSpec
@@ -126,13 +132,23 @@ main = do
     case shard of
         Just value ->
             case parseShard value of
-                Just (index, count) ->
-                    hspecWith
-                        defaultConfig
-                            { configFilterPredicate =
-                                Just (belongsToShard index count)
-                            }
-                        specs
+                Just (index, count) -> do
+                    arguments <- getArgs
+                    config <- readConfig defaultConfig arguments
+                    let requested path =
+                            case config.configFilterPredicate of
+                                Nothing -> True
+                                Just predicate -> predicate path
+                        shardConfig =
+                            config
+                                { configFilterPredicate =
+                                    Just
+                                        ( \path ->
+                                            belongsToShard index count path
+                                                && requested path
+                                        )
+                                }
+                    runSpec specs shardConfig >>= evaluateSummary
                 Nothing ->
                     die $
                         "invalid AGENT_CLI_TEST_SHARD (expected INDEX/COUNT): "

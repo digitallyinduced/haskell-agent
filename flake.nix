@@ -680,7 +680,7 @@
                                     # process-global state remain isolated
                                     # while the subprocess-heavy suite runs
                                     # concurrently.
-                                    AGENT_CLI_TEST_SHARDS = "12";
+                                    AGENT_CLI_TEST_SHARDS = "6";
                                 }))
                             [
                                 pkgs.bash
@@ -752,10 +752,15 @@
                 agentCliPackage = productionHaskellPackages.agent-cli;
                 agentTelegramPackage = productionHaskellPackages.agent-telegram;
                 agentServerPackage = productionHaskellPackages.agent-server;
-                # Exercise the server's own test suite against the production
-                # dependency graph. Referencing the all-check package set here
-                # would also rerun every transitive local package test suite,
-                # making this focused check fail for unrelated dependencies.
+                # Exercise these packages' own test suites against the
+                # production dependency graph. Referencing the all-check
+                # package set here would also rerun every transitive local
+                # package test suite, making focused checks fail for unrelated
+                # dependencies already covered by the agent-cli root.
+                agentTelegramCheckPackage = pkgs.haskell.lib.doCheck
+                    (pkgs.haskell.lib.overrideSrc agentTelegramPackage {
+                        src = agentTelegramCheckSource;
+                    });
                 agentServerCheckPackage = pkgs.haskell.lib.doCheck
                     (pkgs.haskell.lib.overrideSrc agentServerPackage {
                         src = agentServerCheckSource;
@@ -1229,7 +1234,7 @@
                     agent-cli-executable = agentCliExecutable;
                     agent-cli-runtime = haskellPackages.agent-cli-runtime;
                     agent-cli = haskellPackages.agent-cli;
-                    agent-telegram = haskellPackages.agent-telegram;
+                    agent-telegram = agentTelegramCheckPackage;
                     agent-server = agentServerCheckPackage;
                     agent-core = haskellPackages.agent-core;
                     agent-mcp = haskellPackages.agent-mcp;

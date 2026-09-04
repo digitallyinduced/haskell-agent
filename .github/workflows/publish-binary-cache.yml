@@ -25,14 +25,16 @@ jobs:
             runner: '["ubuntu-24.04"]'
             install_nix: true
             trusted-rebuild: false
-            build-cores: 2
+            build-cores: 4
+            timeout_minutes: 180
           - system: aarch64-darwin
             runner: '["self-hosted", "haskell-agent", "ihp-ci-mac", "aarch64-darwin"]'
             install_nix: false
             trusted-rebuild: true
             build-cores: 1
+            timeout_minutes: 90
     runs-on: ${{ fromJSON(matrix.runner) }}
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     env:
       NIX_CONFIG: |
         experimental-features = nix-command flakes
@@ -168,9 +170,9 @@ jobs:
             build_args+=(--accept-flake-config)
           fi
 
-          out_paths_file="$RUNNER_TEMP/haskell-agent-cache-out-paths"
-          "$nix_bin" "${build_args[@]}" > "$out_paths_file"
-          if [[ ! -s "$out_paths_file" ]]; then
+          root_out_paths_file="$RUNNER_TEMP/haskell-agent-cache-root-out-paths"
+          "$nix_bin" "${build_args[@]}" > "$root_out_paths_file"
+          if [[ ! -s "$root_out_paths_file" ]]; then
             echo "::error title=Missing build outputs::Nix did not report any store paths"
             exit 1
           fi
@@ -191,9 +193,70 @@ jobs:
             echo "::error title=Default app is not cached::apps.default no longer uses packages.agent-cli"
             exit 1
           fi
-          if ! grep -Fqx -- "$run_out" "$out_paths_file"; then
+          if ! grep -Fqx -- "$run_out" "$root_out_paths_file"; then
             echo "::error title=Default app is not cached::the packages.agent-cli output was not built"
             exit 1
+          fi
+
+          cache_out_paths_file="$RUNNER_TEMP/haskell-agent-cache-out-paths"
+          if [[ "$SYSTEM" == x86_64-linux ]]; then
+            # A result closure does not contain build-time-only dependencies.
+            # In particular, the fully static CLI does not retain references
+            # to its musl GHC or static libraries, so a fresh PR runner would
+            # otherwise rebuild that toolchain whenever the CLI source
+            # changes. Publish every realised output in the target
+            # derivations' build closure so hosted checks can substitute them.
+            mapfile -t target_drvs < <(
+              "$nix_bin" path-info \
+                --derivation \
+                "${build_targets[@]}"
+            )
+            if (( ${#target_drvs[@]} == 0 )); then
+              echo "::error title=Missing build derivations::Nix did not report the CI roots"
+              exit 1
+            fi
+
+            nix_store_bin="$(command -v nix-store || true)"
+            if [[ -z "$nix_store_bin" ]]; then
+              echo "::error title=Missing nix-store binary::nix-store is required to collect the realised build closure"
+              exit 1
+            fi
+
+            all_cache_paths_file="$RUNNER_TEMP/haskell-agent-all-cache-paths"
+            {
+              cat "$root_out_paths_file"
+              "$nix_store_bin" \
+                --query \
+                --requisites \
+                --include-outputs \
+                "${target_drvs[@]}"
+            } | sort -u > "$all_cache_paths_file"
+
+            # A substituted multi-output dependency may leave an unrequested
+            # output unrealised. Keep every valid path without making those
+            # optional outputs a publication failure.
+            invalid_cache_paths_file="$RUNNER_TEMP/haskell-agent-invalid-cache-paths"
+            xargs -r -n 256 \
+              "$nix_store_bin" --check-validity --print-invalid \
+              < "$all_cache_paths_file" |
+              sort -u > "$invalid_cache_paths_file"
+            comm -23 \
+              "$all_cache_paths_file" \
+              "$invalid_cache_paths_file" \
+              > "$cache_out_paths_file"
+
+            # Fail before authenticating to Attic if filtering did not produce
+            # a non-empty collection of valid store paths.
+            if [[ ! -s "$cache_out_paths_file" ]]; then
+              echo "::error title=Missing cache paths::the realised build closure is empty"
+              exit 1
+            fi
+            "$nix_bin" path-info \
+              --stdin \
+              < "$cache_out_paths_file" \
+              > /dev/null
+          else
+            cp "$root_out_paths_file" "$cache_out_paths_file"
           fi
 
       - name: Push release and Linux CI closures to the public Attic cache

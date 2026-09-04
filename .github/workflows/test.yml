@@ -17,13 +17,14 @@ jobs:
   tests:
     name: ${{ matrix.name }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.timeout_minutes || 30 }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: CLI package tests
             targets: .#checks.x86_64-linux.agent-cli
+            evaluate_flake: true
           - name: Telegram package tests
             targets: .#checks.x86_64-linux.agent-telegram
           - name: Server package tests
@@ -34,6 +35,7 @@ jobs:
             targets: .#checks.x86_64-linux.agent-cli-executable
           - name: Static CLI runtime
             targets: .#checks.x86_64-linux.agent-cli-static-runtime
+            timeout_minutes: 90
           - name: Linux integrations
             targets: >-
               .#checks.x86_64-linux.agent-sandbox-runner
@@ -101,6 +103,7 @@ jobs:
         shell: bash
         env:
           TARGETS: ${{ matrix.targets }}
+          EVALUATE_FLAKE: ${{ matrix.evaluate_flake || false }}
         run: |
           set -euo pipefail
 
@@ -123,6 +126,16 @@ jobs:
             --cores 2 \
             --no-write-lock-file \
             --print-build-logs
+
+          if [[ "$EVALUATE_FLAKE" == true ]]; then
+            # Building the CLI root first materialises the callCabal2nix
+            # import needed to evaluate every exported flake output on a
+            # fresh store. `--no-build` then checks their shape without
+            # duplicating the targeted builds above.
+            "$nix_bin" flake check \
+              --no-build \
+              --no-write-lock-file
+          fi
 
   required-check:
     # Preserve the existing branch-protection context while requiring every
