@@ -9,9 +9,8 @@ import Control.Monad (void)
 
 -- | Apply an action with at most the requested number of active workers.
 --
--- Results retain input order. Worker lifetimes are scoped by
--- 'replicateConcurrently_', so an exception cancels and joins the remaining
--- workers before it escapes.
+-- Results retain input order. The async traversal scopes worker lifetimes, so
+-- an exception cancels and joins the remaining workers before it escapes.
 mapConcurrentlyBounded :: Int -> (a -> IO b) -> [a] -> IO [b]
 mapConcurrentlyBounded requested =
     ConcurrentStream.mapConcurrentlyBounded (max 1 requested)
