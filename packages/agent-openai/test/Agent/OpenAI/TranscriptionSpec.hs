@@ -376,6 +376,62 @@ spec = describe "OpenAI transcription" do
                         ]
             _ -> False
 
+    it "retries a transient ChatGPT server error with the buffered audio" do
+        recorded <- newIORef []
+        attempts <- newIORef (0 :: Int)
+        captures <- newIORef (0 :: Int)
+        callbacks <- newIORef []
+        let credential = openAiCredential "subscription-token"
+            provider = tokenProvider SubscriptionBilled \_ ->
+                pure (Right credential)
+            app request respond =
+                if Wai.rawPathInfo request
+                    == "/backend-api/dictation/stream"
+                    then
+                        respond $ Wai.responseLBS HTTP.status404 [] ""
+                    else do
+                        body <- Wai.strictRequestBody request
+                        modifyIORef' recorded (<> [body])
+                        attempt <- atomicModifyIORef' attempts \count ->
+                            (count + 1, count)
+                        respond $
+                            if attempt == 0
+                                then Wai.responseLBS
+                                    HTTP.status503
+                                    [("Content-Type", "application/json")]
+                                    "{\"error\":\"temporarily unavailable\"}"
+                                else Wai.responseLBS
+                                    HTTP.status200
+                                    [("Content-Type", "application/json")]
+                                    (Aeson.encode (Aeson.object
+                                        [ "text" .=
+                                            ("recovered speech" :: Text)
+                                        ]))
+        withLoopbackApplication (pure app) \port -> do
+            let baseUrl =
+                    "http://127.0.0.1:"
+                        <> Text.pack (show port)
+                        <> "/backend-api"
+                produce send = do
+                    modifyIORef' captures (+ 1)
+                    send "\x01\x00\x02\x00"
+            result <- Timeout.timeout (8 * 1_000_000) $
+                transcribePcmWithOpenAIAt
+                    baseUrl
+                    provider
+                    produce
+                    (\text -> modifyIORef' callbacks (<> [text]))
+            result `shouldBe` Just (Right "recovered speech")
+
+        readIORef captures `shouldReturn` 1
+        readIORef callbacks `shouldReturn` ["recovered speech"]
+        requests <- readIORef recorded
+        requests `shouldSatisfy` \case
+            [first, second] ->
+                first == second
+                    && "RIFF" `BS.isInfixOf` LBS.toStrict first
+            _ -> False
+
 withWebSocketServer
     :: WS.ServerApp
     -> (Int -> IO value)
