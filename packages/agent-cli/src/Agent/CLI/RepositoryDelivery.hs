@@ -46,8 +46,7 @@ import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum, isHexDigit, isSpace)
 import Data.IORef
-    ( modifyIORef'
-    , newIORef
+    ( newIORef
     , readIORef
     , writeIORef
     )
@@ -2101,27 +2100,51 @@ applyEnvironmentOverrides overrides inherited =
             (\(name, _) -> name `notElem` map fst overrides)
             inherited
 
+data BoundedReadState = BoundedReadState
+    { boundedChunks :: ![BS.ByteString]
+    , boundedRetainedBytes :: !Int
+    , boundedTruncated :: !Bool
+    }
+
+emptyBoundedReadState :: BoundedReadState
+emptyBoundedReadState = BoundedReadState
+    { boundedChunks = []
+    , boundedRetainedBytes = 0
+    , boundedTruncated = False
+    }
+
+retainBoundedChunk :: BoundedReadState -> BS.ByteString -> BoundedReadState
+retainBoundedChunk state chunk =
+    BoundedReadState
+        { boundedChunks =
+            if BS.null kept
+                then state.boundedChunks
+                else kept : state.boundedChunks
+        , boundedRetainedBytes =
+            state.boundedRetainedBytes + BS.length kept
+        , boundedTruncated =
+            state.boundedTruncated || BS.length kept < BS.length chunk
+        }
+  where
+    room = max 0 (maxProcessOutputBytes - state.boundedRetainedBytes)
+    kept = BS.take room chunk
+
 readBounded :: Handle -> IO (BS.ByteString, Bool)
 readBounded handle = do
-    chunks <- newIORef []
-    retained <- newIORef 0
-    truncated <- newIORef False
-    let drain = do
-            chunk <- BS.hGetSome handle (64 * 1024)
-            unless (BS.null chunk) do
-                current <- readIORef retained
-                let room = max 0 (maxProcessOutputBytes - current)
-                    kept = BS.take room chunk
-                unless (BS.null kept) do
-                    modifyIORef' chunks (kept :)
-                    writeIORef retained (current + BS.length kept)
-                when (BS.length kept < BS.length chunk)
-                    (writeIORef truncated True)
-                drain
-    drain `finally` closeQuietly handle
-    bytes <- BS.concat . reverse <$> readIORef chunks
-    wasTruncated <- readIORef truncated
-    pure (bytes, wasTruncated)
+    finalState <-
+        drain emptyBoundedReadState `finally` closeQuietly handle
+    pure
+        ( BS.concat (reverse finalState.boundedChunks)
+        , finalState.boundedTruncated
+        )
+  where
+    drain state = do
+        chunk <- BS.hGetSome handle (64 * 1024)
+        if BS.null chunk
+            then pure state
+            else do
+                let nextState = retainBoundedChunk state chunk
+                nextState `seq` drain nextState
 
 terminateProcessGroup
     :: Signal
