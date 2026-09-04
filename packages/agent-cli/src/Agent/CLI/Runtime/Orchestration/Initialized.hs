@@ -46,6 +46,7 @@ import Agent.CLI.GatewayClient
     , newGatewayModelAccess
     , refreshGatewayModels
     )
+import Agent.CLI.GatewayModels (gatewayProviderForStartup)
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ()
 import Agent.CLI.Interrupt ()
@@ -511,7 +512,11 @@ runAgentInitializedWithLock
                     else Nothing
         requestedProvider
             | isJust connectedGateway =
-                options.optProvider <|> Just OpenAIProvider
+                Just $
+                    gatewayProviderForStartup
+                        targetHint
+                        options.optProvider
+                        ((.metaProvider) . fst <$> resumed)
             | otherwise =
                 (.targetProvider) <$> targetHint
                     <|> options.optProvider
