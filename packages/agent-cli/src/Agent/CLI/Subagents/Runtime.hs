@@ -147,9 +147,11 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time.Calendar (Day)
 import Data.Time.Clock (getCurrentTime, utctDay)
 import System.Environment (lookupEnv)
 import qualified System.Info as SystemInfo
+import System.OsPath (OsPath)
 prepareCollaborationSpawn
     :: Provider
     -> Text
@@ -536,6 +538,16 @@ compactXaiChildBackend contextWindowFor compactThresholdFor makeBackend
             history
             Nothing
 
+-- Values resolved before the child acquires its coding-tool runtime.
+data CodexSubagentPreparation = CodexSubagentPreparation
+    { codexPreparationAgentType :: Text
+    , codexPreparationChild :: PreparedChild
+    , codexPreparationModel :: Text
+    , codexPreparationEffort :: Text
+    , codexPreparationSessionTmp :: Maybe OsPath
+    , codexPreparationDialect :: Dialect
+    }
+
 -- | Child Codex agent: per-agent transcript retained across follow-ups,
 -- independently scoped WebSocket requests, and nested multi-agent tools.
 runCodexSubagent
@@ -547,238 +559,349 @@ runCodexSubagent
     -> RunSubagent
 runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
     \env previous prompt onEvent -> do
-        agentType <-
-            fromMaybe defaultSubagentType
-                <$> lookupAgentType runtime.subagentTypes env.subId
-        childModel <- lookupAgentModel runtime.subagentTypes env.subId
-        childEffort <- lookupAgentReasoningEffort runtime.subagentTypes env.subId
-        parentParams <- readIORef runtime.subagentParams
-        let (provisionalModel, provisionalEffort) =
-                resolveChildModelAndEffort
-                    OpenAIProvider
-                    parentParams
-                    (fromMaybe "" parentParams.model)
-                    childModel
-                    childEffort
-        prepared <-
-            prepareChild
-                runtime
+        prepareCodexSubagent runtime env sendToRoot >>= \case
+            Left err -> pure (Left err)
+            Right preparation ->
+                runPreparedCodexSubagent
+                    gatewayOnly runtime tokenProvider
+                    env previous prompt onEvent preparation
+
+prepareCodexSubagent
+    :: SubagentRuntime
+    -> SubagentSpawnEnv
+    -> Maybe (InterAgentMessage -> IO (Either Text Text))
+    -> IO (Either LoopError CodexSubagentPreparation)
+prepareCodexSubagent runtime env sendToRoot = do
+    agentType <-
+        fromMaybe defaultSubagentType
+            <$> lookupAgentType runtime.subagentTypes env.subId
+    childModel <- lookupAgentModel runtime.subagentTypes env.subId
+    childEffort <- lookupAgentReasoningEffort runtime.subagentTypes env.subId
+    parentParams <- readIORef runtime.subagentParams
+    let (provisionalModel, provisionalEffort) =
+            resolveChildModelAndEffort
                 OpenAIProvider
-                provisionalModel
-                provisionalEffort
-                (dialectId codexDialect)
-                env
-                sendToRoot
-        let (model, effort) =
-                resolveChildModelAndEffort
-                    OpenAIProvider
-                    parentParams
-                    prepared.preparedSession.subSessionEffectiveModel
-                    childModel
-                    childEffort
-        sessionTmp <- readIORef runtime.subagentSessionTmp
-        modelPolicyError <- allowedChildModelErrorFor runtime model
-        case modelPolicyError
-                <|> activeSubagentTargetError
-                    OpenAIProvider runtime.subagentConnection
-                    model prepared.preparedSession of
-            Just err -> pure (Left (LoopUnexpected err))
-            Nothing -> do
-                let childDialect =
-                        dialectForId
-                            prepared.preparedSession.subSessionDialect
-                coding <-
-                    codingToolsFor
+                parentParams
+                (fromMaybe "" parentParams.model)
+                childModel
+                childEffort
+    prepared <-
+        prepareChild
+            runtime
+            OpenAIProvider
+            provisionalModel
+            provisionalEffort
+            (dialectId codexDialect)
+            env
+            sendToRoot
+    let (model, effort) =
+            resolveChildModelAndEffort
+                OpenAIProvider
+                parentParams
+                prepared.preparedSession.subSessionEffectiveModel
+                childModel
+                childEffort
+    sessionTmp <- readIORef runtime.subagentSessionTmp
+    modelPolicyError <- allowedChildModelErrorFor runtime model
+    case modelPolicyError
+            <|> activeSubagentTargetError
+                OpenAIProvider runtime.subagentConnection
+                model prepared.preparedSession of
+        Just err -> pure (Left (LoopUnexpected err))
+        Nothing ->
+            pure $ Right CodexSubagentPreparation
+                { codexPreparationAgentType = agentType
+                , codexPreparationChild = prepared
+                , codexPreparationModel = model
+                , codexPreparationEffort = effort
+                , codexPreparationSessionTmp = sessionTmp
+                , codexPreparationDialect =
+                    dialectForId prepared.preparedSession.subSessionDialect
+                }
+
+runPreparedCodexSubagent
+    :: Bool
+    -> SubagentRuntime
+    -> TokenProvider
+    -> SubagentSpawnEnv
+    -> Maybe Text
+    -> InterAgentMessage
+    -> (LoopEvent -> IO ())
+    -> CodexSubagentPreparation
+    -> IO (Either LoopError LoopResult)
+runPreparedCodexSubagent
+        gatewayOnly runtime tokenProvider env previous prompt onEvent
+        preparation = do
+    let prepared = preparation.codexPreparationChild
+        childDialect = preparation.codexPreparationDialect
+    coding <-
+        codingToolsFor
+            childDialect
+            prepared.preparedToolEnv
+            (Just runtime.subagentPlanHooks)
+            Nothing
+            Nothing
+            (Just prepared.preparedMultiContext)
+    syncStoreRootFromPlan
+        runtime.subagentStoreRoot
+        coding.codingPlanMode
+    flip finally coding.codingClose do
+        (toolRegistry, childParams) <-
+            prepareCodexChildTools runtime env preparation coding
+        runCodexChildBackend
+            gatewayOnly runtime tokenProvider env previous prompt onEvent
+            preparation coding toolRegistry childParams
+
+prepareCodexChildTools
+    :: SubagentRuntime
+    -> SubagentSpawnEnv
+    -> CodexSubagentPreparation
+    -> CodingTools
+    -> IO (ToolRegistry, ResponseCreateParams)
+prepareCodexChildTools runtime env preparation coding = do
+    today <- utctDay <$> getCurrentTime
+    shellPath <-
+        Text.pack . fromMaybe defaultShell <$> lookupEnv "SHELL"
+    ghciEnabled <- readIORef runtime.subagentGhciEnabled
+    bashEnabled <- readIORef runtime.subagentBashEnabled
+    let childDialect = preparation.codexPreparationDialect
+        childTools =
+            codexChildToolsForProtocol
+                preparation.codexPreparationAgentType
+                childDialect
+                coding.codingAppTools
+        codingTools =
+            filterGhciTools ghciEnabled $
+                filterBashTools bashEnabled childTools
+        tools = codingTools <> runtime.subagentMcpTools
+        instructions =
+            codexChildInstructions
+                preparation env today shellPath tools
+        childParams =
+            requestParams
+                OpenAIProvider
+                preparation.codexPreparationModel
+                instructions
+                (schemasFromAppTools childDialect tools)
+                preparation.codexPreparationEffort
+    toolRegistry <- requireToolRegistry tools
+    pure (toolRegistry, childParams)
+
+codexChildToolsForProtocol :: Text -> Dialect -> [AppTool] -> [AppTool]
+codexChildToolsForProtocol agentType childDialect appTools =
+    case dialectChildAgentProtocol childDialect of
+        CodexCollaborationProtocol -> appTools
+        GrokTaskProtocol -> filterChildGrokTools agentType appTools
+        GenericTaskProtocol -> filterChildGrokTools agentType appTools
+        NoHostChildAgentProtocol -> []
+
+codexChildInstructions
+    :: CodexSubagentPreparation
+    -> SubagentSpawnEnv
+    -> Day
+    -> Text
+    -> [AppTool]
+    -> Text
+codexChildInstructions preparation env today shellPath tools =
+    baseInstructions
+        <> "\n\n"
+        <> codexChildInstructionSuffix agentType childDialect env.subId
+  where
+    agentType = preparation.codexPreparationAgentType
+    prepared = preparation.codexPreparationChild
+    childDialect = preparation.codexPreparationDialect
+    generatedInstructions =
+        generatedCodexChildInstructions
+            agentType
+            childDialect
+            preparation.codexPreparationModel
+            preparation.codexPreparationEffort
+            env
+            preparation.codexPreparationSessionTmp
+            today
+            shellPath
+            tools
+    baseInstructions
+        | shouldInheritCodexParentPrompt childDialect prepared =
+            fromMaybe
+                generatedInstructions
+                prepared.preparedParentParams.instructions
+        | otherwise = generatedInstructions
+
+generatedCodexChildInstructions
+    :: Text
+    -> Dialect
+    -> Text
+    -> Text
+    -> SubagentSpawnEnv
+    -> Maybe OsPath
+    -> Day
+    -> Text
+    -> [AppTool]
+    -> Text
+generatedCodexChildInstructions
+        agentType childDialect model effort env sessionTmp today shellPath
+        tools =
+    case dialectChildAgentProtocol childDialect of
+        CodexCollaborationProtocol ->
+            systemPromptForTools
+                childDialect
+                model
+                effort
+                toolNames
+                env.subCwd
+                sessionTmp
+                today
+                True
+        GrokTaskProtocol ->
+            Text.intercalate "\n\n" $
+                filter (not . Text.null)
+                    [ grokSubagentSystemPrompt
+                        codingGrokPromptTools
+                        (hostedSearchToolNames childDialect ++ toolNames)
+                        env.subCwd
+                        today
+                        (Text.pack SystemInfo.os)
+                        shellPath
+                        agentType
+                        env.subId.unSubagentId
+                    , sessionTempGuidance sessionTmp
+                    , commitAttributionGuidanceForTools
                         childDialect
-                        prepared.preparedToolEnv
-                        (Just runtime.subagentPlanHooks)
-                        Nothing
-                        Nothing
-                        (Just prepared.preparedMultiContext)
-                syncStoreRootFromPlan
-                    runtime.subagentStoreRoot
-                    coding.codingPlanMode
-                flip finally coding.codingClose do
-                    today <- utctDay <$> getCurrentTime
-                    shellPath <-
-                        Text.pack . fromMaybe defaultShell <$> lookupEnv "SHELL"
-                    ghciEnabled <- readIORef runtime.subagentGhciEnabled
-                    bashEnabled <- readIORef runtime.subagentBashEnabled
-                    let childTools = case
-                                dialectChildAgentProtocol childDialect of
-                            CodexCollaborationProtocol -> coding.codingAppTools
-                            GrokTaskProtocol ->
-                                filterChildGrokTools
-                                    agentType coding.codingAppTools
-                            GenericTaskProtocol ->
-                                filterChildGrokTools
-                                    agentType coding.codingAppTools
-                            NoHostChildAgentProtocol ->
-                                []
-                        codingTools =
-                            filterGhciTools ghciEnabled $
-                                filterBashTools bashEnabled childTools
-                        tools =
-                            codingTools <> runtime.subagentMcpTools
-                        generatedInstructions =
-                            case dialectChildAgentProtocol childDialect of
-                                CodexCollaborationProtocol ->
-                                    systemPromptForTools
-                                        childDialect
-                                        model
-                                        effort
-                                        (map (.appToolName) tools)
-                                        env.subCwd
-                                        sessionTmp
-                                        today
-                                        True
-                                GrokTaskProtocol ->
-                                    Text.intercalate "\n\n" $
-                                        filter (not . Text.null)
-                                            [ grokSubagentSystemPrompt
-                                                codingGrokPromptTools
-                                                (hostedSearchToolNames childDialect
-                                                    ++ map (.appToolName) tools)
-                                                env.subCwd
-                                                today
-                                                (Text.pack SystemInfo.os)
-                                                shellPath
-                                                agentType
-                                                env.subId.unSubagentId
-                                            , sessionTempGuidance sessionTmp
-                                            , commitAttributionGuidanceForTools
-                                                childDialect
-                                                model
-                                                effort
-                                                (map (.appToolName) tools)
-                                            ]
-                                GenericTaskProtocol ->
-                                    systemPromptForTools
-                                        childDialect
-                                        model
-                                        effort
-                                        (map (.appToolName) tools)
-                                        env.subCwd
-                                        sessionTmp
-                                        today
-                                        True
-                                NoHostChildAgentProtocol ->
-                                    systemPrompt
-                                        childDialect
-                                        model
-                                        effort
-                                        env.subCwd
-                                        sessionTmp
-                                        today
-                                        True
-                        inheritParentPrompt =
-                            case dialectChildAgentProtocol childDialect of
-                                CodexCollaborationProtocol ->
-                                    case prepared.preparedParentParams.model of
-                                        Just parentModel ->
-                                            not
-                                                ( "grok"
-                                                    `Text.isPrefixOf`
-                                                        Text.toLower parentModel
-                                                )
-                                        Nothing -> True
-                                _ -> False
-                        baseInstructions =
-                            if inheritParentPrompt
-                                then
-                                    fromMaybe
-                                        generatedInstructions
-                                        prepared.preparedParentParams.instructions
-                                else generatedInstructions
-                        instructions =
-                            baseInstructions
-                                <> "\n\n"
-                                <> case
-                                    dialectChildAgentProtocol childDialect of
-                                    CodexCollaborationProtocol ->
-                                        codexSubagentSuffix env.subId
-                                    GrokTaskProtocol ->
-                                        ""
-                                    GenericTaskProtocol ->
-                                        genericSubagentSuffix agentType env.subId
-                                    NoHostChildAgentProtocol ->
-                                        ""
-                        childParams = requestParams OpenAIProvider model instructions
-                            (schemasFromAppTools childDialect tools) effort
-                    toolRegistry <- requireToolRegistry tools
-                    httpFallbackActive <- newIORef False
-                    turnState <- newCodexTurnState
-                    let websocketBackend =
-                            freshOpenAiBackendWithTurnState
-                                runtime.subagentOptions.optShowRawReasoning
-                                turnState
-                                tokenProvider
-                                (pure childParams)
-                        httpBackend =
-                            statelessResponsesBackendWithRawReasoning
-                                runtime.subagentOptions.optShowRawReasoning
-                                (\request _onEvent ->
-                                    OpenAI.createCodexMessageWithProviderWithTurnState
-                                        turnState tokenProvider request)
-                                (pure childParams)
-                        baseBackend =
-                            -- Keep recovery below automatic compaction so a
-                            -- path change cannot replay a remote checkpoint.
-                            withConnectionRecoveryOn
-                                runtime.subagentNetworkRecovery $
-                                if gatewayOnly
-                                    then websocketBackend
-                                    else
-                                        openAiBackendWithTransportFallback
-                                            httpFallbackActive
-                                            websocketBackend
-                                            httpBackend
-                        compactSender request =
-                            if gatewayOnly
-                                then
-                                    withCodexWsRetryingUsingTurnState
-                                        tokenProvider
-                                        turnState
-                                        \conn _credential ->
-                                            sendWsRequestWithEventsPreservingTurnState
-                                                conn
-                                                request
-                                                Nothing
-                                                (const (pure ()))
-                                else
-                                    OpenAI.createCodexMessageWithProviderWithOptionsAndTurnState
-                                        OpenAI.remoteCompactionV2RequestOptions
-                                        turnState
-                                        tokenProvider
-                                        request
-                        compactingBackend =
-                            autoCompactOpenAiBackendWithSenderHookAndDecorator
-                                runtime.subagentOptions.optCompactThreshold
-                                compactSender
+                        model
+                        effort
+                        toolNames
+                    ]
+        GenericTaskProtocol ->
+            systemPromptForTools
+                childDialect
+                model
+                effort
+                toolNames
+                env.subCwd
+                sessionTmp
+                today
+                True
+        NoHostChildAgentProtocol ->
+            systemPrompt
+                childDialect
+                model
+                effort
+                env.subCwd
+                sessionTmp
+                today
+                True
+  where
+    toolNames = map (.appToolName) tools
+
+shouldInheritCodexParentPrompt :: Dialect -> PreparedChild -> Bool
+shouldInheritCodexParentPrompt childDialect prepared =
+    case dialectChildAgentProtocol childDialect of
+        CodexCollaborationProtocol ->
+            case prepared.preparedParentParams.model of
+                Just parentModel ->
+                    not
+                        ( "grok"
+                            `Text.isPrefixOf` Text.toLower parentModel
+                        )
+                Nothing -> True
+        _ -> False
+
+codexChildInstructionSuffix :: Text -> Dialect -> SubagentId -> Text
+codexChildInstructionSuffix agentType childDialect agentId =
+    case dialectChildAgentProtocol childDialect of
+        CodexCollaborationProtocol -> codexSubagentSuffix agentId
+        GrokTaskProtocol -> ""
+        GenericTaskProtocol -> genericSubagentSuffix agentType agentId
+        NoHostChildAgentProtocol -> ""
+
+runCodexChildBackend
+    :: Bool
+    -> SubagentRuntime
+    -> TokenProvider
+    -> SubagentSpawnEnv
+    -> Maybe Text
+    -> InterAgentMessage
+    -> (LoopEvent -> IO ())
+    -> CodexSubagentPreparation
+    -> CodingTools
+    -> ToolRegistry
+    -> ResponseCreateParams
+    -> IO (Either LoopError LoopResult)
+runCodexChildBackend
+        gatewayOnly runtime tokenProvider env previous prompt onEvent
+        preparation coding toolRegistry childParams = do
+    httpFallbackActive <- newIORef False
+    turnState <- newCodexTurnState
+    let websocketBackend =
+            freshOpenAiBackendWithTurnState
+                runtime.subagentOptions.optShowRawReasoning
+                turnState
+                tokenProvider
+                (pure childParams)
+        httpBackend =
+            statelessResponsesBackendWithRawReasoning
+                runtime.subagentOptions.optShowRawReasoning
+                (\request _onEvent ->
+                    OpenAI.createCodexMessageWithProviderWithTurnState
+                        turnState tokenProvider request)
+                (pure childParams)
+        baseBackend =
+            -- Keep recovery below automatic compaction so a path change
+            -- cannot replay a remote checkpoint.
+            withConnectionRecoveryOn runtime.subagentNetworkRecovery $
+                if gatewayOnly
+                    then websocketBackend
+                    else
+                        openAiBackendWithTransportFallback
+                            httpFallbackActive
+                            websocketBackend
+                            httpBackend
+        compactSender request =
+            if gatewayOnly
+                then
+                    withCodexWsRetryingUsingTurnState
+                        tokenProvider
+                        turnState
+                        \conn _credential ->
+                            sendWsRequestWithEventsPreservingTurnState
+                                conn
+                                request
+                                Nothing
                                 (const (pure ()))
-                                (pure childParams)
-                                (decorateCompactOutcomeWithTaskPlan
-                                    coding.codingTaskPlan)
-                                (\_ _ -> pure CompactionNotInstalled)
-                                prepared.preparedSession.subSessionContextTokens
-                                baseBackend
-                        backend =
-                            withCodexTurnStateScope (pure turnState) $
-                                compactingBackend
-                    runPreparedChild
-                        runtime env prepared.preparedSession
-                        prepared.preparedToolEnv toolRegistry
-                        backend onEvent
-                        (\config ->
-                            case dialectChildAgentProtocol childDialect of
-                                CodexCollaborationProtocol ->
-                                    runLoopInputs
-                                        config previous [AgentMessage prompt]
-                                _ ->
-                                    runLoop
-                                        config
-                                        previous
-                                        (interAgentMessagePayload prompt))
+                else
+                    OpenAI.createCodexMessageWithProviderWithOptionsAndTurnState
+                        OpenAI.remoteCompactionV2RequestOptions
+                        turnState
+                        tokenProvider
+                        request
+        compactingBackend =
+            autoCompactOpenAiBackendWithSenderHookAndDecorator
+                runtime.subagentOptions.optCompactThreshold
+                compactSender
+                (const (pure ()))
+                (pure childParams)
+                (decorateCompactOutcomeWithTaskPlan coding.codingTaskPlan)
+                (\_ _ -> pure CompactionNotInstalled)
+                prepared.preparedSession.subSessionContextTokens
+                baseBackend
+        backend =
+            withCodexTurnStateScope (pure turnState) compactingBackend
+        prepared = preparation.codexPreparationChild
+        childDialect = preparation.codexPreparationDialect
+    runPreparedChild
+        runtime env prepared.preparedSession
+        prepared.preparedToolEnv toolRegistry
+        backend onEvent
+        (\config ->
+            case dialectChildAgentProtocol childDialect of
+                CodexCollaborationProtocol ->
+                    runLoopInputs config previous [AgentMessage prompt]
+                _ ->
+                    runLoop
+                        config
+                        previous
+                        (interAgentMessagePayload prompt))
 
 -- | Child xAI/OpenRouter/Gemini agent: HTTP backend, filtered tools by
 -- @subagent_type@.
