@@ -95,6 +95,46 @@ These are important product features, but not the core differentiation.
 
 ## Install
 
+### macOS without Nix
+
+Apple silicon Macs running macOS 14 or newer can use the standalone release
+archive:
+
+```console
+(
+set -e
+archive=haskell-agent-macos-arm64
+download_dir="$(mktemp -d)"
+curl -fL \
+  "https://github.com/digitallyinduced/haskell-agent/releases/latest/download/$archive.tar.gz" \
+  -o "$download_dir/$archive.tar.gz"
+curl -fL \
+  "https://github.com/digitallyinduced/haskell-agent/releases/latest/download/$archive.tar.gz.sha256" \
+  -o "$download_dir/$archive.tar.gz.sha256"
+(cd "$download_dir" && shasum -a 256 -c "$archive.tar.gz.sha256")
+mkdir -p "$HOME/.local/opt" "$HOME/.local/bin"
+rm -rf "$HOME/.local/opt/haskell-agent-macos-arm64"
+tar -xzf "$download_dir/$archive.tar.gz" -C "$HOME/.local/opt"
+rm -rf "$download_dir"
+ln -sfn \
+  "$HOME/.local/opt/haskell-agent-macos-arm64/bin/agent-cli" \
+  "$HOME/.local/bin/agent-cli"
+"$HOME/.local/bin/agent-cli" --version
+)
+```
+
+Add `$HOME/.local/bin` to `PATH` if it is not already present. Keep the
+extracted directory intact: `agent-cli` discovers its bundled libraries, data
+files, PostgreSQL runtime, and helper tools relative to that directory. The
+symlink may live anywhere.
+
+macOS requires its system libraries and frameworks to remain dynamically
+linked. The archive statically links the Haskell dependency graph and carries
+all non-system dynamic libraries alongside the executable, so it has no Nix
+runtime dependency.
+
+### Nix
+
 1. Install [Determinate Nix](https://docs.determinate.systems/determinate-nix/)
    by following its platform-specific installation instructions.
 
@@ -113,7 +153,7 @@ These are important product features, but not the core differentiation.
    `--accept-flake-config` enables the public IHP binary cache declared by the
    flake.
 
-### Update
+#### Update
 
 `nix profile add` does not replace an existing profile entry. Update an
 existing installation with:
