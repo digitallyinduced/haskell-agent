@@ -142,6 +142,33 @@ spec = do
                     Left err -> "unsafe or unsupported" `Text.isInfixOf` err
                     Right _ -> False
 
+        it "allows only the supported computer-use workflow controls" do
+            let decode command =
+                    decodeMetaPlan
+                        ( "{\"summary\":\"desktop\",\"actions\":[{\"type\":\"session_command\",\"command\":\""
+                            <> command
+                            <> "\"}]}"
+                        )
+                commands =
+                    [ "/computer-use"
+                    , "/computer-use on"
+                    , "/computer-use OFF"
+                    ]
+            map decode commands
+                `shouldBe`
+                    map
+                        (\command ->
+                            Right MetaPlan
+                                { metaSummary = "desktop"
+                                , metaActions = [MetaSessionCommand command]
+                                }
+                        )
+                        commands
+            decode "/computer-use status"
+                `shouldSatisfy` \case
+                    Left err -> "unsafe or unsupported" `Text.isInfixOf` err
+                    Right _ -> False
+
         it "rejects plans that remove and modify the same server" do
             decodeMetaPlan
                 (Text.concat

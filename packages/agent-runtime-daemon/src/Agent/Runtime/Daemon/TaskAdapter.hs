@@ -748,7 +748,11 @@ runProcessTask runtimeSeconds executable task logLine = do
 
 processTaskArguments :: DurableTask -> [String]
 processTaskArguments task =
-    ["--prompt", Text.unpack task.description, "--save-session", "--no-yolo"]
+    [ "--prompt", Text.unpack task.description
+    , "--save-session"
+    , "--no-yolo"
+    , "--no-computer-use"
+    ]
         <> maybe [] (\value -> ["--resume", Text.unpack value]) task.sessionId
         <> ["--cwd", task.workingDirectory]
         <> maybe [] (\value -> ["--provider", Text.unpack value]) task.provider

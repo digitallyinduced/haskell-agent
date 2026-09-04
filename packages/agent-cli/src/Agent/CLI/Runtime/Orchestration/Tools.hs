@@ -90,8 +90,9 @@ import Agent.CLI.Options
       isOneShot,
       normalizeReasoningEffortForDialect,
       resolveApprovalPolicy,
+      resolveComputerUseEnabled,
       CliOptions(optYolo, optModel, optEffort, optMaxConcurrentAgents,
-                 optGhci, optBash, optComputerUse, optNoYolo, optSkills) )
+                 optGhci, optBash, optNoYolo, optSkills) )
 import Agent.CLI.PendingInputs
     ( PendingInputs
     , PendingNoticeKind(..)
@@ -170,7 +171,8 @@ import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupFullscreen, startupBackground,
                      startupFinished, startupDatabaseStore,
-                     startupSessionState, startupNativeHooks) )
+                     startupSessionState, startupNativeHooks,
+                     startupStdinTty) )
 import Agent.CLI.Session.Selection
     ( currentSessionId, loadPrompt, reservedSessionId )
 import Agent.CLI.SessionAdmin ()
@@ -1886,9 +1888,13 @@ assembleSessionToolsRuntime AgentToolsRequest
             maybe [] (.nativeToolGroups) startup.startupNativeHooks
         computerTools =
             [ ComputerUse.computerUseTool
-            | options.optComputerUse
-            , provider == OpenAIProvider
+            | provider == OpenAIProvider
             , os == "darwin"
+            ]
+        activeComputerTools =
+            [ tool
+            | resolveComputerUseEnabled options startup.startupStdinTty
+            , tool <- computerTools
             ]
         imageGenerationTools =
             [ imageGenerationTool
@@ -1903,7 +1909,7 @@ assembleSessionToolsRuntime AgentToolsRequest
             , inferredTarget.targetConnectionId
                 == builtinConnectionId OpenAIProvider
             ]
-        surroundingToolGroups =
+        surroundingToolGroupsFor selectedComputerTools =
             [ ExecutionToolGroup extraTools
             , ExecutionToolGroup sessionMcpTools
             , HostToolGroup persistedSessionTools
@@ -1914,13 +1920,16 @@ assembleSessionToolsRuntime AgentToolsRequest
             ]
                 <> nativeToolGroups
                 <> [ HostToolGroup imageGenerationTools
-                   , ExecutionToolGroup computerTools
+                   , ExecutionToolGroup selectedComputerTools
                    ]
         allToolGroups =
-            coding.codingAppToolGroups <> surroundingToolGroups
+            coding.codingAppToolGroups
+                <> surroundingToolGroupsFor computerTools
         activeCodingGroups =
             map filterCodingExecution coding.codingAppToolGroups
-        activeToolGroups = activeCodingGroups <> surroundingToolGroups
+        activeToolGroups =
+            activeCodingGroups
+                <> surroundingToolGroupsFor activeComputerTools
         filterCodingExecution = \case
             ExecutionToolGroup appTools ->
                 ExecutionToolGroup $

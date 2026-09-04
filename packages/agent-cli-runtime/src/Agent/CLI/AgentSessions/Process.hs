@@ -288,6 +288,7 @@ launchSessionTurnInput
                 ]
                     <> inputArgs
                     <> [ "--save-session"
+                       , "--no-computer-use"
                        ]
                     <> approvalArgs
                     <> ["--no-ghci" | not ghciEnabled]
