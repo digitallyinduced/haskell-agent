@@ -114,7 +114,7 @@ data SessionBackend = SessionBackend
 -- intentionally deferred until the normal session installation boundary.
 data InitialContextPreload = InitialContextPreload
     { preloadedAgentsContext :: !(Maybe LoadedAgentsMd)
-    , preloadedLearnedSkills :: !(Maybe (Either Text [LearnedSkill]))
+    , preloadedLearnedSkills :: !(Maybe [LearnedSkill])
     }
     deriving (Eq, Show)
 

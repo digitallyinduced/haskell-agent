@@ -1735,9 +1735,11 @@ prepareInitialContextPreload AgentToolsRequest
         | otherwise = pure Nothing
     preloadLearnedSkills
         | contextRequirements.initialContextNeeded =
-            Just <$> loadApplicableLearnedSkillsForStore
+            loadApplicableLearnedSkillsForStore
                 startup.startupDatabaseStore
-                databaseScopes
+                databaseScopes >>= \case
+                    Left _ -> pure Nothing
+                    Right learnedSkills -> pure (Just learnedSkills)
         | otherwise = pure Nothing
 
 installCollaborationCallbacks

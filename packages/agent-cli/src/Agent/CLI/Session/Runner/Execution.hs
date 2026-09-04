@@ -683,7 +683,7 @@ buildSkillContextRuntime
                                 startupContext
                                 defaultLearnedSkillContextMaxChars
                                 queueInitialContext
-                                preloaded
+                                (Right preloaded)
                         Nothing ->
                             installLearnedSkills
                                 startupContext
