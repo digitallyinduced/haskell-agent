@@ -29,6 +29,7 @@ import Agent.CLI.ComputerUse.Input (MouseButton(..))
 import Agent.CLI.ComputerUse.Linux.Portal
     ( PortalStream(..)
     , parsePortalStartResults
+    , portalDisplayForStream
     , portalKeysym
     , portalMouseButtonCode
     , portalRequestPathForSender
@@ -39,16 +40,21 @@ import Agent.CLI.ComputerUse.Linux.Portal
 import Agent.CLI.ComputerUse.Linux.X11
     ( XdotoolInvocation(..)
     , parseXrandrDisplay
+    , runX11TypeInvocationsWith
     , withX11InputCleanup
+    , withX11Readiness
     , x11KeyInvocation
     , x11PointerPosition
     , x11ScrollInvocations
+    , x11TypeInvocations
     )
 import Agent.CLI.SessionAdmin (sessionToolEvent)
 import Agent.Json (rawJsonFromEncoding)
 import Agent.Loop (ImageAttachment(..))
 import Agent.Responses.Types
 import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..))
+import Control.Concurrent (threadDelay)
+import Control.Exception.Safe (finally)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
@@ -59,6 +65,7 @@ import Data.IORef
     , modifyIORef'
     , newIORef
     , readIORef
+    , writeIORef
     )
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
@@ -252,6 +259,54 @@ spec = do
                 `shouldReturn` Left "release failed"
             readIORef calls `shouldReturn` ["action", "cleanup"]
 
+        it "chunks typing and stops before the next chunk on lock" do
+            let value = Text.replicate 129 "x"
+                chunks = x11TypeInvocations value
+            map (.xdotoolStdin) chunks
+                `shouldBe`
+                    [ Text.replicate 64 "x"
+                    , Text.replicate 64 "x"
+                    , "x"
+                    ]
+            map (.xdotoolArguments) chunks
+                `shouldSatisfy` all (notElem (replicate 64 'x'))
+
+            locked <- newIORef False
+            calls <- newIORef []
+            let readiness =
+                    readIORef locked >>= \case
+                        False -> pure (Right ())
+                        True -> pure (Left "session locked")
+                run invocation = do
+                    modifyIORef' calls (<> [invocation.xdotoolStdin])
+                    writeIORef locked True
+                    pure (Right ())
+            runX11TypeInvocationsWith readiness run chunks
+                `shouldReturn` Left "session locked"
+            readIORef calls
+                `shouldReturn` [Text.replicate 64 "x"]
+
+        it "cancels an in-flight X11 action on lock" do
+            readinessResults <- newIORef
+                [Right (), Left "session locked"]
+            cancelled <- newIORef False
+            completed <- newIORef False
+            let readiness =
+                    atomicModifyIORef' readinessResults \case
+                        [] -> ([], Left "session locked")
+                        result : rest -> (rest, result)
+                blockedAction =
+                    ( do
+                        threadDelay 1000000
+                        writeIORef completed True
+                        pure (Right ())
+                    )
+                        `finally` writeIORef cancelled True
+            withX11Readiness readiness blockedAction
+                `shouldReturn` Left "session locked"
+            readIORef cancelled `shouldReturn` True
+            readIORef completed `shouldReturn` False
+
     describe "Linux Wayland portal computer use" do
         it "derives race-free request paths from the unique bus name" do
             portalRequestPathForSender ":1.42" "request_ab12"
@@ -308,6 +363,21 @@ spec = do
                 (record "capture" (Right ()))
                 `shouldReturn` Left "session locked"
             readIORef calls `shouldReturn` ["capture", "ready"]
+
+        it "uses negotiated stream metadata for display inspection" do
+            let display =
+                    portalDisplayForStream
+                        (objectPath_
+                            "/org/freedesktop/portal/desktop/session/1_42/session_ab12")
+                        portalStream
+            display.computerDisplayWidth
+                `shouldBe` portalStream.portalStreamWidth
+            display.computerDisplayHeight
+                `shouldBe` portalStream.portalStreamHeight
+            display.computerDisplayFrameWidth
+                `shouldBe` portalStream.portalStreamWidth
+            display.computerDisplayFrameHeight
+                `shouldBe` portalStream.portalStreamHeight
 
     describe "computer action validation" do
         it "preserves supported mouse buttons and modifiers" do

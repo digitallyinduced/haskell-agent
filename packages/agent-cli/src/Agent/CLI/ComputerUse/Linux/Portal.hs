@@ -2,6 +2,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     ( PortalStream(..)
     , newPortalBackend
     , parsePortalStartResults
+    , portalDisplayForStream
     , portalKeysym
     , portalMouseButtonCode
     , portalRequestPathForSender
@@ -185,8 +186,6 @@ data PortalRuntime = PortalRuntime
 
 data CapturedPortalFrame = CapturedPortalFrame
     { portalFrameImage :: !(Image PixelRGB8)
-    , portalFrameWidth :: !Int
-    , portalFrameHeight :: !Int
     }
 
 newPortalBackend
@@ -603,14 +602,8 @@ inspectPortalDisplay runtime =
     ensurePortalReady runtime >>= \case
         Left err -> pure (Left err)
         Right () ->
-            withPortalCaptureReadiness runtime.portalReadiness $
-                withPortalSessionOperation runtime "screen capture" \session -> do
-                    frame <- capturePortalFrame runtime session
-                    pure
-                        (portalDisplay
-                            session
-                            frame.portalFrameWidth
-                            frame.portalFrameHeight)
+            withPortalSessionOperation runtime "display inspection"
+                (pure . portalDisplay)
 
 capturePortalDisplay
     :: PortalRuntime
@@ -625,10 +618,7 @@ capturePortalDisplay runtime encoding =
                     frame <- capturePortalFrame runtime session
                     pure CapturedDisplay
                         { capturedComputerDisplay =
-                            portalDisplay
-                                session
-                                frame.portalFrameWidth
-                                frame.portalFrameHeight
+                            portalDisplay session
                         , capturedComputerImage =
                             encodePortalFrame
                                 encoding
@@ -661,18 +651,9 @@ executePortalAction runtime expected action =
             withPortalSessionOperation runtime "input injection" \session -> do
                 let stream = session.portalSessionStream
                     expectedIdentity =
-                        portalDisplay
-                            session
-                            expected.computerDisplayFrameWidth
-                            expected.computerDisplayFrameHeight
+                        portalDisplay session
                 unless
-                    ( expectedIdentity.computerDisplayId
-                        == expected.computerDisplayId
-                        && expectedIdentity.computerDisplayWidth
-                            == expected.computerDisplayWidth
-                        && expectedIdentity.computerDisplayHeight
-                            == expected.computerDisplayHeight
-                    )
+                    (expectedIdentity == expected)
                     (fail
                         "The selected portal stream changed during computer use.")
                 executePortalActionUnchecked runtime session stream action
@@ -971,10 +952,7 @@ capturePortalFrame runtime session = do
                 unless (validFrameSize width height) $
                     fail "The portal returned an invalid screenshot size."
                 pure CapturedPortalFrame
-                    { portalFrameImage = image
-                    , portalFrameWidth = width
-                    , portalFrameHeight = height
-                    }
+                    { portalFrameImage = image }
 
 openPipeWireRemote :: PortalRuntime -> PortalSession -> IO Fd
 openPipeWireRemote runtime session = do
@@ -1128,15 +1106,23 @@ resizeImage targetWidth targetHeight source
             targetWidth
             targetHeight
 
-portalDisplay :: PortalSession -> Int -> Int -> ComputerDisplay
-portalDisplay session frameWidth frameHeight =
-    let stream = session.portalSessionStream
-    in ComputerDisplay
+portalDisplay :: PortalSession -> ComputerDisplay
+portalDisplay session =
+    portalDisplayForStream
+        session.portalSessionPath
+        session.portalSessionStream
+
+portalDisplayForStream :: ObjectPath -> PortalStream -> ComputerDisplay
+portalDisplayForStream sessionPath stream =
+    -- Captured frames are normalized to the negotiated logical stream size
+    -- before they are returned to the model, so inspection does not need to
+    -- open PipeWire merely to discover physical frame dimensions.
+    ComputerDisplay
         { computerDisplayId =
             Text.intercalate ":"
                 [ "wayland-portal"
                 , Text.pack
-                    (formatObjectPath session.portalSessionPath)
+                    (formatObjectPath sessionPath)
                 , Text.pack (show stream.portalStreamNodeId)
                 , fromMaybe "-" stream.portalStreamId
                 , Text.pack
@@ -1152,8 +1138,8 @@ portalDisplay session frameWidth frameHeight =
         , computerDisplayOriginY = 0
         , computerDisplayWidth = stream.portalStreamWidth
         , computerDisplayHeight = stream.portalStreamHeight
-        , computerDisplayFrameWidth = frameWidth
-        , computerDisplayFrameHeight = frameHeight
+        , computerDisplayFrameWidth = stream.portalStreamWidth
+        , computerDisplayFrameHeight = stream.portalStreamHeight
         }
 
 parsePortalStartResults

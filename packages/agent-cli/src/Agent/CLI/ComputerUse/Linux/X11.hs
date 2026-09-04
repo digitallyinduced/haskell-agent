@@ -2,10 +2,13 @@ module Agent.CLI.ComputerUse.Linux.X11
     ( XdotoolInvocation(..)
     , newX11Backend
     , parseXrandrDisplay
+    , runX11TypeInvocationsWith
     , withX11InputCleanup
+    , withX11Readiness
     , x11KeyInvocation
     , x11PointerPosition
     , x11ScrollInvocations
+    , x11TypeInvocations
     ) where
 
 import Agent.CLI.ComputerUse.Backend
@@ -39,6 +42,7 @@ import Codec.Picture
     , imageWidth
     )
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (race)
 import Control.Exception.Safe (finally, generalBracket, tryAny)
 import Control.Monad (foldM)
 import Codec.Picture.Types (convertImage)
@@ -239,18 +243,22 @@ executeX11Action readiness expected action =
                 pure (Left
                     "The selected display changed during computer use; take a fresh screenshot before continuing.")
             | otherwise ->
-                readiness >>= \case
-                    Left err -> pure (Left err)
-                    Right () -> executeX11ActionUnchecked expected action
+                withX11Readiness readiness
+                    (executeX11ActionUnchecked readiness expected action)
 
 executeX11ActionUnchecked
-    :: ComputerDisplay
+    :: IO (Either Text ())
+    -> ComputerDisplay
     -> ComputerAction
     -> IO (Either Text ())
-executeX11ActionUnchecked display = \case
+executeX11ActionUnchecked readiness display = \case
     ScreenshotAction -> pure (Right ())
     WaitAction -> threadDelay 2000000 >> pure (Right ())
-    TypeAction value -> runXdotool (typeInvocation value)
+    TypeAction value ->
+        runX11TypeInvocationsWith
+            readiness
+            runXdotool
+            (x11TypeInvocations value)
     KeypressAction keys ->
         either (pure . Left) runXdotool (x11KeyInvocation keys)
     ClickAction{clickX, clickY, clickButton, clickKeys} ->
@@ -366,6 +374,28 @@ withX11InputCleanup action cleanup = do
                     <> cleanupErr
                 )
 
+withX11Readiness
+    :: IO (Either Text ())
+    -> IO (Either Text ())
+    -> IO (Either Text ())
+withX11Readiness readiness action =
+    readiness >>= \case
+        Left err -> pure (Left err)
+        Right () ->
+            race action (waitForReadinessFailure readiness) >>= \case
+                Left (Left err) -> pure (Left err)
+                Left (Right ()) -> readiness
+                Right err -> pure (Left err)
+
+waitForReadinessFailure
+    :: IO (Either Text ())
+    -> IO Text
+waitForReadinessFailure readiness = do
+    threadDelay readinessPollDelay
+    readiness >>= \case
+        Left err -> pure err
+        Right () -> waitForReadinessFailure readiness
+
 movePointer :: ComputerDisplay -> Int -> Int -> IO (Either Text ())
 movePointer display x y =
     let (rootX, rootY) = x11PointerPosition display x y
@@ -378,6 +408,20 @@ runXdotoolInvocations =
   where
     step (Left err) _ = pure (Left err)
     step (Right ()) invocation = runXdotool invocation
+
+runX11TypeInvocationsWith
+    :: IO (Either Text ())
+    -> (XdotoolInvocation -> IO (Either Text ()))
+    -> [XdotoolInvocation]
+    -> IO (Either Text ())
+runX11TypeInvocationsWith readiness run =
+    foldM step (Right ())
+  where
+    step (Left err) _ = pure (Left err)
+    step (Right ()) invocation =
+        readiness >>= \case
+            Left err -> pure (Left err)
+            Right () -> run invocation
 
 runXdotoolCleanupInvocations
     :: [XdotoolInvocation]
@@ -509,6 +553,10 @@ typeInvocation value = XdotoolInvocation
     , xdotoolStdin = value
     }
 
+x11TypeInvocations :: Text -> [XdotoolInvocation]
+x11TypeInvocations =
+    map typeInvocation . Text.chunksOf typeChunkSize
+
 arguments :: [String] -> XdotoolInvocation
 arguments values = XdotoolInvocation
     { xdotoolArguments = values
@@ -572,3 +620,9 @@ processError command stderr =
 
 commaInts :: [Int] -> Text
 commaInts = Text.intercalate "," . map (Text.pack . show)
+
+typeChunkSize :: Int
+typeChunkSize = 64
+
+readinessPollDelay :: Int
+readinessPollDelay = 50000
