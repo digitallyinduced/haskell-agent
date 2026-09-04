@@ -24,10 +24,10 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( Async
     , async
-    , cancel
     , mapConcurrently_
     , race
     , waitCatch
+    , withAsync
     )
 import Control.Concurrent.STM
     ( TVar
@@ -61,7 +61,8 @@ data TurnStoreOwner = TurnStoreOwner
     , turnStoreOwnerInstanceId :: !Text
     , turnStoreOwnerHealthy :: !(TVar Bool)
     , turnStoreOwnerLease :: !ServerTurnStore.ServerTurnOwnerLease
-    , turnStoreOwnerHeartbeat :: !(Async ())
+    , turnStoreOwnerStopping :: !(TVar Bool)
+    , turnStoreOwnerLifecycle :: !(Async ())
     , turnStoreOwnerPendingMutationReleases ::
         !(TVar (Map MutationReleaseKey ServerTurnStore.ServerSessionMutation))
     }
@@ -79,14 +80,16 @@ openTurnStoreOwner store instanceId = mask \restore -> do
         Left err -> pure (Left (renderStoreError err))
         Right lease -> do
             healthy <- newTVarIO True
+            stopping <- newTVarIO False
             pendingMutationReleases <- newTVarIO Map.empty
-            heartbeat <-
+            lifecycle <-
                 async
                     ( restore
-                        ( ownerHeartbeatLoop
+                        ( ownerLifecycle
                             store
                             lease
                             healthy
+                            stopping
                             pendingMutationReleases
                         )
                     )
@@ -98,23 +101,61 @@ openTurnStoreOwner store instanceId = mask \restore -> do
                         , turnStoreOwnerInstanceId = instanceId
                         , turnStoreOwnerHealthy = healthy
                         , turnStoreOwnerLease = lease
-                        , turnStoreOwnerHeartbeat = heartbeat
+                        , turnStoreOwnerStopping = stopping
+                        , turnStoreOwnerLifecycle = lifecycle
                         , turnStoreOwnerPendingMutationReleases =
                             pendingMutationReleases
                         }
 
 closeTurnStoreOwner :: TurnStoreOwner -> IO ()
 closeTurnStoreOwner owner = do
-    atomically (writeTVar owner.turnStoreOwnerHealthy False)
-    cancel owner.turnStoreOwnerHeartbeat
-    void (waitCatch owner.turnStoreOwnerHeartbeat)
+    -- The lifecycle owns heartbeat cancellation and lease retirement. Once
+    -- this atomic signal commits, an exception in the caller cannot strand a
+    -- live heartbeat between those cleanup steps.
+    atomically do
+        writeTVar owner.turnStoreOwnerHealthy False
+        writeTVar owner.turnStoreOwnerStopping True
+    void (waitCatch owner.turnStoreOwnerLifecycle)
+
+ownerLifecycle ::
+    Store ->
+    ServerTurnStore.ServerTurnOwnerLease ->
+    TVar Bool ->
+    TVar Bool ->
+    TVar (Map MutationReleaseKey ServerTurnStore.ServerSessionMutation) ->
+    IO ()
+ownerLifecycle store lease healthy stopping pendingMutationReleases =
+    ( withAsync
+        ( ownerHeartbeatLoop
+            store
+            lease
+            healthy
+            pendingMutationReleases
+        )
+        \heartbeat ->
+            void $
+                race
+                    ( atomically do
+                        shouldStop <- readTVar stopping
+                        check shouldStop
+                    )
+                    (void (waitCatch heartbeat))
+    )
+        `finally` do
+            atomically (writeTVar healthy False)
+            retireTurnStoreOwnerLease lease
+
+retireTurnStoreOwnerLease ::
+    ServerTurnStore.ServerTurnOwnerLease ->
+    IO ()
+retireTurnStoreOwnerLease lease =
     ( void $
             timeout ownerHeartbeatTimeoutMicroseconds $
                 ServerTurnStore.releaseServerTurnOwner
-                    owner.turnStoreOwnerLease
+                    lease
         )
         `finally` ServerTurnStore.abandonServerTurnOwnerLease
-            owner.turnStoreOwnerLease
+            lease
 
 withTurnStoreOwnerFence ::
     TurnStoreOwner ->
@@ -495,7 +536,7 @@ reserveSessionMutation store tenantId owner boundary sessionId now
                     owner.turnStoreOwnerInstanceId
         case fenceResult of
             Left err -> pure (Left (storeApiError err))
-            Right Nothing -> pure (Right Nothing)
+            Right Nothing -> pure (Left unhealthyOwnerApiError)
             Right (Just fence) -> do
                 let closeFence =
                         ServerTurnStore.closeServerTurnOwnerActionFence fence
