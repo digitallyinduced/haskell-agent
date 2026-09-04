@@ -203,12 +203,13 @@ cursorTranscriptTitle
 cursorTranscriptTitle env path = do
     titleRef <- newIORef Nothing
     _ <- tryAny $
-        consumeJsonl env path Nothing \record -> do
+        foldJsonl env path Nothing () \() record ->
             case cursorFirstUserTitle record of
                 Just title -> do
                     modifyIORef' titleRef (const (Just title))
-                    pure JsonlStop
-                Nothing -> pure JsonlContinue
+                    pure ((), JsonlStop)
+                Nothing ->
+                    pure ((), JsonlContinue)
     readIORef titleRef
 
 cursorProjectMatchesCwd
@@ -397,31 +398,32 @@ readCursor
     -> Int
     -> IO ExternalSession
 readCursor env candidate maxToolChars = do
-    stateRef <- newIORef (emptyBoundedTurns, mempty)
-    warningRef <- newIORef []
-    let consume value =
-            modifyIORef' stateRef \(bounded, omissions) ->
-                let (turns, addedOmissions) =
-                        cursorTurns maxToolChars value
-                in (foldl (flip appendBoundedTurn) bounded turns,
-                    omissions <> addedOmissions)
     transcript <- resolveCursorTranscript env candidate
-    case transcript of
+    ((bounded, omissions), warnings) <- case transcript of
         Just path -> do
-            counters <- consumeJsonl env path Nothing \value -> do
-                consume value
-                pure JsonlContinue
-            modifyIORef' warningRef (<> jsonlWarnings counters)
-        Nothing
-            | takeFileName candidate.candidatePath == "state.vscdb" ->
-                readDesktopRows candidate consume warningRef
-            | otherwise -> do
-                directory <- doesDirectoryExist candidate.candidatePath
-                if directory
-                    then readCursorStore candidate consume warningRef
-                    else readDesktopRows candidate consume warningRef
-    (bounded, omissions) <- readIORef stateRef
-    warnings <- readIORef warningRef
+            (state, counters) <-
+                foldJsonl env path Nothing (emptyBoundedTurns, mempty)
+                    \state value ->
+                        pure
+                            ( cursorStateStep maxToolChars state value
+                            , JsonlContinue
+                            )
+            pure (state, jsonlWarnings counters)
+        Nothing -> do
+            stateRef <- newIORef (emptyBoundedTurns, mempty)
+            warningRef <- newIORef []
+            let consume value =
+                    modifyIORef' stateRef \state ->
+                        cursorStateStep maxToolChars state value
+            if takeFileName candidate.candidatePath == "state.vscdb"
+                then readDesktopRows candidate consume warningRef
+                else do
+                    directory <-
+                        doesDirectoryExist candidate.candidatePath
+                    if directory
+                        then readCursorStore candidate consume warningRef
+                        else readDesktopRows candidate consume warningRef
+            (,) <$> readIORef stateRef <*> readIORef warningRef
     let turns = boundedRecent bounded
         unavailable =
             [ warning
@@ -436,6 +438,18 @@ readCursor env candidate maxToolChars = do
             (appendOmissionWarnings omissions (warnings <> unavailable))
             (boundedLastText "user" bounded)
             (boundedLastText "assistant" bounded)
+
+cursorStateStep
+    :: Int
+    -> (BoundedTurns, ContentOmissions)
+    -> Value
+    -> (BoundedTurns, ContentOmissions)
+cursorStateStep maxToolChars (bounded, omissions) value =
+    let (turns, addedOmissions) = cursorTurns maxToolChars value
+    in
+        ( foldl (flip appendBoundedTurn) bounded turns
+        , omissions <> addedOmissions
+        )
 
 resolveCursorTranscript
     :: ExternalSessionEnv

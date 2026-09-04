@@ -108,6 +108,7 @@ library
                     , directory
                     , filepath
                     , template-haskell
+                    , transformers
                     , unix
 
 executable agent-openai-login

@@ -2,6 +2,7 @@ module Agent.CLI.ExternalSession.JSONL
     ( JsonlControl(..)
     , consumeJsonl
     , decodeBoundedJsonValue
+    , foldJsonl
     , readJsonFileValue
     , readJsonlValues
     ) where
@@ -22,7 +23,6 @@ import Control.Monad (unless, when)
 import Data.Aeson (Value, eitherDecodeStrict')
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
-import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Text.Encoding (decodeUtf8With)
@@ -60,7 +60,21 @@ consumeJsonl
     -> Maybe Int
     -> (Value -> IO JsonlControl)
     -> IO JsonlCounters
-consumeJsonl env path limit consume
+consumeJsonl env path limit consume =
+    snd <$> foldJsonl env path limit () consumeWithoutState
+  where
+    consumeWithoutState () value = do
+        control <- consume value
+        pure ((), control)
+
+foldJsonl
+    :: ExternalSessionEnv
+    -> FilePath
+    -> Maybe Int
+    -> state
+    -> (state -> Value -> IO (state, JsonlControl))
+    -> IO (state, JsonlCounters)
+foldJsonl env path limit initialState consume
     | ".jsonl.zst" `Text.isSuffixOf` Text.pack (takeFileName path) =
         consumeCompressed
     | otherwise = do
@@ -76,7 +90,12 @@ consumeJsonl env path limit consume
                     (pure handle)
                     hClose
                     \openedHandle ->
-                        fst <$> consumeHandle openedHandle limit consume
+                        (\(state, counters, _) -> (state, counters))
+                            <$> consumeHandle
+                                openedHandle
+                                limit
+                                initialState
+                                consume
   where
     consumeCompressed =
         withCreateProcess
@@ -90,8 +109,8 @@ consumeJsonl env path limit consume
                 case (maybeOutput, maybeErrors) of
                     (Just output, Just errors) ->
                         withAsync (drainStderr errors) \errorsTask -> do
-                            (counters, stopped) <-
-                                consumeHandle output limit consume
+                            (state, counters, stopped) <-
+                                consumeHandle output limit initialState consume
                             when stopped $ do
                                 _ <- tryIO (hClose output)
                                 _ <- tryIO (terminateProcess process)
@@ -108,7 +127,7 @@ consumeJsonl env path limit consume
                                                 then "unknown error"
                                                 else oneLine 300 details
                                         )
-                            pure counters
+                            pure (state, counters)
                     _ ->
                         throwIO $
                             ExternalSessionReadFailure
@@ -121,12 +140,10 @@ readJsonlValues
     -> Maybe Int
     -> IO ([Value], JsonlCounters)
 readJsonlValues env path limit = do
-    valuesRef <- newIORef []
-    counters <- consumeJsonl env path limit \value -> do
-        modifyIORef' valuesRef (value :)
-        pure JsonlContinue
-    values <- reverse <$> readIORef valuesRef
-    pure (values, counters)
+    (values, counters) <-
+        foldJsonl env path limit [] \collected value ->
+            pure (value : collected, JsonlContinue)
+    pure (reverse values, counters)
 
 readJsonFileValue :: FilePath -> IO (Maybe Value)
 readJsonFileValue path =
@@ -145,31 +162,33 @@ decodeBoundedJsonValue bytes
 consumeHandle
     :: Handle
     -> Maybe Int
-    -> (Value -> IO JsonlControl)
-    -> IO (JsonlCounters, Bool)
-consumeHandle handle limit consume = go emptyCounters 0
+    -> state
+    -> (state -> Value -> IO (state, JsonlControl))
+    -> IO (state, JsonlCounters, Bool)
+consumeHandle handle limit initialState consume =
+    go initialState emptyCounters 0
   where
-    go counters accepted
+    go state counters accepted
         | maybe False (accepted >=) limit =
-            pure (counters, True)
+            pure (state, counters, True)
         | otherwise = do
             lineResult <- tryIO (BS8.hGetLine handle)
             case lineResult of
                 Left exception
                     | isEndOfFileException exception ->
-                        pure (counters, False)
+                        pure (state, counters, False)
                     | otherwise -> throwIO exception
                 Right line
                     | BS.all isJsonWhitespace line ->
-                        go counters accepted
+                        go state counters accepted
                     | BS.length line > maxJsonRecordBytes ->
-                        go counters
+                        go state counters
                             { oversizedRecords =
                                 counters.oversizedRecords + 1
                             }
                             accepted
                     | jsonDepthExceeds maxJsonDepth line ->
-                        go counters
+                        go state counters
                             { deeplyNestedRecords =
                                 counters.deeplyNestedRecords + 1
                             }
@@ -177,16 +196,18 @@ consumeHandle handle limit consume = go emptyCounters 0
                     | otherwise ->
                         case eitherDecodeStrict' line of
                             Left _ ->
-                                go counters
+                                go state counters
                                     { malformedRecords =
                                         counters.malformedRecords + 1
                                     }
                                     accepted
-                            Right value ->
-                                consume value >>= \case
-                                    JsonlStop -> pure (counters, True)
+                            Right value -> do
+                                (nextState, control) <- consume state value
+                                nextState `seq` case control of
+                                    JsonlStop ->
+                                        pure (nextState, counters, True)
                                     JsonlContinue ->
-                                        go counters (accepted + 1)
+                                        go nextState counters (accepted + 1)
 
 emptyCounters :: JsonlCounters
 emptyCounters = JsonlCounters 0 0 0

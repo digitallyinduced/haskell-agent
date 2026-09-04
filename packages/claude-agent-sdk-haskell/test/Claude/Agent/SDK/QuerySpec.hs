@@ -53,6 +53,19 @@ spec = describe "query" do
         messages `shouldSatisfy` any hasCanonicalAssistant
         messages `shouldSatisfy` all (not . hasRetractedContent)
 
+    it "returns the canonical messages with the terminal query result" do
+        completed <- expectRight
+            =<< runQueryResultLines canonicalResponseLines
+        map messageUuid completed.queryMessages
+            `shouldBe`
+                [ Just "system-init"
+                , Just "assistant-replacement"
+                , Just "fallback"
+                , Just "result"
+                ]
+        completed.queryResultMessage.result
+            `shouldBe` Just "canonical answer"
+
     it "renders structured tool_result content and retains its raw JSON" do
         (result, messages) <- runQueryLines
             [ structuredToolResultUser
@@ -479,6 +492,54 @@ spec = describe "query" do
                 [_] -> True
                 _ -> False
 
+    it "stops before progress and publication when live validation fails" $
+        withFakeClaude
+            (oneShotScript
+                [ assistantLine "validated" "accepted progress"
+                , assistantLine "rejected" "must remain hidden"
+                , successResult testSessionId
+                ])
+            \directory executable -> do
+                let options = testOptions executable directory
+                    validationError =
+                        CLIProtocolError "message rejected by the host"
+                progressRef <- newIORef []
+                messagesRef <- newIORef []
+                result <-
+                    withClaudeSDKClient options \client ->
+                        withClaudeSDKTurn
+                            client
+                            (pure True)
+                            Nothing
+                            options.model
+                            options.effort
+                            \turn -> do
+                                response <-
+                                    queryTurnContentWithMessageValidatorAndProgress
+                                        turn
+                                        [UserTextBlock "hello"]
+                                        ( \message ->
+                                            pure $
+                                                if messageUuid message
+                                                    == Just "rejected"
+                                                    then Left validationError
+                                                    else Right ()
+                                        )
+                                        (\progress ->
+                                            modifyIORef'
+                                                progressRef
+                                                (<> [progress]))
+                                        (\message ->
+                                            modifyIORef'
+                                                messagesRef
+                                                (<> [message]))
+                                pure ((, pure ()) <$> response)
+
+                result `shouldBe` Left validationError
+                map progressTag <$> readIORef progressRef
+                    `shouldReturn` ["message:validated"]
+                readIORef messagesRef `shouldReturn` []
+
     it "rejects mismatched live tool and nested-result messages without progress" do
         let wrongSessionId =
                 "123e4567-e89b-42d3-a456-426614174999"
@@ -596,6 +657,55 @@ spec = describe "query" do
                                     `Text.isInfixOf` message
                             _ -> False)
             [background, unknown]
+
+    it "switches to the inactivity timeout after submitted-turn progress" $
+        withFakeClaude
+            (Text.unpack $ Text.unlines
+                [ "#!/bin/sh"
+                , "IFS= read -r _query"
+                , "printf '%s\\n' "
+                    <> shellQuote
+                        (assistantLine "before-inactivity" "buffered answer")
+                , "while :; do :; done"
+                ])
+            \directory executable -> do
+                progressRef <- newIORef []
+                messagesRef <- newIORef []
+                result <-
+                    queryWithProgress
+                        ((testOptions executable directory)
+                            { streamStartupTimeoutMicros = 1_000_000
+                            , streamInactivityTimeoutMicros = 100_000
+                            , turnTimeoutMicros = 2_000_000
+                            })
+                        "hello"
+                        (\progress ->
+                            modifyIORef' progressRef (<> [progress]))
+                        (\message ->
+                            modifyIORef' messagesRef (<> [message]))
+                result `shouldSatisfy` \case
+                    Left (CLIConnectionError message) ->
+                        "stopped producing structured output"
+                            `Text.isInfixOf` message
+                    _ -> False
+                progress <- readIORef progressRef
+                progress `shouldSatisfy` any \case
+                    QueryMessageObserved QueryTopLevel message ->
+                        messageUuid message == Just "before-inactivity"
+                    _ -> False
+                readIORef messagesRef `shouldReturn` []
+
+    it "reports EOF as a premature process exit and keeps output buffered" do
+        (result, messages) <-
+            runQueryLines
+                [assistantLine "before-eof" "must remain buffered"]
+
+        result `shouldSatisfy` \case
+            Left ProcessError{message} ->
+                message
+                    == "Claude Code closed its structured output before completing the turn"
+            _ -> False
+        messages `shouldBe` []
 
     it "warns that a turn timeout may have left remote side effects" $
         withFakeClaude
@@ -852,6 +962,29 @@ runQueryLines linesToEmit =
                     modifyIORef' messagesRef (<> [message]))
         messages <- readIORef messagesRef
         pure (result, messages)
+
+runQueryResultLines
+    :: [Text]
+    -> IO (Either ClaudeSDKError QueryResult)
+runQueryResultLines linesToEmit =
+    withFakeClaude (oneShotScript linesToEmit) \directory executable -> do
+        let options = testOptions executable directory
+        withClaudeSDKClient options \client ->
+            withClaudeSDKTurn
+                client
+                (pure True)
+                Nothing
+                options.model
+                options.effort
+                \turn -> do
+                    result <-
+                        queryTurnContentWithMessageValidatorAndProgress
+                            turn
+                            [UserTextBlock "hello"]
+                            (const (pure (Right ())))
+                            (const (pure ()))
+                            (const (pure ()))
+                    pure ((, pure ()) <$> result)
 
 runQueryProgress
     :: [Text]

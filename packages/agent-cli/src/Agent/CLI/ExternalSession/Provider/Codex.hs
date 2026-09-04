@@ -12,7 +12,7 @@ import Agent.CLI.ExternalSession.SQLite
 import Agent.CLI.ExternalSession.Types
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
-import Control.Monad (filterM, when)
+import Control.Monad (filterM, foldM, when)
 import Data.Aeson (Value(..), decodeStrict', encode)
 import qualified Data.Aeson.Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -30,7 +30,6 @@ import Data.Scientific (fromFloatDigits)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Vector as Vector
 import Database.SQLite3 (Database, SQLData(..))
 import Data.Scientific (floatingOrInteger)
 import qualified Data.Text.Encoding
@@ -322,9 +321,9 @@ processCodex
     -> TurnSink
     -> IO CodexProcessed
 processCodex env path maxToolChars sink = do
-    stateRef <- newIORef (0, mempty, False)
-    counters <- consumeJsonl env path Nothing \record -> do
-        (_, _, needsJournal) <- readIORef stateRef
+    ((skipped, omissions, needsJournal), counters) <-
+        foldJsonl env path Nothing (0, mempty, False)
+            \(count, total, needsJournal) record -> do
         let recordType = externalTextValue "type" record
             payload = externalObjectValue "payload" record
         case recordType of
@@ -332,34 +331,57 @@ processCodex env path maxToolChars sink = do
                 case payload >>= externalObjectValue "replacement_history" of
                     Just (Array values) -> do
                         sink.sinkClear
-                        writeIORef stateRef (0, mempty, False)
-                        Vector.forM_ values \replacement -> do
-                            let (turn, unsafe, replacementOmissions) =
-                                    codexTurn maxToolChars replacement
-                            modifyIORef' stateRef
-                                (\(count, total, _) ->
-                                    ( count + if unsafe then 1 else 0
-                                    , total <> replacementOmissions
-                                    , False
-                                    ))
-                            mapM_ sink.sinkAppend turn
-                    _ -> pure ()
+                        nextState <-
+                            foldM
+                                (\(replacementCount, replacementTotal, _)
+                                    replacement -> do
+                                    let
+                                        ( turn
+                                            , unsafe
+                                            , replacementOmissions
+                                            ) =
+                                                codexTurn
+                                                    maxToolChars
+                                                    replacement
+                                    mapM_ sink.sinkAppend turn
+                                    pure
+                                        ( replacementCount
+                                            + if unsafe then 1 else 0
+                                        , replacementTotal
+                                            <> replacementOmissions
+                                        , False
+                                        ))
+                                (0, mempty, False)
+                                values
+                        pure (nextState, JsonlContinue)
+                    _ ->
+                        pure
+                            ( (count, total, needsJournal)
+                            , JsonlContinue
+                            )
             _
-                | needsJournal -> pure ()
+                | needsJournal ->
+                    pure
+                        ( (count, total, needsJournal)
+                        , JsonlContinue
+                        )
             Just "response_item" -> case payload of
                 Just payloadValue -> do
                     let (turn, unsafe, recordOmissions) =
                             codexTurn maxToolChars payloadValue
-                    modifyIORef' stateRef
-                        (\(count, total, required) ->
-                            ( count + if unsafe then 1 else 0
-                            , total <> recordOmissions
-                            , required
-                            ))
                     mapM_ sink.sinkAppend turn
-                Nothing -> modifyIORef' stateRef
-                    (\(count, total, required) ->
-                        (count + 1, total, required))
+                    pure
+                        ( ( count + if unsafe then 1 else 0
+                          , total <> recordOmissions
+                          , needsJournal
+                          )
+                        , JsonlContinue
+                        )
+                Nothing ->
+                    pure
+                        ( (count + 1, total, needsJournal)
+                        , JsonlContinue
+                        )
             Just "event_msg"
                 | Just event <- payload
                 , externalTextValue "type" event
@@ -368,17 +390,25 @@ processCodex env path maxToolChars sink = do
                             externalObjectValue "num_turns" event
                                 >>= integralValue
                     applied <- sink.sinkDropUsers number
-                    when (not applied) $
-                        modifyIORef' stateRef
-                            (\(count, total, _) ->
-                                (count, total, True))
-            Just "session_meta" -> pure ()
-            Just "event_msg" -> pure ()
-            _ -> modifyIORef' stateRef
-                (\(count, total, required) ->
-                    (count + 1, total, required))
-        pure JsonlContinue
-    (skipped, omissions, needsJournal) <- readIORef stateRef
+                    pure
+                        ( (count, total, not applied)
+                        , JsonlContinue
+                        )
+            Just "session_meta" ->
+                pure
+                    ( (count, total, needsJournal)
+                    , JsonlContinue
+                    )
+            Just "event_msg" ->
+                pure
+                    ( (count, total, needsJournal)
+                    , JsonlContinue
+                    )
+            _ ->
+                pure
+                    ( (count + 1, total, needsJournal)
+                    , JsonlContinue
+                    )
     pure CodexProcessed
         { processedJsonl = counters
         , processedSkipped = skipped
