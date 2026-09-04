@@ -3,11 +3,14 @@ module Agent.Responses.LoopBackendSpec (spec) where
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( Backend(..)
+    , BackendResult(..)
+    , BackendSnapshot(..)
     , FileAttachment(..)
     , ImageAttachment(..)
     , LoopEvent(..)
     , TurnAttachment(..)
     , TurnInput(..)
+    , advanceBackendSnapshot
     , emptyBackendSnapshot
     , userMessageWithAttachments
     )
@@ -20,8 +23,11 @@ import Agent.Provider
     )
 import Agent.Json (rawJsonFromEncoding)
 import qualified Agent.Json.Decode as Json
+import qualified Agent.Responses.Codec as Codec
+import Agent.Responses.GenericBackend (genericResponsesBackendWith)
 import Agent.Responses.LoopBackend
-    ( newStreamEventToLoopEvents
+    ( emptyStreamProjectionState
+    , newStreamEventToLoopEvents
     , statelessResponsesBackend
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
@@ -29,10 +35,12 @@ import Agent.Responses.LoopBackend
     , responseItemToToolCall
     , toolResultToItem
     , withRequestInput
+    , streamEventToLoopEventsStep
     )
 import Agent.Responses.Types
     ( MessageContent(..)
     , CodexRateLimits(..)
+    , CompactionItem(..)
     , ComputerAction(..)
     , ComputerCall(..)
     , ComputerCallOutput(..)
@@ -48,6 +56,7 @@ import Agent.Responses.Types
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
+    , Response
     , ResponseStreamEvent(..)
     , StreamEventType(..)
     , ResponseInput(..)
@@ -55,13 +64,13 @@ import Agent.Responses.Types
     , TaggedObject(..)
     , computerFunctionNamespace
     , computerFunctionName
+    , compactionCheckpointOriginItem
     , defaultResponseCreateParams
     , legacyComputerFunctionName
     )
 import Agent.Responses.Types.Items (responseItemDecoder)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
-import qualified Data.Aeson.Key as Key
 import Data.IORef
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Either (isLeft)
@@ -82,6 +91,25 @@ spec = do
 
 backendSpec :: Spec
 backendSpec = describe "tokenProviderStatelessResponsesBackend" do
+    it "preserves checkpoint provenance for provider-aware projection" do
+        let request =
+                withRequestInput
+                    defaultResponseCreateParams
+                    [ CompactionItemValue CompactionItem
+                        { itemId = Just "cmp-1"
+                        , encryptedContent = Just "opaque"
+                        }
+                    , compactionCheckpointOriginItem "xai"
+                    ]
+        request.input `shouldBe` Just
+            (ResponseInputItems
+                [ CompactionItemValue CompactionItem
+                    { itemId = Just "cmp-1"
+                    , encryptedContent = Just "opaque"
+                    }
+                , compactionCheckpointOriginItem "xai"
+                ])
+
     it "rejects computer coordinates outside the platform Int range" do
         let tooLarge = toInteger (maxBound :: Int) + 1
             payload = LBS.toStrict $ Aeson.encode $ Aeson.object
@@ -492,6 +520,116 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
         result `shouldBe` Left (ConnectionError "stopped after failover")
         readIORef attempts `shouldReturn` [first, second]
 
+    it "replaces obsolete history after a server compaction checkpoint" do
+        let oldItems = turnInputsToItems [UserMessage "old context"]
+            checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "compact-1"
+                , encryptedContent = Just "opaque"
+                }
+            answer = MessageItem ResponseMessage
+                { messageId = Just "message-1"
+                , content = MessageContentParts
+                    [OutputTextPart "continued" Nothing Nothing]
+                , role = RoleAssistant
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                }
+            send _params _onEvent =
+                pure (Right (responseWithOutput [checkpoint, answer]))
+            backend =
+                statelessResponsesBackend send
+                    (pure defaultResponseCreateParams)
+            snapshot =
+                advanceBackendSnapshot
+                    emptyBackendSnapshot
+                    oldItems
+                    Nothing
+
+        result <- backend.submitTurn
+            snapshot
+            Nothing
+            [UserMessage "new input"]
+            (const (pure ()))
+
+        fmap (.backendState.backendItems) result
+            `shouldBe` Right [checkpoint, answer]
+
+    it "retains generic history while dropping an unreplayable checkpoint" do
+        let oldItems = turnInputsToItems [UserMessage "old context"]
+            newItems = turnInputsToItems [UserMessage "new input"]
+            checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "compact-generic"
+                , encryptedContent = Just "opaque"
+                }
+            answer = MessageItem ResponseMessage
+                { messageId = Just "message-generic"
+                , content = MessageContentParts
+                    [OutputTextPart "continued" Nothing Nothing]
+                , role = RoleAssistant
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                }
+            send _params _onEvent =
+                pure (Right (responseWithOutput [checkpoint, answer]))
+            backend =
+                genericResponsesBackendWith send
+                    (pure defaultResponseCreateParams)
+            snapshot =
+                advanceBackendSnapshot
+                    emptyBackendSnapshot
+                    oldItems
+                    Nothing
+
+        result <- backend.submitTurn
+            snapshot
+            Nothing
+            [UserMessage "new input"]
+            (const (pure ()))
+
+        fmap (.backendState.backendItems) result
+            `shouldBe`
+                Right
+                    (oldItems <> newItems <> [answer])
+
+    it "preserves retained history when only the request has a checkpoint" do
+        let retained = turnInputsToItems [UserMessage "retained context"]
+            checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "compact-old"
+                , encryptedContent = Just "opaque"
+                }
+            existingItems = retained <> [checkpoint]
+            newItems = turnInputsToItems [UserMessage "new input"]
+            answer = MessageItem ResponseMessage
+                { messageId = Just "message-ordinary"
+                , content = MessageContentParts
+                    [OutputTextPart "continued" Nothing Nothing]
+                , role = RoleAssistant
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                }
+            send _params _onEvent =
+                pure (Right (responseWithOutput [answer]))
+            backend =
+                statelessResponsesBackend send
+                    (pure defaultResponseCreateParams)
+            snapshot =
+                advanceBackendSnapshot
+                    emptyBackendSnapshot
+                    existingItems
+                    Nothing
+
+        result <- backend.submitTurn
+            snapshot
+            Nothing
+            [UserMessage "new input"]
+            (const (pure ()))
+
+        fmap (.backendState.backendItems) result
+            `shouldBe` Right (existingItems <> newItems <> [answer])
+
     it "forwards raw provider reasoning text to the UI loop" do
         events <- newIORef []
         let send _params onStreamEvent = do
@@ -814,11 +952,37 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
         map encodedField (requestInputItems request) !! 1
             `shouldBe` Just (Aeson.String "opaque")
 
--- | Streamed tool calls are announced immediately. Shell argument deltas
--- repaint that call with the partial command, while other tools retain coarse
--- activity updates.
+-- | Streamed tool calls are announced immediately. Selected argument deltas
+-- repaint the call, while other tools retain coarse activity updates.
 streamProjectionSpec :: Spec
 streamProjectionSpec = describe "newStreamEventToLoopEvents" do
+    it "starts a pure projection attempt without retaining reused tool ids" do
+        let (firstState, _) =
+                streamEventToLoopEventsStep False
+                    emptyStreamProjectionState
+                    (functionCallAdded "fc-1" "call-1" "shell_command")
+            (_, firstEvents) =
+                streamEventToLoopEventsStep False firstState
+                    (argumentsDelta "fc-1" "{\"command\":\"pwd\"}")
+            (secondState, _) =
+                streamEventToLoopEventsStep False
+                    emptyStreamProjectionState
+                    (functionCallAdded "fc-1" "call-2" "apply_patch")
+            (_, secondEvents) =
+                streamEventToLoopEventsStep False secondState
+                    (argumentsDelta "fc-1" "{}")
+        firstEvents `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    "{\"command\":\"pwd\"}")
+            ]
+        secondEvents `shouldSatisfy` \case
+            [ToolArgumentsUpdated call] ->
+                call.callId == "call-2" && call.name == "apply_patch"
+            _ -> False
+
     it "publishes Codex weekly capacity updates for retained prompt chrome" do
         projectEvent <- newStreamEventToLoopEvents False
         events <- projectEvent ResponseCodexRateLimitsEvent
@@ -888,15 +1052,65 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
         events <- projectEvent
             (customToolCallAdded "ct-1" "call-9" "apply_patch")
         events `shouldBe`
-            [ ToolStarted ToolCall
-                { callId = "call-9"
-                , name = "apply_patch"
-                , arguments = ""
-                , callKind = CustomCallKind
-                , argumentsEncrypted = False
-                }
-            , ActivityUpdated "Writing apply_patch call…"
+            [ToolStarted (customToolCall "call-9" "apply_patch" "")]
+
+    it "repaints streamed apply_patch input as it arrives" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        let prefix = "*** Begin Patch\n*** Update File: A.hs\n"
+        first <- projectEvent
+            (customInputDelta "ct-1" "call-9" prefix)
+        first `shouldBe`
+            [ ToolArgumentsUpdated
+                (customToolCall
+                    "call-9"
+                    "apply_patch"
+                    prefix)
             ]
+        let continuation =
+                "@@\n-old\n+new\n" <> Text.replicate 256 "x"
+        second <- projectEvent
+            (customInputDelta "ct-1" "call-9" continuation)
+        second `shouldBe`
+            [ ToolArgumentsUpdated
+                (customToolCall
+                    "call-9"
+                    "apply_patch"
+                    (prefix <> continuation))
+            ]
+
+    it "batches tiny apply_patch deltas without losing their content" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        batches <- mapM
+            (\_ -> projectEvent (customInputDelta "ct-1" "call-9" "x"))
+            [1 :: Int .. 8193]
+        let previews =
+                [ call.arguments
+                | ToolArgumentsUpdated call <- concat batches
+                ]
+        length previews `shouldSatisfy` (< 40)
+        last previews `shouldBe` Text.replicate 8193 "x"
+
+    it "bounds a live apply_patch preview" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        let retained = Text.replicate (64 * 1024) "p"
+        first <- projectEvent
+            (customInputDelta
+                "ct-1"
+                "call-9"
+                (retained <> "not retained"))
+        first `shouldBe`
+            [ ToolArgumentsUpdated
+                (customToolCall "call-9" "apply_patch" retained)
+            ]
+        second <- projectEvent
+            (customInputDelta "ct-1" "call-9" "still not retained")
+        second `shouldBe` []
 
     it "updates a streamed custom tool from its done item" do
         projectEvent <- newStreamEventToLoopEvents False
@@ -909,13 +1123,8 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                 "apply_patch"
                 "*** Begin Patch")
         events `shouldBe`
-            [ ToolUpdated ToolCall
-                { callId = "call-9"
-                , name = "apply_patch"
-                , arguments = "*** Begin Patch"
-                , callKind = CustomCallKind
-                , argumentsEncrypted = False
-                }
+            [ ToolUpdated
+                (customToolCall "call-9" "apply_patch" "*** Begin Patch")
             ]
 
     it "does not replace a shell preview with coarse argument activity" do
@@ -946,11 +1155,12 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
 
     it "counts custom tool input as argument streaming" do
         projectEvent <- newStreamEventToLoopEvents False
-        _ <- projectEvent (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "large_custom_tool")
         loud <- projectEvent
             (customInputDelta "ct-1" "call-9" (Text.replicate 10000 "p"))
         loud `shouldBe`
-            [ActivityUpdated "Writing apply_patch call… (10k chars)"]
+            [ActivityUpdated "Writing large_custom_tool call… (10k chars)"]
 
     it "keeps plain deltas mapped through the pure projection" do
         projectEvent <- newStreamEventToLoopEvents False
@@ -974,6 +1184,15 @@ functionToolCall functionCallId functionName functionArguments = ToolCall
     , argumentsEncrypted = False
     }
 
+customToolCall :: Text.Text -> Text.Text -> Text.Text -> ToolCall
+customToolCall customCallId customName customInput = ToolCall
+    { callId = customCallId
+    , name = customName
+    , arguments = customInput
+    , callKind = CustomCallKind
+    , argumentsEncrypted = False
+    }
+
 functionCallAdded :: Text.Text -> Text.Text -> Text.Text -> ResponseStreamEvent
 functionCallAdded functionItemId functionCallId functionName =
     ResponseOutputItemAddedEvent
@@ -992,7 +1211,6 @@ functionCallAdded functionItemId functionCallId functionName =
         , sequenceNumber = Just 1
 
         }
-
 functionCallDone
     :: Text.Text
     -> Text.Text
@@ -1120,6 +1338,17 @@ isUserMessage = \case
                 _ -> False
     _ -> False
 
+responseWithOutput :: [ResponseItem] -> Response
+responseWithOutput output =
+    either error id . Codec.decodeResponse . LBS.toStrict . Aeson.encode $
+        Aeson.object
+            [ "id" Aeson..= ("resp-compacted" :: Text.Text)
+            , "created_at" Aeson..= (0 :: Int)
+            , "model" Aeson..= ("grok-4.6" :: Text.Text)
+            , "status" Aeson..= ("completed" :: Text.Text)
+            , "output" Aeson..= output
+            ]
+
 isEmptyAssistantFollowup :: ResponseItem -> Bool
 isEmptyAssistantFollowup = \case
     MessageItem message ->
@@ -1144,12 +1373,5 @@ developerMessage messageText contentItemKinds =
             , createTime = Nothing
             , contentItemKinds = Just contentItemKinds
             , executedToolCalls = Nothing
-
             }
-
         }
-
-jsonField :: Text.Text -> Aeson.Value -> Maybe Aeson.Value
-jsonField fieldName = \case
-    Aeson.Object object -> KeyMap.lookup (Key.fromText fieldName) object
-    _ -> Nothing

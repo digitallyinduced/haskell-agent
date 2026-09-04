@@ -67,6 +67,7 @@ library
                     , stm
                     , text
                     , time
+                    , transformers
                     , unix
                     , vector
 
