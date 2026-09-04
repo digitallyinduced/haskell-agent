@@ -29,6 +29,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async ()
 import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar ()
+import Control.Applicative (many, (<|>))
 import Control.Exception.Safe
     ( SomeException
     , bracket
@@ -44,7 +45,6 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Int ()
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Map.Strict as Map
-import Data.List ()
 import Data.Maybe ()
 import Data.Set ()
 import qualified Data.Set as Set
@@ -53,6 +53,32 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Clock ()
 import qualified Network.HTTP.Client.TLS as HttpTls
+import Options.Applicative
+    ( Parser
+    , ParserInfo
+    , ParserResult(..)
+    , ReadM
+    , argument
+    , command
+    , defaultPrefs
+    , eitherReader
+    , execParserPure
+    , flag'
+    , fullDesc
+    , header
+    , help
+    , helper
+    , hsubparser
+    , info
+    , long
+    , metavar
+    , option
+    , progDesc
+    , renderFailure
+    , short
+    , strOption
+    , (<**>)
+    )
 import qualified System.Directory as Directory ()
 import System.Directory.OsPath
     ( createDirectoryIfMissing
@@ -97,69 +123,127 @@ telegramMain =
     getArgs >>= either die executeTelegramCommand . parseTelegramArgs
 
 parseTelegramArgs :: [String] -> Either String TelegramCommand
-parseTelegramArgs = \case
-    [] -> Right TelegramRun
-    ["run"] -> Right TelegramRun
-    ["start"] -> Right TelegramStart
-    ["stop"] -> Right TelegramStop
-    ["status"] -> Right TelegramStatus
-    ["users", "list"] -> Right (TelegramUsers TelegramUsersList)
-    ["users", "add", value] ->
-        TelegramUsers . TelegramUsersAdd <$> parseUserId value
-    ["users", "remove", value] ->
-        TelegramUsers . TelegramUsersRemove <$> parseUserId value
-    ["--help"] -> Right TelegramHelp
-    ["-h"] -> Right TelegramHelp
-    ["--version"] -> Right TelegramVersion
-    "setup" : rest -> TelegramSetup <$> parseSetupOptions rest
-    _ -> Left telegramUsage
-  where
-    parseUserId value =
-        case readMaybe value of
-            Just userId | userId > 0 -> Right userId
-            _ -> Left ("invalid Telegram user ID: " <> value)
+parseTelegramArgs args =
+    case execParserPure defaultPrefs telegramParserInfo args of
+        Success commandValue -> Right commandValue
+        Failure failure -> Left (fst (renderFailure failure "agent-telegram"))
+        CompletionInvoked _ -> Left telegramUsage
 
-parseSetupOptions :: [String] -> Either String TelegramSetupOptions
-parseSetupOptions = go defaultTelegramSetupOptions
+telegramParserInfo :: ParserInfo TelegramCommand
+telegramParserInfo = info telegramCommandParser
+    (fullDesc
+        <> progDesc "Run and configure the Haskell Agent Telegram gateway"
+        <> header "agent-telegram")
+
+telegramCommandParser :: Parser TelegramCommand
+telegramCommandParser =
+    flag' TelegramHelp
+        (long "help" <> short 'h' <> help "Show this help text")
+        <|> telegramOperationalParser
+
+telegramOperationalParser :: Parser TelegramCommand
+telegramOperationalParser =
+    flag' TelegramVersion (long "version" <> help "Show the version")
+        <|> telegramSubcommandParser
+        <|> pure TelegramRun
+
+telegramSubcommandParser :: Parser TelegramCommand
+telegramSubcommandParser = hsubparser
+    ( command "setup"
+        (info (TelegramSetup <$> telegramSetupOptionsParser)
+            (progDesc "Configure the Telegram gateway"))
+        <> command "run"
+            (info (pure TelegramRun) (progDesc "Run the configured gateway"))
+        <> command "start"
+            (info (pure TelegramStart) (progDesc "Start the background gateway"))
+        <> command "stop"
+            (info (pure TelegramStop) (progDesc "Stop the background gateway"))
+        <> command
+            "status"
+            (info (pure TelegramStatus) (progDesc "Show gateway status"))
+        <> command "users"
+            (info telegramUsersParser (progDesc "Manage allowed Telegram users"))
+    )
+
+telegramUsersParser :: Parser TelegramCommand
+telegramUsersParser = TelegramUsers <$> hsubparser
+    ( command "list"
+        (info (pure TelegramUsersList) (progDesc "List allowed users"))
+        <> command "add"
+            (info
+                (TelegramUsersAdd <$> argument telegramUserIdReader (metavar "ID"))
+                (progDesc "Allow a Telegram user"))
+        <> command "remove"
+            (info
+                (TelegramUsersRemove <$> argument telegramUserIdReader (metavar "ID"))
+                (progDesc "Remove a Telegram user"))
+    )
+
+telegramSetupOptionsParser :: Parser TelegramSetupOptions
+telegramSetupOptionsParser =
+    foldl' (\options update -> update options) defaultTelegramSetupOptions
+        <$> many setupOption
   where
-    go options = \case
-        [] -> Right options
-        "--provider" : value : rest ->
-            case parseProvider (Text.pack value) of
-                Nothing -> Left ("unknown provider: " <> value)
-                Just provider -> go options { setupProvider = Just provider } rest
-        "--model" : value : rest ->
-            go options { setupModel = Just (Text.pack value) } rest
-        "--cwd" : value : rest ->
-            go options { setupCwd = Just value } rest
-        "--effort" : value : rest ->
-            go options { setupEffort = Just (Text.pack value) } rest
-        "--allowed-user" : value : rest ->
-            case readMaybe value of
-                Just userId | userId > 0 ->
-                    go options
-                        { setupAllowedUsers =
-                            options.setupAllowedUsers <> [userId]
-                        }
-                        rest
-                _ -> Left ("invalid Telegram user ID: " <> value)
-        "--yolo" : rest ->
-            go options { setupApprovalMode = TelegramApprovalYolo } rest
-        "--deny-mutations" : rest ->
-            go options { setupApprovalMode = TelegramApprovalDeny } rest
-        "--all-group-messages" : rest ->
-            go options { setupRespondToAllGroupMessages = True } rest
-        "--workers" : value : rest ->
-            case readMaybe value of
-                Just workers
-                    | workers >= 1
-                    , workers <= maximumTelegramWorkerCount ->
-                        go options { setupWorkerCount = workers } rest
-                _ -> Left
-                    ("workers must be between 1 and "
-                        <> show maximumTelegramWorkerCount)
-        "--start" : rest -> go options { setupStart = True } rest
-        flag : _ -> Left ("unknown setup option: " <> flag <> "\n\n" <> telegramUsage)
+    setupOption =
+        (\provider options -> options { setupProvider = Just provider })
+            <$> option providerReader
+                (long "provider" <> metavar "NAME" <> help "Provider name")
+        <|> (\model options -> options { setupModel = Just (Text.pack model) })
+            <$> strOption
+                (long "model" <> metavar "NAME"
+                    <> help "Optional model override")
+        <|> (\cwd options -> options { setupCwd = Just cwd })
+            <$> strOption
+                (long "cwd" <> metavar "PATH" <> help "Agent working directory")
+        <|> (\effort options -> options { setupEffort = Just (Text.pack effort) })
+            <$> strOption
+                (long "effort" <> metavar "LEVEL"
+                    <> help "Optional reasoning effort")
+        <|> (\userId options ->
+                options
+                    { setupAllowedUsers = options.setupAllowedUsers <> [userId] })
+            <$> option telegramUserIdReader
+                (long "allowed-user" <> metavar "ID"
+                    <> help "Allowed Telegram user ID; may be repeated")
+        <|> flag' (\options ->
+                options { setupApprovalMode = TelegramApprovalYolo })
+            (long "yolo" <> help "Auto-approve mutating agent tools")
+        <|> flag' (\options ->
+                options { setupApprovalMode = TelegramApprovalDeny })
+            (long "deny-mutations" <> help "Deny mutating agent tools")
+        <|> flag' (\options ->
+                options { setupRespondToAllGroupMessages = True })
+            (long "all-group-messages"
+                <> help "Consider every allowed-user group message")
+        <|> (\workers options -> options { setupWorkerCount = workers })
+            <$> option workerCountReader
+                (long "workers" <> metavar "N"
+                    <> help ("Concurrent chat workers (1-"
+                        <> show maximumTelegramWorkerCount <> ")"))
+        <|> flag' (\options -> options { setupStart = True })
+            (long "start" <> help "Start the gateway after setup")
+
+providerReader :: ReadM Provider
+providerReader = eitherReader \value ->
+    maybe (Left ("unknown provider: " <> value)) Right
+        (parseProvider (Text.pack value))
+
+telegramUserIdReader :: ReadM Integer
+telegramUserIdReader = eitherReader \value ->
+    case readMaybe value of
+        Just userId | userId > 0 -> Right userId
+        _ -> Left ("invalid Telegram user ID: " <> value)
+
+workerCountReader :: ReadM Int
+workerCountReader = eitherReader \value ->
+    case readMaybe value of
+        Just workers
+            | workers >= 1
+            , workers <= maximumTelegramWorkerCount ->
+                Right workers
+        _ -> Left
+            ("workers must be between 1 and "
+                <> show maximumTelegramWorkerCount)
 
 executeTelegramCommand :: TelegramCommand -> IO ()
 executeTelegramCommand = \case
@@ -173,29 +257,16 @@ executeTelegramCommand = \case
     TelegramVersion -> putStrLn "agent-telegram 0.1.0.0"
 
 telegramUsage :: String
-telegramUsage = unlines
-    [ "Usage: agent-telegram setup [OPTIONS]"
-    , "       agent-telegram run"
-    , "       agent-telegram start"
-    , "       agent-telegram stop"
-    , "       agent-telegram status"
-    , "       agent-telegram users list|add ID|remove ID"
-    , ""
-    , "Setup options:"
-    , "  --provider NAME       openai, xai, openrouter, gemini, or claude-code"
-    , "  --model NAME          optional model override"
-    , "  --cwd PATH            agent working directory"
-    , "  --effort LEVEL        optional reasoning effort"
-    , "  --allowed-user ID     numeric Telegram user ID"
-    , "                          may be repeated"
-    , "  --yolo                auto-approve mutating agent tools"
-    , "  --deny-mutations       deny mutating agent tools"
-    , "                          default: ask with Telegram buttons"
-    , "  --all-group-messages  consider every allowed-user group message"
-    , "                          and reply only when useful"
-    , "  --workers N           concurrent chat workers (1-64, default: 8)"
-    , "  --start               start the gateway after setup"
-    ]
+telegramUsage =
+    case execParserPure defaultPrefs
+        (info (telegramOperationalParser <**> helper)
+            (fullDesc
+                <> progDesc
+                    "Run and configure the Haskell Agent Telegram gateway"
+                <> header "agent-telegram"))
+        ["--help"] of
+        Failure failure -> fst (renderFailure failure "agent-telegram")
+        _ -> "Usage: agent-telegram COMMAND"
 
 manageTelegramUsers :: TelegramUsersCommand -> IO ()
 manageTelegramUsers command = do

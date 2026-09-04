@@ -73,12 +73,20 @@ spec = describe "Agent.MCP.OAuth" do
         it "reports the origin" do
             resourceOrigin "https://mcp.example.com:8443/server/mcp" `shouldBe` Just "https://mcp.example.com:8443"
             resourceOrigin "not a url" `shouldBe` Nothing
+            resourceOrigin "1https://mcp.example.com/server" `shouldBe` Nothing
+            resourceOrigin "https://?query" `shouldBe` Nothing
+            resourceOrigin "https://user@mcp.example.com/server" `shouldBe` Nothing
+            resourceOrigin "https://mcp.example.com:/server" `shouldBe` Nothing
+            resourceOrigin "https://mcp.example.com:0/server" `shouldBe` Nothing
+            resourceOrigin "https://mcp.example.com:65536/server" `shouldBe` Nothing
 
         it "extracts loopback redirect ports" do
             loopbackRedirectPort "http://127.0.0.1:43127/callback" `shouldBe` Just 43127
             loopbackRedirectPort "http://localhost:8080/callback" `shouldBe` Just 8080
+            loopbackRedirectPort "http://[::1]:43127/callback" `shouldBe` Just 43127
             loopbackRedirectPort "https://example.com:443/callback" `shouldBe` Nothing
             loopbackRedirectPort "http://127.0.0.1/callback" `shouldBe` Nothing
+            loopbackRedirectPort "http://user@127.0.0.1:43127/callback" `shouldBe` Nothing
 
     describe "protectedResourceMetadataUrls" do
         it "tries the path-aware well-known URI before the root" do
