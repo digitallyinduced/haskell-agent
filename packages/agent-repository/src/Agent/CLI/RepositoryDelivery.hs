@@ -13,15 +13,15 @@ module Agent.CLI.RepositoryDelivery
     , validateRemoteName
     ) where
 
-import Control.Concurrent (forkIO, threadDelay)
+import Agent.CLI.RepositoryDelivery.ConfirmationStore
+    ( ConfirmationStore
+    , insertConfirmation
+    , newConfirmationStore
+    , takeConfirmation
+    )
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (cancel, wait, withAsync)
 import Control.Applicative ((<|>))
-import Control.Concurrent.MVar
-    ( MVar
-    , modifyMVar
-    , modifyMVar_
-    , newMVar
-    )
 import Control.Exception.Safe
     ( SomeException
     , bracket
@@ -32,7 +32,7 @@ import Control.Exception.Safe
     , throwIO
     , tryAny
     )
-import Control.Monad (forever, unless, when)
+import Control.Monad (unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
@@ -50,8 +50,6 @@ import Data.IORef
     , readIORef
     , writeIORef
     )
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -198,7 +196,6 @@ instance Eq ValidatedRemote where
 
 data StoredConfirmation = StoredConfirmation
     { storedRoot :: !FilePath
-    , storedDeadlineNanos :: !Word64
     , storedConfirmation :: !Confirmation
     }
 
@@ -1428,25 +1425,16 @@ storeConfirmation root confirmation = do
     token <- randomToken
     let expiresAt = wallNow + confirmationLifetimeSeconds
         deadline = saturatingAdd monotonicNow confirmationLifetimeNanos
-    stored <- modifyMVar deliveryConfirmations \confirmations ->
-        let active = Map.filter
-                (\entry -> entry.storedDeadlineNanos > monotonicNow)
-                confirmations
-        in if Map.size active >= maxActiveConfirmations
-            || Map.member token active
-            then pure (active, False)
-            else
-                pure
-                    ( Map.insert
-                        token
-                        StoredConfirmation
-                            { storedRoot = root
-                            , storedDeadlineNanos = deadline
-                            , storedConfirmation = confirmation
-                            }
-                        active
-                    , True
-                    )
+    stored <-
+        insertConfirmation
+            deliveryConfirmations
+            maxActiveConfirmations
+            token
+            deadline
+            StoredConfirmation
+                { storedRoot = root
+                , storedConfirmation = confirmation
+                }
     unless stored (fail "repository delivery confirmation capacity exhausted")
     pure (token, expiresAt)
 
@@ -1476,34 +1464,27 @@ consumeConfirmation requested token
                             "repository state could not be verified"))
             Just (Right snapshot) -> do
                 monotonicNow <- getMonotonicTimeNSec
-                modifyMVar deliveryConfirmations \confirmations ->
-                    let pruned = Map.filter
-                            (\stored ->
-                                stored.storedDeadlineNanos > monotonicNow)
-                            confirmations
-                    in case Map.lookup token pruned of
+                takeConfirmation
+                    deliveryConfirmations
+                    token
+                    monotonicNow >>= \case
                         Nothing ->
                             pure
-                                ( pruned
-                                , Left
+                                (Left
                                     (DeliveryConfirmationRejected
                                         "confirmation token expired or was already used")
                                 )
                         Just stored ->
-                            let remaining = Map.delete token pruned
-                            in if stored.storedRoot /= snapshot.snapshotRoot
+                            if stored.storedRoot /= snapshot.snapshotRoot
                                 then
                                     pure
-                                        ( remaining
-                                        , Left
+                                        (Left
                                             (DeliveryConfirmationRejected
                                                 "confirmation token belongs to another repository")
                                         )
                                 else
                                     pure
-                                        ( remaining
-                                        , Right stored.storedConfirmation
-                                        )
+                                        (Right stored.storedConfirmation)
 
 randomToken :: IO Text
 randomToken =
@@ -2300,13 +2281,5 @@ maxActiveConfirmations :: Int
 maxActiveConfirmations = 1024
 
 {-# NOINLINE deliveryConfirmations #-}
-deliveryConfirmations :: MVar (Map Text StoredConfirmation)
-deliveryConfirmations = unsafePerformIO do
-    confirmations <- newMVar Map.empty
-    _ <- forkIO $ forever do
-        threadDelay 60_000_000
-        monotonicNow <- getMonotonicTimeNSec
-        modifyMVar_ confirmations
-            (pure . Map.filter
-                (\stored -> stored.storedDeadlineNanos > monotonicNow))
-    pure confirmations
+deliveryConfirmations :: ConfirmationStore StoredConfirmation
+deliveryConfirmations = unsafePerformIO newConfirmationStore

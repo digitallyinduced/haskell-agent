@@ -39,6 +39,7 @@ library
     hs-source-dirs:   src
     other-modules:    Agent.CLI.ProcessSecurity
     exposed-modules:  Agent.CLI.RepositoryDelivery
+                    , Agent.CLI.RepositoryDelivery.ConfirmationStore
                     , Agent.CLI.RepositoryReview
     build-depends:    aeson >= 2.0
                     , async
