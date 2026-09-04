@@ -630,10 +630,7 @@ buildSkillContextRuntime
                         (UiSystemMessage (formatSkillOmission omitted))
     initializeSkills = do
         markStartupStage startup "Loading skills…"
-        skills <-
-            if loadsHostWorkspaceContext
-                then loadSkillsCatalogQuiet options home projectRoot cwd
-                else pure (SkillCatalog [] [])
+        skills <- readIORef skillsRef
         (omitted, _) <- installSkills startupContext
             queueInitialContext
             skills
@@ -909,6 +906,8 @@ buildSessionShellRuntime host SessionRequest{..} =
                             systemPromptForToolsWithHostedSearch
                                 nativeCapabilities.nativeProviderHostedTools
                                 dialect
+                                commitAttributionModel
+                                commitAttributionEffort
                                 enabledNames
                                 cwd
                                 sessionTmp
@@ -1556,7 +1555,7 @@ runSessionInteraction
                         request.managedTurnText
                         inputs
                         >>= either
-                            (startupDie startup . Text.unpack)
+                            (startupDie startup)
                             pure
                 result <- runOneTurn env request.managedTurnText skillInputs
                 callbacks.runnerFinishTurn env True result
@@ -1587,7 +1586,7 @@ runSessionInteraction
                 text
                 [UserMessage text]
                 >>= either
-                    (startupDie startup . Text.unpack)
+                    (startupDie startup)
                     pure
         forM_ host.hostFullscreen \runtime ->
             emitUiEvent runtime (UiUserSubmitted text)

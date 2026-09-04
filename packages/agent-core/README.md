@@ -29,5 +29,35 @@ Provider-neutral infrastructure shared by the harness transports:
   unfinished exchanges poison the session so abandoned frames cannot leak
   into its successor.
 
+## Backend middleware
+
+`Backend` represents one provider/model submission. The corresponding
+middleware type is deliberately just a function:
+
+```haskell
+type BackendMiddleware = Backend -> Backend
+```
+
+Middleware therefore composes with ordinary `(.)`, uses `id` as its empty
+value, and needs no framework-specific combinator:
+
+```haskell
+middleware :: BackendMiddleware
+middleware =
+    addPendingInputs
+        . compactContext
+        . recoverConnections
+
+backend :: Backend
+backend = middleware providerBackend
+```
+
+The leftmost middleware is outermost: it sees the request first and the
+result last. A `BackendMiddleware` wraps only the provider step, including its
+streamed events and returned tool calls. Tool approval and execution happen
+later in `Agent.Loop`, outside this boundary. Consequently, retry middleware
+can replay a provider submission without replaying tools that the host has
+already completed.
+
 This package does not contain OpenAI, ChatGPT, xAI, OpenRouter, or Gemini
 transport logic.
