@@ -13,9 +13,9 @@ import Agent.MCP.Fleet
     )
 import Agent.MCP.Types
 import Control.Concurrent.Async
-    ( asyncWithUnmask
-    , cancel
+    ( cancel
     , waitCatch
+    , withAsyncWithUnmask
     )
 import Control.Concurrent.MVar
     ( modifyMVar
@@ -191,19 +191,18 @@ acquireMcpFleetWith supervisor progressive start configs =
                 (\fleet -> makeLease (entryId, fleet))
                 result
         StartPending entryId completion workerSlot -> do
-            worker <-
-                asyncWithUnmask \unmask ->
-                    tryAny (unmask (start configs)) >>= \case
-                        Left exception ->
-                            pure (Left (exceptionSummary exception))
-                        Right fleet -> pure (Right fleet)
-            atomically $ void (tryPutTMVar workerSlot worker)
-            mapM_ closeMcpFleet obsolete
             outcome <-
-                restore (waitCatch worker)
-                    `onException` do
-                        cancel worker
-                        void (waitCatch worker)
+                (withAsyncWithUnmask
+                    (\unmask ->
+                        tryAny (unmask (start configs)) >>= \case
+                            Left exception ->
+                                pure (Left (exceptionSummary exception))
+                            Right fleet -> pure (Right fleet))
+                    \worker -> do
+                        atomically $ void (tryPutTMVar workerSlot worker)
+                        mapM_ closeMcpFleet obsolete
+                        restore (waitCatch worker))
+                    `onException`
                         failPending entryId completion
                             "MCP fleet startup cancelled"
             case outcome of
