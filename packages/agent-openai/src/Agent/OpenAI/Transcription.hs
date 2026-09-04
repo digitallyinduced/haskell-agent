@@ -1,6 +1,7 @@
 -- | Microphone transcription through OpenAI and ChatGPT.
 module Agent.OpenAI.Transcription
     ( ChatGPTDictationEvent(..)
+    , ChatGPTDictationStreamFailure(..)
     , TranscriptEvent(..)
     , chatGPTTranscriptionBaseUrl
     , decodeChatGPTDictationEvent
@@ -11,6 +12,7 @@ module Agent.OpenAI.Transcription
     , openAITranscriptionSampleRate
     , transcribePcmWithOpenAI
     , transcribePcmWithOpenAIAt
+    , transcribePcmWithChatGPTStreamAt
     ) where
 
 import Agent.Error
@@ -118,6 +120,11 @@ data TranscriptEvent
         { transcriptMessage :: !Text
         }
     | TranscriptUnknown
+    deriving (Eq, Show)
+
+data ChatGPTDictationStreamFailure
+    = ChatGPTDictationStreamUnavailable !Text
+    | ChatGPTDictationCaptureFailed !Text
     deriving (Eq, Show)
 
 transcriptEventDecoder :: Json.Decoder TranscriptEvent
@@ -271,6 +278,94 @@ transcribePcmWithOpenAIAt baseUrl provider produceAudio onTranscript =
                 provider
                 produceAudio
                 onTranscript
+
+-- | Stream PCM through a ChatGPT-compatible dictation WebSocket at an exact
+-- URL. Trusted gateways use this to terminate their own bearer and proxy the
+-- opaque dictation protocol without exposing an upstream credential.
+transcribePcmWithChatGPTStreamAt
+    :: Text
+    -> WS.Headers
+    -> ((BS.ByteString -> IO ()) -> IO ())
+    -> (Text -> IO ())
+    -> IO (Either ChatGPTDictationStreamFailure Text)
+transcribePcmWithChatGPTStreamAt
+    websocketUrl
+    headers
+    produceAudio
+    onTranscript =
+        case chatGPTStreamEndpointAt websocketUrl of
+            Left message ->
+                pure (Left (ChatGPTDictationStreamUnavailable message))
+            Right endpoint ->
+                tryAny
+                    (runChatGPTWebSocketWith
+                        endpoint
+                        headers
+                        (streamSession produceAudio onTranscript)) >>= \case
+                            Left err
+                                | isSyncException err ->
+                                    pure $ Left $ ChatGPTDictationStreamUnavailable
+                                        ("Gateway dictation stream failed: "
+                                            <> Text.pack
+                                                (displayException err))
+                                | otherwise ->
+                                    throwIO err
+                            Right (ChatGPTStreamSucceeded transcript) ->
+                                pure (Right transcript)
+                            Right (ChatGPTStreamUnavailable message) ->
+                                pure
+                                    (Left
+                                        (ChatGPTDictationStreamUnavailable
+                                            message))
+                            Right (ChatGPTCaptureFailed message) ->
+                                pure
+                                    (Left
+                                        (ChatGPTDictationCaptureFailed
+                                            message))
+  where
+    streamSession capture notify connection = do
+        audio <- newChan
+        withAsync
+            (capture (writeChan audio . Just)
+                `finally` writeChan audio Nothing)
+            \captureWorker ->
+                withAsync
+                    (chatGPTStreamSession audio notify connection)
+                    \streamWorker ->
+                        waitEitherCatch
+                            captureWorker
+                            streamWorker >>= \case
+                                Left (Left err)
+                                    | isSyncException err -> do
+                                        cancel streamWorker
+                                        pure $ ChatGPTCaptureFailed
+                                            (Text.pack
+                                                (displayException err))
+                                    | otherwise ->
+                                        throwIO err
+                                Left (Right ()) ->
+                                    waitCatch streamWorker
+                                        >>= resolveStreamResult
+                                Right streamResult -> do
+                                    waitCatch captureWorker >>= \case
+                                        Left err
+                                            | isSyncException err ->
+                                                pure $ ChatGPTCaptureFailed
+                                                    (Text.pack
+                                                        (displayException err))
+                                            | otherwise ->
+                                                throwIO err
+                                        Right () ->
+                                            resolveStreamResult streamResult
+    resolveStreamResult = \case
+        Left err
+            | isSyncException err ->
+                pure $ ChatGPTStreamUnavailable
+                    (Text.pack (displayException err))
+            | otherwise ->
+                throwIO err
+        Right outcome ->
+            pure outcome
 
 transcribeRealtimeWithProvider
     :: TokenProvider
@@ -821,23 +916,7 @@ runChatGPTWebSocket
     -> WS.ClientApp a
     -> IO a
 runChatGPTWebSocket endpoint credential client =
-    if endpoint.streamSecure
-        then
-            Wuss.runSecureClientWith
-                endpoint.streamHost
-                (fromIntegral endpoint.streamPort)
-                endpoint.streamPath
-                WS.defaultConnectionOptions
-                headers
-                client
-        else
-            WS.runClientWith
-                endpoint.streamHost
-                endpoint.streamPort
-                endpoint.streamPath
-                WS.defaultConnectionOptions
-                headers
-                client
+    runChatGPTWebSocketWith endpoint headers client
   where
     headers =
         [ -- Codex Desktop loads its renderer from @app://-/index.html@.
@@ -861,20 +940,55 @@ runChatGPTWebSocket endpoint credential client =
           )
         ]
 
+runChatGPTWebSocketWith
+    :: ChatGPTStreamEndpoint
+    -> WS.Headers
+    -> WS.ClientApp a
+    -> IO a
+runChatGPTWebSocketWith endpoint headers client =
+    if endpoint.streamSecure
+        then
+            Wuss.runSecureClientWith
+                endpoint.streamHost
+                (fromIntegral endpoint.streamPort)
+                endpoint.streamPath
+                WS.defaultConnectionOptions
+                headers
+                client
+        else
+            WS.runClientWith
+                endpoint.streamHost
+                endpoint.streamPort
+                endpoint.streamPath
+                WS.defaultConnectionOptions
+                headers
+                client
+
 chatGPTStreamEndpoint :: Text -> Either Text ChatGPTStreamEndpoint
 chatGPTStreamEndpoint baseUrl = do
+    endpoint <- chatGPTStreamEndpointAt baseUrl
+    pure endpoint
+        { streamPath =
+            dropTrailingSlashes endpoint.streamPath
+                <> "/dictation/stream"
+        }
+
+chatGPTStreamEndpointAt :: Text -> Either Text ChatGPTStreamEndpoint
+chatGPTStreamEndpointAt websocketUrl = do
     uri <- maybe
-        (Left "ChatGPT transcription base URL is invalid")
+        (Left "Dictation WebSocket URL is invalid")
         Right
-        (parseURI (Text.unpack baseUrl))
+        (parseURI (Text.unpack websocketUrl))
     authority <- maybe
-        (Left "ChatGPT transcription base URL has no authority")
+        (Left "Dictation WebSocket URL has no authority")
         Right
         uri.uriAuthority
     secure <- case uri.uriScheme of
         "https:" -> Right True
+        "wss:" -> Right True
         "http:" -> Right False
-        _ -> Left "ChatGPT transcription base URL must use HTTP or HTTPS"
+        "ws:" -> Right False
+        _ -> Left "Dictation WebSocket URL must use WS, WSS, HTTP, or HTTPS"
     port <- case authority.uriPort of
         "" ->
             Right (if secure then 443 else 80)
@@ -884,18 +998,16 @@ chatGPTStreamEndpoint baseUrl = do
                     | value > 0 && value <= 65_535 ->
                         Right value
                 _ ->
-                    Left "ChatGPT transcription base URL has an invalid port"
+                    Left "Dictation WebSocket URL has an invalid port"
         _ ->
-            Left "ChatGPT transcription base URL has an invalid port"
+            Left "Dictation WebSocket URL has an invalid port"
     if null authority.uriRegName
-        then Left "ChatGPT transcription base URL has no host"
+        then Left "Dictation WebSocket URL has no host"
         else
             Right ChatGPTStreamEndpoint
                 { streamHost = authority.uriRegName
                 , streamPort = port
-                , streamPath =
-                    dropTrailingSlashes uri.uriPath
-                        <> "/dictation/stream"
+                , streamPath = uri.uriPath <> uri.uriQuery
                 , streamSecure = secure
                 }
 

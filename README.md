@@ -330,8 +330,10 @@ For Grok models, dictation uses the configured xAI subscription or API-key
 credential; set `XAI_STT_LANGUAGE` to override xAI's default `en`.
 When an organization gateway is connected, the recording is sent only to the
 gateway's authenticated `/v1/audio/transcriptions` endpoint. The gateway uses
-its organization-managed transcription pool and returns a final transcript
-after recording stops; it never falls back to local provider credentials.
+its organization-managed transcription pool and streams partial transcripts
+into the composer while recording. Compatible older gateways and interrupted
+streams use the final-only upload on the same endpoint with the already
+captured recording; dictation never falls back to local provider credentials.
 Dictation is currently unavailable for OpenRouter and Gemini models.
 
 ### Claude Code subscription
