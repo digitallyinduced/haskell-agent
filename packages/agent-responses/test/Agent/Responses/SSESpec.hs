@@ -103,16 +103,10 @@ spec = describe "Responses SSE decoder" do
         let payload =
                 "{\"type\":\"codex.rate_limits\",\"sequence_number\":7,"
                 <> "\"rate_limits\":{\"allowed\":true,\"limit_reached\":false,"
-                <> "\"primary\":{\"used_percent\":12.5,\"window_minutes\":300},"
-                <> "\"secondary\":{\"used_percent\":3.0,\"window_minutes\":10080}}}"
+                <> "\"primary\":{\"used_percent\":12.5},"
+                <> "\"secondary\":{\"used_percent\":3.0}}}"
         event <- expectRight $
             Codec.decodeResponseStreamEvent payload
-        case event of
-            ResponseCodexRateLimitsEvent { rateLimits } -> do
-                rateLimits.primaryWindowMinutes `shouldBe` Just 300
-                rateLimits.secondaryWindowMinutes `shouldBe` Just 10080
-            other -> expectationFailure
-                ("unexpected Codex rate-limit event: " <> show other)
         Codec.decodeResponseStreamEvent
             (LBS.toStrict (Aeson.encode event))
             `shouldBe` Right event

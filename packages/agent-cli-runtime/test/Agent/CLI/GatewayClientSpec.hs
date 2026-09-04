@@ -119,6 +119,29 @@ spec = describe "gateway device authorization" do
             `shouldReturn` Left "gateway unavailable"
         cachedGatewayModels access `shouldReturn` Nothing
 
+    it "passes the exact public alias to the gateway usage transport" do
+        aliases <- newIORef ([] :: [Text.Text])
+        access <-
+            newGatewayModelAccessWithUsage
+                (pure (Right []))
+                (\model -> do
+                    atomicModifyIORef' aliases \current ->
+                        (current <> [model], ())
+                    pure (Left "usage unavailable"))
+        fetchGatewayUsage access "team/gpt-5.6?profile=weekly"
+            `shouldReturn` Left "usage unavailable"
+        atomicModifyIORef' aliases (\current -> (current, current))
+            `shouldReturn` ["team/gpt-5.6?profile=weekly"]
+
+    it "redacts thrown gateway usage transport errors" do
+        access <-
+            newGatewayModelAccessWithUsage
+                (pure (Right []))
+                (\_ -> throwString "gateway-bearer-secret")
+        fetchGatewayUsage access "company-model"
+            `shouldReturn`
+                Left "Could not refresh organization gateway usage."
+
     it "keeps gateway dictation behind the opaque model access" do
         events <- newIORef ([] :: [Text.Text])
         access <-

@@ -1109,84 +1109,11 @@ streamEventToLoopEventsStep showRawReasoning state event =
     ( StreamProjectionState nextArguments
     , maybeToList
         (streamEventToLoopEventWithRawReasoning showRawReasoning event)
-        <> maybeToList (codexRateLimitsUpdate event)
         <> argumentEvents
     )
   where
     (nextArguments, argumentEvents) =
         toolArgumentStreamStep event state.streamToolArguments
-
-codexRateLimitsUpdate :: ResponseStreamEvent -> Maybe LoopEvent
-codexRateLimitsUpdate = \case
-    ResponseCodexRateLimitsEvent { rateLimits = limits } -> do
-        (used, windowMinutes, fallbackLabel, _) <-
-            longestCodexRateLimitWindow limits
-        pure $ limitUpdate
-            (codexRateLimitLabel fallbackLabel windowMinutes)
-            used
-    _ -> Nothing
-  where
-    limitUpdate label used =
-        let remaining :: Int
-            remaining = max 0 (min 100 (round (100 - used)))
-        in ProviderLimitUpdated
-            { providerLimitText =
-                label <> ": " <> Text.pack (show remaining) <> "%"
-            , providerLimitWarning = remaining <= 10
-            }
-
-longestCodexRateLimitWindow
-    :: CodexRateLimits
-    -> Maybe (Double, Maybe Int, Text, Int)
-longestCodexRateLimitWindow limits =
-    case (primary, secondary) of
-        (Nothing, Nothing) -> Nothing
-        (Just window, Nothing) -> Just window
-        (Nothing, Just window) -> Just window
-        (Just primaryWindow, Just secondaryWindow)
-            | windowDuration primaryWindow >= windowDuration secondaryWindow ->
-                Just primaryWindow
-            | otherwise -> Just secondaryWindow
-  where
-    primary =
-        makeWindow
-            "5h limit left"
-            (5 * minutesPerHour)
-            limits.primaryWindowMinutes
-            <$> limits.primaryUsedPercent
-    secondary =
-        makeWindow
-            "Weekly limit left"
-            minutesPerWeek
-            limits.secondaryWindowMinutes
-            <$> limits.secondaryUsedPercent
-    makeWindow fallbackLabel fallbackMinutes windowMinutes used =
-        ( used
-        , windowMinutes
-        , fallbackLabel
-        , fromMaybe fallbackMinutes windowMinutes
-        )
-    windowDuration (_, _, _, duration) = duration
-
-codexRateLimitLabel :: Text -> Maybe Int -> Text
-codexRateLimitLabel fallbackLabel = \case
-    Nothing -> fallbackLabel
-    Just minutes
-        | normalized == minutesPerWeek -> "Weekly limit left"
-        | normalized `mod` minutesPerDay == 0 ->
-            countLabel (normalized `div` minutesPerDay) "d"
-        | normalized `mod` minutesPerHour == 0 ->
-            countLabel (normalized `div` minutesPerHour) "h"
-        | otherwise -> countLabel normalized "m"
-      where
-        normalized = max 0 minutes
-        countLabel count suffix =
-            Text.pack (show count) <> suffix <> " limit left"
-
-minutesPerHour, minutesPerDay, minutesPerWeek :: Int
-minutesPerHour = 60
-minutesPerDay = 24 * minutesPerHour
-minutesPerWeek = 7 * minutesPerDay
 
 -- | Emit an updated argument-streaming activity after this many additional
 -- streamed argument characters.

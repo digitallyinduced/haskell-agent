@@ -983,45 +983,18 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                 call.callId == "call-2" && call.name == "apply_patch"
             _ -> False
 
-    it "publishes Codex weekly capacity updates for retained prompt chrome" do
+    it "leaves Codex capacity display to the authoritative usage endpoint" do
         projectEvent <- newStreamEventToLoopEvents False
         events <- projectEvent ResponseCodexRateLimitsEvent
             { rateLimits = CodexRateLimits
                 { allowed = Just True
                 , limitReached = Just False
                 , primaryUsedPercent = Just 12
-                , primaryWindowMinutes = Just 300
                 , secondaryUsedPercent = Just 79
-                , secondaryWindowMinutes = Just 10080
                 }
             , sequenceNumber = Nothing
             }
-        events `shouldBe`
-            [ ProviderLimitUpdated
-                { providerLimitText = "Weekly limit left: 21%"
-                , providerLimitWarning = False
-                }
-            ]
-
-    it "labels a primary seven-day Codex capacity window as weekly" do
-        projectEvent <- newStreamEventToLoopEvents False
-        events <- projectEvent ResponseCodexRateLimitsEvent
-            { rateLimits = CodexRateLimits
-                { allowed = Just True
-                , limitReached = Just False
-                , primaryUsedPercent = Just 79
-                , primaryWindowMinutes = Just 10080
-                , secondaryUsedPercent = Nothing
-                , secondaryWindowMinutes = Nothing
-                }
-            , sequenceNumber = Nothing
-            }
-        events `shouldBe`
-            [ ProviderLimitUpdated
-                { providerLimitText = "Weekly limit left: 21%"
-                , providerLimitWarning = False
-                }
-            ]
+        events `shouldBe` []
 
     it "publishes a streamed function call immediately" do
         projectEvent <- newStreamEventToLoopEvents False
