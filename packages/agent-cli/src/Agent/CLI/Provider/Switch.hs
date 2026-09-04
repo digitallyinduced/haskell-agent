@@ -106,7 +106,7 @@ import Agent.Error
     ( ApiError(..)
     , CredentialExhaustionReason(..)
     )
-import Agent.Loop (Backend(..))
+import Agent.Loop (Backend(..), BackendMiddleware)
 import Agent.Provider
     ( AccountFailure(..)
     , BillingMode(..)
@@ -949,8 +949,7 @@ commitBackendOnSuccess
     -> IORef Bool
     -> ProviderTransition
     -> Persistence
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 commitBackendOnSuccess
         scope home projectRoot committed transition persist (Backend submit) =
     Backend \state previous inputs onEvent -> do

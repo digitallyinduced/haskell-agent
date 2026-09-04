@@ -103,12 +103,12 @@ defaultJournalConfig directory =
         }
 
 data JournalError
-    = JournalCorrupt FilePath String
+    = JournalCorrupt FilePath Text
     | JournalEventGap Sequence Sequence
     | JournalEventTooLarge Int Int
     | JournalTaskCapacityExceeded Int
     | JournalFileTooLarge FilePath Integer Integer
-    | JournalPoisoned String
+    | JournalPoisoned Text
     | JournalInsecurePath FilePath
     | JournalSequenceExhausted Sequence
     deriving stock (Eq, Show)
@@ -139,7 +139,7 @@ data Journal = Journal
     , state :: MVar JournalState
     , subscribers :: TVar (Map Int Subscription)
     , nextSubscriber :: TVar Int
-    , poisoned :: TVar (Maybe String)
+    , poisoned :: TVar (Maybe Text)
     }
 
 data Subscription = Subscription
@@ -191,7 +191,7 @@ recoverTask config saved event
     | event.eventType /= "task_changed" = pure saved
     | otherwise =
         case fromJSON event.payload of
-            Error message -> throwIO (JournalCorrupt "events.jsonl" message)
+            Error message -> throwIO (JournalCorrupt "events.jsonl" (Text.pack message))
             Success task -> do
                 let boundedTask = boundTaskLog config task
                 boundedTasks <-
@@ -208,7 +208,7 @@ normaliseRecoveredEvent config event
         pure event {payload = redactValue event.payload}
     | otherwise =
         case fromJSON event.payload of
-            Error message -> throwIO (JournalCorrupt "events.jsonl" message)
+            Error message -> throwIO (JournalCorrupt "events.jsonl" (Text.pack message))
             Success task ->
                 pure event {payload = toJSON (boundTaskLog config task)}
 
@@ -505,7 +505,7 @@ readSnapshot config = do
     readPrivateFile (snapshotPath config) (fromIntegral config.maximumSnapshotBytes) >>= \case
         Just bytes ->
             case eitherDecodeStrict' bytes of
-                Left message -> throwIO (JournalCorrupt (snapshotPath config) message)
+                Left message -> throwIO (JournalCorrupt (snapshotPath config) (Text.pack message))
                 Right saved -> pure (True, saved)
         Nothing -> pure (False, emptySnapshot)
   where
@@ -521,7 +521,11 @@ readEvents config = do
 decodeLine :: FromJSON value => (Int, BS.ByteString) -> IO value
 decodeLine (lineNumber, bytes) =
     case eitherDecodeStrict' bytes of
-        Left message -> throwIO (JournalCorrupt "events.jsonl" ("line " <> show lineNumber <> ": " <> message))
+        Left message ->
+            throwIO $
+                JournalCorrupt
+                    "events.jsonl"
+                    ("line " <> Text.pack (show lineNumber) <> ": " <> Text.pack message)
         Right value -> pure value
 
 readPrivateFile :: FilePath -> Integer -> IO (Maybe BS.ByteString)

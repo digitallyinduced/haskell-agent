@@ -95,6 +95,46 @@ These are important product features, but not the core differentiation.
 
 ## Install
 
+### macOS without Nix
+
+Apple silicon Macs running macOS 14 or newer can use the standalone release
+archive:
+
+```console
+(
+set -e
+archive=haskell-agent-macos-arm64
+download_dir="$(mktemp -d)"
+curl -fL \
+  "https://github.com/digitallyinduced/haskell-agent/releases/latest/download/$archive.tar.gz" \
+  -o "$download_dir/$archive.tar.gz"
+curl -fL \
+  "https://github.com/digitallyinduced/haskell-agent/releases/latest/download/$archive.tar.gz.sha256" \
+  -o "$download_dir/$archive.tar.gz.sha256"
+(cd "$download_dir" && shasum -a 256 -c "$archive.tar.gz.sha256")
+mkdir -p "$HOME/.local/opt" "$HOME/.local/bin"
+rm -rf "$HOME/.local/opt/haskell-agent-macos-arm64"
+tar -xzf "$download_dir/$archive.tar.gz" -C "$HOME/.local/opt"
+rm -rf "$download_dir"
+ln -sfn \
+  "$HOME/.local/opt/haskell-agent-macos-arm64/bin/agent-cli" \
+  "$HOME/.local/bin/agent-cli"
+"$HOME/.local/bin/agent-cli" --version
+)
+```
+
+Add `$HOME/.local/bin` to `PATH` if it is not already present. Keep the
+extracted directory intact: `agent-cli` discovers its bundled libraries, data
+files, PostgreSQL runtime, and helper tools relative to that directory. The
+symlink may live anywhere.
+
+macOS requires its system libraries and frameworks to remain dynamically
+linked. The archive statically links the Haskell dependency graph and carries
+all non-system dynamic libraries alongside the executable, so it has no Nix
+runtime dependency.
+
+### Nix
+
 1. Install [Determinate Nix](https://docs.determinate.systems/determinate-nix/)
    by following its platform-specific installation instructions.
 
@@ -113,7 +153,7 @@ These are important product features, but not the core differentiation.
    `--accept-flake-config` enables the public IHP binary cache declared by the
    flake.
 
-### Update
+#### Update
 
 `nix profile add` does not replace an existing profile entry. Update an
 existing installation with:
@@ -290,8 +330,10 @@ For Grok models, dictation uses the configured xAI subscription or API-key
 credential; set `XAI_STT_LANGUAGE` to override xAI's default `en`.
 When an organization gateway is connected, the recording is sent only to the
 gateway's authenticated `/v1/audio/transcriptions` endpoint. The gateway uses
-its organization-managed transcription pool and returns a final transcript
-after recording stops; it never falls back to local provider credentials.
+its organization-managed transcription pool and streams partial transcripts
+into the composer while recording. Compatible older gateways and interrupted
+streams use the final-only upload on the same endpoint with the already
+captured recording; dictation never falls back to local provider credentials.
 Dictation is currently unavailable for OpenRouter and Gemini models.
 
 ### Claude Code subscription
@@ -403,6 +445,13 @@ CLI and gateways. Interactive parsing, rendering, and TTY state remain in
 the terminal frontend. The packaged Telegram service still carries the
 `agent-cli` executable as a runtime dependency because managed child sessions
 launch that executable.
+
+Repository review/delivery and process-hardening code lives in the independent
+`agent-repository` package. Native administration helpers and the Darwin
+foreign-library bridge live in `agent-native-bridge`, which depends on the CLI
+rather than making the production CLI depend on native-only integration code.
+The resulting production rebuild change is recorded in the
+[`package-split benchmark`](docs/package-split-benchmark.md).
 
 `agent-claude` delegates its generic process transport, protocol decoding, and
 session client to

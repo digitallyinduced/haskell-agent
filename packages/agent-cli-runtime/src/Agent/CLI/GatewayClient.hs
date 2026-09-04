@@ -46,9 +46,11 @@ module Agent.CLI.GatewayClient
     , loadGatewayCredential
     , loadGatewayCredentialAt
     , fetchGatewayModels
+    , fetchGatewayUsage
     , newGatewayModelAccess
     , newGatewayModelAccessWith
     , newGatewayModelAccessWithDictation
+    , newGatewayModelAccessWithUsage
     , refreshGatewayModels
     , cachedGatewayModels
     , gatewayModelIds
@@ -62,8 +64,10 @@ module Agent.CLI.GatewayClient
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OpenAI.Transcription
-    ( encodePcm16Wav
+    ( ChatGPTDictationStreamFailure(..)
+    , encodePcm16Wav
     , openAITranscriptionSampleRate
+    , transcribePcmWithChatGPTStreamAt
     )
 import Agent.CLI.Runtime.Options (GatewayCommand (..))
 import Agent.CLI.PrivateFileLock
@@ -72,6 +76,7 @@ import Agent.CLI.PrivateFileLock
     , withPrivateSharedFileLocksAfterGate
     )
 import Agent.Json.Decode qualified as Hermes
+import Agent.OpenAI.Usage (UsageSnapshot, decodeUsageResponse)
 import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
 import Agent.OsPath (unsafeToFilePath)
 import Control.Concurrent (ThreadId, myThreadId, threadDelay)
@@ -259,6 +264,7 @@ instance Aeson.FromJSON GatewayModelProtocol where
 -- accidentally inspect or log the credential captured by its fetch action.
 data GatewayModelAccess = GatewayModelAccess
     { gatewayModelFetch :: !(IO (Either Text [GatewayModel]))
+    , gatewayUsageFetch :: !(Text -> IO (Either Text UsageSnapshot))
     , gatewayModelCache :: !(IORef (Maybe [GatewayModel]))
     , gatewayModelRefreshLock :: !(MVar ())
     , gatewayDictation
@@ -351,8 +357,9 @@ gatewayCredentialDecoder =
 -- | Construct a cached model-list handle for a validated gateway credential.
 newGatewayModelAccess :: GatewayCredential -> IO GatewayModelAccess
 newGatewayModelAccess credential =
-    newGatewayModelAccessWithDictation
+    newGatewayModelAccessWithActions
         (fetchGatewayModels credential)
+        (fetchGatewayUsageWithCredential credential)
         (transcribeGatewayPcmWith credential)
 
 -- | Injectable constructor used by tests and alternative trusted transports.
@@ -362,12 +369,22 @@ newGatewayModelAccessWith
     :: IO (Either Text [GatewayModel])
     -> IO GatewayModelAccess
 newGatewayModelAccessWith fetch =
-    newGatewayModelAccessWithDictation
+    newGatewayModelAccessWithUsage
         fetch
-        (\_ _ ->
-            pure
-                (Left
-                    "Dictation is not available through this gateway connection."))
+        unavailableGatewayUsage
+
+-- | Injectable usage transport used by tests and trusted alternative
+-- gateways. Model aliases are passed through exactly and the decoded snapshot
+-- uses the same type as a direct OpenAI connection.
+newGatewayModelAccessWithUsage
+    :: IO (Either Text [GatewayModel])
+    -> (Text -> IO (Either Text UsageSnapshot))
+    -> IO GatewayModelAccess
+newGatewayModelAccessWithUsage fetch usage =
+    newGatewayModelAccessWithActions
+        fetch
+        usage
+        unavailableGatewayDictation
 
 -- | Injectable constructor for tests and trusted alternative gateway
 -- transports. The action stays opaque with the credential-bearing model
@@ -378,15 +395,137 @@ newGatewayModelAccessWithDictation
         -> (Text -> IO ())
         -> IO (Either Text Text))
     -> IO GatewayModelAccess
-newGatewayModelAccessWithDictation fetch dictation = do
+newGatewayModelAccessWithDictation fetch dictation =
+    newGatewayModelAccessWithActions
+        fetch
+        unavailableGatewayUsage
+        dictation
+
+newGatewayModelAccessWithActions
+    :: IO (Either Text [GatewayModel])
+    -> (Text -> IO (Either Text UsageSnapshot))
+    -> (((BS.ByteString -> IO ()) -> IO ())
+        -> (Text -> IO ())
+        -> IO (Either Text Text))
+    -> IO GatewayModelAccess
+newGatewayModelAccessWithActions fetch usage dictation = do
     cache <- newIORef Nothing
     refreshLock <- newMVar ()
     pure GatewayModelAccess
         { gatewayModelFetch = fetch
+        , gatewayUsageFetch = usage
         , gatewayModelCache = cache
         , gatewayModelRefreshLock = refreshLock
         , gatewayDictation = dictation
         }
+
+unavailableGatewayUsage
+    :: Text
+    -> IO (Either Text UsageSnapshot)
+unavailableGatewayUsage _ =
+    pure $
+        Left "Usage is not available through this gateway connection."
+
+unavailableGatewayDictation
+    :: ((BS.ByteString -> IO ()) -> IO ())
+    -> (Text -> IO ())
+    -> IO (Either Text Text)
+unavailableGatewayDictation _ _ =
+    pure $
+        Left "Dictation is not available through this gateway connection."
+
+-- | Fetch usage through the transport captured by this gateway connection.
+fetchGatewayUsage
+    :: GatewayModelAccess
+    -> Text
+    -> IO (Either Text UsageSnapshot)
+fetchGatewayUsage access model
+    | Text.null model =
+        pure (Left "Gateway usage requires a model alias.")
+    | otherwise =
+        tryAny (access.gatewayUsageFetch model) >>= \case
+            Left _ ->
+                pure (Left "Could not refresh organization gateway usage.")
+            Right result -> pure result
+
+fetchGatewayUsageWithCredential
+    :: GatewayCredential
+    -> Text
+    -> IO (Either Text UsageSnapshot)
+fetchGatewayUsageWithCredential admitted model =
+    withGatewayCredentialLease do
+        loadGatewayCredential >>= \case
+            Right (Just current)
+                | current == admitted ->
+                    requestGatewayUsage current model
+            _ ->
+                pure $
+                    Left
+                        "The organization gateway changed before usage was refreshed."
+
+requestGatewayUsage
+    :: GatewayCredential
+    -> Text
+    -> IO (Either Text UsageSnapshot)
+requestGatewayUsage credential model =
+    case validateGatewayCredential credential of
+        Left _ -> pure (Left "Gateway credential is invalid.")
+        Right () -> do
+            let query =
+                    TextEncoding.decodeUtf8
+                        . LBS.toStrict
+                        . Builder.toLazyByteString
+                        $ renderQueryText True [("model", Just model)]
+                endpoint =
+                    Text.dropWhileEnd (== '/')
+                        (Text.strip credential.gatewayBaseUrl)
+                        <> "/backend-api/wham/usage"
+                        <> query
+            outcome <- tryAny do
+                manager <- newTlsManager
+                initial <- HTTP.parseRequest (Text.unpack endpoint)
+                let request =
+                        initial
+                            { HTTP.method = "GET"
+                            , HTTP.requestHeaders =
+                                [ ( hAuthorization
+                                  , "Bearer "
+                                        <> TextEncoding.encodeUtf8
+                                            credential.gatewayAccessToken
+                                  )
+                                , (hAccept, "application/json")
+                                ]
+                            , HTTP.checkResponse = \_ _ -> pure ()
+                            -- Never forward the gateway bearer to a redirect.
+                            , HTTP.redirectCount = 0
+                            , HTTP.responseTimeout =
+                                HTTP.responseTimeoutMicro (5 * 1_000_000)
+                            }
+                HTTP.withResponse request manager \response -> do
+                    body <-
+                        readBoundedBody
+                            gatewayMaxResponseBytes
+                            (HTTP.responseBody response)
+                    pure (HTTP.responseStatus response, body)
+            pure case outcome of
+                Left _ ->
+                    Left "Could not reach the gateway usage endpoint."
+                Right (_status, Nothing) ->
+                    Left "Gateway usage returned an oversized response."
+                Right (status, Just body)
+                    | statusIsSuccessful status ->
+                        case decodeUsageResponse (LBS.fromStrict body) of
+                            Left _ ->
+                                Left
+                                    "Gateway returned an unreadable usage response."
+                            Right snapshot -> Right snapshot
+                    | statusCode status == 404 ->
+                        Left
+                            "Usage is not supported by this organization gateway."
+                    | otherwise ->
+                        Left $
+                            "Gateway usage returned HTTP "
+                                <> Text.pack (show (statusCode status))
 
 -- | Record PCM through the opaque, gateway-bound dictation action.
 transcribeGatewayPcm
@@ -406,18 +545,104 @@ transcribeGatewayPcmWith admitted produceAudio onTranscript =
         loadGatewayCredential >>= \case
             Right (Just current)
                 | current == admitted ->
-                    captureGatewayWav produceAudio >>= \case
+                    case gatewayDictationWebSocketUrl current of
                         Left err -> pure (Left err)
-                        Right wav ->
-                            postGatewayTranscription current wav >>= \case
-                                Left err -> pure (Left err)
-                                Right transcript -> do
-                                    onTranscript transcript
-                                    pure (Right transcript)
+                        Right websocketUrl -> do
+                            chunks <- newIORef []
+                            capturedBytes <- newIORef 0
+                            let captureAndBuffer sendAudio =
+                                    produceAudio \chunk ->
+                                        unless (BS.null chunk) do
+                                            total <-
+                                                (+ BS.length chunk)
+                                                    <$> readIORef capturedBytes
+                                            when
+                                                (total > gatewayMaxPcmBytes)
+                                                (throwString
+                                                    "gateway dictation audio exceeded the client limit")
+                                            writeIORef capturedBytes total
+                                            modifyIORef' chunks (chunk :)
+                                            sendAudio chunk
+                            transcribePcmWithChatGPTStreamAt
+                                websocketUrl
+                                [ ( "Authorization"
+                                  , "Bearer "
+                                        <> TextEncoding.encodeUtf8
+                                            current.gatewayAccessToken
+                                  )
+                                ]
+                                captureAndBuffer
+                                onTranscript >>= \case
+                                    Left ChatGPTDictationCaptureFailed{} ->
+                                        pure $
+                                            Left
+                                                "Gateway dictation audio capture failed."
+                                    Left ChatGPTDictationStreamUnavailable{} -> do
+                                        pcm <-
+                                            BS.concat . reverse
+                                                <$> readIORef chunks
+                                        wavResult <-
+                                            if BS.null pcm
+                                                then
+                                                    captureGatewayWav
+                                                        produceAudio
+                                                else
+                                                    pure $
+                                                        case encodePcm16Wav
+                                                            openAITranscriptionSampleRate
+                                                            pcm of
+                                                                Left _ ->
+                                                                    Left
+                                                                        "Gateway dictation streaming failed."
+                                                                Right wav ->
+                                                                    Right wav
+                                        case wavResult of
+                                            Left err -> pure (Left err)
+                                            Right wav ->
+                                                loadGatewayCredential >>= \case
+                                                    Right (Just latest)
+                                                        | latest == current ->
+                                                            postGatewayTranscription
+                                                                latest
+                                                                wav >>= \case
+                                                                    Left err ->
+                                                                        pure
+                                                                            (Left
+                                                                                err)
+                                                                    Right transcript -> do
+                                                                        onTranscript
+                                                                            transcript
+                                                                        pure
+                                                                            (Right
+                                                                                transcript)
+                                                    _ ->
+                                                        pure $
+                                                            Left
+                                                                "The organization gateway changed during dictation."
+                                    Right transcript ->
+                                        pure (Right transcript)
             _ ->
                 pure $
                     Left
                         "The organization gateway changed before dictation started."
+
+gatewayDictationWebSocketUrl
+    :: GatewayCredential
+    -> Either Text Text
+gatewayDictationWebSocketUrl credential = do
+    uri <-
+        maybe
+            (Left "Gateway WebSocket URL is invalid.")
+            Right
+            (URI.parseURI (Text.unpack credential.gatewayWebSocketUrl))
+    pure $
+        Text.pack $
+            show
+                uri
+                    { URI.uriPath = "/v1/audio/transcriptions"
+                    , URI.uriQuery = ""
+                    , URI.uriFragment = ""
+                    }
 
 captureGatewayWav
     :: ((BS.ByteString -> IO ()) -> IO ())

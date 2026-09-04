@@ -16,6 +16,15 @@ type safety and the approach of functional program maps well to the problem spac
 
 we follow the tool defintions that are used by the first party lab harnesses. e.g. for oai we use the tool defintions that codex provides out of the box, for grok we use the tool definitions that grok build provides out of the box. This way
 
+# ci trust model
+
+Right now, repository CI is configured so that only pull requests authored by
+the repository owner (`mpscholten`) can run jobs on the self-hosted runner.
+External contributors' pull requests cannot run code on that host. Treat this
+as a current operational setting and verify it again if the repository's
+Actions or runner configuration changes. Do not recommend reimaging the runner
+solely because public pull requests exist; first establish that an untrusted
+revision actually ran on it.
 
 # ghci
 
@@ -41,6 +50,8 @@ nix develop
 cabal repl \
   agent-cli:lib:agent-cli \
   agent-cli-runtime:lib:agent-cli-runtime \
+  agent-repository:lib:agent-repository \
+  agent-native-bridge:lib:agent-native-bridge \
   agent-telegram:lib:agent-telegram \
   agent-core:lib:agent-core \
   agent-connectivity:lib:agent-connectivity \

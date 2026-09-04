@@ -22,21 +22,59 @@ jobs:
       matrix:
         include:
           - system: x86_64-linux
-            runner: '["self-hosted", "haskell-agent", "office-builder", "x86_64-linux"]'
+            runner: '["ubuntu-24.04"]'
+            install_nix: true
             trusted-rebuild: false
-            build-cores: 1
+            build-cores: 4
+            timeout_minutes: 180
           - system: aarch64-darwin
             runner: '["self-hosted", "haskell-agent", "ihp-ci-mac", "aarch64-darwin"]'
+            install_nix: false
             trusted-rebuild: true
             build-cores: 1
+            timeout_minutes: 90
     runs-on: ${{ fromJSON(matrix.runner) }}
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     env:
       NIX_CONFIG: |
         experimental-features = nix-command flakes
       ATTIC_PACKAGE: github:NixOS/nixpkgs/afe3d8ac4395617bdcdac9f188ac8717a062e014#attic-client
       GIT_PACKAGE: github:NixOS/nixpkgs/afe3d8ac4395617bdcdac9f188ac8717a062e014#git
     steps:
+      - name: Install Nix
+        if: ${{ matrix.install_nix }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive="$RUNNER_TEMP/nix-2.34.7-x86_64-linux.tar.xz"
+          curl --fail --location --silent --show-error \
+            https://releases.nixos.org/nix/nix-2.34.7/nix-2.34.7-x86_64-linux.tar.xz \
+            -o "$archive"
+          printf '%s  %s\n' \
+            eafe5042404e818505e28c5ca3d0885f3ec45c31f955489a25bb38258f87560e \
+            "$archive" |
+            sha256sum --check
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+
+          extra_conf="$RUNNER_TEMP/nix-extra.conf"
+          cat > "$extra_conf" <<'EOF'
+            extra-substituters = https://cache.digitallyinduced.com/public
+            extra-trusted-public-keys = public:kR6JCoqAIMaO4s+EdDGh+jsHEHnoLq4ZLJPMCo0hcIQ=
+            fallback = true
+          EOF
+          "$RUNNER_TEMP/nix-2.34.7-x86_64-linux/install" \
+            --daemon \
+            --yes \
+            --no-channel-add \
+            --no-modify-profile \
+            --nix-extra-conf-file "$extra_conf"
+
+          export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+          printf '%s\n' /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
+          nix --version
+          nix store ping
+
       - name: Check out the triggering revision
         shell: bash
         run: |
@@ -69,7 +107,7 @@ jobs:
             "$GITHUB_SHA"
           "$git_bin" -C "$source_dir" checkout --detach FETCH_HEAD
 
-      - name: Build install and run closures
+      - name: Build release and Linux CI closures
         shell: bash
         env:
           SYSTEM: ${{ matrix.system }}
@@ -89,11 +127,44 @@ jobs:
             exit 1
           fi
 
-          build_args=(
+          build_targets=(
             # `nix profile add` installs packages.default, while `nix run`
             # executes apps.default, backed by packages.agent-cli. They are
             # different outputs on Linux, so publish both closures.
-            build .#default .#agent-cli
+            .#default
+            .#agent-cli
+          )
+          if [[ "$SYSTEM" == x86_64-linux ]]; then
+            # Seed the public cache with the same roots used by the secretless
+            # PR matrix. Source filtering lets a PR reuse every unchanged
+            # package test while rebuilding only its affected graph.
+            build_targets+=(
+              .#checks.x86_64-linux.agent-cli
+              .#checks.x86_64-linux.agent-repository
+              .#checks.x86_64-linux.agent-native-bridge
+              .#checks.x86_64-linux.package-boundaries
+              .#checks.x86_64-linux.agent-telegram
+              .#checks.x86_64-linux.agent-server
+              .#checks.x86_64-linux.agent-runtime-daemon
+              .#checks.x86_64-linux.agent-cli-executable
+              .#checks.x86_64-linux.agent-cli-static-runtime
+              .#checks.x86_64-linux.agent-sandbox-runner
+              .#checks.x86_64-linux.nixos-module
+            )
+          fi
+          if [[ "$SYSTEM" == aarch64-darwin ]]; then
+            # The native bridge is now its own Cabal package rather than an
+            # agent-cli component, so build its checked and wrapped outputs
+            # explicitly on the native runner.
+            build_targets+=(
+              .#checks.aarch64-darwin.agent-native-bridge
+              .#agent-native-bridge
+            )
+          fi
+
+          build_args=(
+            build
+            "${build_targets[@]}"
             --no-link
             --print-out-paths
             --max-jobs 1
@@ -111,9 +182,9 @@ jobs:
             build_args+=(--accept-flake-config)
           fi
 
-          out_paths_file="$RUNNER_TEMP/haskell-agent-cache-out-paths"
-          "$nix_bin" "${build_args[@]}" > "$out_paths_file"
-          if [[ ! -s "$out_paths_file" ]]; then
+          root_out_paths_file="$RUNNER_TEMP/haskell-agent-cache-root-out-paths"
+          "$nix_bin" "${build_args[@]}" > "$root_out_paths_file"
+          if [[ ! -s "$root_out_paths_file" ]]; then
             echo "::error title=Missing build outputs::Nix did not report any store paths"
             exit 1
           fi
@@ -134,12 +205,73 @@ jobs:
             echo "::error title=Default app is not cached::apps.default no longer uses packages.agent-cli"
             exit 1
           fi
-          if ! grep -Fqx -- "$run_out" "$out_paths_file"; then
+          if ! grep -Fqx -- "$run_out" "$root_out_paths_file"; then
             echo "::error title=Default app is not cached::the packages.agent-cli output was not built"
             exit 1
           fi
 
-      - name: Push install and run closures to the public Attic cache
+          cache_out_paths_file="$RUNNER_TEMP/haskell-agent-cache-out-paths"
+          if [[ "$SYSTEM" == x86_64-linux ]]; then
+            # A result closure does not contain build-time-only dependencies.
+            # In particular, the fully static CLI does not retain references
+            # to its musl GHC or static libraries, so a fresh PR runner would
+            # otherwise rebuild that toolchain whenever the CLI source
+            # changes. Publish every realised output in the target
+            # derivations' build closure so hosted checks can substitute them.
+            mapfile -t target_drvs < <(
+              "$nix_bin" path-info \
+                --derivation \
+                "${build_targets[@]}"
+            )
+            if (( ${#target_drvs[@]} == 0 )); then
+              echo "::error title=Missing build derivations::Nix did not report the CI roots"
+              exit 1
+            fi
+
+            nix_store_bin="$(command -v nix-store || true)"
+            if [[ -z "$nix_store_bin" ]]; then
+              echo "::error title=Missing nix-store binary::nix-store is required to collect the realised build closure"
+              exit 1
+            fi
+
+            all_cache_paths_file="$RUNNER_TEMP/haskell-agent-all-cache-paths"
+            {
+              cat "$root_out_paths_file"
+              "$nix_store_bin" \
+                --query \
+                --requisites \
+                --include-outputs \
+                "${target_drvs[@]}"
+            } | sort -u > "$all_cache_paths_file"
+
+            # A substituted multi-output dependency may leave an unrequested
+            # output unrealised. Keep every valid path without making those
+            # optional outputs a publication failure.
+            invalid_cache_paths_file="$RUNNER_TEMP/haskell-agent-invalid-cache-paths"
+            xargs -r -n 256 \
+              "$nix_store_bin" --check-validity --print-invalid \
+              < "$all_cache_paths_file" |
+              sort -u > "$invalid_cache_paths_file"
+            comm -23 \
+              "$all_cache_paths_file" \
+              "$invalid_cache_paths_file" \
+              > "$cache_out_paths_file"
+
+            # Fail before authenticating to Attic if filtering did not produce
+            # a non-empty collection of valid store paths.
+            if [[ ! -s "$cache_out_paths_file" ]]; then
+              echo "::error title=Missing cache paths::the realised build closure is empty"
+              exit 1
+            fi
+            "$nix_bin" path-info \
+              --stdin \
+              < "$cache_out_paths_file" \
+              > /dev/null
+          else
+            cp "$root_out_paths_file" "$cache_out_paths_file"
+          fi
+
+      - name: Push release and Linux CI closures to the public Attic cache
         shell: bash
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}

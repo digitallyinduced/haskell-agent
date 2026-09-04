@@ -1,0 +1,77 @@
+cabal-version:      3.0
+name:               agent-repository
+version:            0.1.0.0
+synopsis:           Repository review and delivery operations
+description:        Concurrent, cancellation-safe repository inspection,
+                    delivery, and process-security primitives.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Development
+build-type:         Simple
+
+common common-options
+    default-language: GHC2021
+    default-extensions: BlockArguments
+                      , OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , TypeApplications
+                      , ScopedTypeVariables
+    ghc-options:      -Wall
+                      -Wcompat
+                      -Widentities
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wincomplete-record-updates
+                      -Wpartial-fields
+                      -Wno-name-shadowing
+
+library
+    import:           common-options
+    hs-source-dirs:   src
+    other-modules:    Agent.CLI.ProcessSecurity
+    exposed-modules:  Agent.CLI.RepositoryDelivery
+                    , Agent.CLI.RepositoryReview
+    build-depends:    aeson >= 2.0
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , crypton
+                    , directory
+                    , filelock
+                    , filepath
+                    , process >= 1.6.26
+                    , safe-exceptions
+                    , text >= 2.0 && < 2.2
+                    , time
+                    , transformers
+                    , unix
+
+test-suite agent-repository-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    ghc-options:      -threaded
+    other-modules:    Agent.CLI.RepositoryDeliverySpec
+                    , Agent.CLI.RepositoryReviewSpec
+    build-depends:    agent-repository
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , directory
+                    , filepath
+                    , hspec >= 2.11 && < 2.12
+                    , process
+                    , safe-exceptions
+                    , text
+                    , unix
