@@ -22,7 +22,8 @@ import Agent.CLI.Command
       ReplAction(ReplCommandError, ReplQuit, ReplReload,
                  ReplUpdateAndRestart, ReplPrompt, ReplExpandedPrompt,
                  ReplInvokeSkill, ReplSkills, ReplShowShell,
-                 ReplSetShell, ReplPaste, ReplShowAttachments, ReplClearAttachments,
+                 ReplSetShell, ReplToggleComputerUse, ReplSetComputerUse,
+                 ReplPaste, ReplShowAttachments, ReplClearAttachments,
                  ReplRemoveAttachment,
                  ReplShowAgentLimit, ReplSetAgentLimit, ReplAgents, ReplMcp, ReplMcpPrompt,
                  ReplGoalStatus, ReplGoalPause, ReplGoalResume, ReplGoalClear,
@@ -469,6 +470,20 @@ handleReplLine
                         showShellMode continue color
                     ReplSetShell mode ->
                         setShellMode continue color mode
+                    ReplToggleComputerUse -> do
+                        enabled <- env.sessionComputerUseEnabled
+                        message <-
+                            env.sessionSetComputerUseEnabled (not enabled)
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphOk <> message))
+                        continue
+                    ReplSetComputerUse enabled -> do
+                        message <- env.sessionSetComputerUseEnabled enabled
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphOk <> message))
+                        continue
                     action@ReplPaste{} -> handleAttachmentAction env finishTurn continue action
                     action@ReplShowAttachments -> handleAttachmentAction env finishTurn continue action
                     action@ReplClearAttachments -> handleAttachmentAction env finishTurn continue action

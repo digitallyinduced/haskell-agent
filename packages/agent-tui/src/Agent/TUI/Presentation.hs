@@ -45,7 +45,11 @@ module Agent.TUI.Presentation
     , workspaceRelativeDisplayPath
     ) where
 
-import Agent.JsonText (jsonTextField, jsonTextFieldDefault)
+import Agent.JsonText
+    ( jsonTextField
+    , jsonTextFieldDefault
+    , jsonTextFieldPartial
+    )
 import qualified Agent.Json.Decode as Hermes
 import Agent.OsPath (fromText, relativeDisplayPath)
 import Agent.TUI.TextWidth (displayTerminalText)
@@ -144,7 +148,7 @@ toolCallHeaderRelative workspace call =
 -- | Full invocation text that benefits from dedicated code rendering.
 toolCallInput :: ToolCall -> Text
 toolCallInput call = case canonicalToolName call.name of
-    "run_ghci" -> jsonTextFieldDefault "expression" call.arguments
+    "run_ghci" -> jsonTextFieldPartialDefault "expression" call.arguments
     "exec" -> call.arguments
     _ -> ""
 
@@ -196,13 +200,15 @@ data SearchReplaceDiff = SearchReplaceDiff
 
 parseSearchReplaceDiff :: Text -> SearchReplaceDiff
 parseSearchReplaceDiff arguments =
-    let path = jsonTextFieldDefault "file_path" arguments
-        oldText = jsonTextFieldDefault "old_string" arguments
-        newText = jsonTextFieldDefault "new_string" arguments
-        action = case (Text.null oldText, Text.null newText) of
-            (True, False) -> Just SearchReplaceCreate
-            (False, True) -> Just SearchReplaceDelete
-            _ -> Nothing
+    let path = jsonTextFieldPartialDefault "file_path" arguments
+        oldText = jsonTextFieldPartialDefault "old_string" arguments
+        newText = jsonTextFieldPartialDefault "new_string" arguments
+        action = case decodeJsonValue arguments of
+            Just _ -> case (Text.null oldText, Text.null newText) of
+                (True, False) -> Just SearchReplaceCreate
+                (False, True) -> Just SearchReplaceDelete
+                _ -> Nothing
+            Nothing -> Nothing
         raw =
             map SearchReplaceRemoved (Text.lines oldText)
                 <> map SearchReplaceAdded (Text.lines newText)
@@ -219,13 +225,14 @@ parseSearchReplaceDiff arguments =
 -- says @write@ rather than @create@.
 parseWriteFileDiff :: Text -> SearchReplaceDiff
 parseWriteFileDiff arguments =
-    let path = jsonTextFieldDefault "file_path" arguments
-        content = jsonTextFieldDefault "content" arguments
+    let path = jsonTextFieldPartialDefault "file_path" arguments
+        content = jsonTextFieldPartialDefault "content" arguments
         raw = map SearchReplaceAdded (Text.lines content)
         shown = take 20 raw
     in SearchReplaceDiff
         { diffPath = path
-        , diffAction = Just SearchReplaceWrite
+        , diffAction =
+            if Text.null path then Nothing else Just SearchReplaceWrite
         , diffLines = shown
         , diffHiddenLines = length raw - length shown
         }
@@ -698,11 +705,14 @@ toolPathArgument :: ToolCall -> Maybe Text
 toolPathArgument call =
     nonEmptyPath $ case canonicalToolName call.name of
         "read_file" -> readFilePath call.arguments
-        "list_dir" -> jsonTextFieldDefault "target_directory" call.arguments
-        "search_replace" -> jsonTextFieldDefault "file_path" call.arguments
+        "list_dir" ->
+            jsonTextFieldPartialDefault "target_directory" call.arguments
+        "search_replace" ->
+            jsonTextFieldPartialDefault "file_path" call.arguments
         "apply_patch" -> fromMaybe "" (firstPatchPath call.arguments)
-        "Write" -> jsonTextFieldDefault "file_path" call.arguments
-        "NotebookEdit" -> jsonTextFieldDefault "notebook_path" call.arguments
+        "Write" -> jsonTextFieldPartialDefault "file_path" call.arguments
+        "NotebookEdit" ->
+            jsonTextFieldPartialDefault "notebook_path" call.arguments
         _ -> ""
   where
     nonEmptyPath text =
@@ -1032,10 +1042,18 @@ mcpToolDisplayName name =
 -- that identity as @server: tool@ instead of the unhelpful @mcp_call@ name.
 mcpCallDisplayName :: Text -> Text
 mcpCallDisplayName arguments =
-    case nonEmptyJsonText "name" arguments
-        <|> nonEmptyJsonText "tool_name" arguments of
+    case selectedName of
         Just qualifiedName -> qualifiedMcpDisplayName qualifiedName
         Nothing -> "MCP call"
+  where
+    selectedName =
+        case decodeJsonValue arguments of
+            Just _ ->
+                nonEmptyJsonText "name" arguments
+                    <|> nonEmptyJsonText "tool_name" arguments
+            Nothing ->
+                nonEmptyPartialJsonText "name" arguments
+                    <|> nonEmptyPartialJsonText "tool_name" arguments
 
 qualifiedMcpDisplayName :: Text -> Text
 qualifiedMcpDisplayName name =
@@ -1055,12 +1073,12 @@ toolDetail :: ToolCall -> Text
 toolDetail call = case canonicalToolName call.name of
     "computer" -> computerActionDetail call.arguments
     "read_file" -> readFilePath call.arguments
-    "list_dir" -> jsonTextFieldDefault "target_directory" call.arguments
-    "search_replace" -> jsonTextFieldDefault "file_path" call.arguments
-    "grep" -> jsonTextFieldDefault "pattern" call.arguments
-    "run_terminal_cmd" -> firstLine (jsonTextFieldDefault "command" call.arguments)
-    "run_ghci" -> firstLine (jsonTextFieldDefault "expression" call.arguments)
-    "shell_command" -> firstLine (jsonTextFieldDefault "command" call.arguments)
+    "list_dir" -> partialField "target_directory"
+    "search_replace" -> partialField "file_path"
+    "grep" -> partialField "pattern"
+    "run_terminal_cmd" -> firstLine (partialField "command")
+    "run_ghci" -> firstLine (partialField "expression")
+    "shell_command" -> firstLine (partialField "command")
     "write_stdin" ->
         maybe "" ("session " <>) (jsonIntField "session_id" call.arguments)
     "apply_patch" -> fromMaybe "patch" (firstPatchPath call.arguments)
@@ -1069,60 +1087,63 @@ toolDetail call = case canonicalToolName call.name of
     "ask_user_question" -> askUserQuestionDetail call.arguments
     "ask_secret" ->
         firstLine $
-            let purpose = jsonTextFieldDefault "purpose" call.arguments
+            let purpose = partialField "purpose"
             in if Text.null (Text.strip purpose)
-                then jsonTextFieldDefault "prompt" call.arguments
+                then partialField "prompt"
                 else purpose
-    "spawn_agent" -> jsonTextFieldDefault "task_name" call.arguments
+    "spawn_agent" -> partialField "task_name"
     "spawn_agent_in_worktree" ->
-        jsonTextFieldDefault "task_name" call.arguments
-    "send_message" -> jsonTextFieldDefault "target" call.arguments
-    "followup_task" -> jsonTextFieldDefault "target" call.arguments
-    "interrupt_agent" -> jsonTextFieldDefault "target" call.arguments
+        partialField "task_name"
+    "send_message" -> partialField "target"
+    "followup_task" -> partialField "target"
+    "interrupt_agent" -> partialField "target"
     "create_agent_session" ->
-        firstLine (jsonTextFieldDefault "title" call.arguments)
+        firstLine (partialField "title")
     "read_agent_session" ->
-        jsonTextFieldDefault "session_id" call.arguments
+        partialField "session_id"
     "send_agent_session_message" ->
-        jsonTextFieldDefault "session_id" call.arguments
+        partialField "session_id"
     "list_agents" ->
-        maybe "" ("under " <>) (nonEmptyJsonText "path_prefix" call.arguments)
-    "skill_search" -> firstLine (jsonTextFieldDefault "query" call.arguments)
+        maybe "" ("under " <>)
+            (nonEmptyPartialJsonText "path_prefix" call.arguments)
+    "skill_search" -> firstLine (partialField "query")
     "view_skill" -> viewSkillIdentity call.arguments
     "skill_create" -> skillIdentity call.arguments
     "skill_update" -> skillIdentity call.arguments
     "skill_archive" -> skillIdentity call.arguments
     "skill_rollback" -> skillIdentity call.arguments
     "conversation_search" ->
-        firstLine (jsonTextFieldDefault "query" call.arguments)
-    "get_task_output" -> jsonTextFieldDefault "task_id" call.arguments
-    "kill_task" -> jsonTextFieldDefault "task_id" call.arguments
-    "Write" -> jsonTextFieldDefault "file_path" call.arguments
-    "Glob" -> jsonTextFieldDefault "pattern" call.arguments
-    "WebFetch" -> jsonTextFieldDefault "url" call.arguments
-    "WebSearch" -> firstLine (jsonTextFieldDefault "query" call.arguments)
-    "ToolSearch" -> firstLine (jsonTextFieldDefault "query" call.arguments)
-    "Agent" -> firstLine (jsonTextFieldDefault "description" call.arguments)
-    "Task" -> firstLine (jsonTextFieldDefault "description" call.arguments)
-    "NotebookEdit" -> jsonTextFieldDefault "notebook_path" call.arguments
-    "Monitor" -> firstLine (jsonTextFieldDefault "command" call.arguments)
-    "Skill" -> firstLine (jsonTextFieldDefault "skill" call.arguments)
-    "SendMessage" -> jsonTextFieldDefault "to" call.arguments
+        firstLine (partialField "query")
+    "get_task_output" -> partialField "task_id"
+    "kill_task" -> partialField "task_id"
+    "Write" -> partialField "file_path"
+    "Glob" -> partialField "pattern"
+    "WebFetch" -> partialField "url"
+    "WebSearch" -> firstLine (partialField "query")
+    "ToolSearch" -> firstLine (partialField "query")
+    "Agent" -> firstLine (partialField "description")
+    "Task" -> firstLine (partialField "description")
+    "NotebookEdit" -> partialField "notebook_path"
+    "Monitor" -> firstLine (partialField "command")
+    "Skill" -> firstLine (partialField "skill")
+    "SendMessage" -> partialField "to"
     _ -> ""
+  where
+    partialField key = jsonTextFieldPartialDefault key call.arguments
 
 -- | Host @read_file@ takes @target_file@; Claude Code's @Read@ shares the
 -- canonical name but passes @file_path@.
 readFilePath :: Text -> Text
 readFilePath arguments =
-    case nonEmptyJsonText "target_file" arguments of
+    case nonEmptyPartialJsonText "target_file" arguments of
         Just path -> path
-        Nothing -> jsonTextFieldDefault "file_path" arguments
+        Nothing -> jsonTextFieldPartialDefault "file_path" arguments
 
 skillIdentity :: Text -> Text
 skillIdentity arguments =
     case
-        ( nonEmptyJsonText "scope" arguments
-        , nonEmptyJsonText "slug" arguments
+        ( nonEmptyPartialJsonText "scope" arguments
+        , nonEmptyPartialJsonText "slug" arguments
         )
     of
         (Just scope, Just slug) -> scope <> "/" <> slug
@@ -1132,8 +1153,8 @@ skillIdentity arguments =
 viewSkillIdentity :: Text -> Text
 viewSkillIdentity arguments =
     case
-        ( nonEmptyJsonText "scope" arguments
-        , nonEmptyJsonText "name" arguments
+        ( nonEmptyPartialJsonText "scope" arguments
+        , nonEmptyPartialJsonText "name" arguments
         )
     of
         (Just scope, Just name) -> scope <> "/" <> name
@@ -1164,6 +1185,16 @@ nonEmptyJsonText :: Text -> Text -> Maybe Text
 nonEmptyJsonText key input = jsonTextField key input >>= \value ->
     let stripped = Text.strip value
     in if Text.null stripped then Nothing else Just stripped
+
+nonEmptyPartialJsonText :: Text -> Text -> Maybe Text
+nonEmptyPartialJsonText key input =
+    jsonTextFieldPartial key input >>= \value ->
+        let stripped = Text.strip value
+        in if Text.null stripped then Nothing else Just stripped
+
+jsonTextFieldPartialDefault :: Text -> Text -> Text
+jsonTextFieldPartialDefault key input =
+    fromMaybe "" (jsonTextFieldPartial key input)
 
 jsonIntField :: Text -> Text -> Maybe Text
 jsonIntField key input =
@@ -1214,7 +1245,7 @@ firstLine = Text.takeWhile (/= '\n')
 
 askUserQuestionDetail :: Text -> Text
 askUserQuestionDetail arguments =
-    case firstLine (jsonTextFieldDefault "question" arguments) of
+    case firstLine (jsonTextFieldPartialDefault "question" arguments) of
         legacy | not (Text.null legacy) -> legacy
         _ -> fromMaybe "" (decodeMaybe questionDetailDecoder arguments)
   where

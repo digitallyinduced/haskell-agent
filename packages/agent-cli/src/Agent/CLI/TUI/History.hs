@@ -405,6 +405,11 @@ trimWindowPrefer
     -> HistoryWindow
 trimWindowPrefer preferred window
     | withinBudget window = window
+    -- Turns are the paging unit, so an oversized turn cannot be trimmed
+    -- without losing its whole prompt and response. Keep one turn even when
+    -- it exceeds a soft block or byte budget; otherwise committing a long
+    -- live turn would clear it from the transcript immediately.
+    | Seq.length window.historyWindowTurns <= 1 = window
     | otherwise =
         case preferredEvictionDirection preferred window of
             Nothing -> window
