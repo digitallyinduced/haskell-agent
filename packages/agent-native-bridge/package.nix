@@ -1,9 +1,9 @@
 { mkDerivation, aeson, agent-cli, agent-cli-runtime, agent-core
-, agent-json, agent-mcp, agent-openai, agent-openrouter, agent-repository
-, agent-runtime-daemon, agent-store, agent-xai, async, base
-, bytestring, containers, directory, filelock, filepath, hspec, lib
-, network-uri, safe-exceptions, stdenv, stm, text, time, transformers
-, unix
+, agent-json, agent-mcp, agent-openai, agent-openrouter
+, agent-repository, agent-responses-types, agent-runtime-daemon
+, agent-store, agent-xai, async, base, bytestring, containers
+, directory, filelock, filepath, hspec, lib, network-uri
+, safe-exceptions, stdenv, stm, text, time, transformers, unix
 }:
 mkDerivation {
   pname = "agent-native-bridge";
@@ -16,8 +16,8 @@ mkDerivation {
     bytestring containers filepath network-uri text time transformers
   ] ++ lib.optionals stdenv.hostPlatform.isDarwin [
     aeson agent-openai agent-openrouter agent-repository
-    agent-runtime-daemon agent-xai async directory filelock
-    safe-exceptions stm
+    agent-responses-types agent-runtime-daemon agent-xai async directory
+    filelock safe-exceptions stm
   ];
   testHaskellDepends = [
     agent-cli agent-core agent-mcp agent-runtime-daemon agent-store
@@ -25,7 +25,7 @@ mkDerivation {
     safe-exceptions stm text unix
   ] ++ lib.optionals stdenv.hostPlatform.isDarwin [
     aeson agent-cli-runtime agent-openai agent-openrouter
-    agent-repository agent-xai filelock time
+    agent-repository agent-responses-types agent-xai filelock time
   ];
   description = "Native host integration for the agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";
