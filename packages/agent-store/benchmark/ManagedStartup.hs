@@ -17,7 +17,7 @@ import Agent.Store.Types (StoreError, renderStoreError)
 import Control.Exception (evaluate)
 import Control.Exception.Safe (finally)
 import Control.Monad (forM, unless, void)
-import Data.List (sortOn)
+import Data.List (sort)
 import qualified Data.Text as Text
 import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Stats
@@ -143,7 +143,20 @@ measure action = do
 
 median :: [Sample] -> Sample
 median samples =
-    sortOn (.sampleElapsedMillis) samples !! (length samples `div` 2)
+    Sample
+        { sampleElapsedMillis =
+            medianValue (map (.sampleElapsedMillis) samples)
+        , sampleCpuMillis =
+            medianValue (map (.sampleCpuMillis) samples)
+        , sampleAllocatedBytes =
+            medianValue (map (.sampleAllocatedBytes) samples)
+        , sampleChecksum =
+            medianValue (map (.sampleChecksum) samples)
+        }
+
+medianValue :: Ord a => [a] -> a
+medianValue values =
+    sort values !! (length values `div` 2)
 
 printSample :: Int -> Strategy -> Sample -> IO ()
 printSample sampleCount strategy sample =
