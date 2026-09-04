@@ -156,6 +156,31 @@ spec = do
                 , "renamed"
                 ]
 
+        it "keeps the title static until nested input waits end" do
+            written <- newIORef []
+            let firstFrame = case spinnerFrames of
+                    frame : _ -> frame
+                    [] -> "*"
+            controller <- newWindowTitleController
+                MotionOff
+                "initial"
+                id
+                (\title -> modifyIORef' written (<> [title]))
+            controller.windowTitleBeginBusy
+            controller.windowTitleBeginInputWait
+            controller.windowTitleBeginInputWait
+            controller.windowTitleEndInputWait
+            controller.windowTitleEndInputWait
+            controller.windowTitleEndBusy
+            actual <- readIORef written
+            actual
+                `shouldBe`
+                [ firstFrame <> " initial"
+                , "initial"
+                , firstFrame <> " initial"
+                , "initial"
+                ]
+
         it "keeps reduced-motion busy titles static" do
             written <- newIORef []
             let firstFrame = case spinnerFrames of
