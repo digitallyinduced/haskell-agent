@@ -947,7 +947,7 @@ runXaiProvider request@AgentProviderRequest{..} nativeCapabilities = do
                                     currentParams
                                     history
                                     Nothing
-                                    >>= decorateAutomaticCompact
+                                    >>= decorateAutomaticCompact request
                                         xaiContextWindow
                             -- Reconnection wraps only the continuation. Keeping
                             -- automatic compaction outside it prevents a
