@@ -733,12 +733,11 @@
                     pkgs.ripgrep
                     pkgs.zstd
                 ];
-                wrapAgentCli = package:
+                prepareAgentCli = package:
                     package.overrideAttrs
                         (old: {
                             nativeBuildInputs =
                                 (old.nativeBuildInputs or [ ])
-                                ++ [ pkgs.makeWrapper ]
                                 ++ pkgs.lib.optionals
                                     (system == "aarch64-darwin")
                                     [ pkgs.removeReferencesTo ];
@@ -759,7 +758,27 @@
                                             -t ${agentOpenaiPackage} \
                                             -t ${agentCorePackage} \
                                             "$out/bin/agent-cli"
-                                    ''
+                                    '';
+                        } // pkgs.lib.optionalAttrs
+                            pkgs.stdenv.hostPlatform.isDarwin {
+                                # Darwin retains GHC as a requisite of the
+                                # justStaticExecutables output. GHC is
+                                # deliberately not included in either runtime
+                                # package, so code mode still uses an
+                                # independently installed compiler when one is
+                                # available.
+                                disallowedRequisites = pkgs.lib.remove
+                                    haskellPackages.ghc
+                                    (old.disallowedRequisites or [ ]);
+                            });
+                wrapAgentCli = package:
+                    package.overrideAttrs
+                        (old: {
+                            nativeBuildInputs =
+                                (old.nativeBuildInputs or [ ])
+                                ++ [ pkgs.makeWrapper ];
+                            postInstall =
+                                (old.postInstall or "")
                                 + ''
                                     wrapProgram "$out/bin/agent-cli" \
                                         --set-default AGENT_SYNTAX_DIR \
@@ -769,17 +788,10 @@
                                         --prefix PATH : \
                                             "${pkgs.lib.makeBinPath agentCliRuntimeTools}"
                                 '';
-                        } // pkgs.lib.optionalAttrs
-                            pkgs.stdenv.hostPlatform.isDarwin {
-                                # Darwin retains GHC as a requisite of the
-                                # wrapped justStaticExecutables output. GHC is
-                                # deliberately not added to PATH, so code mode
-                                # still uses an independently installed
-                                # compiler when one is available.
-                                disallowedRequisites = pkgs.lib.remove
-                                    haskellPackages.ghc
-                                    (old.disallowedRequisites or [ ]);
-                            });
+                        });
+                agentCliBareExecutable =
+                    prepareAgentCli
+                        (pkgs.haskell.lib.justStaticExecutables agentCliPackage);
                 agentCliStaticExecutable =
                     if pkgs.stdenv.hostPlatform.isLinux then
                         wrapAgentCli
@@ -788,8 +800,21 @@
                     else
                         agentCliExecutable;
                 agentCliExecutable =
-                    wrapAgentCli
-                        (pkgs.haskell.lib.justStaticExecutables agentCliPackage);
+                    wrapAgentCli agentCliBareExecutable;
+                agentCliMacosRelease =
+                    if pkgs.stdenv.hostPlatform.isDarwin then
+                        import ./nix/macos-bundle.nix {
+                            inherit pkgs skylightingSyntaxes;
+                            agentCli = agentCliBareExecutable;
+                            agentCliSource = agentCliProductionSource;
+                            agentCliRuntimeSource =
+                                agentCliRuntimeProductionSource;
+                            inherit agentCoreSource;
+                            bun = bun_1_4;
+                            sourceDateEpoch = self.lastModified or 1;
+                        }
+                    else
+                        null;
                 agentRuntimeDaemonExecutable =
                     pkgs.haskell.lib.justStaticExecutables
                         agentRuntimeDaemonPackage;
@@ -1047,6 +1072,12 @@
                     then "agent-sandbox-runner" else null} = agentSandboxRunner;
                 packages.${if pkgs.stdenv.hostPlatform.isDarwin
                     then "agent-native-bridge" else null} = agentNativeBridgePackage;
+                packages.${if pkgs.stdenv.hostPlatform.isDarwin
+                    then "agent-cli-macos-bundle" else null} =
+                    agentCliMacosRelease.bundle;
+                packages.${if pkgs.stdenv.hostPlatform.isDarwin
+                    then "agent-cli-macos-archive" else null} =
+                    agentCliMacosRelease.archive;
                 packages.agent-cli-runtime = agentCliRuntimePackage;
                 packages.agent-core = agentCorePackage;
                 packages.agent-mcp = agentMcpPackage;
@@ -1191,6 +1222,8 @@
                     nixos-module = import ./nix/tests/telegram-module.nix {
                         inherit self nixpkgs pkgs system;
                     };
+                } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+                    agent-cli-macos-bundle = agentCliMacosRelease.bundle;
                 } // pkgs.lib.optionalAttrs functionalTestEnabled {
                     agent-cli-functional-openai-hello-world =
                         agentCliHelloWorldFunctional "openai"

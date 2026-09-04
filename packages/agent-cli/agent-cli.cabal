@@ -344,6 +344,8 @@ executable agent-cli
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
+                    , directory
+                    , filepath
 
 foreign-library haskell-agent-bridge
     import:           common-options
