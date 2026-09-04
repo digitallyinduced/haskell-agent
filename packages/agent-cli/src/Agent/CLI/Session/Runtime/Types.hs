@@ -12,6 +12,7 @@ import Agent.CLI.AgentViewport
     , AgentTarget
     )
 import Agent.CLI.Claude (ClaudeSessionRuntimeSlot)
+import Agent.CLI.Config (HarnessConfig)
 import Agent.CLI.Session.History (LiveConversation)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.CodeModeRuntime
@@ -192,6 +193,7 @@ data SessionRequest = SessionRequest
 
 data StartupRuntime = StartupRuntime
     { startupToolEnv :: !ToolEnv
+    , startupHarnessConfig :: !HarnessConfig
     , startupNetworkRecovery :: !(Maybe NetworkRecovery)
     , startupDatabaseStore :: !Store
     , startupInterrupt :: !InterruptState

@@ -176,6 +176,40 @@ spec = describe "Agent.CLI.Worktree" do
                 doesFileExist (path </> fromFilePath "LOCAL")
                     `shouldReturn` True
 
+        it "keeps startup worktree policy on its snapshot while later creation reloads config" $
+            withTempRemoteRepo \repo updater ->
+            withTempDir "agent-home-" \home -> do
+                local <- git repo ["rev-parse", "HEAD"]
+                latest <- git updater ["rev-parse", "HEAD"]
+                local `shouldNotBe` latest
+                let initialConfig = defaultHarnessConfig
+                        { configWorktree = WorktreeConfig
+                            { worktreeFetchLatestUpstream = False
+                            }
+                        }
+
+                -- Model a config edit after startup captured its snapshot.
+                saveHarnessConfig home initialConfig `shouldReturn` Right ()
+                startupConfig <- loadHarnessConfig home >>= \case
+                    Left err -> do
+                        expectationFailure
+                            ("failed to load startup config: "
+                                <> Text.unpack err)
+                        pure defaultHarnessConfig
+                    Right config -> pure config
+                saveHarnessConfig home defaultHarnessConfig
+                    `shouldReturn` Right ()
+                startupPath <- expectRight
+                    =<< createManagedWorktreeFromConfigWithProgress
+                        (const (pure ()))
+                        startupConfig
+                        home
+                        repo
+                git startupPath ["rev-parse", "HEAD"] `shouldReturn` local
+
+                laterPath <- expectRight =<< createManagedWorktree home repo
+                git laterPath ["rev-parse", "HEAD"] `shouldReturn` latest
+
         it "uses isolated fetch refs for concurrent worktree creation" $
             withTempRemoteRepo \repo updater ->
             withTempDir "agent-home-" \home -> do

@@ -29,7 +29,6 @@ import Agent.CLI.Compaction ()
 import Agent.CLI.Config
     ( HarnessConfig(..),
       McpServerConfig(..),
-      loadHarnessConfig,
       useProgressiveMcp )
 import Agent.Connectivity ()
 import Agent.CLI.Database ( databaseTools )
@@ -171,6 +170,7 @@ import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupFullscreen, startupBackground,
                      startupFinished, startupDatabaseStore,
+                     startupHarnessConfig,
                      startupSessionState, startupNativeHooks,
                      startupStdinTty) )
 import Agent.CLI.Session.Selection
@@ -735,7 +735,6 @@ loadToolStartup request@AgentToolsRequest
     { loaded
     , connectedGateway
     , gatewayIdentity
-    , home
     , startup
     } = do
     let toolNativeCapabilities =
@@ -751,10 +750,7 @@ loadToolStartup request@AgentToolsRequest
     when ((gatewayCredentialIdentity <$> connectedGateway) /= gatewayIdentity) $
         startupDie startup
             "gateway credential snapshot and session binding disagree"
-    toolHarnessConfig <-
-        loadHarnessConfig home >>= \case
-            Left err -> startupDie startup err
-            Right config -> pure config
+    let toolHarnessConfig = startup.startupHarnessConfig
     (toolGatewaySelection, toolGatewayAllowedChildModels) <-
         selectGatewayModels request
     pure ToolStartup{..}
