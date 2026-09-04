@@ -15,7 +15,7 @@ import Agent.Claude.Transport
     )
 import Agent.Process (terminateProcessGroup)
 import qualified Agent.Json.Decode as Json
-import Control.Concurrent.Async (waitBoth, withAsync)
+import Control.Concurrent.Async (poll, waitBoth, withAsync)
 import Control.Exception.Safe
     ( displayException
     , finally
@@ -151,8 +151,14 @@ runAuthStatusProbe executablePath cleanEnvironment =
                                         streams <- restore $
                                             timeout readerDrainTimeoutMicros
                                                 (waitBoth outReader errReader)
-                                        let (stdoutText, stderrText) =
-                                                maybe ("", "") id streams
+                                        (stdoutText, stderrText) <-
+                                            case streams of
+                                                Just completed ->
+                                                    pure completed
+                                                Nothing ->
+                                                    (,)
+                                                        <$> completedOutput outReader
+                                                        <*> completedOutput errReader
                                         pure (code, stdoutText, stderrText)
                 awaitProbe `finally` mapM_ hCloseQuiet [out, err]
             _ -> do
@@ -164,6 +170,10 @@ runAuthStatusProbe executablePath cleanEnvironment =
     hCloseQuiet = void . tryAny . hClose
     safeDrain handle =
         either (const "") id <$> tryAny (drainCapped handle)
+    completedOutput reader =
+        poll reader >>= \case
+            Just (Right output) -> pure output
+            _ -> pure ""
     setupHandle handle = do
         hSetBinaryMode handle True
         hSetBuffering handle NoBuffering
