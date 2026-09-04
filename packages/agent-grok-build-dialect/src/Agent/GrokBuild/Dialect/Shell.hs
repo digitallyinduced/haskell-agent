@@ -248,7 +248,7 @@ runForegroundStreaming session command timeoutMs onSnapshot =
                         result <- runShellCommandStreaming
                             session.grokEnv
                             session.grokEnv.toolCwd
-                            wrapped
+                            (Text.pack wrapped)
                             timeoutMs
                             onSnapshot
                         next <- if result.commandTimedOut
@@ -308,7 +308,7 @@ startBackgroundCommand session command =
                                         (startShellCommandWithCompletion
                                             session.grokEnv
                                             session.grokEnv.toolCwd
-                                            wrapped
+                                            (Text.pack wrapped)
                                             publish
                                             >>= either
                                                 (throwIO . userError . Text.unpack)

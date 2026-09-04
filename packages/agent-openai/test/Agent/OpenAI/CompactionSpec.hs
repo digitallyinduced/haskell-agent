@@ -1346,7 +1346,7 @@ spec = do
             , "output" .= output
             ] of
             Right response -> response
-            Left err -> error err
+            Left err -> error (Text.unpack err)
     agentMessage :: Text.Text -> Text.Text -> Text.Text -> ResponseItem
     agentMessage author recipient text =
         AgentMessageItem ResponseAgentMessage

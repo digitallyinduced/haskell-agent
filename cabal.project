@@ -3,6 +3,8 @@ packages:
     packages/agent-process
     packages/agent-cli-runtime
     packages/agent-cli
+    packages/agent-repository
+    packages/agent-native-bridge
     packages/agent-telegram
     packages/agent-core
     packages/agent-mcp

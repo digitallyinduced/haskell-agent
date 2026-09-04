@@ -22,7 +22,12 @@ import Agent.CLI.Compaction
     )
 import Agent.Connectivity (withConnectionRecoveryOn)
 import Agent.CLI.Options (CliOptions(..), defaultEffortFor)
-import Agent.CLI.Prompt (sessionTempGuidance, systemPrompt, systemPromptForTools)
+import Agent.CLI.Prompt
+    ( commitAttributionGuidanceForTools
+    , sessionTempGuidance
+    , systemPrompt
+    , systemPromptForTools
+    )
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.Session (LegacySubagentTarget(..))
 import Agent.CLI.SubagentStore
@@ -73,10 +78,11 @@ import Agent.Dialect
      dialectChildAgentProtocol, dialectForId, dialectId, dialectIdForModel)
 import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
 import Agent.Loop
-    (Backend(..), BackendSnapshot(..), BackendStateStore(..), LoopConfig(..),
-     LoopError(..), LoopEvent(..), LoopResult(..), TurnInput(..),
-     advanceBackendSnapshot, defaultLoopDispatch, emptyBackendSnapshot,
-     initialBackendSnapshot, runLoop, runLoopInputs)
+    (Backend(..), BackendMiddleware, BackendSnapshot(..),
+     BackendStateStore(..), LoopConfig(..), LoopError(..), LoopEvent(..),
+     LoopResult(..), TurnInput(..), advanceBackendSnapshot,
+     defaultLoopDispatch, emptyBackendSnapshot, initialBackendSnapshot,
+     runLoop, runLoopInputs)
 import Agent.ToolDispatch (ToolDispatchConfig(..))
 import Agent.Tools.OutputArtifact (finalizeToolOutput)
 import Agent.Tools.Background (setBackgroundTaskHooks)
@@ -499,23 +505,13 @@ runXaiParentSubagent
                     prompt
                     onEvent
 
--- Values resolved before the child acquires its coding-tool runtime.
-data CodexSubagentPreparation = CodexSubagentPreparation
-    { codexPreparationAgentType :: Text
-    , codexPreparationChild :: PreparedChild
-    , codexPreparationModel :: Text
-    , codexPreparationEffort :: Text
-    , codexPreparationSessionTmp :: Maybe OsPath
-    , codexPreparationDialect :: Dialect
-    }
 compactXaiChildBackend
     :: (ResponseCreateParams -> Int)
     -> (ResponseCreateParams -> Int)
     -> (ResponseCreateParams -> Backend)
     -> SubagentSession
     -> ResponseCreateParams
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 compactXaiChildBackend contextWindowFor compactThresholdFor makeBackend
         session params requestBackend =
     autoCompactBackendWith
@@ -541,6 +537,16 @@ compactXaiChildBackend contextWindowFor compactThresholdFor makeBackend
             params
             history
             Nothing
+
+-- Values resolved before the child acquires its coding-tool runtime.
+data CodexSubagentPreparation = CodexSubagentPreparation
+    { codexPreparationAgentType :: Text
+    , codexPreparationChild :: PreparedChild
+    , codexPreparationModel :: Text
+    , codexPreparationEffort :: Text
+    , codexPreparationSessionTmp :: Maybe OsPath
+    , codexPreparationDialect :: Dialect
+    }
 
 -- | Child Codex agent: per-agent transcript retained across follow-ups,
 -- independently scoped WebSocket requests, and nested multi-agent tools.
@@ -708,6 +714,8 @@ codexChildInstructions preparation env today shellPath tools =
         generatedCodexChildInstructions
             agentType
             childDialect
+            preparation.codexPreparationModel
+            preparation.codexPreparationEffort
             env
             preparation.codexPreparationSessionTmp
             today
@@ -723,6 +731,8 @@ codexChildInstructions preparation env today shellPath tools =
 generatedCodexChildInstructions
     :: Text
     -> Dialect
+    -> Text
+    -> Text
     -> SubagentSpawnEnv
     -> Maybe OsPath
     -> Day
@@ -730,11 +740,14 @@ generatedCodexChildInstructions
     -> [AppTool]
     -> Text
 generatedCodexChildInstructions
-        agentType childDialect env sessionTmp today shellPath tools =
+        agentType childDialect model effort env sessionTmp today shellPath
+        tools =
     case dialectChildAgentProtocol childDialect of
         CodexCollaborationProtocol ->
             systemPromptForTools
                 childDialect
+                model
+                effort
                 toolNames
                 env.subCwd
                 sessionTmp
@@ -753,10 +766,17 @@ generatedCodexChildInstructions
                         agentType
                         env.subId.unSubagentId
                     , sessionTempGuidance sessionTmp
+                    , commitAttributionGuidanceForTools
+                        childDialect
+                        model
+                        effort
+                        toolNames
                     ]
         GenericTaskProtocol ->
             systemPromptForTools
                 childDialect
+                model
+                effort
                 toolNames
                 env.subCwd
                 sessionTmp
@@ -765,6 +785,8 @@ generatedCodexChildInstructions
         NoHostChildAgentProtocol ->
             systemPrompt
                 childDialect
+                model
+                effort
                 env.subCwd
                 sessionTmp
                 today
@@ -905,7 +927,7 @@ runHttpSubagentWith
     -> Provider
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
     -> (ResponseCreateParams -> Backend)
-    -> (SubagentSession -> ResponseCreateParams -> Backend -> Backend)
+    -> (SubagentSession -> ResponseCreateParams -> BackendMiddleware)
     -> RunSubagent
 runHttpSubagentWith
         runtime dialect provider sendToRoot mkBackend wrapBackend =
@@ -997,6 +1019,8 @@ runHttpSubagentWith
                                 CodexCollaborationProtocol ->
                                     systemPromptForTools
                                         childDialect
+                                        model
+                                        effort
                                         (map (.appToolName) tools)
                                         env.subCwd
                                         sessionTmp
@@ -1016,10 +1040,17 @@ runHttpSubagentWith
                                                 agentType
                                                 env.subId.unSubagentId
                                             , sessionTempGuidance sessionTmp
+                                            , commitAttributionGuidanceForTools
+                                                childDialect
+                                                model
+                                                effort
+                                                (map (.appToolName) tools)
                                             ]
                                 GenericTaskProtocol ->
                                     systemPromptForTools
                                         childDialect
+                                        model
+                                        effort
                                         (map (.appToolName) tools)
                                         env.subCwd
                                         sessionTmp
@@ -1028,6 +1059,8 @@ runHttpSubagentWith
                                 NoHostChildAgentProtocol ->
                                     systemPrompt
                                         childDialect
+                                        model
+                                        effort
                                         env.subCwd
                                         sessionTmp
                                         today

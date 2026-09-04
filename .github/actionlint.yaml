@@ -3,5 +3,7 @@ self-hosted-runner:
     - haskell-agent
     - office-builder
     - x86_64-linux
+    - ihp-ci-mac
+    - aarch64-darwin
 
 config-variables: null

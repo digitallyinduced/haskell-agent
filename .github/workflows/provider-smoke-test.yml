@@ -1,0 +1,111 @@
+name: Provider smoke test
+
+# Provider credentials never enter pull-request jobs. Exercise the live API
+# only after reviewed code reaches the protected branch.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: haskell-agent-provider-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  openai:
+    name: OpenAI hello world
+    if: ${{ github.repository == 'digitallyinduced/haskell-agent' && github.ref == 'refs/heads/master' }}
+    runs-on: [self-hosted, haskell-agent, office-builder, x86_64-linux]
+    timeout-minutes: 15
+    env:
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        accept-flake-config = false
+    steps:
+      - name: Check out the protected revision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_dir="$RUNNER_TEMP/haskell-agent-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf 'SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
+
+          git init "$source_dir"
+          git -C "$source_dir" remote add origin \
+            https://github.com/digitallyinduced/haskell-agent.git
+          git -C "$source_dir" fetch \
+            --depth=1 \
+            --no-tags \
+            origin \
+            "$GITHUB_SHA"
+          git -C "$source_dir" checkout --detach FETCH_HEAD
+
+      - name: Run OpenAI functional check
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$SOURCE_DIR"
+
+          nix_bin="$(command -v nix || true)"
+          if [[ -z "$nix_bin" && -x /run/current-system/sw/bin/nix ]]; then
+            nix_bin=/run/current-system/sw/bin/nix
+          fi
+          if [[ -z "$nix_bin" ]]; then
+            echo "::error title=Missing Nix binary::nix is required to run the provider smoke test"
+            exit 1
+          fi
+
+          account_home=/var/lib/github-runner-haskell-agent
+          credential_home="$(mktemp -d \
+            "$SOURCE_DIR/.agent-functional-credentials.XXXXXX")"
+          chmod 700 "$credential_home"
+          export AGENT_FUNCTIONAL_TEST_CREDENTIAL_HOME="$credential_home"
+
+          cleanup() {
+            set +e
+            find "$credential_home" -type f -exec shred -u {} +
+            rm -r "$credential_home"
+          }
+          trap cleanup EXIT
+
+          credential_source_home="$HOME"
+          if [[ ! -f "$credential_source_home/.codex/auth.json" \
+            && ! -d "$credential_source_home/.haskell-agent/credentials" \
+            && -d "$account_home" ]]; then
+            credential_source_home="$account_home"
+          fi
+
+          if [[ -f "$credential_source_home/.codex/auth.json" ]]; then
+            mkdir -p "$credential_home/.codex"
+            install -m 600 "$credential_source_home/.codex/auth.json" \
+              "$credential_home/.codex/auth.json"
+          else
+            echo "::error title=Missing OpenAI credentials::the protected CI runner must provide .codex/auth.json"
+            exit 1
+          fi
+          if [[ -d "$credential_source_home/.haskell-agent/credentials" ]]; then
+            mkdir -p "$credential_home/.haskell-agent"
+            cp -R "$credential_source_home/.haskell-agent/credentials" \
+              "$credential_home/.haskell-agent/credentials"
+            chmod -R go-rwx "$credential_home/.haskell-agent/credentials"
+          fi
+
+          # The runner is user-namespaced, so it cannot create ACL entries for
+          # the host's nixbld users. Expose only this short-lived staged copy;
+          # cleanup shreds it immediately after the check.
+          find "$credential_home" -type d -exec chmod 755 {} +
+          find "$credential_home" -type f -exec chmod 644 {} +
+
+          "$nix_bin" build \
+            .#checks.x86_64-linux.agent-cli-functional-openai-hello-world \
+            --impure \
+            --no-link \
+            --max-jobs 1 \
+            --cores 2 \
+            --option sandbox relaxed \
+            --no-write-lock-file \
+            --print-build-logs

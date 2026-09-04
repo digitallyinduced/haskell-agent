@@ -5490,7 +5490,7 @@ runNativeTurn
 nativeExceptionMessage :: SomeException -> Text
 nativeExceptionMessage exception =
     case fromException exception of
-        Just (StartupFailure message) -> Text.pack message
+        Just (StartupFailure message) -> message
         Nothing -> Text.pack (show exception)
 
 nativeTurnArguments :: TurnStart -> [String]
