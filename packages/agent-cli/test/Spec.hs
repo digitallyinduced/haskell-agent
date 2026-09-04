@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-
 module Main (main) where
 
 import Control.Concurrent.Async (mapConcurrently)
@@ -37,7 +35,6 @@ import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
 import qualified Agent.CLI.ArtifactSpec as ArtifactSpec
 import qualified Agent.CLI.AuthSpec as AuthSpec
 import qualified Agent.CLI.BtwSpec as BtwSpec
-import qualified Agent.CLI.BrowserToolsSpec as BrowserToolsSpec
 import qualified Agent.CLI.CancelWatchSpec as CancelWatchSpec
 import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.ClaudeGatewayProxySpec as ClaudeGatewayProxySpec
@@ -67,7 +64,6 @@ import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
 import qualified Agent.CLI.MetaConsoleSpec as MetaConsoleSpec
 import qualified Agent.CLI.MetaConsoleRuntimeSpec as MetaConsoleRuntimeSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
-import qualified Agent.CLI.McpAdminSpec as McpAdminSpec
 import qualified Agent.CLI.NativeAgentsSpec as NativeAgentsSpec
 import qualified Agent.CLI.NativeRuntimeSpec as NativeRuntimeSpec
 import qualified Agent.CLI.NotificationSpec as NotificationSpec
@@ -84,9 +80,6 @@ import qualified Agent.CLI.ProviderFallbackSpec as ProviderFallbackSpec
 import qualified Agent.CLI.ProviderAvailabilitySpec as ProviderAvailabilitySpec
 import qualified Agent.CLI.ProviderTransitionSpec as ProviderTransitionSpec
 import qualified Agent.CLI.RequestSpec as RequestSpec
-import qualified Agent.CLI.RepositoryDeliverySpec as RepositoryDeliverySpec
-import qualified Agent.CLI.RepositoryReviewSpec as RepositoryReviewSpec
-import qualified Agent.CLI.ResourceAdminSpec as ResourceAdminSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
 import qualified Agent.CLI.ResumeSpec as ResumeSpec
@@ -116,16 +109,6 @@ import qualified Agent.CLI.TUITranscriptSpec as TUITranscriptSpec
 import qualified Agent.CLI.UsageSpec as UsageSpec
 import qualified Agent.CLI.WebLspSpec as WebLspSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
-import qualified Agent.CLI.MacOS.EngineMailboxSpec as EngineMailboxSpec
-import qualified Agent.CLI.MacOS.NativeLoopEventSpec as NativeLoopEventSpec
-import qualified Agent.CLI.MacOS.TaskSchedulerSpec as TaskSchedulerSpec
-#ifdef darwin_HOST_OS
-import qualified Agent.CLI.MacOS.BridgeFFISpec as BridgeFFISpec
-import qualified Agent.CLI.MacOS.BridgeHeaderSpec as BridgeHeaderSpec
-import qualified Agent.CLI.MacOS.BridgeSpec as BridgeSpec
-import qualified Agent.CLI.MacOS.BrowserBridgeFFISpec as BrowserBridgeFFISpec
-#endif
-
 main :: IO ()
 main = do
     shard <- lookupEnv "AGENT_CLI_TEST_SHARD"
@@ -178,13 +161,6 @@ specs = do
     ArtifactSpec.spec
     AuthSpec.spec
     BtwSpec.spec
-    BrowserToolsSpec.spec
-#ifdef darwin_HOST_OS
-    BrowserBridgeFFISpec.spec
-    BridgeFFISpec.spec
-    BridgeHeaderSpec.spec
-    BridgeSpec.spec
-#endif
     CancelWatchSpec.spec
     ClipboardSpec.spec
     ClaudeGatewayProxySpec.spec
@@ -210,7 +186,6 @@ specs = do
     LoginSpec.spec
     LearnedSkillsSpec.spec
     MarkdownSpec.spec
-    McpAdminSpec.spec
     McpManagerSpec.spec
     MetaConsoleSpec.spec
     MetaConsoleRuntimeSpec.spec
@@ -231,9 +206,6 @@ specs = do
     ProviderAvailabilitySpec.spec
     ProviderTransitionSpec.spec
     RequestSpec.spec
-    RepositoryDeliverySpec.spec
-    RepositoryReviewSpec.spec
-    ResourceAdminSpec.spec
     RenderSpec.spec
     ReplStatusSpec.spec
     ResumeSpec.spec
@@ -263,9 +235,6 @@ specs = do
     UsageSpec.spec
     WebLspSpec.spec
     WorktreeSpec.spec
-    EngineMailboxSpec.spec
-    NativeLoopEventSpec.spec
-    TaskSchedulerSpec.spec
 
 runShards :: Int -> IO ()
 runShards count = do

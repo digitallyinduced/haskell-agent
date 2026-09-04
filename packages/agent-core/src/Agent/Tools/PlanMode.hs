@@ -12,6 +12,7 @@ module Agent.Tools.PlanMode
     , PlanModeEnv(..)
     , PlanModeHooks(..)
     , newPlanModeEnv
+    , setPlanModeInputWaitHooks
     , planFileName
     , planFilePath
     , isPlanModeActive
@@ -47,7 +48,7 @@ import Agent.Tools.Types
     , jsonTool
     )
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (tryAny)
+import Control.Exception.Safe (bracket_, tryAny)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LazyByteString
@@ -85,6 +86,7 @@ data PlanModeEnv = PlanModeEnv
     , planSessionDir :: !(IORef (Maybe OsPath))
     , planFallbackDir :: !OsPath
     , planHooks :: !PlanModeHooks
+    , planInputWaitHooks :: !(IORef (IO (), IO ()))
     }
 
 data PlanModeHooks = PlanModeHooks
@@ -110,12 +112,32 @@ newPlanModeEnv :: OsPath -> Maybe PlanModeHooks -> IO PlanModeEnv
 newPlanModeEnv fallbackDir hooks = do
     stateRef <- newIORef PlanInactive
     sessionRef <- newIORef Nothing
+    inputWaitHooksRef <- newIORef (pure (), pure ())
+    let baseHooks = fromMaybe defaultHooks hooks
+        withInputWait action = do
+            (beginWait, endWait) <- readIORef inputWaitHooksRef
+            bracket_ beginWait endWait action
+        wrappedHooks = PlanModeHooks
+            { planConfirmEnter = \reason ->
+                withInputWait (baseHooks.planConfirmEnter reason)
+            , planDecideExit = \markdown ->
+                withInputWait (baseHooks.planDecideExit markdown)
+            , planAskQuestion = \question options ->
+                withInputWait (baseHooks.planAskQuestion question options)
+            }
     pure PlanModeEnv
         { planStateRef = stateRef
         , planSessionDir = sessionRef
         , planFallbackDir = fallbackDir
-        , planHooks = fromMaybe defaultHooks hooks
+        , planHooks = wrappedHooks
+        , planInputWaitHooks = inputWaitHooksRef
         }
+
+-- | Configure callbacks which bracket every plan-mode prompt that can wait
+-- for the user. The default callbacks are no-ops for non-interactive hosts.
+setPlanModeInputWaitHooks :: PlanModeEnv -> IO () -> IO () -> IO ()
+setPlanModeInputWaitHooks env beginWait endWait =
+    writeIORef env.planInputWaitHooks (beginWait, endWait)
 
 planFilePath :: PlanModeEnv -> IO OsPath
 planFilePath env = do

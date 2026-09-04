@@ -140,6 +140,9 @@ jobs:
             # package test while rebuilding only its affected graph.
             build_targets+=(
               .#checks.x86_64-linux.agent-cli
+              .#checks.x86_64-linux.agent-repository
+              .#checks.x86_64-linux.agent-native-bridge
+              .#checks.x86_64-linux.package-boundaries
               .#checks.x86_64-linux.agent-telegram
               .#checks.x86_64-linux.agent-server
               .#checks.x86_64-linux.agent-runtime-daemon
@@ -147,6 +150,15 @@ jobs:
               .#checks.x86_64-linux.agent-cli-static-runtime
               .#checks.x86_64-linux.agent-sandbox-runner
               .#checks.x86_64-linux.nixos-module
+            )
+          fi
+          if [[ "$SYSTEM" == aarch64-darwin ]]; then
+            # The native bridge is now its own Cabal package rather than an
+            # agent-cli component, so build its checked and wrapped outputs
+            # explicitly on the native runner.
+            build_targets+=(
+              .#checks.aarch64-darwin.agent-native-bridge
+              .#agent-native-bridge
             )
           fi
 
