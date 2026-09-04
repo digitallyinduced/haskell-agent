@@ -439,10 +439,7 @@ runAgentWithRuntime processRuntime runMode options = do
                                         now <- getCurrentTime
                                         throwIO $
                                             StartupFailure
-                                                (Text.unpack
-                                                    (formatApiErrorAt
-                                                        now
-                                                        apiError))
+                                                (formatApiErrorAt now apiError)
                                     | otherwise -> do
                                         reportProviderUnavailable Nothing apiError
                                         pure DevQuit
@@ -451,8 +448,7 @@ runAgentWithRuntime processRuntime runMode options = do
                             now <- getCurrentTime
                             throwIO $
                                 StartupFailure
-                                    (Text.unpack
-                                        (formatApiErrorAt now apiError))
+                                    (formatApiErrorAt now apiError)
                         | otherwise -> pure DevQuit
             RunQuit -> pure DevQuit
             RunReload sessionId -> pure (DevReload sessionId)
@@ -695,7 +691,7 @@ runAgent
                 (\failure@(StartupFailure message) ->
                     if runMode.runInBackground
                         then throwIO failure
-                        else die message)
+                        else die (Text.unpack message))
                 pure
                 startupOutcome
     case (prepared.preparedFullscreen, result) of
@@ -837,7 +833,7 @@ prepareAgentIterationResources request = do
     configuredTheme <-
         loadHarnessConfig home >>= \case
             Left err ->
-                failAgentIterationPreparation request (Text.unpack err)
+                failAgentIterationPreparation request err
             Right config -> pure config.configTheme
     let root = sessionsRoot home
     databaseStore <-
@@ -851,7 +847,7 @@ prepareAgentIterationResources request = do
             openStore databaseConfig >>= \case
                 Left err ->
                     failAgentIterationPreparation request
-                        (Text.unpack (renderStoreError err))
+                        (renderStoreError err)
                 Right store -> do
                     writeIORef request.iterationDatabaseStoreRef (Just store)
                     pure store
@@ -859,7 +855,7 @@ prepareAgentIterationResources request = do
         loadGatewayCredentialAt home >>= \case
             Left err ->
                 failAgentIterationPreparation request
-                    ("Could not load gateway credentials: " <> Text.unpack err)
+                    ("Could not load gateway credentials: " <> err)
             Right credential -> pure credential
     let connectedGatewayIdentity =
             gatewayCredentialIdentity <$> connectedGateway
@@ -906,25 +902,24 @@ loadAgentIterationResume request root databaseStore connectedGatewayIdentity =
             dir <- either
                 (\err -> do
                     signalAgentIterationReady request (Left err)
-                    failAgentIterationPreparation request (Text.unpack err))
+                    failAgentIterationPreparation request err)
                 pure
                 (sessionDirForId root sessionId)
             exists <- doesDirectoryExist dir
             when (not exists) do
                 let err = "session not found: " <> sessionId
                 signalAgentIterationReady request (Left err)
-                failAgentIterationPreparation request (Text.unpack err)
+                failAgentIterationPreparation request err
             acquireSessionLock dir sessionId >>= \case
                 Left err -> do
                     signalAgentIterationReady request (Left err)
-                    failAgentIterationPreparation request (Text.unpack err)
+                    failAgentIterationPreparation request err
                 Right lock -> do
                     writeIORef request.iterationResumeLockRef (Just lock)
                     loadSessionMeta sessionPool root sessionId >>= \case
                         Left err -> do
                             signalAgentIterationReady request (Left err)
-                            failAgentIterationPreparation request
-                                (Text.unpack err)
+                            failAgentIterationPreparation request err
                         Right meta ->
                             case
                                 validateResumeMetaForBoundary
@@ -933,8 +928,7 @@ loadAgentIterationResume request root databaseStore connectedGatewayIdentity =
                             of
                                 Left err -> do
                                     signalAgentIterationReady request (Left err)
-                                    failAgentIterationPreparation request
-                                        (Text.unpack err)
+                                    failAgentIterationPreparation request err
                                 Right () ->
                                     loadActiveSession
                                         sessionPool
@@ -946,7 +940,7 @@ loadAgentIterationResume request root databaseStore connectedGatewayIdentity =
                                                     (Left err)
                                                 failAgentIterationPreparation
                                                     request
-                                                    (Text.unpack err)
+                                                    err
                                             Right loaded@(loadedMeta, _) ->
                                                 case
                                                     validateResumeMetaForBoundary
@@ -959,7 +953,7 @@ loadAgentIterationResume request root databaseStore connectedGatewayIdentity =
                                                             (Left err)
                                                         failAgentIterationPreparation
                                                             request
-                                                            (Text.unpack err)
+                                                            err
                                                     Right () -> do
                                                         signalAgentIterationReady
                                                             request
@@ -977,7 +971,7 @@ signalAgentIterationReady request result =
 
 failAgentIterationPreparation
     :: AgentIterationRequest
-    -> String
+    -> Text
     -> IO a
 failAgentIterationPreparation request message =
     releasePreparationResources
@@ -987,7 +981,7 @@ failAgentIterationPreparation request message =
             Nothing
                 | request.iterationRunMode.runInBackground ->
                     throwIO (StartupFailure message)
-                | otherwise -> die message
+                | otherwise -> die (Text.unpack message)
             Just _ -> throwIO (StartupFailure message)
 
 prepareAgentIterationInterface
@@ -1249,7 +1243,7 @@ resolveAgentIterationCwd request resources interface resumeLock =
         mapM_ releaseSessionLock resumeLock
         case fullscreen of
             Nothing -> die (Text.unpack err)
-            Just _ -> throwIO (StartupFailure (Text.unpack err))
+            Just _ -> throwIO (StartupFailure err)
     worktreeCreated path = do
         color <- resolveColor stderrHandle
         case fullscreen of

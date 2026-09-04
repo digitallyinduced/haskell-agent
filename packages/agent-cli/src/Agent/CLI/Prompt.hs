@@ -2,6 +2,7 @@
 module Agent.CLI.Prompt
     ( appendMcpInstructions
     , codexEnvironmentContext
+    , commitAttributionGuidanceForTools
     , mcpInstructionsForRequest
     , mcpInstructionsGuidance
     , secretInputGuidance
@@ -38,6 +39,7 @@ import Agent.GrokBuild.Dialect.Prompt
     )
 import Agent.OsPath (toText)
 import Agent.Provider (BillingMode(..), Provider(..))
+import Data.Char (isControl)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -77,12 +79,21 @@ subscriptionSubagentModelGuidance provider billing
     | otherwise = Nothing
 
 -- | @isNonInteractive@ is True for one-shot @-p@ (no human in the loop).
-systemPrompt :: Dialect -> OsPath -> Maybe OsPath -> Day -> Bool -> Text
-systemPrompt dialect cwd sessionTmp today isNonInteractive =
+systemPrompt
+    :: Dialect
+    -> Text
+    -> Text
+    -> OsPath
+    -> Maybe OsPath
+    -> Day
+    -> Bool
+    -> Text
+systemPrompt dialect model effort cwd sessionTmp today isNonInteractive =
     Text.intercalate "\n\n" $
         filter (not . Text.null)
             [ base
             , sessionTempGuidance sessionTmp
+            , commitAttributionGuidance model effort
             , ghciGuidanceForDialect dialect
             , timeContextGuidance
             ]
@@ -100,6 +111,8 @@ systemPrompt dialect cwd sessionTmp today isNonInteractive =
 -- including provider-hosted search by default.
 systemPromptForTools
     :: Dialect
+    -> Text
+    -> Text
     -> [Text]
     -> OsPath
     -> Maybe OsPath
@@ -115,6 +128,8 @@ systemPromptForTools =
 systemPromptForToolsWithHostedSearch
     :: Bool
     -> Dialect
+    -> Text
+    -> Text
     -> [Text]
     -> OsPath
     -> Maybe OsPath
@@ -122,11 +137,16 @@ systemPromptForToolsWithHostedSearch
     -> Bool
     -> Text
 systemPromptForToolsWithHostedSearch includeHostedSearch
-        dialect toolNames cwd sessionTmp today isNonInteractive =
+        dialect model effort toolNames cwd sessionTmp today isNonInteractive =
     Text.intercalate "\n\n" $
         filter (not . Text.null)
             [ base
             , sessionTempGuidance sessionTmp
+            , commitAttributionGuidanceForTools
+                dialect
+                model
+                effort
+                (Set.toList available)
             , secretInputGuidance available
             , imageDisplayGuidance available
             , learnedSkillGuidance available
@@ -165,6 +185,8 @@ systemPromptForToolsWithHostedSearch includeHostedSearch
 -- them through 'codexEnvironmentContext', matching upstream placement.
 systemPromptForCatalogModel
     :: Dialect
+    -> Text
+    -> Text
     -> ModelInfo
     -> [Text]
     -> Maybe OsPath
@@ -175,17 +197,24 @@ systemPromptForCatalogModel =
 systemPromptForCatalogModelWithHostedSearch
     :: Bool
     -> Dialect
+    -> Text
+    -> Text
     -> ModelInfo
     -> [Text]
     -> Maybe OsPath
     -> Text
 systemPromptForCatalogModelWithHostedSearch
-        includeHostedSearch dialect info toolNames sessionTmp =
+        includeHostedSearch dialect model effort info toolNames sessionTmp =
     Text.intercalate "\n\n" $
         filter (not . Text.null)
             [ Text.strip
                 (renderModelInstructions ModelPersonalityDefault info)
             , sessionTempGuidance sessionTmp
+            , commitAttributionGuidanceForTools
+                dialect
+                model
+                effort
+                (Set.toList available)
             , secretInputGuidance available
             , imageDisplayGuidance available
             , learnedSkillGuidance available
@@ -241,6 +270,49 @@ sessionTempGuidance = \case
             , "Filesystem-tool paths under /tmp or /private/tmp are redirected into this directory."
             , "HASKELL_AGENT_TMPDIR and TMPDIR point to this directory for shell commands; use $TMPDIR instead of a literal /tmp or /private/tmp path."
             ]
+
+-- | Keep the user's configured Git identity as the commit author while making
+-- the harness's contribution visible in GitHub and other trailer-aware tools.
+commitAttributionGuidance :: Text -> Text -> Text
+commitAttributionGuidance model effort =
+    Text.unlines
+        [ "Git commit attribution:"
+        , "- When you create or amend a Git commit for work performed in this session, append exactly one `"
+            <> trailer
+            <> "` trailer to the commit message."
+        , "- Preserve the user's configured author identity and any existing co-author trailers."
+        , "- Do not add a duplicate Haskell Agent trailer, and omit it if the user explicitly asks you not to add it."
+        ]
+  where
+    trailer =
+        "Co-authored-by: Haskell Agent ("
+            <> sanitizeCommitIdentityComponent model
+            <> ", "
+            <> sanitizeCommitIdentityComponent effort
+            <> ") <agent@digitallyinduced.com>"
+
+commitAttributionGuidanceForTools
+    :: Dialect -> Text -> Text -> [Text] -> Text
+commitAttributionGuidanceForTools dialect model effort available
+    | dialectPromptStyle dialect == ClaudeCodePromptStyle =
+        commitAttributionGuidance model effort
+    | not (any (`Set.member` commandTools) available) = ""
+    | otherwise = commitAttributionGuidance model effort
+  where
+    commandTools =
+        Set.fromList
+            [ "shell_command"
+            , "run_terminal_cmd"
+            , "run_terminal_command"
+            , "run_ghci"
+            ]
+
+sanitizeCommitIdentityComponent :: Text -> Text
+sanitizeCommitIdentityComponent =
+    Text.map \character ->
+        if isControl character || character `elem` ['<', '>']
+            then '-'
+            else character
 
 -- | Keep sensitive values outside model-visible text and tool arguments when
 -- the host exposes the dedicated secret-entry capability.

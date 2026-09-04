@@ -148,7 +148,7 @@ decodeJsonResponseBodyBytes bodyBytes =
                 Right response -> rejectFailedCodexResponse response
                 Left _ -> Left
                     (JsonDecodeError
-                        (Text.pack directError)
+                        directError
                         (bodyPreview bodyBytes))
 
 wrappedResponseDecoder :: Json.Decoder OpenAI.Response

@@ -1,0 +1,211 @@
+name: Publish macOS release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: haskell-agent-macos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish Apple silicon archive
+    if: ${{ github.repository == 'digitallyinduced/haskell-agent' }}
+    runs-on: [self-hosted, haskell-agent, ihp-ci-mac, aarch64-darwin]
+    timeout-minutes: 90
+    env:
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+      GIT_PACKAGE: github:NixOS/nixpkgs/afe3d8ac4395617bdcdac9f188ac8717a062e014#git
+      GH_PACKAGE: github:NixOS/nixpkgs/afe3d8ac4395617bdcdac9f188ac8717a062e014#gh
+      ARCHIVE_NAME: haskell-agent-macos-arm64
+    steps:
+      - name: Check out the tagged revision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          nix_bin="$(command -v nix || true)"
+          if [[ -z "$nix_bin" ]]; then
+            echo "::error title=Missing Nix binary::nix is required to obtain the pinned Git client"
+            exit 1
+          fi
+          git_path=$(
+            "$nix_bin" build "$GIT_PACKAGE" \
+              --no-link \
+              --print-out-paths \
+              --option substituters https://cache.nixos.org/ \
+              --option extra-substituters ""
+          )
+          git_bin="$git_path/bin/git"
+
+          source_dir="$RUNNER_TEMP/haskell-agent-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf 'SOURCE_DIR=%s\n' "$source_dir" >> "$GITHUB_ENV"
+
+          "$git_bin" init "$source_dir"
+          "$git_bin" -C "$source_dir" remote add origin \
+            https://github.com/digitallyinduced/haskell-agent.git
+          "$git_bin" -C "$source_dir" fetch \
+            --depth=1 \
+            origin \
+            "$GITHUB_SHA"
+          "$git_bin" -C "$source_dir" checkout --detach FETCH_HEAD
+
+      - name: Build and smoke-test the portable archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+
+          nix_bin="$(command -v nix || true)"
+          if [[ -z "$nix_bin" ]]; then
+            echo "::error title=Missing Nix binary::nix is required to build haskell-agent"
+            exit 1
+          fi
+
+          archive_out=$(
+            "$nix_bin" build \
+              --accept-flake-config \
+              --no-link \
+              --print-out-paths \
+              --max-jobs 1 \
+              --cores 1 \
+              .#agent-cli-macos-archive
+          )
+          release_dir="$RUNNER_TEMP/macos-release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          extract_dir="$RUNNER_TEMP/macos-release-smoke-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [[ -e "$release_dir" || -e "$extract_dir" ]]; then
+            echo "::error title=Stale release directory::Refusing to reuse an existing release test directory"
+            exit 1
+          fi
+          printf 'RELEASE_DIR=%s\n' "$release_dir" >> "$GITHUB_ENV"
+          mkdir -p "$release_dir"
+          cp "$archive_out/$ARCHIVE_NAME.tar.gz" \
+            "$archive_out/$ARCHIVE_NAME.tar.gz.sha256" \
+            "$release_dir/"
+
+          (
+            cd "$release_dir"
+            shasum -a 256 -c "$ARCHIVE_NAME.tar.gz.sha256"
+          )
+
+          mkdir -p "$extract_dir"
+          tar -xzf "$release_dir/$ARCHIVE_NAME.tar.gz" -C "$extract_dir"
+          bundle="$extract_dir/$ARCHIVE_NAME"
+          test -x "$bundle/bin/agent-cli"
+          touch "$bundle/.write-test"
+          rm "$bundle/.write-test"
+
+          macho_count=0
+          while IFS= read -r -d '' candidate; do
+            description=$(file -b "$candidate")
+            if [[ "$description" == Mach-O* ]]; then
+              ((macho_count += 1))
+              grep -Fq 'arm64' <<<"$description"
+              codesign --verify --strict "$candidate"
+              if otool -l "$candidate" | grep -F /nix/store/ >/dev/null; then
+                echo "::error file=$candidate,title=Non-portable Mach-O::Nix store load command remains"
+                exit 1
+              fi
+            fi
+          done < <(find "$bundle" -type f -print0)
+          ((macho_count > 0))
+
+          test -f "$bundle/share/agent-cli/skills/add-model/SKILL.md"
+          test -f "$bundle/share/agent-cli-runtime/config/models.default.json"
+          test -f "$bundle/share/agent-core/data/code-mode/worker.mjs"
+          find "$bundle/share/skylighting/xml" -type f -print -quit | grep -q .
+
+          short_root="/var/tmp/haskell-agent-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [[ -e "$short_root" ]]; then
+            echo "::error title=Stale runtime directory::Refusing to reuse $short_root"
+            exit 1
+          fi
+          home="$short_root/home"
+          link_dir="$short_root/bin"
+          mkdir -p "$home" "$link_dir"
+          ln -s "$bundle/bin/agent-cli" "$link_dir/agent-cli"
+          port=$((49152 + GITHUB_RUN_ID % 12000))
+
+          run_agent() {
+            env -i \
+              HOME="$home" \
+              PATH=/usr/bin:/bin \
+              LC_ALL=C \
+              AGENT_POSTGRES_PORT="$port" \
+              "$link_dir/agent-cli" "$@"
+          }
+          cleanup() {
+            run_agent storage stop || true
+            rm -rf -- "$short_root"
+          }
+          trap cleanup EXIT
+
+          env -i HOME="$home" PATH=/usr/bin:/bin LC_ALL=C \
+            "$bundle/bin/ffmpeg" \
+              -hide_banner -loglevel error \
+              -f lavfi -i 'sine=frequency=440:duration=0.01' \
+              -f s16le "$short_root/tone.pcm"
+          test -s "$short_root/tone.pcm"
+          env -i HOME="$home" PATH=/usr/bin:/bin LC_ALL=C \
+            "$bundle/bin/bun" --version
+          env -i HOME="$home" PATH=/usr/bin:/bin LC_ALL=C \
+            "$bundle/bin/bun" \
+              -e 'if (1 + 1 !== 2) process.exit(1)'
+          env -i HOME="$home" PATH=/usr/bin:/bin LC_ALL=C \
+            "$bundle/bin/rg" --version
+          env -i HOME="$home" PATH=/usr/bin:/bin LC_ALL=C \
+            "$bundle/bin/zstd" --version
+          env -i HOME="$home" PATH=/usr/bin:/bin LC_ALL=C \
+            "$bundle/libexec/postgresql/bin/postgres" --version
+          env -i HOME="$home" PATH=/usr/bin:/bin LC_ALL=C \
+            "$bundle/libexec/postgresql/bin/initdb" --version
+
+          run_agent --version
+          run_agent storage start
+          run_agent storage doctor
+          run_agent storage stop
+          rm -rf -- "$short_root"
+          trap - EXIT
+
+      - name: Upload archive to the GitHub release
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          nix_bin="$(command -v nix || true)"
+          if [[ -z "$nix_bin" ]]; then
+            echo "::error title=Missing Nix binary::nix is required to obtain the pinned GitHub client"
+            exit 1
+          fi
+          gh_path=$(
+            "$nix_bin" build "$GH_PACKAGE" \
+              --no-link \
+              --print-out-paths \
+              --option substituters https://cache.nixos.org/ \
+              --option extra-substituters ""
+          )
+          gh_bin="$gh_path/bin/gh"
+
+          if "$gh_bin" release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            "$gh_bin" release upload \
+              "$GITHUB_REF_NAME" \
+              "$RELEASE_DIR"/* \
+              --clobber
+          else
+            "$gh_bin" release create \
+              "$GITHUB_REF_NAME" \
+              "$RELEASE_DIR"/* \
+              --verify-tag \
+              --generate-notes \
+              --title "$GITHUB_REF_NAME"
+          fi

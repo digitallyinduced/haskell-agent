@@ -1383,10 +1383,6 @@ spec = do
             reverse <$> readIORef events `shouldReturn`
                 [ WarningRaised
                     "Codex usage is low: primary 8% left. Check /usage for reset details."
-                , ProviderLimitUpdated
-                    { providerLimitText = "5h limit left: 8%"
-                    , providerLimitWarning = True
-                    }
                 ]
             readIORef healthy `shouldReturn` False
             readIORef freshCalls `shouldReturn` 1
@@ -2136,7 +2132,7 @@ testResponseWithUsage responseId output usage =
     , "output" Aeson..= output
     ] <> usageField))) of
         Right response -> response
-        Left err -> error err
+        Left err -> error (Text.unpack err)
   where
     usageField = case usage of
         Aeson.Null -> []
