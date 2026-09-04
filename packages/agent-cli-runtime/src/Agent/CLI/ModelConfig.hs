@@ -460,9 +460,9 @@ validateConfig :: Text -> ConfigFile -> Either Text ModelCatalog
 validateConfig source config = do
     ensureUniqueModelRoutes source config.configModels
     connections <- validationToEither $
-        Map.traverseWithKey validateConnection config.configConnections
+        Map.traverseWithKey validateModelConnection config.configConnections
     models <- validationToEither $
-        traverse (validateModel connections) config.configModels
+        traverse (validateCatalogModel connections) config.configModels
     traverse_ (validateBuiltinDefault models) allBuiltinProviders
     pure ModelCatalog
         { catalogConnections = connections
@@ -482,14 +482,19 @@ validateConfig source config = do
                     == organizationGatewayConnectionId
                 ]
         }
-  where
-    validateConnection connectionId raw =
+
+validateModelConnection
+    :: Text
+    -> ConnectionFile
+    -> Validation [Text] ModelConnection
+validateModelConnection connectionId raw =
         case validateConnectionId connectionId of
             Left err -> validationFailure err
             Right () ->
                 ModelConnection connectionId
                     <$> validateConnectionKind connectionId raw
 
+  where
     validateConnectionKind connectionId raw =
         case Text.toLower (Text.strip raw.connectionApi) of
             "builtin" ->
@@ -555,7 +560,11 @@ validateConfig source config = do
                 validationFailure ("connection " <> connectionId
                     <> " has unsupported api " <> other)
 
-    validateModel connections raw =
+validateCatalogModel
+    :: Map Text ModelConnection
+    -> ModelFile
+    -> Validation [Text] CatalogModel
+validateCatalogModel connections raw =
         let modelId = Text.strip raw.modelFileId
             connectionId = Text.strip raw.modelFileConnection
             wireId = Text.strip (fromMaybe modelId raw.modelFileWireId)
@@ -591,7 +600,7 @@ validateConfig source config = do
                                 wireId
                                 reasoningEfforts
                                 defaultReasoningEffort
-      where
+  where
         validateResolvedModel
             connection
             dialect

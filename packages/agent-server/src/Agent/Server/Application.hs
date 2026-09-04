@@ -232,211 +232,42 @@ dispatchBoundary
             fmap
                 (fmap (jsonResponse status200 headers))
                 (backend.backendListModels boundary)
-        ("GET", ["v1", "sessions"]) -> do
-            let archive = queryArchiveFilter request
-                cursor = queryOptionalText "cursor" request
-                limit = queryLimit "limit" 50 100 request
-            case (archive, cursor, limit) of
-                (Right archiveFilter, Right pageCursor, Right pageLimit) ->
-                    fmap
-                        (fmap (jsonResponse status200 headers))
-                        (backend.backendListSessions
-                            boundary
-                            archiveFilter
-                            pageCursor
-                            pageLimit)
-                _ -> pure $
-                    Left $
-                        firstQueryError
-                            [ () <$ archive
-                            , () <$ cursor
-                            , () <$ limit
-                            ]
+        ("GET", ["v1", "sessions"]) ->
+            listSessionsResponse backend boundary headers request
         ("POST", ["v1", "sessions"]) ->
-            withJsonBody config request \body ->
-                fmap
-                    (fmap (jsonResponse status201 headers))
-                    (backend.backendCreateSession boundary body)
+            createSessionResponse config backend boundary headers request
         ("GET", ["v1", "sessions", sessionId]) ->
             fmap
                 (fmap (jsonResponse status200 headers))
                 (backend.backendGetSession boundary sessionId)
         ("PATCH", ["v1", "sessions", sessionId]) ->
-            withJsonBody config request
-                \(body :: PatchSessionRequest) ->
-                    if body.patchSessionTitle == Nothing
-                        && body.patchSessionArchived == Nothing
-                        then
-                            pure
-                                (Left ApiError
-                                    { apiErrorStatus = 400
-                                    , apiErrorCode =
-                                        "empty_patch"
-                                    , apiErrorMessage =
-                                        "at least one patch field is required"
-                                    , apiErrorDetails = Nothing
-                                    })
-                        else if body.patchSessionTitle /= Nothing
-                            && body.patchSessionArchived /= Nothing
-                            then
-                                pure
-                                    (Left ApiError
-                                        { apiErrorStatus = 422
-                                        , apiErrorCode =
-                                            "non_atomic_patch"
-                                        , apiErrorMessage =
-                                            "title and archived must be patched in separate requests"
-                                        , apiErrorDetails = Nothing
-                                        })
-                        else
-                            runSessionMutation
-                                supervisor
-                                boundary
-                                sessionId
-                                (fmap
-                                    (fmap
-                                        (jsonResponse
-                                            status200
-                                            headers))
-                                    (backend.backendPatchSession
-                                        boundary
-                                        sessionId
-                                        body))
+            patchSessionResponse
+                config backend supervisor boundary sessionId headers request
         ("DELETE", ["v1", "sessions", sessionId]) ->
-            runSessionMutation
-                supervisor
-                boundary
-                sessionId
-                (do
-                    backend.backendDeleteSession
-                        boundary sessionId >>= \case
-                            Left err -> pure (Left err)
-                            Right () ->
-                                pure $
-                                    Right $
-                                        responseLBS
-                                            status204
-                                            headers
-                                            "")
-        ("GET", ["v1", "sessions", sessionId, "history"]) -> do
-            let before =
-                    queryOptionalInteger "cursor" request >>= \case
-                        Nothing ->
-                            queryOptionalInteger "before" request
-                        value -> Right value
-                limit = queryLimit "limit" 50 100 request
-            case (before, limit) of
-                (Right cursor, Right pageLimit) ->
-                    fmap
-                        (fmap (jsonResponse status200 headers))
-                        (backend.backendSessionHistory
-                            boundary
-                            sessionId
-                            cursor
-                            pageLimit)
-                _ -> pure $
-                    Left $
-                        firstQueryError
-                            [() <$ before, () <$ limit]
+            deleteSessionResponse
+                backend supervisor boundary sessionId headers
+        ("GET", ["v1", "sessions", sessionId, "history"]) ->
+            sessionHistoryResponse backend boundary sessionId headers request
         ("POST", ["v1", "sessions", sessionId, "fork"]) ->
-            withJsonBody config request \body ->
-                runSessionMutation
-                    supervisor
-                    boundary
-                    sessionId
-                    (do
-                        fmap
-                            (fmap (jsonResponse status201 headers))
-                            (backend.backendForkSession
-                                boundary
-                                sessionId
-                                body))
+            forkSessionResponse
+                config backend supervisor boundary sessionId headers request
         ("POST", ["v1", "sessions", sessionId, "turns"]) ->
-            withJsonBody config request \body ->
-                createTurn backend supervisor boundary sessionId body
-                    >>= pure
-                        . fmap (jsonResponse status202 headers . toJSONValue)
+            createTurnResponse
+                config backend supervisor boundary sessionId headers request
         ("GET", ["v1", "turns"]) ->
-            case queryOptionalText "sessionId" request of
-                Left err -> pure (Left err)
-                Right sessionId -> do
-                    turns <- listTurns supervisor boundary sessionId
-                    pure $
-                        Right $
-                            jsonResponse
-                                status200
-                                headers
-                                (object ["data" .= turns])
+            listTurnsResponse supervisor boundary headers request
         ("GET", ["v1", "turns", rawTurnId]) ->
             findTurn supervisor boundary rawTurnId >>= pure
                 . fmap (jsonResponse status200 headers . toJSONValue)
         ("POST", ["v1", "turns", rawTurnId, "cancel"]) ->
-            cancelTurn
-                supervisor
-                boundary
-                (TurnId rawTurnId) >>= \case
-                    Left _ -> pure (Left turnNotFound)
-                    Right turn ->
-                        pure $
-                            Right $
-                                jsonResponse
-                                    status200
-                                    headers
-                                    (toJSONValue turn)
+            cancelTurnResponse supervisor boundary rawTurnId headers
         ("GET", ["v1", "turns", rawTurnId, "agents"]) ->
-            lookupTurnAgents
-                supervisor
-                boundary
-                (TurnId rawTurnId) >>= \case
-                    Nothing -> pure (Left turnNotFound)
-                    Just agents ->
-                        pure $
-                            Right $
-                                jsonResponse
-                                    status200
-                                    headers
-                                    (object ["data" .= agents])
-        ("GET", ["v1", "requests"]) -> do
-            requests <- listHumanRequests supervisor boundary
-            pure $
-                Right $
-                    jsonResponse
-                        status200
-                        headers
-                        (object ["data" .= requests])
+            turnAgentsResponse supervisor boundary rawTurnId headers
+        ("GET", ["v1", "requests"]) ->
+            humanRequestsResponse supervisor boundary headers
         ("POST", ["v1", "requests", rawRequestId, "resolve"]) ->
-            withJsonBody config request \(body :: ResolveRequest) -> do
-                let response = HumanResponse
-                        { humanResponseDecision =
-                            body.resolveRequestDecision
-                        , humanResponseValue =
-                            body.resolveRequestValue
-                        }
-                resolveHumanRequest
-                    supervisor
-                    boundary
-                    (RequestId rawRequestId)
-                    response >>= \case
-                        Left message ->
-                            pure $
-                                Left ApiError
-                                    { apiErrorStatus =
-                                        if "not found"
-                                            `Text.isInfixOf`
-                                                Text.toLower message
-                                            then 404
-                                            else 409
-                                    , apiErrorCode = "request_not_resolved"
-                                    , apiErrorMessage = message
-                                    , apiErrorDetails = Nothing
-                                    }
-                        Right resolved ->
-                            pure $
-                                Right $
-                                    jsonResponse
-                                        status200
-                                        headers
-                                        (toJSONValue resolved)
+            resolveHumanRequestResponse
+                config supervisor boundary rawRequestId headers request
         ("GET", ["v1", "events"]) ->
             createEventResponse
                 backend
@@ -448,6 +279,304 @@ dispatchBoundary
         _ -> pure (Left routeNotFound)
   where
     headers = responseHeaders requestId corsHeaders []
+
+listSessionsResponse
+    :: Backend
+    -> AccessBoundary
+    -> [Header]
+    -> Request
+    -> IO (Either ApiError Response)
+listSessionsResponse backend boundary headers request = do
+    let archive = queryArchiveFilter request
+        cursor = queryOptionalText "cursor" request
+        limit = queryLimit "limit" 50 100 request
+    case (archive, cursor, limit) of
+        (Right archiveFilter, Right pageCursor, Right pageLimit) ->
+            fmap
+                (fmap (jsonResponse status200 headers))
+                (backend.backendListSessions
+                    boundary
+                    archiveFilter
+                    pageCursor
+                    pageLimit)
+        _ -> pure $
+            Left $
+                firstQueryError
+                    [ () <$ archive
+                    , () <$ cursor
+                    , () <$ limit
+                    ]
+
+createSessionResponse
+    :: ApplicationConfig
+    -> Backend
+    -> AccessBoundary
+    -> [Header]
+    -> Request
+    -> IO (Either ApiError Response)
+createSessionResponse config backend boundary headers request =
+    withJsonBody config request \body ->
+        fmap
+            (fmap (jsonResponse status201 headers))
+            (backend.backendCreateSession boundary body)
+
+patchSessionResponse
+    :: ApplicationConfig
+    -> Backend
+    -> Supervisor
+    -> AccessBoundary
+    -> Text
+    -> [Header]
+    -> Request
+    -> IO (Either ApiError Response)
+patchSessionResponse
+        config backend supervisor boundary sessionId headers request =
+    withJsonBody config request \(body :: PatchSessionRequest) ->
+        if body.patchSessionTitle == Nothing
+            && body.patchSessionArchived == Nothing
+            then
+                pure
+                    (Left ApiError
+                        { apiErrorStatus = 400
+                        , apiErrorCode =
+                            "empty_patch"
+                        , apiErrorMessage =
+                            "at least one patch field is required"
+                        , apiErrorDetails = Nothing
+                        })
+            else if body.patchSessionTitle /= Nothing
+                && body.patchSessionArchived /= Nothing
+                then
+                    pure
+                        (Left ApiError
+                            { apiErrorStatus = 422
+                            , apiErrorCode =
+                                "non_atomic_patch"
+                            , apiErrorMessage =
+                                "title and archived must be patched in separate requests"
+                            , apiErrorDetails = Nothing
+                            })
+                else
+                    runSessionMutation
+                        supervisor
+                        boundary
+                        sessionId
+                        (fmap
+                            (fmap
+                                (jsonResponse
+                                    status200
+                                    headers))
+                            (backend.backendPatchSession
+                                boundary
+                                sessionId
+                                body))
+
+deleteSessionResponse
+    :: Backend
+    -> Supervisor
+    -> AccessBoundary
+    -> Text
+    -> [Header]
+    -> IO (Either ApiError Response)
+deleteSessionResponse backend supervisor boundary sessionId headers =
+    runSessionMutation
+        supervisor
+        boundary
+        sessionId
+        (do
+            backend.backendDeleteSession
+                boundary sessionId >>= \case
+                    Left err -> pure (Left err)
+                    Right () ->
+                        pure $
+                            Right $
+                                responseLBS
+                                    status204
+                                    headers
+                                    "")
+
+sessionHistoryResponse
+    :: Backend
+    -> AccessBoundary
+    -> Text
+    -> [Header]
+    -> Request
+    -> IO (Either ApiError Response)
+sessionHistoryResponse backend boundary sessionId headers request = do
+    let before =
+            queryOptionalInteger "cursor" request >>= \case
+                Nothing ->
+                    queryOptionalInteger "before" request
+                value -> Right value
+        limit = queryLimit "limit" 50 100 request
+    case (before, limit) of
+        (Right cursor, Right pageLimit) ->
+            fmap
+                (fmap (jsonResponse status200 headers))
+                (backend.backendSessionHistory
+                    boundary
+                    sessionId
+                    cursor
+                    pageLimit)
+        _ -> pure $
+            Left $
+                firstQueryError
+                    [() <$ before, () <$ limit]
+
+forkSessionResponse
+    :: ApplicationConfig
+    -> Backend
+    -> Supervisor
+    -> AccessBoundary
+    -> Text
+    -> [Header]
+    -> Request
+    -> IO (Either ApiError Response)
+forkSessionResponse
+        config backend supervisor boundary sessionId headers request =
+    withJsonBody config request \body ->
+        runSessionMutation
+            supervisor
+            boundary
+            sessionId
+            (do
+                fmap
+                    (fmap (jsonResponse status201 headers))
+                    (backend.backendForkSession
+                        boundary
+                        sessionId
+                        body))
+
+createTurnResponse
+    :: ApplicationConfig
+    -> Backend
+    -> Supervisor
+    -> AccessBoundary
+    -> Text
+    -> [Header]
+    -> Request
+    -> IO (Either ApiError Response)
+createTurnResponse
+        config backend supervisor boundary sessionId headers request =
+    withJsonBody config request \body ->
+        createTurn backend supervisor boundary sessionId body
+            >>= pure
+                . fmap (jsonResponse status202 headers . toJSONValue)
+
+listTurnsResponse
+    :: Supervisor
+    -> AccessBoundary
+    -> [Header]
+    -> Request
+    -> IO (Either ApiError Response)
+listTurnsResponse supervisor boundary headers request =
+    case queryOptionalText "sessionId" request of
+        Left err -> pure (Left err)
+        Right sessionId -> do
+            turns <- listTurns supervisor boundary sessionId
+            pure $
+                Right $
+                    jsonResponse
+                        status200
+                        headers
+                        (object ["data" .= turns])
+
+cancelTurnResponse
+    :: Supervisor
+    -> AccessBoundary
+    -> Text
+    -> [Header]
+    -> IO (Either ApiError Response)
+cancelTurnResponse supervisor boundary rawTurnId headers =
+    cancelTurn
+        supervisor
+        boundary
+        (TurnId rawTurnId) >>= \case
+            Left _ -> pure (Left turnNotFound)
+            Right turn ->
+                pure $
+                    Right $
+                        jsonResponse
+                            status200
+                            headers
+                            (toJSONValue turn)
+
+turnAgentsResponse
+    :: Supervisor
+    -> AccessBoundary
+    -> Text
+    -> [Header]
+    -> IO (Either ApiError Response)
+turnAgentsResponse supervisor boundary rawTurnId headers =
+    lookupTurnAgents
+        supervisor
+        boundary
+        (TurnId rawTurnId) >>= \case
+            Nothing -> pure (Left turnNotFound)
+            Just agents ->
+                pure $
+                    Right $
+                        jsonResponse
+                            status200
+                            headers
+                            (object ["data" .= agents])
+
+humanRequestsResponse
+    :: Supervisor
+    -> AccessBoundary
+    -> [Header]
+    -> IO (Either ApiError Response)
+humanRequestsResponse supervisor boundary headers = do
+    requests <- listHumanRequests supervisor boundary
+    pure $
+        Right $
+            jsonResponse
+                status200
+                headers
+                (object ["data" .= requests])
+
+resolveHumanRequestResponse
+    :: ApplicationConfig
+    -> Supervisor
+    -> AccessBoundary
+    -> Text
+    -> [Header]
+    -> Request
+    -> IO (Either ApiError Response)
+resolveHumanRequestResponse
+        config supervisor boundary rawRequestId headers request =
+    withJsonBody config request \(body :: ResolveRequest) -> do
+        let response = HumanResponse
+                { humanResponseDecision =
+                    body.resolveRequestDecision
+                , humanResponseValue =
+                    body.resolveRequestValue
+                }
+        resolveHumanRequest
+            supervisor
+            boundary
+            (RequestId rawRequestId)
+            response >>= \case
+                Left message ->
+                    pure $
+                        Left ApiError
+                            { apiErrorStatus =
+                                if "not found"
+                                    `Text.isInfixOf`
+                                        Text.toLower message
+                                then 404
+                                else 409
+                            , apiErrorCode = "request_not_resolved"
+                            , apiErrorMessage = message
+                            , apiErrorDetails = Nothing
+                            }
+                Right resolved ->
+                    pure $
+                        Right $
+                            jsonResponse
+                                status200
+                                headers
+                                (toJSONValue resolved)
 
 createTurn
     :: Backend
