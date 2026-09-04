@@ -198,6 +198,20 @@ spec = describe "tool presentation" do
                 "{\"name\":\"a%255F%255Fb__tool%5F%5Fname\"}")
             `shouldBe` "a%5F%5Fb: tool__name"
 
+    it "keeps completed MCP tool-name lookup at the top level" do
+        let call =
+                functionToolCall
+                    "mcp"
+                    "use_tool"
+                    "{\"tool_name\":\"server__tool\",\
+                    \\"tool_input\":{\"name\":\"nested-value\"}}"
+        summarizeToolCall call
+            `shouldBe` "server: tool"
+        toolCallTitle call
+            `shouldBe` "server: tool"
+        permissionToolCallPrompt call
+            `shouldBe` "Allow server: tool?"
+
     it "unwraps MCP text envelopes and pretty-prints embedded JSON" do
         let call =
                 functionToolCall

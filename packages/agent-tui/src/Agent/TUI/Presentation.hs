@@ -1042,10 +1042,18 @@ mcpToolDisplayName name =
 -- that identity as @server: tool@ instead of the unhelpful @mcp_call@ name.
 mcpCallDisplayName :: Text -> Text
 mcpCallDisplayName arguments =
-    case nonEmptyPartialJsonText "name" arguments
-        <|> nonEmptyPartialJsonText "tool_name" arguments of
+    case selectedName of
         Just qualifiedName -> qualifiedMcpDisplayName qualifiedName
         Nothing -> "MCP call"
+  where
+    selectedName =
+        case decodeJsonValue arguments of
+            Just _ ->
+                nonEmptyJsonText "name" arguments
+                    <|> nonEmptyJsonText "tool_name" arguments
+            Nothing ->
+                nonEmptyPartialJsonText "name" arguments
+                    <|> nonEmptyPartialJsonText "tool_name" arguments
 
 qualifiedMcpDisplayName :: Text -> Text
 qualifiedMcpDisplayName name =
