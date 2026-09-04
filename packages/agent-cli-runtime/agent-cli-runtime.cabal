@@ -105,6 +105,8 @@ library
                     , transformers
                     , unix
                     , vector
+                    , wai
+                    , warp
 
 test-suite agent-cli-runtime-test
     import:           common-options
