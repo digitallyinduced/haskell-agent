@@ -466,23 +466,26 @@ fallbackToChatGPTBatch
         case encodePcm16Wav openAITranscriptionSampleRate pcm of
             Left err ->
                 pure (Left err)
-            Right wav -> do
-                seeded <- seedTokenProvider provider initial
-                runWithTokenProvider seeded \credential ->
-                    if credential.provider /= OpenAIProvider
-                        then pure $ Left $ CredentialError
-                            "ChatGPT dictation requires an OpenAI credential"
-                        else
-                            postChatGPTTranscription
-                                baseUrl
-                                credential
-                                wav >>= \case
-                                    Left err ->
-                                        pure (Left err)
-                                    Right transcript -> do
-                                        ignoreSynchronousException
-                                            (onTranscript transcript)
-                                        pure (Right transcript)
+            Right wav ->
+                prepareChatGPTTranscriptionRequest baseUrl wav >>= \case
+                    Left err ->
+                        pure (Left err)
+                    Right request -> do
+                        seeded <- seedTokenProvider provider initial
+                        runWithTokenProvider seeded \credential ->
+                            if credential.provider /= OpenAIProvider
+                                then pure $ Left $ CredentialError
+                                    "ChatGPT dictation requires an OpenAI credential"
+                                else
+                                    postChatGPTTranscription
+                                        credential
+                                        request >>= \case
+                                            Left err ->
+                                                pure (Left err)
+                                            Right transcript -> do
+                                                ignoreSynchronousException
+                                                    (onTranscript transcript)
+                                                pure (Right transcript)
 
 data ChatGPTStreamOutcome
     = ChatGPTStreamSucceeded !Text
@@ -1058,40 +1061,28 @@ encodePcm16Wav sampleRate pcm
     bytesPerSample = 2
     maxWavDataLength = fromIntegral (maxBound :: Word32) - 36
 
-postChatGPTTranscription
+prepareChatGPTTranscriptionRequest
     :: Text
-    -> Credential
     -> LBS.ByteString
-    -> IO (Either ApiError Text)
-postChatGPTTranscription baseUrl credential wav = do
+    -> IO (Either ApiError Http.Request)
+prepareChatGPTTranscriptionRequest baseUrl wav = do
     let endpoint =
             Text.unpack
                 (Text.dropWhileEnd (== '/') baseUrl <> "/transcribe")
-        accountHeader request
-            | Text.null (Text.strip credential.accountId) = request
-            | otherwise =
-                setRequestHeader
-                    "ChatGPT-Account-Id"
-                    [Text.encodeUtf8 credential.accountId]
-                    request
-    prepared <- tryAny
-        (do
-            request <- parseRequest endpoint
-            Multipart.formDataBody
-                [ (Multipart.partFileRequestBody
-                    "file"
-                    "audio.wav"
-                    (Http.RequestBodyLBS wav))
-                    { Multipart.partContentType = Just "audio/wav" }
-                ]
-                $ setRequestMethod "POST"
-                $ setRequestHeader "Accept" ["application/json"]
-                $ setRequestHeader "Originator" ["haskell-agent"]
-                $ setRequestHeader "User-Agent" ["haskell-agent"]
-                $ setRequestHeader
-                    "Authorization"
-                    ["Bearer " <> Text.encodeUtf8 credential.accessToken]
-                $ accountHeader request)
+    prepared <- tryAny do
+        request <- parseRequest endpoint
+        Multipart.formDataBody
+            [ (Multipart.partFileRequestBody
+                "file"
+                "audio.wav"
+                (Http.RequestBodyLBS wav))
+                { Multipart.partContentType = Just "audio/wav" }
+            ]
+            $ setRequestMethod "POST"
+            $ setRequestHeader "Accept" ["application/json"]
+            $ setRequestHeader "Originator" ["haskell-agent"]
+            $ setRequestHeader "User-Agent" ["haskell-agent"]
+            request
     case prepared of
         Left err
             | isSyncException err ->
@@ -1100,13 +1091,32 @@ postChatGPTTranscription baseUrl credential wav = do
                         <> Text.pack (displayException err))
             | otherwise ->
                 throwIO err
-        Right multipartRequest ->
-            retryTransientTranscription
-                [3_000_000, 6_000_000]
-                (sendRequest multipartRequest)
+        Right request ->
+            pure (Right request)
+
+postChatGPTTranscription
+    :: Credential
+    -> Http.Request
+    -> IO (Either ApiError Text)
+postChatGPTTranscription credential request =
+    retryTransientTranscription [3_000_000, 6_000_000] sendRequest
   where
-    sendRequest request =
-        tryAny (httpLBS request) >>= \case
+    addAccountHeader request'
+        | Text.null (Text.strip credential.accountId) = request'
+        | otherwise =
+            setRequestHeader
+                "ChatGPT-Account-Id"
+                [Text.encodeUtf8 credential.accountId]
+                request'
+
+    authenticatedRequest =
+        setRequestHeader
+            "Authorization"
+            ["Bearer " <> Text.encodeUtf8 credential.accessToken]
+            (addAccountHeader request)
+
+    sendRequest =
+        tryAny (httpLBS authenticatedRequest) >>= \case
             Left err
                 | isSyncException err ->
                     pure $ Left $ ConnectionError
