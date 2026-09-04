@@ -59,15 +59,6 @@ library
                     , Agent.CLI.Compaction.Continuation
                     , Agent.CLI.Compaction.Projection
                     , Agent.CLI.Compaction.Types
-                    , Agent.CLI.ExternalSession.Content
-                    , Agent.CLI.ExternalSession.JSONL
-                    , Agent.CLI.ExternalSession.Paths
-                    , Agent.CLI.ExternalSession.Provider.Claude
-                    , Agent.CLI.ExternalSession.Provider.Codex
-                    , Agent.CLI.ExternalSession.Provider.Cursor
-                    , Agent.CLI.ExternalSession.Provider.Grok
-                    , Agent.CLI.ExternalSession.SQLite
-                    , Agent.CLI.ExternalSession.Types
                     , Agent.CLI.Clipboard.Linux
                     , Agent.CLI.Clipboard.MacOS
                     , Agent.CLI.McpStatus
@@ -182,7 +173,6 @@ library
                     , Agent.CLI.Dictation
                     , Agent.CLI.Dialects
                     , Agent.CLI.ExternalProgram
-                    , Agent.CLI.ExternalSession
                     , Agent.CLI.FileUri
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.GatewayModels
@@ -261,7 +251,8 @@ library
                     , Agent.CLI.WindowTitle
                     , Agent.CLI.Worktree
     reexported-modules:
-                      agent-cli-runtime:Agent.CLI.Auth as Agent.CLI.Auth
+                      agent-external-session:Agent.CLI.ExternalSession as Agent.CLI.ExternalSession
+                    , agent-cli-runtime:Agent.CLI.Auth as Agent.CLI.Auth
                     , agent-cli-runtime:Agent.CLI.CredentialStore as Agent.CLI.CredentialStore
                     , agent-cli-runtime:Agent.CLI.Duration as Agent.CLI.Duration
                     , agent-cli-runtime:Agent.CLI.Environment as Agent.CLI.Environment
@@ -277,6 +268,7 @@ library
                     , agent-cli-runtime:Agent.CLI.Session.StoreCodec as Agent.CLI.Session.StoreCodec
                     , agent-cli-runtime:Agent.CLI.SessionLock as Agent.CLI.SessionLock
     build-depends:    agent-cli-runtime >= 0.1 && < 0.2
+                    , agent-external-session >= 0.1 && < 0.2
                     , agent-connectivity >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
                     , agent-mcp >= 0.1 && < 0.2
@@ -305,7 +297,6 @@ library
                     , containers
                     , crypton
                     , directory
-                    , direct-sqlite >= 2.3 && < 2.4
                     , entropy
                     , filelock
                     , filepath
@@ -460,7 +451,6 @@ test-suite agent-cli-test
                     , Agent.CLI.DatabaseSpec
                     , Agent.CLI.DesktopSpec
                     , Agent.CLI.ExternalProgramSpec
-                    , Agent.CLI.ExternalSessionSpec
                     , Agent.CLI.FileUriSpec
                     , Agent.CLI.GatewayModelsSpec
                     , Agent.CLI.GitDiffSpec
@@ -545,7 +535,6 @@ test-suite agent-cli-test
                     , colour
                     , containers
                     , directory
-                    , direct-sqlite >= 2.3 && < 2.4
                     , filepath
                     , haskeline >= 0.8 && < 0.9
                     , hspec >= 2.11 && < 2.12

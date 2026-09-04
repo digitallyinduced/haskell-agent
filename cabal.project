@@ -2,6 +2,7 @@ packages:
     packages/agent-connectivity
     packages/agent-process
     packages/agent-cli-runtime
+    packages/agent-external-session
     packages/agent-cli
     packages/agent-repository
     packages/agent-native-bridge
