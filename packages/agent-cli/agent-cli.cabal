@@ -453,6 +453,7 @@ benchmark concurrency-bench
     ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-cli
                     , agent-core
+                    , agent-mcp
                     , async
                     , base >= 4.17 && < 5
                     , bytestring
