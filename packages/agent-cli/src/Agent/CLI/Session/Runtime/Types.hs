@@ -90,6 +90,7 @@ import Data.IORef (IORef)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Clock
     ( NominalDiffTime
     , UTCTime
@@ -214,11 +215,11 @@ data StartupRuntime = StartupRuntime
     , startupNativeHooks :: !(Maybe NativeRunHooks)
     }
 
-newtype StartupFailure = StartupFailure String
+newtype StartupFailure = StartupFailure Text
     deriving (Show)
 
 instance Exception StartupFailure where
-    displayException (StartupFailure message) = message
+    displayException (StartupFailure message) = Text.unpack message
 
 data StartupCancelled = StartupCancelled
     deriving (Show)

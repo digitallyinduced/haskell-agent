@@ -578,7 +578,7 @@ monitorWorker
                 case decodeProtocolMessage line of
                     Left err ->
                         failClosed hasStarted $
-                            "invalid worker message: " <> Text.pack err
+                            "invalid worker message: " <> err
                     Right WorkerReady
                         | not hasStarted -> do
                             atomically $ void $ tryPutTMVar ready (Right ())
