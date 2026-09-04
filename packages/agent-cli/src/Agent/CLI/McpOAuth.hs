@@ -321,7 +321,12 @@ receiveCallback listener = do
     readMVar resultVar
   where
     plainResponse status body =
-        Wai.responseLBS status [(hContentType, "text/plain; charset=utf-8")] body
+        Wai.responseLBS
+            status
+            [ (hContentType, "text/plain; charset=utf-8")
+            , (hConnection, "close")
+            ]
+            body
 
 callbackFromQuery :: Query -> Callback
 callbackFromQuery query = Callback
