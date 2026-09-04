@@ -51,6 +51,15 @@ let
         url = "https://raw.githubusercontent.com/oven-sh/bun/bun-v${bun.version}/LICENSE.md";
         hash = "sha256-ucr1JyhpG0BX43EjLCIaEyiDGYvi89Ld+SyQQEyYSxo=";
     };
+    macosDylibBundler = pkgs.writers.writeHaskellBin "bundle-macos-dylibs" {
+        ghcArgs = [
+            "-O2"
+            "-Wall"
+        ];
+        libraries = haskellPackages: [
+            haskellPackages.cryptohash-sha256
+        ];
+    } (builtins.readFile ./bundle-macos-dylibs.hs);
 
     bundle = pkgs.stdenvNoCC.mkDerivation {
         pname = "haskell-agent-macos-bundle";
@@ -65,7 +74,7 @@ let
             pkgs.darwin.xattr
             pkgs.file
             pkgs.nukeReferences
-            pkgs.python3
+            macosDylibBundler
         ];
 
         installPhase = ''
@@ -157,25 +166,10 @@ let
             # Nix's PostgreSQL build records its build-host locale command in
             # the server. Replace that command without changing the Mach-O's
             # size before removing all remaining inert store references.
-            python3 - \
+            bundle-macos-dylibs replace-padded \
                 "$postgresRoot/bin/postgres" \
                 '${pkgs.darwin.adv_cmds}/bin/locale -a' \
-                '/usr/bin/locale -a' \
-                <<'PY'
-            from pathlib import Path
-            import sys
-
-            path = Path(sys.argv[1])
-            old = sys.argv[2].encode()
-            new = sys.argv[3].encode()
-            if len(new) > len(old):
-                raise SystemExit("replacement locale command is too long")
-            data = path.read_bytes()
-            count = data.count(old)
-            if count != 1:
-                raise SystemExit(f"expected one locale command, found {count}")
-            path.write_bytes(data.replace(old, new + b" " * (len(old) - len(new))))
-            PY
+                '/usr/bin/locale -a'
 
             # Nix store paths in Mach-O load commands are not usable after the
             # archive is copied to another Mac. Copy each non-system dylib
@@ -186,7 +180,7 @@ let
                 file -b "$1" | grep -q '^Mach-O'
             }
 
-            python3 ${./bundle-macos-dylibs.py} \
+            bundle-macos-dylibs relocate \
                 --destination "$out/lib/deps" \
                 --install-prefix '@executable_path/../lib/deps/' \
                 "$out/bin/agent-cli" \
@@ -204,7 +198,7 @@ let
                 find "$postgresRoot/bin" "$postgresRoot/lib" \
                     -type f -print0 | sort -z
             )
-            python3 ${./bundle-macos-dylibs.py} \
+            bundle-macos-dylibs relocate \
                 --destination "$postgresRoot/lib/deps" \
                 --install-prefix '@executable_path/../lib/deps/' \
                 "''${postgresTargets[@]}"
