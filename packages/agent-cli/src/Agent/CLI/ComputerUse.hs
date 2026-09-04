@@ -65,10 +65,12 @@ import Control.Concurrent
     , modifyMVar
     , modifyMVar_
     , newMVar
+    , putMVar
+    , takeMVar
     , threadDelay
     , withMVar
     )
-import Control.Exception.Safe (bracket, finally, tryAny)
+import Control.Exception.Safe (bracket, finally, mask, onException, tryAny)
 import Control.Monad (foldM)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -413,7 +415,9 @@ desktopComputerUseBackend backend = ComputerUseBackend
 
 -- | Adapt a display-identity backend while retaining the exact display from
 -- the latest successful observation. Mutating calls must use that lease;
--- screenshot-only calls may establish or replace it.
+-- screenshot-only calls may establish or replace it. Starting a mutating
+-- transaction invalidates the old lease until its post-action observation
+-- succeeds, including when the transaction throws or is cancelled.
 newLeasedDesktopComputerUseBackend
     :: ComputerBackend
     -> IO ComputerUseBackend
@@ -421,17 +425,29 @@ newLeasedDesktopComputerUseBackend backend = do
     displayLease <- newMVar Nothing
     pure ComputerUseBackend
         { computerRunTransaction = \encoding actions validateDisplay ->
-            modifyMVar displayLease \lease ->
-                runDesktopComputerTransaction
-                    backend
-                    (RequireDisplayLease lease)
-                    encoding
-                    actions
-                    validateDisplay
-                    >>= \case
-                        Left err -> pure (lease, Left err)
-                        Right (display, observation) ->
-                            pure (Just display, Right observation)
+            mask \restore -> do
+                lease <- takeMVar displayLease
+                let failedLease
+                        | null actions = lease
+                        | otherwise = Nothing
+                    releaseFailedLease =
+                        putMVar displayLease failedLease
+                result <-
+                    restore
+                        (runDesktopComputerTransaction
+                            backend
+                            (RequireDisplayLease lease)
+                            encoding
+                            actions
+                            validateDisplay)
+                        `onException` releaseFailedLease
+                case result of
+                    Left err -> do
+                        releaseFailedLease
+                        pure (Left err)
+                    Right (display, observation) -> do
+                        putMVar displayLease (Just display)
+                        pure (Right observation)
         }
 
 data DesktopDisplayPolicy

@@ -26,7 +26,9 @@ import Agent.CLI.ComputerUse.Linux
     , detectLinuxSessionType
     )
 import Agent.CLI.ComputerUse.Linux.Logind
-    ( processSessionRequest
+    ( LogindSessionTarget(..)
+    , processSessionRequest
+    , validateLogindSession
     , validateLogindState
     )
 import Agent.CLI.ComputerUse.Input (MouseButton(..))
@@ -45,6 +47,7 @@ import Agent.CLI.ComputerUse.Linux.Portal
 import Agent.CLI.ComputerUse.Linux.X11
     ( XdotoolInvocation(..)
     , parseXrandrDisplay
+    , pinX11DisplayEnvironment
     , runX11TypeInvocationsWith
     , withX11InputCleanup
     , withX11Readiness
@@ -59,7 +62,7 @@ import Agent.Loop (ImageAttachment(..))
 import Agent.Responses.Types
 import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..))
 import Control.Concurrent (threadDelay)
-import Control.Exception.Safe (finally)
+import Control.Exception.Safe (finally, throwString, tryAny)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
@@ -283,6 +286,104 @@ spec = do
             actionResult `shouldSatisfy` succeeds
             readIORef executedDisplays `shouldReturn` [changedDisplay]
 
+        it "invalidates a lease after a mutating transaction fails" do
+            captureFails <- newIORef False
+            actionCount <- newIORef (0 :: Int)
+            let backend =
+                    (testBackend x11Display)
+                        { computerBackendExecuteAction = \_ _ -> do
+                            modifyIORef' actionCount (+ 1)
+                            pure (Right ())
+                        , computerBackendCaptureDisplay = \_ -> do
+                            fails <- readIORef captureFails
+                            pure $ if fails
+                                then Left "capture failed after input"
+                                else Right CapturedDisplay
+                                    { capturedComputerDisplay = x11Display
+                                    , capturedComputerImage = emptyImage
+                                    }
+                        }
+                screenshotCall =
+                    exampleCall { computerActions = [ScreenshotAction] }
+                succeeds = either (const False) (const True)
+            leasedBackend <- newLeasedDesktopComputerUseBackend backend
+
+            initialObservation <- executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                screenshotCall
+            initialObservation `shouldSatisfy` succeeds
+
+            writeIORef captureFails True
+            executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                exampleCall
+                `shouldReturn` Left "capture failed after input"
+            writeIORef captureFails False
+
+            executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                exampleCall
+                `shouldReturn` Left
+                    "Take a fresh computer screenshot before sending input actions."
+            readIORef actionCount `shouldReturn` 1
+
+            refreshedObservation <- executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                screenshotCall
+            refreshedObservation `shouldSatisfy` succeeds
+            finalAction <- executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                exampleCall
+            finalAction `shouldSatisfy` succeeds
+            readIORef actionCount `shouldReturn` 2
+
+        it "keeps a mutating lease invalid after a backend exception" do
+            actionThrows <- newIORef True
+            let backend =
+                    (testBackend x11Display)
+                        { computerBackendExecuteAction = \_ _ -> do
+                            throws <- readIORef actionThrows
+                            if throws
+                                then throwString "input backend failed"
+                                else pure (Right ())
+                        }
+                screenshotCall =
+                    exampleCall { computerActions = [ScreenshotAction] }
+                succeeds = either (const False) (const True)
+            leasedBackend <- newLeasedDesktopComputerUseBackend backend
+
+            initialObservation <- executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                screenshotCall
+            initialObservation `shouldSatisfy` succeeds
+            failedAction <- tryAny $
+                executeComputerCallWithBackend
+                    leasedBackend
+                    ScreenshotPng
+                    exampleCall
+            failedAction `shouldSatisfy` \case
+                Left _ -> True
+                Right _ -> False
+
+            writeIORef actionThrows False
+            executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                exampleCall
+                `shouldReturn` Left
+                    "Take a fresh computer screenshot before sending input actions."
+            refreshedObservation <- executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                screenshotCall
+            refreshedObservation `shouldSatisfy` succeeds
+
     describe "Linux X11 computer use" do
         it "prefers native Wayland over the XWayland DISPLAY" do
             detectLinuxSessionType
@@ -313,6 +414,60 @@ spec = do
                     (fromVariant pid :: Maybe Word32)
                         `shouldBe` Just 4242
                 _ -> expectationFailure "expected one process id"
+
+        it "binds the X11 server to the graphical logind session" do
+            validateLogindSession
+                (LogindX11Session ":1.0")
+                True
+                False
+                "x11"
+                (Just "unix/:1")
+                `shouldBe` Right ()
+            validateLogindSession
+                (LogindX11Session ":1")
+                True
+                False
+                "x11"
+                (Just ":0")
+                `shouldBe` Left
+                    "Computer use cannot associate DISPLAY with the current systemd-logind X11 session."
+            validateLogindSession
+                (LogindX11Session ":1")
+                True
+                False
+                "tty"
+                (Just ":1")
+                `shouldBe` Left
+                    "Computer use cannot verify that the current systemd-logind session is X11."
+            validateLogindSession
+                (LogindX11Session "host.example:1")
+                True
+                False
+                "x11"
+                (Just "host.example:1")
+                `shouldBe` Left
+                    "Computer use cannot associate DISPLAY with the current systemd-logind X11 session."
+            validateLogindSession
+                LogindWaylandSession
+                True
+                False
+                "wayland"
+                Nothing
+                `shouldBe` Right ()
+
+        it "pins every X11 subprocess to one DISPLAY environment" do
+            pinX11DisplayEnvironment
+                ":7"
+                [ ("PATH", "/run/current-system/sw/bin")
+                , ("DISPLAY", ":0")
+                , ("XAUTHORITY", "/run/user/1000/xauth")
+                , ("DISPLAY", ":2")
+                ]
+                `shouldBe`
+                    [ ("DISPLAY", ":7")
+                    , ("PATH", "/run/current-system/sw/bin")
+                    , ("XAUTHORITY", "/run/user/1000/xauth")
+                    ]
 
         it "selects the primary monitor and preserves its signed origin" do
             parseXrandrDisplay

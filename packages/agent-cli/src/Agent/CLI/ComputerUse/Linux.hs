@@ -7,6 +7,7 @@ module Agent.CLI.ComputerUse.Linux
 import Agent.CLI.ComputerUse.Backend (ComputerBackend(..))
 import Agent.CLI.ComputerUse.Linux.Logind
     ( LogindGuard(..)
+    , LogindSessionTarget(..)
     , newLogindGuard
     )
 import Agent.CLI.ComputerUse.Linux.Portal (newPortalBackend)
@@ -51,29 +52,55 @@ newLinuxBackend = do
     xDisplay <- lookupEnv "DISPLAY"
     case detectLinuxSessionType sessionType waylandDisplay xDisplay of
         Left err -> pure (Left err)
-        Right graphicalSession -> do
-            logindResult <- newLogindGuard
-            case logindResult of
+        Right graphicalSession ->
+            case logindSessionTarget graphicalSession xDisplay of
                 Left err -> pure (Left err)
-                Right logind ->
-                    case graphicalSession of
-                        LinuxX11 -> do
-                            backend <-
-                                newX11Backend logind.checkLogindGuard
-                                    `onException` logind.closeLogindGuard
-                            pure (Right (attachLogindGuard logind backend))
-                        LinuxWayland -> do
-                            portal <-
-                                newPortalBackend logind.checkLogindGuard
-                                    `onException` logind.closeLogindGuard
-                            case portal of
-                                Left err -> do
-                                    logind.closeLogindGuard
-                                    pure (Left err)
-                                Right backend ->
+                Right target -> do
+                    logindResult <- newLogindGuard target
+                    case logindResult of
+                        Left err -> pure (Left err)
+                        Right logind ->
+                            case target of
+                                LogindX11Session display -> do
+                                    backend <-
+                                        newX11Backend
+                                            display
+                                            logind.checkLogindGuard
+                                            `onException`
+                                                logind.closeLogindGuard
                                     pure
                                         (Right
                                             (attachLogindGuard logind backend))
+                                LogindWaylandSession -> do
+                                    portal <-
+                                        newPortalBackend
+                                            logind.checkLogindGuard
+                                            `onException`
+                                                logind.closeLogindGuard
+                                    case portal of
+                                        Left err -> do
+                                            logind.closeLogindGuard
+                                            pure (Left err)
+                                        Right backend ->
+                                            pure
+                                                (Right
+                                                    (attachLogindGuard
+                                                        logind
+                                                        backend))
+
+logindSessionTarget
+    :: LinuxSessionType
+    -> Maybe String
+    -> Either Text LogindSessionTarget
+logindSessionTarget LinuxWayland _ = Right LogindWaylandSession
+logindSessionTarget LinuxX11 xDisplay =
+    case xDisplay of
+        Just display
+            | not (null display) ->
+                Right (LogindX11Session (Text.pack display))
+        _ ->
+            Left
+                "Linux computer use requires an active X11 or Wayland graphical session."
 
 attachLogindGuard :: LogindGuard -> ComputerBackend -> ComputerBackend
 attachLogindGuard logind backend =

@@ -2,6 +2,7 @@ module Agent.CLI.ComputerUse.Linux.X11
     ( XdotoolInvocation(..)
     , newX11Backend
     , parseXrandrDisplay
+    , pinX11DisplayEnvironment
     , runX11TypeInvocationsWith
     , withX11InputCleanup
     , withX11Readiness
@@ -54,12 +55,13 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word8)
 import System.Directory (getTemporaryDirectory, removeFile)
+import System.Environment (getEnvironment)
 import System.Exit (ExitCode(..))
 import System.IO (hClose, openBinaryTempFile)
 import System.Process
-    ( proc
+    ( CreateProcess(..)
+    , proc
     , readCreateProcessWithExitCode
-    , readProcessWithExitCode
     )
 import Text.Read (readMaybe)
 
@@ -68,26 +70,47 @@ data XdotoolInvocation = XdotoolInvocation
     , xdotoolStdin :: !Text
     } deriving (Eq, Show)
 
-newX11Backend :: IO (Either Text ()) -> IO ComputerBackend
-newX11Backend readiness = pure ComputerBackend
-    { computerBackendEnsureReady =
-        readiness >>= \case
-            Left err -> pure (Left err)
-            Right () -> ensureX11Ready
-    , computerBackendInspectDisplay = inspectX11Display
-    , computerBackendExecuteAction = executeX11Action readiness
-    , computerBackendCaptureDisplay = captureX11Display readiness
-    , computerBackendClose = pure ()
-    }
+newX11Backend :: Text -> IO (Either Text ()) -> IO ComputerBackend
+newX11Backend display readiness = do
+    processEnvironment <-
+        pinX11DisplayEnvironment display <$> getEnvironment
+    pure ComputerBackend
+        { computerBackendEnsureReady =
+            readiness >>= \case
+                Left err -> pure (Left err)
+                Right () -> ensureX11Ready processEnvironment
+        , computerBackendInspectDisplay =
+            inspectX11Display processEnvironment
+        , computerBackendExecuteAction =
+            executeX11Action processEnvironment readiness
+        , computerBackendCaptureDisplay =
+            captureX11Display processEnvironment readiness
+        , computerBackendClose = pure ()
+        }
 
-ensureX11Ready :: IO (Either Text ())
-ensureX11Ready =
-    fmap (fmap (const ())) inspectX11Display
+pinX11DisplayEnvironment
+    :: Text
+    -> [(String, String)]
+    -> [(String, String)]
+pinX11DisplayEnvironment display environment =
+    ("DISPLAY", Text.unpack display)
+        : filter ((/= "DISPLAY") . fst) environment
 
-inspectX11Display :: IO (Either Text ComputerDisplay)
-inspectX11Display = do
+ensureX11Ready :: [(String, String)] -> IO (Either Text ())
+ensureX11Ready processEnvironment =
+    fmap (fmap (const ())) (inspectX11Display processEnvironment)
+
+inspectX11Display
+    :: [(String, String)]
+    -> IO (Either Text ComputerDisplay)
+inspectX11Display processEnvironment = do
     attempted <- tryAny $
-        readProcessWithExitCode "xrandr" ["--listactivemonitors"] ""
+        readCreateProcessWithExitCode
+            (processWithEnvironment
+                processEnvironment
+                "xrandr"
+                ["--listactivemonitors"])
+            ""
     pure case attempted of
         Left exception ->
             Left ("Unable to query the X11 display with xrandr: "
@@ -231,12 +254,13 @@ scrollClicks delta =
     (&) = flip ($)
 
 executeX11Action
-    :: IO (Either Text ())
+    :: [(String, String)]
+    -> IO (Either Text ())
     -> ComputerDisplay
     -> ComputerAction
     -> IO (Either Text ())
-executeX11Action readiness expected action =
-    inspectX11Display >>= \case
+executeX11Action processEnvironment readiness expected action =
+    inspectX11Display processEnvironment >>= \case
         Left err -> pure (Left err)
         Right current
             | current /= expected ->
@@ -244,102 +268,141 @@ executeX11Action readiness expected action =
                     "The selected display changed during computer use; take a fresh screenshot before continuing.")
             | otherwise ->
                 withX11Readiness readiness
-                    (executeX11ActionUnchecked readiness expected action)
+                    (executeX11ActionUnchecked
+                        processEnvironment
+                        readiness
+                        expected
+                        action)
 
 executeX11ActionUnchecked
-    :: IO (Either Text ())
+    :: [(String, String)]
+    -> IO (Either Text ())
     -> ComputerDisplay
     -> ComputerAction
     -> IO (Either Text ())
-executeX11ActionUnchecked readiness display = \case
+executeX11ActionUnchecked processEnvironment readiness display = \case
     ScreenshotAction -> pure (Right ())
     WaitAction -> threadDelay 2000000 >> pure (Right ())
     TypeAction value ->
         runX11TypeInvocationsWith
             readiness
-            runXdotool
+            (runXdotool processEnvironment)
             (x11TypeInvocations value)
     KeypressAction keys ->
-        either (pure . Left) runXdotool (x11KeyInvocation keys)
+        either
+            (pure . Left)
+            (runXdotool processEnvironment)
+            (x11KeyInvocation keys)
     ClickAction{clickX, clickY, clickButton, clickKeys} ->
         case (parseMouseButton clickButton, parseModifiers clickKeys) of
             (Left err, _) -> pure (Left err)
             (_, Left err) -> pure (Left err)
             (Right button, Right modifiers) ->
-                withX11Modifiers modifiers do
-                    moved <- movePointer display clickX clickY
+                withX11Modifiers processEnvironment modifiers do
+                    moved <-
+                        movePointer
+                            processEnvironment
+                            display
+                            clickX
+                            clickY
                     continue moved
-                        (runXdotool (arguments ["click", mouseButton button]))
+                        (runXdotool
+                            processEnvironment
+                            (arguments ["click", mouseButton button]))
     DoubleClickAction{doubleClickX, doubleClickY, doubleClickKeys} ->
         case parseModifiers doubleClickKeys of
             Left err -> pure (Left err)
             Right modifiers ->
-                withX11Modifiers modifiers do
-                    moved <- movePointer display doubleClickX doubleClickY
+                withX11Modifiers processEnvironment modifiers do
+                    moved <-
+                        movePointer
+                            processEnvironment
+                            display
+                            doubleClickX
+                            doubleClickY
                     continue moved
                         (runXdotool
+                            processEnvironment
                             (arguments
                                 ["click", "--repeat", "2", "--delay", "80", "1"]))
     MoveAction{moveX, moveY, moveKeys} ->
         case parseModifiers moveKeys of
             Left err -> pure (Left err)
             Right modifiers ->
-                withX11Modifiers modifiers (movePointer display moveX moveY)
+                withX11Modifiers
+                    processEnvironment
+                    modifiers
+                    (movePointer processEnvironment display moveX moveY)
     ScrollAction{scrollX, scrollY, scrollDx, scrollDy, scrollKeys} ->
         case parseModifiers scrollKeys of
             Left err -> pure (Left err)
             Right modifiers ->
-                withX11Modifiers modifiers do
-                    moved <- movePointer display scrollX scrollY
+                withX11Modifiers processEnvironment modifiers do
+                    moved <-
+                        movePointer
+                            processEnvironment
+                            display
+                            scrollX
+                            scrollY
                     case moved of
                         Left err -> pure (Left err)
                         Right () ->
-                            runXdotoolInvocations
+                            runXdotoolInvocations processEnvironment
                                 (x11ScrollInvocations scrollDx scrollDy)
     DragAction{dragPath, dragKeys} ->
         case parseModifiers dragKeys of
             Left err -> pure (Left err)
             Right modifiers ->
-                withX11Modifiers modifiers (dragPointer display dragPath)
+                withX11Modifiers
+                    processEnvironment
+                    modifiers
+                    (dragPointer processEnvironment display dragPath)
     UnknownComputerAction value ->
         pure (Left ("Unsupported computer action: " <> value.tag))
 
 dragPointer
-    :: ComputerDisplay
+    :: [(String, String)]
+    -> ComputerDisplay
     -> [ComputerPoint]
     -> IO (Either Text ())
-dragPointer _ [] =
+dragPointer _ _ [] =
     pure (Left "Computer drag path is empty.")
-dragPointer _ [_] =
+dragPointer _ _ [_] =
     pure (Left "Computer drag path needs at least two points.")
-dragPointer display (first : rest) = do
+dragPointer processEnvironment display (first : rest) = do
     moved <- movePoint first
     case moved of
         Left err -> pure (Left err)
         Right () ->
             withX11InputCleanup
                 (do
-                    pressed <- runXdotool (arguments ["mousedown", "1"])
+                    pressed <-
+                        runXdotool
+                            processEnvironment
+                            (arguments ["mousedown", "1"])
                     case pressed of
                         Left err -> pure (Left err)
                         Right () -> foldM moveResult (Right ()) rest)
-                (runXdotool (arguments ["mouseup", "1"]))
+                (runXdotool
+                    processEnvironment
+                    (arguments ["mouseup", "1"]))
   where
     movePoint ComputerPoint{pointX, pointY} = do
         threadDelay 20000
-        movePointer display pointX pointY
+        movePointer processEnvironment display pointX pointY
     moveResult (Left err) _ = pure (Left err)
     moveResult (Right ()) point = movePoint point
 
 withX11Modifiers
-    :: [Modifier]
+    :: [(String, String)]
+    -> [Modifier]
     -> IO (Either Text ())
     -> IO (Either Text ())
-withX11Modifiers [] action = action
-withX11Modifiers modifiers action =
+withX11Modifiers _ [] action = action
+withX11Modifiers processEnvironment modifiers action =
     withX11InputCleanup
         (do
-            pressed <- runXdotoolInvocations
+            pressed <- runXdotoolInvocations processEnvironment
                 [ arguments ["keydown", Text.unpack (modifierName modifier)]
                 | modifier <- modifiers
                 ]
@@ -349,7 +412,7 @@ withX11Modifiers modifiers action =
         cleanup
   where
     cleanup =
-        runXdotoolCleanupInvocations
+        runXdotoolCleanupInvocations processEnvironment
             [ arguments ["keyup", Text.unpack (modifierName modifier)]
             | modifier <- reverse modifiers
             ]
@@ -380,18 +443,27 @@ withX11Readiness
     -> IO (Either Text ())
 withX11Readiness = withLogindReadiness
 
-movePointer :: ComputerDisplay -> Int -> Int -> IO (Either Text ())
-movePointer display x y =
+movePointer
+    :: [(String, String)]
+    -> ComputerDisplay
+    -> Int
+    -> Int
+    -> IO (Either Text ())
+movePointer processEnvironment display x y =
     let (rootX, rootY) = x11PointerPosition display x y
-    in runXdotool
+    in runXdotool processEnvironment
         (arguments ["mousemove", "--sync", show rootX, show rootY])
 
-runXdotoolInvocations :: [XdotoolInvocation] -> IO (Either Text ())
-runXdotoolInvocations =
+runXdotoolInvocations
+    :: [(String, String)]
+    -> [XdotoolInvocation]
+    -> IO (Either Text ())
+runXdotoolInvocations processEnvironment =
     foldM step (Right ())
   where
     step (Left err) _ = pure (Left err)
-    step (Right ()) invocation = runXdotool invocation
+    step (Right ()) invocation =
+        runXdotool processEnvironment invocation
 
 runX11TypeInvocationsWith
     :: IO (Either Text ())
@@ -408,13 +480,14 @@ runX11TypeInvocationsWith readiness run =
             Right () -> run invocation
 
 runXdotoolCleanupInvocations
-    :: [XdotoolInvocation]
+    :: [(String, String)]
+    -> [XdotoolInvocation]
     -> IO (Either Text ())
-runXdotoolCleanupInvocations =
+runXdotoolCleanupInvocations processEnvironment =
     foldM step (Right ())
   where
     step previous invocation = do
-        current <- runXdotool invocation
+        current <- runXdotool processEnvironment invocation
         pure case (previous, current) of
             (Right (), result) -> result
             (result, Right ()) -> result
@@ -425,11 +498,17 @@ runXdotoolCleanupInvocations =
                         <> next
                     )
 
-runXdotool :: XdotoolInvocation -> IO (Either Text ())
-runXdotool invocation = do
+runXdotool
+    :: [(String, String)]
+    -> XdotoolInvocation
+    -> IO (Either Text ())
+runXdotool processEnvironment invocation = do
     attempted <- tryAny $
         readCreateProcessWithExitCode
-            (proc "xdotool" invocation.xdotoolArguments)
+            (processWithEnvironment
+                processEnvironment
+                "xdotool"
+                invocation.xdotoolArguments)
             (Text.unpack invocation.xdotoolStdin)
     pure case attempted of
         Left exception ->
@@ -439,11 +518,12 @@ runXdotool invocation = do
             Left (processError "xdotool" stderr)
 
 captureX11Display
-    :: IO (Either Text ())
+    :: [(String, String)]
+    -> IO (Either Text ())
     -> ScreenshotEncoding
     -> IO (Either Text CapturedDisplay)
-captureX11Display readiness encoding =
-    inspectX11Display >>= \case
+captureX11Display processEnvironment readiness encoding =
+    inspectX11Display processEnvironment >>= \case
         Left err -> pure (Left err)
         Right display ->
             readiness >>= \case
@@ -458,8 +538,13 @@ captureX11Display readiness encoding =
             hClose handle
             flip finally (removeFile path) do
                 let geometry = x11CaptureGeometry display
-                readProcessWithExitCode
-                    "maim" ["--geometry", geometry, path] "" >>= \case
+                readCreateProcessWithExitCode
+                    (processWithEnvironment
+                        processEnvironment
+                        "maim"
+                        ["--geometry", geometry, path])
+                    ""
+                    >>= \case
                         (ExitFailure _, _, stderr) ->
                             pure (Left (processError "maim" stderr))
                         (ExitSuccess, _, _) -> do
@@ -471,7 +556,7 @@ captureX11Display readiness encoding =
         pure (either (Left . Text.pack . show) id attempted)
 
     verifyCapturedDisplay display captured =
-        inspectX11Display >>= \case
+        inspectX11Display processEnvironment >>= \case
             Left err -> pure (Left err)
             Right current
                 | current /= display ->
@@ -601,6 +686,16 @@ processError command stderr =
     in if Text.null detail
         then command <> " failed."
         else command <> " failed: " <> detail
+
+processWithEnvironment
+    :: [(String, String)]
+    -> FilePath
+    -> [String]
+    -> CreateProcess
+processWithEnvironment processEnvironment command commandArguments =
+    (proc command commandArguments)
+        { env = Just processEnvironment
+        }
 
 commaInts :: [Int] -> Text
 commaInts = Text.intercalate "," . map (Text.pack . show)

@@ -1,11 +1,14 @@
 module Agent.CLI.ComputerUse.Linux.Logind
     ( LogindGuard(..)
+    , LogindSessionTarget(..)
     , newLogindGuard
     , processSessionRequest
+    , validateLogindSession
     , validateLogindState
     , withLogindReadiness
     ) where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
     ( MVar
@@ -39,14 +42,20 @@ import DBus.Client
 import System.Posix.Process (getProcessID)
 import System.Posix.Types (ProcessID)
 import System.Timeout (timeout)
+import Text.Read (readMaybe)
 
 data LogindGuard = LogindGuard
     { checkLogindGuard :: IO (Either Text ())
     , closeLogindGuard :: IO ()
     }
 
-newLogindGuard :: IO (Either Text LogindGuard)
-newLogindGuard = do
+data LogindSessionTarget
+    = LogindX11Session !Text
+    | LogindWaylandSession
+    deriving (Eq, Show)
+
+newLogindGuard :: LogindSessionTarget -> IO (Either Text LogindGuard)
+newLogindGuard target = do
     attempted <- tryAny $
         timeout logindCallTimeout connectAndResolve >>= \case
             Nothing ->
@@ -69,7 +78,7 @@ newLogindGuard = do
                 state <- newMVar (Just client)
                 pure LogindGuard
                     { checkLogindGuard =
-                        checkGuard state sessionPath
+                        checkGuard target state sessionPath
                     , closeLogindGuard = closeGuard state
                     }
 
@@ -106,10 +115,11 @@ callForPath client member body = do
             fail "systemd-logind returned an invalid session path"
 
 checkGuard
-    :: MVar (Maybe Client)
+    :: LogindSessionTarget
+    -> MVar (Maybe Client)
     -> ObjectPath
     -> IO (Either Text ())
-checkGuard state sessionPath =
+checkGuard target state sessionPath =
     withMVar state \case
         Nothing ->
             pure (Left "The Linux computer-use session has been closed.")
@@ -122,7 +132,20 @@ checkGuard state sessionPath =
                         locked <-
                             getSessionProperty
                                 client sessionPath "LockedHint"
-                        pure (validateLogindState active locked))
+                        sessionType <-
+                            getSessionProperty client sessionPath "Type"
+                        sessionDisplay <- case target of
+                            LogindX11Session _ ->
+                                Just <$> getSessionProperty
+                                    client sessionPath "Display"
+                            LogindWaylandSession -> pure Nothing
+                        pure
+                            (validateLogindSession
+                                target
+                                active
+                                locked
+                                sessionType
+                                sessionDisplay))
                     >>= \case
                         Nothing ->
                             fail
@@ -177,6 +200,60 @@ validateLogindState active locked
     | locked =
         Left "Computer use is unavailable while the Linux session is locked."
     | otherwise = Right ()
+
+validateLogindSession
+    :: LogindSessionTarget
+    -> Bool
+    -> Bool
+    -> Text
+    -> Maybe Text
+    -> Either Text ()
+validateLogindSession target active locked sessionType sessionDisplay = do
+    validateLogindState active locked
+    case target of
+        LogindWaylandSession
+            | sessionType == "wayland" -> Right ()
+            | otherwise ->
+                Left
+                    "Computer use cannot verify that the current systemd-logind session is Wayland."
+        LogindX11Session expectedDisplay
+            | sessionType /= "x11" ->
+                Left
+                    "Computer use cannot verify that the current systemd-logind session is X11."
+            | Just actualDisplay <- sessionDisplay
+            , sameLocalX11Server expectedDisplay actualDisplay ->
+                Right ()
+            | otherwise ->
+                Left
+                    "Computer use cannot associate DISPLAY with the current systemd-logind X11 session."
+
+sameLocalX11Server :: Text -> Text -> Bool
+sameLocalX11Server first second =
+    case (localX11ServerNumber first, localX11ServerNumber second) of
+        (Just firstNumber, Just secondNumber) ->
+            firstNumber == secondNumber
+        _ -> False
+
+localX11ServerNumber :: Text -> Maybe Integer
+localX11ServerNumber display = do
+    suffix <-
+        Text.stripPrefix "unix/:" display
+            <|> Text.stripPrefix "unix:" display
+            <|> Text.stripPrefix ":" display
+    let (displayNumber, screenSuffix) = Text.breakOn "." suffix
+    if not (asciiDigits displayNumber) || not (validScreen screenSuffix)
+        then Nothing
+        else readMaybe (Text.unpack displayNumber)
+  where
+    asciiDigits value =
+        not (Text.null value)
+            && Text.all (\character ->
+                character >= '0' && character <= '9') value
+    validScreen value
+        | Text.null value = True
+        | Just screen <- Text.stripPrefix "." value =
+            asciiDigits screen
+        | otherwise = False
 
 withLogindReadiness
     :: IO (Either Text ())
