@@ -131,6 +131,31 @@ spec = do
                 , "renamed"
                 ]
 
+        it "shows a static title while waiting for human input" do
+            written <- newIORef []
+            let firstFrame = case spinnerFrames of
+                    frame : _ -> frame
+                    [] -> "*"
+            controller <- newWindowTitleController
+                MotionOff
+                "initial"
+                id
+                (\title -> modifyIORef' written (<> [title]))
+            controller.windowTitleBeginBusy
+            controller.windowTitleBeginInputWait
+            controller.windowTitleSet "renamed"
+            controller.windowTitleEndInputWait
+            controller.windowTitleEndBusy
+            actual <- readIORef written
+            actual
+                `shouldBe`
+                [ firstFrame <> " initial"
+                , "initial"
+                , "renamed"
+                , firstFrame <> " renamed"
+                , "renamed"
+                ]
+
         it "keeps reduced-motion busy titles static" do
             written <- newIORef []
             let firstFrame = case spinnerFrames of

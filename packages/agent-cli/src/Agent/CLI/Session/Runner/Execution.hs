@@ -233,6 +233,10 @@ newSessionHostRuntime SessionRequest{..} = do
         startupWindowTitle
         withIoLock
         writeWindowTitle
+    setPlanModeInputWaitHooks
+        planMode
+        windowTitle.windowTitleBeginInputWait
+        windowTitle.windowTitleEndInputWait
     setToolRootAccessRequest toolEnv (Just requestRootAccess)
     let showTitleEvent = \case
             SessionTitleGenerated SessionTitleResult{..} ->
