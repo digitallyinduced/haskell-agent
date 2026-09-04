@@ -909,6 +909,8 @@ buildSessionShellRuntime host SessionRequest{..} =
                             systemPromptForToolsWithHostedSearch
                                 nativeCapabilities.nativeProviderHostedTools
                                 dialect
+                                commitAttributionModel
+                                commitAttributionEffort
                                 enabledNames
                                 cwd
                                 sessionTmp

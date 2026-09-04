@@ -115,6 +115,8 @@ data SessionRequest = SessionRequest
     , options :: !CliOptions
     , provider :: !Provider
     , dialect :: !Dialect
+    , commitAttributionModel :: !Text
+    , commitAttributionEffort :: !Text
     , policyRef :: !(IORef ApprovalPolicy)
     , allTools :: ![AppTool]
     , recordImageGenerationInputs :: !([ImageAttachment] -> IO ())

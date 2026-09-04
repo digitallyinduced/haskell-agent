@@ -22,7 +22,12 @@ import Agent.CLI.Compaction
     )
 import Agent.Connectivity (withConnectionRecoveryOn)
 import Agent.CLI.Options (CliOptions(..), defaultEffortFor)
-import Agent.CLI.Prompt (sessionTempGuidance, systemPrompt, systemPromptForTools)
+import Agent.CLI.Prompt
+    ( commitAttributionGuidanceForTools
+    , sessionTempGuidance
+    , systemPrompt
+    , systemPromptForTools
+    )
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.Session (LegacySubagentTarget(..))
 import Agent.CLI.SubagentStore
@@ -620,6 +625,8 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                                 CodexCollaborationProtocol ->
                                     systemPromptForTools
                                         childDialect
+                                        model
+                                        effort
                                         (map (.appToolName) tools)
                                         env.subCwd
                                         sessionTmp
@@ -639,10 +646,17 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                                                 agentType
                                                 env.subId.unSubagentId
                                             , sessionTempGuidance sessionTmp
+                                            , commitAttributionGuidanceForTools
+                                                childDialect
+                                                model
+                                                effort
+                                                (map (.appToolName) tools)
                                             ]
                                 GenericTaskProtocol ->
                                     systemPromptForTools
                                         childDialect
+                                        model
+                                        effort
                                         (map (.appToolName) tools)
                                         env.subCwd
                                         sessionTmp
@@ -651,6 +665,8 @@ runCodexSubagent gatewayOnly runtime tokenProvider sendToRoot =
                                 NoHostChildAgentProtocol ->
                                     systemPrompt
                                         childDialect
+                                        model
+                                        effort
                                         env.subCwd
                                         sessionTmp
                                         today
@@ -880,6 +896,8 @@ runHttpSubagentWith
                                 CodexCollaborationProtocol ->
                                     systemPromptForTools
                                         childDialect
+                                        model
+                                        effort
                                         (map (.appToolName) tools)
                                         env.subCwd
                                         sessionTmp
@@ -899,10 +917,17 @@ runHttpSubagentWith
                                                 agentType
                                                 env.subId.unSubagentId
                                             , sessionTempGuidance sessionTmp
+                                            , commitAttributionGuidanceForTools
+                                                childDialect
+                                                model
+                                                effort
+                                                (map (.appToolName) tools)
                                             ]
                                 GenericTaskProtocol ->
                                     systemPromptForTools
                                         childDialect
+                                        model
+                                        effort
                                         (map (.appToolName) tools)
                                         env.subCwd
                                         sessionTmp
@@ -911,6 +936,8 @@ runHttpSubagentWith
                                 NoHostChildAgentProtocol ->
                                     systemPrompt
                                         childDialect
+                                        model
+                                        effort
                                         env.subCwd
                                         sessionTmp
                                         today
