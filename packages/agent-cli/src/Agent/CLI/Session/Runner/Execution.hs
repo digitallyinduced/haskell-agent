@@ -524,25 +524,27 @@ buildSkillContextRuntime
     installLearnedSkills context maximum queueContext =
         loadApplicableLearnedSkillsForStore
             startup.startupDatabaseStore
-            databaseScopes >>= \case
-                Left err -> do
-                    reportLearnedSkillWarning
-                        ("learned skills unavailable: " <> err)
-                    pure []
-                Right learnedSkills -> do
-                    omitted <-
-                        if queueContext
-                            then queueLearnedSkillContextWithOmissions
-                                maximum
-                                context
-                                learnedSkills
-                            else pure 0
-                    when (omitted > 0) $
-                        reportLearnedSkillWarning
-                            ("learned skills: "
-                                <> Text.pack (show omitted)
-                                <> " omitted from model context due to the context budget")
-                    pure learnedSkills
+            databaseScopes
+            >>= installLearnedSkillResult context maximum queueContext
+    installLearnedSkillResult context maximum queueContext = \case
+        Left err -> do
+            reportLearnedSkillWarning
+                ("learned skills unavailable: " <> err)
+            pure []
+        Right learnedSkills -> do
+            omitted <-
+                if queueContext
+                    then queueLearnedSkillContextWithOmissions
+                        maximum
+                        context
+                        learnedSkills
+                    else pure 0
+            when (omitted > 0) $
+                reportLearnedSkillWarning
+                    ("learned skills: "
+                        <> Text.pack (show omitted)
+                        <> " omitted from model context due to the context budget")
+            pure learnedSkills
     reloadGeneratedContext = do
         freshAgents <-
             if loadsHostWorkspaceContext
@@ -674,10 +676,19 @@ buildSkillContextRuntime
         reportSkillCatalog (isNothing fullscreen) skills omitted
         learnedSkills <-
             if needsInitialContext
-                then installLearnedSkills
-                    startupContext
-                    defaultLearnedSkillContextMaxChars
-                    queueInitialContext
+                then
+                    case initialContextPreload.preloadedLearnedSkills of
+                        Just preloaded ->
+                            installLearnedSkillResult
+                                startupContext
+                                defaultLearnedSkillContextMaxChars
+                                queueInitialContext
+                                preloaded
+                        Nothing ->
+                            installLearnedSkills
+                                startupContext
+                                defaultLearnedSkillContextMaxChars
+                                queueInitialContext
                 else pure []
         callbacks.runnerFinishStartup startup
         pure learnedSkills

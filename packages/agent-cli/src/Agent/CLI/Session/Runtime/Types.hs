@@ -1,6 +1,7 @@
 -- | Typed inputs shared by provider startup and the session loop.
 module Agent.CLI.Session.Runtime.Types
-    ( SessionBackend(..)
+    ( InitialContextPreload(..)
+    , SessionBackend(..)
     , SessionRequest(..)
     , StartupCancelled(..)
     , StartupFailure(..)
@@ -69,11 +70,13 @@ import Agent.Provider
     , TokenProvider
     )
 import Agent.Responses.Types (ResponseCreateParams)
+import Agent.ProjectInstructions (LoadedAgentsMd)
 import Agent.Skills
     ( SkillCatalog
     , SkillInvocation
     )
 import Agent.Store.Postgres (Store)
+import Agent.Store.Postgres.Skill (LearnedSkill)
 import Agent.Subagents
     ( RootTurnId
     , SubagentId
@@ -105,6 +108,15 @@ data SessionBackend = SessionBackend
     , interruptBackend :: !(IO ())
     , resetBackendState :: !(IO ())
     }
+
+-- | Side-effect-free startup reads that can be prepared while independent
+-- tool resources initialize. Their warnings and model-facing formatting are
+-- intentionally deferred until the normal session installation boundary.
+data InitialContextPreload = InitialContextPreload
+    { preloadedAgentsContext :: !(Maybe LoadedAgentsMd)
+    , preloadedLearnedSkills :: !(Maybe (Either Text [LearnedSkill]))
+    }
+    deriving (Eq, Show)
 
 data SessionRequest = SessionRequest
     { catalog :: !ModelCatalog
@@ -153,6 +165,7 @@ data SessionRequest = SessionRequest
         :: !(IORef (Maybe AutomaticCompactionBoundary))
     , needsInitialContext :: !Bool
     , queueInitialContext :: !Bool
+    , initialContextPreload :: !InitialContextPreload
     , initialGrokContext :: !(Maybe Text)
     , persist :: !Persistence
     , startupWindowTitle :: !Text

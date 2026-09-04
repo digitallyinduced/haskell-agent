@@ -4,6 +4,7 @@ module Agent.CLI.Resume
     , ResumeBrowser(..)
     , ResumeSourceFilter(..)
     , ResumeState(..)
+    , SessionInitialContext(..)
     , applyResumeKey
     , applyResumeSearchResults
     , beginResumeSearch
@@ -30,6 +31,7 @@ module Agent.CLI.Resume
     , resumeSearchEntries
     , filterResumeSessionsForBoundary
     , resumeRelativeAge
+    , resolveSessionInitialContext
     , resumeSourceLabel
     , selectedResumeBrowser
     , setResumeDeletePending
@@ -51,6 +53,7 @@ import Agent.CLI.Session
     , loadSessionMeta
     , loadSessionResumeStats
     )
+import Agent.CLI.Session.History (foldSessionItems)
 import Agent.CLI.Session.Types (TranscriptEffect(..))
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.OpenAI.Compaction (hasReloadedGeneratedContextItems)
@@ -68,7 +71,7 @@ import Control.Monad (forM)
 import Data.Char (isAlphaNum)
 import Data.Containers.ListUtils (nubOrd)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -83,6 +86,46 @@ data ResumeSourceFilter
     = ResumeAll
     | ResumeProvider !Text
     deriving (Eq, Show)
+
+-- | Transcript-derived context requirements that can be resolved before
+-- provider prompt construction. Keeping this decision pure allows startup
+-- context reads to overlap independent tool acquisition without changing
+-- resume semantics.
+data SessionInitialContext = SessionInitialContext
+    { initialContextItems :: [ResponseItem]
+    , initialContextResumeNeedsFresh :: Bool
+    , initialContextPrevious :: Maybe Text
+    , initialContextNeeded :: Bool
+    , initialContextMayRestoreSnapshot :: Bool
+    }
+    deriving (Eq, Show)
+
+resolveSessionInitialContext
+    :: Bool
+    -> Bool
+    -> Maybe (SessionMeta, [SessionTurn])
+    -> SessionInitialContext
+resolveSessionInitialContext hasTransition resumeTargetChanged resumed =
+    SessionInitialContext{..}
+  where
+    initialTurns = maybe [] snd resumed
+    initialContextItems = maybe [] (foldSessionItems . snd) resumed
+    initialContextResumeNeedsFresh =
+        resumeNeedsGeneratedContext initialTurns
+    initialContextPrevious
+        | hasTransition || resumeTargetChanged = Nothing
+        | otherwise =
+            resumed >>= \(meta, _) -> meta.metaLastResponseId
+    initialContextNeeded =
+        initialContextResumeNeedsFresh
+            || (null initialTurns && initialContextPrevious == Nothing)
+    initialContextMayRestoreSnapshot =
+        case resumed of
+            Just (meta, turns) ->
+                null turns
+                    && initialContextPrevious == Nothing
+                    && isJust meta.metaPromptSnapshot
+            Nothing -> False
 
 data ResumeEntry = ResumeEntry
     { resumeId :: !Text
