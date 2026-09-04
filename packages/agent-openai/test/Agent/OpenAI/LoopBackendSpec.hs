@@ -1367,6 +1367,7 @@ spec = do
                     codexRateLimitsEvent $ Aeson.object
                         [ "primary" Aeson..= Aeson.object
                             [ "used_percent" Aeson..= (92 :: Int)
+                            , "window_minutes" Aeson..= (300 :: Int)
                             ]
                         ]
                 sendCurrent _request _previous onEvent = do
@@ -2103,7 +2104,9 @@ codexRateLimitsEvent rateLimits = ResponseCodexRateLimitsEvent
         { allowed = boolField "allowed" rateLimits
         , limitReached = boolField "limit_reached" rateLimits
         , primaryUsedPercent = percentField "primary" rateLimits
+        , primaryWindowMinutes = windowMinutesField "primary" rateLimits
         , secondaryUsedPercent = percentField "secondary" rateLimits
+        , secondaryWindowMinutes = windowMinutesField "secondary" rateLimits
         }
     , sequenceNumber = Nothing
     }
@@ -2121,6 +2124,14 @@ codexRateLimitsEvent rateLimits = ResponseCodexRateLimitsEvent
                     _ -> Nothing
             _ -> Nothing
     percentField _ _ = Nothing
+    windowMinutesField name (Aeson.Object object) =
+        case KeyMap.lookup name object of
+            Just (Aeson.Object window) ->
+                case KeyMap.lookup "window_minutes" window of
+                    Just (Aeson.Number value) -> Just (round value)
+                    _ -> Nothing
+            _ -> Nothing
+    windowMinutesField _ _ = Nothing
 
 testResponse :: Text -> [ResponseItem] -> Response
 testResponse responseId output = testResponseWithUsage responseId output Aeson.Null

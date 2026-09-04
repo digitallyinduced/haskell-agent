@@ -244,27 +244,32 @@ data ResponseStreamError = ResponseStreamError
 instance ToJSON CodexRateLimits where
     toJSON CodexRateLimits
             { allowed, limitReached
-            , primaryUsedPercent, secondaryUsedPercent } =
+            , primaryUsedPercent, primaryWindowMinutes
+            , secondaryUsedPercent, secondaryWindowMinutes } =
         objectWith
             [ optionalField "allowed" allowed
             , optionalField "limit_reached" limitReached
             , fmap
-                (field "primary" . rateLimitWindow)
+                (field "primary" . rateLimitWindow primaryWindowMinutes)
                 primaryUsedPercent
             , fmap
-                (field "secondary" . rateLimitWindow)
+                (field "secondary" . rateLimitWindow secondaryWindowMinutes)
                 secondaryUsedPercent
             ]
       where
-        rateLimitWindow usedPercent =
+        rateLimitWindow windowMinutes usedPercent =
             objectWith
-                [Just (field "used_percent" usedPercent)]
+                [ Just (field "used_percent" usedPercent)
+                , optionalField "window_minutes" windowMinutes
+                ]
 
 data CodexRateLimits = CodexRateLimits
-    { allowed              :: !(Maybe Bool)
-    , limitReached         :: !(Maybe Bool)
-    , primaryUsedPercent   :: !(Maybe Double)
-    , secondaryUsedPercent :: !(Maybe Double)
+    { allowed                :: !(Maybe Bool)
+    , limitReached           :: !(Maybe Bool)
+    , primaryUsedPercent     :: !(Maybe Double)
+    , primaryWindowMinutes   :: !(Maybe Int)
+    , secondaryUsedPercent   :: !(Maybe Double)
+    , secondaryWindowMinutes :: !(Maybe Int)
     } deriving stock (Eq, Show)
 
 instance ToJSON ResponseStreamError where
@@ -731,17 +736,27 @@ firstJust first second = case first of
     Nothing -> second
 
 codexRateLimitsDecoder :: Hermes.Decoder CodexRateLimits
-codexRateLimitsDecoder = Hermes.object $
-    CodexRateLimits
-        <$> optionalAtKey "allowed" Hermes.bool
-        <*> optionalAtKey "limit_reached" Hermes.bool
-        <*> (fmap (.usedPercent)
-            <$> optionalAtKey "primary" rateLimitWindowDecoder)
-        <*> (fmap (.usedPercent)
-            <$> optionalAtKey "secondary" rateLimitWindowDecoder)
+codexRateLimitsDecoder = Hermes.object do
+    allowed <- optionalAtKey "allowed" Hermes.bool
+    limitReached <- optionalAtKey "limit_reached" Hermes.bool
+    primary <- optionalAtKey "primary" rateLimitWindowDecoder
+    secondary <- optionalAtKey "secondary" rateLimitWindowDecoder
+    pure CodexRateLimits
+        { allowed
+        , limitReached
+        , primaryUsedPercent = (.rateLimitWindowUsedPercent) <$> primary
+        , primaryWindowMinutes = primary >>= (.rateLimitWindowMinutes)
+        , secondaryUsedPercent = (.rateLimitWindowUsedPercent) <$> secondary
+        , secondaryWindowMinutes = secondary >>= (.rateLimitWindowMinutes)
+        }
 
-newtype RateLimitWindow = RateLimitWindow { usedPercent :: Double }
+data RateLimitWindow = RateLimitWindow
+    { rateLimitWindowUsedPercent :: !Double
+    , rateLimitWindowMinutes     :: !(Maybe Int)
+    }
 
 rateLimitWindowDecoder :: Hermes.Decoder RateLimitWindow
 rateLimitWindowDecoder = Hermes.object $
-    RateLimitWindow <$> Hermes.atKey "used_percent" Hermes.double
+    RateLimitWindow
+        <$> Hermes.atKey "used_percent" Hermes.double
+        <*> optionalAtKey "window_minutes" Hermes.int
