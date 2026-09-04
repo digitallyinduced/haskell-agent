@@ -8,6 +8,10 @@ module Agent.Responses.Types.Items
     , parseResponseItemType
     , responseItemTypeText
     , ResponseMessage(..)
+    , localCompactionSummaryContentItemKind
+    , responseMessageHasContentItemKind
+    , compactionCheckpointOriginItem
+    , responseItemCompactionCheckpointOrigin
     , FunctionCall(..)
     , FunctionCallOutput(..)
     , CustomToolCall(..)
@@ -61,6 +65,19 @@ data ResponseMessage = ResponseMessage
     , passthrough :: !(Maybe InternalChatMetadata)
 
     } deriving stock (Eq, Show)
+
+-- | Internal marker attached to locally generated compaction summaries.
+-- Provider request adapters may remove it at the wire boundary after using it
+-- to distinguish checkpoints from ordinary assistant text.
+localCompactionSummaryContentItemKind :: Text
+localCompactionSummaryContentItemKind =
+    "haskell-agent.local-compaction-summary"
+
+responseMessageHasContentItemKind :: Text -> ResponseMessage -> Bool
+responseMessageHasContentItemKind kind message =
+    maybe False
+        (maybe False (kind `elem`) . (.contentItemKinds))
+        message.passthrough
 
 instance ToJSON ResponseMessage where
     toJSON ResponseMessage
@@ -694,6 +711,30 @@ data ResponseItem
     | KnownResponseItem !ResponseItemType !TaggedObject
     | UnknownResponseItem !TaggedObject
     deriving stock (Eq, Show)
+
+-- | Host-only provenance attached immediately after an opaque server
+-- compaction checkpoint. The provider name is kept in the item tag so the
+-- marker survives session persistence without changing the checkpoint item.
+compactionCheckpointOriginItem :: Text -> ResponseItem
+compactionCheckpointOriginItem provider =
+    UnknownResponseItem
+        (TaggedObject
+            (compactionCheckpointOriginPrefix
+                <> Text.toLower (Text.strip provider)))
+
+-- | Recover the provider name from a host-only checkpoint provenance marker.
+responseItemCompactionCheckpointOrigin :: ResponseItem -> Maybe Text
+responseItemCompactionCheckpointOrigin = \case
+    UnknownResponseItem TaggedObject{tag} ->
+        case Text.stripPrefix compactionCheckpointOriginPrefix tag of
+            Just provider
+                | not (Text.null provider) -> Just provider
+            _ -> Nothing
+    _ -> Nothing
+
+compactionCheckpointOriginPrefix :: Text
+compactionCheckpointOriginPrefix =
+    "haskell-agent.compaction-checkpoint-origin."
 
 instance ToJSON ResponseItem where
     toJSON = \case

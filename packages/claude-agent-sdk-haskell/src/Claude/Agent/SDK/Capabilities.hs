@@ -27,6 +27,8 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (when)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Except (ExceptT(..), runExceptT, throwE, withExceptT)
 import qualified Data.ByteString as ByteString
 import Data.IORef (IORef, newIORef, readIORef, atomicModifyIORef')
 import qualified Data.Map.Strict as Map
@@ -178,48 +180,49 @@ probeClaudeCapabilities :: FilePath -> IO (Either Text ClaudeAgentCapabilities)
 probeClaudeCapabilities executable = getCurrentDirectory >>= probeClaudeCapabilitiesIn executable
 
 probeClaudeCapabilitiesIn :: FilePath -> FilePath -> IO (Either Text ClaudeAgentCapabilities)
-probeClaudeCapabilitiesIn executable cwd = do
-    versionResult <- runProbe executable cwd ["--version"]
-    case versionResult of
-        Left err -> pure (Left err)
-        Right (exitCode, _, _)
-            | exitCode /= ExitSuccess ->
-                pure
-                    (Left
-                        "Claude Code --version probe exited unsuccessfully.")
-        Right (_, versionOutput, versionErr) ->
-            case parseClaudeVersion (versionOutput <> "\n" <> versionErr) of
-                Nothing -> pure (Left "Unable to parse Claude Code version output.")
-                Just version -> do
-                    let key = executable <> "\0" <> Text.unpack version
-                    cached <- readIORef capabilityCache
-                    case Map.lookup key cached of
-                        Just result -> pure (Right result)
-                        Nothing -> do
-                            helpResult <- runProbe executable cwd ["--help"]
-                            case helpResult of
-                                Left err ->
-                                    pure
-                                        (Left
-                                            ("Claude Code --help probe failed: " <> err))
-                                Right (helpExit, _, _)
-                                    | helpExit /= ExitSuccess ->
-                                        pure
-                                            (Left
-                                                "Claude Code --help probe exited unsuccessfully.")
-                                Right (_, helpOutput, helpErr) -> do
-                                    let parsed = parseClaudeHelp helpOutput
-                                        failures =
-                                            [ "Claude Code probe stderr: " <> helpErr
-                                            | not (Text.null (Text.strip helpErr))
-                                            ]
-                                        result = parsed
-                                            { capabilityVersion = Just version
-                                            , warnings = failures <> parsed.warnings
-                                            }
-                                    atomicModifyIORef' capabilityCache
-                                        \m -> (Map.insert key result m, ())
-                                    pure (Right result)
+probeClaudeCapabilitiesIn executable cwd = runExceptT do
+    versionProbe <- ExceptT $ runProbe executable cwd ["--version"]
+    (versionOutput, versionErr) <- requireSuccessfulProbe "--version" versionProbe
+    version <- parseProbeVersion versionOutput versionErr
+    let key = executable <> "\0" <> Text.unpack version
+    cached <- liftIO $ Map.lookup key <$> readIORef capabilityCache
+    case cached of
+        -- A cached result is a successful capability discovery for this
+        -- executable/version pair, so avoid a redundant help probe.
+        Just result -> pure result
+        Nothing -> do
+            helpProbe <- withExceptT
+                ("Claude Code --help probe failed: " <>)
+                (ExceptT $ runProbe executable cwd ["--help"])
+            (helpOutput, helpErr) <- requireSuccessfulProbe "--help" helpProbe
+            let parsed = parseClaudeHelp helpOutput
+                failures =
+                    [ "Claude Code probe stderr: " <> helpErr
+                    | not (Text.null (Text.strip helpErr))
+                    ]
+                result = parsed
+                    { capabilityVersion = Just version
+                    , warnings = failures <> parsed.warnings
+                    }
+            liftIO $ atomicModifyIORef' capabilityCache
+                \m -> (Map.insert key result m, ())
+            pure result
+
+requireSuccessfulProbe
+    :: Text
+    -> (ExitCode, Text, Text)
+    -> ExceptT Text IO (Text, Text)
+requireSuccessfulProbe name (exitCode, output, errorOutput)
+    | exitCode == ExitSuccess = pure (output, errorOutput)
+    | otherwise =
+        throwE ("Claude Code " <> name <> " probe exited unsuccessfully.")
+
+parseProbeVersion :: Text -> Text -> ExceptT Text IO Text
+parseProbeVersion output errorOutput =
+    case parseClaudeVersion (output <> "\n" <> errorOutput) of
+        Just version -> pure version
+        Nothing -> throwE "Unable to parse Claude Code version output."
+
 capabilityCache :: IORef (Map.Map String ClaudeAgentCapabilities)
 capabilityCache = unsafePerformIO (newIORef Map.empty)
 {-# NOINLINE capabilityCache #-}

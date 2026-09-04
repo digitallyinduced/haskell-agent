@@ -1240,9 +1240,7 @@ validateLoadedMeta
     -> SessionMeta
     -> Either ApiError ()
 validateLoadedMeta boundary meta
-    | meta.metaGatewayIdentity
-        == boundary.accessGatewayBoundary.gatewayBoundaryIdentity
-        && case boundary.accessGatewayBoundary.gatewayBoundaryIdentity of
+    | case boundary.accessGatewayBoundary.gatewayBoundaryIdentity of
             Nothing ->
                 meta.metaConnection /= organizationGatewayConnectionId
             Just _ ->

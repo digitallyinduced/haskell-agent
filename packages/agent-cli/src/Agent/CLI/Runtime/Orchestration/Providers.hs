@@ -30,7 +30,9 @@ import Agent.CLI.Compaction
       runProviderCompactWith,
       runBackendCompactHistoryWithLimits,
       runBackendCompactWithLimits,
-      runResponsesCompactWithContextWindow )
+      runResponsesCompactWithContextWindow,
+      runXaiBackendCompactHistoryWithContextWindow,
+      runXaiResponsesCompactWithContextWindow )
 import Agent.CLI.Config ()
 import Agent.Connectivity ( withConnectionRecoveryOn )
 import Agent.CLI.Database ()
@@ -205,7 +207,7 @@ import Agent.Tools.Secret ()
 import Agent.Tools.Types ()
 import Agent.Tools.OutputArtifact (finalizeToolOutput)
 import Agent.ToolDispatch (ToolDispatchConfig(..))
-import Agent.XAI.LoopBackend ( xaiBackend )
+import Agent.XAI.LoopBackend ( xaiBackendWithClientOptions )
 import Control.Applicative ()
 import Control.Concurrent.Async ( link, withAsync )
 import Control.Concurrent.Chan
@@ -253,8 +255,10 @@ import qualified Agent.CLI.Session.Runner as SessionRunner
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text ( null, unpack )
 import qualified Agent.XAI.Options as XAI
-    ( ClientOptions(hostedXSearchEnabled)
+    ( ClientOptions(..)
     , clientOptionsFromEnv
+    , grokAutoCompactTokenLimit
+    , grokDefaultContextWindow
     )
 import qualified Agent.XAI.Client as XAIClient
     ( createResponseWith )
@@ -883,7 +887,31 @@ runXaiProvider request@AgentProviderRequest{..} nativeCapabilities = do
                         let xaiContextWindow =
                                 contextWindowForParams
                                     (XAIRequest.mapModel xaiOptions)
-                                    500_000
+                                    XAI.grokDefaultContextWindow
+                            xaiWireModel params =
+                                maybe xaiOptions.defaultModel
+                                    (XAIRequest.mapModel xaiOptions)
+                                    params.model
+                            xaiCompactThresholdFor currentParams =
+                                let contextWindow =
+                                        xaiContextWindow currentParams
+                                in max 1 $
+                                    min contextWindow $
+                                        fromMaybe
+                                            (XAI.grokAutoCompactTokenLimit
+                                                (xaiWireModel currentParams)
+                                                contextWindow)
+                                            options.optCompactThreshold
+                            xaiOptionsFor currentParams =
+                                xaiOptions
+                                    { XAI.autoCompactTokenLimit =
+                                        Just
+                                            (xaiCompactThresholdFor
+                                                currentParams)
+                                    }
+                            xaiCompactThreshold =
+                                xaiCompactThresholdFor
+                                    <$> readIORef paramsRef
                             protectXaiOverflow occupancy getParams backend =
                                 boundCompletedToolContinuations
                                     xaiContextWindow
@@ -897,40 +925,74 @@ runXaiProvider request@AgentProviderRequest{..} nativeCapabilities = do
                                         subagentRuntime
                                         dialect
                                         ctx.multiSendToRoot
+                                        xaiContextWindow
+                                        xaiCompactThresholdFor
                                         (\childParams ->
-                                            protectXaiOverflow
-                                                contextTokensRef
-                                                (pure childParams)
-                                                (xaiBackend xaiOptions tokenProvider
-                                                    (pure childParams)))
+                                            xaiBackendWithClientOptions
+                                                xaiOptionsFor
+                                                tokenProvider
+                                                (pure childParams))
                             Nothing -> pure ()
-                        let backend =
-                                withPendingInputs pendingNotices $
-                                    withConnectionRecoveryOn
-                                        startup.startupNetworkRecovery $
-                                        protectXaiOverflow
-                                            contextTokensRef
-                                            (readIORef paramsRef)
-                                            (xaiBackend xaiOptions tokenProvider
-                                                (readIORef paramsRef))
-                            btwBackend privateParams =
-                                xaiBackend xaiOptions tokenProvider
+                        let btwBackend privateParams =
+                                xaiBackendWithClientOptions
+                                    xaiOptionsFor
+                                    tokenProvider
                                     (pure privateParams)
+                            compactHistory history _inputs = do
+                                currentParams <- readIORef paramsRef
+                                runXaiBackendCompactHistoryWithContextWindow
+                                    (xaiContextWindow currentParams)
+                                    btwBackend
+                                    recordCompactionUsage
+                                    currentParams
+                                    history
+                                    Nothing
+                                    >>= decorateAutomaticCompact request
+                                        xaiContextWindow
+                            -- Reconnection wraps only the continuation. Keeping
+                            -- automatic compaction outside it prevents a
+                            -- failed continuation from rerunning the summary.
+                            requestBackend =
+                                withConnectionRecoveryOn
+                                    startup.startupNetworkRecovery $
+                                    protectXaiOverflow
+                                        contextTokensRef
+                                        (readIORef paramsRef)
+                                        (xaiBackendWithClientOptions
+                                            xaiOptionsFor
+                                            tokenProvider
+                                            (readIORef paramsRef))
+                            compactingBackend =
+                                autoCompactBackendWith
+                                    xaiCompactThreshold
+                                    compactHistory
+                                    (\outcome inputs ->
+                                        readIORef automaticCompactionHookRef
+                                            >>= \hook ->
+                                                hook outcome inputs)
+                                    (readIORef paramsRef)
+                                    contextTokensRef
+                                    requestBackend
+                            backend =
+                                withPendingInputs pendingNotices
+                                    compactingBackend
                             compactRunner focus = do
                                 contextWindow <-
                                     currentModelContextWindow
                                         (XAIRequest.mapModel xaiOptions)
                                 historyRef <-
                                     newIORef =<< readLiveTranscript conversationRef
-                                installLiveCompactOutcome conversationRef Nothing
+                                installLiveCompactOutcome
+                                    conversationRef
+                                    (Just contextTokensRef)
                                     (\requestedFocus ->
-                                        runResponsesCompactWithContextWindow
+                                        runXaiResponsesCompactWithContextWindow
                                             contextWindow
                                             (\request ->
                                                 runWithTokenProvider tokenProvider
                                                     \credential ->
                                                         XAIClient.createResponseWith
-                                                            xaiOptions
+                                                            (xaiOptionsFor request)
                                                             credential
                                                             request)
                                             recordCompactionUsage

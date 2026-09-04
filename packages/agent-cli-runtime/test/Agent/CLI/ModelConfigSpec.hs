@@ -279,6 +279,36 @@ spec = describe "Agent.CLI.ModelConfig" do
             (Just ("models.json", overlay))
             `shouldSatisfy` leftContains "invalid api_key_env"
 
+    it "reports independent connection validation errors together in check order" do
+        defaults <- readPackagedDefaults
+        let overlay =
+                "{\"version\":1,\"connections\":{\"local\":{\"api\":\"responses\",\"base_url\":\"ftp://localhost/v1\",\"api_key_env\":\"BAD-NAME\",\"request_timeout_seconds\":0}}}"
+        err <- expectLeft
+            (mergeModelConfigs
+                ("models.default.json", defaults)
+                (Just ("models.json", overlay)))
+        err `shouldBe` Text.intercalate "\n"
+            [ "connection local base_url must start with http:// or https://"
+            , "connection local request_timeout_seconds must be positive"
+            , "connection local has invalid api_key_env BAD-NAME"
+            ]
+
+    it "reports independent model validation errors together in check order" do
+        defaults <- readPackagedDefaults
+        let overlay =
+                "{\"version\":1,\"connections\":{\"local\":{\"api\":\"responses\",\"base_url\":\"http://localhost/v1\",\"api_key_optional\":true}},\"models\":[{\"id\":\"local-model\",\"connection\":\"local\",\"dialect\":\"generic-responses\",\"fallback_priority\":-1,\"context_window\":0,\"reasoning_efforts\":[\"turbo\",\"turbo\"],\"default_reasoning_effort\":\"high\"}]}"
+        err <- expectLeft
+            (mergeModelConfigs
+                ("models.default.json", defaults)
+                (Just ("models.json", overlay)))
+        err `shouldBe` Text.intercalate "\n"
+            [ "model local-model fallback_priority must not be negative"
+            , "model local-model context_window must be positive"
+            , "model local-model has unsupported reasoning_efforts; expected none, low, medium, high, xhigh, max"
+            , "model local-model reasoning_efforts must not contain duplicates"
+            , "model local-model default_reasoning_effort must be listed in reasoning_efforts"
+            ]
+
     it "requires an API-key environment variable unless auth is optional" do
         defaults <- readPackagedDefaults
         let overlay =
@@ -370,6 +400,13 @@ expectRight = \case
         expectationFailure (Text.unpack err)
         fail "expected Right"
     Right value -> pure value
+
+expectLeft :: Either Text value -> IO Text
+expectLeft = \case
+    Left err -> pure err
+    Right _ -> do
+        expectationFailure "expected Left"
+        fail "expected Left"
 
 readPackagedDefaults :: IO LBS.ByteString
 readPackagedDefaults =

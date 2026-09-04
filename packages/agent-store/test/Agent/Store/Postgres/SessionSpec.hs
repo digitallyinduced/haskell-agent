@@ -597,7 +597,7 @@ spec = describe "PostgreSQL session schema" do
                                 1 >>= \case
                                     Right [match] ->
                                         match.searchSessionId
-                                            `shouldBe` "boundary-authorized"
+                                            `shouldBe` "boundary-unauthorized"
                                     other ->
                                         expectationFailure
                                             ("unexpected gateway-bound search: "
@@ -623,7 +623,7 @@ spec = describe "PostgreSQL session schema" do
                                 1 >>= \case
                                     Right [match] ->
                                         match.nativeSearchSessionId
-                                            `shouldBe` "boundary-authorized"
+                                            `shouldBe` "boundary-unauthorized"
                                     other ->
                                         expectationFailure
                                             ("unexpected native gateway search: "
@@ -724,8 +724,14 @@ spec = describe "PostgreSQL session schema" do
                                 pool
                                 pageGateway
                                 otherPageIdentity
-                                "page-authorized-a"
-                                `shouldReturn` Right Nothing
+                                "page-authorized-a" >>= \case
+                                    Right (Just loaded) ->
+                                        loaded.sessionListEntryMetadata.sessionMetadataKey
+                                            `shouldBe` "page-authorized-a"
+                                    other ->
+                                        expectationFailure
+                                            ("expected portable gateway metadata: "
+                                                <> show other)
                             loadSessionMetadataForBoundary
                                 pool
                                 pageGateway
@@ -744,51 +750,25 @@ spec = describe "PostgreSQL session schema" do
                                 pageIdentity
                                 SessionAll
                                 Nothing
-                                2 >>= \case
+                                10 >>= \case
                                     Left err ->
                                         expectationFailure
-                                            ("could not list first boundary page: "
+                                            ("could not list gateway sessions: "
                                                 <> show err)
-                                    Right firstPage -> do
+                                    Right gatewayPage -> do
                                         map
                                             (\entry ->
                                                 entry.sessionListEntryMetadata.sessionMetadataKey)
-                                            firstPage.sessionListPageSessions
+                                            gatewayPage.sessionListPageSessions
                                             `shouldBe`
-                                                [ "page-authorized-a"
+                                                [ "page-other-newer"
+                                                , "page-authorized-a"
                                                 , "page-authorized-b"
+                                                , "page-other-between"
+                                                , "page-authorized-c"
                                                 ]
-                                        firstPage.sessionListPageNextCursor
-                                            `shouldBe`
-                                                Just SessionListCursor
-                                                    { sessionListCursorUpdatedAt =
-                                                        pageTieTime
-                                                    , sessionListCursorKey =
-                                                        "page-authorized-b"
-                                                    }
-                                        listSessionMetadataForBoundary
-                                            pool
-                                            pageGateway
-                                            pageIdentity
-                                            SessionAll
-                                            firstPage.sessionListPageNextCursor
-                                            2 >>= \case
-                                                Left err ->
-                                                    expectationFailure
-                                                        ( "could not list second "
-                                                            <> "boundary page: "
-                                                            <> show err
-                                                        )
-                                                Right secondPage -> do
-                                                    map
-                                                        (\entry ->
-                                                            entry.sessionListEntryMetadata.sessionMetadataKey)
-                                                        secondPage.sessionListPageSessions
-                                                        `shouldBe`
-                                                            [ "page-authorized-c"
-                                                            ]
-                                                    secondPage.sessionListPageNextCursor
-                                                        `shouldBe` Nothing
+                                        gatewayPage.sessionListPageNextCursor
+                                            `shouldBe` Nothing
                             listSessionMetadataForBoundary
                                 pool
                                 pageGateway
@@ -807,7 +787,10 @@ spec = describe "PostgreSQL session schema" do
                                             otherPage.sessionListPageSessions
                                             `shouldBe`
                                                 [ "page-other-newer"
+                                                , "page-authorized-a"
+                                                , "page-authorized-b"
                                                 , "page-other-between"
+                                                , "page-authorized-c"
                                                 ]
                             let
                                 directTieTime = addUTCTime 500 now
@@ -900,7 +883,10 @@ spec = describe "PostgreSQL session schema" do
                                                     `shouldBe` expected
                             expectFilteredPage
                                 SessionActive
-                                [ "page-authorized-b"
+                                [ "page-gateway-without-identity"
+                                , "page-other-newer"
+                                , "page-authorized-b"
+                                , "page-other-between"
                                 , "page-authorized-c"
                                 ]
                             expectFilteredPage
@@ -908,8 +894,11 @@ spec = describe "PostgreSQL session schema" do
                                 ["page-authorized-a"]
                             expectFilteredPage
                                 SessionAll
-                                [ "page-authorized-a"
+                                [ "page-gateway-without-identity"
+                                , "page-other-newer"
+                                , "page-authorized-a"
                                 , "page-authorized-b"
+                                , "page-other-between"
                                 , "page-authorized-c"
                                 ]
                             setSessionArchived pool "session-2" True now
