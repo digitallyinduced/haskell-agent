@@ -25,6 +25,17 @@ import Agent.Tools.Types
     , toolExecutionPolicyFor
     , withToolResourceClaims
     )
+import Codec.Picture
+    ( PixelRGB8(..)
+    , convertRGB8
+    , decodeImage
+    , encodeBitmap
+    , encodeJpegAtQuality
+    , generateImage
+    , imageHeight
+    , imageWidth
+    )
+import Codec.Picture.Types (convertImage)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (cancel, wait, withAsync)
 import Control.Concurrent.MVar
@@ -35,9 +46,13 @@ import Control.Concurrent.MVar
     , tryReadMVar
     )
 import qualified Control.Exception as Exception
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Base64 as Base64
+import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import System.Timeout (timeout)
 import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
@@ -143,6 +158,151 @@ spec = describe "runLoop" do
             }
         seen <- readIORef submissions
         seen `shouldBe` [(Nothing, inputs)]
+
+    it "normalizes oversized images before backend submission" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-image" [] (Just "saw it")
+            ]
+        let sourceBytes = oversizedFixtureBytes
+            input =
+                userMessageWithAttachments
+                    "see this"
+                    [ ImageAttachmentItem
+                        (ImageAttachment "image/bmp" sourceBytes)
+                    ]
+        ByteString.length sourceBytes `shouldSatisfy` (> 1500000)
+        config <- testConfig backend
+        result <- runLoopInputs config Nothing [input]
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-image"
+            , finalText = Just "saw it"
+            , turnsUsed = 1
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        case seen of
+            [(Nothing, [submitted])] ->
+                case turnInputImages submitted of
+                    [normalized] ->
+                        assertNormalizedImage
+                            sourceBytes
+                            normalized.imageMime
+                            normalized.imageBytes
+                    images ->
+                        expectationFailure $
+                            "expected one submitted image, got "
+                                <> show (length images)
+            submissionsSeen ->
+                expectationFailure $
+                    "unexpected submissions: " <> show submissionsSeen
+
+    it "normalizes oversized tool images before follow-up submission" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-tool-image"
+                [functionToolCall "c1" "image" "{}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-tool-done" [] (Just "saw it")
+            ]
+        let sourceUrl =
+                "data:image/bmp;base64,"
+                    <> TextEncoding.decodeUtf8
+                        (Base64.encode oversizedFixtureBytes)
+            imageTool =
+                passthroughTool "image" \_emit _call ->
+                    pure . Right $ ToolHandlerResult
+                        { resultText = "viewed image"
+                        , resultImages =
+                            [ToolResultImage sourceUrl (Just "auto")]
+                        }
+        config0 <- testConfig backend
+        result <- runLoop
+            config0 { loopTools = registryFromHandlers [imageTool] }
+            Nothing
+            "show it"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-tool-done"
+            , finalText = Just "saw it"
+            , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        case seen of
+            [ _
+              , ( Just "resp-tool-image"
+                , [ CompletedTool ToolCallResultWithImages{
+                        toolResultImages = [normalized]
+                    }
+                  ]
+                )
+              ] -> do
+                normalized.imageUrl `shouldNotBe` sourceUrl
+                let (metadata, payloadWithComma) =
+                        Text.breakOn "," normalized.imageUrl
+                metadata
+                    `shouldSatisfy`
+                        (`elem`
+                            [ "data:image/png;base64"
+                            , "data:image/jpeg;base64"
+                            ])
+                case Base64.decode
+                        (TextEncoding.encodeUtf8
+                            (Text.drop 1 payloadWithComma)) of
+                    Left decodeError ->
+                        expectationFailure decodeError
+                    Right normalizedBytes ->
+                        assertNormalizedImage
+                            oversizedFixtureBytes
+                            (Text.drop 5 (Text.dropEnd 7 metadata))
+                            normalizedBytes
+            submissionsSeen ->
+                expectationFailure $
+                    "unexpected submissions: " <> show submissionsSeen
+
+    it "applies EXIF orientation while normalizing oversized camera JPEGs" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-oriented-image" [] (Just "saw it")
+            ]
+        let sourceBytes = orientedFixtureBytes
+            input =
+                userMessageWithAttachments
+                    "see this"
+                    [ ImageAttachmentItem
+                        (ImageAttachment "image/jpeg" sourceBytes)
+                    ]
+        config <- testConfig backend
+        result <- runLoopInputs config Nothing [input]
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-oriented-image"
+            , finalText = Just "saw it"
+            , turnsUsed = 1
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        case seen of
+            [(Nothing, [submitted])] ->
+                case turnInputImages submitted of
+                    [normalized] -> do
+                        assertNormalizedImage
+                            sourceBytes
+                            normalized.imageMime
+                            normalized.imageBytes
+                        case decodeImage normalized.imageBytes of
+                            Left decodeError ->
+                                expectationFailure decodeError
+                            Right dynamicImage -> do
+                                let image = convertRGB8 dynamicImage
+                                imageHeight image
+                                    `shouldSatisfy` (> imageWidth image)
+                    images ->
+                        expectationFailure $
+                            "expected one submitted image, got "
+                                <> show (length images)
+            submissionsSeen ->
+                expectationFailure $
+                    "unexpected submissions: " <> show submissionsSeen
 
     it "accepts file attachments in multimodal turns" do
         submissions <- newIORef []
@@ -2114,6 +2274,74 @@ functionResult callId output = ToolCallResult
     , output
     , callKind = FunctionCallKind
     }
+
+oversizedFixtureBytes :: ByteString.ByteString
+oversizedFixtureBytes =
+    LazyByteString.toStrict (encodeBitmap sourceImage)
+  where
+    sourceImage =
+        generateImage fixturePixel 2200 1200
+    fixturePixel x y =
+        PixelRGB8
+            (channel 73 151 x y)
+            (channel 193 41 x y)
+            (channel 17 239 x y)
+    channel xFactor yFactor x y =
+        fromIntegral
+            ((x * xFactor + y * yFactor + x * y) `mod` 256)
+
+orientedFixtureBytes :: ByteString.ByteString
+orientedFixtureBytes =
+    addExifOrientation 6 $
+        LazyByteString.toStrict
+            (encodeJpegAtQuality 90 (convertImage sourceImage))
+  where
+    sourceImage =
+        generateImage fixturePixel 2200 800
+    fixturePixel x y =
+        PixelRGB8
+            (fromIntegral (x `mod` 256))
+            (fromIntegral (y `mod` 256))
+            (fromIntegral ((x + y) `mod` 256))
+
+addExifOrientation :: Int -> ByteString.ByteString -> ByteString.ByteString
+addExifOrientation orientation jpeg
+    | ByteString.take 2 jpeg == ByteString.pack [0xff, 0xd8] =
+        ByteString.take 2 jpeg
+            <> ByteString.pack
+                [ 0xff, 0xe1, 0x00, 0x22
+                , 0x45, 0x78, 0x69, 0x66, 0x00, 0x00
+                , 0x4d, 0x4d, 0x00, 0x2a
+                , 0x00, 0x00, 0x00, 0x08
+                , 0x00, 0x01
+                , 0x01, 0x12
+                , 0x00, 0x03
+                , 0x00, 0x00, 0x00, 0x01
+                , 0x00, fromIntegral orientation, 0x00, 0x00
+                , 0x00, 0x00, 0x00, 0x00
+                ]
+            <> ByteString.drop 2 jpeg
+    | otherwise = jpeg
+
+assertNormalizedImage
+    :: ByteString.ByteString
+    -> Text
+    -> ByteString.ByteString
+    -> Expectation
+assertNormalizedImage sourceBytes mime bytes = do
+    ByteString.length bytes `shouldSatisfy` (<= 1500000)
+    bytes `shouldNotBe` sourceBytes
+    mime `shouldSatisfy` (`elem` ["image/png", "image/jpeg"])
+    case decodeImage bytes of
+        Left decodeError ->
+            expectationFailure decodeError
+        Right dynamicImage -> do
+            let image = convertRGB8 dynamicImage
+                width = imageWidth image
+                height = imageHeight image
+            width `shouldSatisfy` (<= 2000)
+            height `shouldSatisfy` (<= 2000)
+            width * height `shouldSatisfy` (<= 2408448)
 
 scriptedBackend
     :: IORef [(Maybe Text, [TurnInput])]

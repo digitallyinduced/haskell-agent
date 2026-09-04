@@ -3,6 +3,11 @@ module Agent.Loop.Internal where
 import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
 import qualified Agent.Json.Decode as Json
 import Agent.Error (ApiError)
+import Agent.Image.Normalize
+    ( NormalizedImage(..)
+    , normalizeImageDataUrl
+    , normalizeImageForPrompt
+    )
 import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.Loop.EventPump
     ( EventPump
@@ -21,6 +26,7 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
+    , ToolResultImage(..)
     )
 import Agent.Tools.Scheduling
     ( ToolSchedulingPlan(..)
@@ -139,6 +145,40 @@ mapTurnInputUserText transform = \case
     UserMessageWithAttachments text attachments ->
         UserMessageWithAttachments (transform text) attachments
     other -> other
+
+normalizeTurnInputImages :: TurnInput -> TurnInput
+normalizeTurnInputImages = \case
+    UserMessageWithAttachments text attachments ->
+        UserMessageWithAttachments text
+            (fmap normalizeAttachment attachments)
+    CompletedTool result ->
+        CompletedTool (normalizeToolResultImages result)
+    other -> other
+  where
+    normalizeAttachment = \case
+        ImageAttachmentItem ImageAttachment{imageMime, imageBytes} ->
+            case normalizeImageForPrompt imageMime imageBytes of
+                NormalizedImage{normalizedImageMime, normalizedImageBytes} ->
+                    ImageAttachmentItem ImageAttachment
+                        { imageMime = normalizedImageMime
+                        , imageBytes = normalizedImageBytes
+                        }
+        file@FileAttachmentItem{} -> file
+
+    normalizeToolResultImages result@ToolCallResult{} = result
+    normalizeToolResultImages result@ToolCallResultWithImages{
+        toolResultImages
+    } =
+        result
+            { toolResultImages =
+                fmap normalizeToolResultImage toolResultImages
+            }
+
+    normalizeToolResultImage image@ToolResultImage{imageUrl} =
+        image { imageUrl = normalizeImageDataUrl imageUrl }
+
+normalizeTurnInputs :: [TurnInput] -> [TurnInput]
+normalizeTurnInputs = map normalizeTurnInputImages
 
 -- | Provider-reported token counts for one model response. @inputTokens@
 -- typically includes any cached prefix; @cachedTokens@ is that subset when
@@ -724,7 +764,8 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                         config.loopBackend.submitTurn
                                             cursor.cursorState
                                             cursor.cursorPreviousResponseId
-                                            cursor.cursorInputs
+                                            (normalizeTurnInputs
+                                                cursor.cursorInputs)
                                             onBackendEvent)
                                     \submission -> do
                                     result <- restore $ race
