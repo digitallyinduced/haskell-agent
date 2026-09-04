@@ -13,7 +13,6 @@ import Control.Applicative ((<|>))
 import Control.Monad (filterM)
 import Data.Aeson (Value(..))
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -166,20 +165,25 @@ readGrok env candidate maxToolChars = do
             | plainSafe = Just plain
             | compressedSafe = Just compressed
             | otherwise = Nothing
-    stateRef <- newIORef (emptyBoundedTurns, 0, mempty)
-    counters <- case transcript of
-        Nothing -> pure (JsonlCounters 0 0 0)
+    ((bounded, skipped, omissions), counters) <- case transcript of
+        Nothing ->
+            pure
+                ( (emptyBoundedTurns, 0, mempty)
+                , JsonlCounters 0 0 0
+                )
         Just path ->
-            consumeJsonl env path Nothing \record -> do
+            foldJsonl env path Nothing
+                (emptyBoundedTurns, 0, mempty)
+                \(current, skippedTotal, totalOmissions) record -> do
                 let (turn, skipped, omissions) =
                         grokTurn maxToolChars record
-                modifyIORef' stateRef \(bounded, skippedTotal, totalOmissions) ->
-                    ( maybe bounded (`appendBoundedTurn` bounded) turn
+                pure
+                    ( ( maybe current (`appendBoundedTurn` current) turn
                     , skippedTotal + skipped
                     , totalOmissions <> omissions
                     )
-                pure JsonlContinue
-    (bounded, skipped, omissions) <- readIORef stateRef
+                    , JsonlContinue
+                    )
     let transcriptWarnings =
             [ warning
                 "grok_transcript_unavailable"
