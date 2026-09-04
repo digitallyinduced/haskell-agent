@@ -138,6 +138,7 @@ import Network.HTTP.Types
     ( hAccept
     , hAuthorization
     , hCacheControl
+    , hConnection
     , hContentLength
     , hContentType
     , methodGet
@@ -2135,6 +2136,7 @@ receiveGatewayAuthorizationCallback listener expectedState = do
                     status200
                     [ (hContentType, "text/html; charset=utf-8")
                     , (hCacheControl, "no-store")
+                    , (hConnection, "close")
                     , ( "Content-Security-Policy"
                       , "default-src 'none'; style-src 'unsafe-inline'"
                       )

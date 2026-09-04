@@ -63,6 +63,7 @@ import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Network.HTTP.Simple
 import Network.HTTP.Types
     ( hCacheControl
+    , hConnection
     , hContentLength
     , hLocation
     , methodGet
@@ -517,6 +518,7 @@ receiveOAuthCallback listener expectedState = do
                     [ (hLocation, location)
                     , (hContentLength, "0")
                     , (hCacheControl, "no-store")
+                    , (hConnection, "close")
                     ]
                     "")
                 `finally` finish

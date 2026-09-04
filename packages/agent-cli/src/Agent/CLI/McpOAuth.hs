@@ -38,6 +38,7 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types
     ( hCacheControl
+    , hConnection
     , hContentType
     , methodGet
     , status200
@@ -311,6 +312,7 @@ receiveCallback listener = do
                         status200
                         [ (hContentType, "text/html; charset=utf-8")
                         , (hCacheControl, "no-store")
+                        , (hConnection, "close")
                         , ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
                         ]
                         OAuth.oauthCallbackSuccessPage)
