@@ -2,14 +2,17 @@ module Main (main) where
 
 import Agent.CLI.Dialects (CodingTools(..), codingToolsFor)
 import Agent.CLI.Options (defaultCliOptions)
-import Agent.CLI.Skills (loadSkillsCatalogQuiet)
-import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.CLI.PendingInputs
     ( PendingInputs
     , enqueuePendingInput
     , newPendingInputs
     , withPendingInputs
     )
+import Agent.CLI.ModelConfig (loadModelCatalogAt)
+import Agent.CLI.Project (loadProjectSettings, loadUserSettings)
+import Agent.CLI.Session.History (detectGitBranch)
+import Agent.CLI.Skills (loadSkillsCatalogQuiet)
+import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.Dialect (DialectId(CodexDialect), dialectForId)
 import Agent.Loop
     ( Backend(..)
@@ -25,23 +28,23 @@ import Agent.MCP
     , McpProtocolPreference(..)
     , McpServerConfig(..)
     , McpSupervisor
-    , acquireMcpFleetWithProgress
+    , acquireMcpFleet
+    , acquireMcpFleetProgressive
     , closeMcpSupervisor
+    , mcpFleetStatuses
     , mcpFleetTools
     , newMcpSupervisor
     , releaseMcpFleetLease
     )
 import Agent.ResourceScope
-    ( ResourceKey
-    , allocateResource
+    ( allocateResource
     , allocateResourcesConcurrently
-    , releaseResource
     , withResourceScope
     )
 import Agent.Skills (Skill(..), SkillCatalog(..))
 import Agent.Tools.Types (ToolEnv, defaultToolEnv)
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (poll, withAsync)
+import Control.Concurrent.Async (concurrently, poll, withAsync)
 import Control.Exception.Safe
     ( SomeException
     , bracket
@@ -50,10 +53,10 @@ import Control.Exception.Safe
     , onException
     )
 import qualified Control.Exception.Safe as Exception
-import Control.Monad (forM_, unless, when)
+import Control.Monad (forM, forM_, unless, when)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
-import Data.Char (ord)
+import Data.Char (isDigit, isSpace, ord)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -99,6 +102,11 @@ data LocalToolStartup = LocalToolStartup
     , localSkills :: !SkillCatalog
     }
 
+data ToolStartupStrategy
+    = StartupSerial
+    | StartupParentFullOverlap
+    | StartupPreloadSkills
+
 main :: IO ()
 main = do
     args <- getArgs
@@ -125,14 +133,28 @@ main = do
                 (read samples)
         ["startup-tools-serial", servers, mcpDelayMillis, skills, samples] ->
             benchmarkStartupTools
-                False
+                StartupSerial
                 (read servers)
                 (read mcpDelayMillis)
                 (read skills)
                 (read samples)
-        ["startup-tools-overlap", servers, mcpDelayMillis, skills, samples] ->
+        ["startup-tools-parent", servers, mcpDelayMillis, skills, samples] ->
             benchmarkStartupTools
-                True
+                StartupParentFullOverlap
+                (read servers)
+                (read mcpDelayMillis)
+                (read skills)
+                (read samples)
+        ["startup-tools-preload-skills",
+            servers, mcpDelayMillis, skills, samples] ->
+            benchmarkStartupTools
+                StartupPreloadSkills
+                (read servers)
+                (read mcpDelayMillis)
+                (read skills)
+                (read samples)
+        ["startup-tools-paired", servers, mcpDelayMillis, skills, samples] ->
+            benchmarkStartupToolsPaired
                 (read servers)
                 (read mcpDelayMillis)
                 (read skills)
@@ -234,16 +256,17 @@ overlapStartup worktreeMillis accountMillis =
                 Just (Left err) -> Exception.throwIO err
                 Just (Right accountResult) -> pure (1 + accountResult)
 
-benchmarkStartupTools :: Bool -> Int -> Int -> Int -> Int -> IO ()
 benchmarkStartupTools
-        useOverlap serverCount mcpDelayMillis skillCount sampleCount = do
+    :: ToolStartupStrategy -> Int -> Int -> Int -> Int -> IO ()
+benchmarkStartupTools
+        strategy serverCount mcpDelayMillis skillCount sampleCount = do
     statsEnabled <- getRTSStatsEnabled
     when (not statsEnabled) $
         fail "run with +RTS -T"
     executable <- getExecutablePath
-    let normalizedServers = max 1 serverCount
+    let normalizedServers = max 0 serverCount
         normalizedDelay = max 0 mcpDelayMillis
-        normalizedSkills = max 1 skillCount
+        normalizedSkills = max 0 skillCount
         normalizedSamples = max 1 sampleCount
     withToolStartupFixture
         executable
@@ -251,22 +274,24 @@ benchmarkStartupTools
         normalizedDelay
         normalizedSkills
         \fixture -> do
-            serialChecksum <- runToolStartup False fixture
-            overlapChecksum <- runToolStartup True fixture
-            when (serialChecksum /= overlapChecksum) $
+            validateMcpFixture fixture
+            serialChecksum <- runToolStartup StartupSerial fixture
+            selectedChecksum <- runToolStartup strategy fixture
+            when (serialChecksum /= selectedChecksum) $
                 fail "startup tool implementations disagree on checksum"
-            let label =
-                    if useOverlap
-                        then "startup-tools-overlap"
-                        else "startup-tools-serial"
+            let label = case strategy of
+                    StartupSerial -> "startup-tools-serial"
+                    StartupParentFullOverlap -> "startup-tools-parent"
+                    StartupPreloadSkills -> "startup-tools-preload-skills"
             samples <-
                 mapM
-                    (const (measureToolStartup useOverlap fixture))
+                    (const (measureToolStartup strategy fixture))
                     [1 .. normalizedSamples]
             let sample = medianSample samples
             putStrLn
                 ( label
-                    <> " servers=" <> show normalizedServers
+                    <> " mcp-mode=progressive"
+                    <> " mcp-servers=" <> show normalizedServers
                     <> " mcp-delay-ms=" <> show normalizedDelay
                     <> " skills=" <> show normalizedSkills
                     <> " samples=" <> show normalizedSamples
@@ -275,110 +300,234 @@ benchmarkStartupTools
                     <> " allocated-bytes=" <> show sample.sampleAllocatedBytes
                 )
 
-runToolStartup :: Bool -> ToolStartupFixture -> IO Int
-runToolStartup useOverlap fixture = do
+benchmarkStartupToolsPaired :: Int -> Int -> Int -> Int -> IO ()
+benchmarkStartupToolsPaired
+        serverCount mcpDelayMillis skillCount sampleCount = do
+    statsEnabled <- getRTSStatsEnabled
+    when (not statsEnabled) $
+        fail "run with +RTS -T"
+    executable <- getExecutablePath
+    let normalizedServers = max 0 serverCount
+        normalizedDelay = max 0 mcpDelayMillis
+        normalizedSkills = max 0 skillCount
+        normalizedSamples = max 1 sampleCount
+    withToolStartupFixture
+        executable
+        normalizedServers
+        normalizedDelay
+        normalizedSkills
+        \fixture -> do
+            validateMcpFixture fixture
+            parentChecksum <-
+                runToolStartup StartupParentFullOverlap fixture
+            currentChecksum <- runToolStartup StartupPreloadSkills fixture
+            when (parentChecksum /= currentChecksum) $
+                fail "startup tool implementations disagree on checksum"
+            pairedSamples <-
+                forM [1 .. normalizedSamples] \index ->
+                    if odd index
+                        then do
+                            parentSample <-
+                                measureToolStartup
+                                    StartupParentFullOverlap
+                                    fixture
+                            currentSample <-
+                                measureToolStartup StartupPreloadSkills fixture
+                            pure (parentSample, currentSample)
+                        else do
+                            currentSample <-
+                                measureToolStartup StartupPreloadSkills fixture
+                            parentSample <-
+                                measureToolStartup
+                                    StartupParentFullOverlap
+                                    fixture
+                            pure (parentSample, currentSample)
+            let parentSample = medianSample (map fst pairedSamples)
+                currentSample = medianSample (map snd pairedSamples)
+                elapsedDelta =
+                    median
+                        [ current.sampleElapsedMillis
+                            - parent.sampleElapsedMillis
+                        | (parent, current) <- pairedSamples
+                        ]
+                cpuDelta =
+                    median
+                        [ current.sampleCpuMillis - parent.sampleCpuMillis
+                        | (parent, current) <- pairedSamples
+                        ]
+                allocationDelta =
+                    median
+                        [ toInteger current.sampleAllocatedBytes
+                            - toInteger parent.sampleAllocatedBytes
+                        | (parent, current) <- pairedSamples
+                        ]
+                printSample label sample =
+                    putStrLn
+                        ( label
+                            <> " mcp-mode=progressive"
+                            <> " pairing=alternating"
+                            <> " mcp-servers=" <> show normalizedServers
+                            <> " mcp-delay-ms=" <> show normalizedDelay
+                            <> " skills=" <> show normalizedSkills
+                            <> " samples=" <> show normalizedSamples
+                            <> " elapsed-ms="
+                            <> show sample.sampleElapsedMillis
+                            <> " cpu-ms=" <> show sample.sampleCpuMillis
+                            <> " allocated-bytes="
+                            <> show sample.sampleAllocatedBytes
+                        )
+            printSample "startup-tools-paired-parent" parentSample
+            printSample "startup-tools-paired-current" currentSample
+            putStrLn
+                ( "startup-tools-paired-delta"
+                    <> " mcp-mode=progressive"
+                    <> " pairing=alternating"
+                    <> " mcp-servers=" <> show normalizedServers
+                    <> " mcp-delay-ms=" <> show normalizedDelay
+                    <> " skills=" <> show normalizedSkills
+                    <> " samples=" <> show normalizedSamples
+                    <> " elapsed-ms=" <> show elapsedDelta
+                    <> " cpu-ms=" <> show cpuDelta
+                    <> " allocated-bytes=" <> show allocationDelta
+                )
+
+runToolStartup :: ToolStartupStrategy -> ToolStartupFixture -> IO Int
+runToolStartup strategy fixture = do
     toolEnv <- defaultToolEnv fixture.fixtureProject
     mcpReleases <- newIORef (0 :: Int)
     localReleases <- newIORef (0 :: Int)
     bracket newMcpSupervisor closeMcpSupervisor \supervisor ->
         runToolStartupWithSupervisor
-            useOverlap
+            strategy
             fixture
             supervisor
             toolEnv
             mcpReleases
             localReleases
+            (toolStartupChecksum fixture)
 
-measureToolStartup :: Bool -> ToolStartupFixture -> IO Sample
-measureToolStartup useOverlap fixture = do
+measureToolStartup :: ToolStartupStrategy -> ToolStartupFixture -> IO Sample
+measureToolStartup strategy fixture = do
     toolEnv <- defaultToolEnv fixture.fixtureProject
     mcpReleases <- newIORef (0 :: Int)
     localReleases <- newIORef (0 :: Int)
+    performMajorGC
+    beforeStats <- getRTSStats
+    beforeCpu <- getCPUTime
+    beforeElapsed <- getMonotonicTimeNSec
     bracket newMcpSupervisor closeMcpSupervisor \supervisor ->
-        measure
-            (runToolStartupWithSupervisor
-                useOverlap
+        runToolStartupWithSupervisor
+                strategy
                 fixture
                 supervisor
                 toolEnv
                 mcpReleases
-                localReleases)
+                localReleases
+                \mcpLease local -> do
+                    checksum <- toolStartupChecksum fixture mcpLease local
+                    checksum `seq` pure ()
+                    afterElapsed <- getMonotonicTimeNSec
+                    afterCpu <- getCPUTime
+                    -- allocated_bytes is only current after a GC. Capture
+                    -- prompt-ready latency and CPU first so this accounting
+                    -- barrier and resource cleanup stay outside that interval.
+                    performMajorGC
+                    afterStats <- getRTSStats
+                    pure Sample
+                        { sampleElapsedMillis =
+                            fromIntegral (afterElapsed - beforeElapsed)
+                                / 1_000_000
+                        , sampleCpuMillis =
+                            fromIntegral (afterCpu - beforeCpu)
+                                / 1_000_000_000
+                        , sampleAllocatedBytes =
+                            fromIntegral
+                                (allocated_bytes afterStats
+                                    - allocated_bytes beforeStats)
+                        }
 
 runToolStartupWithSupervisor
-    :: Bool
+    :: ToolStartupStrategy
     -> ToolStartupFixture
     -> McpSupervisor
     -> ToolEnv
     -> IORef Int
     -> IORef Int
-    -> IO Int
+    -> (McpFleetLease -> LocalToolStartup -> IO a)
+    -> IO a
 runToolStartupWithSupervisor
-        useOverlap fixture supervisor toolEnv mcpReleases localReleases = do
+        strategy fixture supervisor toolEnv mcpReleases localReleases
+        continuation = do
     let acquireMcp =
-            acquireMcpFleetWithProgress
+            acquireMcpFleetProgressive
                 supervisor
                 (const (pure ()))
                 fixture.fixtureMcpConfigs
         releaseMcp lease =
             releaseMcpFleetLease lease
                 `finally` noteRelease mcpReleases
-        acquireLocal = acquireLocalToolStartup fixture toolEnv
+        acquireLocalWith skills =
+            acquireLocalToolStartupWith toolEnv skills
+        loadSkills =
+            loadSkillsCatalogQuiet
+                defaultCliOptions
+                fixture.fixtureHome
+                fixture.fixtureProject
+                fixture.fixtureProject
+        acquireLocal = acquireLocalWith loadSkills
         releaseLocal local =
             releaseLocalToolStartup local
                 `finally` noteRelease localReleases
-    checksum <-
-        if useOverlap
-            then
-                -- Mirrors the scoped MCP/local acquisition block in
-                -- runAgentToolsRequest, including its early close actions.
-                withResourceScope \resourceScope -> do
-                    (mcpResource, localResource) <-
-                        allocateResourcesConcurrently
-                            resourceScope
-                            acquireMcp
-                            releaseMcp
-                            acquireLocal
-                            releaseLocal
-                    consumeToolStartupResources
-                        fixture
-                        mcpReleases
-                        localReleases
-                        mcpResource
-                        localResource
-            else
-                -- Use the same ownership and cleanup path while acquiring in
-                -- the order used before startup acquisition was overlapped.
-                withResourceScope \resourceScope -> do
-                    mcpResource <-
-                        allocateResource resourceScope acquireMcp releaseMcp
-                    localResource <-
-                        allocateResource
-                            resourceScope
-                            acquireLocal
-                            releaseLocal
-                    consumeToolStartupResources
-                        fixture
-                        mcpReleases
-                        localReleases
-                        mcpResource
-                        localResource
-    assertReleaseCounts mcpReleases localReleases
-    pure checksum
-
-consumeToolStartupResources
-    :: ToolStartupFixture
-    -> IORef Int
-    -> IORef Int
-    -> (ResourceKey, McpFleetLease)
-    -> (ResourceKey, LocalToolStartup)
-    -> IO Int
-consumeToolStartupResources
-        fixture mcpReleases localReleases
-        (mcpKey, mcpLease) (localKey, local) = do
-    result <- toolStartupChecksum fixture mcpLease local
-    result `seq` pure ()
-    releaseResource mcpKey
-        `finally` releaseResource localKey
+        loadWorkspace = do
+            ((projectSettings, userSettings), (catalogResult, branch)) <-
+                concurrently
+                    (concurrently
+                        (loadProjectSettings fixture.fixtureProject)
+                        (loadUserSettings fixture.fixtureHome))
+                    (concurrently
+                        (loadModelCatalogAt
+                            fixture.fixtureHome
+                            fixture.fixtureProject)
+                        (detectGitBranch fixture.fixtureProject))
+            catalog <- either (fail . Text.unpack) pure catalogResult
+            projectSettings `seq`
+                userSettings `seq`
+                catalog `seq`
+                branch `seq`
+                pure ()
+        acquireSerially resourceScope selectedAcquireLocal = do
+            (_, mcpLease) <-
+                allocateResource resourceScope acquireMcp releaseMcp
+            (_, local) <-
+                allocateResource
+                    resourceScope
+                    selectedAcquireLocal
+                    releaseLocal
+            continuation mcpLease local
+        acquireFullyConcurrently resourceScope selectedAcquireLocal = do
+            ((_, mcpLease), (_, local)) <-
+                allocateResourcesConcurrently
+                    resourceScope
+                    acquireMcp
+                    releaseMcp
+                    selectedAcquireLocal
+                    releaseLocal
+            continuation mcpLease local
+    result <-
+        withResourceScope \resourceScope ->
+            case strategy of
+                StartupSerial ->
+                    loadWorkspace
+                        >> acquireSerially resourceScope acquireLocal
+                StartupParentFullOverlap ->
+                    loadWorkspace
+                        >> acquireFullyConcurrently resourceScope acquireLocal
+                StartupPreloadSkills -> do
+                    (_, preloadedSkills) <-
+                        concurrently loadWorkspace loadSkills
+                    acquireFullyConcurrently
+                        resourceScope
+                        (acquireLocalWith (pure preloadedSkills))
     assertReleaseCounts mcpReleases localReleases
     pure result
 
@@ -395,8 +544,11 @@ assertReleaseCounts mcpReleases localReleases = do
             ("expected one MCP and one local cleanup, got "
                 <> show mcpCount <> " and " <> show localCount)
 
-acquireLocalToolStartup :: ToolStartupFixture -> ToolEnv -> IO LocalToolStartup
-acquireLocalToolStartup fixture toolEnv =
+acquireLocalToolStartupWith
+    :: ToolEnv
+    -> IO SkillCatalog
+    -> IO LocalToolStartup
+acquireLocalToolStartupWith toolEnv acquireSkills =
     bracketOnError
         (codingToolsFor
             (dialectForId CodexDialect)
@@ -407,12 +559,7 @@ acquireLocalToolStartup fixture toolEnv =
             Nothing)
         (.codingClose)
         \localCoding -> do
-            localSkills <-
-                loadSkillsCatalogQuiet
-                    defaultCliOptions
-                    fixture.fixtureHome
-                    fixture.fixtureProject
-                    fixture.fixtureProject
+            localSkills <- acquireSkills
             pure LocalToolStartup{..}
 
 releaseLocalToolStartup :: LocalToolStartup -> IO ()
@@ -425,8 +572,8 @@ toolStartupChecksum
     -> LocalToolStartup
     -> IO Int
 toolStartupChecksum fixture mcpLease local = do
-    let mcpToolCount =
-            length (mcpFleetTools mcpLease.mcpLeaseFleet)
+    statuses <- mcpFleetStatuses mcpLease.mcpLeaseFleet
+    let mcpServerCount = length statuses
         codingToolCount =
             length local.localCoding.codingAppTools
         benchmarkSkillCount =
@@ -434,13 +581,14 @@ toolStartupChecksum fixture mcpLease local = do
                 (filter
                     (Text.isPrefixOf "startup-bench-" . (.skillName))
                     local.localSkills.catalogSkills)
-        expectedMcpTools = length fixture.fixtureMcpConfigs
-    when (mcpToolCount /= expectedMcpTools) $
+        expectedMcpServers = length fixture.fixtureMcpConfigs
+        warnings = mcpLease.mcpLeaseFleet.mcpFleetWarnings
+    unless (null warnings) $
+        fail ("MCP startup warnings: " <> show warnings)
+    when (mcpServerCount /= expectedMcpServers) $
         fail
-            ("expected " <> show expectedMcpTools
-                <> " MCP tools, got " <> show mcpToolCount
-                <> "; warnings: "
-                <> show mcpLease.mcpLeaseFleet.mcpFleetWarnings)
+            ("expected " <> show expectedMcpServers
+                <> " MCP servers, got " <> show mcpServerCount)
     when (codingToolCount <= 0) $
         fail "expected coding tool construction to produce tools"
     when (benchmarkSkillCount /= fixture.fixtureSkillCount) $
@@ -448,9 +596,27 @@ toolStartupChecksum fixture mcpLease local = do
             ("expected " <> show fixture.fixtureSkillCount
                 <> " benchmark skills, got " <> show benchmarkSkillCount)
     pure
-        (mcpToolCount * 1_000_000
+        (mcpServerCount * 1_000_000
             + codingToolCount * 10_000
             + benchmarkSkillCount)
+
+validateMcpFixture :: ToolStartupFixture -> IO ()
+validateMcpFixture fixture =
+    bracket newMcpSupervisor closeMcpSupervisor \supervisor ->
+        bracket
+            (acquireMcpFleet supervisor fixture.fixtureMcpConfigs)
+            releaseMcpFleetLease
+            \lease -> do
+                let toolCount = length (mcpFleetTools lease.mcpLeaseFleet)
+                    expected = length fixture.fixtureMcpConfigs
+                    warnings = lease.mcpLeaseFleet.mcpFleetWarnings
+                unless (null warnings) $
+                    fail ("MCP fixture warnings: " <> show warnings)
+                when (toolCount /= expected) $
+                    fail
+                        ("expected " <> show expected
+                            <> " discovered MCP tools, got "
+                            <> show toolCount)
 
 medianSample :: [Sample] -> Sample
 medianSample samples =
@@ -686,24 +852,43 @@ runFakeMcpServer delayMillis serverIndex = loop
             if "\"method\":\"initialize\"" `BS8.isInfixOf` request
                 then do
                     threadDelay (delayMillis * 1000)
-                    respond initializeResponse
+                    respond request initializeResult
                 else
                     when
                         ("\"method\":\"tools/list\"" `BS8.isInfixOf` request)
-                        (respond toolsResponse)
+                        (respond request toolsResult)
             loop
 
-    respond response = do
-        BS8.hPutStrLn stdout response
-        hFlush stdout
+    respond request result =
+        case requestIdentifier request of
+            Nothing -> fail "MCP benchmark request omitted a numeric id"
+            Just identifier -> do
+                BS8.hPutStrLn stdout
+                    ("{\"jsonrpc\":\"2.0\",\"id\":"
+                        <> identifier
+                        <> ",\"result\":"
+                        <> result
+                        <> "}")
+                hFlush stdout
 
-    initializeResponse =
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"startup-bench\",\"version\":\"1\"}}}"
-    toolsResponse =
+    initializeResult =
+        "{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"startup-bench\",\"version\":\"1\"}}"
+    toolsResult =
         BS8.pack
-            ("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"read_"
+            ("{\"tools\":[{\"name\":\"read_"
                 <> show serverIndex
-                <> "\",\"description\":\"Read.\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":true}}]}}")
+                <> "\",\"description\":\"Read.\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":true}}]}")
+
+requestIdentifier :: BS8.ByteString -> Maybe BS8.ByteString
+requestIdentifier request =
+    case BS8.breakSubstring "\"id\":" request of
+        (_, suffix)
+            | BS8.null suffix -> Nothing
+            | otherwise ->
+                let identifier =
+                        BS8.takeWhile isDigit
+                            (BS8.dropWhile isSpace (BS8.drop 5 suffix))
+                in if BS8.null identifier then Nothing else Just identifier
 
 withInputFiles :: Int -> Int -> ([FilePath] -> IO a) -> IO a
 withInputFiles count bytesPerFile action = do

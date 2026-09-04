@@ -198,6 +198,20 @@ spec = describe "tool presentation" do
                 "{\"name\":\"a%255F%255Fb__tool%5F%5Fname\"}")
             `shouldBe` "a%5F%5Fb: tool__name"
 
+    it "keeps completed MCP tool-name lookup at the top level" do
+        let call =
+                functionToolCall
+                    "mcp"
+                    "use_tool"
+                    "{\"tool_name\":\"server__tool\",\
+                    \\"tool_input\":{\"name\":\"nested-value\"}}"
+        summarizeToolCall call
+            `shouldBe` "server: tool"
+        toolCallTitle call
+            `shouldBe` "server: tool"
+        permissionToolCallPrompt call
+            `shouldBe` "Allow server: tool?"
+
     it "unwraps MCP text envelopes and pretty-prints embedded JSON" do
         let call =
                 functionToolCall
@@ -265,6 +279,29 @@ spec = describe "tool presentation" do
                 "ask_secret"
                 "{\"prompt\":\"Enter token\",\"purpose\":\"Configure Telegram\"}")
             `shouldBe` "Requested secret Configure Telegram"
+
+    it "renders semantic fields from incomplete streamed arguments" do
+        summarizeToolCall
+            (functionToolCall
+                "read"
+                "read_file"
+                "{\"target_file\":\"src/Ma")
+            `shouldBe` "Read src/Ma"
+        toolDetail
+            (functionToolCall "grep" "grep" "{\"pattern\":\"streamed pre")
+            `shouldBe` "streamed pre"
+        toolCallInput
+            (functionToolCall
+                "ghci"
+                "run_ghci"
+                "{\"expression\":\"map (+ 1) [1, 2")
+            `shouldBe` "map (+ 1) [1, 2"
+        summarizeToolCall
+            (functionToolCall
+                "mcp"
+                "mcp_call"
+                "{\"name\":\"seo-mcp__search_per")
+            `shouldBe` "seo-mcp: search_per"
 
     it "separates GHCi expressions from their compact retained heading" do
         let call =
@@ -369,6 +406,36 @@ spec = describe "tool presentation" do
         parsed.diffAction `shouldBe` Nothing
         length parsed.diffLines `shouldBe` 20
         parsed.diffHiddenLines `shouldBe` 10
+
+    it "renders partial edit arguments without guessing the final action" do
+        let early =
+                parseSearchReplaceDiff
+                    "{\"file_path\":\"src/Main.hs\",\"old_string\":\"old"
+            preview =
+                functionToolCall
+                    "edit"
+                    "search_replace"
+                    "{\"file_path\":\"src/Main.hs\",\
+                    \\"old_string\":\"old\",\"new_string\":\"ne"
+            writePreview =
+                functionToolCall
+                    "write"
+                    "Write"
+                    "{\"file_path\":\"src/New.hs\",\"content\":\"one\\ntw"
+        early.diffPath `shouldBe` "src/Main.hs"
+        early.diffAction `shouldBe` Nothing
+        early.diffLines `shouldBe` [SearchReplaceRemoved "old"]
+        formatToolDiffRelative "" preview
+            `shouldBe` "          │ -old\n          │ +ne"
+        formatToolDiffRelative "" writePreview
+            `shouldBe`
+                "  write src/New.hs\n\
+                \        1 │ +one\n\
+                \        2 │ +tw"
+        (parseSearchReplaceDiff
+            "{\"file_path\":\"src/Main.hs\",\
+            \\"old_string\":\"old\",\"new_string\":\"\"}").diffAction
+            `shouldBe` Just SearchReplaceDelete
 
     it "uses resolved search-replace line numbers in completed diffs" do
         let call = customToolCall "edit" "search_replace"
