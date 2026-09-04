@@ -103,10 +103,6 @@ module Agent.CLI.Session
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
-import Agent.CLI.SessionLock
-    ( acquireSessionLock
-    , releaseSessionLock
-    )
 import Agent.CLI.Json (decodeLazy)
 import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
 import Agent.CLI.Request
@@ -132,16 +128,69 @@ import Agent.CLI.Session.Types
     , Persistence(..)
     , PersistenceState(..)
     )
+import Agent.CLI.Session.Storage
+    ( deleteSession
+    , listArchivedSessionIds
+    , listSessions
+    , loadActiveSession
+    , loadRecentSessionHistoryTurns
+    , loadRecentSessionTurns
+    , loadSession
+    , loadSessionHandle
+    , loadSessionHistorySnapshot
+    , loadSessionHistoryTurnsAround
+    , loadSessionHistoryTurnsBefore
+    , loadSessionHistoryTurnsRange
+    , loadSessionHistoryTurnsRangeBounded
+    , loadSessionMeta
+    , loadSessionResumeStats
+    , loadSessions
+    , loadSessionTurnsAfter
+    , loadSessionTurnsBefore
+    , renameSession
+    , sessionSchemaVersion
+    , setSessionArchived
+    , writeSessionMeta
+    )
+import Agent.CLI.Session.TaskPlan
+    ( fromStoredTaskPlan
+    , toStoredTaskPlanItem
+    )
+import Agent.CLI.Session.TempWorkspace
+    ( SessionTempCleanupReport(..)
+    , SessionTempLease
+    , acquireSessionTempLease
+    , allocateSessionTemp
+    , cleanupStaleSessionTemps
+    , defaultSessionTempKeepCount
+    , ensurePrivateDir
+    , ensureSessionTemp
+    , isValidSessionId
+    , releaseSessionTempLease
+    , removeReservedTemp
+    , removeSessionMaterializationMeta
+    , removeSessionTemp
+    , sessionDirForId
+    , sessionMaterializationMetaPath
+    , sessionTempDirForId
+    , sessionTempsRoot
+    , sessionsRoot
+    , symbolicLinkStatusMaybe
+    )
+import Agent.CLI.Session.Transfer
+    ( SessionTransferEnvelope(..)
+    , exportSessionTransfer
+    , forkSessionAtTurn
+    , importSessionTransfer
+    , importSessionTransferRemapped
+    , sessionTransferFormatVersion
+    , streamSessionTransfer
+    , validateSessionTransferEnvelope
+    )
 import Agent.CLI.Session.Codec
-    ( contentFingerprint
-    , decodeStoredSession
-    , fromStoredMetadata
-    , fromStoredTurn
-    , importLegacySession
-    , toStoredMetadata
+    ( toStoredMetadata
     , toStoredPromptSnapshot
     , toStoredTurn
-    , validateSessionMeta
     )
 import Agent.CLI.Models (ModelTarget(..))
 import Agent.CLI.Session.TitlePolicy (titleRefreshIndex)
@@ -159,174 +208,49 @@ import Agent.Tools.TaskPlan
     ( CurrentTaskPlan(..)
     , TaskPlan(..)
     , TaskPlanHooks(..)
-    , TaskPlanItem(..)
-    , TaskPlanStatus(..)
     )
 import Control.Applicative ((<|>))
 import Control.Exception.Safe
-    ( SomeException
-    , displayException
+    ( displayException
     , finally
     , mask
     , onException
     , tryAny
     , tryIO
     )
-import Control.Monad (foldM, guard, unless, when)
-import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.Except
-    ( ExceptT(..)
-    , except
-    , runExceptT
-    , throwE
-    )
+import Control.Monad (guard, unless, when)
 import qualified Data.Aeson as Aeson
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (isHexDigit)
 import Data.Int (Int64)
 import Data.IORef
 import Data.Functor ((<&>))
-import Data.List (sortOn)
-import Data.Maybe (fromMaybe, isJust, mapMaybe)
-import Data.Ord (Down(..))
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time.Calendar (Day)
 import Data.Time.Clock
     ( UTCTime
     , getCurrentTime
-    , nominalDiffTimeToSeconds
-    , utctDay
     )
-import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
-import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
-import qualified Data.Vector as Vector
-import Numeric (showHex)
 import System.Directory.OsPath
     ( copyFile
     , createDirectory
-    , createDirectoryIfMissing
-    , doesDirectoryExist
     , doesFileExist
     , listDirectory
     , removePathForcibly
     , removeFile
     )
-import qualified System.FileLock as FileLock
 import System.OsPath
     ( OsPath
-    , equalFilePath
-    , normalise
-    , takeDirectory
-    , takeFileName
     , unsafeEncodeUtf
     , (</>)
     )
-import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files
-    ( FileStatus
-    , getSymbolicLinkStatus
+    ( getSymbolicLinkStatus
     , isDirectory
     , isRegularFile
     , isSymbolicLink
     , setFileMode
     )
-
-sessionSchemaVersion :: Int
-sessionSchemaVersion = 1
-
--- | Keep a small recent cache for session artifacts while bounding abandoned
--- shell environments, tool outputs, and other scratch data.
-defaultSessionTempKeepCount :: Int
-defaultSessionTempKeepCount = 15
-
--- | Stable interchange envelope for full-fidelity session transfers.
-data SessionTransferEnvelope = SessionTransferEnvelope
-    { transferFormat :: !Text
-    , transferFormatVersion :: !Int
-    , transferSession :: !SessionTransfer
-    }
-    deriving (Eq, Show)
-
-sessionTransferFormatVersion :: Int
-sessionTransferFormatVersion = 1
-
-sessionTransferFormatName :: Text
-sessionTransferFormatName = "haskell-agent.session-transfer"
-
-instance Aeson.ToJSON SessionTransferEnvelope where
-    toJSON envelope = Aeson.object
-        [ "format" Aeson..= envelope.transferFormat
-        , "version" Aeson..= envelope.transferFormatVersion
-        , "session" Aeson..= envelope.transferSession
-        ]
-
-instance Aeson.FromJSON SessionTransferEnvelope where
-    parseJSON = Aeson.withObject "SessionTransferEnvelope" \object -> do
-        envelope <- SessionTransferEnvelope
-            <$> object Aeson..: "format"
-            <*> object Aeson..: "version"
-            <*> object Aeson..: "session"
-        either (fail . Text.unpack) pure
-            (validateSessionTransferEnvelope envelope)
-
-validateSessionTransferEnvelope
-    :: SessionTransferEnvelope
-    -> Either Text SessionTransferEnvelope
-validateSessionTransferEnvelope envelope
-    | envelope.transferFormat /= sessionTransferFormatName =
-        Left "unsupported session transfer format"
-    | envelope.transferFormatVersion /= sessionTransferFormatVersion =
-        Left
-            ("unsupported session transfer version: "
-                <> Text.pack (show envelope.transferFormatVersion))
-    | not (isValidSessionId meta.metaId) =
-        Left "invalid transferred session id"
-    | meta.metaVersion <= 0 =
-        Left "invalid transferred session schema version"
-    | length turns > maximumTransferTurns =
-        Left "session transfer contains too many turns"
-    | any invalidTurn turns =
-        Left "session transfer contains an oversized turn"
-    | otherwise = Right envelope
-  where
-    transfer = envelope.transferSession
-    meta = transfer.transferMeta
-    turns = transfer.transferTurns
-    invalidTurn turn =
-        Text.length turn.turnUserText > maximumTransferTextLength
-            || maybe False
-                ((> maximumTransferTextLength) . Text.length)
-                turn.turnAssistantText
-            || maybe False
-                ((> maximumTransferTextLength) . Text.length)
-                turn.turnError
-
-maximumTransferTurns :: Int
-maximumTransferTurns = 100000
-
-maximumTransferTextLength :: Int
-maximumTransferTextLength = 16 * 1024 * 1024
-
-data SessionTempCleanupReport = SessionTempCleanupReport
-    { tempCleanupRemoved :: ![OsPath]
-    , tempCleanupFailures :: ![(OsPath, Text)]
-    }
-    deriving (Eq, Show)
-
-instance Semigroup SessionTempCleanupReport where
-    left <> right = SessionTempCleanupReport
-        { tempCleanupRemoved =
-            left.tempCleanupRemoved <> right.tempCleanupRemoved
-        , tempCleanupFailures =
-            left.tempCleanupFailures <> right.tempCleanupFailures
-        }
-
-instance Monoid SessionTempCleanupReport where
-    mempty = SessionTempCleanupReport [] []
-
-newtype SessionTempLease = SessionTempLease FileLock.FileLock
 
 -- | Reuse an immutable provider prefix only when the runtime target and the
 -- ordered provider-visible tool identities still describe the same session.
@@ -360,17 +284,6 @@ compatibleSessionPromptSnapshot
             )
         pure snapshot
 
--- | @~/.haskell-agent/sessions@ given the user's home directory.
-sessionsRoot :: OsPath -> OsPath
-sessionsRoot home =
-    home </> unsafeEncodeUtf ".haskell-agent" </> unsafeEncodeUtf "sessions"
-
--- | @~/.haskell-agent/tmp/sessions@ for a corresponding sessions root.
-sessionTempsRoot :: OsPath -> OsPath
-sessionTempsRoot root =
-    takeDirectory root
-        </> unsafeEncodeUtf "tmp"
-        </> unsafeEncodeUtf "sessions"
 
 newPendingPersistence :: SessionCreate -> IO Persistence
 newPendingPersistence spec = do
@@ -708,13 +621,6 @@ copyPrivateFile source destination = do
     copyFile source destination
     setFileMode (unsafeToFilePath destination) 0o600
 
-symbolicLinkStatusMaybe :: OsPath -> IO (Maybe FileStatus)
-symbolicLinkStatusMaybe path =
-    tryIO (getSymbolicLinkStatus (unsafeToFilePath path)) >>= \case
-        Left err
-            | isDoesNotExistError err -> pure Nothing
-            | otherwise -> ioError err
-        Right status -> pure (Just status)
 
 sessionDatabaseIsOwned
     :: StorePool
@@ -938,17 +844,6 @@ createReservedSessionWithHandoff
                     createAndPublish
                     (cleanupDirectory >> failConflict)
 
-sessionMaterializationMetaPath :: OsPath -> Text -> OsPath
-sessionMaterializationMetaPath root sessionId =
-    sessionTempsRoot root
-        </> unsafeEncodeUtf
-            (".materialization-" <> Text.unpack sessionId <> ".json")
-
-removeSessionMaterializationMeta :: OsPath -> Text -> IO ()
-removeSessionMaterializationMeta root sessionId = do
-    _ <- tryIO (removeFile (sessionMaterializationMetaPath root sessionId))
-    pure ()
-
 ensureMaterializationDirectory :: OsPath -> IO ()
 ensureMaterializationDirectory dir =
     symbolicLinkStatusMaybe dir >>= \case
@@ -1091,32 +986,6 @@ mapStoreException label action =
         Left err -> Left (label <> ": " <> Text.pack (displayException err))
         Right result -> either (Left . renderStoreError) Right result
 
-fromStoredTaskPlan :: Store.SessionTaskPlan -> CurrentTaskPlan
-fromStoredTaskPlan stored = CurrentTaskPlan
-    { currentTaskPlanRevision = stored.sessionTaskPlanRevision
-    , currentTaskPlanValue = TaskPlan
-        { taskPlanExplanation = stored.sessionTaskPlanExplanation
-        , taskPlanItems = map fromStoredTaskPlanItem stored.sessionTaskPlanItems
-        }
-    }
-
-fromStoredTaskPlanItem :: Store.SessionTaskPlanItem -> TaskPlanItem
-fromStoredTaskPlanItem stored = TaskPlanItem
-    { taskPlanStep = stored.sessionTaskPlanItemStep
-    , taskPlanStatus = case stored.sessionTaskPlanItemStatus of
-        Store.SessionTaskPlanPending -> TaskPlanPending
-        Store.SessionTaskPlanInProgress -> TaskPlanInProgress
-        Store.SessionTaskPlanCompleted -> TaskPlanCompleted
-    }
-
-toStoredTaskPlanItem :: TaskPlanItem -> Store.SessionTaskPlanItem
-toStoredTaskPlanItem item = Store.SessionTaskPlanItem
-    { Store.sessionTaskPlanItemStep = item.taskPlanStep
-    , Store.sessionTaskPlanItemStatus = case item.taskPlanStatus of
-        TaskPlanPending -> Store.SessionTaskPlanPending
-        TaskPlanInProgress -> Store.SessionTaskPlanInProgress
-        TaskPlanCompleted -> Store.SessionTaskPlanCompleted
-    }
 
 -- | Ensure the durable session exists and atomically persist the
 -- provider-visible request prefix before it can be sent. Subsequent calls only
@@ -1503,695 +1372,9 @@ retainedLastResponseId = foldl' step Nothing
         TranscriptReset -> turn.turnResponseId
 
 
-loadSession
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> IO (Either Text (SessionMeta, [SessionTurn]))
-loadSession pool root sessionId = runExceptT do
-    _ <- except (sessionDirForId root sessionId)
-    stored <- loadWithLegacyImport root pool sessionId Store.loadSession
-    storedPrompt <- loadStoredPromptEpoch pool sessionId
-    decodeStoredSession
-        sessionSchemaVersion
-        isValidSessionId
-        sessionId
-        storedPrompt
-        stored
 
-loadActiveSession
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> IO (Either Text (SessionMeta, [SessionTurn]))
-loadActiveSession pool root sessionId = runExceptT do
-    _ <- except (sessionDirForId root sessionId)
-    stored <- loadWithLegacyImport root pool sessionId Store.loadActiveSession
-    storedPrompt <- loadStoredPromptEpoch pool sessionId
-    decodeStoredSession
-        sessionSchemaVersion
-        isValidSessionId
-        sessionId
-        storedPrompt
-        stored
 
-loadStoredPromptEpoch
-    :: StorePool
-    -> Text
-    -> ExceptT Text IO (Maybe Store.SessionPromptEpoch)
-loadStoredPromptEpoch pool sessionId =
-    lift (Store.loadLatestSessionPromptEpoch pool sessionId)
-        >>= either (throwE . renderStoreError) pure
 
-loadSessionMeta
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> IO (Either Text SessionMeta)
-loadSessionMeta pool root sessionId = runExceptT do
-    _ <- except (sessionDirForId root sessionId)
-    stored <- loadWithLegacyImport root pool sessionId Store.loadSessionMetadata
-    meta <- except (fromStoredMetadata stored)
-    validateSessionMeta sessionSchemaVersion isValidSessionId sessionId meta
-    pure meta
-
-loadRecentSessionTurns
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> Int
-    -> IO (Either Text SessionTurnPage)
-loadRecentSessionTurns pool root sessionId limit =
-    loadSessionTurnPage root pool sessionId
-        (\pool' key -> Store.loadRecentSessionTurns pool' key limit)
-
-loadRecentSessionHistoryTurns
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> Int
-    -> IO (Either Text SessionTurnPage)
-loadRecentSessionHistoryTurns pool root sessionId limit =
-    loadSessionTurnPage root pool sessionId
-        (\pool' key -> Store.loadRecentSessionHistoryTurns pool' key limit)
-
-loadSessionTurnsBefore
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> Int64
-    -> Int
-    -> IO (Either Text SessionTurnPage)
-loadSessionTurnsBefore pool root sessionId cursor limit =
-    loadSessionTurnPage root pool sessionId
-        (\pool' key ->
-            Store.loadSessionTurnsBefore
-                pool' key cursor (boundedPageLimit limit))
-
-loadSessionHistoryTurnsBefore
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> Int64
-    -> Int
-    -> IO (Either Text SessionTurnPage)
-loadSessionHistoryTurnsBefore pool root sessionId cursor limit =
-    loadSessionTurnPage root pool sessionId
-        (\pool' key ->
-            Store.loadSessionHistoryTurnsBefore
-                pool' key cursor (boundedPageLimit limit))
-
-loadSessionTurnsAfter
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> Int64
-    -> Int
-    -> IO (Either Text SessionTurnPage)
-loadSessionTurnsAfter pool root sessionId cursor limit =
-    loadSessionTurnPage root pool sessionId
-        (\pool' key ->
-            Store.loadSessionTurnsAfter
-                pool' key cursor (boundedPageLimit limit))
-
-loadSessionHistoryTurnsRange
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> Int64
-    -> Int
-    -> IO (Either Text SessionTurnPage)
-loadSessionHistoryTurnsRange pool root sessionId start limit =
-    loadSessionTurnPage root pool sessionId
-        (\pool' key ->
-            Store.loadSessionHistoryTurnsRange
-                pool' key start (boundedPageLimit limit))
-
-loadSessionHistoryTurnsRangeBounded
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> Int64
-    -> Int64
-    -> Int
-    -> IO (Either Text SessionTurnPage)
-loadSessionHistoryTurnsRangeBounded
-        pool root sessionId start endExclusive limit =
-    loadSessionTurnPage root pool sessionId
-        (\pool' key ->
-            Store.loadSessionHistoryTurnsRangeBounded
-                pool' key start endExclusive (boundedPageLimit limit))
-
-boundedPageLimit :: Int -> Int
-boundedPageLimit = min 1000 . max 1
-
--- | Return a bounded full-history window centered on a durable turn index.
--- The requested turn is included when it exists. Near either edge the result
--- is intentionally not rebalanced; callers can use the page flags to continue
--- in either direction without an eager full-session load.
-loadSessionHistoryTurnsAround
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> Int64
-    -> Int
-    -> IO (Either Text SessionTurnPage)
-loadSessionHistoryTurnsAround pool root sessionId center radius
-    | center < 0 = pure (Left "turn index must be non-negative")
-    | radius < 0 = pure (Left "turn radius must be non-negative")
-    | otherwise =
-        loadSessionHistoryTurnsRange
-            pool
-            root
-            sessionId
-            (max 0 (center - fromIntegral boundedRadius))
-            (boundedRadius * 2 + 1)
-  where
-    boundedRadius = min 500 radius
-
-loadSessionHistorySnapshot
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> IO (Either Text (SessionMeta, Int64, Int64))
-loadSessionHistorySnapshot pool root sessionId = runExceptT do
-    _ <- except (sessionDirForId root sessionId)
-    stored <- loadWithLegacyImport
-        root pool sessionId Store.loadSessionHistorySnapshot
-    meta <- except (fromStoredMetadata stored.sessionSnapshotMetadata)
-    validateSessionMeta sessionSchemaVersion isValidSessionId sessionId meta
-    pure
-        ( meta
-        , stored.sessionSnapshotStart
-        , stored.sessionSnapshotTotal
-        )
-
-loadSessionResumeStats
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> IO (Either Text SessionResumeStats)
-loadSessionResumeStats pool root sessionId = runExceptT do
-    _ <- except (sessionDirForId root sessionId)
-    stored <- loadWithLegacyImport root pool sessionId Store.loadSessionResumeStats
-    pure SessionResumeStats
-        { resumeStatsTurnCount = fromIntegral stored.sessionResumeTurnCount
-        , resumeStatsMessageCount = fromIntegral stored.sessionResumeMessageCount
-        , resumeStatsToolCount = fromIntegral stored.sessionResumeToolCount
-        , resumeStatsFirstPrompt =
-            fmap Text.strip stored.sessionResumeFirstPrompt
-        }
-
-loadSessionTurnPage
-    :: OsPath
-    -> StorePool
-    -> Text
-    -> (StorePool -> Text
-        -> IO (Either StoreError (Maybe Store.SessionTurnPage)))
-    -> IO (Either Text SessionTurnPage)
-loadSessionTurnPage root pool sessionId loader = runExceptT do
-    _ <- except (sessionDirForId root sessionId)
-    stored <- loadWithLegacyImport root pool sessionId loader
-    turns <- except $ traverse
-        (\storedTurn -> do
-            turn <- fromStoredTurn storedTurn.storedTurn
-            pure (storedTurn.storedTurnIndex, turn))
-        (Vector.toList stored.sessionPageTurns)
-    pure SessionTurnPage
-        { pageTurns = turns
-        , pageGenerationStart = stored.sessionPageGenerationStart
-        , pageTotalTurns = stored.sessionPageTotal
-        , pageHasOlder = stored.sessionPageHasOlder
-        , pageHasNewer = stored.sessionPageHasNewer
-        }
-
-loadWithLegacyImport
-    :: OsPath
-    -> StorePool
-    -> Text
-    -> (StorePool -> Text -> IO (Either StoreError (Maybe a)))
-    -> ExceptT Text IO a
-loadWithLegacyImport root pool sessionId loader = do
-    stored <- lift (loader pool sessionId)
-        >>= either (throwE . renderStoreError) pure
-    stored' <- case stored of
-        Just value -> pure (Just value)
-        Nothing -> do
-            _ <- importLegacySession
-                sessionSchemaVersion
-                isValidSessionId
-                (sessionDirForId root)
-                pool
-                sessionId
-            -- Another process may win the import race and return False from
-            -- its idempotent insert. Always reload the canonical row.
-            lift (loader pool sessionId)
-                >>= either (throwE . renderStoreError) pure
-    maybe (throwE ("session not found: " <> sessionId)) pure stored'
-
--- | Load several sessions with one batched PostgreSQL read while preserving
--- request order. A missing database row still takes the legacy import path.
-loadSessions
-    :: StorePool
-    -> OsPath
-    -> [Text]
-    -> IO [Either Text (SessionMeta, [SessionTurn])]
-loadSessions pool root sessionIds = do
-    let validated =
-            [ sessionDirForId root sessionId
-                >> Right sessionId
-            | sessionId <- sessionIds
-            ]
-        validIds = [sessionId | Right sessionId <- validated]
-    stored <- Store.loadSessions pool validIds
-    restoreResults validated stored
-  where
-    restoreResults [] [] = pure []
-    restoreResults (Left err : rest) results =
-        (Left err :) <$> restoreResults rest results
-    restoreResults (Right sessionId : rest) (result : results) = do
-        loaded <- case result of
-            Left err -> pure (Left (renderStoreError err))
-            Right Nothing -> loadSession pool root sessionId
-            Right (Just value) ->
-                runExceptT
-                    (decodeStoredSession
-                        sessionSchemaVersion
-                        isValidSessionId
-                        sessionId
-                        Nothing
-                        value)
-        (loaded :) <$> restoreResults rest results
-    restoreResults _ _ =
-        pure [Left "batched session load returned an unexpected result count"]
-
-loadSessionHandle
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> IO (Either Text (SessionHandle, [SessionTurn]))
-loadSessionHandle pool root sessionId =
-    loadActiveSession pool root sessionId >>= \case
-        Left err -> pure (Left err)
-        Right (meta, turns) ->
-            pure do
-                dir <- sessionDirForId root sessionId
-                tempDir <- sessionTempDirForId root sessionId
-                Right
-                    ( SessionHandle
-                        { sessionPool = pool
-                        , sessionDir = dir
-                        , sessionTempDir = tempDir
-                        , sessionMetaPath = dir </> unsafeEncodeUtf "meta.json"
-                        , sessionTranscriptPath =
-                            dir </> unsafeEncodeUtf "transcript.jsonl"
-                        , sessionMeta = meta
-                        }
-                    , turns
-                    )
-
--- | Import a transferred session under its existing id and optional cwd.
-importSessionTransfer
-    :: StorePool
-    -> OsPath
-    -> Maybe OsPath
-    -> SessionTransfer
-    -> IO (Either Text Text)
-importSessionTransfer pool root cwd transfer = runExceptT do
-    let sessionId = transfer.transferMeta.metaId
-    dir <- except (sessionDirForId root sessionId)
-    exists <- lift (doesDirectoryExist dir)
-    when exists (throwE ("session already exists: " <> sessionId))
-    lift (ensurePrivateDir root)
-    lift (createDirectory dir)
-    lift (setFileMode (unsafeToFilePath dir) 0o700)
-    _ <- lift (ensureSessionTemp root sessionId) >>= except
-    let meta = transfer.transferMeta
-            { metaCwd = fromMaybe transfer.transferMeta.metaCwd cwd }
-        bytes = Aeson.encode
-            (SessionTransfer meta transfer.transferTaskPlan transfer.transferTurns)
-        legacy = Store.LegacySession
-            { legacySourcePath = "afk:" <> transfer.transferMeta.metaId
-            , legacyContentHash = contentFingerprint bytes
-            , legacyMetadata = toStoredMetadata meta
-            , legacyTurns = map toStoredTurn transfer.transferTurns
-            , legacyPromptSnapshot =
-                toStoredPromptSnapshot <$> meta.metaPromptSnapshot
-            , legacyTaskPlan =
-                fmap
-                    (\plan ->
-                        Store.SessionTaskPlanSnapshot
-                            { Store.sessionTaskPlanSnapshotExplanation =
-                                plan.taskPlanExplanation
-                            , Store.sessionTaskPlanSnapshotItems =
-                                map toStoredTaskPlanItem plan.taskPlanItems
-                            })
-                    transfer.transferTaskPlan
-            }
-    lift (Store.importLegacySession pool legacy) >>= \case
-        Left err -> do
-            lift (cleanupTransfer dir sessionId)
-            throwE (renderStoreError err)
-        Right False -> do
-            lift (cleanupTransfer dir sessionId)
-            throwE ("session already exists: " <> sessionId)
-        Right True -> pure sessionId
-  where
-    cleanupTransfer dir sessionId = do
-        _ <- tryIO (removePathForcibly dir)
-        _ <- removeSessionTemp root sessionId
-        pure ()
--- | Import a validated transfer as a new session. The source id is never
--- reused, which makes importing the same file safe and preserves the source
--- transcript as an immutable object.
-importSessionTransferRemapped
-    :: StorePool
-    -> OsPath
-    -> Maybe OsPath
-    -> SessionTransferEnvelope
-    -> IO (Either Text Text)
-importSessionTransferRemapped pool root cwd rawEnvelope =
-    case validateSessionTransferEnvelope rawEnvelope of
-        Left err -> pure (Left err)
-        Right envelope -> do
-            (sessionId, _) <- allocateSessionTemp root
-            now <- normalizePostgresTimestamp <$> getCurrentTime
-            let transfer = envelope.transferSession
-                sourceMeta = transfer.transferMeta
-                meta = sourceMeta
-                    { metaId = sessionId
-                    , metaCreatedAt = now
-                    , metaUpdatedAt = now
-                    }
-            importSessionTransfer pool root cwd
-                transfer { transferMeta = meta }
-
-exportSessionTransfer
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> IO (Either Text SessionTransferEnvelope)
-exportSessionTransfer pool root sessionId =
-    loadSession pool root sessionId >>= \case
-        Left err -> pure (Left err)
-        Right (meta, turns) ->
-            Store.loadSessionTaskPlan pool sessionId <&> \result -> do
-                storedPlan <- either (Left . renderStoreError) Right result
-                validateSessionTransferEnvelope SessionTransferEnvelope
-                    { transferFormat = sessionTransferFormatName
-                    , transferFormatVersion = sessionTransferFormatVersion
-                    , transferSession =
-                        SessionTransfer
-                            meta
-                            ((.currentTaskPlanValue) . fromStoredTaskPlan <$> storedPlan)
-                            turns
-                    }
-
--- | Stream a transfer document in bounded turn pages. Callback bytes are
--- valid only for the duration of the callback. The export captures the turn
--- count from its first page and ignores later appends, yielding an immutable
--- prefix without hydrating the full transcript.
-streamSessionTransfer
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> (BS.ByteString -> IO ())
-    -> IO (Either Text ())
-streamSessionTransfer pool root sessionId emit = runExceptT do
-    (meta, snapshotStart, snapshotTotal) <-
-        lift (loadSessionHistorySnapshot pool root sessionId) >>= except
-    storedPlan <- lift (Store.loadSessionTaskPlan pool sessionId)
-        >>= either (throwE . renderStoreError) pure
-    let taskPlan = ((.currentTaskPlanValue) . fromStoredTaskPlan) <$> storedPlan
-    let snapshotEnd = snapshotStart + max 0 snapshotTotal
-    lift $ emitLazy
-        ("{\"format\":\"haskell-agent.session-transfer\","
-            <> "\"version\":1,\"session\":{\"meta\":"
-            <> Aeson.encode meta
-            <> ",\"currentTaskPlan\":"
-            <> Aeson.encode (fmap taskPlanTransferJson taskPlan)
-            <> ",\"turns\":[")
-    firstPage <- lift
-        (loadSessionHistoryTurnsRangeBounded
-            pool root sessionId snapshotStart snapshotEnd 256)
-        >>= except
-    let total = max 0 snapshotTotal
-    emitted <- lift (emitPage True total 0 firstPage)
-    when (emitted < total) $
-        streamRest snapshotEnd total emitted firstPage
-    lift (emitLazy "]}}")
-  where
-    emitLazy = mapM_ emit . LBS.toChunks
-
-    emitPage first total emitted page = do
-        let remaining = max 0 (total - emitted)
-            selected = take (fromIntegral remaining) page.pageTurns
-        _ <- foldl'
-            (\action (_, turn) -> do
-                isFirst <- action
-                unless isFirst (emit ",")
-                emitLazy (Aeson.encode turn)
-                pure False)
-            (pure first)
-            selected
-        pure (emitted + fromIntegral (length selected))
-
-    streamRest snapshotEnd total emitted previous =
-        case reverse previous.pageTurns of
-            [] -> throwE "session export paging made no progress"
-            (lastIndex, _) : _ -> do
-                page <- lift
-                    (loadSessionHistoryTurnsRangeBounded
-                        pool root sessionId (lastIndex + 1) snapshotEnd 256)
-                    >>= except
-                next <- lift (emitPage False total emitted page)
-                when (next <= emitted) $
-                    throwE "session export paging made no progress"
-                when (next < total) (streamRest snapshotEnd total next page)
-
-taskPlanTransferJson :: TaskPlan -> Aeson.Value
-taskPlanTransferJson plan = Aeson.object
-    [ "explanation" Aeson..= plan.taskPlanExplanation
-    , "plan" Aeson..= map itemJson plan.taskPlanItems
-    ]
-  where
-    itemJson item = Aeson.object
-        [ "step" Aeson..= item.taskPlanStep
-        , "status" Aeson..= case item.taskPlanStatus of
-            TaskPlanPending -> ("pending" :: Text)
-            TaskPlanInProgress -> "in_progress"
-            TaskPlanCompleted -> "completed"
-        ]
-
--- | Fork a source session through an inclusive durable turn index. The source
--- remains untouched. Transcript effects are copied verbatim, while derived
--- usage and continuation metadata are recomputed from the selected prefix.
-forkSessionAtTurn
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> Int64
-    -> IO (Either Text Text)
-forkSessionAtTurn pool root sourceId throughIndex = runExceptT do
-    when (throughIndex < 0) (throwE "turn index must be non-negative")
-    (sourceMeta, snapshotStart, snapshotTotal) <-
-        lift (loadSessionHistorySnapshot pool root sourceId) >>= except
-    let snapshotEnd = snapshotStart + max 0 snapshotTotal
-    when
-        (throughIndex < snapshotStart || throughIndex >= snapshotEnd) $
-        throwE "turn index is outside the session transcript"
-    turns <- loadPrefix snapshotStart (throughIndex + 1) id
-    let
-        usage = foldl' addUsage
-            (TokenUsage
-                { inputTokens = 0
-                , outputTokens = 0
-                , cachedTokens = 0
-                })
-            (mapMaybe (.turnUsage) turns)
-        meta = sourceMeta
-            { metaLastResponseId = continuationResponseId turns
-            , metaInputTokens = usage.inputTokens
-            , metaOutputTokens = usage.outputTokens
-            , metaCachedTokens = usage.cachedTokens
-            , metaLastRecap = Nothing
-            , metaLastTurnSummary = Nothing
-            , metaLastRecapMainTurns = 0
-            , metaTitleUserTurns =
-                length (filter (not . Text.null . Text.strip . (.turnUserText)) turns)
-            }
-        envelope = SessionTransferEnvelope
-            { transferFormat = sessionTransferFormatName
-            , transferFormatVersion = sessionTransferFormatVersion
-            , transferSession = SessionTransfer meta Nothing turns
-            }
-    lift (importSessionTransferRemapped pool root Nothing envelope) >>= except
-  where
-    loadPrefix cursor endExclusive append
-        | cursor >= endExclusive = pure (append [])
-        | otherwise = do
-            page <- lift
-                (loadSessionHistoryTurnsRangeBounded
-                    pool root sourceId cursor endExclusive 256)
-                >>= except
-            case page.pageTurns of
-                [] -> throwE "session fork paging made no progress"
-                values -> do
-                    let lastIndex = fst (last values)
-                        pageTurns = map snd values
-                    loadPrefix
-                        (lastIndex + 1)
-                        endExclusive
-                        (append . (pageTurns <>))
-
-    addUsage left right = TokenUsage
-        { inputTokens = left.inputTokens + right.inputTokens
-        , outputTokens = left.outputTokens + right.outputTokens
-        , cachedTokens = left.cachedTokens + right.cachedTokens
-        }
-
-    continuationResponseId = foldl' step Nothing
-    step previous turn =
-        let base = case turn.turnEffect of
-                TranscriptAppend -> previous
-                TranscriptReplace -> Nothing
-                TranscriptReset -> Nothing
-        in turn.turnResponseId <|> base
-
-deleteSession :: StorePool -> OsPath -> Text -> IO (Either Text ())
-deleteSession pool root sessionId = runExceptT do
-    dir <- except (sessionDirForId root sessionId)
-    exists <- lift (doesDirectoryExist dir)
-    lock <- if exists
-        then lift (acquireSessionLock dir sessionId) >>= \case
-            Left _ -> throwE "cannot delete a running session"
-            Right lock -> pure (Just lock)
-        else pure Nothing
-    now <- lift getCurrentTime
-    deleted <- lift $
-        Store.deleteSession pool sessionId now
-            `finally` maybe (pure ()) releaseSessionLock lock
-    case deleted of
-        Left err -> throwE (renderStoreError err)
-        Right False -> throwE ("session not found: " <> sessionId)
-        Right True
-            | not exists -> pure ()
-            | otherwise ->
-                lift (tryIO (removePathForcibly dir)) >>= \case
-                    Left err ->
-                        throwE
-                            ("session deleted but artifacts could not be removed: "
-                                <> Text.pack (displayException err))
-                    Right () -> pure ()
-    tempRemoved <- lift (removeSessionTemp root sessionId)
-    except tempRemoved
-
-renameSession
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> Text
-    -> IO (Either Text SessionMeta)
-renameSession pool root sessionId rawTitle = runExceptT do
-    let title = Text.unwords (Text.words (Text.strip rawTitle))
-    when (Text.null title) (throwE "session title cannot be empty")
-    _ <- except (sessionDirForId root sessionId)
-    now <- lift getCurrentTime
-    renamed <- lift $
-        Store.setSessionTitle pool sessionId title True 2 now
-    case renamed of
-        Left err -> throwE (renderStoreError err)
-        Right False -> throwE ("session not found: " <> sessionId)
-        Right True -> lift (loadSessionMeta pool root sessionId) >>= except
-
-setSessionArchived
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> Bool
-    -> IO (Either Text ())
-setSessionArchived pool root sessionId archived = runExceptT do
-    _ <- except (sessionDirForId root sessionId)
-    now <- lift getCurrentTime
-    changed <- lift $
-        Store.setSessionArchived pool sessionId archived now
-    case changed of
-        Left err -> throwE (renderStoreError err)
-        Right False -> throwE ("session not found: " <> sessionId)
-        Right True -> pure ()
-
--- | Session ids are single path components. Keep this deliberately broader
--- than the current date-plus-hex allocator so older ids remain resumable.
-isValidSessionId :: Text -> Bool
-isValidSessionId sessionId =
-    not (Text.null sessionId)
-        && sessionId /= "."
-        && sessionId /= ".."
-        && Text.all (\char -> char /= '/' && char /= '\\' && char /= '\NUL') sessionId
-
-sessionDirForId :: OsPath -> Text -> Either Text OsPath
-sessionDirForId root sessionId
-    | isValidSessionId sessionId =
-        Right (root </> unsafeEncodeUtf (Text.unpack sessionId))
-    | otherwise = Left "invalid session id"
-
-sessionTempDirForId :: OsPath -> Text -> Either Text OsPath
-sessionTempDirForId root sessionId
-    | isValidSessionId sessionId =
-        Right
-            (sessionTempsRoot root
-                </> unsafeEncodeUtf (Text.unpack sessionId))
-    | otherwise = Left "invalid session id"
-
-listSessions :: StorePool -> OsPath -> IO ([SessionMeta], [Text])
-listSessions pool _root = do
-    Store.listSessionMetadata pool >>= \case
-        Left err ->
-            fail
-                ("could not list PostgreSQL sessions: "
-                    <> Text.unpack (renderStoreError err))
-        Right values ->
-            let decoded = map decodeListedSessionMeta values
-            in pure
-                ( [meta | Right meta <- decoded]
-                , [err | Left err <- decoded]
-                )
-
--- | Decode one persisted session for listing. Corrupt or incompatible
--- metadata becomes an error string instead of disappearing from the picker.
-decodeListedSessionMeta :: Store.SessionMetadata -> Either Text SessionMeta
-decodeListedSessionMeta value = do
-    meta <- fromStoredMetadata value
-    unless (meta.metaVersion == sessionSchemaVersion) $
-        Left $
-            "unsupported session schema version "
-                <> Text.pack (show meta.metaVersion)
-                <> " for session "
-                <> meta.metaId
-                <> " (expected "
-                <> Text.pack (show sessionSchemaVersion)
-                <> ")"
-    pure meta
-
-listArchivedSessionIds :: StorePool -> IO (Either Text [Text])
-listArchivedSessionIds pool =
-    Store.listSessionArchiveKeys pool >>= \case
-        Left err -> pure (Left (renderStoreError err))
-        Right sessionIds -> pure (Right sessionIds)
-
-writeSessionMeta :: StorePool -> OsPath -> SessionMeta -> IO ()
-writeSessionMeta pool _path meta = do
-    Store.replaceSessionMetadata
-        pool
-        "session.metadata_replaced"
-        (toStoredMetadata meta) >>= \case
-            Left err ->
-                fail
-                    ("could not update PostgreSQL session metadata: "
-                        <> Text.unpack (renderStoreError err))
-            Right False ->
-                fail ("session not found: " <> Text.unpack meta.metaId)
-            Right True -> pure ()
 
 sessionTitleFromPrompt :: Text -> Text
 sessionTitleFromPrompt prompt =
@@ -2322,306 +1505,3 @@ resumeHint progName sessionId =
 shellSingleQuote :: String -> Text
 shellSingleQuote s =
     "'" <> Text.replace "'" "'\\''" (Text.pack s) <> "'"
-
--- | Reserve a unique session id by atomically creating its private scratch
--- directory. The durable session directory remains deferred until first use.
-allocateSessionTemp :: OsPath -> IO (Text, OsPath)
-allocateSessionTemp root = do
-    let tempRoot = sessionTempsRoot root
-    ensurePrivateDir tempRoot
-    now <- getCurrentTime
-    go tempRoot now (0 :: Int)
-  where
-    go tempRoot now attempt
-        | attempt >= 32 = fail "could not allocate a unique session temp directory"
-        | otherwise = do
-            let sessionId = sessionIdForAttempt now attempt
-                durableDir =
-                    root </> unsafeEncodeUtf (Text.unpack sessionId)
-                tempDir =
-                    tempRoot </> unsafeEncodeUtf (Text.unpack sessionId)
-            durableExists <-
-                maybe False (const True)
-                    <$> symbolicLinkStatusMaybe durableDir
-            recoveryExists <-
-                maybe False (const True)
-                    <$> symbolicLinkStatusMaybe
-                        (sessionMaterializationMetaPath root sessionId)
-            if durableExists || recoveryExists
-                then go tempRoot now (attempt + 1)
-                else tryIO (createDirectory tempDir) >>= \case
-                    Left _ -> go tempRoot now (attempt + 1)
-                    Right () -> do
-                        setFileMode (unsafeToFilePath tempDir) 0o700
-                        pure (sessionId, tempDir)
-
--- | Take a shared lease for a session's scratch directory. Automatic cleanup
--- requires the matching exclusive lock, so a live process cannot lose its
--- temporary files even before its durable session lock has been acquired.
-acquireSessionTempLease
-    :: OsPath
-    -> OsPath
-    -> IO (Either Text (Maybe SessionTempLease))
-acquireSessionTempLease root path =
-    case sessionTempId root path of
-        Nothing -> pure (Right Nothing)
-        Just sessionId -> do
-            let lockPath = sessionTempLockPath root sessionId
-            result <- tryAny $
-                ensurePrivateDir (takeDirectory lockPath)
-                    >> FileLock.tryLockFile
-                        (unsafeToFilePath lockPath)
-                        FileLock.Shared
-            pure case result of
-                Left exception ->
-                    Left
-                        ("failed to lease session scratch directory "
-                            <> toText path
-                            <> ": "
-                            <> Text.pack (displayException exception))
-                Right Nothing ->
-                    Left
-                        ("session scratch directory is being cleaned up: "
-                            <> toText path)
-                Right (Just lock) ->
-                    Right (Just (SessionTempLease lock))
-
-releaseSessionTempLease :: SessionTempLease -> IO ()
-releaseSessionTempLease (SessionTempLease lock) = do
-    _ <- tryAny (FileLock.unlockFile lock)
-    pure ()
-
--- | Remove old session scratch directories after retaining the newest entries.
--- Only allocator-shaped names are considered, and a directory with a live
--- shared lease is skipped. Failures are reported per path and never stop the
--- rest of the best-effort cleanup. Directories allocated on the current UTC
--- day are always kept, closing the startup interval before a lease is taken.
-cleanupStaleSessionTemps
-    :: OsPath
-    -> Int
-    -> [OsPath]
-    -> IO SessionTempCleanupReport
-cleanupStaleSessionTemps root requestedKeep protected = do
-    let tempRoot = sessionTempsRoot root
-    exists <- doesDirectoryExist tempRoot
-    if not exists
-        then pure mempty
-        else do
-            today <- utctDay <$> getCurrentTime
-            listed <- tryAny (listDirectory tempRoot)
-            case listed of
-                Left exception ->
-                    pure $ tempCleanupFailure tempRoot exception
-                Right entries -> do
-                    directories <- foldM
-                        (collectDirectory tempRoot)
-                        ([], [])
-                        entries
-                    case directories of
-                        (managed, discoveryFailures) -> do
-                            let candidates =
-                                    filter
-                                        (isBefore today . takeFileName)
-                                        (drop (max 1 requestedKeep) $
-                                            sortOn
-                                                (Down
-                                                    . unsafeToFilePath
-                                                    . takeFileName)
-                                                managed)
-                            cleaned <- foldM cleanupOne mempty candidates
-                            pure $
-                                cleaned
-                                    <> mempty
-                                        { tempCleanupFailures =
-                                            discoveryFailures
-                                        }
-  where
-    protectedPaths = map normalise protected
-    isBefore today path =
-        maybe False (< today) (allocatedSessionDay path)
-
-    collectDirectory tempRoot (managed, failures) entry = do
-        let path = tempRoot </> entry
-        checked <- tryAny (doesDirectoryExist path)
-        pure case checked of
-            Left exception ->
-                ( managed
-                , failures
-                    <> [(path, Text.pack (displayException exception))]
-                )
-            Right True
-                | isAllocatedSessionId entry ->
-                    (managed <> [path], failures)
-            Right _ -> (managed, failures)
-
-    cleanupOne report candidate
-        | any
-            (\protectedPath ->
-                equalFilePath protectedPath (normalise candidate))
-            protectedPaths =
-                pure report
-        | otherwise = do
-            result <- tryAny (cleanupStaleSessionTemp root candidate)
-            pure $ report <> case result of
-                Left exception ->
-                    tempCleanupFailure candidate exception
-                Right candidateReport -> candidateReport
-
-cleanupStaleSessionTemp
-    :: OsPath
-    -> OsPath
-    -> IO SessionTempCleanupReport
-cleanupStaleSessionTemp root candidate =
-    case sessionTempId root candidate of
-        Nothing -> pure mempty
-        Just sessionId -> do
-            let durableDir = root </> sessionId
-            durableExists <- doesDirectoryExist durableDir
-            durableLock <-
-                if durableExists
-                    then fmap (fmap Just) $
-                        acquireSessionLock durableDir (toText sessionId)
-                    else pure (Right Nothing)
-            case durableLock of
-                -- A running or otherwise un-lockable durable session owns the
-                -- scratch directory. Treat either case conservatively.
-                Left _ -> pure mempty
-                Right lock ->
-                    cleanupWithSessionLock sessionId
-                        `finally` mapM_ releaseSessionLock lock
-  where
-    cleanupWithSessionLock sessionId = do
-        let lockPath = sessionTempLockPath root sessionId
-        locked <- tryAny $
-            ensurePrivateDir (takeDirectory lockPath)
-                >> FileLock.tryLockFile
-                    (unsafeToFilePath lockPath)
-                    FileLock.Exclusive
-        case locked of
-            Left exception ->
-                pure $ tempCleanupFailure candidate exception
-            Right Nothing ->
-                pure mempty
-            Right (Just lock) -> do
-                removed <- tryAny $
-                    (do
-                        symbolicLinkStatusMaybe candidate >>= \case
-                            -- Another startup cleaner may have removed the
-                            -- candidate before this process acquired its
-                            -- exclusive lock.
-                            Nothing -> pure False
-                            Just status
-                                | isSymbolicLink status -> pure False
-                                | otherwise ->
-                                    removePathForcibly candidate
-                                        >> removeSessionMaterializationMeta
-                                            root
-                                            (toText sessionId)
-                                        >> pure True)
-                        `finally` FileLock.unlockFile lock
-                pure case removed of
-                    Left exception ->
-                        tempCleanupFailure candidate exception
-                    Right True ->
-                        mempty { tempCleanupRemoved = [candidate] }
-                    Right False -> mempty
-
-sessionTempId :: OsPath -> OsPath -> Maybe OsPath
-sessionTempId root rawPath =
-    let tempRoot = normalise (sessionTempsRoot root)
-        path = normalise rawPath
-    in if equalFilePath tempRoot (takeDirectory path)
-            && isAllocatedSessionId (takeFileName path)
-        then Just (takeFileName path)
-        else Nothing
-
-sessionTempLockPath :: OsPath -> OsPath -> OsPath
-sessionTempLockPath root sessionId =
-    sessionTempsRoot root
-        </> unsafeEncodeUtf ".locks"
-        </> (sessionId <> unsafeEncodeUtf ".lock")
-
-isAllocatedSessionId :: OsPath -> Bool
-isAllocatedSessionId path = case allocatedSessionDay path of
-    Just _ -> True
-    Nothing -> False
-
-allocatedSessionDay :: OsPath -> Maybe Day
-allocatedSessionDay path =
-    case unsafeToFilePath path of
-        year1 : year2 : year3 : year4 : '-' :
-                month1 : month2 : '-' : day1 : day2 : '-' : suffix ->
-            let date =
-                    [ year1, year2, year3, year4, '-'
-                    , month1, month2, '-', day1, day2
-                    ]
-            in if length suffix == 8 && all isHexDigit suffix
-                then parseTimeM True defaultTimeLocale "%Y-%m-%d" date
-                else Nothing
-        _ -> Nothing
-
-tempCleanupFailure
-    :: OsPath
-    -> SomeException
-    -> SessionTempCleanupReport
-tempCleanupFailure path exception =
-    mempty
-        { tempCleanupFailures =
-            [(path, Text.pack (displayException exception))]
-        }
-
-ensureSessionTemp :: OsPath -> Text -> IO (Either Text OsPath)
-ensureSessionTemp root sessionId =
-    case sessionTempDirForId root sessionId of
-        Left err -> pure (Left err)
-        Right tempDir -> do
-            result <- tryIO (ensurePrivateDir tempDir)
-            pure $ case result of
-                Left err ->
-                    Left
-                        ("could not create session temp directory: "
-                            <> Text.pack (displayException err))
-                Right () -> Right tempDir
-
-sessionIdForAttempt :: UTCTime -> Int -> Text
-sessionIdForAttempt now attempt =
-    let day = formatTime defaultTimeLocale "%Y-%m-%d" now
-        start =
-            floor
-                (nominalDiffTimeToSeconds
-                    (utcTimeToPOSIXSeconds now)
-                    * 1000000) :: Integer
-        hex = hex8 (start + fromIntegral attempt)
-    in Text.pack (day <> "-" <> hex)
-
-removeSessionTemp :: OsPath -> Text -> IO (Either Text ())
-removeSessionTemp root sessionId =
-    case sessionTempDirForId root sessionId of
-        Left err -> pure (Left err)
-        Right tempDir -> do
-            removeSessionMaterializationMeta root sessionId
-            exists <- doesDirectoryExist tempDir
-            if not exists
-                then pure (Right ())
-                else tryIO (removePathForcibly tempDir) >>= \case
-                    Left err ->
-                        pure $ Left
-                            ("could not delete session temp directory: "
-                                <> Text.pack (displayException err))
-                    Right () -> pure (Right ())
-
-removeReservedTemp :: OsPath -> Text -> IO ()
-removeReservedTemp root sessionId = do
-    _ <- removeSessionTemp root sessionId
-    pure ()
-
-hex8 :: Integer -> String
-hex8 n =
-    let s = showHex (n `mod` 0x100000000) ""
-    in replicate (8 - length s) '0' <> s
-
-ensurePrivateDir :: OsPath -> IO ()
-ensurePrivateDir path = do
-    createDirectoryIfMissing True path
-    _ <- tryIO (setFileMode (unsafeToFilePath path) 0o700)
-    pure ()
