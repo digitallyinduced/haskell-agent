@@ -251,7 +251,6 @@ import Agent.Tools.Types
     )
 import Control.Concurrent
     ( ThreadId
-    , forkFinally
     , forkIO
     , myThreadId
     , threadDelay
@@ -1052,7 +1051,7 @@ data SessionMutation
 
 data Engine = Engine
     { engineCommands :: !(EngineMailbox EngineCommand)
-    , engineDone :: !(MVar ())
+    , engineWorker :: !(Async ())
     , engineStagedImages :: !(TVar (Map Text [ImageAttachment]))
     , engineBrowser :: !BrowserHost
     , engineComputer :: !ComputerHost
@@ -4097,7 +4096,6 @@ ha_engine_create callback context
             home <- getHomeDirectory
             config <- managedPostgresConfigForHome home
             commands <- newEngineMailboxIO
-            done <- newEmptyMVar
             stagedImages <- newTVarIO Map.empty
             browser <- BrowserHost <$> newMVar Nothing
             computer <- newComputerHost
@@ -4110,29 +4108,33 @@ ha_engine_create callback context
                     , interactionCallbackLock = interactionLock
                     , interactionPending = pendingInteractions
                     }
-            _ <- forkFinally
-                (workerLifecycle
-                    callback
-                    context
-                    config
-                    (sessionsRoot home)
-                    commands
-                    stagedImages
-                    browser
-                    computer
-                    stagedTurnOptions
-                    interactions)
-                (const (putMVar done ()))
-            stable <- newStablePtr Engine
-                { engineCommands = commands
-                , engineDone = done
-                , engineStagedImages = stagedImages
-                , engineBrowser = browser
-                , engineComputer = computer
-                , engineStagedTurnOptions = stagedTurnOptions
-                , engineInteractions = interactions
-                }
-            pure (castStablePtrToPtr stable)
+            mask \_ -> do
+                -- Keep worker creation and stable-pointer publication in one
+                -- masked region so publication failure cannot orphan it.
+                worker <- asyncWithUnmask \unmask ->
+                    unmask
+                        (workerLifecycle
+                            callback
+                            context
+                            config
+                            (sessionsRoot home)
+                            commands
+                            stagedImages
+                            browser
+                            computer
+                            stagedTurnOptions
+                            interactions)
+                let engine = Engine
+                        { engineCommands = commands
+                        , engineWorker = worker
+                        , engineStagedImages = stagedImages
+                        , engineBrowser = browser
+                        , engineComputer = computer
+                        , engineStagedTurnOptions = stagedTurnOptions
+                        , engineInteractions = interactions
+                        }
+                stable <- newStablePtr engine `onException` cancel worker
+                pure (castStablePtrToPtr stable)
         case created of
             Left exception -> do
                 sendEvent callback context $
@@ -4586,7 +4588,7 @@ ha_engine_destroy pointer
                 (const (pure Nothing))
             _ <- atomically
                 (closeEngineMailbox engine.engineCommands EngineStop)
-            readMVar engine.engineDone)
+            void (waitCatch engine.engineWorker))
             `finally` freeStablePtr stable
 
 workerLifecycle
