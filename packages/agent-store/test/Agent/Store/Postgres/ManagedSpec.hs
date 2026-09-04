@@ -99,10 +99,17 @@ spec =
             withSystemTempDirectory "ha" \stateDirectory -> do
                 let
                     config = defaultManagedPostgresConfig stateDirectory ""
+                    dataDirectoryAlias =
+                        config.postgresPaths.postgresDataDirectory <> "/."
                     unavailableBinConfig =
                         config
                             { postgresBinDirectory =
                                 stateDirectory <> "/missing-postgres-bin"
+                            , postgresPaths =
+                                config.postgresPaths
+                                    { postgresDataDirectory =
+                                        dataDirectoryAlias
+                                    }
                             }
                     cleanup = do
                         _ <- stopManagedPostgres config
@@ -114,6 +121,8 @@ spec =
                     -- The running server remains reachable through its socket.
                     -- An attempted pg_ctl/psql command would fail because this
                     -- configuration points at a deliberately absent bin dir.
+                    -- Reaching it through a non-normalized data-directory alias
+                    -- also proves the identity check compares canonical paths.
                     -- The cluster has not been migrated yet, so this also
                     -- proves that the fast path runs migrations before it
                     -- validates and returns the runtime-role pool.
@@ -152,6 +161,47 @@ spec =
                             Right () ->
                                 expectationFailure
                                     "stopped cluster unexpectedly opened"
+                    ) `finally` cleanup
+
+        it "rejects a warm socket backed by a different data directory" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = defaultManagedPostgresConfig stateDirectory ""
+                    otherDataDirectory = stateDirectory <> "/other-data"
+                    mismatchedConfig =
+                        config
+                            { postgresBinDirectory =
+                                stateDirectory <> "/missing-postgres-bin"
+                            , postgresPaths =
+                                config.postgresPaths
+                                    { postgresDataDirectory =
+                                        otherDataDirectory
+                                    }
+                            }
+                    cleanup = do
+                        _ <- stopManagedPostgres config
+                        pure ()
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+
+                    -- The socket, database, and owner role all resolve, but
+                    -- the connected server belongs to the original data
+                    -- directory. A correct warm probe must reject it and enter
+                    -- lifecycle fallback, whose deliberately missing binary
+                    -- makes the distinction observable.
+                    withStore mismatchedConfig (const (pure ()))
+                        >>= \case
+                            Left (StoreProcessError message) ->
+                                message `shouldSatisfy`
+                                    Text.isInfixOf "Could not run initdb"
+                            Left err ->
+                                expectationFailure $
+                                    "expected lifecycle fallback failure, got: "
+                                        <> show err
+                            Right () ->
+                                expectationFailure
+                                    "mismatched cluster unexpectedly opened"
                     ) `finally` cleanup
 
         it "ignores an unrelated migration 11 from another worktree" $
