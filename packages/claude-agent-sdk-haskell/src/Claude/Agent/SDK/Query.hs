@@ -1,7 +1,8 @@
 -- | One-shot and per-turn query functions, analogous to the official SDK's
 -- top-level @query()@ API.
 module Claude.Agent.SDK.Query
-    ( query
+    ( QueryResult(..)
+    , query
     , queryWithProgress
     , queryContent
     , queryContentWithProgress
@@ -62,6 +63,13 @@ import qualified Data.Text as Text
 import System.Exit (ExitCode)
 import System.Timeout (timeout)
 
+-- | A completed query together with the canonical message sequence that
+-- produced its terminal result.
+data QueryResult = QueryResult
+    { queryMessages :: ![Message]
+    , queryResultMessage :: !ResultMessage
+    } deriving (Eq, Show)
+
 -- | Run a self-contained query and close its client afterward.
 query
     :: ClaudeAgentOptions
@@ -91,12 +99,13 @@ queryTurnContentWithProgress
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
 queryTurnContentWithProgress turn content onProgress onMessage =
-    queryTurnContentWithMessageValidatorAndProgress
-        turn
-        content
-        (const (pure (Right ())))
-        onProgress
-        onMessage
+    fmap queryResultOnly $
+        queryTurnContentWithMessageValidatorAndProgress
+            turn
+            content
+            (const (pure (Right ())))
+            onProgress
+            onMessage
 
 -- | Run a self-contained query with structured user content.
 queryContent
@@ -219,12 +228,13 @@ queryTurnContentWithMessageValidator
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
 queryTurnContentWithMessageValidator turn content validateMessage onMessage = do
-    queryTurnContentWithMessageValidatorAndProgress
-        turn
-        content
-        validateMessage
-        (const (pure ()))
-        onMessage
+    fmap queryResultOnly $
+        queryTurnContentWithMessageValidatorAndProgress
+            turn
+            content
+            validateMessage
+            (const (pure ()))
+            onMessage
 
 -- | Like 'queryTurnContentWithMessageValidator', with a live observer that
 -- runs after query routing and canonicalization state updates. It sees only
@@ -236,7 +246,7 @@ queryTurnContentWithMessageValidatorAndProgress
     -> (Message -> IO (Either ClaudeSDKError ()))
     -> (QueryProgress -> IO ())
     -> (Message -> IO ())
-    -> IO (Either ClaudeSDKError ResultMessage)
+    -> IO (Either ClaudeSDKError QueryResult)
 queryTurnContentWithMessageValidatorAndProgress
     turn content validateMessage onProgress onMessage =
         runExceptT $
@@ -277,11 +287,12 @@ receiveResponseWithMessageValidator
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
 receiveResponseWithMessageValidator turn validateMessage onMessage =
-    receiveResponseWithMessageValidatorAndProgress
-        turn
-        validateMessage
-        (const (pure ()))
-        onMessage
+    fmap queryResultOnly $
+        receiveResponseWithMessageValidatorAndProgress
+            turn
+            validateMessage
+            (const (pure ()))
+            onMessage
 
 -- | Receive a response with classified live query progress.
 receiveResponseWithMessageValidatorAndProgress
@@ -289,7 +300,7 @@ receiveResponseWithMessageValidatorAndProgress
     -> (Message -> IO (Either ClaudeSDKError ()))
     -> (QueryProgress -> IO ())
     -> (Message -> IO ())
-    -> IO (Either ClaudeSDKError ResultMessage)
+    -> IO (Either ClaudeSDKError QueryResult)
 receiveResponseWithMessageValidatorAndProgress
     turn validateMessage onProgress onMessage =
         runExceptT $
@@ -304,14 +315,14 @@ receiveResponseT
     -> (Message -> IO (Either ClaudeSDKError ()))
     -> (QueryProgress -> IO ())
     -> (Message -> IO ())
-    -> ExceptT ClaudeSDKError IO ResultMessage
+    -> ExceptT ClaudeSDKError IO QueryResult
 receiveResponseT turn validateMessage onProgress onMessage =
     go emptyQueryAccumulator False
   where
     go
         :: QueryAccumulator
         -> Bool
-        -> ExceptT ClaudeSDKError IO ResultMessage
+        -> ExceptT ClaudeSDKError IO QueryResult
     go accumulator sawOutput = do
         outcome <- liftIO (receiveOutcome turn sawOutput)
         message <- messageFromReceiveOutcome turn sawOutput outcome
@@ -328,7 +339,10 @@ receiveResponseT turn validateMessage onProgress onMessage =
                 ExceptT (acceptTurnSessionId turn result.sessionId)
                 liftIO (mapM_ onProgress progress)
                 liftIO (mapM_ onMessage messages)
-                pure result
+                pure QueryResult
+                    { queryMessages = messages
+                    , queryResultMessage = result
+                    }
 
 data ReceiveOutcome
     = ReceiveTimedOut
@@ -400,6 +414,12 @@ consumeResponseMessage accumulator message = do
             ResponseContinues nextAccumulator progress
         Just (messages, result) ->
             ResponseCompleted progress messages result
+
+queryResultOnly
+    :: Either ClaudeSDKError QueryResult
+    -> Either ClaudeSDKError ResultMessage
+queryResultOnly =
+    fmap \QueryResult{queryResultMessage} -> queryResultMessage
 
 validateLiveProgressSession
     :: ClaudeSDKTurn
