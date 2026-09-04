@@ -453,6 +453,11 @@ rather than making the production CLI depend on native-only integration code.
 The resulting production rebuild change is recorded in the
 [`package-split benchmark`](docs/package-split-benchmark.md).
 
+Discovery and bounded import of Codex, Claude, Cursor, and Grok histories lives
+in `agent-external-session`. The CLI re-exports its public facade while keeping
+the provider-specific parsers independently testable and reusable by future
+frontends.
+
 `agent-claude` delegates its generic process transport, protocol decoding, and
 session client to
 [`claude-agent-sdk-haskell`](packages/claude-agent-sdk-haskell/README.md),

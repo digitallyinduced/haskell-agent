@@ -15,6 +15,7 @@ import qualified Agent.CLI.MacOS.BridgeFFISpec as BridgeFFISpec
 import qualified Agent.CLI.MacOS.BridgeHeaderSpec as BridgeHeaderSpec
 import qualified Agent.CLI.MacOS.BridgeSpec as BridgeSpec
 import qualified Agent.CLI.MacOS.BrowserBridgeFFISpec as BrowserBridgeFFISpec
+import qualified Agent.CLI.MacOS.ComputerBridgeSpec as ComputerBridgeSpec
 #endif
 
 main :: IO ()
@@ -30,4 +31,5 @@ main = hspec do
     BridgeFFISpec.spec
     BridgeHeaderSpec.spec
     BridgeSpec.spec
+    ComputerBridgeSpec.spec
 #endif
