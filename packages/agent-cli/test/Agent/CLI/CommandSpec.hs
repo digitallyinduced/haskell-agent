@@ -164,6 +164,17 @@ spec = do
                 `shouldBe` ReplCommandError
                     "usage: /shell [ghci|bash|both|none]"
 
+        it "toggles or explicitly sets computer use" do
+            parseReplLine "/computer-use"
+                `shouldBe` ReplToggleComputerUse
+            parseReplLine "/computer-use on"
+                `shouldBe` ReplSetComputerUse True
+            parseReplLine "/computer-use OFF"
+                `shouldBe` ReplSetComputerUse False
+            parseReplLine "/computer-use status"
+                `shouldBe` ReplCommandError
+                    "usage: /computer-use [on|off]"
+
         it "parses runtime code-mode enablement" do
             parseReplLine "/codemod" `shouldBe` ReplEnableCodeMode
             parseReplLine "/code-mode" `shouldBe` ReplEnableCodeMode
@@ -513,6 +524,7 @@ spec = do
                     , "deep-research"
                     , "skills"
                     , "shell"
+                    , "computer-use"
                     , "codemod"
                     , "always-approve"
                     , "update-and-restart"
@@ -596,6 +608,8 @@ spec = do
                 `shouldBe` ["--worktree", "--no-worktree"]
             slashCompletionCandidates "llehs/" "b"
                 `shouldBe` ["bash", "both"]
+            slashCompletionCandidates "esu-retupmoc/" "o"
+                `shouldBe` ["on", "off"]
 
         it "does not complete ordinary prompts" do
             slashCompletionCandidates "" "help" `shouldBe` []

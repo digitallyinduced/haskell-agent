@@ -366,14 +366,66 @@ spec = do
             parseArgs ["--no-bash", "--bash"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optBash = True })
 
-        it "keeps computer use opt-in" do
-            defaultCliOptions.optComputerUse `shouldBe` False
-            parseArgs ["--computer-use"]
+        it "tracks explicit computer-use overrides with last-flag-wins semantics" do
+            defaultCliOptions.optComputerUse `shouldBe` True
+            defaultCliOptions.optComputerUseExplicit `shouldBe` False
+            parseArgs ["--no-computer-use"]
                 `shouldBe` Right (RunAgent defaultCliOptions
-                    { optComputerUse = True })
+                    { optComputerUse = False
+                    , optComputerUseExplicit = True
+                    })
+            parseArgs ["--no-computer-use", "--computer-use"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optComputerUse = True
+                    , optComputerUseExplicit = True
+                    })
             parseArgs ["--computer-use", "--no-computer-use"]
                 `shouldBe` Right (RunAgent defaultCliOptions
-                    { optComputerUse = False })
+                    { optComputerUse = False
+                    , optComputerUseExplicit = True
+                    })
+
+        it "defaults computer use to TTY sessions while honoring explicit flags" do
+            resolveComputerUseEnabled defaultCliOptions True `shouldBe` True
+            resolveComputerUseEnabled defaultCliOptions False `shouldBe` False
+            resolveComputerUseEnabled
+                defaultCliOptions
+                    { optComputerUse = True
+                    , optComputerUseExplicit = True
+                    }
+                False
+                `shouldBe` True
+            resolveComputerUseEnabled
+                defaultCliOptions
+                    { optComputerUse = False
+                    , optComputerUseExplicit = True
+                    }
+                True
+                `shouldBe` False
+
+        it "requires an explicit opt-in for one-shot TTY invocations" do
+            resolveComputerUseEnabled
+                defaultCliOptions { optPrompt = Just "hi" }
+                True
+                `shouldBe` False
+            resolveComputerUseEnabled
+                defaultCliOptions
+                    { optPromptFile = Just (fromFilePath "prompt.md") }
+                True
+                `shouldBe` False
+            resolveComputerUseEnabled
+                defaultCliOptions
+                    { optManagedTurnFile = Just (fromFilePath "turn.json") }
+                True
+                `shouldBe` False
+            resolveComputerUseEnabled
+                defaultCliOptions
+                    { optPrompt = Just "hi"
+                    , optComputerUse = True
+                    , optComputerUseExplicit = True
+                    }
+                True
+                `shouldBe` True
 
         it "uses conventional tool calling by default" do
             defaultCliOptions.optCodeMode `shouldBe` False
