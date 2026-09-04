@@ -9,6 +9,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , requestResponseRule
     , sessionClosedRule
     , withPortalCaptureReadiness
+    , withPortalInputReadiness
     ) where
 
 import Agent.CLI.ComputerUse.Backend
@@ -26,6 +27,7 @@ import Agent.CLI.ComputerUse.Input
     , parseModifiers
     , parseMouseButton
     )
+import Agent.CLI.ComputerUse.Linux.Logind (withLogindReadiness)
 import Agent.Loop (ImageAttachment(..))
 import Agent.Responses.Types
     ( ComputerAction(..)
@@ -61,6 +63,7 @@ import Control.Exception.Safe
     , bracket
     , catchAny
     , finally
+    , generalBracket
     , onException
     , throwIO
     , tryAny
@@ -648,15 +651,22 @@ executePortalAction runtime expected action =
     ensurePortalReady runtime >>= \case
         Left err -> pure (Left err)
         Right () ->
-            withPortalSessionOperation runtime "input injection" \session -> do
-                let stream = session.portalSessionStream
-                    expectedIdentity =
-                        portalDisplay session
-                unless
-                    (expectedIdentity == expected)
-                    (fail
-                        "The selected portal stream changed during computer use.")
-                executePortalActionUnchecked runtime session stream action
+            withPortalInputReadiness runtime.portalReadiness $
+                withPortalSessionOperation runtime "input injection" \session -> do
+                    let stream = session.portalSessionStream
+                        expectedIdentity =
+                            portalDisplay session
+                    unless
+                        (expectedIdentity == expected)
+                        (fail
+                            "The selected portal stream changed during computer use.")
+                    executePortalActionUnchecked runtime session stream action
+
+withPortalInputReadiness
+    :: IO (Either Text ())
+    -> IO (Either Text value)
+    -> IO (Either Text value)
+withPortalInputReadiness = withLogindReadiness
 
 withPortalSessionOperation
     :: PortalRuntime
@@ -764,17 +774,13 @@ withPortalModifiers
 withPortalModifiers _ _ [] action = action
 withPortalModifiers runtime session modifiers action = do
     let keysyms = map modifierKeysym modifiers
-    pressed <- tryAny $
-        forM_ keysyms \keysym ->
-            notifyKeyboardKeysym runtime session keysym keyPressed
-    case pressed of
-        Left exception -> do
-            releaseKeysymsIgnoringErrors runtime session keysyms
-            throwIO exception
-        Right () ->
-            action
-                `finally`
-                    releaseKeysyms runtime session keysyms
+    fst <$> generalBracket
+        (pure ())
+        (\() _ -> releaseKeysyms runtime session keysyms)
+        (\() -> do
+            forM_ keysyms \keysym ->
+                notifyKeyboardKeysym runtime session keysym keyPressed
+            action)
 
 releaseKeysyms
     :: PortalRuntime
@@ -790,20 +796,6 @@ releaseKeysyms runtime session keysyms = do
     case [exception | Left exception <- results] of
         exception : _ -> throwIO (exception :: SomeException)
         [] -> pure ()
-
-releaseKeysymsIgnoringErrors
-    :: PortalRuntime
-    -> PortalSession
-    -> [Int32]
-    -> IO ()
-releaseKeysymsIgnoringErrors runtime session =
-    mapM_
-        (\keysym ->
-            void
-                (tryAny
-                    (notifyKeyboardKeysym
-                        runtime session keysym keyReleased)))
-        . reverse
 
 tapKeysym :: PortalRuntime -> PortalSession -> Int32 -> IO ()
 tapKeysym runtime session keysym =

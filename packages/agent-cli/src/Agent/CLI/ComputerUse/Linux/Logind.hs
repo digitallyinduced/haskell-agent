@@ -1,15 +1,19 @@
 module Agent.CLI.ComputerUse.Linux.Logind
     ( LogindGuard(..)
     , newLogindGuard
+    , processSessionRequest
     , validateLogindState
+    , withLogindReadiness
     ) where
 
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar_
     , newMVar
     , withMVar
     )
+import Control.Concurrent.Async (race)
 import Control.Exception.Safe (catchAny, onException, tryAny)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -32,8 +36,8 @@ import DBus.Client
     , connectSystem
     , disconnect
     )
-import System.Environment (lookupEnv)
 import System.Posix.Process (getProcessID)
+import System.Posix.Types (ProcessID)
 import System.Timeout (timeout)
 
 data LogindGuard = LogindGuard
@@ -71,19 +75,15 @@ newLogindGuard = do
 
 resolveSessionPath :: Client -> IO ObjectPath
 resolveSessionPath client = do
-    sessionId <- lookupEnv "XDG_SESSION_ID"
-    case nonempty sessionId of
-        Just value ->
-            callForPath client "GetSession" [toVariant (Text.pack value)]
-        Nothing -> do
-            pid <- getProcessID
-            callForPath
-                client
-                "GetSessionByPID"
-                [toVariant (fromIntegral pid :: Word32)]
-  where
-    nonempty (Just value) | not (null value) = Just value
-    nonempty _ = Nothing
+    pid <- getProcessID
+    let (member, body) = processSessionRequest pid
+    callForPath client member body
+
+processSessionRequest :: ProcessID -> (MemberName, [Variant])
+processSessionRequest pid =
+    ( "GetSessionByPID"
+    , [toVariant (fromIntegral pid :: Word32)]
+    )
 
 callForPath :: Client -> MemberName -> [Variant] -> IO ObjectPath
 callForPath client member body = do
@@ -178,6 +178,31 @@ validateLogindState active locked
         Left "Computer use is unavailable while the Linux session is locked."
     | otherwise = Right ()
 
+withLogindReadiness
+    :: IO (Either Text ())
+    -> IO (Either Text value)
+    -> IO (Either Text value)
+withLogindReadiness readiness action =
+    readiness >>= \case
+        Left err -> pure (Left err)
+        Right () ->
+            race action (waitForReadinessFailure readiness) >>= \case
+                Left (Left err) -> pure (Left err)
+                Left (Right value) ->
+                    readiness >>= \case
+                        Left err -> pure (Left err)
+                        Right () -> pure (Right value)
+                Right err -> pure (Left err)
+
+waitForReadinessFailure
+    :: IO (Either Text ())
+    -> IO Text
+waitForReadinessFailure readiness = do
+    threadDelay readinessPollDelay
+    readiness >>= \case
+        Left err -> pure err
+        Right () -> waitForReadinessFailure readiness
+
 closeGuard :: MVar (Maybe Client) -> IO ()
 closeGuard state =
     modifyMVar_ state \case
@@ -192,3 +217,6 @@ throwMethodError methodError =
 
 logindCallTimeout :: Int
 logindCallTimeout = 5000000
+
+readinessPollDelay :: Int
+readinessPollDelay = 50000

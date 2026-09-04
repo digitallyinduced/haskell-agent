@@ -24,7 +24,10 @@ import Agent.CLI.ComputerUse.Linux
     ( LinuxSessionType(..)
     , detectLinuxSessionType
     )
-import Agent.CLI.ComputerUse.Linux.Logind (validateLogindState)
+import Agent.CLI.ComputerUse.Linux.Logind
+    ( processSessionRequest
+    , validateLogindState
+    )
 import Agent.CLI.ComputerUse.Input (MouseButton(..))
 import Agent.CLI.ComputerUse.Linux.Portal
     ( PortalStream(..)
@@ -36,6 +39,7 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , requestResponseRule
     , sessionClosedRule
     , withPortalCaptureReadiness
+    , withPortalInputReadiness
     )
 import Agent.CLI.ComputerUse.Linux.X11
     ( XdotoolInvocation(..)
@@ -71,7 +75,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Word (Word32, Word64)
-import DBus (Variant, busName_, objectPath_, toVariant)
+import DBus (Variant, busName_, fromVariant, objectPath_, toVariant)
 import DBus.Client (MatchRule(..))
 import Test.Hspec
 
@@ -202,6 +206,15 @@ spec = do
             validateLogindState False False
                 `shouldBe` Left
                     "Computer use is unavailable while the Linux session is inactive."
+
+        it "binds logind lookup to the current process" do
+            let (member, body) = processSessionRequest 4242
+            member `shouldBe` "GetSessionByPID"
+            case body of
+                [pid] ->
+                    (fromVariant pid :: Maybe Word32)
+                        `shouldBe` Just 4242
+                _ -> expectationFailure "expected one process id"
 
         it "selects the primary monitor and preserves its signed origin" do
             parseXrandrDisplay
@@ -363,6 +376,27 @@ spec = do
                 (record "capture" (Right ()))
                 `shouldReturn` Left "session locked"
             readIORef calls `shouldReturn` ["capture", "ready"]
+
+        it "cancels portal input on lock and still runs cleanup" do
+            readinessResults <- newIORef
+                [Right (), Left "session locked"]
+            cleanedUp <- newIORef False
+            completed <- newIORef False
+            let readiness =
+                    atomicModifyIORef' readinessResults \case
+                        [] -> ([], Left "session locked")
+                        result : rest -> (rest, result)
+                blockedInput =
+                    ( do
+                        threadDelay 1000000
+                        writeIORef completed True
+                        pure (Right ())
+                    )
+                        `finally` writeIORef cleanedUp True
+            withPortalInputReadiness readiness blockedInput
+                `shouldReturn` Left "session locked"
+            readIORef cleanedUp `shouldReturn` True
+            readIORef completed `shouldReturn` False
 
         it "uses negotiated stream metadata for display inspection" do
             let display =

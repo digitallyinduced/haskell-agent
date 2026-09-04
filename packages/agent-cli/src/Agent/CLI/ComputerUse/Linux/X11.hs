@@ -26,6 +26,7 @@ import Agent.CLI.ComputerUse.Input
     , parseModifiers
     , parseMouseButton
     )
+import Agent.CLI.ComputerUse.Linux.Logind (withLogindReadiness)
 import Agent.Loop (ImageAttachment(..))
 import Agent.Responses.Types
     ( ComputerAction(..)
@@ -42,7 +43,6 @@ import Codec.Picture
     , imageWidth
     )
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (race)
 import Control.Exception.Safe (finally, generalBracket, tryAny)
 import Control.Monad (foldM)
 import Codec.Picture.Types (convertImage)
@@ -378,23 +378,7 @@ withX11Readiness
     :: IO (Either Text ())
     -> IO (Either Text ())
     -> IO (Either Text ())
-withX11Readiness readiness action =
-    readiness >>= \case
-        Left err -> pure (Left err)
-        Right () ->
-            race action (waitForReadinessFailure readiness) >>= \case
-                Left (Left err) -> pure (Left err)
-                Left (Right ()) -> readiness
-                Right err -> pure (Left err)
-
-waitForReadinessFailure
-    :: IO (Either Text ())
-    -> IO Text
-waitForReadinessFailure readiness = do
-    threadDelay readinessPollDelay
-    readiness >>= \case
-        Left err -> pure err
-        Right () -> waitForReadinessFailure readiness
+withX11Readiness = withLogindReadiness
 
 movePointer :: ComputerDisplay -> Int -> Int -> IO (Either Text ())
 movePointer display x y =
@@ -623,6 +607,3 @@ commaInts = Text.intercalate "," . map (Text.pack . show)
 
 typeChunkSize :: Int
 typeChunkSize = 64
-
-readinessPollDelay :: Int
-readinessPollDelay = 50000
