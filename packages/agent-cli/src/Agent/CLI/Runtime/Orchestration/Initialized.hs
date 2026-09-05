@@ -4,7 +4,6 @@ module Agent.CLI.Runtime.Orchestration.Initialized
     , withPreparedStartupAuth
     ) where
 
-import Agent.CLI.AccountPicker ()
 import Agent.CLI.AccountSelection
     ( PreparedProviderAccounts,
       SelectedAccount(..),
@@ -12,11 +11,6 @@ import Agent.CLI.AccountSelection
       prepareProviderAccounts,
       selectPreparedProviderAccount,
       selectProviderAccount )
-import Agent.CLI.Afk ()
-import Agent.CLI.AgentSessions ()
-import Agent.CLI.AgentViewport ()
-import Agent.CLI.Approval ()
-import Agent.CLI.Artifact ()
 import Agent.CLI.Auth
     ( LoadedAuth(loadedAccountLabel, LoadedAuth, loadedOpenAiPool,
                  loadedProvider, loadedTokenProvider, loadedSelectionId),
@@ -29,19 +23,10 @@ import Agent.CLI.Auth
       loadAuthForAccount,
       probeLoadedAuthCredential,
       staticCredentialProvider )
-import Agent.CLI.Clipboard ()
-import Agent.CLI.CodeModeRuntime ()
-import Agent.CLI.Command ()
-import Agent.CLI.Compaction ()
-import Agent.CLI.Config ()
-import Agent.Connectivity ()
-import Agent.CLI.Database ()
 import Agent.CLI.Database.Store
     ( DatabaseScopes
     , deriveDatabaseScopesWithNamespace
     )
-import Agent.CLI.Dialects ()
-import Agent.CLI.Error ()
 import Agent.CLI.GatewayClient
     ( GatewayCredential
     , GatewayModelAccess
@@ -50,16 +35,6 @@ import Agent.CLI.GatewayClient
     , refreshGatewayModels
     )
 import Agent.CLI.GatewayModels (gatewayProviderForStartup)
-import Agent.CLI.GatewayBridge ()
-import Agent.CLI.Input ()
-import Agent.CLI.Interrupt ()
-import Agent.CLI.LearnedSkills ()
-import Agent.CLI.LearnedSkills.Store ()
-import Agent.CLI.Login ()
-import Agent.CLI.Lsp ()
-import Agent.CLI.ManagedTurn ()
-import Agent.CLI.McpManager ()
-import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , catalogConnection,
@@ -78,8 +53,6 @@ import Agent.CLI.Models
                   targetModelId, targetDialect) )
 import Agent.CLI.Options
     ( CliOptions(optModel, optProvider, optSkills, optYolo) )
-import Agent.CLI.PendingInputs ()
-import Agent.CLI.Plan ()
 import Agent.CLI.Project
     ( loadProjectSettings,
       loadUserSettings,
@@ -90,11 +63,7 @@ import Agent.CLI.Project
       ProjectAccount(projectAccountId, projectAccountSelectionId),
       ProjectModel(projectModelTarget),
       ProjectSettings(settingsLastModel) )
-import Agent.CLI.Prompt ()
-import Agent.CLI.PromptHooks ()
-import Agent.CLI.Provider.OpenAI ()
 import Agent.CLI.Provider.Switch ( loadSelectedAccountAuth )
-import Agent.CLI.ProviderAvailability ()
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback )
 import Agent.CLI.ProviderTransition
@@ -102,18 +71,14 @@ import Agent.CLI.ProviderTransition
                          transitionUnavailableProviders, transitionPendingTurn,
                          transitionTarget, transitionAccountSelectionId,
                          transitionAccountId) )
-import Agent.CLI.Recap ()
-import Agent.CLI.Render ()
-import Agent.CLI.ReplMode ()
-import Agent.CLI.Request ()
 import Agent.CLI.Resume ( publishResumeHistoryAfterBoundary )
 import Agent.CLI.Runtime.HistorySource
     ( loadFullscreenHistoryPage, sessionUiPageSize )
-import Agent.CLI.Runtime.Orchestration.Background ()
-import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Startup
     ( setStartupRepository )
-import Agent.CLI.Runtime.Orchestration.Tools ( runAgentTools )
+import Agent.CLI.Runtime.Orchestration.Tools ( AgentToolsRequest(..)
+    , runAgentTools
+    )
 import Agent.CLI.Runtime.Orchestration.Types
     ( ActiveHttpAuth(activeHttpGeneration, ActiveHttpAuth,
                      activeHttpAccountId, activeHttpProvider, activeHttpResolveLabel),
@@ -122,62 +87,29 @@ import Agent.CLI.Runtime.Orchestration.Types
       NativeDiscoveryContext(..),
       NativeRunHooks(nativeDatabaseScopeNamespace, nativeWorkspaceDiscovery),
       nativePreparedDiscovery )
-import Agent.CLI.Runtime.Persistence ()
-import Agent.CLI.Runtime.Recap ()
-import Agent.CLI.Runtime.Repl ()
 import Agent.CLI.Runtime.Types ( DevResult, RunResult )
-import Agent.CLI.Secret ()
 import Agent.CLI.Session
     ( loadRecentSessionTurns,
       SessionMeta(metaId, metaProvider, metaConnection, metaModel,
                   metaTransportModel, metaDialect, metaGatewayIdentity),
       SessionTurn )
-import Agent.CLI.Session.Attachments ()
-import Agent.CLI.Session.Choices ()
 import Agent.CLI.Session.History ( detectGitBranch )
-import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupToolEnv, startupStderr, startupStdout,
                      startupStdoutTty, startupStdinTty, startupFullscreen,
                      startupUiRuntimeRef, startupEscPaused, startupInterrupt,
                      startupDatabaseStore, startupNativeHooks) )
-import Agent.CLI.Session.Selection ()
-import Agent.CLI.SessionAdmin ()
-import Agent.CLI.SessionEnv ()
 import Agent.CLI.SessionLock ( releaseSessionLock, SessionLock )
-import Agent.CLI.SessionState ()
-import Agent.CLI.SessionTitle ()
 import Agent.CLI.Skills ( loadSkillsCatalogQuiet )
 import Agent.CLI.Startup.Auth
     ( loadStartupAuth, loadStartupAuthFromResult, markStartupStage, startupDie )
-import Agent.CLI.StartupContext ()
 import Agent.CLI.Style ( setCliWindowTitle )
-import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
     ( setFullscreenHistorySource, setFullscreenWindowTitle )
 import Agent.CLI.TUI.History
     ( HistoryDirection(HistoryNewer), HistoryGeneration(..) )
 import Agent.CLI.TUI.SessionHistory ( sessionHistoryPage )
-import Agent.CLI.Terminal ()
-import Agent.CLI.Tools ()
-import Agent.CLI.Turn ()
-import Agent.CLI.Usage ()
-import Agent.CLI.WebFetch ()
-import Agent.CLI.Worktree ()
-import Agent.Cancel ()
-import Agent.Claude ()
-import Agent.Dialect ()
 import Agent.Error ( ApiError(..) )
-import Agent.GrokBuild.Dialect.Goal ()
-import Agent.GrokBuild.Dialect.Runtime ()
-import Agent.GrokBuild.Dialect.Task ()
-import Agent.GrokBuild.Dialect.Workflow ()
-import Agent.Loop ()
-import Agent.OpenAI.Compaction ()
-import Agent.OpenAI.Usage ()
-import Agent.OpenAI.WebSocketClient ()
-import Agent.OpenRouter.LoopBackend ()
-import Agent.OsPath ()
 import Agent.Provider
     ( Provider(OpenAIProvider, XAIProvider, OpenRouterProvider,
                GeminiProvider, ClaudeCodeProvider),
@@ -189,26 +121,11 @@ import Agent.Provider
       tokenProviderWithNextToken,
       BillingMode(ApiBilled),
       FailedCredential(credential) )
-import Agent.ReasoningEffort ()
-import Agent.Responses.GenericBackend ()
-import Agent.Responses.GenericClient ()
-import Agent.Responses.Types ()
 import Agent.Skills ( SkillCatalog(..) )
 import Agent.Store.Postgres ( trustedPool )
-import Agent.Store.Types ()
-import Agent.Subagents ()
-import Agent.Subagents.TaskPath ()
-import Agent.TUI.Model ()
-import Agent.TUI.Motion ()
-import Agent.Tools.MultiAgents ()
-import Agent.Tools.PlanMode ()
-import Agent.Tools.Secret ()
-import Agent.Tools.Types ()
-import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async
     ( Async, cancel, concurrently, poll, wait, withAsync )
-import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar_
@@ -218,41 +135,16 @@ import Control.Concurrent.MVar
     , takeMVar
     , tryPutMVar
     )
-import Control.Concurrent.STM ()
-import Control.Exception ()
 import Control.Exception.Safe ( onException )
 import Control.Monad ( forM_, void, when )
-import Data.Functor ()
 import Data.IORef ( IORef, newIORef, readIORef, writeIORef )
-import Data.List ()
 import Data.Maybe ( isNothing, fromMaybe, isJust )
 import Data.Text ( Text )
-import Data.Time.Clock ()
-import System.Console.ANSI ()
-import System.Console.ANSI.Codes ()
-import System.Directory.OsPath ()
 import System.Environment ( lookupEnv )
-import System.Exit ()
-import System.IO ()
 import System.OsPath ( OsPath, (</>), decodeFS, unsafeEncodeUtf )
-import qualified Data.ByteString as BS ()
-import qualified Agent.Responses.GenericClient as GenericResponses
-    ()
-import qualified Agent.MCP as MCP ()
-import qualified Data.Map.Strict as Map ()
-import qualified Agent.OpenAI.Auth as OpenAI ()
-import qualified Agent.OpenRouter as OpenRouter ()
-import qualified Agent.OpenRouter.Usage as OpenRouterUsage ()
 import qualified Agent.Provider as Provider ( tokenProvider )
-import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
-import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ( empty )
 import qualified Data.Text as Text ( null, pack, unpack )
-import qualified Data.Text.IO as Text ()
-import qualified Agent.XAI.Options as XAI ()
-import qualified Agent.XAI.Client as XAIClient ()
-import qualified Agent.XAI.Request as XAIRequest ()
-import qualified Agent.XAI.Usage as XAIUsage ()
 
 data PreparedStartupAuth = PreparedStartupAuth
     { preparedAuthResult :: !(Either Text LoadedAuth)
@@ -1256,57 +1148,58 @@ launchInitializedTools
     -> InitializedHttpRuntime
     -> IO RunResult
 launchInitializedTools request workspace targets auth refs httpRuntime =
-    runAgentTools
-        request.initializedRunAgentChild
-        auth.initializedLoaded
-        request.initializedConnectedGateway
-        auth.initializedLearnAboutUserRequested
-        auth.initializedCustomBearerToken
-        refs.initializedActiveAccountIdRef
-        refs.initializedActiveAccountRef
-        refs.initializedActiveSelectionRef
-        startup.startupToolEnv
-        workspace.initializedCatalog
-        workspace.initializedSkills
-        refs.initializedGatewayModelsRef
-        targets.initializedGatewayIdentity
-        ( targets.initializedCheckStartupUsageInBackground
-            && isNothing auth.initializedPreparedAccountUsage
-        )
-        targets.initializedConfiguredTarget
-        targets.initializedCustomResponses
-        request.initializedCwd
-        workspace.initializedDatabaseScopes
-        startup.startupEscPaused
-        fullscreen
-        request.initializedHome
-        startup.startupInterrupt
-        startup.startupStdinTty
-        request.initializedProcessRuntime.processMcpSupervisor
-        request.initializedOptions
-        pendingTurn
-        refs.initializedPreferredOpenAiAccountRef
-        request.initializedProcessRuntime
-        workspace.initializedProjectRoot
-        workspace.initializedProjectSettings
-        targets.initializedProjectTarget
-        httpRuntime.initializedResolveActiveAccountLabel
-        request.initializedResumeLock
-        request.initializedResumed
-        targets.initializedResumedTarget
-        request.initializedRoot
-        httpRuntime.initializedSelectHttpAccount
-        refs.initializedSelectableTokenProvider
-        setWindowTitle
-        startup
-        workspace.initializedStateDirectory
-        startup.startupStderr
-        targets.initializedTargetHint
-        httpRuntime.initializedTokenProvider
-        transition
-        targets.initializedTransitionTarget
-        startup.startupUiRuntimeRef
-        unavailableProviders
+    runAgentTools AgentToolsRequest
+        { runAgentChild = request.initializedRunAgentChild
+        , loaded = auth.initializedLoaded
+        , connectedGateway = request.initializedConnectedGateway
+        , learnAboutUserRequested = auth.initializedLearnAboutUserRequested
+        , customBearerToken = auth.initializedCustomBearerToken
+        , activeAccountIdRef = refs.initializedActiveAccountIdRef
+        , activeAccountRef = refs.initializedActiveAccountRef
+        , activeSelectionRef = refs.initializedActiveSelectionRef
+        , baseToolEnv = startup.startupToolEnv
+        , catalog = workspace.initializedCatalog
+        , initialSkills = workspace.initializedSkills
+        , gatewayModelsRef = refs.initializedGatewayModelsRef
+        , gatewayIdentity = targets.initializedGatewayIdentity
+        , checkStartupUsageInBackground =
+            targets.initializedCheckStartupUsageInBackground
+                && isNothing auth.initializedPreparedAccountUsage
+        , configuredOptionTarget = targets.initializedConfiguredTarget
+        , customResponses = targets.initializedCustomResponses
+        , cwd = request.initializedCwd
+        , databaseScopes = workspace.initializedDatabaseScopes
+        , escPaused = startup.startupEscPaused
+        , fullscreen
+        , home = request.initializedHome
+        , interrupt = startup.startupInterrupt
+        , isTty = startup.startupStdinTty
+        , mcpSupervisor = request.initializedProcessRuntime.processMcpSupervisor
+        , options = request.initializedOptions
+        , pendingTurn
+        , preferredOpenAiAccountRef = refs.initializedPreferredOpenAiAccountRef
+        , processRuntime = request.initializedProcessRuntime
+        , projectRoot = workspace.initializedProjectRoot
+        , projectSettings = workspace.initializedProjectSettings
+        , projectTarget = targets.initializedProjectTarget
+        , resolveActiveAccountLabel = httpRuntime.initializedResolveActiveAccountLabel
+        , resumeLock = request.initializedResumeLock
+        , resumed = request.initializedResumed
+        , resumedTarget = targets.initializedResumedTarget
+        , root = request.initializedRoot
+        , selectHttpAccount = httpRuntime.initializedSelectHttpAccount
+        , selectableTokenProvider = refs.initializedSelectableTokenProvider
+        , setWindowTitle
+        , startup
+        , stateDirectory = workspace.initializedStateDirectory
+        , stderrHandle = startup.startupStderr
+        , targetHint = targets.initializedTargetHint
+        , tokenProvider = httpRuntime.initializedTokenProvider
+        , transition
+        , transitionTarget = targets.initializedTransitionTarget
+        , uiRuntimeRef = startup.startupUiRuntimeRef
+        , unavailableProviders
+        }
   where
     startup = request.initializedStartup
     fullscreen = startup.startupFullscreen

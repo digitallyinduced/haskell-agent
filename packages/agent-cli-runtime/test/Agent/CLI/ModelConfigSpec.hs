@@ -52,8 +52,21 @@ spec = describe "Agent.CLI.ModelConfig" do
             (catalogModelsForConnection "openai" catalog)
             `shouldBe`
                 [ "gpt-5.6-sol"
+                , "gpt-6-astra"
                 , "gpt-5.6-terra"
                 , "gpt-5.6-luna"
+                ]
+        fmap
+            (\model ->
+                ( model.catalogModelId
+                , model.catalogModelFallbackPriority
+                ))
+            (catalogModelsForConnection "openai" catalog)
+            `shouldBe`
+                [ ("gpt-5.6-sol", Just 1)
+                , ("gpt-6-astra", Just 0)
+                , ("gpt-5.6-terra", Just 2)
+                , ("gpt-5.6-luna", Just 3)
                 ]
         fmap (.catalogModelId)
             (catalogModelsForConnection "gemini" catalog)
@@ -89,6 +102,19 @@ spec = describe "Agent.CLI.ModelConfig" do
                 Just
                     ( Just ["low", "medium", "high", "xhigh", "max"]
                     , Just "low"
+                    )
+        fmap
+            (\model ->
+                ( model.catalogModelReasoningEfforts
+                , model.catalogModelDefaultReasoningEffort
+                , model.catalogModelDefault
+                ))
+            (Map.lookup "gpt-6-astra" catalog.catalogModelsById)
+            `shouldBe`
+                Just
+                    ( Just ["low", "medium", "high", "xhigh", "max"]
+                    , Just "low"
+                    , False
                     )
 
     it "loads protocol metadata for organization gateway aliases" do

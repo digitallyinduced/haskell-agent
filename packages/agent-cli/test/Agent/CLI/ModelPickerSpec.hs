@@ -188,6 +188,7 @@ spec = do
                     "gpt-5.6-sol"
                     CodexDialect
             listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-sol"
+            listing `shouldSatisfy` Text.isInfixOf "gpt-6-astra"
             listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-terra"
             listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-luna"
             listing `shouldSatisfy` Text.isInfixOf "openai"

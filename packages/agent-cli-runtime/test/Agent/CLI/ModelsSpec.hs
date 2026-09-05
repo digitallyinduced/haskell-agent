@@ -50,15 +50,17 @@ spec = do
                 `shouldBe` defaultModelFor catalog ClaudeCodeProvider
 
         it "ships the configured frontier models for each provider" do
-            modelIdsFor OpenAIProvider `shouldContain` ["gpt-5.6-sol"]
+            modelIdsFor OpenAIProvider
+                `shouldContain` ["gpt-5.6-sol", "gpt-6-astra"]
             modelIdsFor XAIProvider `shouldContain` ["grok-4.6"]
             modelIdsFor OpenRouterProvider `shouldContain` ["stealth/ox-alpha"]
             modelIdsFor GeminiProvider `shouldContain` ["gemini-3.7-flash"]
 
-        it "ships the GPT-5.6 series and each other provider frontier model" do
+        it "ships the OpenAI frontier models and each other provider frontier model" do
             modelIdsFor OpenAIProvider
                 `shouldBe`
                     [ "gpt-5.6-sol"
+                    , "gpt-6-astra"
                     , "gpt-5.6-terra"
                     , "gpt-5.6-luna"
                     ]

@@ -1,19 +1,12 @@
 module Agent.CLI.Runtime.Orchestration.Session
-    ( runAgentSession
+    ( AgentSessionRequest(..)
+    , runAgentSession
     ) where
 
-import Agent.CLI.AccountPicker ()
-import Agent.CLI.AccountSelection ()
-import Agent.CLI.Afk ()
-import Agent.CLI.AgentSessions ()
-import Agent.CLI.AgentViewport ()
-import Agent.CLI.Approval ()
-import Agent.CLI.Artifact ()
 import Agent.CLI.Auth
     ( LoadedAuth(loadedTokenProvider)
     , isGatewayLoadedAuth
     )
-import Agent.CLI.Clipboard ()
 import Agent.CLI.Claude
     ( ClaudeSessionRuntimeSlot
     , newClaudeSessionRuntimeSlot
@@ -25,39 +18,26 @@ import Agent.CLI.CodeModeRuntime
       filterStartupUnavailableTools,
       imageGenerationCodeModeRuntimeFor,
       loadCodexCatalogModelInfo )
-import Agent.CLI.Command ()
 import Agent.CLI.Compaction
     ( AutomaticCompactionBoundary
     , CompactOutcome
     , CompactionInstall(CompactionNotInstalled)
     , OccupancySnapshot
     )
-import Agent.CLI.Config ()
-import Agent.Connectivity ()
-import Agent.CLI.Database ()
 import Agent.CLI.Database.Store (DatabaseScopes)
 import Agent.CLI.Dialects (CodingTools(..))
-import Agent.CLI.Error ()
 import Agent.CLI.GatewayClient
     ( GatewayCredential
     , GatewayModelAccess
     , gatewayCredentialIdentity
     )
-import Agent.CLI.GatewayBridge ()
-import Agent.CLI.Input ()
 import Agent.CLI.Interrupt
     ( InterruptState
     , catchUserInterrupt
     , retryUserInterruptOnce
     , withCtrlCHandler
     )
-import Agent.CLI.LearnedSkills ()
-import Agent.CLI.LearnedSkills.Store ()
-import Agent.CLI.Login ()
-import Agent.CLI.Lsp ()
 import Agent.CLI.ManagedTurn ( ManagedTurnRequest(..) )
-import Agent.CLI.McpManager ()
-import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig
     (ModelCatalog, catalogContextWindowForTransport)
 import Agent.CLI.Models (ModelTarget(targetConnectionId))
@@ -67,7 +47,6 @@ import Agent.CLI.Options
     , CliOptions(optCodeMode)
     )
 import Agent.CLI.PendingInputs (PendingInputs)
-import Agent.CLI.Plan ()
 import Agent.CLI.Project ( ModelSwitchScope(..) )
 import Agent.CLI.Prompt
     ( codexEnvironmentContext,
@@ -75,15 +54,10 @@ import Agent.CLI.Prompt
       appendMcpInstructions,
       systemPromptForCatalogModelWithHostedSearch,
       systemPromptForToolsWithHostedSearch )
-import Agent.CLI.PromptHooks ()
-import Agent.CLI.Provider.OpenAI ()
-import Agent.CLI.Provider.Switch ()
 import Agent.CLI.ProviderAvailability ( probeLoadedAvailability )
 import Agent.CLI.ProviderFallback ( isProviderUnavailable )
 import Agent.CLI.ProviderTransition (PendingTurn, ProviderTransition)
-import Agent.CLI.Recap ()
 import Agent.CLI.Render ( putTextLn )
-import Agent.CLI.ReplMode ()
 import Agent.CLI.Request
     ( requestParams
     , setRequestInstructionsAndTools
@@ -92,11 +66,10 @@ import Agent.CLI.Request
 import Agent.CLI.Resume
     ( SessionInitialContext(..)
     )
-import Agent.CLI.Runtime.HistorySource ()
-import Agent.CLI.Runtime.Orchestration.Background ()
 import Agent.CLI.Runtime.Orchestration.Providers
-    ( runAgentProviders )
-import Agent.CLI.Runtime.Orchestration.Restart ()
+    ( AgentProviderRequest(..)
+    , runAgentProviders
+    )
 import Agent.CLI.Runtime.Orchestration.Startup
     ( clearNativeProgress, mcpToolCollision, reportStartupWarning )
 import Agent.CLI.Runtime.Orchestration.Types
@@ -105,11 +78,7 @@ import Agent.CLI.Runtime.Orchestration.Types
     , fullNativeRunCapabilities
     , nativeLoadsHostWorkspaceContext
     )
-import Agent.CLI.Runtime.Persistence ()
-import Agent.CLI.Runtime.Recap ()
-import Agent.CLI.Runtime.Repl ()
 import Agent.CLI.Runtime.Types ( RunResult(RunQuit) )
-import Agent.CLI.Secret ()
 import Agent.CLI.Session
     ( addSessionUsage,
       ensureSession,
@@ -125,8 +94,6 @@ import Agent.CLI.Session
       SessionMeta(metaId, metaPromptSnapshot, metaTitle),
       SessionTurn,
       SessionPromptSnapshot(..) )
-import Agent.CLI.Session.Attachments ()
-import Agent.CLI.Session.Choices ()
 import Agent.CLI.Session.History
     ( LiveConversation
     , currentLiveTranscriptGeneration,
@@ -134,7 +101,6 @@ import Agent.CLI.Session.History
       evictLiveTranscript,
       readLiveTranscript,
       replaceLiveConversation )
-import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( InitialContextPreload(..)
     , SessionRequest(codexCatalogSession, SessionRequest, catalog,
@@ -165,12 +131,7 @@ import Agent.CLI.Session.Runtime.Types
                      startupNetworkRecovery, startupSessionState,
                      startupNativeHooks) )
 import Agent.CLI.Session.Selection ( reservedSessionId )
-import Agent.CLI.SessionAdmin ()
-import Agent.CLI.SessionEnv ()
-import Agent.CLI.SessionLock ()
 import Agent.CLI.SessionState ( SessionState(sessionConversation) )
-import Agent.CLI.SessionTitle ()
-import Agent.CLI.Skills ()
 import Agent.CLI.Startup.Auth ( markStartupStage, startupDie )
 import Agent.CLI.StartupContext
     ( AgentsContextNotice(..), loadAgentsContextWithPreload )
@@ -191,25 +152,14 @@ import Agent.CLI.Subagents.Runtime.Types
     (SubagentSession, SubagentStoreRoot)
 import Agent.CLI.TUI.App
     ( FullscreenRuntime, withFullscreenSuspended )
-import Agent.CLI.TUI.History ()
-import Agent.CLI.TUI.SessionHistory ()
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Tools
     ( schemasFromAppToolsCodeModeWithHostedSearch
     , schemasFromAppToolsWithHostedSearch
     )
-import Agent.CLI.Turn ()
-import Agent.CLI.Usage ()
-import Agent.CLI.WebFetch ()
-import Agent.CLI.Worktree ()
-import Agent.Cancel ()
-import Agent.Claude ()
 import Agent.Dialect (Dialect, dialectId)
 import Agent.Error (ApiError)
-import Agent.GrokBuild.Dialect.Goal ()
-import Agent.GrokBuild.Dialect.Runtime ()
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
-import Agent.GrokBuild.Dialect.Workflow ()
 import Agent.Loop
     ( ImageAttachment
     , TokenUsage
@@ -217,46 +167,30 @@ import Agent.Loop
     , addTokenUsage
     , emptyTokenUsage
     )
-import Agent.OpenAI.Compaction ()
-import Agent.OpenAI.Usage ()
-import Agent.OpenAI.WebSocketClient ()
 import Agent.OpenAI.Models.Types ( ModelInfo, resolvedContextWindow )
-import Agent.OpenRouter.LoopBackend ()
 import Agent.OpenRouter.Options (ClientOptions)
-import Agent.OsPath ()
 import Agent.Provider
     (Credential, Provider(OpenAIProvider), TokenProvider,
      tokenProviderBillingMode)
-import Agent.ReasoningEffort ()
-import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient (GenericClientOptions)
 import Agent.Responses.Types
     (ResponseItem, ResponseCreateParams(model))
 import Agent.Skills (SkillCatalog, SkillInvocation)
 import Agent.Store.Postgres ( trustedPool )
-import Agent.Store.Types ()
 import Agent.Subagents (SubagentRegistry)
 import Agent.Subagents.Types (RootTurnId, SubagentId)
-import Agent.Subagents.TaskPath ()
-import Agent.TUI.Model ()
-import Agent.TUI.Motion ()
 import Agent.Tools.MultiAgents
     (CollaborationModelTarget, MultiAgentContext, SubagentWorktree)
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks)
-import Agent.Tools.Secret ()
 import Agent.ToolDispatch (canonicalToolName)
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolSchema(..)
     , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp)
     )
-import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async ( waitSTM, withAsync )
-import Control.Concurrent.Chan ()
-import Control.Concurrent.MVar ()
 import Control.Concurrent.STM ( STM, retry )
-import Control.Exception ()
 import Control.Exception.Safe ( mask_, finally )
 import Control.Monad ( forM_, void, when )
 import Data.Functor ( (<&>) )
@@ -266,37 +200,18 @@ import Data.IORef
       newIORef,
       readIORef,
       writeIORef )
-import Data.List ()
 import Data.Map.Strict (Map)
 import Data.Maybe ( isJust, isNothing, fromMaybe )
 import Data.Set (Set)
 import Data.Text (Text)
 import Data.Time.Clock ( getCurrentTime, utctDay )
-import System.Console.ANSI ()
-import System.Console.ANSI.Codes ()
-import System.Directory.OsPath ()
 import System.Environment ( getProgName )
-import System.Exit ()
 import System.IO (Handle, stderr)
 import System.Mem ( performMajorGC )
 import System.OsPath (OsPath)
-import qualified Data.ByteString as BS ()
-import qualified Agent.Responses.GenericClient as GenericResponses
-    ()
 import qualified Agent.MCP as MCP
-import qualified Data.Map.Strict as Map ()
 import qualified Agent.OpenAI.Auth as OpenAI (Pool)
-import qualified Agent.OpenRouter as OpenRouter ()
-import qualified Agent.OpenRouter.Usage as OpenRouterUsage ()
-import qualified Agent.Provider as Provider ()
-import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
-import qualified Agent.CLI.Session.Runner as SessionRunner ()
-import qualified Data.Set as Set ()
 import qualified Data.Text.IO as Text ( hPutStr )
-import qualified Agent.XAI.Options as XAI ()
-import qualified Agent.XAI.Client as XAIClient ()
-import qualified Agent.XAI.Request as XAIRequest ()
-import qualified Agent.XAI.Usage as XAIUsage ()
 
 data AgentSessionRequest closeResult windowTitleResult = AgentSessionRequest
     { loaded :: LoadedAuth
@@ -432,187 +347,9 @@ data SessionLiveRuntime = SessionLiveRuntime
     }
 
 runAgentSession
-    :: LoadedAuth
-    -> Maybe GatewayCredential
-    -> Bool
-    -> OsPath
-    -> IORef Text
-    -> IORef Text
-    -> IORef Text
-    -> GrokSubagentSpecs
-    -> [AppTool]
-    -> ([ImageAttachment] -> IO ())
-    -> IO ()
-    -> IORef Bool
-    -> ModelCatalog
-    -> IORef (Maybe GatewayModelAccess)
-    -> Bool
-    -> (SessionHandle -> IO ())
-    -> Bool
-    -> IO closeResult
-    -> IORef (IO ())
-    -> CodingTools
-    -> (OsPath -> IO (Either Text SubagentWorktree))
-    -> Maybe GenericClientOptions
-    -> OsPath
-    -> [AppTool]
-    -> DatabaseScopes
-    -> SessionInitialContext
-    -> InitialContextPreload
-    -> Dialect
-    -> Text
-    -> IORef Bool
-    -> [AppTool]
-    -> Maybe FullscreenRuntime
-    -> [AppTool]
-    -> IORef Bool
-    -> Maybe [Text]
-    -> Maybe (Text -> IO (Maybe CollaborationModelTarget))
-    -> Maybe (Text -> IO Bool)
-    -> OsPath
-    -> ModelTarget
-    -> InterruptState
-    -> [AppTool]
-    -> Maybe LegacySubagentTarget
-    -> MCP.McpFleet
-    -> [(Text, Text)]
-    -> [AppTool]
-    -> Text
-    -> Maybe MultiAgentContext
-    -> (OsPath -> IO ())
-    -> ClientOptions
-    -> Maybe TokenProvider
-    -> CliOptions
-    -> PendingInputs
-    -> Maybe PendingTurn
-    -> Persistence
-    -> PlanModeHooks
-    -> PlanModeEnv
-    -> ApprovalPolicy
-    -> IORef (Maybe Text)
-    -> OsPath
-    -> Maybe ManagedTurnRequest
-    -> Provider
-    -> Bool
-    -> SubagentRegistry
-    -> (Credential -> IO Text)
-    -> Bool
-    -> Maybe (SessionMeta, [SessionTurn])
-    -> OsPath
-    -> IORef (Maybe RootTurnId)
-    -> (Text -> IO (Either ApiError Text))
-    -> TokenProvider
-    -> [AppTool]
-    -> (Text -> IO titleResult)
-    -> IORef [SkillInvocation]
-    -> IORef SkillCatalog
-    -> StartupRuntime
-    -> FilePath
-    -> Handle
-    -> IORef (Maybe (IO [ResponseItem]))
-    -> IORef (Map SubagentId SubagentSession)
-    -> SubagentStoreRoot
-    -> TokenProvider
-    -> ToolEnv
-    -> [AppTool]
-    -> Maybe ProviderTransition
-    -> (Text -> Text)
-    -> Set Provider
-    -> IO RunResult
-runAgentSession
-    loaded
-    connectedGateway
-    learnAboutUserRequested
-    sessionTmp
-    activeAccountIdRef
-    activeAccountRef
-    activeSelectionRef
-    agentTypesRef
-    allTools
-    recordImageGenerationInputs
-    clearImageGenerationHistory
-    bashEnabledRef
-    catalog
-    gatewayModelsRef
-    checkStartupUsageInBackground
-    claimCurrentSession
-    claudeBypassEnabled
-    closeAll
-    codeModeCloseRef
-    coding
-    createSubagentWorktree
-    customGenericOptions
-    cwd
-    databaseAppTools
-    databaseScopes
-    initialContext
-    initialContextPreload
-    dialect
-    effortText
-    escPaused
-    extraTools
-    fullscreen
-    gatewayTools
-    ghciEnabledRef
-    allowedChildModels
-    resolveChildModel
-    childModelAllowed
-    home
-    inferredTarget
-    interrupt
-    learnedSkillAppTools
-    legacySubagentTarget
-    mcpFleet
-    mcpInstructions
-    mcpTools
-    model
-    multiCtx
-    noteSessionDir
-    openRouterOptions
-    openaiChild
-    options
-    pendingNotices
-    pendingTurn
-    persist
-    planHooks
-    planMode
-    policy
-    preferredOpenAiAccountRef
-    projectRoot
-    promptRequest
-    provider
-    refreshDialectContext
-    registry
-    resolveActiveAccountLabel
-    resumeTargetChanged
-    resumed
-    root
-    rootTurnRef
-    selectHttpAccount
-    selectableTokenProvider
-    sessionTools
-    setWindowTitle
-    skillInvocationsRef
-    skillsRef
-    startup
-    stateDirectory
-    stderrHandle
-    subagentForkSource
-    subagentSessions
-    subagentStoreRoot
-    tokenProvider
-    toolEnv
-    tools
-    transition
-    transportModel
-    unavailableProviders
-    =
-    runAgentSessionRequest AgentSessionRequest{..}
-
-runAgentSessionRequest
     :: AgentSessionRequest closeResult windowTitleResult
     -> IO RunResult
-runAgentSessionRequest request@AgentSessionRequest{closeAll} =
+runAgentSession request@AgentSessionRequest{closeAll} =
     flip finally closeAll do
         validateSessionMcpTools request
         codeRuntime <- prepareSessionCodeRuntime request
@@ -1311,59 +1048,63 @@ launchPreparedSession request promptRuntime liveRuntime = do
     runSessionWithInterruptHandling request progName $
         withSessionStartupAvailability request shouldProbeAtStartup
             \startupUnavailable ->
-                runAgentProviders
-                    (if request.startup.startupBackground
-                        then SessionLocalSwitch
-                        else TopLevelSwitch)
-                    request.loaded
-                    request.connectedGateway
-                    (buildProviderSessionRequest
-                        request
-                        promptRuntime
-                        liveRuntime)
-                    request.activeAccountIdRef
-                    request.activeAccountRef
-                    request.activeSelectionRef
-                    request.catalog
-                    request.claudeBypassEnabled
-                    liveRuntime.sessionContextTokensRef
-                    (sessionContextWindowForParams request)
-                    liveRuntime.sessionConversationRef
-                    (sessionCurrentModelContextWindow
-                        request
-                        promptRuntime)
-                    request.customGenericOptions
-                    request.cwd
-                    request.dialect
-                    request.fullscreen
-                    promptRuntime.sessionAutomaticCompactionHookRef
-                    request.coding.codingTaskPlan
-                    request.home
-                    promptRuntime.sessionInitialPrevious
-                    request.model
-                    request.multiCtx
-                    request.openRouterOptions
-                    request.options
-                    promptRuntime.sessionParams
-                    promptRuntime.sessionParamsRef
-                    request.pendingNotices
-                    request.persist
-                    request.preferredOpenAiAccountRef
-                    request.projectRoot
-                    request.provider
-                    liveRuntime.sessionRecordCompactionUsage
-                    request.resolveActiveAccountLabel
-                    request.selectHttpAccount
-                    request.selectableTokenProvider
-                    shouldProbeAtStartup
-                    request.startup
-                    startupUnavailable
-                    request.stderrHandle
-                    liveRuntime.sessionSubagentRuntime
-                    request.tokenProvider
-                    request.transition
-                    request.transportModel
-                    request.unavailableProviders
+                runAgentProviders AgentProviderRequest
+                    { modelSwitchScope =
+                          if request.startup.startupBackground
+                              then SessionLocalSwitch
+                              else TopLevelSwitch
+                    , loaded = request.loaded
+                    , connectedGateway = request.connectedGateway
+                    , sessionRequest =
+                          buildProviderSessionRequest
+                              request
+                              promptRuntime
+                              liveRuntime
+                    , activeAccountIdRef = request.activeAccountIdRef
+                    , activeAccountRef = request.activeAccountRef
+                    , activeSelectionRef = request.activeSelectionRef
+                    , catalog = request.catalog
+                    , claudeBypassEnabled = request.claudeBypassEnabled
+                    , contextTokensRef = liveRuntime.sessionContextTokensRef
+                    , contextWindowForParams = sessionContextWindowForParams request
+                    , conversationRef = liveRuntime.sessionConversationRef
+                    , currentModelContextWindow =
+                          sessionCurrentModelContextWindow
+                              request
+                              promptRuntime
+                    , customGenericOptions = request.customGenericOptions
+                    , cwd = request.cwd
+                    , dialect = request.dialect
+                    , fullscreen = request.fullscreen
+                    , automaticCompactionHookRef =
+                        promptRuntime.sessionAutomaticCompactionHookRef
+                    , taskPlan = request.coding.codingTaskPlan
+                    , home = request.home
+                    , initialPrevious = promptRuntime.sessionInitialPrevious
+                    , model = request.model
+                    , multiCtx = request.multiCtx
+                    , openRouterOptions = request.openRouterOptions
+                    , options = request.options
+                    , paramsRef = promptRuntime.sessionParamsRef
+                    , pendingNotices = request.pendingNotices
+                    , persist = request.persist
+                    , preferredOpenAiAccountRef = request.preferredOpenAiAccountRef
+                    , projectRoot = request.projectRoot
+                    , provider = request.provider
+                    , recordCompactionUsage = liveRuntime.sessionRecordCompactionUsage
+                    , resolveActiveAccountLabel = request.resolveActiveAccountLabel
+                    , selectHttpAccount = request.selectHttpAccount
+                    , selectableTokenProvider = request.selectableTokenProvider
+                    , shouldProbeAtStartup
+                    , startup = request.startup
+                    , startupUnavailable
+                    , stderrHandle = request.stderrHandle
+                    , subagentRuntime = liveRuntime.sessionSubagentRuntime
+                    , tokenProvider = request.tokenProvider
+                    , transition = request.transition
+                    , transportModel = request.transportModel
+                    , unavailableProviders = request.unavailableProviders
+                    }
 
 -- | Print a copy-pasteable --resume line whenever the CLI session quits.
 -- Ctrl-C is normalized to the same graceful 'RunQuit' result as :q/Ctrl-D so

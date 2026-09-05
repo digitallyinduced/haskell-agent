@@ -39,6 +39,15 @@
       "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
       "default_reasoning_effort": "low",
       "default": true,
+      "fallback_priority": 1
+    },
+    {
+      "id": "gpt-6-astra",
+      "connection": "openai",
+      "dialect": "codex",
+      "label": "frontier",
+      "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "default_reasoning_effort": "low",
       "fallback_priority": 0
     },
     {
@@ -48,7 +57,7 @@
       "label": "balanced",
       "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
       "default_reasoning_effort": "medium",
-      "fallback_priority": 1
+      "fallback_priority": 2
     },
     {
       "id": "gpt-5.6-luna",
@@ -57,7 +66,7 @@
       "label": "fast · low cost",
       "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
       "default_reasoning_effort": "medium",
-      "fallback_priority": 2
+      "fallback_priority": 3
     },
     {
       "id": "grok-4.6",
