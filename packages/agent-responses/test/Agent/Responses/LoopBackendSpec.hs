@@ -350,6 +350,110 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             other -> expectationFailure
                 ("unexpected native computer continuation: " <> show other)
 
+    it "labels a structured full accessibility snapshot with its revision" do
+        let accessibilityState = Aeson.object
+                [ "kind" Aeson..= ("full" :: Text.Text)
+                , "revision" Aeson..= (1 :: Int)
+                , "snapshot" Aeson..= Aeson.object
+                    ["application" Aeson..= ("TextEdit" :: Text.Text)]
+                ]
+            encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "ignored"
+                    , screenshotDataUrl = "data:image/jpeg;base64,AA=="
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Nothing
+                    , computerOutputExtra = KeyMap.singleton
+                        "accessibility_state"
+                        accessibilityState
+                    }
+            result = ToolCallResult
+                { callId = "call-native-full"
+                , output = encoded
+                , callKind = ComputerFunctionCallKind
+                }
+        case turnInputsToItems [CompletedTool result] of
+            FunctionCallOutputItem output : _ ->
+                case Aeson.toJSON output.output of
+                    Aeson.String rendered -> do
+                        rendered `shouldSatisfy` Text.isInfixOf
+                            "Full macOS accessibility snapshot, revision 1:"
+                        rendered `shouldSatisfy` Text.isInfixOf
+                            "\"kind\":\"full\""
+                    other -> expectationFailure
+                        ("expected text output, got " <> show other)
+            other -> expectationFailure
+                ("unexpected native computer continuation: " <> show other)
+
+    it "labels accessibility deltas with their base and new revisions" do
+        let accessibilityState = Aeson.object
+                [ "kind" Aeson..= ("delta" :: Text.Text)
+                , "base_revision" Aeson..= (3 :: Int)
+                , "revision" Aeson..= (4 :: Int)
+                , "patch" Aeson..= ([] :: [Aeson.Value])
+                ]
+            encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "ignored"
+                    , screenshotDataUrl = "data:image/jpeg;base64,AA=="
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Nothing
+                    , computerOutputExtra = KeyMap.singleton
+                        "accessibility_state"
+                        accessibilityState
+                    }
+            result = ToolCallResult
+                { callId = "call-native-delta"
+                , output = encoded
+                , callKind = ComputerFunctionCallKind
+                }
+        case turnInputsToItems [CompletedTool result] of
+            FunctionCallOutputItem output : _ ->
+                Aeson.toJSON output.output `shouldSatisfy` \case
+                    Aeson.String rendered ->
+                        "macOS accessibility changes, revision 3 -> 4:"
+                            `Text.isInfixOf` rendered
+                            && "\"patch\":[]" `Text.isInfixOf` rendered
+                    _ -> False
+            other -> expectationFailure
+                ("unexpected native computer continuation: " <> show other)
+
+    it "labels structured accessibility capture failures" do
+        let accessibilityState = Aeson.object
+                [ "kind" Aeson..= ("unavailable" :: Text.Text)
+                , "revision" Aeson..= (2 :: Int)
+                , "reason" Aeson..= ("AX timeout" :: Text.Text)
+                ]
+            encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "ignored"
+                    , screenshotDataUrl = "data:image/jpeg;base64,AA=="
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Nothing
+                    , computerOutputExtra = KeyMap.singleton
+                        "accessibility_state"
+                        accessibilityState
+                    }
+            result = ToolCallResult
+                { callId = "call-native-unavailable"
+                , output = encoded
+                , callKind = ComputerFunctionCallKind
+                }
+        case turnInputsToItems [CompletedTool result] of
+            FunctionCallOutputItem output : _ ->
+                Aeson.toJSON output.output `shouldSatisfy` \case
+                    Aeson.String rendered ->
+                        "macOS accessibility state unavailable, revision 2:"
+                            `Text.isInfixOf` rendered
+                            && "\"reason\":\"AX timeout\""
+                                `Text.isInfixOf` rendered
+                    _ -> False
+            other -> expectationFailure
+                ("unexpected native computer continuation: " <> show other)
+
     it "keeps computer output before its observation in standard and Lite requests" do
         let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
                 ComputerCallOutput

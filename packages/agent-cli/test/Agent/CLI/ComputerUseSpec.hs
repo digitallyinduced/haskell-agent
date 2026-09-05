@@ -1,11 +1,18 @@
 module Agent.CLI.ComputerUseSpec (spec) where
 
 import Agent.CLI.ComputerUse
-    ( ComputerObservation(..)
+    ( AccessibilityObservation(..)
+    , AccessibilityPatchOperation(..)
+    , AccessibilitySnapshot(..)
+    , ComputerObservation(..)
     , ComputerUseBackend(..)
     , ScreenshotEncoding(..)
+    , advanceAccessibilityObservation
+    , applyAccessibilityPatch
     , computerApprovalPrompt
+    , decodeAccessibilitySnapshot
     , executeComputerCallWithBackend
+    , initialAccessibilityDeltaState
     , keyCombinationScript
     , parseDisplaySize
     , parseSessionLocked
@@ -29,6 +36,91 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "accessibility observations" do
+        it "decodes the versioned native snapshot schema" do
+            decodeAccessibilitySnapshot
+                "{\"schema_version\":1,\"scope\":{\"pid\":42},\"contents\":[]}"
+                `shouldBe` Right
+                    (AccessibilitySnapshot
+                        1
+                        (Aeson.object ["pid" Aeson..= (42 :: Int)])
+                        (Aeson.toJSON ([] :: [Int])))
+
+        it "rejects unsupported snapshot schema versions" do
+            decodeAccessibilitySnapshot
+                "{\"schema_version\":2,\"scope\":{},\"contents\":[]}"
+                `shouldSatisfy` either
+                    (Text.isInfixOf "unsupported")
+                    (const False)
+
+        it "emits a full snapshot followed by an empty delta" do
+            let (first, state) =
+                    advanceAccessibilityObservation
+                        initialAccessibilityDeltaState
+                        exampleAccessibilitySnapshot
+                (second, _) =
+                    advanceAccessibilityObservation
+                        state
+                        exampleAccessibilitySnapshot
+            first `shouldBe`
+                AccessibilityFull 1 exampleAccessibilitySnapshot
+            second `shouldBe` AccessibilityDelta 1 2 []
+
+        it "emits reconstructable patches with escaped JSON Pointer paths" do
+            let oldSnapshot = largeAccessibilitySnapshot
+                    (Aeson.object ["label/with~escape" Aeson..= ("old" :: Text.Text)])
+                newSnapshot = largeAccessibilitySnapshot
+                    (Aeson.object ["label/with~escape" Aeson..= ("new" :: Text.Text)])
+                (_, state) =
+                    advanceAccessibilityObservation
+                        initialAccessibilityDeltaState
+                        oldSnapshot
+                (observation, _) =
+                    advanceAccessibilityObservation state newSnapshot
+            case observation of
+                AccessibilityDelta 1 2 patch -> do
+                    patch `shouldContain`
+                        [AccessibilityReplace
+                            "/contents/change/label~1with~0escape"
+                            (Aeson.String "new")]
+                    applyAccessibilityPatch
+                        (Aeson.toJSON oldSnapshot)
+                        patch
+                        `shouldBe` Right (Aeson.toJSON newSnapshot)
+                _ -> expectationFailure "expected an accessibility delta"
+
+        it "checkpoints when the application/window scope changes" do
+            let (_, state) =
+                    advanceAccessibilityObservation
+                        initialAccessibilityDeltaState
+                        exampleAccessibilitySnapshot
+                changed = exampleAccessibilitySnapshot
+                    { accessibilitySnapshotScope =
+                        Aeson.object ["pid" Aeson..= (99 :: Int)]
+                    }
+                (observation, _) =
+                    advanceAccessibilityObservation state changed
+            observation `shouldBe` AccessibilityFull 2 changed
+
+        it "encodes accessibility state as structured JSON" do
+            let backend = ComputerUseBackend
+                    { computerRunTransaction = \_ _ _ ->
+                        pure (Right
+                            (ComputerObservation
+                                (ImageAttachment "image/png" "observation")
+                                (Just (AccessibilityFull
+                                    1
+                                    exampleAccessibilitySnapshot))))
+                    }
+            result <- executeComputerCallWithBackend
+                backend
+                ScreenshotPng
+                exampleCall { computerActions = [ScreenshotAction] }
+            result `shouldSatisfy` either
+                (const False)
+                (Text.isInfixOf
+                    "\"accessibility_state\":{\"kind\":\"full\"")
+
     describe "computer action validation" do
         it "preserves supported mouse buttons and modifiers" do
             pointerScript (ClickAction 12 34 "back" ["shift"])
@@ -482,6 +574,24 @@ spec = do
                 (not . ("top secret" `Text.isInfixOf`))
             encoded `shouldSatisfy`
                 (not . ("large-private-payload" `Text.isInfixOf`))
+
+exampleAccessibilitySnapshot :: AccessibilitySnapshot
+exampleAccessibilitySnapshot = AccessibilitySnapshot
+    1
+    (Aeson.object
+        [ "pid" Aeson..= (42 :: Int)
+        , "window" Aeson..= ("main" :: Text.Text)
+        ])
+    (Aeson.object ["role" Aeson..= ("AXWindow" :: Text.Text)])
+
+largeAccessibilitySnapshot :: Aeson.Value -> AccessibilitySnapshot
+largeAccessibilitySnapshot change = AccessibilitySnapshot
+    1
+    (Aeson.object ["pid" Aeson..= (42 :: Int)])
+    (Aeson.object
+        [ "change" Aeson..= change
+        , "unchanged" Aeson..= Text.replicate 512 "x"
+        ])
 
 toolCall :: ComputerCall -> ToolCall
 toolCall call = ToolCall

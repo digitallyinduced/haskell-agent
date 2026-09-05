@@ -1,6 +1,16 @@
 -- | Function-based computer use backed by macOS screen capture and input.
 module Agent.CLI.ComputerUse
     ( ComputerObservation(..)
+    , AccessibilitySnapshot(..)
+    , AccessibilityPatchOperation(..)
+    , AccessibilityObservation(..)
+    , AccessibilityDeltaState
+    , initialAccessibilityDeltaState
+    , decodeAccessibilitySnapshot
+    , advanceAccessibilityObservation
+    , unavailableAccessibilityObservation
+    , resetAccessibilityDeltaState
+    , applyAccessibilityPatch
     , ComputerUseBackend(..)
     , ScreenshotEncoding(..)
     , computerToolName
@@ -24,6 +34,7 @@ module Agent.CLI.ComputerUse
 
 import qualified Agent.Json.Decode as Json
 import Agent.Loop (ImageAttachment(..))
+import Agent.CLI.ComputerUse.Accessibility
 import Agent.Responses.Types
     ( ComputerAction(..)
     , ComputerCall(..)
@@ -255,7 +266,7 @@ data ScreenshotEncoding
 
 data ComputerObservation = ComputerObservation
     { computerObservationImage :: !ImageAttachment
-    , computerObservationAccessibility :: !(Maybe Text)
+    , computerObservationAccessibility :: !(Maybe AccessibilityObservation)
     } deriving (Eq, Show)
 
 -- | One computer-use transaction. The backend owns display discovery,
@@ -354,7 +365,7 @@ encodeComputerOutput call observation =
             , computerOutputStatus = Nothing
             , computerOutputExtra = maybe
                 KeyMap.empty
-                (KeyMap.singleton "accessibility_state" . Aeson.String)
+                (KeyMap.singleton "accessibility_state" . Aeson.toJSON)
                 observation.computerObservationAccessibility
             }
   where

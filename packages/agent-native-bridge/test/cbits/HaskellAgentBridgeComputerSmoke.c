@@ -49,6 +49,9 @@ static int32_t computer_callback(
     uint8_t *output,
     size_t output_capacity,
     size_t *output_length,
+    uint8_t *accessibility_output,
+    size_t accessibility_output_capacity,
+    size_t *accessibility_output_length,
     uint64_t *output_display_token,
     int32_t *output_width,
     int32_t *output_height,
@@ -66,12 +69,17 @@ static int32_t computer_callback(
             || text != NULL || text_length != 0
             || requested_image_format != HA_COMPUTER_IMAGE_NONE
             || output == NULL || output_capacity != HA_COMPUTER_ERROR_CAPACITY
-            || output_length == NULL || output_display_token == NULL
+            || output_length == NULL
+            || accessibility_output != NULL
+            || accessibility_output_capacity != 0
+            || accessibility_output_length == NULL
+            || output_display_token == NULL
             || output_width == NULL
             || output_height == NULL || output_image_format == NULL) {
         return HA_COMPUTER_STATUS_INVALID_ARGUMENT;
     }
     *output_length = 0;
+    *accessibility_output_length = 0;
     *output_display_token = 42;
     *output_width = 1440;
     *output_height = 900;
@@ -82,18 +90,21 @@ static int32_t computer_callback(
 int ha_computer_callback_abi_smoke(void) {
     uint8_t output[HA_COMPUTER_ERROR_CAPACITY];
     size_t output_length = 17;
+    size_t accessibility_output_length = 17;
     uint64_t output_display_token = 0;
     int32_t output_width = 0;
     int32_t output_height = 0;
     int32_t output_image_format = -1;
     ha_computer_callback callback = computer_callback;
 
-    if (HA_COMPUTER_ACTION_STRUCT_SIZE_V1 != 64
+    if (HA_COMPUTER_ABI_VERSION != 2
+            || HA_COMPUTER_ACTION_STRUCT_SIZE_V1 != 64
             || HA_COMPUTER_MAX_ACTIONS != 10
             || HA_COMPUTER_MAX_POINTS_PER_ACTION != 1024
             || HA_COMPUTER_MAX_TOTAL_POINTS != 10240
             || HA_COMPUTER_MAX_TEXT_BYTES != 327680
             || HA_COMPUTER_OUTPUT_CAPACITY != 16777216
+            || HA_COMPUTER_ACCESSIBILITY_CAPACITY != 524288
             || HA_COMPUTER_STATUS_DISPLAY_CHANGED != 9) {
         return 1;
     }
@@ -115,6 +126,9 @@ int ha_computer_callback_abi_smoke(void) {
         output,
         sizeof(output),
         &output_length,
+        NULL,
+        0,
+        &accessibility_output_length,
         &output_display_token,
         &output_width,
         &output_height,
@@ -122,6 +136,7 @@ int ha_computer_callback_abi_smoke(void) {
     );
     if (status != HA_COMPUTER_STATUS_SUCCESS
             || output_length != 0
+            || accessibility_output_length != 0
             || output_display_token != 42
             || output_width != 1440
             || output_height != 900
