@@ -4,6 +4,11 @@ module Agent.CLI.Session.Runner.Execution
     , SessionRunnerContinuation(..)
     , runSession
     ) where
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    , readSessionRequestModel
+    , modifySessionRequestOptions
+    )
 import Agent.CLI.CodeModeRuntime
 import Agent.CLI.Claude
     ( ClaudeSessionRuntime(..)
@@ -327,7 +332,7 @@ withSessionTitleRuntime
 withSessionTitleRuntime host SessionRequest{..} SessionBackend{..} =
     withSessionTitleManager
         btwBackend
-        (readIORef paramsRef)
+        (readSessionRequestParams paramsRef)
         host.hostTitleEvent
 
 -- | Mutable controls shared by rendering, tools, persistence, and the agent
@@ -340,7 +345,6 @@ data SessionControlRuntime = SessionControlRuntime
     , controlAllowedToolsRef :: !(IORef (Set.Set Text.Text))
     , controlComputerUseEnabledRef :: !(IORef Bool)
     , controlLastAssistantRef :: !(IORef (Maybe Text.Text))
-    , controlModelRef :: !(IORef Text.Text)
     , controlUnavailableProvidersRef :: !(IORef (Set.Set Provider))
     , controlStartupUnavailableRef :: !(IORef (Maybe (STM ApiError)))
     , controlRestartEffortRef :: !(IORef (Maybe Text.Text))
@@ -381,14 +385,13 @@ newSessionControlRuntime host SessionRequest{..} = do
                     computerToolName
                     (sessionDirectTools refreshTools codeModeRuntime))
     lastAssistantRef <- newIORef Nothing
-    modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     unavailableProvidersRef <- newIORef unavailableProviders
     startupUnavailableRef <- newIORef startupUnavailable
     restartEffortRef <- newIORef Nothing
     lastFailedTurnRef <- newIORef Nothing
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     let loadSelectedAgent agentId = do
-            effectiveModel <- readIORef modelRef
+            effectiveModel <- readSessionRequestModel paramsRef
             lookupOrCreateSubagentSession
                 subagentSessions
                 storeRoot
@@ -470,7 +473,6 @@ newSessionControlRuntime host SessionRequest{..} = do
         , controlAllowedToolsRef = allowedToolsRef
         , controlComputerUseEnabledRef = computerUseEnabledRef
         , controlLastAssistantRef = lastAssistantRef
-        , controlModelRef = modelRef
         , controlUnavailableProvidersRef = unavailableProvidersRef
         , controlStartupUnavailableRef = startupUnavailableRef
         , controlRestartEffortRef = restartEffortRef
@@ -722,7 +724,7 @@ buildSessionLoopEventRuntime
         , renderLock = host.hostIoLock
         , renderStdout = host.hostStdoutHandle
         , renderStderr = host.hostStderrHandle
-        , renderModelRef = controls.controlModelRef
+        , renderModel = readSessionRequestModel paramsRef
         , renderNativeProgress =
             host.hostStderrTty
                 && terminal.terminalNativeProgress
@@ -765,7 +767,7 @@ buildSessionLoopEventRuntime
                 case event of
                     TurnFinished _ -> do
                         occupancy <- readIORef contextOccupancyRef
-                        params <- readIORef paramsRef
+                        params <- readSessionRequestParams paramsRef
                         history <- readLiveTranscript conversationRef
                         contextWindow <- currentContextWindow
                         emitUiEvent runtime $
@@ -1022,7 +1024,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
                             nativeCapabilities.nativeProviderHostedTools
                             dialect
                             enabledTools
-        modifyIORef' paramsRef
+        modifySessionRequestOptions paramsRef
             (setRequestInstructionsAndTools
                 instructionText
                 (Just toolSchemas))
@@ -1630,7 +1632,7 @@ installSessionActions
                                     runtime.runtimeInput
                         showImmediate (formatQueuedPrompts prompts)
                     ReplContext -> do
-                        currentParams <- readIORef env.sessionParams
+                        currentParams <- readSessionRequestParams env.sessionParams
                         history <- readLiveTranscript conversationRef
                         occupancy <- readIORef contextOccupancyRef
                         contextWindow <- currentContextWindow

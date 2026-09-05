@@ -10,6 +10,9 @@ module Agent.CLI.Subagents.Runtime
     , runHttpSubagent, runXaiParentSubagent, grokSpawnedChildIdentity
     , usesOpenAiChildTransport, validatePersistedSubagentTarget
     ) where
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    )
 import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.CLI.Compaction
@@ -577,7 +580,7 @@ prepareCodexSubagent runtime env sendToRoot = do
             <$> lookupAgentType runtime.subagentTypes env.subId
     childModel <- lookupAgentModel runtime.subagentTypes env.subId
     childEffort <- lookupAgentReasoningEffort runtime.subagentTypes env.subId
-    parentParams <- readIORef runtime.subagentParams
+    parentParams <- readSessionRequestParams runtime.subagentParams
     let (provisionalModel, provisionalEffort) =
             resolveChildModelAndEffort
                 OpenAIProvider
@@ -938,7 +941,7 @@ runHttpSubagentWith
         childModel <- lookupAgentModel runtime.subagentTypes env.subId
         childEffort <-
             lookupAgentReasoningEffort runtime.subagentTypes env.subId
-        parentParams <- readIORef runtime.subagentParams
+        parentParams <- readSessionRequestParams runtime.subagentParams
         let inheritedParentModel =
                 inheritedGrokChildModel
                     runtime
@@ -1119,7 +1122,7 @@ prepareChild
 prepareChild
         runtime provider currentEffectiveModel currentEffort currentDialect
         env sendToRoot = do
-    parentParams <- readIORef runtime.subagentParams
+    parentParams <- readSessionRequestParams runtime.subagentParams
     childEnv <- do
         freshEnv <- defaultToolEnv env.subCwd
         pure freshEnv

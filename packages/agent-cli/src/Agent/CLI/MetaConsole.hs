@@ -21,6 +21,10 @@ module Agent.CLI.MetaConsole
     , formatMetaError
     ) where
 
+import Agent.CLI.Session.Request
+    ( SessionRequestState
+    , readSessionRequestParams
+    )
 import Agent.Cancel (CancelFlag, newCancelFlag, waitCancel)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Config (McpInitStrategy(..))
@@ -49,7 +53,6 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (Object, Parser)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum)
-import Data.IORef (IORef, readIORef)
 import Data.List (nub)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
@@ -931,12 +934,12 @@ runMetaConsoleWithCancel
         -> IO (Either MetaError MetaPlan)
         -> IO (Either MetaError MetaPlan))
     -> BtwBackendFactory
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> Aeson.Value
     -> Text
     -> IO (Either MetaError MetaPlan)
 runMetaConsoleWithCancel withCancelScope makeBackend paramsRef context request = do
-    params <- privateMetaParams <$> readIORef paramsRef
+    params <- privateMetaParams <$> readSessionRequestParams paramsRef
     cancel <- newCancelFlag
     let Backend submit = makeBackend params
         initialPrompt = metaConsolePrompt context request

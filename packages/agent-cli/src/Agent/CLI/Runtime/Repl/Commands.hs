@@ -5,6 +5,9 @@ module Agent.CLI.Runtime.Repl.Commands
     , preparePromptSkillInputsWithPaste
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    )
 import Agent.CLI.AgentViewport
     ( AgentViewportEnv(viewportSelect, viewportEntries,
                        viewportSelected) )
@@ -680,7 +683,7 @@ handleReplLine
         displayInfo message (Text.putStrLn message)
         next
     showContextReport next = do
-        currentParams <- readIORef env.sessionParams
+        currentParams <- readSessionRequestParams env.sessionParams
         history <- readLiveTranscript conversationRef
         occupancy <- readIORef contextOccupancyRef
         contextWindow <- currentContextWindow

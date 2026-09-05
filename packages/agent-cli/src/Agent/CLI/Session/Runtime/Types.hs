@@ -8,6 +8,9 @@ module Agent.CLI.Session.Runtime.Types
     , StartupRuntime(..)
     ) where
 
+import Agent.CLI.Session.Request
+    ( SessionRequestState
+    )
 import Agent.CLI.ActiveAccount (ActiveAccountRef)
 import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.AgentViewport
@@ -71,7 +74,6 @@ import Agent.Provider
     , Provider
     , TokenProvider
     )
-import Agent.Responses.Types (ResponseCreateParams)
 import Agent.ProjectInstructions (LoadedAgentsMd)
 import Agent.Skills
     ( SkillCatalog
@@ -159,7 +161,7 @@ data SessionRequest = SessionRequest
     , pendingTurn :: !(Maybe PendingTurn)
     , unavailableProviders :: !(Set Provider)
     , startupUnavailable :: !(Maybe (STM ApiError))
-    , paramsRef :: !(IORef ResponseCreateParams)
+    , paramsRef :: !(SessionRequestState)
     , conversationRef :: !(IORef LiveConversation)
     , contextOccupancyRef :: !(IORef (Maybe OccupancySnapshot))
     , currentContextWindow :: !(IO (Maybe Int))
