@@ -75,10 +75,11 @@ import Agent.CLI.Provider.Switch ( loadSelectedAccountAuth )
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback )
 import Agent.CLI.ProviderTransition
-    ( ProviderTransition(transitionAutomaticBilling,
+    ( ProviderTransition(transitionCause,
                          transitionUnavailableProviders, transitionPendingTurn,
                          transitionTarget, transitionAccountSelectionId,
-                         transitionAccountId) )
+                         transitionAccountId)
+    , TransitionCause(AutomaticFallback) )
 import Agent.CLI.Resume ( publishResumeHistoryAfterBoundary )
 import Agent.CLI.Runtime.HistorySource
     ( loadFullscreenHistoryPage, sessionUiPageSize )
@@ -801,9 +802,8 @@ validateInitializedAuth request targets loaded = do
                     <> " but auth resolved "
                     <> providerSlug loaded.loadedProvider
         _ -> pure ()
-    case request.initializedTransition
-        >>= (.transitionAutomaticBilling) of
-        Just sourceBilling
+    case (.transitionCause) <$> request.initializedTransition of
+        Just (AutomaticFallback sourceBilling)
             | not
                 (allowsAutomaticBillingFallback
                     sourceBilling

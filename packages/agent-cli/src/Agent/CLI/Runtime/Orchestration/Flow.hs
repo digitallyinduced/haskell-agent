@@ -47,7 +47,7 @@ import Agent.CLI.ProviderTransition
       ProviderTransition(ProviderTransition, transitionCause,
                          transitionUnavailableProviders, transitionPendingTurn,
                          transitionTarget, transitionAccountSelectionId,
-                         transitionAccountId, transitionAutomaticBilling,
+                         transitionAccountId,
                          transitionSessionId, transitionEffort),
       TransitionCause(AutomaticFallback, ManualTransition) )
 import Agent.CLI.Render ( putTextLn )
@@ -322,7 +322,7 @@ runAgentWithRuntime processRuntime runMode options = do
             RunProviderStartFailed apiError ->
                 case transition of
                     Just failed
-                        | failed.transitionCause == AutomaticFallback ->
+                        | AutomaticFallback _ <- failed.transitionCause ->
                             continueAutomaticFallback
                                 (nativeProviderFallbackEnabled runMode)
                                 (nativeRunHomeHint runMode)
@@ -510,7 +510,6 @@ runAgent
                                     , transitionAccountId = Nothing
                                     , transitionUnavailableProviders = Set.empty
                                     , transitionCause = ManualTransition
-                                    , transitionAutomaticBilling = Nothing
                                     }
                             Nothing ->
                                 ProviderTransition
@@ -522,7 +521,6 @@ runAgent
                                     , transitionPendingTurn = Nothing
                                     , transitionUnavailableProviders = Set.empty
                                     , transitionCause = ManualTransition
-                                    , transitionAutomaticBilling = Nothing
                                     }
                     callbacks = RestartCallbacks
                         { restartPrepare =
