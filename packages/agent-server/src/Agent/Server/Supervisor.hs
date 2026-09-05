@@ -158,6 +158,8 @@ type TurnBoundaryGuard =
 data HumanRequestPersistenceResolution
     = HumanRequestResolvedDurably !HumanRequest
     | HumanRequestNotFoundDurably
+    | HumanRequestAlreadyResolvedDurably
+    | HumanRequestInvalidDecisionDurably
     | HumanRequestLocalOnly
     deriving (Eq, Show)
 
@@ -915,6 +917,20 @@ resolveHumanRequest supervisor boundary requestId response = do
             pure (Left (HumanRequestResolutionStoreUnavailable err))
         Right HumanRequestNotFoundDurably ->
             pure (Left HumanRequestResolutionNotFound)
+        Right HumanRequestAlreadyResolvedDurably ->
+            pure
+                ( Left
+                    ( HumanRequestResolutionConflict
+                        "request has already been resolved"
+                    )
+                )
+        Right HumanRequestInvalidDecisionDurably ->
+            pure
+                ( Left
+                    ( HumanRequestResolutionConflict
+                        "decision is not one of the allowed options"
+                    )
+                )
         Right (HumanRequestResolvedDurably request) ->
             resolveLocal (Just request)
         Right HumanRequestLocalOnly ->

@@ -27,6 +27,7 @@ import Agent.Store.Postgres.Session (
     createSession,
     deleteSession,
  )
+import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (bracket, finally)
 import Control.Monad (void)
 import Data.Text (Text)
@@ -595,15 +596,17 @@ exerciseTurnStoreWithOwners pool ownerOne ownerTwo = do
         releaseServerSessionMutation pool protectedMutation
             `shouldReturn` Right ()
 
-    heartbeatServerTurnOwner ownerTwo
-        `shouldReturn` Right ()
     interrupted <-
-        loadServerTurn
-            pool
-            boundary
-            interruptedRequest.reserveServerTurnId
+        timeout
+            (5 * 1000 * 1000)
+            ( waitForInterruptedTurn
+                pool
+                ownerTwo
+                boundary
+                interruptedRequest.reserveServerTurnId
+            )
     interrupted `shouldSatisfy` \case
-        Right (Just stored) ->
+        Just (Right (Just stored)) ->
             stored.storedServerTurnStatus == ServerTurnFailed
                 && stored.storedServerTurnFinishedAt /= Nothing
                 && stored.storedServerTurnError
@@ -715,6 +718,25 @@ exerciseTurnStoreWithOwners pool ownerOne ownerTwo = do
     listed `shouldSatisfy` \case
         Right turns -> length turns == 3
         Left _ -> False
+
+waitForInterruptedTurn ::
+    StorePool ->
+    ServerTurnOwnerLease ->
+    ServerTurnBoundary ->
+    Text ->
+    IO (Either StoreError (Maybe StoredServerTurn))
+waitForInterruptedTurn pool owner boundary turnId =
+    heartbeatServerTurnOwner owner >>= \case
+        Left err -> pure (Left err)
+        Right () ->
+            loadServerTurn pool boundary turnId >>= \case
+                loaded@(Right (Just stored))
+                    | stored.storedServerTurnStatus == ServerTurnFailed ->
+                        pure loaded
+                Left err -> pure (Left err)
+                _ -> do
+                    threadDelay 10000
+                    waitForInterruptedTurn pool owner boundary turnId
 
 instanceOne :: Text
 instanceOne = "01999999-0000-7000-8000-000000000003"

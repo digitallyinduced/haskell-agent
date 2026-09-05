@@ -214,6 +214,40 @@ spec = describe "agent-server WAI application" do
             LBS8.unpack response.simpleBody
                 `shouldContain` "\"code\":\"store_unavailable\""
 
+    it "preserves durable human request conflicts as 409" do
+        let requestId = "01999999-1111-7111-8111-111111111124"
+            cases =
+                [ ( HumanRequestAlreadyResolvedDurably
+                  , "request has already been resolved"
+                  )
+                , ( HumanRequestInvalidDecisionDurably
+                  , "decision is not one of the allowed options"
+                  )
+                ]
+            assertConflict (resolution, expectedMessage) = do
+                let backend =
+                        fakeBackend
+                            { backendTurnPersistence =
+                                inMemoryTurnPersistence
+                                    { turnPersistenceResolveHumanRequest =
+                                        \_ _ _ -> pure (Right resolution)
+                                    }
+                            }
+                withBackendApplication backend immediateRunner \application -> do
+                    response <-
+                        perform
+                            application
+                            methodPost
+                            ["v1", "requests", requestId, "resolve"]
+                            validHeaders
+                            "{\"decision\":\"approve\"}"
+                    response.simpleStatus `shouldBe` status409
+                    LBS8.unpack response.simpleBody
+                        `shouldContain` "\"code\":\"request_not_resolved\""
+                    LBS8.unpack response.simpleBody
+                        `shouldContain` expectedMessage
+        mapM_ assertConflict cases
+
     it "distinguishes a remote turn from an unavailable agent snapshot" do
         createdAt <- getCurrentTime
         let turnId = TurnId "01999999-1111-7111-8111-111111111122"

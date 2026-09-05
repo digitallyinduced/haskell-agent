@@ -493,9 +493,9 @@ resolveStoredHumanRequest store boundary requestId response = do
         Right HumanRequestStore.ServerHumanRequestNotFound ->
             Right HumanRequestNotFoundDurably
         Right HumanRequestStore.ServerHumanRequestAlreadyResolved ->
-            Left "request has already been resolved"
+            Right HumanRequestAlreadyResolvedDurably
         Right HumanRequestStore.ServerHumanRequestInvalidDecision ->
-            Left "decision is not one of the allowed options"
+            Right HumanRequestInvalidDecisionDurably
         Right (HumanRequestStore.ServerHumanRequestResolved request) ->
             first renderStoreError $
                 HumanRequestResolvedDurably
