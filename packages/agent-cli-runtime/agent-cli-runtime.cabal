@@ -40,7 +40,11 @@ library
     import:           common-options
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_cli_runtime
-    other-modules:    Paths_agent_cli_runtime
+    other-modules:    Agent.CLI.Session.Storage
+                    , Agent.CLI.Session.TaskPlan
+                    , Agent.CLI.Session.TempWorkspace
+                    , Agent.CLI.Session.Transfer
+                    , Paths_agent_cli_runtime
     exposed-modules:  Agent.CLI.AgentSessions.Process
                     , Agent.CLI.Auth
                     , Agent.CLI.Auth.Gemini
