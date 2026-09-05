@@ -79,6 +79,33 @@ spec = describe "agent-server WAI application" do
         request.createTurnInput `shouldBe` ""
         request.createTurnImages
             `shouldBe` [ImageAttachment "image/png" "\x89PNG\r\n\x1a\n"]
+        request.createTurnFiles `shouldBe` []
+
+    it "decodes opaque generic files and rejects unsafe names" do
+        let decode body = eitherDecode body :: Either String CreateTurnRequest
+        request <-
+            case decode
+                "{\"files\":[{\"name\":\"report.pdf\",\"mimeType\":\"application/pdf\",\"data\":\"UERG\"}]}"
+            of
+                Left err -> expectationFailure err >> fail "unreachable"
+                Right decoded -> pure decoded
+        request.createTurnInput `shouldBe` ""
+        request.createTurnFiles
+            `shouldBe` [FileAttachment "report.pdf" "application/pdf" "PDF"]
+        decode
+            "{\"files\":[{\"name\":\"../secret\",\"mimeType\":\"text/plain\",\"data\":\"eA==\"}]}"
+            `shouldSatisfy` isLeft
+
+    it "allows at most five total attachments" do
+        let decode body = eitherDecode body :: Either String CreateTurnRequest
+            file = "{\"name\":\"x\",\"mimeType\":\"text/plain\",\"data\":\"eA==\"}"
+            files = LBS8.intercalate "," (replicate 5 file)
+            image = "{\"mimeType\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}"
+        (eitherDecode ("{\"images\":[" <> image <> "],\"files\":[" <> files <> "]}") :: Either String CreateTurnRequest)
+            `shouldSatisfy` isLeft
+        decode
+            "{\"files\":[{\"name\":\"x\",\"mimeType\":\"text/plain\\ninvalid\",\"data\":\"eA==\"}]}"
+            `shouldSatisfy` isLeft
 
     it "rejects invalid image base64 and media types" do
         let decode body = eitherDecode body :: Either String CreateTurnRequest

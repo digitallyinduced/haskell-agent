@@ -633,22 +633,38 @@ resolveHumanRequestResponse
 
 turnReservationInput :: CreateTurnRequest -> Text
 turnReservationInput request
-    | null request.createTurnImages = request.createTurnInput
-    | otherwise =
+    | null request.createTurnImages && null request.createTurnFiles =
+        request.createTurnInput
+    | null request.createTurnFiles =
         "image-turn-v1:"
+            <> Text.pack (show (hash imagePayload :: Digest SHA256))
+    | otherwise =
+        "attachment-turn-v1:"
             <> Text.pack (show (hash payload :: Digest SHA256))
   where
     promptBytes = TextEncoding.encodeUtf8 request.createTurnInput
-    payload =
+    imagePayload =
         lengthPrefix promptBytes
             <> promptBytes
             <> foldMap encodeImage request.createTurnImages
+    payload =
+        imagePayload
+            <> foldMap encodeFile request.createTurnFiles
     encodeImage image =
         let mimeBytes = TextEncoding.encodeUtf8 image.imageMime
          in lengthPrefix mimeBytes
                 <> mimeBytes
                 <> lengthPrefix image.imageBytes
                 <> image.imageBytes
+    encodeFile file =
+        let nameBytes = TextEncoding.encodeUtf8 file.fileName
+            mimeBytes = TextEncoding.encodeUtf8 file.fileMime
+         in lengthPrefix nameBytes
+                <> nameBytes
+                <> lengthPrefix mimeBytes
+                <> mimeBytes
+                <> lengthPrefix file.fileBytes
+                <> file.fileBytes
     lengthPrefix bytes =
         ByteString8.pack (show (ByteString.length bytes) <> ":")
 
@@ -661,12 +677,13 @@ createTurn
     -> IO (Either ApiError TurnRecord)
 createTurn backend supervisor boundary sessionId request
     | Text.null (Text.strip request.createTurnInput)
-        && null request.createTurnImages =
+        && null request.createTurnImages
+        && null request.createTurnFiles =
         pure $
             Left ApiError
                 { apiErrorStatus = 422
                 , apiErrorCode = "empty_input"
-                , apiErrorMessage = "turn input must not be empty"
+                , apiErrorMessage = "turn input or an attachment is required"
                 , apiErrorDetails = Nothing
                 }
     | otherwise = do
@@ -681,6 +698,7 @@ createTurn backend supervisor boundary sessionId request
                 , turnSpecClientRequestId = clientRequestId
                 , turnSpecPrompt = request.createTurnInput
                 , turnSpecImages = request.createTurnImages
+                , turnSpecFiles = request.createTurnFiles
                 , turnSpecBoundary = boundary
                 }
             validateSession =
