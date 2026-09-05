@@ -20,7 +20,7 @@ import Agent.CLI.Artifact ()
 import Agent.CLI.Auth ()
 import Agent.CLI.Clipboard ()
 import Agent.CLI.Command
-    ( currentEffort, currentModel, mkSlashCatalog )
+    ( currentEffort, currentModel, mkSlashCatalog, SlashCatalog )
 import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.CLI.Compaction ()
 import Agent.CLI.Config ()
@@ -32,13 +32,15 @@ import Agent.CLI.Error ()
 import Agent.CLI.Dictation
     ( dictationTargetForSession )
 import Agent.CLI.GatewayClient
-    ( cachedGatewayModels
+    ( GatewayModelAccess
+    , cachedGatewayModels
     , fetchGatewayUsage
     , gatewayModelIds
     )
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input
-    ( readReplLineWithCatalogForProvider
+    ( ReplLine
+    , readReplLineWithCatalogForProvider
     , readReplLineWithCatalogForTarget
     )
 import Agent.CLI.Interrupt ()
@@ -120,7 +122,8 @@ import Agent.CLI.Style
       userBackground )
 import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
-    ( emitUiEvent,
+    ( FullscreenRuntime
+    , emitUiEvent,
       readFullscreenLineOrWithCatalog,
       setFullscreenImagePreviews )
 import Agent.CLI.Terminal
@@ -167,7 +170,8 @@ import Agent.Store.Types ()
 import Agent.Subagents ()
 import Agent.Subagents.TaskPath ()
 import Agent.TUI.Model
-    ( UiEvent(UiSetPromptLimitStatus, UiSystemMessage) )
+    ( PromptState
+    , UiEvent(UiSetPromptLimitStatus, UiSystemMessage) )
 import Agent.TUI.Motion ()
 import Agent.ToolDispatch ()
 import Agent.Tools.MultiAgents ()
@@ -257,7 +261,6 @@ replWithDraft env@SessionEnv
     , sessionParams = paramsRef
     , sessionPolicy = policyRef
     , sessionPlanMode = planMode
-    , sessionTokenProvider = tokenProvider
     , sessionSkillInvocations = skillInvocationsRef
     , sessionRefreshSkills = refreshSkills
     , sessionActiveToolNames = readActiveToolNames
@@ -315,38 +318,14 @@ replWithDraft env@SessionEnv
                         (isJust selectAccount)
                         usage
                         (length pendingAttachments)
-                readPrompt = do
-                    startupUnavailable <- readIORef startupUnavailableRef
-                    failedTurn <- readIORef env.sessionLastFailedTurn
-                    let backgroundWake =
-                            case failedTurn of
-                                -- Preserve the user's retry candidate. Its
-                                -- next retry or replacement turn will consume
-                                -- the queued completion through normal
-                                -- steering.
-                                Just _ -> retry
-                                Nothing ->
-                                    BackgroundCompletionWake
-                                        <$ awaitBackgroundCompletion
-                                            env.sessionSteeringInputs
-                        wake = case startupUnavailable of
-                            Nothing -> backgroundWake
-                            Just unavailable ->
-                                (ProviderUnavailableWake <$> unavailable)
-                                    `orElse` backgroundWake
-                    readFullscreenLineOrWithCatalog
-                        runtime
-                        slashCatalog
-                        promptState
-                        draft
-                        wake
-            withAsync
-                (refreshAccountLimit
-                    gatewayAccess
-                    (currentModel params)
-                    runtime)
-                \_ ->
-                readPrompt
+            readFullscreenPrompt
+                env
+                runtime
+                slashCatalog
+                promptState
+                draft
+                gatewayAccess
+                (currentModel params)
         Nothing -> Right <$> withMVar render.renderLock \_ -> do
             -- The inline editor redraws its ANSI frame with several writes.
             -- Keep the renderer out for the complete prompt lifetime so a
@@ -457,8 +436,65 @@ replWithDraft env@SessionEnv
                 planState
                 policy
                 mline
-  where
-    refreshAccountLimit gatewayAccess model runtime =
+
+readFullscreenPrompt
+    :: SessionEnv
+    -> FullscreenRuntime
+    -> SlashCatalog
+    -> PromptState
+    -> Text
+    -> Maybe GatewayModelAccess
+    -> Text
+    -> IO (Either ReplWake ReplLine)
+readFullscreenPrompt
+    env
+    runtime
+    slashCatalog
+    promptState
+    draft
+    gatewayAccess
+    model =
+    withAsync
+        (refreshPromptAccountLimit env gatewayAccess model runtime)
+        \_ -> do
+            startupUnavailable <- readIORef env.sessionStartupUnavailable
+            failedTurn <- readIORef env.sessionLastFailedTurn
+            let backgroundWake =
+                    case failedTurn of
+                        -- Preserve the user's retry candidate. Its next retry
+                        -- or replacement turn will consume the queued
+                        -- completion through normal steering.
+                        Just _ -> retry
+                        Nothing ->
+                            BackgroundCompletionWake
+                                <$ awaitBackgroundCompletion
+                                    env.sessionSteeringInputs
+                wake = case startupUnavailable of
+                    Nothing -> backgroundWake
+                    Just unavailable ->
+                        (ProviderUnavailableWake <$> unavailable)
+                            `orElse` backgroundWake
+            readFullscreenLineOrWithCatalog
+                runtime
+                slashCatalog
+                promptState
+                draft
+                wake
+
+refreshPromptAccountLimit
+    :: SessionEnv
+    -> Maybe GatewayModelAccess
+    -> Text
+    -> FullscreenRuntime
+    -> IO ()
+refreshPromptAccountLimit
+    SessionEnv
+        { sessionProvider = provider
+        , sessionTokenProvider = tokenProvider
+        }
+    gatewayAccess
+    model
+    runtime =
         case (gatewayAccess, provider, tokenProvider) of
             (Just access, _, _) ->
                 fetchGatewayUsage access model >>= \case
@@ -497,15 +533,15 @@ replWithDraft env@SessionEnv
                                     publish
                                         (formatOpenRouterLimitStatus snapshot)
             _ -> pure ()
-      where
-        refreshWith tokens fetch formatStatus =
-            getNextToken tokens Nothing >>= \case
-                Left _ -> pure ()
-                Right credential ->
-                    fetch credential >>= \case
-                        Left _ -> pure ()
-                        Right snapshot -> publish (formatStatus snapshot)
-        publish limitStatus =
-            forM_
-                limitStatus
-                (emitUiEvent runtime . UiSetPromptLimitStatus . Just)
+  where
+    refreshWith tokens fetch formatStatus =
+        getNextToken tokens Nothing >>= \case
+            Left _ -> pure ()
+            Right credential ->
+                fetch credential >>= \case
+                    Left _ -> pure ()
+                    Right snapshot -> publish (formatStatus snapshot)
+    publish limitStatus =
+        forM_
+            limitStatus
+            (emitUiEvent runtime . UiSetPromptLimitStatus . Just)

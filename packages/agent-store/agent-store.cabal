@@ -46,6 +46,8 @@ library
                     , Agent.Store.Postgres.Managed
                     , Agent.Store.Postgres.Migrations
                     , Agent.Store.Postgres.Scope
+                    , Agent.Store.Postgres.ServerTurn
+                    , Agent.Store.Postgres.ServerHumanRequest
                     , Agent.Store.Postgres.Session
                     , Agent.Store.Postgres.Skill
                     , Agent.Store.Postgres.Tenant
@@ -61,6 +63,7 @@ library
                     , Agent.Store.Postgres.Session.Write
                     , Agent.Store.Postgres.Hasql
                     , Agent.Store.Postgres.Sql
+                    , Agent.Store.Postgres.ServerTurn.OwnerFence
                     , Agent.Store.Postgres.SessionItem
                     , Agent.Store.Postgres.SessionItem.Mapping.Statements.BaseRows
                     , Agent.Store.Postgres.SessionItem.Mapping.Statements.ContentParts
@@ -89,6 +92,7 @@ library
                     , Agent.Store.Postgres.Skill.Mapping.Statements.UpdateSkill
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
+                    , aeson
                     , async >= 2.2.6 && < 2.3
                     , bytestring
                     , containers
@@ -99,6 +103,7 @@ library
                     , hasql
                     , hasql-pool
                     , hasql-transaction
+                    , pqi
                     , pqi-ffi
                     , process
                     , safe-exceptions
@@ -186,6 +191,8 @@ test-suite agent-store-test
                     , Agent.Store.Postgres.ManagedSpec
                     , Agent.Store.PoolCacheSpec
                     , Agent.Store.Postgres.ScopeSpec
+                    , Agent.Store.Postgres.ServerTurnRecoverySpec
+                    , Agent.Store.Postgres.ServerTurnSpec
                     , Agent.Store.Postgres.SessionSpec
                     , Agent.Store.Postgres.SkillSpec
                     , Agent.Store.Postgres.TenantSpec

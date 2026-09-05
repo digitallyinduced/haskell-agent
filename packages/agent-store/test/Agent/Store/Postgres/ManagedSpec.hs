@@ -242,6 +242,44 @@ spec =
                                 (closeStorePool ownerPool)
                     ) `finally` cleanup
 
+        it "upgrades the published server-turn migration in place" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = defaultManagedPostgresConfig stateDirectory ""
+                    cleanup = do
+                        _ <- stopManagedPostgres config
+                        pure ()
+                    publishedMigrations =
+                        takeWhile
+                            ((<= 111) . (.migrationVersion))
+                            coreMigrations
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+                    openStorePool config defaultPoolConfig >>= \case
+                        Left err ->
+                            expectationFailure
+                                ("could not open migration pool: " <> show err)
+                        Right ownerPool ->
+                            finally
+                                (do
+                                    runMigrations
+                                        ownerPool
+                                        publishedMigrations
+                                        `shouldReturn` Right ()
+                                    runMigrations ownerPool coreMigrations
+                                        `shouldReturn` Right ()
+                                    withSession ownerPool
+                                        ( Session.statement
+                                            ()
+                                            serverCoordinationSchemaStatement
+                                        )
+                                        `shouldReturn`
+                                            Right (True, True, True, True, True)
+                                )
+                                (closeStorePool ownerPool)
+                    ) `finally` cleanup
+
         it "upgrades an empty normalized session schema in place" $
             withSystemTempDirectory "ha" \stateDirectory -> do
                 let
@@ -667,6 +705,39 @@ providerTelemetryColumnStatement = Statement.preparable
     Encoders.noParams
     (Decoders.singleRow $
         Decoders.column (Decoders.nonNullable Decoders.bool))
+
+serverCoordinationSchemaStatement ::
+    Statement () (Bool, Bool, Bool, Bool, Bool)
+serverCoordinationSchemaStatement = Statement.preparable
+    "SELECT\
+    \ to_regclass('harness.server_session_mutations') IS NOT NULL,\
+    \ EXISTS (\
+    \   SELECT 1 FROM information_schema.columns\
+    \   WHERE table_schema = 'harness'\
+    \     AND table_name = 'server_turns'\
+    \     AND column_name = 'cancellation_requested_at'\
+    \ ),\
+    \ NOT EXISTS (\
+    \   SELECT 1 FROM information_schema.columns\
+    \   WHERE table_schema = 'harness'\
+    \     AND table_name = 'server_turns'\
+    \     AND column_name = 'teardown_pending'\
+    \ ),\
+    \ EXISTS (\
+    \   SELECT 1 FROM information_schema.columns\
+    \   WHERE table_schema = 'harness'\
+    \     AND table_name = 'server_turn_owners'\
+    \     AND column_name = 'revoked_at'\
+    \ ),\
+    \ to_regclass('harness.server_human_requests') IS NOT NULL"
+    Encoders.noParams
+    (Decoders.singleRow $
+        (,,,,)
+            <$> Decoders.column (Decoders.nonNullable Decoders.bool)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool))
 
 migratedOpaqueFieldsStatement :: Statement () (Bool, Bool, Bool)
 migratedOpaqueFieldsStatement = Statement.preparable

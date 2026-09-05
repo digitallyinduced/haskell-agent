@@ -3,7 +3,7 @@
   "info": {
     "title": "haskell-agent server API",
     "version": "1.0.0",
-    "description": "Local, versioned API for durable agent sessions and process-local turns. Default loopback mode requires an exact local Host header; configuring a token enables bearer mode on any bind. Remote mode requires --allow-remote, bearer authentication, and trusted TLS termination. Organization-gateway credentials form an exact isolation boundary for sessions, turns, requests, and events."
+    "description": "Local, versioned API for durable agent sessions and idempotently submitted turns. Default loopback mode requires an exact local Host header; configuring a token enables bearer mode on any bind. Remote mode requires --allow-remote, bearer authentication, and trusted TLS termination. Organization-gateway credentials form an exact isolation boundary for sessions, turns, requests, and events."
   },
   "servers": [
     {
@@ -43,8 +43,29 @@
               }
             }
           },
-          "429": {
-            "description": "The global or per-tenant event subscriber limit was reached.",
+          "default": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/v1/turns/{turnId}/result": {
+      "parameters": [
+        { "$ref": "#/components/parameters/TurnId" }
+      ],
+      "get": {
+        "tags": ["turns"],
+        "operationId": "getTurnResult",
+        "description": "Returns the canonical durable result for a terminal turn. Active turns return 409.",
+        "responses": {
+          "200": {
+            "description": "Canonical terminal turn result.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TurnResult" }
+              }
+            }
+          },
+          "409": {
+            "description": "The turn is not terminal.",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
@@ -313,7 +334,7 @@
       "post": {
         "tags": ["turns"],
         "operationId": "createTurn",
-        "description": "Queues one in-process agent turn. A session may have only one queued/running/waiting turn.",
+        "description": "Durably reserves and queues one agent turn. Reusing clientRequestId with identical input returns the original turn; reusing it with different input is rejected. Once reserved, an admission rejection is represented by the same durable failed turn. A session may have only one queued/running/waiting turn.",
         "requestBody": {
           "required": true,
           "content": {
@@ -324,7 +345,7 @@
         },
         "responses": {
           "202": {
-            "description": "Turn accepted.",
+            "description": "Turn durably accepted. Immediate admission failures are returned as a terminal failed turn.",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/Turn" }
@@ -348,7 +369,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Process-local turn records.",
+            "description": "Durable turn records.",
             "content": {
               "application/json": {
                 "schema": {
@@ -404,6 +425,14 @@
               }
             }
           },
+          "202": {
+            "description": "Durable cancellation requested from the owning server instance.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Turn" }
+              }
+            }
+          },
           "default": { "$ref": "#/components/responses/Error" }
         }
       }
@@ -433,6 +462,14 @@
               }
             }
           },
+          "409": {
+            "description": "The turn exists, but its process-local agent snapshot is unavailable on this server instance.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          },
           "default": { "$ref": "#/components/responses/Error" }
         }
       }
@@ -441,6 +478,15 @@
       "get": {
         "tags": ["requests"],
         "operationId": "listRequests",
+        "parameters": [
+          {
+            "name": "turnId",
+            "in": "query",
+            "required": false,
+            "description": "Restrict the bounded pending-request view to one turn.",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Pending approvals, root access prompts, and plan interactions.",
@@ -512,6 +558,14 @@
               }
             }
           },
+          "429": {
+            "description": "The global or per-tenant event subscriber limit was reached.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          },
           "default": { "$ref": "#/components/responses/Error" }
         }
       }
@@ -536,13 +590,13 @@
         "name": "turnId",
         "in": "path",
         "required": true,
-        "schema": { "type": "string" }
+        "schema": { "type": "string", "format": "uuid" }
       },
       "RequestId": {
         "name": "requestId",
         "in": "path",
         "required": true,
-        "schema": { "type": "string" }
+        "schema": { "type": "string", "format": "uuid" }
       }
     },
     "responses": {
@@ -669,6 +723,11 @@
       "CreateTurn": {
         "type": "object",
         "properties": {
+          "clientRequestId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional for legacy callers. Supplying a stable UUID makes turn creation idempotent."
+          },
           "input": { "type": "string", "minLength": 1 }
         },
         "required": ["input"],
@@ -677,8 +736,9 @@
       "Turn": {
         "type": "object",
         "properties": {
-          "id": { "type": "string" },
+          "id": { "type": "string", "format": "uuid" },
           "sessionId": { "type": "string" },
+          "clientRequestId": { "type": "string", "format": "uuid" },
           "status": {
             "type": "string",
             "enum": ["queued", "running", "waiting_for_input", "completed", "failed", "cancelled"]
@@ -688,7 +748,42 @@
           "finishedAt": { "type": ["string", "null"], "format": "date-time" },
           "error": { "type": ["string", "null"] }
         },
-        "required": ["id", "sessionId", "status", "createdAt", "startedAt", "finishedAt", "error"]
+        "required": ["id", "sessionId", "clientRequestId", "status", "createdAt", "startedAt", "finishedAt", "error"]
+      },
+      "TurnCompletion": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["completed", "incomplete"]
+          },
+          "reason": { "type": "string" },
+          "reasoningTokens": { "type": ["integer", "null"], "minimum": 0 }
+        },
+        "required": ["status"]
+      },
+      "TurnOutput": {
+        "type": "object",
+        "properties": {
+          "responseId": { "type": "string" },
+          "assistantText": { "type": ["string", "null"] },
+          "assistantTextTruncated": { "type": "boolean" },
+          "completion": { "$ref": "#/components/schemas/TurnCompletion" }
+        },
+        "required": ["responseId", "assistantText", "assistantTextTruncated", "completion"]
+      },
+      "TurnResult": {
+        "type": "object",
+        "properties": {
+          "turn": { "$ref": "#/components/schemas/Turn" },
+          "output": {
+            "oneOf": [
+              { "$ref": "#/components/schemas/TurnOutput" },
+              { "type": "null" }
+            ]
+          }
+        },
+        "required": ["turn", "output"]
       },
       "Agent": {
         "type": "object",
@@ -703,8 +798,8 @@
       "HumanRequest": {
         "type": "object",
         "properties": {
-          "id": { "type": "string" },
-          "turnId": { "type": "string" },
+          "id": { "type": "string", "format": "uuid" },
+          "turnId": { "type": "string", "format": "uuid" },
           "sessionId": { "type": "string" },
           "kind": {
             "type": "string",
