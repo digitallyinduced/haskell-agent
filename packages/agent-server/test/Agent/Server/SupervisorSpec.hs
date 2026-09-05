@@ -6,6 +6,7 @@ import Agent.Server.Types
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (
     async,
+    asyncThreadId,
     cancel,
     wait,
     waitCatch,
@@ -322,6 +323,25 @@ spec = describe "turn supervisor" do
                     localAccessBoundary
                     "session-a"
                     `shouldReturn` False
+
+    it "preserves the incumbent cancellation task when a duplicate loses" do
+        never <- newEmptyMVar
+        let turnId = TurnId "01999999-3333-7333-8333-333333333333"
+        withAsync (takeMVar never) \incumbent ->
+            withAsync (takeMVar never) \duplicate -> do
+                let registered = Map.singleton turnId incumbent
+                    afterDuplicate =
+                        deleteCancellationTaskIfOwned
+                            turnId
+                            (asyncThreadId duplicate)
+                            registered
+                    afterIncumbent =
+                        deleteCancellationTaskIfOwned
+                            turnId
+                            (asyncThreadId incumbent)
+                            registered
+                Map.member turnId afterDuplicate `shouldBe` True
+                Map.member turnId afterIncumbent `shouldBe` False
 
     it "cancels active workers concurrently during shutdown" do
         firstStarted <- newEmptyMVar

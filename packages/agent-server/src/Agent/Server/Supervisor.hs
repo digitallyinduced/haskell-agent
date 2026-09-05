@@ -36,14 +36,16 @@ module Agent.Server.Supervisor
     , lookupTurnAgents
     , publishEvent
     , subscribeEvents
+    , deleteCancellationTaskIfOwned
     ) where
 
 import Agent.Server.Identifier (newUUIDv7Text)
 import Agent.Server.Types
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (ThreadId, myThreadId, threadDelay)
 import Control.Concurrent.Async
     ( Async
     , async
+    , asyncThreadId
     , cancel
     , forConcurrently
     , mapConcurrently_
@@ -1186,7 +1188,8 @@ spawnCancellationTask :: Supervisor -> TurnRecord -> IO ()
 spawnCancellationTask supervisor record = mask \restore -> do
     start <- newEmptyMVar
     task <-
-        async $
+        async do
+            taskThreadId <- myThreadId
             (readMVar start >> restore cancelRecord)
                 `finally`
                     atomically
@@ -1195,8 +1198,9 @@ spawnCancellationTask supervisor record = mask \restore -> do
                             ( \state ->
                                 state
                                     { stateCancellationTasks =
-                                        Map.delete
+                                        deleteCancellationTaskIfOwned
                                             record.turnRecordId
+                                            taskThreadId
                                             state.stateCancellationTasks
                                     }
                             )
@@ -1234,6 +1238,22 @@ spawnCancellationTask supervisor record = mask \restore -> do
                         supervisor
                         record.turnRecordBoundary
                         record.turnRecordId
+
+-- | Delete only the task whose own finalizer is running. A rejected duplicate
+-- must leave the incumbent registered so shutdown can still cancel and join it.
+deleteCancellationTaskIfOwned
+    :: TurnId
+    -> ThreadId
+    -> Map TurnId (Async ())
+    -> Map TurnId (Async ())
+deleteCancellationTaskIfOwned turnId ownerThreadId =
+    Map.update
+        ( \registered ->
+            if asyncThreadId registered == ownerThreadId
+                then Nothing
+                else Just registered
+        )
+        turnId
 
 reserveRunnable :: Supervisor -> STM (Maybe (TurnId, TurnSpec))
 reserveRunnable supervisor = do
