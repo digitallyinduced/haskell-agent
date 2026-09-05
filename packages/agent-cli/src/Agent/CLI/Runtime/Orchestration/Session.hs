@@ -50,7 +50,10 @@ import Agent.CLI.Interrupt
     )
 import Agent.CLI.ManagedTurn ( ManagedTurnRequest(..) )
 import Agent.CLI.ModelConfig
-    (ModelCatalog, catalogContextWindowForTransport)
+    ( ModelCatalog
+    , catalogContextWindowForTransport
+    , catalogSupportsAsyncToolCallsForTransport
+    )
 import Agent.CLI.Models (ModelTarget(targetConnectionId))
 import Agent.CLI.Options
     ( ApprovalPolicy
@@ -177,8 +180,8 @@ import Agent.CLI.TUI.App
     ( FullscreenRuntime, withFullscreenSuspended, emitUiEvent )
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Tools
-    ( schemasFromAppToolsCodeModeWithHostedSearch
-    , schemasFromAppToolsWithHostedSearch
+    ( schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
+    , schemasFromAppToolsWithHostedSearchAndAsyncCapability
     )
 import Agent.Tools.OutputArtifact (finalizeToolOutput)
 import qualified Control.Exception.Safe as Safe
@@ -427,6 +430,8 @@ prepareSessionCodeRuntime AgentSessionRequest
     , dialect
     , selectableTokenProvider
     , model
+    , catalog
+    , inferredTarget
     , startup
     , options
     , tools
@@ -529,17 +534,24 @@ prepareSessionCodeRuntime AgentSessionRequest
                         (Just sessionTmp)
                         today
                         (isOneShot options)
+        modelSupportsAsync =
+            catalogSupportsAsyncToolCallsForTransport
+                catalog
+                inferredTarget.targetConnectionId
+                model
         wireSchemas = case sessionCodeModeRuntime of
             Just codeMode ->
-                schemasFromAppToolsCodeModeWithHostedSearch
+                schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
                     includeHostedSearch
+                    modelSupportsAsync
                     dialect
                     ( codeMode.codeModeWireTools
                         <> codeMode.codeModeDirectTools
                     )
             Nothing ->
-                schemasFromAppToolsWithHostedSearch
+                schemasFromAppToolsWithHostedSearchAndAsyncCapability
                     includeHostedSearch
+                    modelSupportsAsync
                     dialect
                     providerTools
         sessionEnvironmentContext =

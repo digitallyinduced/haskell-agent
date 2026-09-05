@@ -608,6 +608,13 @@ spec = describe "Agent.CLI.Session" do
                         "new binary instructions"
                         [promptFunctionTool "lookup" "new documentation"]
                         "low"
+                asyncRegenerated =
+                    requestParams
+                        XAIProvider
+                        "grok-4"
+                        "new binary instructions"
+                        [asyncPromptFunctionTool "lookup" "new documentation"]
+                        "low"
                 renamed =
                     requestParams
                         XAIProvider
@@ -629,6 +636,11 @@ spec = describe "Agent.CLI.Session" do
                 (fromFilePath "/tmp/work")
                 (Just sessionId)
                 `shouldBe` Just snapshot
+            compatible
+                asyncRegenerated
+                (fromFilePath "/tmp/work")
+                (Just sessionId)
+                `shouldBe` Nothing
             compatible
                 renamed
                 (fromFilePath "/tmp/work")
@@ -2227,6 +2239,16 @@ promptFunctionTool toolName documentation =
         , parameters = Nothing
         , strict = Just True
         , async = Nothing
+        }
+
+asyncPromptFunctionTool :: Text.Text -> Text.Text -> ResponseTool
+asyncPromptFunctionTool toolName documentation =
+    FunctionToolValue FunctionTool
+        { name = toolName
+        , description = Just documentation
+        , parameters = Nothing
+        , strict = Just True
+        , async = Just True
         }
 
 fixedTime :: UTCTime

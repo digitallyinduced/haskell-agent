@@ -25,8 +25,9 @@ typedef void (*ha_event_callback)(
      * Kind 4 is also emitted for tool/argument updates; consumers replace
      * the card identified by call ID. Its flags use bit 0 for encrypted
      * arguments, bit 1 for truncation, and bit 2 for an asynchronous call;
-     * tool-finish uses bit 1 for truncation. Consumers must ignore unknown
-     * flag bits for forward compatibility.
+     * tool-finish uses bit 1 for truncation and bit 2 for an asynchronous
+     * result. Consumers must ignore unknown flag bits for forward
+     * compatibility.
      * Turn IDs are stable task IDs for the lifetime of an engine. Events for
      * one task are delivered in order, but callbacks for different tasks may
      * run concurrently on runtime worker threads. The callback must be

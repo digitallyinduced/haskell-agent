@@ -199,7 +199,13 @@ import Agent.Loop (TokenUsage(..))
 import Agent.OpenAI.Compaction (rewindSessionUserText)
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Provider (Provider)
-import Agent.Responses.Types (ResponseCreateParams(model))
+import Agent.Responses.Types
+    ( CustomTool(..)
+    , FunctionTool(..)
+    , NamespaceTool(..)
+    , ResponseCreateParams(model)
+    , ResponseTool(..)
+    )
 import Agent.Store.Postgres (normalizePostgresTimestamp)
 import Agent.Store.Postgres.Connection (StorePool)
 import qualified Agent.Store.Postgres.Session as Store
@@ -255,8 +261,8 @@ import System.Posix.Files
 -- | Reuse an immutable provider prefix only when the runtime target and the
 -- ordered provider-visible tool identities still describe the same session.
 -- Tool documentation/schema bytes may evolve between binaries; the persisted
--- versions remain authoritative until a tool is added, removed, reordered, or
--- renamed.
+-- versions remain authoritative until a tool is added, removed, reordered,
+-- renamed, or changes asynchronous execution capability.
 compatibleSessionPromptSnapshot
     :: Provider
     -> Text
@@ -282,7 +288,20 @@ compatibleSessionPromptSnapshot
             ( requestToolIdentities snapshot.promptSnapshotTools
                 == requestToolIdentities currentTools
             )
+        guard
+            ( requestToolAsyncCapabilities snapshot.promptSnapshotTools
+                == requestToolAsyncCapabilities currentTools
+            )
         pure snapshot
+
+requestToolAsyncCapabilities :: [ResponseTool] -> [Bool]
+requestToolAsyncCapabilities = concatMap \case
+    FunctionToolValue FunctionTool{async} -> [async == Just True]
+    CustomToolValue CustomTool{async} -> [async == Just True]
+    NamespaceToolValue NamespaceTool{tools} ->
+        requestToolAsyncCapabilities tools
+    KnownResponseTool{} -> []
+    UnknownResponseTool{} -> []
 
 
 newPendingPersistence :: SessionCreate -> IO Persistence

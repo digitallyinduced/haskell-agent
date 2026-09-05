@@ -879,6 +879,7 @@ data SessionShellRuntime = SessionShellRuntime
     , shellComputerUseEnabled :: !(IO Bool)
     , shellSetComputerUseEnabled :: !(Bool -> IO Text.Text)
     , shellSetTempDir :: !(OsPath -> IO ())
+    , shellRefreshRequestParams :: !(IO ())
     }
 
 buildSessionShellRuntime
@@ -895,6 +896,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         , shellComputerUseEnabled = readIORef computerUseEnabledRef
         , shellSetComputerUseEnabled = setComputerUse
         , shellSetTempDir = setSessionTempDir
+        , shellRefreshRequestParams = refreshCurrentSessionParams
         }
   where
     nativeCapabilities = host.hostNativeCapabilities
@@ -1039,6 +1041,14 @@ buildSessionShellRuntime host controls SessionRequest{..} =
             (setRequestInstructionsAndTools
                 instructionText
                 (Just toolSchemas))
+    refreshCurrentSessionParams = do
+        ghciEnabled <- readIORef ghciEnabledRef
+        bashEnabled <- readIORef bashEnabledRef
+        computerUseEnabled <- readIORef computerUseEnabledRef
+        refreshSessionParams
+            ghciEnabled
+            bashEnabled
+            computerUseEnabled
     setShellMode mode = do
         let (ghciEnabled, bashEnabled) = shellModeFlags mode
         writeIORef ghciEnabledRef ghciEnabled
@@ -1073,13 +1083,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         -- file remains attached to the previous session.
         resetToolSessionTemp tempDir
         setToolSessionTmp toolEnv (Just tempDir)
-        ghciEnabled <- readIORef ghciEnabledRef
-        bashEnabled <- readIORef bashEnabledRef
-        computerUseEnabled <- readIORef computerUseEnabledRef
-        refreshSessionParams
-            ghciEnabled
-            bashEnabled
-            computerUseEnabled
+        refreshCurrentSessionParams
 
 data SessionSubagentRuntime = SessionSubagentRuntime
     { subagentBeginTurn :: !(IO (Maybe RootTurnId))
@@ -1491,6 +1495,8 @@ buildSessionEnv
             loopRuntime.loopRuntimeShell.shellComputerUseEnabled
         , sessionSetComputerUseEnabled =
             loopRuntime.loopRuntimeShell.shellSetComputerUseEnabled
+        , sessionRefreshRequestParams =
+            loopRuntime.loopRuntimeShell.shellRefreshRequestParams
         , sessionBackground = startup.startupBackground
         , sessionStdinControl = stdinControl
         , sessionDraft = startup.startupSessionState.sessionDraft
