@@ -7,6 +7,9 @@ import Agent.CLI.ComputerUse
     , ScreenshotEncoding(..)
     , computerUseTool
     )
+import Agent.CLI.ComputerUse.Accessibility
+    ( AccessibilityObservation(..)
+    )
 import Agent.CLI.MacOS.Bridge (composeNativeTools)
 import Agent.CLI.MacOS.ComputerBridge
     ( CComputerAction(..)
@@ -140,12 +143,13 @@ spec = describe "native computer bridge" do
             result `shouldBe` Right
                 (ComputerObservation
                     (ImageAttachment "image/png" pngSignature)
-                    Nothing)
+                    (Just (AccessibilityUnavailable 1
+                        "Native accessibility snapshot unavailable.")))
             readIORef observed `shouldReturn`
                 [ ObservedComputerInvocation
-                    1 1 0 0 0 [] [] BS.empty 0 65536
+                    2 1 0 0 0 [] [] BS.empty 0 65536 0
                 , ObservedComputerInvocation
-                    1 2 41 100 80
+                    2 2 41 100 80
                     [ (plainObservedAction 1)
                         { cComputerX = 10
                         , cComputerY = 20
@@ -164,6 +168,7 @@ spec = describe "native computer bridge" do
                     (BS.pack [206, 187])
                     1
                     16777216
+                    524288
                 ]
 
     it "executes later actions against the lease from the model's screenshot" do
@@ -182,7 +187,8 @@ spec = describe "native computer bridge" do
                 `shouldReturn` Right
                     (ComputerObservation
                         (ImageAttachment "image/png" pngSignature)
-                        Nothing)
+                        (Just (AccessibilityUnavailable 1
+                            "Native accessibility snapshot unavailable.")))
             invokeComputerSessionTransaction
                 host session ScreenshotPng
                 [ClickAction 10 20 "left" []]
@@ -190,10 +196,51 @@ spec = describe "native computer bridge" do
                 `shouldReturn` Right
                     (ComputerObservation
                         (ImageAttachment "image/png" pngSignature)
-                        Nothing)
+                        (Just (AccessibilityUnavailable 2
+                            "Native accessibility snapshot unavailable.")))
             invocations <- readIORef observed
             map observedOperationAndToken invocations `shouldBe`
                 [(1, 0), (2, 41), (2, 42)]
+
+    it "emits a full accessibility snapshot followed by an empty delta" do
+        observed <- newIORef []
+        withComputerHost (accessibilityComputerCallback observed) \host -> do
+            session <- newComputerSession
+            first <- invokeComputerSessionTransaction
+                host session ScreenshotPng [] (const (Right ()))
+            second <- invokeComputerSessionTransaction
+                host session ScreenshotPng [] (const (Right ()))
+            case (first, second) of
+                ( Right ComputerObservation
+                    { computerObservationAccessibility =
+                        Just (AccessibilityFull 1 _)
+                    }
+                  , Right ComputerObservation
+                    { computerObservationAccessibility =
+                        Just (AccessibilityDelta 1 2 [])
+                    }
+                  ) -> pure ()
+                values -> expectationFailure
+                    ("unexpected accessibility observations: " <> show values)
+
+    it "keeps a valid screenshot when accessibility JSON is malformed" do
+        observed <- newIORef []
+        withComputerHost
+            (accessibilityComputerCallbackWith "{" observed)
+            \host -> do
+                session <- newComputerSession
+                result <- invokeComputerSessionTransaction
+                    host session ScreenshotPng [] (const (Right ()))
+                case result of
+                    Right ComputerObservation
+                        { computerObservationImage =
+                            ImageAttachment "image/png" bytes
+                        , computerObservationAccessibility =
+                            Just (AccessibilityUnavailable 1 _)
+                        } ->
+                            bytes `shouldBe` pngSignature
+                    value -> expectationFailure
+                        ("unexpected malformed accessibility result: " <> show value)
 
     it "waits for an in-flight transaction before disabling its callback" do
         runEntered <- newEmptyMVar
@@ -201,7 +248,9 @@ spec = describe "native computer bridge" do
         observed <- newIORef []
         let blockingCallback context abi operation token width height
                 actions actionCount points pointCount text textLength
-                imageFormat output outputCapacity outputLength outputToken
+                imageFormat output outputCapacity outputLength
+                accessibilityOutput accessibilityCapacity accessibilityLength
+                outputToken
                 outputWidth outputHeight outputImageFormat = do
                     if operation == 2
                         then putMVar runEntered () >> takeMVar releaseRun
@@ -210,7 +259,9 @@ spec = describe "native computer bridge" do
                         context abi operation token width height
                         actions actionCount points pointCount text textLength
                         imageFormat output outputCapacity outputLength
-                        outputToken outputWidth outputHeight outputImageFormat
+                        accessibilityOutput accessibilityCapacity
+                        accessibilityLength outputToken outputWidth outputHeight
+                        outputImageFormat
         withCallback blockingCallback \callback -> do
             registration <- newMVar
                 (Just (ComputerRegistration callback nullPtr))
@@ -235,7 +286,8 @@ spec = describe "native computer bridge" do
                             wait running `shouldReturn` Right
                                 (ComputerObservation
                                     (ImageAttachment "image/png" pngSignature)
-                                    Nothing)
+                                    (Just (AccessibilityUnavailable 1
+                                        "Native accessibility snapshot unavailable.")))
                             wait disabling
             invokeComputerTransaction host ScreenshotPng [] (const (Right ()))
                 `shouldReturn` Left "Native computer control is not active."
@@ -280,6 +332,7 @@ data ObservedComputerInvocation = ObservedComputerInvocation
     !BS.ByteString
     !CInt
     !CSize
+    !CSize
     deriving (Eq, Show)
 
 recordingComputerCallback
@@ -287,17 +340,19 @@ recordingComputerCallback
     -> ComputerCallback
 recordingComputerCallback observed _ abi operation token width height
         actions actionCount points pointCount text textLength imageFormat
-        output outputCapacity outputLength outputToken outputWidth outputHeight
-        outputImageFormat = do
+        output outputCapacity outputLength _accessibilityOutput
+        accessibilityCapacity accessibilityLength outputToken outputWidth
+        outputHeight outputImageFormat = do
     decodedActions <- peekValues actions actionCount
     decodedPoints <- peekValues points pointCount
     decodedText <- peekBytes text textLength
     modifyIORef' observed (<> [ObservedComputerInvocation
         abi operation token width height decodedActions decodedPoints
-        decodedText imageFormat outputCapacity])
+        decodedText imageFormat outputCapacity accessibilityCapacity])
     case operation of
         1 -> do
             poke outputLength 0
+            poke accessibilityLength 0
             poke outputToken 41
             poke outputWidth 100
             poke outputHeight 80
@@ -306,12 +361,39 @@ recordingComputerCallback observed _ abi operation token width height
         2 -> do
             status <- writeBytes pngSignature
                 output outputCapacity outputLength
+            poke accessibilityLength 0
             poke outputToken (token + 1)
             poke outputWidth 100
             poke outputHeight 80
             poke outputImageFormat 1
             pure status
         _ -> pure 1
+
+accessibilityComputerCallback
+    :: IORef [ObservedComputerInvocation]
+    -> ComputerCallback
+accessibilityComputerCallback =
+    accessibilityComputerCallbackWith accessibilitySnapshotBytes
+
+accessibilityComputerCallbackWith
+    :: BS.ByteString
+    -> IORef [ObservedComputerInvocation]
+    -> ComputerCallback
+accessibilityComputerCallbackWith accessibilityBytes observed
+        context abi operation token width height
+        actions actionCount points pointCount text textLength imageFormat
+        output outputCapacity outputLength accessibilityOutput
+        accessibilityCapacity accessibilityLength outputToken outputWidth
+        outputHeight outputImageFormat = do
+    status <- recordingComputerCallback observed context abi operation token
+        width height actions actionCount points pointCount text textLength
+        imageFormat output outputCapacity outputLength accessibilityOutput
+        accessibilityCapacity accessibilityLength outputToken outputWidth
+        outputHeight outputImageFormat
+    if status == 0 && operation == 2
+        then writeBytes accessibilityBytes
+            accessibilityOutput accessibilityCapacity accessibilityLength
+        else pure status
 
 peekValues :: Storable value => Ptr value -> CSize -> IO [value]
 peekValues _ (CSize 0) = pure []
@@ -368,9 +450,13 @@ plainObservedAction action = CComputerAction
 pngSignature :: BS.ByteString
 pngSignature = BS.pack [137, 80, 78, 71, 13, 10, 26, 10]
 
+accessibilitySnapshotBytes :: BS.ByteString
+accessibilitySnapshotBytes =
+    "{\"schema_version\":1,\"scope\":{\"bundle_id\":\"test\"},\"contents\":{\"role\":\"AXWindow\"}}"
+
 observedOperationAndToken
     :: ObservedComputerInvocation
     -> (CInt, Word64)
 observedOperationAndToken
-        (ObservedComputerInvocation _ operation token _ _ _ _ _ _ _) =
+        (ObservedComputerInvocation _ operation token _ _ _ _ _ _ _ _) =
     (operation, token)
