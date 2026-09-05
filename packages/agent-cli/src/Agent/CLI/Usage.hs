@@ -204,6 +204,7 @@ formatModelUsageSummary snapshot = do
             ]
         summaries = map summarizeWindow windows
         parts
+            | not limits.allowed = "unavailable" : summaries
             | limits.limitReached = "limit reached" : summaries
             | otherwise = summaries
     case parts of

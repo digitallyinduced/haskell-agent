@@ -83,6 +83,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (getCurrentTime)
 import System.IO (stdout)
+import System.Timeout (timeout)
 
 modelChoice
     :: ModelCatalog
@@ -224,9 +225,12 @@ loadGatewayModelUsage
     :: GatewayModelAccess
     -> [ModelOption]
     -> IO (Map.Map Text Text)
-loadGatewayModelUsage access options =
-    Map.fromList . concat
-        <$> mapConcurrentlyBounded 4 loadUsage options
+loadGatewayModelUsage access options = do
+    loaded <-
+        timeout 2000000 $
+            Map.fromList . concat
+                <$> mapConcurrentlyBounded 4 loadUsage options
+    pure (fromMaybe Map.empty loaded)
   where
     loadUsage option = do
         let modelId = option.modelTarget.targetModelId
