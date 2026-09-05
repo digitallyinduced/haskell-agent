@@ -116,6 +116,7 @@ data NativeRunCapabilities = NativeRunCapabilities
     { nativeProviderFallback :: !Bool
     , nativeProviderHostedTools :: !Bool
     , nativeHostExtensions :: !Bool
+    , nativeMcpTools :: !Bool
     , nativeCollaboration :: !Bool
     , nativeProviderNativeTools :: !Bool
     }
@@ -126,6 +127,7 @@ fullNativeRunCapabilities = NativeRunCapabilities
     { nativeProviderFallback = True
     , nativeProviderHostedTools = True
     , nativeHostExtensions = True
+    , nativeMcpTools = True
     , nativeCollaboration = True
     , nativeProviderNativeTools = True
     }

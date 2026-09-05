@@ -132,7 +132,7 @@ maximumToolDurationMicroseconds :: Int
 maximumToolDurationMicroseconds = 15 * 60 * 1000 * 1000
 
 maximumReadinessDurationMicroseconds :: Int
-maximumReadinessDurationMicroseconds = 120 * 1000 * 1000
+maximumReadinessDurationMicroseconds = 15 * 60 * 1000 * 1000
 
 data TenantSandbox = TenantSandbox
     { sandboxRunner :: !FilePath

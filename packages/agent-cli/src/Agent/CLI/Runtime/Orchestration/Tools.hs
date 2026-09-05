@@ -30,6 +30,7 @@ import Agent.CLI.Config
     ( HarnessConfig(..),
       McpServerConfig(..),
       loadHarnessConfig,
+      mcpServerEnabledForRuntime,
       useProgressiveMcp )
 import Agent.Connectivity ()
 import Agent.CLI.Database ( databaseTools )
@@ -1389,8 +1390,10 @@ mcpConfiguration AgentToolsRequest
             }
         | (label, config) <-
             Map.toAscList harnessConfig.configMcpServers
-        , config.mcpEnabled
-        , nativeCapabilities.nativeHostExtensions
+        , mcpServerEnabledForRuntime
+            nativeCapabilities.nativeMcpTools
+            nativeCapabilities.nativeHostExtensions
+            config
         ]
 
 startStaleResourceCleanup
@@ -1905,7 +1908,9 @@ assembleSessionToolsRuntime AgentToolsRequest
             ]
         surroundingToolGroupsFor selectedComputerTools =
             [ ExecutionToolGroup extraTools
-            , ExecutionToolGroup sessionMcpTools
+            -- MCP clients and their tenant credentials stay in the
+            -- orchestrator process; only execution tools cross a sandbox.
+            , HostToolGroup sessionMcpTools
             , HostToolGroup persistedSessionTools
             , HostToolGroup sessionGatewayTools
             , HostToolGroup sessionDatabaseTools

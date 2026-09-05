@@ -17,12 +17,8 @@ let
       sleep 0.05
     done
 
-    tenant_id=
-    for argument in $(${pkgs.coreutils}/bin/cat /proc/cmdline); do
-      case "$argument" in
-        agent.tenant_id=*) tenant_id="''${argument#agent.tenant_id=}" ;;
-      esac
-    done
+    credential_dir="''${CREDENTIALS_DIRECTORY:?missing systemd credential directory}"
+    tenant_id=$(${pkgs.coreutils}/bin/cat "$credential_dir/agent.tenant_id")
     case "$tenant_id" in
       ????????-????-????-????-????????????) ;;
       *) exit 2 ;;
@@ -52,7 +48,9 @@ in
     writableStore = true;
     useNixStoreImage = true;
     useHostCerts = false;
-    qemu.forceAccel = true;
+    # Prefer KVM, but retain full VM isolation through QEMU's TCG fallback on
+    # hosts where nested hardware virtualization is unavailable.
+    qemu.forceAccel = false;
 
     # The runner adds only these two shares dynamically. Declaring their
     # guest mount points here keeps host paths out of the Nix derivation.
@@ -100,6 +98,11 @@ in
   };
 
   systemd.tmpfiles.rules = [
+    # Do not rewrite /workspace: its host-side owner and mode are the tenant
+    # boundary enforced by the unprivileged QEMU process. The guest mounts it
+    # with access=any so those host permissions remain authoritative without
+    # requiring mapped ownership metadata on an administrator-owned root.
+    "d /state 0700 agent agent -"
     "d /state/home 0700 agent agent -"
     "d /state/tmp 0700 agent agent -"
     "d /state/sessions 0700 agent agent -"
@@ -117,7 +120,10 @@ in
       "local-fs.target"
       "systemd-tmpfiles-setup.service"
     ];
-    requires = [ "agent-egress-host-block.service" ];
+    requires = [
+      "agent-egress-host-block.service"
+      "systemd-tmpfiles-setup.service"
+    ];
     unitConfig.RequiresMountsFor = [
       "/workspace"
       "/state"
@@ -150,6 +156,7 @@ in
       Type = "simple";
       User = "agent";
       Group = "agent";
+      ImportCredential = [ "agent.tenant_id" ];
       WorkingDirectory = "/workspace";
       ExecStart = workerLauncher;
       Restart = "no";

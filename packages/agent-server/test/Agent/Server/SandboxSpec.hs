@@ -170,25 +170,34 @@ spec = describe "tenant sandbox protocol" do
                                     Text.isInfixOf "wrong tenant")
                         (closeTenantSandbox sandbox)
 
-    it "keeps explicit host-service tools in the host process" do
+    it "keeps host services local while routing execution tools to the guest" do
         withFakeSandbox "normal" \tenant sandbox _ ->
             do
-                routed <-
-                    composedTool
-                        (composeSandboxTools
+                let routed =
+                        composeSandboxTools
                             sandbox
                             validSessionId
                             tenant.resolvedTenantWorkspaceRoot
                             CodexDialect
-                            [HostToolGroup [testSandboxTool]])
-                outcome <-
+                            [ HostToolGroup [testHostServiceTool]
+                            , ExecutionToolGroup [testSandboxTool]
+                            ]
+                    handlers = map (.appToolHandler) routed
+                hostOutcome <-
                     dispatchToolCallDetailed
                         testDispatchConfig
-                        [routed.appToolHandler]
-                        (functionToolCall "host-call" "list_dir" "{}")
-                outcome.toolDispatchSucceeded `shouldBe` True
-                outcome.toolDispatchResult.output
-                    `shouldBe` "host handler ran"
+                        handlers
+                        (functionToolCall "host-call" "mcp_test" "{}")
+                hostOutcome.toolDispatchSucceeded `shouldBe` True
+                hostOutcome.toolDispatchResult.output
+                    `shouldBe` "host MCP handler ran"
+                guestOutcome <-
+                    dispatchToolCallDetailed
+                        testDispatchConfig
+                        handlers
+                        (functionToolCall "guest-call" "list_dir" "{}")
+                guestOutcome.toolDispatchSucceeded `shouldBe` True
+                guestOutcome.toolDispatchResult.output `shouldBe` "{}"
 
     it "uses the real guest filesystem tool set" do
         withSystemTempDirectory "agent-sandbox-worker" \root -> do
@@ -279,6 +288,15 @@ testSandboxTool =
         []
         AlwaysReadOnly
         (noArgsTool "list_dir" (pure (Right "host handler ran")))
+
+testHostServiceTool :: AppTool
+testHostServiceTool =
+    jsonAppTool
+        "mcp_test"
+        "test"
+        []
+        AlwaysReadOnly
+        (noArgsTool "mcp_test" (pure (Right "host MCP handler ran")))
 
 composedTool :: [AppTool] -> IO AppTool
 composedTool = \case
