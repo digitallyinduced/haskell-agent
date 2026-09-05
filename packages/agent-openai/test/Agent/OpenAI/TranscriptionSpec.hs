@@ -456,7 +456,14 @@ spec = describe "OpenAI transcription" do
                     ]
                 sendEvent connection $
                     Aeson.object ["type" .= ("session.started" :: Text)]
-                threadDelay (2 * 1_000_000)
+                Timeout.timeout (5 * 1_000_000)
+                    ( (WS.receiveData connection :: IO Text)
+                        `shouldThrow` \case
+                            WS.CloseRequest _ _ -> True
+                            WS.ConnectionClosed -> True
+                            _ -> False
+                    )
+                    `shouldReturn` Just ()
         withWebSocketServer server \port -> do
             let websocketUrl =
                     "ws://127.0.0.1:"

@@ -1957,8 +1957,8 @@ maximumQueuedAttachmentBytesPerTenant = 40 * 1024 * 1024
 
 turnAttachmentBytes :: TurnSpec -> Int
 turnAttachmentBytes spec =
-    sum (map (ByteString.length . imageBytes) spec.turnSpecImages)
-        + sum (map (ByteString.length . fileBytes) spec.turnSpecFiles)
+    sum (map (\image -> ByteString.length image.imageBytes) spec.turnSpecImages)
+        + sum (map (\file -> ByteString.length file.fileBytes) spec.turnSpecFiles)
 
 queuedAttachmentBytes :: Map TurnId TurnSlot -> Int
 queuedAttachmentBytes =
