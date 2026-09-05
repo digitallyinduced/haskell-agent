@@ -41,6 +41,8 @@ module Agent.Server.Supervisor
 
 import Agent.Loop (ImageAttachment(..))
 import Agent.Server.Identifier (newUUIDv7Text)
+import Agent.Server.Supervisor.Persistence
+import Agent.Server.Supervisor.EventReplay
 import Agent.Server.Types
 import Control.Concurrent (ThreadId, myThreadId, threadDelay)
 import Control.Concurrent.Async
@@ -101,7 +103,6 @@ import Data.Sequence qualified as Seq
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Data.Text qualified as Text
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import System.Timeout (timeout)
 
@@ -159,79 +160,6 @@ type TurnBoundaryGuard =
     IO value ->
     IO (Either Text value)
 
-data HumanRequestPersistenceResolution
-    = HumanRequestResolvedDurably !HumanRequest
-    | HumanRequestNotFoundDurably
-    | HumanRequestAlreadyResolvedDurably
-    | HumanRequestInvalidDecisionDurably
-    | HumanRequestLocalOnly
-    deriving (Eq, Show)
-
-data HumanRequestResolutionError
-    = HumanRequestResolutionNotFound
-    | HumanRequestResolutionConflict !Text
-    | HumanRequestResolutionStoreUnavailable !Text
-    deriving (Eq, Show)
-
-data HumanRequestCleanup
-    = HumanRequestAbandoned
-    | HumanResponseConsumed
-    deriving (Eq, Show)
-
-data TurnPersistence = TurnPersistence
-    { turnPersistenceStarted ::
-        !(TurnRecord -> UTCTime -> IO (Either Text ()))
-    , turnPersistenceTerminal ::
-        !( TurnRecord ->
-           UTCTime ->
-           TurnTerminalOutcome ->
-           IO (Either Text TurnRecord)
-         )
-    , turnPersistenceShouldCancel ::
-        !(TurnRecord -> IO (Either Text Bool))
-    , turnPersistenceCreateHumanRequest ::
-        !(TurnRecord -> HumanRequest -> IO (Either Text ()))
-    , turnPersistenceListHumanRequests ::
-        !(AccessBoundary -> Maybe TurnId -> IO (Either Text [HumanRequest]))
-    , turnPersistenceResolveHumanRequest ::
-        !( AccessBoundary ->
-           RequestId ->
-           HumanResponse ->
-           IO (Either Text HumanRequestPersistenceResolution)
-         )
-    , turnPersistenceLoadHumanResponse ::
-        !( TurnRecord ->
-           RequestId ->
-           IO (Either Text (Maybe HumanResponse))
-         )
-    , turnPersistenceDeleteHumanRequest ::
-        !( TurnRecord ->
-           RequestId ->
-           HumanRequestCleanup ->
-           IO (Either Text ())
-         )
-    }
-
-inMemoryTurnPersistence :: TurnPersistence
-inMemoryTurnPersistence =
-    TurnPersistence
-        { turnPersistenceStarted = \_ _ -> pure (Right ())
-        , turnPersistenceTerminal = \record finishedAt outcome ->
-            pure (Right (terminalRecord finishedAt outcome record))
-        , turnPersistenceShouldCancel = \_ ->
-            pure (Right False)
-        , turnPersistenceCreateHumanRequest = \_ _ ->
-            pure (Right ())
-        , turnPersistenceListHumanRequests = \_ _ ->
-            pure (Right [])
-        , turnPersistenceResolveHumanRequest = \_ _ _ ->
-            pure (Right HumanRequestLocalOnly)
-        , turnPersistenceLoadHumanResponse = \_ _ ->
-            pure (Right Nothing)
-        , turnPersistenceDeleteHumanRequest = \_ _ _ ->
-            pure (Right ())
-        }
-
 data TurnSlot = TurnSlot
     { turnSlotSpec :: !TurnSpec
     , turnSlotRecord :: !TurnRecord
@@ -243,11 +171,6 @@ data TurnSlot = TurnSlot
 data PendingInput = PendingInput
     { pendingInputView :: !HumanRequest
     , pendingInputReply :: !(TMVar (Either Text HumanResponse))
-    }
-
-data EventBuffer = EventBuffer
-    { eventBufferReplay :: !(Seq ServerEvent)
-    , eventBufferNextId :: !Integer
     }
 
 data EventSubscriber = EventSubscriber
@@ -1084,26 +1007,10 @@ subscribeEvents supervisor boundary lastEventId =
     createSubscription state = do
         let buffer =
                 Map.findWithDefault
-                    (EventBuffer Seq.empty 1)
+                    emptyEventBuffer
                     boundary
                     state.stateEvents
-            replay = buffer.eventBufferReplay
-            oldest = (.serverEventId) <$> Seq.lookup 0 replay
-            latest = (.serverEventId) <$> Seq.lookup
-                (Seq.length replay - 1)
-                replay
-            resetRequired = case (lastEventId, oldest) of
-                (Nothing, _) -> False
-                (Just requested, Nothing) -> requested > 0
-                (Just requested, Just firstId) ->
-                    requested < firstId - 1
-                        || maybe False (requested >) latest
-            replayEvents = case lastEventId of
-                Nothing -> []
-                Just requested ->
-                    filter
-                        ((> requested) . (.serverEventId))
-                        (toList replay)
+            selection = selectReplay lastEventId buffer
             subscriberId = state.stateNextSubscriberId
         channel <-
             newTBQueue
@@ -1121,9 +1028,9 @@ subscribeEvents supervisor boundary lastEventId =
                     state.stateSubscribers
             }
         pure EventSubscription
-            { subscriptionReplay = replayEvents
-            , subscriptionResetRequired = resetRequired
-            , subscriptionLatestEventId = latest
+            { subscriptionReplay = selection.replayEvents
+            , subscriptionResetRequired = selection.replayResetRequired
+            , subscriptionLatestEventId = selection.replayLatestEventId
             , subscriptionChannel = channel
             , subscriptionClose =
                 atomically $
@@ -2040,35 +1947,18 @@ appendEventToState config now boundary eventType turnId sessionId value state =
   where
     buffer =
         Map.findWithDefault
-            (EventBuffer Seq.empty 1)
+            emptyEventBuffer
             boundary
             state.stateEvents
-    event = ServerEvent
-        { serverEventId = buffer.eventBufferNextId
-        , serverEventBoundary = boundary
-        , serverEventType = eventType
-        , serverEventTurnId = turnId
-        , serverEventSessionId = sessionId
-        , serverEventData = value
-        , serverEventAt = now
-        }
-    replay =
-        trimReplay
+    (event, buffer') =
+        appendReplayEvent
             config.supervisorEventReplayLimit
-            (buffer.eventBufferReplay |> event)
-    buffer' = EventBuffer
-        { eventBufferReplay = replay
-        , eventBufferNextId = buffer.eventBufferNextId + 1
-        }
+            now boundary eventType turnId sessionId value buffer
     state' =
         state
             { stateEvents =
                 Map.insert boundary buffer' state.stateEvents
             }
-
-trimReplay :: Int -> Seq a -> Seq a
-trimReplay limit values =
-    Seq.drop (max 0 (Seq.length values - limit)) values
 
 publishToSubscribers :: SupervisorState -> ServerEvent -> STM ()
 publishToSubscribers state event =
@@ -2141,39 +2031,6 @@ cancelSlot _now slot =
             , turnSlotCancel = Nothing
             }
 
-cancelledRecord
-    :: UTCTime
-    -> TurnRecord
-    -> TurnRecord
-cancelledRecord now record =
-    record
-        { turnRecordStatus = TurnCancelled
-        , turnRecordFinishedAt = Just now
-        , turnRecordError = Nothing
-        }
-
-terminalRecord
-    :: UTCTime
-    -> TurnTerminalOutcome
-    -> TurnRecord
-    -> TurnRecord
-terminalRecord finishedAt outcome record =
-    case outcome of
-        TurnSucceeded _ ->
-            record
-                { turnRecordStatus = TurnCompleted
-                , turnRecordFinishedAt = Just finishedAt
-                , turnRecordError = Nothing
-                }
-        TurnErrored err ->
-            record
-                { turnRecordStatus = TurnFailed
-                , turnRecordFinishedAt = Just finishedAt
-                , turnRecordError = Just (boundedSupervisorText err)
-                }
-        TurnWasCancelled ->
-            cancelledRecord finishedAt record
-
 resumeWaitingTurn
     :: UTCTime
     -> TurnSlot
@@ -2222,11 +2079,6 @@ completePendingInputInState config now requestId state = do
 validHumanAnswer :: [Text] -> Text -> Bool
 validHumanAnswer options answer =
     null options || answer `elem` options
-
-boundedSupervisorText :: Text -> Text
-boundedSupervisorText value
-    | Text.length value <= 16384 = value
-    | otherwise = Text.take 16383 value <> "…"
 
 terminalPersistenceInitialRetryMicros :: Int
 terminalPersistenceInitialRetryMicros = 100 * 1000
