@@ -9,7 +9,7 @@ import Agent.CLI.Command
     ( currentEffort,
       currentModel,
       ForkRequest(..),
-      ReplAction(ReplRenameAuto, ReplResume, ReplSearch, ReplHome, ReplRewind, ReplClear,
+      SessionAction(ReplRenameAuto, ReplResume, ReplSearch, ReplHome, ReplRewind, ReplClear,
                  ReplNew, ReplDelete, ReplShowSession, ReplShowSessionInfo, ReplAfk,
                  ReplWorktree, ReplRename, ReplFork),
       ShellMode(ShellNone, ShellGhci, ShellBash, ShellBoth),
@@ -110,7 +110,7 @@ handleSessionAction
     :: SessionEnv
     -> SlashCatalog
     -> IO RunResult
-    -> ReplAction
+    -> SessionAction
     -> IO RunResult
 handleSessionAction
         env
@@ -130,7 +130,7 @@ data SessionActionRuntime = SessionActionRuntime
 
 dispatchSessionAction
     :: SessionActionRuntime
-    -> ReplAction
+    -> SessionAction
     -> IO RunResult
 dispatchSessionAction runtime = \case
     ReplResume maybeId -> handleResumeAction runtime maybeId
@@ -147,7 +147,6 @@ dispatchSessionAction runtime = \case
     ReplWorktree -> handleWorktreeAction runtime
     ReplRename title -> handleRenameAction runtime title
     ReplRenameAuto -> handleRenameAutoAction runtime
-    _ -> error "handleSessionAction: unsupported action"
 
 runtimeFullscreenEvent :: SessionActionRuntime -> UiEvent -> IO ()
 runtimeFullscreenEvent runtime event =
