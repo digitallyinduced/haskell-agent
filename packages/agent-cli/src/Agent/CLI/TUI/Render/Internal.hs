@@ -64,8 +64,8 @@ import Agent.CLI.TUI.Motion
       motionModeForTerminalFocus )
 import Agent.CLI.TUI.Types
     ( AppState(appMetaConsole, appMotionElapsedMillis, appTerminalFocus,
-               appAgentEntries, appRuntime, appImagePreviews, appResume,
-               appTextPrompt, appChoice, appUi),
+               appAgentEntries, appRuntime, appImagePreviews, appUi),
+      choiceOverlay, resumeOverlay, textOverlay,
       activeTheme,
       FullscreenRuntime(runtimeNativeImagePreviews, runtimeWaveTrough,
                         runtimeColor, runtimeMotionMode),
@@ -214,11 +214,11 @@ import Agent.CLI.TUI.Render.Workspace
 drawApp :: AppState -> [Widget Name]
 drawApp state =
     map fullscreenBounds $
-        case state.appResume of
+        case resumeOverlay state of
             Just resume ->
                 drawResume state resume : dimmedMainLayers
             Nothing ->
-                case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
+                case (textOverlay state, choiceOverlay state, state.appUi.uiPermission) of
                     (Just prompt, _, _) ->
                         drawTextPrompt state prompt : dimmedMainLayers
                     (Nothing, Just choice, _) ->
