@@ -305,6 +305,15 @@ spec = describe "systemPrompt" do
                     , "browser_snapshot"
                     , "browser_click"
                     , "browser_type"
+                    , "browser_key"
+                    , "browser_scroll"
+                    , "browser_back"
+                    , "browser_forward"
+                    , "browser_reload"
+                    , "browser_screenshot"
+                    , "browser_list_tabs"
+                    , "browser_switch_tab"
+                    , "browser_list_downloads"
                     ]
                     (fromFilePath "/tmp/repo")
                     Nothing
@@ -330,6 +339,9 @@ spec = describe "systemPrompt" do
             "appears in the right sidebar"
         withBrowser `shouldSatisfy` Text.isInfixOf
             "Use the browser_* tools for websites"
+        withBrowser `shouldSatisfy` Text.isInfixOf
+            "opaque refs from the latest browser_snapshot"
+        withBrowser `shouldNotSatisfy` Text.isInfixOf "selectors returned"
         withoutBrowser `shouldNotSatisfy` Text.isInfixOf "Browser control:"
         unrelatedBrowserPrefix `shouldNotSatisfy`
             Text.isInfixOf "Browser control:"

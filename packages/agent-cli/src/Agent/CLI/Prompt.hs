@@ -391,7 +391,9 @@ browserControlGuidance available
             [ "Browser control:"
             , "- Use the browser_* tools for websites instead of whole-desktop computer control."
             , "- In Haskell Agent for macOS, the user can show the connected in-app browser with the browser button; it appears in the right sidebar. A configured dedicated Safari tab may be connected when that pane is hidden."
-            , "- Navigate or take a snapshot first, then use selectors returned by browser_snapshot for interaction."
+            , "- Navigate or take a snapshot first, then interact only with opaque refs from the latest browser_snapshot. Re-snapshot after navigation, actions, or tab switches because old refs become stale."
+            , "- Use browser_list_tabs and browser_switch_tab only for agent-owned tabs. Use browser_screenshot explicitly when pixels are needed; screenshots are not attached automatically."
+            , "- browser_list_downloads contains only downloads attributed to approved browser actions, never an arbitrary filesystem listing."
             ]
   where
     requiredBrowserTools = Set.fromList
@@ -399,6 +401,15 @@ browserControlGuidance available
         , "browser_snapshot"
         , "browser_click"
         , "browser_type"
+        , "browser_key"
+        , "browser_scroll"
+        , "browser_back"
+        , "browser_forward"
+        , "browser_reload"
+        , "browser_screenshot"
+        , "browser_list_tabs"
+        , "browser_switch_tab"
+        , "browser_list_downloads"
         ]
 
 -- | Prefer GHCI as the general-purpose scripting environment.

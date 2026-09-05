@@ -44,7 +44,11 @@ enum {
     HA_BROWSER_FORWARD = 6,
     HA_BROWSER_RELOAD = 7,
     HA_BROWSER_KEY = 8,
-    HA_BROWSER_SCROLL = 9
+    HA_BROWSER_SCROLL = 9,
+    HA_BROWSER_SCREENSHOT = 10,
+    HA_BROWSER_LIST_TABS = 11,
+    HA_BROWSER_SWITCH_TAB = 12,
+    HA_BROWSER_LIST_DOWNLOADS = 13
 };
 
 enum {
@@ -59,80 +63,168 @@ enum {
     HA_BROWSER_STATUS_PERMISSION_DENIED = 4,
     HA_BROWSER_STATUS_UNSUPPORTED = 5,
     HA_BROWSER_STATUS_FAILED = 6,
-    HA_BROWSER_STATUS_OUTPUT_TOO_LARGE = 7
+    HA_BROWSER_STATUS_OUTPUT_TOO_LARGE = 7,
+    HA_BROWSER_STATUS_CANCELLED = 8
 };
 
 enum {
     HA_BROWSER_URL_MAX_BYTES = 8192,
-    HA_BROWSER_SELECTOR_MAX_BYTES = 4096,
+    HA_BROWSER_REF_MAX_BYTES = 4096,
     HA_BROWSER_TEXT_MAX_BYTES = 65536,
     HA_BROWSER_KEY_MAX_BYTES = 128,
+    HA_BROWSER_TAB_ID_MAX_BYTES = 512,
+    HA_BROWSER_SCOPE_ID_MAX_BYTES = 1024,
+    HA_BROWSER_CALL_ID_MAX_BYTES = 1024,
     HA_BROWSER_SCROLL_MAX_ABS_DELTA = 10000,
-    HA_BROWSER_OUTPUT_CAPACITY = 262144
+    HA_BROWSER_TEXT_RESULT_MAX_BYTES = 262144,
+    HA_BROWSER_IMAGE_RESULT_MAX_BYTES = 16777216,
+    HA_BROWSER_IMAGE_MAX_DIMENSION = 100000,
+    HA_BROWSER_PNG_MAX_DIMENSION = 16384,
+    HA_BROWSER_PNG_MAX_PIXELS = 67108864,
+    HA_BROWSER_REQUEST_STRUCT_SIZE = 96,
+    HA_BROWSER_RESULT_STRUCT_SIZE = 56
 };
 
 /*
- * Host-browser callback used by browser tools in native agent turns.
+ * The browser bridge is intentionally a single current ABI. Changes to this
+ * structure are breaking and the host and runtime must be updated together.
  *
  * Commands use these typed fields:
  *   NAVIGATE: argument1 is an absolute HTTP(S) URL without userinfo, at most
  *             HA_BROWSER_URL_MAX_BYTES UTF-8 bytes.
  *   SNAPSHOT: no arguments.
- *   CLICK: argument1 is a CSS selector, at most
- *          HA_BROWSER_SELECTOR_MAX_BYTES UTF-8 bytes.
- *   TYPE: argument1 is a selector with the same limit as CLICK; argument2 is
- *         at most HA_BROWSER_TEXT_MAX_BYTES UTF-8 bytes; flags bit
- *         HA_BROWSER_TYPE_SUBMIT requests form submission.
- *   KEY: argument1 is a nonempty DOM KeyboardEvent.key value, at most
+ *   CLICK: argument1 is a nonempty opaque ref from the latest snapshot, at
+ *          most HA_BROWSER_REF_MAX_BYTES UTF-8 bytes.
+ *   TYPE: argument1 is a nonempty ref with the same limit as CLICK; argument2 is at
+ *         most HA_BROWSER_TEXT_MAX_BYTES UTF-8 bytes; flags bit
+ *         HA_BROWSER_TYPE_SUBMIT requests a trusted Enter after typing.
+ *   KEY: argument1 is a nonempty key value, at most
  *        HA_BROWSER_KEY_MAX_BYTES UTF-8 bytes.
  *   SCROLL: scroll_delta_x and scroll_delta_y are finite CSS-pixel deltas,
  *           each with absolute value at most
  *           HA_BROWSER_SCROLL_MAX_ABS_DELTA; at least one must be nonzero.
- *   BACK, FORWARD, RELOAD: no arguments.
+ *   SWITCH_TAB: argument1 is a nonempty opaque ID returned by LIST_TABS, at
+ *               most HA_BROWSER_TAB_ID_MAX_BYTES UTF-8 bytes.
+ *   BACK, FORWARD, RELOAD, SCREENSHOT, LIST_TABS, LIST_DOWNLOADS: no
+ *   arguments.
  *
- * Unused text fields have length zero. Unused scroll fields and flags are
- * zero. Unknown commands or nonzero unused fields must be rejected with
- * HA_BROWSER_STATUS_INVALID_ARGUMENT.
+ * scope_id identifies the agent turn/run and call_id identifies the tool call.
+ * Both are nonempty UTF-8 and are used for ref isolation, cancellation, and
+ * download provenance. Unused text fields have length zero. Unused scroll
+ * fields and flags are zero. Unknown commands, a wrong struct_size, or nonzero
+ * unused fields must be rejected with HA_BROWSER_STATUS_INVALID_ARGUMENT.
  *
- * Input buffers are nonnull, callback-scoped UTF-8 and may have zero length.
- * output is a nonnull, callback-scoped writable buffer. Set *output_length to
- * the UTF-8 bytes written, never above output_capacity. Return 0 for success
- * or a HA_BROWSER_STATUS_* value for failure; on failure, write a useful UTF-8
- * error to output when possible. The runtime supplies
- * HA_BROWSER_OUTPUT_CAPACITY bytes. The callback runs synchronously on an
- * agent tool worker, never the setter's caller or AppKit main thread. It must
- * not call engine functions.
- *
- * The runtime does not retain input/output buffers. The host owns callback
- * and context. ha_engine_set_browser_callback may wait for an in-flight
- * callback; after it returns, a replaced callback/context will not be used
- * again. The currently installed callback/context must remain valid until
- * replaced, disabled, or ha_engine_destroy returns.
+ * All request pointers are borrowed and valid only until ha_browser_callback
+ * returns. The host must copy every needed byte before returning. Empty slices
+ * use NULL/zero. The callback returns HA_BROWSER_STATUS_SUCCESS only after it
+ * has accepted the request; any other status rejects it and completion must
+ * not be called. An accepted request must call completion exactly once, on any
+ * thread, including after cancellation. The completion and completion_context
+ * are owned by the runtime and valid until that call.
  */
+typedef struct {
+    uint32_t struct_size;
+    int32_t command;
+    int32_t flags;
+    int32_t reserved;
+    double scroll_delta_x;
+    double scroll_delta_y;
+    const uint8_t *scope_id;
+    size_t scope_id_length;
+    const uint8_t *call_id;
+    size_t call_id_length;
+    const uint8_t *argument1;
+    size_t argument1_length;
+    const uint8_t *argument2;
+    size_t argument2_length;
+} ha_browser_request;
+
+enum {
+    HA_BROWSER_IMAGE_NONE = 0,
+    HA_BROWSER_IMAGE_PNG = 1
+};
+
+/*
+ * Browser completion result. text and image are borrowed for the duration of
+ * the completion call and are copied by the runtime before it returns.
+ * Empty text or image slices must use NULL/zero; nonempty slices require a
+ * non-NULL pointer.
+ * text_length must not exceed HA_BROWSER_TEXT_RESULT_MAX_BYTES. image_format
+ * is HA_BROWSER_IMAGE_NONE with NULL/zero image fields for ordinary results.
+ * A successful SCREENSHOT uses HA_BROWSER_IMAGE_PNG, positive logical pixel
+ * dimensions no greater than HA_BROWSER_IMAGE_MAX_DIMENSION, a decodable PNG
+ * byte sequence with positive physical dimensions no greater than
+ * HA_BROWSER_PNG_MAX_DIMENSION per axis or HA_BROWSER_PNG_MAX_PIXELS in total,
+ * and at most HA_BROWSER_IMAGE_RESULT_MAX_BYTES. Logical dimensions need not
+ * equal PNG dimensions because backing scale can differ. Images on other
+ * commands and images on failed results are rejected. reserved must be zero.
+ */
+typedef struct {
+    uint32_t struct_size;
+    int32_t status;
+    int32_t image_format;
+    int32_t image_width;
+    int32_t image_height;
+    int32_t reserved;
+    const uint8_t *text;
+    size_t text_length;
+    const uint8_t *image;
+    size_t image_length;
+} ha_browser_result;
+
+typedef void (*ha_browser_completion)(
+    void *completion_context,
+    const ha_browser_result *result
+);
+
 typedef int32_t (*ha_browser_callback)(
     void *context,
-    int32_t command,
-    const uint8_t *argument1, size_t argument1_length,
-    const uint8_t *argument2, size_t argument2_length,
-    double scroll_delta_x,
-    double scroll_delta_y,
-    int32_t flags,
-    uint8_t *output, size_t output_capacity, size_t *output_length
+    const ha_browser_request *request,
+    ha_browser_completion completion,
+    void *completion_context
 );
 
 /*
+ * Requests cancellation of one accepted command. The borrowed UTF-8 IDs
+ * exactly match its request. This callback returns promptly and does not
+ * replace the accepted command's required terminal completion.
+ */
+typedef void (*ha_browser_cancel_callback)(
+    void *context,
+    const uint8_t *scope_id,
+    size_t scope_id_length,
+    const uint8_t *call_id,
+    size_t call_id_length
+);
+
+#if UINTPTR_MAX == UINT64_MAX
+_Static_assert(sizeof(ha_browser_request) == HA_BROWSER_REQUEST_STRUCT_SIZE,
+    "unexpected ha_browser_request layout");
+_Static_assert(sizeof(ha_browser_result) == HA_BROWSER_RESULT_STRUCT_SIZE,
+    "unexpected ha_browser_result layout");
+#endif
+
+/*
  * Installs browser support for future turns. A turn exposes browser tools only
- * when its turn.start processing observes a nonnull callback. Passing NULL
- * disables browser support; context is ignored in that case. Tools retained
- * by an already-started turn fail as inactive after disabling.
+ * when its turn.start processing observes nonnull callbacks. Passing NULL for
+ * both callbacks disables browser support; mixed nullability is invalid.
+ *
+ * The host owns callback, cancel_callback, and context.
+ * ha_engine_set_browser_callback waits for accepted requests on the replaced
+ * registration to complete. After it returns, that callback/context will not
+ * be used again. The current registration remains valid until replaced,
+ * disabled, or ha_engine_destroy returns.
+ * Browser callbacks must not call ha_engine_set_browser_callback or
+ * ha_engine_destroy reentrantly.
  *
  * Returns 0 on success, 1 for a null engine, or 2 for an internal failure.
  * Calls must be serialized with ha_engine_destroy. This function may block
- * until a running browser callback returns.
+ * while cancellation and terminal completions drain.
  */
 int32_t ha_engine_set_browser_callback(
     void *engine,
     ha_browser_callback callback,
+    ha_browser_cancel_callback cancel_callback,
     void *context
 );
 
