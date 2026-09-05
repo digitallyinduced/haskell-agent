@@ -413,7 +413,7 @@ metaCancelScope env cancel action =
         case env.sessionFullscreen of
             Nothing
                 | not env.sessionBackground ->
-                    withEscCancel cancel env.sessionEscPaused action
+                    withEscCancel cancel env.sessionStdinControl action
             _ -> action
 
 shellModeText :: ShellMode -> Text

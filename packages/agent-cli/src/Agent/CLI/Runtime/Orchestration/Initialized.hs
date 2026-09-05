@@ -105,7 +105,7 @@ import Agent.CLI.Session.History ( detectGitBranch )
 import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupToolEnv, startupStderr, startupStdout,
                      startupStdoutTty, startupStdinTty, startupFullscreen,
-                     startupUiRuntimeRef, startupEscPaused, startupInterrupt,
+                     startupUiRuntimeRef, startupStdinControl, startupInterrupt,
                      startupDatabaseStore, startupNativeHooks) )
 import Agent.CLI.SessionLock ( releaseSessionLock, SessionLock )
 import Agent.CLI.Skills ( loadSkillsCatalogQuiet )
@@ -1164,7 +1164,7 @@ launchInitializedTools request workspace targets auth refs httpRuntime =
         , customResponses = targets.initializedCustomResponses
         , cwd = request.initializedCwd
         , databaseScopes = workspace.initializedDatabaseScopes
-        , escPaused = startup.startupEscPaused
+        , stdinControl = startup.startupStdinControl
         , fullscreen
         , home = request.initializedHome
         , interrupt = startup.startupInterrupt

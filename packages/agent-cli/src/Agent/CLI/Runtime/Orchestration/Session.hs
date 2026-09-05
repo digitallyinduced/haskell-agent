@@ -3,9 +3,8 @@ module Agent.CLI.Runtime.Orchestration.Session
     , runAgentSession
     ) where
 
-import Agent.CLI.ActiveAccount
-    ( ActiveAccountRef
-    )
+import Agent.CLI.ActiveAccount (ActiveAccountRef)
+import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.Auth
     ( LoadedAuth(loadedTokenProvider)
     , isGatewayLoadedAuth
@@ -126,7 +125,7 @@ import Agent.CLI.Session.Runtime.Types
                      startupWindowTitle, automaticCompactionRef,
                      projectRoot, home, cwd, tokenProvider, openAiPool, startupContext,
                      automaticCompactionHookRef, skillsRef, skillInvocationsRef,
-                     escPaused, interrupt, multiCtx, rootTurnRef, subagentSessions,
+                     stdinControl, interrupt, multiCtx, rootTurnRef, subagentSessions,
                      pendingNotices, storeRoot, agentTypes, legacyTarget, usageRef,
                      accountRef, accountLabel,
                      selectAccount, onPersisted, compactRunner, codeModeRuntime),
@@ -245,7 +244,7 @@ data AgentSessionRequest closeResult windowTitleResult = AgentSessionRequest
     , initialContextPreload :: InitialContextPreload
     , dialect :: Dialect
     , effortText :: Text
-    , escPaused :: IORef Bool
+    , stdinControl :: StdinControl
     , extraTools :: [AppTool]
     , fullscreen :: Maybe FullscreenRuntime
     , gatewayTools :: [AppTool]
@@ -972,7 +971,7 @@ buildProviderSessionRequest
                 promptRuntime.sessionAutomaticCompactionHookRef
             , skillsRef = request.skillsRef
             , skillInvocationsRef = request.skillInvocationsRef
-            , escPaused = request.escPaused
+            , stdinControl = request.stdinControl
             , interrupt = request.interrupt
             , multiCtx = request.multiCtx
             , rootTurnRef = request.rootTurnRef

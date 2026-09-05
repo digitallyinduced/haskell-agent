@@ -3,6 +3,7 @@ module Agent.CLI.Runtime.Orchestration.Flow
     , withRestoredCurrentDirectory
     ) where
 
+import Agent.CLI.CancelWatch (newStdinControl)
 import Agent.CLI.AgentSessions ( signalManagedSessionReady )
 import Agent.CLI.AgentViewport ( AgentTarget(AgentRoot) )
 import Agent.CLI.Config
@@ -105,7 +106,7 @@ import Agent.CLI.Session.Runtime.Types
       StartupRuntime(startupSessionState, StartupRuntime, startupToolEnv,
                      startupHarnessConfig,
                      startupNetworkRecovery, startupDatabaseStore,
-                     startupInterrupt, startupEscPaused,
+                     startupInterrupt, startupStdinControl,
                      startupUiRuntimeRef, startupFullscreen, startupTerminal,
                      startupStdout, startupStderr, startupBackground, startupUseColor,
                      startupStderrTty, startupStdinTty, startupStdoutTty,
@@ -900,7 +901,7 @@ prepareAgentIterationInterface request resources = do
                 color <- resolveColor stderrHandle
                 putTextLn stderrHandle (roleMuted color msg)
     -- Shared with Esc cancel and plan prompts so arrow-key pickers own stdin.
-    escPaused <- newIORef False
+    stdinControl <- newStdinControl
     stderrTty <-
         if background then pure False else hIsTerminalDevice stderrHandle
     stdinTty <- if background then pure False else hIsTerminalDevice stdin
@@ -1001,7 +1002,7 @@ prepareAgentIterationInterface request resources = do
                 request.iterationProcessRuntime.processNetworkRecovery
             , startupDatabaseStore = resources.iterationDatabaseStore
             , startupInterrupt = interrupt
-            , startupEscPaused = escPaused
+            , startupStdinControl = stdinControl
             , startupUiRuntimeRef = uiRuntimeRef
             , startupFullscreen = fullscreen
             , startupTerminal = terminal

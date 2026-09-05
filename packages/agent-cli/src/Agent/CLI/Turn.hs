@@ -266,7 +266,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv{}
   withTurnCancel env.sessionInterrupt config.loopCancel $
     (if isJust fullscreen || env.sessionBackground
         then id
-        else withEscCancel config.loopCancel env.sessionEscPaused) do
+        else withEscCancel config.loopCancel env.sessionStdinControl) do
     prepared <- prepareBusyTurn request
     executed <- executeBusyTurn request prepared
     finishBusyTurn executed

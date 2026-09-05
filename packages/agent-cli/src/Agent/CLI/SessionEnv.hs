@@ -4,9 +4,8 @@ module Agent.CLI.SessionEnv
     , SessionEnv(..)
     ) where
 
-import Agent.CLI.ActiveAccount
-    ( ActiveAccountRef
-    )
+import Agent.CLI.ActiveAccount (ActiveAccountRef)
+import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.AgentViewport (AgentViewportEnv)
 import Agent.CLI.GatewayClient (GatewayModelAccess)
@@ -109,7 +108,7 @@ data SessionEnv = SessionEnv
     , sessionComputerUseEnabled :: !(IO Bool)
     , sessionSetComputerUseEnabled :: !(Bool -> IO Text)
     , sessionBackground :: !Bool
-    , sessionEscPaused :: !(IORef Bool)
+    , sessionStdinControl :: !StdinControl
     , sessionDraft :: !(IORef Text)
     , sessionPreviewId :: !(IORef Int)
     , sessionInterrupt :: !InterruptState

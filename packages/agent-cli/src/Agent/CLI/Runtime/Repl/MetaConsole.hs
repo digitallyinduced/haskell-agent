@@ -358,7 +358,7 @@ promptMetaSecret runtime title body =
             requestFullscreenSecret fullscreen title body
         Nothing ->
             promptSecretLine
-                (metaEnv runtime).sessionEscPaused
+                (metaEnv runtime).sessionStdinControl
                 body
                 (Just
                     "Meta Console configuration; the value is written only to the local config file")

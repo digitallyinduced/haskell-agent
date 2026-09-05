@@ -8,9 +8,8 @@ module Agent.CLI.Session.Runtime.Types
     , StartupRuntime(..)
     ) where
 
-import Agent.CLI.ActiveAccount
-    ( ActiveAccountRef
-    )
+import Agent.CLI.ActiveAccount (ActiveAccountRef)
+import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.AgentViewport
     ( AgentEntry
     , AgentTarget
@@ -183,7 +182,7 @@ data SessionRequest = SessionRequest
             (CompactOutcome -> [TurnInput] -> IO CompactionInstall))
     , skillsRef :: !(IORef SkillCatalog)
     , skillInvocationsRef :: !(IORef [SkillInvocation])
-    , escPaused :: !(IORef Bool)
+    , stdinControl :: !StdinControl
     , interrupt :: !InterruptState
     , multiCtx :: !(Maybe MultiAgentContext)
     , rootTurnRef :: !(IORef (Maybe RootTurnId))
@@ -211,7 +210,7 @@ data StartupRuntime = StartupRuntime
     , startupNetworkRecovery :: !(Maybe NetworkRecovery)
     , startupDatabaseStore :: !Store
     , startupInterrupt :: !InterruptState
-    , startupEscPaused :: !(IORef Bool)
+    , startupStdinControl :: !StdinControl
     , startupUiRuntimeRef :: !(IORef (Maybe FullscreenRuntime))
     , startupFullscreen :: !(Maybe FullscreenRuntime)
     , startupTerminal :: !TerminalCapabilities
