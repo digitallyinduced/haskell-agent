@@ -5,6 +5,9 @@ module Agent.CLI.CancelWatch
     ( EscapeContinuation(..)
     , readEscapeContinuation
     , escapeContinuationCancels
+    , StdinControl
+    , newStdinControl
+    , withStdinOwnership
     , withEscCancel
     , withStdinPaused
     , isBareEscape
@@ -14,8 +17,8 @@ import Agent.Cancel (CancelFlag, requestCancel)
 import Agent.CLI.Input.KeyDecoder (kittyRelease, parseKittyKey)
 import Agent.CLI.Input.Types (KittyKey(..))
 import Agent.CLI.Terminal (rawAttrs)
-import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent (forkIOWithUnmask)
+import Control.Concurrent.MVar (MVar, newMVar, newEmptyMVar, putMVar, readMVar, withMVar)
 import Control.Exception.Safe (bracket, finally)
 import Control.Monad (void, when)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -39,64 +42,67 @@ import System.Posix.Terminal
     , withMode
     )
 
+-- | Shared ownership of stdin between the turn watcher and interactive prompts.
+-- A reader owns the lease for its entire input operation, including any
+-- fragmented escape sequence. Prompt entry therefore acknowledges that the
+-- watcher has finished reading instead of guessing from a polling interval.
+newtype StdinControl = StdinControl (MVar ())
+
+newStdinControl :: IO StdinControl
+newStdinControl = StdinControl <$> newMVar ()
+
+-- | Serialize stdin readers. Do not nest ownership of the same control.
+withStdinOwnership :: StdinControl -> IO a -> IO a
+withStdinOwnership (StdinControl owner) action = withMVar owner (const action)
+
 -- | Run @action@ while Esc on a TTY stdin requests soft cancel.
 -- Restores the pre-call terminal attributes afterward. Non-TTY is a no-op.
 --
--- @paused@ suspends stdin reads (see 'withStdinPaused') so approval prompts
--- can use cooked 'getLine' without the watcher stealing keystrokes.
---
--- The watcher is never 'killThread'ed while blocked on stdin: that can leave
--- the Handle lock stuck and break the next haskeline prompt (arrow keys print
--- as raw CSI like @^[OA@). Instead we set a stop flag and wait for the
--- watcher's short poll timeout to exit.
-withEscCancel :: CancelFlag -> IORef Bool -> IO a -> IO a
-withEscCancel cancel paused action = do
+-- The watcher is never killed while blocked on stdin: that can leave the
+-- Handle lock stuck. Its owner asks it to stop and joins it before restoring
+-- terminal settings. A prompt can acquire stdin with 'withStdinPaused'.
+withEscCancel :: CancelFlag -> StdinControl -> IO a -> IO a
+withEscCancel cancel control action = do
     tty <- hIsTerminalDevice stdin
     if not tty
         then action
-        else do
-            oldTerm <- getTerminalAttributes stdInput
-            oldBuf <- hGetBuffering stdin
+        else bracket snapshot restore \(oldTerm, _) -> do
+            withStdinOwnership control do
+                setTerminalAttributes stdInput (rawAttrs oldTerm) Immediately
+                hSetBuffering stdin NoBuffering
             stopped <- newIORef False
             done <- newEmptyMVar
-            let enter = do
-                    setTerminalAttributes stdInput (rawAttrs oldTerm) Immediately
-                    hSetBuffering stdin NoBuffering
-                restore = do
-                    -- Ask the watcher to exit, then wait for its poll loop.
-                    writeIORef stopped True
-                    void (takeMVar done)
-                    setTerminalAttributes stdInput oldTerm Immediately
-                    hSetBuffering stdin oldBuf
-            bracket enter (const restore) \() -> do
-                _ <- forkIO $
-                    escLoop cancel paused stopped
+            let start = forkIOWithUnmask \unmask ->
+                    unmask (escLoop cancel control stopped)
                         `finally` putMVar done ()
-                action
+                stop _ = do
+                    writeIORef stopped True
+                    readMVar done
+            bracket start stop (const action)
+  where
+    snapshot = withStdinOwnership control $
+        (,) <$> getTerminalAttributes stdInput <*> hGetBuffering stdin
+    restore (term, buffering) = withStdinOwnership control do
+        setTerminalAttributes stdInput term Immediately
+        hSetBuffering stdin buffering
 
--- | Temporarily stop the Esc watcher and restore cooked stdin for approval.
-withStdinPaused :: IORef Bool -> IO a -> IO a
-withStdinPaused paused action = do
+-- | Own stdin and restore cooked input for the duration of a prompt. Taking
+-- the lease waits for any in-flight watcher read to finish. Brackets release
+-- ownership and restore terminal settings on errors or cancellation as well.
+withStdinPaused :: StdinControl -> IO a -> IO a
+withStdinPaused control action = withStdinOwnership control do
     tty <- hIsTerminalDevice stdin
     if not tty
         then action
-        else do
-            -- Snapshot the active (raw) attrs so we can put them back.
-            activeTerm <- getTerminalAttributes stdInput
-            activeBuf <- hGetBuffering stdin
-            let cooked = cookedAttrs activeTerm
-                enter = do
-                    writeIORef paused True
-                    -- Give the watcher one poll interval to observe @paused@
-                    -- before we start reading approval input.
-                    threadDelay 120000
-                    setTerminalAttributes stdInput cooked Immediately
-                    hSetBuffering stdin LineBuffering
-                restore = do
-                    setTerminalAttributes stdInput activeTerm Immediately
-                    hSetBuffering stdin activeBuf
-                    writeIORef paused False
-            bracket enter (const restore) (\_ -> action)
+        else bracket snapshot restore \(activeTerm, _) -> do
+            setTerminalAttributes stdInput (cookedAttrs activeTerm) Immediately
+            hSetBuffering stdin LineBuffering
+            action
+  where
+    snapshot = (,) <$> getTerminalAttributes stdInput <*> hGetBuffering stdin
+    restore (term, buffering) = do
+        setTerminalAttributes stdInput term Immediately
+        hSetBuffering stdin buffering
 
 cookedAttrs :: TerminalAttributes -> TerminalAttributes
 cookedAttrs term =
@@ -111,47 +117,36 @@ isBareEscape = \case
     "\ESC" -> True
     _ -> False
 
-escLoop :: CancelFlag -> IORef Bool -> IORef Bool -> IO ()
-escLoop cancel paused stopped = go
+escLoop :: CancelFlag -> StdinControl -> IORef Bool -> IO ()
+escLoop cancel control stopped = go
   where
     go = do
+        continue <- withStdinOwnership control do
+            done <- readIORef stopped
+            if done then pure False else readKey
+        when continue go
+
+    readKey = do
+        ready <- hWaitForInput stdin 100
         done <- readIORef stopped
         if done
-            then pure ()
-            else do
-                isPaused <- readIORef paused
-                if isPaused
-                    then hWaitForInput stdin 100 >> go
-                    else do
-                        ready <- hWaitForInput stdin 100
-                        done' <- readIORef stopped
-                        if done'
-                            then pure ()
-                            else if not ready
-                                then go
+            then pure False
+            else if not ready
+                then pure True
+                else do
+                    c <- hGetChar stdin
+                    if c /= '\ESC'
+                        then pure True
+                        else do
+                            more <- hWaitForInput stdin 50
+                            cancels <- if not more
+                                then pure True
                                 else do
-                                    -- Re-check pause: approval may have started
-                                    -- between wait and read.
-                                    isPaused' <- readIORef paused
-                                    if isPaused'
-                                        then go
-                                        else do
-                                            c <- hGetChar stdin
-                                            if c /= '\ESC'
-                                                then go
-                                                else do
-                                                    -- Peek for CSI / SS3 so arrows do not cancel,
-                                                    -- but a Kitty-encoded Esc key press must.
-                                                    more <- hWaitForInput stdin 50
-                                                    if not more
-                                                        then requestCancel cancel
-                                                        else do
-                                                            c2 <- hGetChar stdin
-                                                            continuation <-
-                                                                readEscapeContinuation stdin c2
-                                                            if escapeContinuationCancels continuation
-                                                                then requestCancel cancel
-                                                                else go
+                                    c2 <- hGetChar stdin
+                                    escapeContinuationCancels
+                                        <$> readEscapeContinuation stdin c2
+                            when cancels (requestCancel cancel)
+                            pure (not cancels)
 
 -- | The tail of an escape sequence read after a leading ESC byte.
 data EscapeContinuation

@@ -207,7 +207,7 @@ runBtwQuestion registerCancel env question = do
                                     | otherwise ->
                                         withEscCancel
                                             cancel
-                                            env.sessionEscPaused
+                                            env.sessionStdinControl
                                             action
                                 Just _ -> action
                     else action)

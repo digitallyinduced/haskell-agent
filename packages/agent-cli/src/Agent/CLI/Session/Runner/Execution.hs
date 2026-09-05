@@ -238,7 +238,7 @@ newSessionHostRuntime SessionRequest{..} = do
                                                 , ("Deny", "")
                                                 ]
                                     Nothing ->
-                                        withStdinPaused escPaused
+                                        withStdinPaused stdinControl
                                             (promptRootAccess useColor root)
         reportSessionError message =
             case fullscreen of
@@ -818,7 +818,7 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                         Nothing ->
                             approve
                                 (\requested ->
-                                    withStdinPaused escPaused do
+                                    withStdinPaused stdinControl do
                                         color <-
                                             resolveColor host.hostStderrHandle
                                         promptPermission
@@ -1479,7 +1479,7 @@ buildSessionEnv
         , sessionSetComputerUseEnabled =
             loopRuntime.loopRuntimeShell.shellSetComputerUseEnabled
         , sessionBackground = startup.startupBackground
-        , sessionEscPaused = escPaused
+        , sessionStdinControl = stdinControl
         , sessionDraft = startup.startupSessionState.sessionDraft
         , sessionPreviewId =
             startup.startupSessionState.sessionPreviewId
