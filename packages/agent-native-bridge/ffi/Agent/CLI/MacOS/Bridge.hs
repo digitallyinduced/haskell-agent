@@ -34,12 +34,13 @@ import Agent.CLI.MacOS.Marshalling
 import Agent.CLI.MacOS.BrowserBridge
 import Agent.CLI.MacOS.GatewayBridge (invokeGatewayCallbackOnce)
 import Agent.CLI.MacOS.AccountBridge ()
+import Agent.CLI.MacOS.RepositoryChecks
+import Agent.CLI.MacOS.RepositoryDeliveryBridge ()
+import Agent.CLI.MacOS.RepositoryInput
 import Agent.CLI.MacOS.RepositoryWorkers
     ( cancelRepositoryWorkers
-    , isRepositoryCallbackThread
     , startRepositoryWorker
     , tryRepositorySynchronous
-    , withRepositoryCallbackThread
     )
 import Agent.CLI.MacOS.ComputerBridge
     ( ComputerCallback
@@ -152,7 +153,6 @@ import Agent.CLI.Project
     , loadProjectSettings
     , resolveProjectRoot
     )
-import qualified Agent.CLI.RepositoryDelivery as RepositoryDelivery
 import qualified Agent.CLI.RepositoryReview as RepositoryReview
 import Agent.CLI.Options (parseEffort)
 import Agent.CLI.Session
@@ -232,7 +232,6 @@ import Control.Concurrent.MVar
     , newEmptyMVar
     , newMVar
     , putMVar
-    , readMVar
     , withMVar
     , takeMVar
     )
@@ -279,8 +278,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Char (ord)
 import Data.Either (isRight)
 import Data.IORef
-    ( IORef
-    , modifyIORef'
+    ( modifyIORef'
     , newIORef
     , readIORef
     , writeIORef
@@ -329,7 +327,6 @@ import System.Directory
     , removeFile
     )
 import System.Directory.OsPath (getHomeDirectory)
-import qualified System.Exit
 import System.IO
     ( IOMode(WriteMode)
     , hClose
@@ -457,38 +454,6 @@ type RepositoryResultCallback =
     -> CString -> CSize -- error
     -> IO ()
 
-type RepositoryDeliveryStatusCallback =
-    Ptr () -> CInt
-    -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize
-    -> CLLong -> CLLong -> CString -> CSize -> IO ()
-
-type RepositoryPushPreviewCallback =
-    Ptr () -> CInt -> CString -> CSize -> CLLong
-    -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize
-    -> CLLong -> CLLong -> CString -> CSize -> IO ()
-
-type RepositoryPushResultCallback =
-    Ptr () -> CInt -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> IO ()
-
-type RepositoryPullRequestPreviewCallback =
-    Ptr () -> CInt -> CString -> CSize -> CLLong
-    -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> IO ()
-
-type RepositoryPullRequestResultCallback =
-    Ptr () -> CInt -> CString -> CSize -> CString -> CSize -> IO ()
-
-type RepositoryCheckOutputCallback =
-    Ptr () -> CInt -> Ptr Word8 -> CSize -> IO ()
-
-type RepositoryCheckExitCallback =
-    Ptr () -> CInt -> CInt -> CString -> CSize -> IO ()
-
 -- Status is 0 for an active task, 1 for completion, and -1 for failure.
 -- State is 0 for queued and 1 for running. Every pointer is callback-scoped.
 type TaskSnapshotCallback =
@@ -580,39 +545,6 @@ foreign import ccall "dynamic"
 foreign import ccall "dynamic"
     invokeRepositoryResultCallback
         :: FunPtr RepositoryResultCallback -> RepositoryResultCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryDeliveryStatusCallback
-        :: FunPtr RepositoryDeliveryStatusCallback
-        -> RepositoryDeliveryStatusCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryPushPreviewCallback
-        :: FunPtr RepositoryPushPreviewCallback
-        -> RepositoryPushPreviewCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryPushResultCallback
-        :: FunPtr RepositoryPushResultCallback
-        -> RepositoryPushResultCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryPullRequestPreviewCallback
-        :: FunPtr RepositoryPullRequestPreviewCallback
-        -> RepositoryPullRequestPreviewCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryPullRequestResultCallback
-        :: FunPtr RepositoryPullRequestResultCallback
-        -> RepositoryPullRequestResultCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryCheckOutputCallback
-        :: FunPtr RepositoryCheckOutputCallback -> RepositoryCheckOutputCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryCheckExitCallback
-        :: FunPtr RepositoryCheckExitCallback -> RepositoryCheckExitCallback
 
 foreign import ccall "dynamic"
     invokeTaskSnapshotCallback
@@ -1360,39 +1292,7 @@ foreign export ccall ha_repository_commit
     :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
     -> FunPtr RepositoryResultCallback -> Ptr () -> IO CInt
 
-foreign export ccall ha_repository_delivery_status
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryDeliveryStatusCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_repository_push_preview
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPushPreviewCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_repository_push_confirm
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPushResultCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_repository_pr_preview
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPullRequestPreviewCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_repository_pr_confirm
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPullRequestResultCallback -> Ptr () -> IO CInt
-
 foreign export ccall ha_repository_cancel_all :: IO ()
-
-foreign export ccall ha_repository_check_start
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> Ptr () -> CSize
-    -> FunPtr RepositoryCheckOutputCallback
-    -> FunPtr RepositoryCheckExitCallback
-    -> Ptr () -> Ptr (Ptr ()) -> IO CInt
-
-foreign export ccall ha_repository_check_cancel :: Ptr () -> IO ()
-
-foreign export ccall ha_repository_check_destroy :: Ptr () -> IO ()
 
 ha_repository_snapshot
     :: Ptr Word8 -> CSize
@@ -1651,177 +1551,6 @@ ha_repository_commit pathBytes pathLength snapshotBytes snapshotLength
                     pure (if started then 0 else 3)
                 Right _ -> pure 3
 
-ha_repository_delivery_status
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryDeliveryStatusCallback -> Ptr () -> IO CInt
-ha_repository_delivery_status pathBytes pathLength snapshotBytes snapshotLength
-    callback context
-    | callback == nullFunPtr = pure 1
-    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
-        || not (deliveryInputValid
-            snapshotBytes snapshotLength deliveryTokenLimit) = pure 2
-    | otherwise =
-        copyRequiredTexts
-            [(pathBytes, pathLength), (snapshotBytes, snapshotLength)] >>= \case
-                Right [path, snapshot] -> do
-                    terminal <- newMVar False
-                    started <- startRepositoryWorker
-                        (emitDeliveryOnce terminal $
-                            emitDeliveryStatusFailure callback context (-3)
-                                "repository delivery was cancelled") $
-                        prepareDeliveryResult terminal
-                            (RepositoryDelivery.repositoryDeliveryStatus
-                                (Text.unpack path)
-                                snapshot)
-                            (emitDeliveryStatusFailure callback context (-1)
-                                "repository delivery failed")
-                            (emitDeliveryStatusFailure callback context)
-                            (emitDeliveryStatus callback context)
-                    pure (if started then 0 else 3)
-                _ -> pure 2
-
-ha_repository_push_preview
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPushPreviewCallback -> Ptr () -> IO CInt
-ha_repository_push_preview pathBytes pathLength snapshotBytes snapshotLength
-    callback context
-    | callback == nullFunPtr = pure 1
-    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
-        || not (deliveryInputValid
-            snapshotBytes snapshotLength deliveryTokenLimit) = pure 2
-    | otherwise =
-        copyRequiredTexts
-            [(pathBytes, pathLength), (snapshotBytes, snapshotLength)] >>= \case
-                Right [path, snapshot] -> do
-                    terminal <- newMVar False
-                    started <- startRepositoryWorker
-                        (emitDeliveryOnce terminal $
-                            emitPushPreviewFailure callback context (-3)
-                                "repository push preview was cancelled") $
-                        prepareDeliveryResult terminal
-                            (RepositoryDelivery.previewRepositoryPush
-                                (Text.unpack path)
-                                snapshot)
-                            (emitPushPreviewFailure callback context (-1)
-                                "repository push preview failed")
-                            (emitPushPreviewFailure callback context)
-                            (emitPushPreview callback context)
-                    pure (if started then 0 else 3)
-                _ -> pure 2
-
-ha_repository_push_confirm
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPushResultCallback -> Ptr () -> IO CInt
-ha_repository_push_confirm pathBytes pathLength tokenBytes tokenLength
-    callback context
-    | callback == nullFunPtr = pure 1
-    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
-        || not (deliveryInputValid tokenBytes tokenLength deliveryTokenLimit) =
-            pure 2
-    | otherwise =
-        copyRequiredTexts
-            [(pathBytes, pathLength), (tokenBytes, tokenLength)] >>= \case
-                Right [path, token] -> do
-                    terminal <- newMVar False
-                    started <- startRepositoryWorker
-                        (emitDeliveryOnce terminal $
-                            emitPushResultFailure callback context (-3)
-                                "repository push was cancelled") $
-                        prepareDeliveryResult terminal
-                            (RepositoryDelivery.confirmRepositoryPush
-                                (Text.unpack path)
-                                token)
-                            (emitPushResultFailure callback context (-1)
-                                "repository push failed")
-                            (emitPushResultFailure callback context)
-                            (\status ->
-                                        withText status.deliverySnapshotId
-                                            \snapshotPtr snapshotSize ->
-                                        withText status.deliveryHeadOid
-                                            \headPtr headSize ->
-                                                invokeRepositoryPushResultCallback
-                                                    callback context 0
-                                                    snapshotPtr snapshotSize
-                                                    headPtr headSize
-                                                    nullPtr 0)
-                    pure (if started then 0 else 3)
-                _ -> pure 2
-
-ha_repository_pr_preview
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPullRequestPreviewCallback -> Ptr () -> IO CInt
-ha_repository_pr_preview pathBytes pathLength snapshotBytes snapshotLength
-    baseBytes baseLength titleBytes titleLength bodyBytes bodyLength
-    callback context
-    | callback == nullFunPtr = pure 1
-    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
-        || not (deliveryInputValid
-            snapshotBytes snapshotLength deliveryTokenLimit)
-        || not (deliveryInputValid baseBytes baseLength deliveryRefLimit)
-        || not (deliveryInputValid titleBytes titleLength deliveryTitleLimit)
-        || not (deliveryInputValid bodyBytes bodyLength deliveryBodyLimit) =
-            pure 2
-    | otherwise =
-        copyRequiredTexts
-            [ (pathBytes, pathLength)
-            , (snapshotBytes, snapshotLength)
-            , (baseBytes, baseLength)
-            , (titleBytes, titleLength)
-            , (bodyBytes, bodyLength)
-            ] >>= \case
-                Right [path, snapshot, base, title, body] -> do
-                    terminal <- newMVar False
-                    started <- startRepositoryWorker
-                        (emitDeliveryOnce terminal $
-                            emitPullRequestPreviewFailure
-                                callback context (-3)
-                                "pull-request preview was cancelled") $
-                        prepareDeliveryResult terminal
-                            (RepositoryDelivery.previewPullRequest
-                                (Text.unpack path)
-                                snapshot base title body)
-                            (emitPullRequestPreviewFailure
-                                callback context (-1)
-                                "pull-request preview failed")
-                            (emitPullRequestPreviewFailure callback context)
-                            (emitPullRequestPreview callback context)
-                    pure (if started then 0 else 3)
-                _ -> pure 2
-
-ha_repository_pr_confirm
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPullRequestResultCallback -> Ptr () -> IO CInt
-ha_repository_pr_confirm pathBytes pathLength tokenBytes tokenLength
-    callback context
-    | callback == nullFunPtr = pure 1
-    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
-        || not (deliveryInputValid tokenBytes tokenLength deliveryTokenLimit) =
-            pure 2
-    | otherwise =
-        copyRequiredTexts
-            [(pathBytes, pathLength), (tokenBytes, tokenLength)] >>= \case
-                Right [path, token] -> do
-                    terminal <- newMVar False
-                    started <- startRepositoryWorker
-                        (emitDeliveryOnce terminal $
-                            emitPullRequestResultFailure callback context (-3)
-                                "pull-request creation was cancelled") $
-                        prepareDeliveryResult terminal
-                            (RepositoryDelivery.createPullRequest
-                                (Text.unpack path)
-                                token)
-                            (emitPullRequestResultFailure callback context (-1)
-                                "pull-request creation failed")
-                            (emitPullRequestResultFailure callback context)
-                            (\url ->
-                                        withText url \urlPtr urlSize ->
-                                            invokeRepositoryPullRequestResultCallback
-                                                callback context 0
-                                                urlPtr urlSize nullPtr 0)
-                    pure (if started then 0 else 3)
-                _ -> pure 2
-
 startRepositoryMutation
     :: FunPtr RepositoryResultCallback
     -> Ptr ()
@@ -1857,201 +1586,6 @@ prepareRepositoryResult callback context action =
 
 ha_repository_cancel_all :: IO ()
 ha_repository_cancel_all = cancelRepositoryWorkers
-
-data RepositoryCheckHandle = RepositoryCheckHandle
-    { repositoryCheckValue :: !(IORef (Maybe RepositoryReview.RepositoryCheck))
-    , repositoryCheckCancelRequested :: !(IORef Bool)
-    , repositoryCheckOwner :: !(Async ())
-    }
-
-ha_repository_check_start
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> Ptr () -> CSize
-    -> FunPtr RepositoryCheckOutputCallback
-    -> FunPtr RepositoryCheckExitCallback
-    -> Ptr () -> Ptr (Ptr ()) -> IO CInt
-ha_repository_check_start pathBytes pathLength snapshotBytes snapshotLength
-    executableBytes executableLength argumentsPointer argumentCount
-    outputCallback exitCallback context outCheck
-    | outputCallback == nullFunPtr
-        || exitCallback == nullFunPtr
-        || outCheck == nullPtr = pure 1
-    | argumentsPointer == nullPtr && argumentCount > 0 = pure 2
-    | argumentCount > fromIntegral maxRepositoryCheckArguments = pure 2
-    | otherwise =
-        copyRequiredTexts
-            [ (pathBytes, pathLength)
-            , (snapshotBytes, snapshotLength)
-            , (executableBytes, executableLength)
-            ] >>= \case
-                Left _ -> pure 2
-                Right [path, expected, executable] -> do
-                    copiedArguments <- copyRepositoryCheckArguments
-                        argumentsPointer argumentCount
-                    case copiedArguments of
-                        Left _ -> pure 2
-                        Right arguments -> mask \_ -> do
-                            poke outCheck nullPtr
-                            checkRef <- newIORef Nothing
-                            cancelRef <- newIORef False
-                            gate <- newEmptyMVar
-                            owner <- asyncWithUnmask \unmask ->
-                                readMVar gate >> do
-                                    -- asyncWithUnmask starts masked. Keep
-                                    -- acquisition and publication in that
-                                    -- masked region so ownership transfer is
-                                    -- atomic with respect to cancellation. Its
-                                    -- blocking I/O remains interruptible under
-                                    -- masked-interruptible semantics and owns
-                                    -- cleanup brackets.
-                                    started <- tryRepositorySynchronous
-                                        (RepositoryReview.startRepositoryCheck
-                                            (Text.unpack path)
-                                            expected
-                                            (Text.unpack executable)
-                                            (map Text.unpack arguments)
-                                            (\stream bytes ->
-                                                BS.useAsCStringLen bytes
-                                                    \(pointer, length) ->
-                                                        withRepositoryCallbackThread
-                                                            (invokeRepositoryCheckOutputCallback
-                                                                outputCallback
-                                                                context
-                                                                (case stream of
-                                                                    RepositoryReview.RepositoryCheckStdout -> 1
-                                                                    RepositoryReview.RepositoryCheckStderr -> 2)
-                                                                (castPtr pointer)
-                                                                (fromIntegral length)))
-                                            (\cancelled exitCode ->
-                                                withRepositoryCallbackThread
-                                                    (invokeRepositoryCheckExitCallback
-                                                        exitCallback
-                                                        context
-                                                        (if cancelled then 1 else 0)
-                                                        (case exitCode of
-                                                            System.Exit.ExitSuccess -> 0
-                                                            System.Exit.ExitFailure code ->
-                                                                fromIntegral code)
-                                                        nullPtr 0)))
-                                    case started of
-                                        Left exception ->
-                                            unmask
-                                                (withText
-                                                    (Text.pack (show exception))
-                                                    \errorPtr errorLength ->
-                                                        withRepositoryCallbackThread
-                                                            (invokeRepositoryCheckExitCallback
-                                                                exitCallback
-                                                                context 0 (-1)
-                                                                errorPtr errorLength))
-                                        Right (Left err) ->
-                                            unmask
-                                                (withText
-                                                    (RepositoryReview.repositoryErrorText
-                                                        err)
-                                                    \errorPtr errorLength ->
-                                                        withRepositoryCallbackThread
-                                                            (invokeRepositoryCheckExitCallback
-                                                                exitCallback
-                                                                context 0 (-1)
-                                                                errorPtr errorLength))
-                                        Right (Right check) -> do
-                                            writeIORef checkRef (Just check)
-                                            cancelRequested <- readIORef cancelRef
-                                            when cancelRequested
-                                                (RepositoryReview.cancelRepositoryCheck
-                                                    check)
-                                            unmask
-                                                (RepositoryReview.waitRepositoryCheck
-                                                    check)
-                                                `onException`
-                                                    RepositoryReview.cancelRepositoryCheck
-                                                        check
-                            stable <- newStablePtr RepositoryCheckHandle
-                                { repositoryCheckValue = checkRef
-                                , repositoryCheckCancelRequested = cancelRef
-                                , repositoryCheckOwner = owner
-                                }
-                                `onException` cancel owner
-                            (do
-                                poke outCheck (castStablePtrToPtr stable)
-                                -- No callback can begin before the owned
-                                -- handle is visible through out_check.
-                                putMVar gate ()
-                                pure 0)
-                                `onException` do
-                                    cancel owner
-                                    freeStablePtr stable
-                                    poke outCheck nullPtr
-                Right _ -> pure 3
-
-ha_repository_check_cancel :: Ptr () -> IO ()
-ha_repository_check_cancel pointer
-    | pointer == nullPtr = pure ()
-    | otherwise = do
-        isRepositoryCallbackThread >>= \case
-            True -> pure ()
-            False -> do
-                let stable =
-                        castPtrToStablePtr pointer
-                            :: StablePtr RepositoryCheckHandle
-                handle <- deRefStablePtr stable
-                writeIORef handle.repositoryCheckCancelRequested True
-                readIORef handle.repositoryCheckValue >>= mapM_
-                    RepositoryReview.cancelRepositoryCheck
-
-ha_repository_check_destroy :: Ptr () -> IO ()
-ha_repository_check_destroy pointer
-    | pointer == nullPtr = pure ()
-    | otherwise = do
-        isRepositoryCallbackThread >>= \case
-            True -> pure ()
-            False -> do
-                let stable =
-                        castPtrToStablePtr pointer
-                            :: StablePtr RepositoryCheckHandle
-                handle <- deRefStablePtr stable
-                _ <- waitCatch handle.repositoryCheckOwner
-                freeStablePtr stable
-
-copyRepositoryCheckArguments
-    :: Ptr () -> CSize -> IO (Either () [Text])
-copyRepositoryCheckArguments pointer count
-    | count > fromIntegral maxRepositoryCheckArguments = pure (Left ())
-    | itemSize <= 0 = pure (Left ())
-    | otherwise = go 0 (0 :: Int) []
-  where
-    pointerSize = sizeOf (nullPtr :: Ptr ())
-    sizeSize = sizeOf (undefined :: CSize)
-    itemSize = pointerSize + sizeSize
-    countInt = fromIntegral count
-    go index total acc
-        | index >= countInt = pure (Right (reverse acc))
-        | index > maxBound `div` itemSize = pure (Left ())
-        | otherwise = do
-            let base = castPtr pointer `plusPtr` (index * itemSize)
-            bytes <- peekByteOff base 0 :: IO (Ptr Word8)
-            length <- peekByteOff base pointerSize :: IO CSize
-            if length > fromIntegral maxRepositoryCheckArgumentBytes
-                || toInteger total + toInteger length
-                    > toInteger maxRepositoryCheckTotalArgumentBytes
-                then pure (Left ())
-                else copyRequiredText bytes length >>= \case
-                    Left _ -> pure (Left ())
-                    Right value ->
-                        go
-                            (index + 1)
-                            (total + fromIntegral length)
-                            (value : acc)
-
-maxRepositoryCheckArguments :: Int
-maxRepositoryCheckArguments = 4096
-
-maxRepositoryCheckArgumentBytes :: Int
-maxRepositoryCheckArgumentBytes = 1024 * 1024
-
-maxRepositoryCheckTotalArgumentBytes :: Int
-maxRepositoryCheckTotalArgumentBytes = 8 * 1024 * 1024
 
 repositoryPathMutation
     :: CInt -> FilePath -> Maybe RepositoryReview.RepositoryMutation
@@ -2132,186 +1666,6 @@ emitRepositoryError callback context err =
         _ ->
             emitRepositoryFailure
                 callback context (RepositoryReview.repositoryErrorText err)
-
-emitDeliveryOnce :: MVar Bool -> IO () -> IO ()
-emitDeliveryOnce terminal callback =
-    mask \_ -> do
-        shouldRun <- modifyMVar terminal \completed ->
-            pure (True, not completed)
-        when shouldRun callback
-
-prepareDeliveryResult
-    :: MVar Bool
-    -> IO (Either RepositoryDelivery.DeliveryError value)
-    -> IO ()
-    -> (CInt -> Text -> IO ())
-    -> (value -> IO ())
-    -> IO (IO ())
-prepareDeliveryResult terminal operation unexpectedFailure knownFailure success =
-    tryRepositorySynchronous operation >>= \case
-        Left _ ->
-            pure (emitDeliveryOnce terminal unexpectedFailure)
-        Right (Left err) ->
-            pure
-                (emitDeliveryOnce terminal $
-                    knownFailure
-                        (deliveryErrorStatus err)
-                        (RepositoryDelivery.deliveryErrorText err))
-        Right (Right value) ->
-            pure (emitDeliveryOnce terminal (success value))
-
-emitDeliveryStatus
-    :: FunPtr RepositoryDeliveryStatusCallback
-    -> Ptr ()
-    -> RepositoryDelivery.DeliveryStatus
-    -> IO ()
-emitDeliveryStatus callback context status =
-    withText status.deliverySnapshotId \snapshotPtr snapshotSize ->
-    withText status.deliveryHeadOid \headPtr headSize ->
-    withText status.deliveryBranch \branchPtr branchSize ->
-    withText status.deliveryRemote \remotePtr remoteSize ->
-    withText status.deliveryUpstreamRef \upstreamPtr upstreamSize ->
-    withText status.deliveryUpstreamOid \upstreamOidPtr upstreamOidSize ->
-        invokeRepositoryDeliveryStatusCallback
-            callback context 0
-            snapshotPtr snapshotSize headPtr headSize
-            branchPtr branchSize remotePtr remoteSize
-            upstreamPtr upstreamSize upstreamOidPtr upstreamOidSize
-            (fromIntegral status.deliveryAhead)
-            (fromIntegral status.deliveryBehind)
-            nullPtr 0
-
-emitDeliveryStatusFailure
-    :: FunPtr RepositoryDeliveryStatusCallback
-    -> Ptr () -> CInt -> Text -> IO ()
-emitDeliveryStatusFailure callback context status message =
-    withText message \errorPtr errorSize ->
-        invokeRepositoryDeliveryStatusCallback
-            callback context status
-            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-            nullPtr 0 nullPtr 0 0 0 errorPtr errorSize
-
-emitPushPreview
-    :: FunPtr RepositoryPushPreviewCallback
-    -> Ptr ()
-    -> RepositoryDelivery.PushPreview
-    -> IO ()
-emitPushPreview callback context preview =
-    let status = preview.pushPreviewStatus
-        expires = fromIntegral
-            (floor preview.pushPreviewExpiresAt :: Integer)
-    in withText preview.pushPreviewConfirmation \tokenPtr tokenSize ->
-    withText status.deliveryHeadOid \headPtr headSize ->
-    withText status.deliveryBranch \branchPtr branchSize ->
-    withText status.deliveryRemote \remotePtr remoteSize ->
-    withText status.deliveryUpstreamRef \upstreamPtr upstreamSize ->
-        invokeRepositoryPushPreviewCallback
-            callback context 0 tokenPtr tokenSize expires
-            headPtr headSize branchPtr branchSize remotePtr remoteSize
-            upstreamPtr upstreamSize
-            (fromIntegral status.deliveryAhead)
-            (fromIntegral status.deliveryBehind)
-            nullPtr 0
-
-emitPushPreviewFailure
-    :: FunPtr RepositoryPushPreviewCallback
-    -> Ptr () -> CInt -> Text -> IO ()
-emitPushPreviewFailure callback context status message =
-    withText message \errorPtr errorSize ->
-        invokeRepositoryPushPreviewCallback
-            callback context status nullPtr 0 0
-            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-            0 0 errorPtr errorSize
-
-emitPushResultFailure
-    :: FunPtr RepositoryPushResultCallback
-    -> Ptr () -> CInt -> Text -> IO ()
-emitPushResultFailure callback context status message =
-    withText message \errorPtr errorSize ->
-        invokeRepositoryPushResultCallback
-            callback context status
-            nullPtr 0 nullPtr 0 errorPtr errorSize
-
-emitPullRequestPreview
-    :: FunPtr RepositoryPullRequestPreviewCallback
-    -> Ptr ()
-    -> RepositoryDelivery.PullRequestPreview
-    -> IO ()
-emitPullRequestPreview callback context preview =
-    let expires = fromIntegral
-            (floor preview.pullRequestExpiresAt :: Integer)
-    in withText preview.pullRequestConfirmation \tokenPtr tokenSize ->
-    withText preview.pullRequestRepository \repositoryPtr repositorySize ->
-    withText preview.pullRequestBaseRef \basePtr baseSize ->
-    withText preview.pullRequestHeadRef \headPtr headSize ->
-    withText preview.pullRequestTitle \titlePtr titleSize ->
-        invokeRepositoryPullRequestPreviewCallback
-            callback context 0 tokenPtr tokenSize expires
-            repositoryPtr repositorySize basePtr baseSize
-            headPtr headSize titlePtr titleSize nullPtr 0
-
-emitPullRequestPreviewFailure
-    :: FunPtr RepositoryPullRequestPreviewCallback
-    -> Ptr () -> CInt -> Text -> IO ()
-emitPullRequestPreviewFailure callback context status message =
-    withText message \errorPtr errorSize ->
-        invokeRepositoryPullRequestPreviewCallback
-            callback context status nullPtr 0 0
-            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 errorPtr errorSize
-
-emitPullRequestResultFailure
-    :: FunPtr RepositoryPullRequestResultCallback
-    -> Ptr () -> CInt -> Text -> IO ()
-emitPullRequestResultFailure callback context status message =
-    withText message \errorPtr errorSize ->
-        invokeRepositoryPullRequestResultCallback
-            callback context status nullPtr 0 errorPtr errorSize
-
-deliveryErrorStatus :: RepositoryDelivery.DeliveryError -> CInt
-deliveryErrorStatus = \case
-    RepositoryDelivery.DeliveryStale _ -> -2
-    RepositoryDelivery.DeliveryConfirmationRejected _ -> -4
-    _ -> -1
-
-deliveryInputValid :: Ptr Word8 -> CSize -> Int -> Bool
-deliveryInputValid pointer length limit =
-    pointer /= nullPtr
-        && length > 0
-        && toInteger length <= toInteger limit
-
-deliveryPathLimit, deliveryTokenLimit, deliveryRefLimit :: Int
-deliveryPathLimit = 16 * 1024
-deliveryTokenLimit = 4 * 1024
-deliveryRefLimit = 1024
-
-deliveryTitleLimit, deliveryBodyLimit :: Int
-deliveryTitleLimit = 4 * 1024
-deliveryBodyLimit = 1024 * 1024
-
-copyRequiredText :: Ptr Word8 -> CSize -> IO (Either () Text)
-copyRequiredText pointer (CSize length)
-    | pointer == nullPtr || length == 0 = pure (Left ())
-    | toInteger length > toInteger (maxBound :: Int) = pure (Left ())
-    | toInteger length > toInteger maxRepositoryRequestItemBytes =
-        pure (Left ())
-    | otherwise = do
-        bytes <- BS.packCStringLen (castPtr pointer, fromIntegral length)
-        pure (first (const ()) (TextEncoding.decodeUtf8' bytes))
-
-copyRequiredTexts
-    :: [(Ptr Word8, CSize)]
-    -> IO (Either () [Text])
-copyRequiredTexts fields
-    | sum (map (toInteger . snd) fields)
-        > toInteger maxRepositoryRequestTotalBytes = pure (Left ())
-    | otherwise =
-        fmap sequence (mapM (uncurry copyRequiredText) fields)
-
-maxRepositoryRequestItemBytes :: Int
-maxRepositoryRequestItemBytes = 8 * 1024 * 1024
-
-maxRepositoryRequestTotalBytes :: Int
-maxRepositoryRequestTotalBytes = 16 * 1024 * 1024
 
 byteStringChunks :: Int -> BS.ByteString -> [BS.ByteString]
 byteStringChunks size bytes
