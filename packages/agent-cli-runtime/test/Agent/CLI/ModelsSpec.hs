@@ -215,6 +215,23 @@ spec = do
                 options
                 `shouldBe` True
 
+        it "uses Grok capabilities for the gateway Grok model" do
+            gatewayModelOptions catalog OpenAIProvider ["grok-4.6"]
+                `shouldBe`
+                    [ ModelOption
+                        { modelTarget =
+                            ModelTarget
+                                OpenAIProvider
+                                organizationGatewayConnectionId
+                                "grok-4.6"
+                                "grok-4.6"
+                                GrokBuildDialect
+                        , modelContextWindow = Just 500_000
+                        , modelLabel = Nothing
+                        , modelFallbackPriority = Nothing
+                        }
+                    ]
+
         it "rejects a persisted gateway route after disconnection" do
             let resolve deferToGateway =
                     resolveSavedModelTarget
