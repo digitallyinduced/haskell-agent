@@ -1489,8 +1489,6 @@ buildSessionEnv
         , sessionStoreRoot = storeRoot
         , sessionUsage = usageRef
         , sessionAccount = accountRef
-        , sessionAccountId = accountIdRef
-        , sessionAccountSelectionId = selectionRef
         , sessionAccountLabel = accountLabel
         , sessionSelectAccount = selectAccount
         , sessionLastAssistant = controls.controlLastAssistantRef

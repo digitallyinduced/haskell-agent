@@ -8,6 +8,7 @@ module Agent.CLI.Session.Runtime.Types
     , StartupRuntime(..)
     ) where
 
+import Agent.CLI.ActiveAccount (ActiveAccountRef)
 import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.AgentViewport
     ( AgentEntry
@@ -191,9 +192,7 @@ data SessionRequest = SessionRequest
     , agentTypes :: !GrokSubagentSpecs
     , legacyTarget :: !(Maybe LegacySubagentTarget)
     , usageRef :: !(IORef TokenUsage)
-    , accountRef :: !(IORef Text)
-    , accountIdRef :: !(IORef Text)
-    , selectionRef :: !(IORef Text)
+    , accountRef :: !ActiveAccountRef
     , accountLabel :: !(Credential -> IO Text)
     , selectAccount :: !(Maybe (Text -> IO (Either ApiError Text)))
     , onPersisted :: !(SessionHandle -> IO ())

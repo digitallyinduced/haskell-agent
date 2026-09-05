@@ -3,6 +3,7 @@ module Agent.CLI.Runtime.Orchestration.Tools
     , runAgentTools
     ) where
 
+import Agent.CLI.ActiveAccount (ActiveAccountRef)
 import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.AgentSessions
     ( agentSessionTools,
@@ -334,9 +335,7 @@ data AgentToolsRequest windowTitleResult = AgentToolsRequest
     , connectedGateway :: Maybe GatewayCredential
     , learnAboutUserRequested :: Bool
     , customBearerToken :: Maybe Text
-    , activeAccountIdRef :: IORef Text
-    , activeAccountRef :: IORef Text
-    , activeSelectionRef :: IORef Text
+    , activeAccountRef :: ActiveAccountRef
     , baseToolEnv :: ToolEnv
     , catalog :: ModelCatalog
     , initialSkills :: SkillCatalog
@@ -711,9 +710,7 @@ resolveToolModel AgentToolsRequest
   where
     toolProvider = loaded.loadedProvider
     fallbackModel =
-        fromMaybe
-            (error "validated default model is missing")
-            (defaultModelFor catalog toolProvider)
+        defaultModelFor catalog toolProvider
     unrestrictedModel =
         fromMaybe
             (maybe fallbackModel (.targetModelId) targetHint)
@@ -1960,9 +1957,7 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
         , connectedGateway
         , learnAboutUserRequested
         , sessionTmp
-        , activeAccountIdRef
         , activeAccountRef
-        , activeSelectionRef
         , agentTypesRef
         , allTools
         , recordImageGenerationInputs =

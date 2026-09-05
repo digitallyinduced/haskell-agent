@@ -5,6 +5,10 @@ module Agent.CLI.Runtime.Repl.Selection
     , selectRequestedAccount
     ) where
 
+import Agent.CLI.ActiveAccount
+    ( ActiveAccount(..)
+    , readActiveAccount
+    )
 import Agent.CLI.AccountPicker
     ( AccountPickerOption(..),
       accountPickerMatches,
@@ -147,8 +151,9 @@ selectRequestedAccountWithoutGateway env requestedProvider selector =
                 (Left
                     "Account selection needs the fullscreen account picker; use /login in minimal mode")
         Just runtime -> do
-            currentSelectionId <- readIORef env.sessionAccountSelectionId
-            currentAccountId <- readIORef env.sessionAccountId
+            account <- readActiveAccount env.sessionAccount
+            let currentSelectionId = account.activeSelectionId
+                currentAccountId = account.activeAccountId
             loaded <- withActivity runtime $
                 loadAllAccountPickerOptions env.sessionProvider
             let options =
@@ -249,7 +254,7 @@ selectRequestedAccountWithoutGateway env requestedProvider selector =
                     pure (Right Nothing)
         | otherwise = do
             params <- readIORef env.sessionParams
-            currentAccount <- readIORef env.sessionAccount
+            currentAccount <- (.activeAccountLabel) <$> readActiveAccount env.sessionAccount
             requestAccountProviderSwitch
                 env.sessionModelCatalog
                 (Just runtime)
@@ -296,8 +301,6 @@ handleSelection
             , sessionProjectRoot = projectRoot
             , sessionHome = home
             , sessionDraft = draftRef
-            , sessionAccountId = accountIdRef
-            , sessionAccountSelectionId = selectionRef
             , sessionSelectAccount = selectAccount
             , sessionTokenProvider = tokenProvider
             , sessionFullscreen = fullscreen
@@ -628,8 +631,9 @@ handleSelection
     chooseAccountFromOptions next =
         case fullscreen of
             Just runtime -> do
-                currentSelectionId <- readIORef selectionRef
-                currentAccountId <- readIORef accountIdRef
+                account <- readActiveAccount env.sessionAccount
+                let currentSelectionId = account.activeSelectionId
+                    currentAccountId = account.activeAccountId
                 options <- withReplActivity
                     "Loading account usage…"
                     (loadAllAccountPickerOptionsCached databasePool provider)
@@ -756,7 +760,7 @@ handleSelection
                                         next
                         | otherwise = do
                             params <- readIORef paramsRef
-                            currentAccount <- readIORef env.sessionAccount
+                            currentAccount <- (.activeAccountLabel) <$> readActiveAccount env.sessionAccount
                             requestAccountProviderSwitch
                                 catalog fullscreen provider connectionId
                                 (currentModel params) currentAccount
