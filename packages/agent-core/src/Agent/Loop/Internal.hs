@@ -39,7 +39,6 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallMode(..)
     , ToolOutcome(..)
-    , withToolCallOutcome
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , ToolResultImage(..)
@@ -216,26 +215,7 @@ normalizeTurnInputImages = \case
                         }
         file@FileAttachmentItem{} -> file
 
-    normalizeToolResultImages result@ToolCallResult{} = result
-    normalizeToolResultImages result@ToolCallResultWithImages{
-        toolResultImages
-    } =
-        result
-            { toolResultImages =
-                fmap normalizeToolResultImage toolResultImages
-            }
-    normalizeToolResultImages result@AsyncToolCallResult{} = result
-    normalizeToolResultImages result@AsyncToolCallResultWithImages{
-        toolResultImages
-    } =
-        result
-            { toolResultImages =
-                fmap normalizeToolResultImage toolResultImages
-            }
-
-    normalizeToolResultImages result@ToolCallResultWithOutcome{toolResultImages} =
-        result { toolResultImages = fmap normalizeToolResultImage toolResultImages }
-    normalizeToolResultImages result@AsyncToolCallResultWithOutcome{toolResultImages} =
+    normalizeToolResultImages result@ToolCallResult{toolResultImages} =
         result { toolResultImages = fmap normalizeToolResultImage toolResultImages }
 
     normalizeToolResultImage :: ToolResultImage -> ToolResultImage
@@ -1934,22 +1914,24 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
             result <- case approval of
                 ToolApprovalDenied denial ->
                     pure $
-                        withToolCallResultMode (toolCallMode call) $
-                            withToolCallOutcome (Just ToolDenied) $
-                                ToolCallResult
-                                    { callId = call.callId
-                                    , output = denial
-                                    , callKind = call.callKind
-                                    }
+                        ToolCallResult
+                            { callId = call.callId
+                            , output = denial
+                            , callKind = call.callKind
+                            , toolResultMode = toolCallMode call
+                            , toolResultImages = []
+                            , toolResultOutcome = Just ToolDenied
+                            }
                 ToolApprovalRejected ->
                     pure $
-                        withToolCallResultMode (toolCallMode call) $
-                            withToolCallOutcome (Just ToolDenied) $
-                                ToolCallResult
-                                    { callId = call.callId
-                                    , output = "Tool call rejected by user."
-                                    , callKind = call.callKind
-                                    }
+                        ToolCallResult
+                            { callId = call.callId
+                            , output = "Tool call rejected by user."
+                            , callKind = call.callKind
+                            , toolResultMode = toolCallMode call
+                            , toolResultImages = []
+                            , toolResultOutcome = Just ToolDenied
+                            }
                 ToolApprovalGranted ->
                     dispatchRegisteredToolCall
                         config.loopDispatch

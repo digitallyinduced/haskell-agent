@@ -37,6 +37,7 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     )
 import Claude.Agent.SDK.Types
     ( AssistantMessage(..)
@@ -694,6 +695,9 @@ userBlockEvents = \case
                 { callId = toolUseId
                 , output
                 , callKind = FunctionCallKind
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 }
             ]
     ServerToolResultBlock{toolUseId, content} ->
@@ -703,6 +707,9 @@ userBlockEvents = \case
                 { callId = toolUseId
                 , output = rawOutput
                 , callKind = FunctionCallKind
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 }
             ]
     _ ->

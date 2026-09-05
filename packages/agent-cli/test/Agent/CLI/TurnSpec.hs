@@ -38,6 +38,7 @@ import Agent.Responses.Types
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     , functionToolCall
     )
 import Agent.Tools.PlanMode
@@ -86,7 +87,7 @@ spec = do
                                 (ToolCallResult
                                     "c1"
                                     "clean"
-                                    FunctionCallKind)
+                                    FunctionCallKind BlockingToolCall [] Nothing)
                             , ResponseRestarted "retrying"
                             , TextDelta "second attempt"
                             ]
@@ -137,7 +138,7 @@ spec = do
                                 (ToolCallResult
                                     "same"
                                     "first output"
-                                    FunctionCallKind)
+                                    FunctionCallKind BlockingToolCall [] Nothing)
                             , ResponseRestarted "retrying"
                             , ToolStarted secondCall
                             , ToolOutputUpdated "same" "second output"
@@ -364,7 +365,7 @@ spec = do
                     [ functionCallItem "c1" "read" "{\"path\":\"a\"}" Nothing
                     , functionCallItem "c2" "shell" "{\"cmd\":\"ls\"}" Nothing
                     ]
-                result = ToolCallResult "c1" "contents of a" FunctionCallKind
+                result = ToolCallResult "c1" "contents of a" FunctionCallKind BlockingToolCall [] Nothing
                 execution = LoopExecution
                     { executionState =
                         history <> inputs <> [assistantMessage "checking"] <> calls
@@ -385,7 +386,7 @@ spec = do
                                 (ToolCallResult
                                     "c2"
                                     "Tool `shell` was interrupted: the user cancelled the turn. It was not run, or was stopped before finishing and may have partially executed."
-                                    FunctionCallKind)
+                                    FunctionCallKind BlockingToolCall [] Nothing)
                            ]
                         <> turnInputsToItems [UserMessage turnAbortedNote]
 
@@ -424,7 +425,7 @@ spec = do
                                 (ToolCallResult
                                     "c-ok"
                                     "Tool `read` was not executed: the response was cut off (max_output_tokens)."
-                                    FunctionCallKind)
+                                    FunctionCallKind BlockingToolCall [] Nothing)
                            ]
 
         it "drops a call whose arguments never became valid JSON even without a status" do
@@ -454,7 +455,7 @@ spec = do
         it "keeps queued results after a transport failure without adding the aborted note" do
             let inputs = inputOnlyTurnItems prepared
                 call = functionCallItem "c1" "read" "{}" Nothing
-                result = ToolCallResult "c1" "done" FunctionCallKind
+                result = ToolCallResult "c1" "done" FunctionCallKind BlockingToolCall [] Nothing
                 execution = LoopExecution
                     { executionState = history <> inputs <> [call]
                     , executionPendingInputs = [CompletedTool result]

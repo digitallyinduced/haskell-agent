@@ -20,6 +20,7 @@ import Agent.Responses.Types
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     , ToolResultImage(..)
     )
 import qualified Data.Aeson as Aeson
@@ -57,7 +58,7 @@ spec = describe "bounded fullscreen history window" do
                 , (ShellTimedOut, "output", BlockFailed)
                 ]
         mapM_ (\(kind, (outcome, body, expected)) -> do
-            let result = ToolCallResultWithOutcome "call" body kind [] outcome
+            let result = ToolCallResult "call" body kind BlockingToolCall [] (Just outcome)
                 item = toolResultToItem result
                 call = functionToolCall "call" "echo" "{}"
                 live = reduceUi (UiLoop (ToolFinished result))
@@ -73,13 +74,13 @@ spec = describe "bounded fullscreen history window" do
                         , restored])
             map (.blockState) (toList history.historyTurnBlocks) `shouldBe` [expected]
             Aeson.toJSON item `shouldBe`
-                Aeson.toJSON (toolResultToItem (ToolCallResult "call" body kind)))
+                Aeson.toJSON (toolResultToItem (ToolCallResult "call" body kind BlockingToolCall [] Nothing)))
             [(kind, testCase) | kind <- [FunctionCallKind, CustomCallKind], testCase <- cases]
 
     it "uses a typed shell session id even if output contains a different id" do
         let call = functionToolCall "shell" "shell_command" "{\"command\":\"echo hi\"}"
-            result = ToolCallResultWithOutcome "shell"
-                "Process still running.\nsession_id: 999\nworking" FunctionCallKind [] (ShellRunning 42)
+            result = ToolCallResult "shell"
+                "Process still running.\nsession_id: 999\nworking" FunctionCallKind BlockingToolCall [] (Just (ShellRunning 42))
             state = reduceUi (UiLoop (ToolFinished result))
                 (reduceUi (UiLoop (ToolStarted call)) initialUiState)
         map (.blockState) (toList state.uiBlocks) `shouldBe` [BlockRunning]
@@ -89,12 +90,12 @@ spec = describe "bounded fullscreen history window" do
 
     it "does not mistake a failed stdin interaction for a stopped process" do
         let call = functionToolCall "shell" "shell_command" "{\"command\":\"cat\"}"
-            running = ToolCallResultWithOutcome "shell"
-                "Process still running.\nsession_id: 42\n" FunctionCallKind [] (ShellRunning 42)
+            running = ToolCallResult "shell"
+                "Process still running.\nsession_id: 42\n" FunctionCallKind BlockingToolCall [] (Just (ShellRunning 42))
             state = reduceUi (UiLoop (ToolFinished running))
                 (reduceUi (UiLoop (ToolStarted call)) initialUiState)
             poll = functionToolCall "poll" "write_stdin" "{\"session_id\":42}"
-            failed = ToolCallResultWithOutcome "poll" "input unavailable" FunctionCallKind [] ToolFailed
+            failed = ToolCallResult "poll" "input unavailable" FunctionCallKind BlockingToolCall [] (Just ToolFailed)
             afterPoll = reduceUi (UiLoop (ToolFinished failed))
                 (reduceUi (UiLoop (ToolStarted poll)) state)
         Map.keys afterPoll.uiShellProcesses `shouldBe` [42]
@@ -452,14 +453,15 @@ spec = describe "bounded fullscreen history window" do
             payloadMarker = "VERY_SECRET_IMAGE_BYTES"
             imageOutput =
                 toolResultToItem
-                    (ToolCallResultWithImages
+                    (ToolCallResult
                         "image-call"
                         summary
                         FunctionCallKind
+                        BlockingToolCall
                         [ ToolResultImage
                             ("data:image/png;base64," <> payloadMarker)
                             (Just "high")
-                        ])
+                        ] Nothing)
             rendered = projectedToolResult imageOutput
         rendered `shouldSatisfy` Text.isInfixOf summary
         rendered `shouldSatisfy` (not . Text.isInfixOf payloadMarker)

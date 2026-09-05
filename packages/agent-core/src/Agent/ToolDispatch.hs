@@ -239,46 +239,17 @@ data ToolDispatchOutcome = ToolDispatchOutcome
 
 -- | Provider-neutral result ready for a transport adapter to encode.
 --
--- Native dispatch always supplies an outcome. The legacy constructors
--- represent historical/imported results whose execution facts are unknown.
--- Consumers use the total image, mode, and outcome accessors across all forms.
-data ToolCallResult
-    = ToolCallResult
-        { callId :: !Text
-        , output :: !Text
-        , callKind :: !ToolCallKind
-        }
-    | ToolCallResultWithImages
-        { callId :: !Text
-        , output :: !Text
-        , callKind :: !ToolCallKind
-        , toolResultImages :: ![ToolResultImage]
-        }
-    | AsyncToolCallResult
-        { callId :: !Text
-        , output :: !Text
-        , callKind :: !ToolCallKind
-        }
-    | AsyncToolCallResultWithImages
-        { callId :: !Text
-        , output :: !Text
-        , callKind :: !ToolCallKind
-        , toolResultImages :: ![ToolResultImage]
-        }
-    | ToolCallResultWithOutcome
-        { callId :: !Text
-        , output :: !Text
-        , callKind :: !ToolCallKind
-        , toolResultImages :: ![ToolResultImage]
-        , toolResultOutcome :: !ToolOutcome
-        }
-    | AsyncToolCallResultWithOutcome
-        { callId :: !Text
-        , output :: !Text
-        , callKind :: !ToolCallKind
-        , toolResultImages :: ![ToolResultImage]
-        , toolResultOutcome :: !ToolOutcome
-        }
+-- Native dispatch always supplies an outcome. Historical/imported results
+-- retain 'Nothing' when execution facts are unknown. Mode, images, and outcome
+-- are independent: an empty image list has only one representation.
+data ToolCallResult = ToolCallResult
+    { callId :: !Text
+    , output :: !Text
+    , callKind :: !ToolCallKind
+    , toolResultMode :: !ToolCallMode
+    , toolResultImages :: ![ToolResultImage]
+    , toolResultOutcome :: !(Maybe ToolOutcome)
+    }
     deriving (Eq)
 
 instance Show ToolCallResult where
@@ -296,70 +267,24 @@ instance Show ToolCallResult where
             images -> ", images = <" <> show (length images) <> ">"
 
 toolCallResultImages :: ToolCallResult -> [ToolResultImage]
-toolCallResultImages = \case
-    ToolCallResult{} -> []
-    ToolCallResultWithImages{toolResultImages} -> toolResultImages
-    AsyncToolCallResult{} -> []
-    AsyncToolCallResultWithImages{toolResultImages} -> toolResultImages
-    ToolCallResultWithOutcome{toolResultImages} -> toolResultImages
-    AsyncToolCallResultWithOutcome{toolResultImages} -> toolResultImages
+toolCallResultImages = (.toolResultImages)
 
 toolCallResultOutcome :: ToolCallResult -> Maybe ToolOutcome
-toolCallResultOutcome = \case
-    ToolCallResultWithOutcome{toolResultOutcome} -> Just toolResultOutcome
-    AsyncToolCallResultWithOutcome{toolResultOutcome} -> Just toolResultOutcome
-    _ -> Nothing
+toolCallResultOutcome = (.toolResultOutcome)
 
 toolCallResultMode :: ToolCallResult -> ToolCallMode
-toolCallResultMode = \case
-    ToolCallResult{} -> BlockingToolCall
-    ToolCallResultWithImages{} -> BlockingToolCall
-    AsyncToolCallResult{} -> AsyncToolCall
-    AsyncToolCallResultWithImages{} -> AsyncToolCall
-    ToolCallResultWithOutcome{} -> BlockingToolCall
-    AsyncToolCallResultWithOutcome{} -> AsyncToolCall
+toolCallResultMode = (.toolResultMode)
 
 -- | Retag a result while preserving its payload, images, and outcome.
 withToolCallResultMode :: ToolCallMode -> ToolCallResult -> ToolCallResult
-withToolCallResultMode mode result =
-    case toolCallResultOutcome result of
-        Just outcome ->
-            case mode of
-                BlockingToolCall ->
-                    ToolCallResultWithOutcome
-                        result.callId result.output result.callKind
-                        (toolCallResultImages result) outcome
-                AsyncToolCall ->
-                    AsyncToolCallResultWithOutcome
-                        result.callId result.output result.callKind
-                        (toolCallResultImages result) outcome
-        Nothing ->
-            case (mode, toolCallResultImages result) of
-                (BlockingToolCall, []) ->
-                    ToolCallResult result.callId result.output result.callKind
-                (BlockingToolCall, images) ->
-                    ToolCallResultWithImages
-                        result.callId result.output result.callKind images
-                (AsyncToolCall, []) ->
-                    AsyncToolCallResult
-                        result.callId result.output result.callKind
-                (AsyncToolCall, images) ->
-                    AsyncToolCallResultWithImages
-                        result.callId result.output result.callKind images
+withToolCallResultMode mode result = result { toolResultMode = mode }
 
 -- | Attach execution facts at a native or durable-storage boundary. Legacy
--- imports without facts retain their compatibility representation.
+-- imports without facts must not erase an outcome already attached.
 withToolCallOutcome :: Maybe ToolOutcome -> ToolCallResult -> ToolCallResult
 withToolCallOutcome Nothing result = result
 withToolCallOutcome (Just outcome) result =
-    case toolCallResultMode result of
-        BlockingToolCall ->
-            ToolCallResultWithOutcome result.callId result.output result.callKind
-                (toolCallResultImages result) outcome
-        AsyncToolCall ->
-            AsyncToolCallResultWithOutcome
-                result.callId result.output result.callKind
-                (toolCallResultImages result) outcome
+    result { toolResultOutcome = Just outcome }
 
 functionToolCall :: Text -> Text -> Text -> ToolCall
 functionToolCall callId name arguments = ToolCall
@@ -549,9 +474,9 @@ dispatchToolHandlerDetailed config maybeHandler call = do
             Right (Left _) -> ToolFailed
             Left _ -> ToolFailed
         dispatchedResult =
-            withToolCallResultMode (toolCallMode call) $
-                ToolCallResultWithOutcome
-                    call.callId finalizedOutput call.callKind resultImages outcome
+            ToolCallResult
+                call.callId finalizedOutput call.callKind
+                (toolCallMode call) resultImages (Just outcome)
     pure ToolDispatchOutcome
         { toolDispatchResult = dispatchedResult
         , toolDispatchSucceeded = toolOutcomeSucceeded outcome

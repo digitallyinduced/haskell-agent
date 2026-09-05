@@ -2035,6 +2035,9 @@ scriptedStatelessSend seen remaining request onEvent = do
 functionResult :: Text -> Text -> ToolCallResult
 functionResult callId output = ToolCallResult
     { callId
+    , toolResultMode = BlockingToolCall
+    , toolResultImages = []
+    , toolResultOutcome = Nothing
     , output
     , callKind = FunctionCallKind
     }
@@ -2042,6 +2045,9 @@ functionResult callId output = ToolCallResult
 customResult :: Text -> Text -> ToolCallResult
 customResult callId output = ToolCallResult
     { callId
+    , toolResultMode = BlockingToolCall
+    , toolResultImages = []
+    , toolResultOutcome = Nothing
     , output
     , callKind = CustomCallKind
     }

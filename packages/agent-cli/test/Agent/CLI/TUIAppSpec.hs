@@ -147,6 +147,7 @@ import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     , customToolCall
     , functionToolCall
     )
@@ -193,7 +194,7 @@ spec = do
                 reduceUi
                     (UiLoop
                         (ToolFinished
-                            (ToolCallResult callId "done" FunctionCallKind)))
+                            (ToolCallResult callId "done" FunctionCallKind BlockingToolCall [] Nothing)))
             firstBlock = BlockId initialUiState.uiNextBlockId
             secondBlock = BlockId (initialUiState.uiNextBlockId + 1)
 
@@ -238,7 +239,7 @@ spec = do
                                 (ToolCallResult
                                     "read-1"
                                     "module Main where"
-                                    FunctionCallKind)))
+                                    FunctionCallKind BlockingToolCall [] Nothing)))
                         running
             runtime <- newScriptRuntime completed
             let appState =
@@ -1554,6 +1555,9 @@ spec = do
                         (UiLoop
                             (ToolFinished ToolCallResult
                                 { callId = "shell-1"
+                                , toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
                                 , output = "Exit code: 0\nclean"
                                 , callKind = FunctionCallKind
                                 }))
@@ -1589,6 +1593,9 @@ spec = do
                         , UiLoop
                             (ToolFinished ToolCallResult
                                 { callId = "todo-1"
+                                , toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
                                 , output = "- [in_progress] 1: Keep this list"
                                 , callKind = FunctionCallKind
                                 })
@@ -1616,6 +1623,9 @@ spec = do
                         (UiLoop
                             (ToolFinished ToolCallResult
                                 { callId = resultCallId
+                                , toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
                                 , output
                                 , callKind = resultCallKind
                                 }))
@@ -2098,6 +2108,9 @@ spec = do
                             (ToolFinished
                                 ToolCallResult
                                     { callId = "tool-1"
+                                    , toolResultMode = BlockingToolCall
+                                    , toolResultImages = []
+                                    , toolResultOutcome = Nothing
                                     , output = "exit: 0"
                                     , callKind = FunctionCallKind
                                     }))
@@ -2123,6 +2136,9 @@ spec = do
                             (ToolFinished
                                 ToolCallResult
                                     { callId = "inspect-1"
+                                    , toolResultMode = BlockingToolCall
+                                    , toolResultImages = []
+                                    , toolResultOutcome = Nothing
                                     , output = "contents"
                                     , callKind = FunctionCallKind
                                     }))
@@ -2159,6 +2175,9 @@ spec = do
                             (ToolFinished
                                 ToolCallResult
                                     { callId = "tool-2"
+                                    , toolResultMode = BlockingToolCall
+                                    , toolResultImages = []
+                                    , toolResultOutcome = Nothing
                                     , output = "Error: failed"
                                     , callKind = FunctionCallKind
                                     }))

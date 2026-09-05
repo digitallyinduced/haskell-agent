@@ -47,6 +47,7 @@ import Agent.OpenAI.ModelMetadata (codexEffectiveContextWindowFor)
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
@@ -1977,6 +1978,9 @@ spec = do
                 toolOutputText = Text.replicate 400 "x"
                 toolResult = ToolCallResult
                     { callId = "call-1"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = toolOutputText
                     , callKind = FunctionCallKind
                     }
@@ -2058,6 +2062,9 @@ spec = do
                     Text.replicate ((contextWindow + 10_000) * 4) "x"
                 toolResult = ToolCallResult
                     { callId = "call-oversized"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = originalOutput
                     , callKind = FunctionCallKind
                     }
@@ -2211,6 +2218,9 @@ spec = do
                     ]
                 toolResult = ToolCallResult
                     { callId = "call-keep"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = "hello from the tool"
                     , callKind = FunctionCallKind
                     }
@@ -2265,6 +2275,9 @@ spec = do
                 originalOutput = Text.replicate 80_000 "x"
                 toolResult = ToolCallResult
                     { callId = "call-occupancy"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = originalOutput
                     , callKind = FunctionCallKind
                     }
@@ -2368,6 +2381,9 @@ spec = do
                     ]
                 toolResult = ToolCallResult
                     { callId = "call-live"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = "ok"
                     , callKind = FunctionCallKind
                     }
@@ -2431,6 +2447,9 @@ spec = do
                     ]
                 toolResult = ToolCallResult
                     { callId = "call-replay"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = "ok"
                     , callKind = FunctionCallKind
                     }

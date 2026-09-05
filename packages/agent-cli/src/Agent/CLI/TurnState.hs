@@ -517,6 +517,9 @@ abortedToolOutput abort call =
                 "Tool `" <> call.name <> "` was not executed: "
                     <> reason <> "."
         , callKind = call.callKind
+        , toolResultMode = BlockingToolCall
+        , toolResultImages = []
+        , toolResultOutcome = Nothing
         }
 
 abortNote :: TurnAbort -> [ResponseItem] -> [ResponseItem]

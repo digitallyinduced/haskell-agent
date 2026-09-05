@@ -56,6 +56,7 @@ import Agent.Subagents (SubagentId(..), SubagentStatus(..))
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     , customToolCall
     , functionToolCall
     )
@@ -678,6 +679,9 @@ appendResponseItem showRawReasoning state = \case
                     { callId = output.callId
                     , output = renderToolOutputValue output.output
                     , callKind = FunctionCallKind
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     }))
             state
     CustomToolCallOutputItem output ->
@@ -687,6 +691,9 @@ appendResponseItem showRawReasoning state = \case
                     { callId = output.callId
                     , output = renderToolOutputValue output.output
                     , callKind = CustomCallKind
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     }))
             state
     ComputerCallOutputItem output ->
@@ -696,6 +703,9 @@ appendResponseItem showRawReasoning state = \case
                     { callId = output.computerOutputCallId
                     , output = "Screenshot captured"
                     , callKind = ComputerCallKind
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     }))
             state
     ReasoningItemValue reasoning ->
