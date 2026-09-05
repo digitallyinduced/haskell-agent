@@ -9,11 +9,13 @@ module Agent.CLI.ComputerUse
     , computerUseToolWith
     , computerUseRuntimeTool
     , newComputerUseRuntime
+    , newComputerUseRuntimeWithBackend
     , closeComputerUseRuntime
     , computerFunctionParameters
     , executeComputerCall
     , executeComputerCallWithBackend
     , executeComputerCallWithDesktopBackend
+    , executeComputerCallWithRuntime
     , newLeasedDesktopComputerUseBackend
     , screenshotMacOS
     , summarizeComputerCall
@@ -62,7 +64,6 @@ import Agent.Tools.Types
 import Control.Applicative ((<|>))
 import Control.Concurrent
     ( MVar
-    , modifyMVar
     , modifyMVar_
     , newMVar
     , putMVar
@@ -99,10 +100,12 @@ computerToolName = "computer"
 -- type, keeps this privileged handler separate from caller-defined functions.
 data ComputerUseRuntime = ComputerUseRuntime
     { computerRuntimeState :: !(MVar ComputerUseRuntimeState)
+    , computerRuntimeInitialize ::
+        !(IO (Either Text ManagedComputerBackend))
     }
 
 data ComputerUseRuntimeState
-    = ComputerRuntimeOpen !(Maybe (Either Text ManagedComputerBackend))
+    = ComputerRuntimeOpen !(Maybe ManagedComputerBackend)
     | ComputerRuntimeClosed
 
 data ManagedComputerBackend = ManagedComputerBackend
@@ -112,7 +115,31 @@ data ManagedComputerBackend = ManagedComputerBackend
 
 newComputerUseRuntime :: IO ComputerUseRuntime
 newComputerUseRuntime =
-    ComputerUseRuntime <$> newMVar (ComputerRuntimeOpen Nothing)
+    newComputerUseRuntimeWithInitializer newManagedComputerBackend
+
+-- | Construct a runtime around an initializer whose successful backend needs
+-- no runtime-owned teardown. Failed attempts remain retryable.
+newComputerUseRuntimeWithBackend
+    :: IO (Either Text ComputerUseBackend)
+    -> IO ComputerUseRuntime
+newComputerUseRuntimeWithBackend initialize =
+    newComputerUseRuntimeWithInitializer do
+        fmap
+            (fmap \backend -> ManagedComputerBackend
+                { managedComputerUseBackend = backend
+                , managedComputerBackendClose = pure ()
+                })
+            initialize
+
+newComputerUseRuntimeWithInitializer
+    :: IO (Either Text ManagedComputerBackend)
+    -> IO ComputerUseRuntime
+newComputerUseRuntimeWithInitializer initialize = do
+    computerRuntimeState <- newMVar (ComputerRuntimeOpen Nothing)
+    pure ComputerUseRuntime
+        { computerRuntimeState
+        , computerRuntimeInitialize = initialize
+        }
 
 closeComputerUseRuntime :: ComputerUseRuntime -> IO ()
 closeComputerUseRuntime runtime =
@@ -120,8 +147,8 @@ closeComputerUseRuntime runtime =
         ComputerRuntimeClosed -> pure ComputerRuntimeClosed
         ComputerRuntimeOpen backend -> do
             case backend of
-                Just (Right value) -> value.managedComputerBackendClose
-                _ -> pure ()
+                Just value -> value.managedComputerBackendClose
+                Nothing -> pure ()
             pure ComputerRuntimeClosed
 
 computerUseTool :: AppTool
@@ -331,27 +358,49 @@ executeComputerCallWithRuntime
 executeComputerCallWithRuntime runtime encoding call
     | Left err <- validateComputerCall call = pure (Left err)
     | otherwise = do
-        ensureComputerBackend runtime
-        withMVar runtime.computerRuntimeState \case
-            ComputerRuntimeClosed ->
-                pure (Left "Computer use has been closed.")
-            ComputerRuntimeOpen Nothing ->
-                pure (Left "Computer use backend initialization failed.")
-            ComputerRuntimeOpen (Just (Left err)) -> pure (Left err)
-            ComputerRuntimeOpen (Just (Right backend)) ->
-                executeComputerCallWithBackend
-                    backend.managedComputerUseBackend
-                    encoding
-                    call
+        ensureComputerBackend runtime >>= \case
+            Left err -> pure (Left err)
+            Right () ->
+                withMVar runtime.computerRuntimeState \case
+                    ComputerRuntimeClosed ->
+                        pure (Left "Computer use has been closed.")
+                    ComputerRuntimeOpen Nothing ->
+                        pure (Left
+                            "Computer use backend initialization failed.")
+                    ComputerRuntimeOpen (Just backend) ->
+                        executeComputerCallWithBackend
+                            backend.managedComputerUseBackend
+                            encoding
+                            call
 
-ensureComputerBackend :: ComputerUseRuntime -> IO ()
+ensureComputerBackend :: ComputerUseRuntime -> IO (Either Text ())
 ensureComputerBackend runtime =
-    modifyMVar runtime.computerRuntimeState \case
-        state@ComputerRuntimeClosed -> pure (state, ())
-        state@(ComputerRuntimeOpen (Just _)) -> pure (state, ())
-        ComputerRuntimeOpen Nothing -> do
-            backend <- newManagedComputerBackend
-            pure (ComputerRuntimeOpen (Just backend), ())
+    mask \restore -> do
+        state <- takeMVar runtime.computerRuntimeState
+        case state of
+            ComputerRuntimeClosed -> do
+                putMVar runtime.computerRuntimeState state
+                pure (Left "Computer use has been closed.")
+            ComputerRuntimeOpen (Just _) -> do
+                putMVar runtime.computerRuntimeState state
+                pure (Right ())
+            ComputerRuntimeOpen Nothing -> do
+                initialized <-
+                    restore runtime.computerRuntimeInitialize
+                        `onException` putMVar
+                            runtime.computerRuntimeState
+                            (ComputerRuntimeOpen Nothing)
+                case initialized of
+                    Left err -> do
+                        putMVar
+                            runtime.computerRuntimeState
+                            (ComputerRuntimeOpen Nothing)
+                        pure (Left err)
+                    Right backend -> do
+                        putMVar
+                            runtime.computerRuntimeState
+                            (ComputerRuntimeOpen (Just backend))
+                        pure (Right ())
 
 newManagedComputerBackend :: IO (Either Text ManagedComputerBackend)
 newManagedComputerBackend =

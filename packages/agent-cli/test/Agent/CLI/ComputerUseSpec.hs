@@ -4,11 +4,14 @@ import Agent.CLI.ComputerUse
     ( ComputerObservation(..)
     , ComputerUseBackend(..)
     , ScreenshotEncoding(..)
+    , closeComputerUseRuntime
     , computerApprovalPrompt
     , executeComputerCallWithBackend
     , executeComputerCallWithDesktopBackend
+    , executeComputerCallWithRuntime
     , keyCombinationScript
     , newLeasedDesktopComputerUseBackend
+    , newComputerUseRuntimeWithBackend
     , parseDisplaySize
     , parseSessionLocked
     , pointerScript
@@ -67,7 +70,13 @@ import Agent.Json (rawJsonFromEncoding)
 import Agent.Loop (ImageAttachment(..))
 import Agent.Responses.Types
 import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..))
-import Control.Concurrent (threadDelay)
+import Control.Concurrent
+    ( newEmptyMVar
+    , putMVar
+    , takeMVar
+    , threadDelay
+    )
+import Control.Concurrent.Async (cancel, waitCatch, withAsync)
 import Control.Exception.Safe (finally, throwString, tryAny)
 import Control.Monad (forM_)
 import qualified Data.Aeson as Aeson
@@ -100,6 +109,86 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "computer runtime backend initialization" do
+        it "retries failures and caches the first successful backend" do
+            attempts <- newIORef (0 :: Int)
+            let backend = ComputerUseBackend
+                    { computerRunTransaction =
+                        \_ _ validateDisplay ->
+                            pure do
+                                validateDisplay (100, 100)
+                                pure (ComputerObservation
+                                    (ImageAttachment
+                                        "image/png"
+                                        "observation")
+                                    Nothing)
+                    }
+                initialize = do
+                    attempt <- atomicModifyIORef' attempts \current ->
+                        let next = current + 1
+                        in (next, next)
+                    pure if attempt == 1
+                        then Left "desktop temporarily unavailable"
+                        else Right backend
+                call =
+                    exampleCall { computerActions = [ScreenshotAction] }
+            runtime <- newComputerUseRuntimeWithBackend initialize
+            (do
+                executeComputerCallWithRuntime runtime ScreenshotPng call
+                    `shouldReturn`
+                        Left "desktop temporarily unavailable"
+                second <- executeComputerCallWithRuntime
+                    runtime ScreenshotPng call
+                second `shouldSatisfy` either (const False) (const True)
+                third <- executeComputerCallWithRuntime
+                    runtime ScreenshotPng call
+                third `shouldSatisfy` either (const False) (const True)
+                readIORef attempts `shouldReturn` 2)
+                `finally` closeComputerUseRuntime runtime
+
+        it "remains retryable when initialization is cancelled" do
+            attempts <- newIORef (0 :: Int)
+            entered <- newEmptyMVar
+            blocker <- newEmptyMVar
+            let backend = ComputerUseBackend
+                    { computerRunTransaction =
+                        \_ _ validateDisplay ->
+                            pure do
+                                validateDisplay (100, 100)
+                                pure (ComputerObservation
+                                    (ImageAttachment
+                                        "image/png"
+                                        "observation")
+                                    Nothing)
+                    }
+                initialize = do
+                    attempt <- atomicModifyIORef' attempts \current ->
+                        let next = current + 1
+                        in (next, next)
+                    if attempt == 1
+                        then do
+                            putMVar entered ()
+                            takeMVar blocker
+                        else pure (Right backend)
+                call =
+                    exampleCall { computerActions = [ScreenshotAction] }
+            runtime <- newComputerUseRuntimeWithBackend initialize
+            (do
+                withAsync
+                    (executeComputerCallWithRuntime
+                        runtime ScreenshotPng call)
+                    \initializing -> do
+                        takeMVar entered
+                        cancel initializing
+                        cancelled <- waitCatch initializing
+                        cancelled `shouldSatisfy`
+                            either (const True) (const False)
+                retried <- executeComputerCallWithRuntime
+                    runtime ScreenshotPng call
+                retried `shouldSatisfy` either (const False) (const True)
+                readIORef attempts `shouldReturn` 2)
+                `finally` closeComputerUseRuntime runtime
+
     describe "computer backend executor" do
         it "rejects a structurally invalid batch before touching the backend" do
             backendCalls <- newIORef ([] :: [Text.Text])
