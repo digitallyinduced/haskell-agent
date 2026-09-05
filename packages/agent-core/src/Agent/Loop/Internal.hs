@@ -3,7 +3,13 @@ module Agent.Loop.Internal where
 import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
 import qualified Agent.Json.Decode as Json
 import Agent.Error (ApiError)
+import Agent.Image.Normalize
+    ( NormalizedImage(..)
+    , normalizeImageDataUrl
+    , normalizeImageForPrompt
+    )
 import Agent.InterAgentMessage (InterAgentMessage)
+import Agent.Json (RawJson, rawJsonBytes, rawJsonFromEncoding)
 import Agent.Loop.EventPump
     ( EventPump
     , EventPumpFailure(..)
@@ -15,12 +21,23 @@ import Agent.Loop.EventPump
     , runEventPump
     , waitEventPumpFailure
     )
-import Agent.Responses.Types (ResponseItem)
+import Agent.Responses.Types
+    ( ComputerCallOutput(..)
+    , CustomToolCallOutput(..)
+    , FunctionCallOutput(..)
+    , MessageContent(..)
+    , ResponseContentPart(..)
+    , ResponseAgentMessage(..)
+    , ResponseItem(..)
+    , ResponseMessage(..)
+    , ReasoningItem(..)
+    )
 import Agent.Telemetry (TurnTelemetry)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
+    , ToolResultImage(..)
     )
 import Agent.Tools.Scheduling
     ( ToolSchedulingPlan(..)
@@ -46,6 +63,8 @@ import Control.Exception.Safe
     )
 import Control.Monad (when)
 import Data.Aeson (ToJSON(..), object, (.=))
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
@@ -139,6 +158,138 @@ mapTurnInputUserText transform = \case
     UserMessageWithAttachments text attachments ->
         UserMessageWithAttachments (transform text) attachments
     other -> other
+
+normalizeTurnInputImages :: TurnInput -> TurnInput
+normalizeTurnInputImages = \case
+    UserMessageWithAttachments text attachments ->
+        UserMessageWithAttachments text
+            (fmap normalizeAttachment attachments)
+    CompletedTool result ->
+        CompletedTool (normalizeToolResultImages result)
+    other -> other
+  where
+    normalizeAttachment = \case
+        ImageAttachmentItem ImageAttachment{imageMime, imageBytes} ->
+            case normalizeImageForPrompt imageMime imageBytes of
+                NormalizedImage{normalizedImageMime, normalizedImageBytes} ->
+                    ImageAttachmentItem ImageAttachment
+                        { imageMime = normalizedImageMime
+                        , imageBytes = normalizedImageBytes
+                        }
+        file@FileAttachmentItem{} -> file
+
+    normalizeToolResultImages result@ToolCallResult{} = result
+    normalizeToolResultImages result@ToolCallResultWithImages{
+        toolResultImages
+    } =
+        result
+            { toolResultImages =
+                fmap normalizeToolResultImage toolResultImages
+            }
+
+    normalizeToolResultImage :: ToolResultImage -> ToolResultImage
+    normalizeToolResultImage image@ToolResultImage{imageUrl} =
+        image { imageUrl = normalizeImageDataUrl imageUrl }
+
+normalizeTurnInputs :: [TurnInput] -> [TurnInput]
+normalizeTurnInputs = map normalizeTurnInputImages
+
+normalizeBackendSnapshotImages :: BackendSnapshot -> BackendSnapshot
+normalizeBackendSnapshotImages snapshot =
+    snapshot
+        { backendItems =
+            map normalizeResponseItemImages snapshot.backendItems
+        }
+
+normalizeResponseItemImages :: ResponseItem -> ResponseItem
+normalizeResponseItemImages = \case
+    MessageItem message ->
+        MessageItem
+            message
+                { content =
+                    normalizeMessageContentImages message.content
+                }
+    AgentMessageItem message ->
+        AgentMessageItem
+            message
+                { content =
+                    map normalizeResponseContentPartImage message.content
+                }
+    ReasoningItemValue reasoning ->
+        ReasoningItemValue
+            reasoning
+                { content =
+                    fmap
+                        (map normalizeResponseContentPartImage)
+                        reasoning.content
+                }
+    FunctionCallOutputItem callOutput ->
+        FunctionCallOutputItem
+            callOutput
+                { output = normalizeRawJsonImages callOutput.output
+                }
+    CustomToolCallOutputItem callOutput ->
+        CustomToolCallOutputItem
+            callOutput
+                { output = normalizeRawJsonImages callOutput.output
+                }
+    ComputerCallOutputItem callOutput ->
+        ComputerCallOutputItem
+            callOutput
+                { screenshotDataUrl =
+                    normalizeImageDataUrl callOutput.screenshotDataUrl
+                }
+    item -> item
+
+normalizeMessageContentImages :: MessageContent -> MessageContent
+normalizeMessageContentImages = \case
+    MessageContentText text -> MessageContentText text
+    MessageContentParts parts ->
+        MessageContentParts (map normalizeResponseContentPartImage parts)
+
+normalizeResponseContentPartImage
+    :: ResponseContentPart
+    -> ResponseContentPart
+normalizeResponseContentPartImage part@InputImagePart{imageUrl} =
+    part
+        { imageUrl = fmap normalizeImageDataUrl imageUrl
+        }
+normalizeResponseContentPartImage part = part
+
+normalizeRawJsonImages :: RawJson -> RawJson
+normalizeRawJsonImages raw =
+    case Aeson.decodeStrict' (rawJsonBytes raw) of
+        Nothing -> raw
+        Just value ->
+            let normalized = normalizeJsonImageValues value
+            in if normalized == value
+                then raw
+                else rawJsonFromEncoding (Aeson.toEncoding normalized)
+
+normalizeJsonImageValues :: Aeson.Value -> Aeson.Value
+normalizeJsonImageValues = \case
+    Aeson.Object object ->
+        Aeson.Object (normalizeObjectImageUrl recursivelyNormalized)
+      where
+        recursivelyNormalized = KeyMap.map normalizeJsonImageValues object
+    Aeson.Array values ->
+        Aeson.Array (fmap normalizeJsonImageValues values)
+    value -> value
+  where
+    normalizeObjectImageUrl object =
+        case
+            ( KeyMap.lookup "type" object
+            , KeyMap.lookup "image_url" object
+            )
+        of
+            (Just (Aeson.String kind), Just (Aeson.String imageUrl))
+                | kind == "input_image"
+                    || kind == "computer_screenshot" ->
+                        KeyMap.insert
+                            "image_url"
+                            (Aeson.String (normalizeImageDataUrl imageUrl))
+                            object
+            _ -> object
 
 -- | Provider-reported token counts for one model response. @inputTokens@
 -- typically includes any cached prefix; @cachedTokens@ is that subset when
@@ -822,9 +973,9 @@ submitLoopTurn runtime cursor = do
         withAsync
             (restore $
                 config.loopBackend.submitTurn
-                    cursor.cursorState
+                    (normalizeBackendSnapshotImages cursor.cursorState)
                     cursor.cursorPreviousResponseId
-                    cursor.cursorInputs
+                    (normalizeTurnInputs cursor.cursorInputs)
                     onBackendEvent)
             \submission -> do
                 result <- restore $ race

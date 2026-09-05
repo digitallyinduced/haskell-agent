@@ -95,7 +95,8 @@ library
                     , Agent.Tools.Types
                     , Agent.Tools.ViewImage
                     , Agent.Transport.WebSocket
-    other-modules:    Agent.Loop.EventPump
+    other-modules:    Agent.Image.Normalize
+                    , Agent.Loop.EventPump
                     , Agent.Loop.Internal
                     , Agent.Subagents.Registry.Internal.Core
                     , Agent.Subagents.Registry.Internal.Operations
@@ -133,6 +134,7 @@ library
                     , vector
                     , websockets
                     , yaml
+                    , zlib
 
 benchmark grep-streaming-bench
     import:           common-opts
@@ -286,6 +288,7 @@ test-suite agent-core-test
                     , filepath
                     , containers
                     , hspec
+                    , JuicyPixels
                     , process
                     , QuickCheck >= 2.14 && < 2.16
                     , retry >= 0.9.3.1 && < 0.10
@@ -299,3 +302,4 @@ test-suite agent-core-test
                     , unix
                     , websockets
                     , yaml
+                    , zlib
