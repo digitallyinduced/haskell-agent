@@ -454,62 +454,50 @@ runAgent
                             Left err -> pure (Left err)
                             Right catalog -> do
                                 color <- resolveColor runMode.runStderr
-                                let currentTarget =
+                                let preferredTarget =
                                         ((.transitionTarget) <$> nextTransition)
                                             <|> ( (.modelTarget)
                                                     <$> (nextOptions.optModel
                                                         >>= resolveConfiguredModel
                                                             catalog)
                                                 )
-                                            <|> ( (.modelTarget)
-                                                    <$> (nextOptions.optProvider
-                                                        >>= defaultModelOptionFor
-                                                            catalog)
-                                                )
-                                            <|> ( (.modelTarget)
-                                                    <$> defaultModelOptionFor
-                                                        catalog
-                                                        OpenAIProvider
-                                                )
-                                case currentTarget of
-                                    Nothing ->
-                                        pure
-                                            (Left
-                                                "No configured models are available.")
-                                    Just current ->
-                                        recoveryGatewayAccess
-                                            current.targetProvider
-                                            nextTransition >>= \case
-                                                Left err -> pure (Left err)
-                                                Right gatewayAccess ->
-                                                    modelChoiceWithEffort
-                                                        catalog
-                                                        gatewayAccess
-                                                        (Just runtime)
-                                                        color
-                                                        current.targetConnectionId
-                                                        current.targetProvider
-                                                        current.targetModelId
-                                                        current.targetDialect
-                                                        (fromMaybe
-                                                            (defaultEffortFor
-                                                                current.targetProvider)
-                                                            ( (nextTransition
-                                                                    >>= (.transitionEffort))
-                                                                <|> nextOptions.optEffort
-                                                            ))
-                                                        >>= \case
-                                                            Left err ->
-                                                                pure (Left err)
-                                                            Right Nothing ->
-                                                                pure (Right Nothing)
-                                                            Right (Just selection) ->
-                                                                pure $ Right $ Just $
-                                                                    recoveryModelTransition
-                                                                        nextOptions
-                                                                        nextTransition
-                                                                        selection.modelPickerOption.modelTarget
-                                                                        selection.modelPickerEffort
+                                    defaultOption = defaultModelOptionFor catalog
+                                        (fromMaybe OpenAIProvider nextOptions.optProvider)
+                                    current = fromMaybe defaultOption.modelTarget
+                                        preferredTarget
+                                recoveryGatewayAccess
+                                    current.targetProvider
+                                    nextTransition >>= \case
+                                        Left err -> pure (Left err)
+                                        Right gatewayAccess ->
+                                            modelChoiceWithEffort
+                                                catalog
+                                                gatewayAccess
+                                                (Just runtime)
+                                                color
+                                                current.targetConnectionId
+                                                current.targetProvider
+                                                current.targetModelId
+                                                current.targetDialect
+                                                (fromMaybe
+                                                    (defaultEffortFor
+                                                        current.targetProvider)
+                                                    ( (nextTransition
+                                                            >>= (.transitionEffort))
+                                                        <|> nextOptions.optEffort
+                                                    ))
+                                                >>= \case
+                                                    Left err ->
+                                                        pure (Left err)
+                                                    Right Nothing ->
+                                                        pure (Right Nothing)
+                                                    Right (Just selection) ->
+                                                        pure $ Right $ Just $
+                                                            recoveryModelTransition
+                                                                nextOptions
+                                                                nextTransition
+                                                                selection.modelPickerOption.modelTarget
+                                                                selection.modelPickerEffort
                     recoveryModelTransition
                             nextOptions nextTransition target selectedEffort =
                         case nextTransition of

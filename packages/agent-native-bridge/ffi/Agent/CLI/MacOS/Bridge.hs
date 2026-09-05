@@ -6033,26 +6033,17 @@ loadNativeModelCatalog
                                 == target.targetConnectionId
                                 then Just option
                                 else Nothing
-                    selectedTarget <-
-                        traverse
-                            (fmap (.modelTarget)
-                                . resolveModelOptionDialect)
-                            ( configuredTarget
-                                <|> defaultModelOptionFor
-                                    catalog
-                                    OpenAIProvider
-                                <|> listToMaybe (modelCatalog catalog)
-                            )
-                    case selectedTarget of
-                        Nothing -> pure (Left "model catalog is empty")
-                        Just target -> do
-                            picker <- initialPickerStateResolved
-                                catalog
-                                target.targetConnectionId
-                                target.targetProvider
-                                target.targetModelId
-                                target.targetDialect
-                            pure (Right (modelPickerJSON catalog picker))
+                    selected <- resolveModelOptionDialect $
+                        fromMaybe (defaultModelOptionFor catalog OpenAIProvider)
+                            configuredTarget
+                    let target = selected.modelTarget
+                    picker <- initialPickerStateResolved
+                        catalog
+                        target.targetConnectionId
+                        target.targetProvider
+                        target.targetModelId
+                        target.targetDialect
+                    pure (Right (modelPickerJSON catalog picker))
 
 modelPickerJSON :: ModelCatalog -> PickerState -> Aeson.Value
 modelPickerJSON catalog picker =
