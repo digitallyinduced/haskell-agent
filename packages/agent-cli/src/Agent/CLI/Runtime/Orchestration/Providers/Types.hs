@@ -2,6 +2,9 @@ module Agent.CLI.Runtime.Orchestration.Providers.Types
     ( AgentProviderRequest(..)
     ) where
 
+import Agent.CLI.ActiveAccount
+    ( ActiveAccountRef
+    )
 import Agent.CLI.Auth.Types (LoadedAuth)
 import Agent.CLI.Compaction
     ( CompactOutcome
@@ -48,9 +51,7 @@ data AgentProviderRequest = AgentProviderRequest
         -> IO (Maybe Int)
         -> (Maybe Text -> IO (Either Text CompactOutcome))
         -> SessionRequest
-    , activeAccountIdRef :: IORef Text
-    , activeAccountRef :: IORef Text
-    , activeSelectionRef :: IORef Text
+    , activeAccountRef :: ActiveAccountRef
     , catalog :: ModelCatalog
     , claudeBypassEnabled :: Bool
     , contextTokensRef :: IORef (Maybe OccupancySnapshot)

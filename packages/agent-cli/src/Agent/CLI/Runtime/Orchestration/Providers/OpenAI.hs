@@ -2,6 +2,11 @@ module Agent.CLI.Runtime.Orchestration.Providers.OpenAI
     ( runOpenAiProvider
     ) where
 
+import Agent.CLI.ActiveAccount
+    ( ActiveAccount(..)
+    , readActiveAccount
+    , writeActiveAccount
+    )
 import Agent.CLI.Auth.Types
     ( LoadedAuth(..)
     , isGatewayLoadedAuth
@@ -209,15 +214,11 @@ newOpenAiProviderRuntime AgentProviderRequest{..} conn credential = do
                                         newCredential
                                         newHealthy
                                         newConn
-                                writeIORef
-                                    activeAccountIdRef
-                                    newCredential.accountId
-                                writeIORef
-                                    activeSelectionRef
-                                    newCredential.accountId
-                                writeIORef
-                                    activeAccountRef
-                                    label
+                                writeActiveAccount activeAccountRef ActiveAccount
+                                    { activeAccountId = newCredential.accountId
+                                    , activeSelectionId = newCredential.accountId
+                                    , activeAccountLabel = label
+                                    }
                                 writeIORef
                                     httpFallbackActive
                                     usesHttp
@@ -231,7 +232,7 @@ newOpenAiProviderRuntime AgentProviderRequest{..} conn credential = do
                     oldConnection <-
                         readIORef activeConnectionRef
                     previousAccountId <-
-                        readIORef activeAccountIdRef
+                        (.activeAccountId) <$> readActiveAccount activeAccountRef
                     let OpenAiPersistentConnection
                             _
                             oldHealthy

@@ -416,9 +416,7 @@ accountSwitchTarget
                     }
                 }
         else
-            fromMaybe
-                (error "validated default model is missing")
-                (defaultModelOptionFor catalog selectedProvider)
+            defaultModelOptionFor catalog selectedProvider
 
 persistenceTransportModel :: Text -> Persistence -> IO Text
 persistenceTransportModel fallback = \case

@@ -12,32 +12,10 @@ import Agent.CLI.Approval ( setApprovalPolicy, toggleAlwaysApprove )
 import Agent.CLI.Changelog (loadReleaseNotes)
 import Agent.CLI.Clipboard ( loadImagesFromPastedText )
 import Agent.CLI.Command
-    ( formatSlashHelpWithCatalog,
+    ( AttachmentAction(ReplRemoveAttachment),
+      formatSlashHelpWithCatalog,
       parseReplLineWithCatalog,
-      ReplAction(ReplCommandError, ReplQuit, ReplReload,
-                 ReplUpdateAndRestart, ReplPrompt, ReplExpandedPrompt,
-                 ReplInvokeSkill, ReplSkills, ReplShowShell,
-                 ReplSetShell, ReplToggleComputerUse, ReplSetComputerUse,
-                 ReplPaste, ReplShowAttachments, ReplClearAttachments,
-                 ReplRemoveAttachment,
-                 ReplShowAgentLimit, ReplSetAgentLimit, ReplAgents, ReplMcp, ReplMcpPrompt,
-                 ReplGoalStatus, ReplGoalPause, ReplGoalResume, ReplGoalClear,
-                 ReplGoalSet, ReplWorkflowRuns, ReplWorkflowManage, ReplCopy,
-                 ReplCopyCode, ReplCopyDiff, ReplCopyPath, ReplCopySession,
-                 ReplDesktop, ReplShowTerminal, ReplChangelog,
-                 ReplShowEffort, ReplSetEffort, ReplShowModel,
-                 ReplSetModel, ReplShowTheme, ReplSetTheme,
-                 ReplToggleFast, ReplEnableCodeMode,
-                 ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
-                 ReplViewPlan, ReplQueue, ReplTranscript, ReplEditPrompt,
-                 ReplContext, ReplHistory, ReplFind,
-                 ReplBtw, ReplMetaConsole, ReplRecap, ReplRetry, ReplResume, ReplSearch,
-                 ReplHome, ReplRewind, ReplClear, ReplNew, ReplDelete,
-                 ReplShowSession, ReplShowSessionInfo, ReplAfk, ReplWorktree,
-                 ReplRename, ReplRenameAuto, ReplInit, ReplReview, ReplDiff,
-                 ReplFork, ReplExport, ReplPermissions,
-                 ReplLogin, ReplUsage, ReplReloadAuth,
-                 ReplHelp),
+      ReplAction(..),
       ShellMode(ShellNone, ShellGhci, ShellBash, ShellBoth),
       SlashCatalog )
 import Agent.CLI.Command.Instructions ( initInstruction )
@@ -106,7 +84,7 @@ import Agent.CLI.Review
     )
 import Agent.CLI.Runtime.Recap ( runSessionRecap )
 import Agent.CLI.Runtime.Repl.Attachments
-    ( handleAttachmentAction, handleClipboardInput )
+    ( ClipboardInput(..), handleAttachmentAction, handleClipboardInput )
 import Agent.CLI.Runtime.Repl.Context
     ( ReplHandlerContext(..)
     , displayReplError
@@ -117,7 +95,7 @@ import Agent.CLI.Runtime.Repl.Context
     )
 import Agent.CLI.Runtime.Repl.MetaConsole ( handleMetaConsoleRequest )
 import Agent.CLI.Runtime.Repl.Selection
-    ( handleSelectionAction, handleSelectionInput )
+    ( SelectionInput(..), handleSelectionAction, handleSelectionInput )
 import Agent.CLI.Runtime.Repl.Session ( handleSessionAction )
 import Agent.CLI.Runtime.Repl.Transcript
     ( TranscriptAction(..), handleTranscriptAction )
@@ -294,28 +272,30 @@ handleReplLine
                     putStr "\ESC[2A\r\ESC[J"
                     hFlush stdout
             continueWith keptDraft
-    action@(ReplClipboardPaste _ _) ->
-        handleClipboardInput env continueWith stdoutColor action
-    action@(ReplClipboardPasteOrText _ _ _) ->
-        handleClipboardInput env continueWith stdoutColor action
-    action@(ReplChooseModel keptDraft) ->
+    ReplClipboardPaste draft images ->
+        handleClipboardInput env continueWith stdoutColor
+            (ClipboardPaste draft images)
+    ReplClipboardPasteOrText draft pasted pastedDraft ->
+        handleClipboardInput env continueWith stdoutColor
+            (ClipboardPasteOrText draft pasted pastedDraft)
+    ReplChooseModel keptDraft ->
         handleSelectionInput
             env
             (continueWith keptDraft)
             retryPendingTurn
-            action
-    action@(ReplChooseEffort keptDraft) ->
+            (ChooseModel keptDraft)
+    ReplChooseEffort keptDraft ->
         handleSelectionInput
             env
             (continueWith keptDraft)
             retryPendingTurn
-            action
-    action@(ReplChooseAccount keptDraft) ->
+            (ChooseEffort keptDraft)
+    ReplChooseAccount keptDraft ->
         handleSelectionInput
             env
             (continueWith keptDraft)
             retryPendingTurn
-            action
+            (ChooseAccount keptDraft)
     ReplMeta request ->
         runMetaConsoleRequest request
     ReplRemovePendingImage keptDraft index ->
@@ -400,10 +380,8 @@ handleReplLine
                             Text.putStrLn
                                 (roleMuted color (glyphOk <> message))
                         continue
-                    action@ReplPaste{} -> handleAttachmentAction env finishTurn continue action
-                    action@ReplShowAttachments -> handleAttachmentAction env finishTurn continue action
-                    action@ReplClearAttachments -> handleAttachmentAction env finishTurn continue action
-                    action@ReplRemoveAttachment{} -> handleAttachmentAction env finishTurn continue action
+                    ReplAttachment action ->
+                        handleAttachmentAction env finishTurn continue action
                     ReplShowAgentLimit ->
                         showAgentLimit continue
                     ReplSetAgentLimit limit ->
@@ -415,13 +393,8 @@ handleReplLine
                     ReplMcpPrompt server name arguments ->
                         submitMcpPrompt
                             continue color server name arguments
-                    action@ReplGoalStatus -> handleWorkflowAction env submitExpandedTurn color continue action
-                    action@ReplGoalPause -> handleWorkflowAction env submitExpandedTurn color continue action
-                    action@ReplGoalResume -> handleWorkflowAction env submitExpandedTurn color continue action
-                    action@ReplGoalClear -> handleWorkflowAction env submitExpandedTurn color continue action
-                    action@ReplGoalSet{} -> handleWorkflowAction env submitExpandedTurn color continue action
-                    action@ReplWorkflowRuns -> handleWorkflowAction env submitExpandedTurn color continue action
-                    action@ReplWorkflowManage{} -> handleWorkflowAction env submitExpandedTurn color continue action
+                    ReplWorkflow action ->
+                        handleWorkflowAction env submitExpandedTurn color continue action
                     ReplCopy request ->
                         handleTranscriptAction handlerContext
                             (CopyResponse request)
@@ -440,13 +413,8 @@ handleReplLine
                         showTerminalCapabilities continue color
                     ReplChangelog ->
                         showChangelog continue
-                    action@ReplShowEffort -> handleSelectionAction env continue action
-                    action@ReplSetEffort{} -> handleSelectionAction env continue action
-                    action@ReplToggleFast -> handleSelectionAction env continue action
-                    action@ReplShowModel -> handleSelectionAction env continue action
-                    action@ReplSetModel{} -> handleSelectionAction env continue action
-                    action@ReplShowTheme -> handleSelectionAction env continue action
-                    action@ReplSetTheme{} -> handleSelectionAction env continue action
+                    ReplSelection action ->
+                        handleSelectionAction env continue action
                     ReplEnableCodeMode ->
                         requestCodeModeRestart fullscreen persist
                     ReplToggleAlwaysApprove ->
@@ -484,20 +452,8 @@ handleReplLine
                                     "No failed turn is available to retry."
                                     (pure ())
                                 continue)
-                    action@ReplResume{} -> handleSessionAction env slashCatalog continue action
-                    action@ReplSearch{} -> handleSessionAction env slashCatalog continue action
-                    action@ReplHome -> handleSessionAction env slashCatalog continue action
-                    action@ReplRewind -> handleSessionAction env slashCatalog continue action
-                    action@ReplClear -> handleSessionAction env slashCatalog continue action
-                    action@ReplNew -> handleSessionAction env slashCatalog continue action
-                    action@ReplDelete -> handleSessionAction env slashCatalog continue action
-                    action@ReplFork{} -> handleSessionAction env slashCatalog continue action
-                    action@ReplShowSession -> handleSessionAction env slashCatalog continue action
-                    action@ReplShowSessionInfo -> handleSessionAction env slashCatalog continue action
-                    action@ReplAfk{} -> handleSessionAction env slashCatalog continue action
-                    action@ReplWorktree -> handleSessionAction env slashCatalog continue action
-                    action@ReplRename{} -> handleSessionAction env slashCatalog continue action
-                    action@ReplRenameAuto -> handleSessionAction env slashCatalog continue action
+                    ReplSession action ->
+                        handleSessionAction env slashCatalog continue action
                     ReplLogin ->
                         manageLogin continue
                     ReplUsage ->

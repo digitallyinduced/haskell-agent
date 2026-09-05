@@ -43,7 +43,7 @@ import Agent.CLI.MetaConsole
 import Agent.CLI.ModelConfig
     ( organizationGatewayConnectionId
     , CatalogModel(..)
-    , ModelCatalog(..)
+    , catalogModels
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.SessionEnv (SessionEnv(..))
@@ -358,7 +358,7 @@ buildMetaContext env config = do
         Nothing ->
             pure
                 [ (model.catalogModelId, model.catalogModelConnectionId)
-                | model <- env.sessionModelCatalog.catalogModels
+                | model <- catalogModels env.sessionModelCatalog
                 ]
         Just access ->
             maybe
@@ -413,7 +413,7 @@ metaCancelScope env cancel action =
         case env.sessionFullscreen of
             Nothing
                 | not env.sessionBackground ->
-                    withEscCancel cancel env.sessionEscPaused action
+                    withEscCancel cancel env.sessionStdinControl action
             _ -> action
 
 shellModeText :: ShellMode -> Text

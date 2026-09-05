@@ -8,6 +8,10 @@ module Agent.CLI.Session.Interaction
     , syncFullscreenPrompt
     ) where
 
+import Agent.CLI.ActiveAccount
+    ( ActiveAccount(..)
+    , readActiveAccount
+    )
 import Agent.CLI.Btw
     ( formatBtwError
     , runBtwWithCancel
@@ -90,7 +94,7 @@ syncFullscreenPrompt env = do
         planState <- readIORef env.sessionPlanMode.planStateRef
         params <- readIORef env.sessionParams
         policy <- readIORef env.sessionPolicy
-        account <- readIORef env.sessionAccount
+        account <- (.activeAccountLabel) <$> readActiveAccount env.sessionAccount
         usage <- readIORef env.sessionUsage
         attachments <- readLiveAttachments env.sessionConversation
         emitUiEvent runtime $ UiSetPrompt $
@@ -207,7 +211,7 @@ runBtwQuestion registerCancel env question = do
                                     | otherwise ->
                                         withEscCancel
                                             cancel
-                                            env.sessionEscPaused
+                                            env.sessionStdinControl
                                             action
                                 Just _ -> action
                     else action)

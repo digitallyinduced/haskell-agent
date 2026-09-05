@@ -80,7 +80,7 @@ runSessionRecap registerCancel env kind = do
                                             | otherwise ->
                                             withEscCancel
                                                 cancel
-                                                env.sessionEscPaused
+                                                env.sessionStdinControl
                                                 action
                                         Just _ -> action
                             else action)

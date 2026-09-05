@@ -3,6 +3,7 @@ module Agent.CLI.Runtime.Orchestration.Flow
     , withRestoredCurrentDirectory
     ) where
 
+import Agent.CLI.CancelWatch (newStdinControl)
 import Agent.CLI.AgentSessions ( signalManagedSessionReady )
 import Agent.CLI.AgentViewport ( AgentTarget(AgentRoot) )
 import Agent.CLI.Config
@@ -105,7 +106,7 @@ import Agent.CLI.Session.Runtime.Types
       StartupRuntime(startupSessionState, StartupRuntime, startupToolEnv,
                      startupHarnessConfig,
                      startupNetworkRecovery, startupDatabaseStore,
-                     startupInterrupt, startupEscPaused,
+                     startupInterrupt, startupStdinControl,
                      startupUiRuntimeRef, startupFullscreen, startupTerminal,
                      startupStdout, startupStderr, startupBackground, startupUseColor,
                      startupStderrTty, startupStdinTty, startupStdoutTty,
@@ -454,62 +455,50 @@ runAgent
                             Left err -> pure (Left err)
                             Right catalog -> do
                                 color <- resolveColor runMode.runStderr
-                                let currentTarget =
+                                let preferredTarget =
                                         ((.transitionTarget) <$> nextTransition)
                                             <|> ( (.modelTarget)
                                                     <$> (nextOptions.optModel
                                                         >>= resolveConfiguredModel
                                                             catalog)
                                                 )
-                                            <|> ( (.modelTarget)
-                                                    <$> (nextOptions.optProvider
-                                                        >>= defaultModelOptionFor
-                                                            catalog)
-                                                )
-                                            <|> ( (.modelTarget)
-                                                    <$> defaultModelOptionFor
-                                                        catalog
-                                                        OpenAIProvider
-                                                )
-                                case currentTarget of
-                                    Nothing ->
-                                        pure
-                                            (Left
-                                                "No configured models are available.")
-                                    Just current ->
-                                        recoveryGatewayAccess
-                                            current.targetProvider
-                                            nextTransition >>= \case
-                                                Left err -> pure (Left err)
-                                                Right gatewayAccess ->
-                                                    modelChoiceWithEffort
-                                                        catalog
-                                                        gatewayAccess
-                                                        (Just runtime)
-                                                        color
-                                                        current.targetConnectionId
-                                                        current.targetProvider
-                                                        current.targetModelId
-                                                        current.targetDialect
-                                                        (fromMaybe
-                                                            (defaultEffortFor
-                                                                current.targetProvider)
-                                                            ( (nextTransition
-                                                                    >>= (.transitionEffort))
-                                                                <|> nextOptions.optEffort
-                                                            ))
-                                                        >>= \case
-                                                            Left err ->
-                                                                pure (Left err)
-                                                            Right Nothing ->
-                                                                pure (Right Nothing)
-                                                            Right (Just selection) ->
-                                                                pure $ Right $ Just $
-                                                                    recoveryModelTransition
-                                                                        nextOptions
-                                                                        nextTransition
-                                                                        selection.modelPickerOption.modelTarget
-                                                                        selection.modelPickerEffort
+                                    defaultOption = defaultModelOptionFor catalog
+                                        (fromMaybe OpenAIProvider nextOptions.optProvider)
+                                    current = fromMaybe defaultOption.modelTarget
+                                        preferredTarget
+                                recoveryGatewayAccess
+                                    current.targetProvider
+                                    nextTransition >>= \case
+                                        Left err -> pure (Left err)
+                                        Right gatewayAccess ->
+                                            modelChoiceWithEffort
+                                                catalog
+                                                gatewayAccess
+                                                (Just runtime)
+                                                color
+                                                current.targetConnectionId
+                                                current.targetProvider
+                                                current.targetModelId
+                                                current.targetDialect
+                                                (fromMaybe
+                                                    (defaultEffortFor
+                                                        current.targetProvider)
+                                                    ( (nextTransition
+                                                            >>= (.transitionEffort))
+                                                        <|> nextOptions.optEffort
+                                                    ))
+                                                >>= \case
+                                                    Left err ->
+                                                        pure (Left err)
+                                                    Right Nothing ->
+                                                        pure (Right Nothing)
+                                                    Right (Just selection) ->
+                                                        pure $ Right $ Just $
+                                                            recoveryModelTransition
+                                                                nextOptions
+                                                                nextTransition
+                                                                selection.modelPickerOption.modelTarget
+                                                                selection.modelPickerEffort
                     recoveryModelTransition
                             nextOptions nextTransition target selectedEffort =
                         case nextTransition of
@@ -912,7 +901,7 @@ prepareAgentIterationInterface request resources = do
                 color <- resolveColor stderrHandle
                 putTextLn stderrHandle (roleMuted color msg)
     -- Shared with Esc cancel and plan prompts so arrow-key pickers own stdin.
-    escPaused <- newIORef False
+    stdinControl <- newStdinControl
     stderrTty <-
         if background then pure False else hIsTerminalDevice stderrHandle
     stdinTty <- if background then pure False else hIsTerminalDevice stdin
@@ -1013,7 +1002,7 @@ prepareAgentIterationInterface request resources = do
                 request.iterationProcessRuntime.processNetworkRecovery
             , startupDatabaseStore = resources.iterationDatabaseStore
             , startupInterrupt = interrupt
-            , startupEscPaused = escPaused
+            , startupStdinControl = stdinControl
             , startupUiRuntimeRef = uiRuntimeRef
             , startupFullscreen = fullscreen
             , startupTerminal = terminal

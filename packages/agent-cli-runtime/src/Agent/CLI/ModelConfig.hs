@@ -6,7 +6,8 @@
 module Agent.CLI.ModelConfig
     ( CatalogModel(..)
     , ConnectionKind(..)
-    , ModelCatalog(..)
+    , ModelCatalog
+    , catalogModels
     , ModelConnection(..)
     , ResponsesConnection(..)
     , builtinConnectionId
@@ -45,7 +46,6 @@ import Control.Exception.Safe (tryIO)
 import Control.Monad (unless)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlpha, isAlphaNum, isSpace)
-import Data.Foldable (traverse_)
 import Data.List (nub)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
@@ -95,11 +95,28 @@ data CatalogModel = CatalogModel
 
 data ModelCatalog = ModelCatalog
     { catalogConnections :: !(Map Text ModelConnection)
-    , catalogModels :: ![CatalogModel]
+    , modelEntries :: ![CatalogModel]
+    , catalogDefaults :: !ProviderDefaults
     , catalogModelsById :: !(Map Text CatalogModel)
     , catalogGatewayModelsById :: !(Map Text CatalogModel)
     }
     deriving (Eq, Show)
+
+-- Every supported provider has a default after configuration validation.
+-- Keeping a product here makes lookup exhaustive without a partial Map lookup.
+data ProviderDefaults = ProviderDefaults
+    { openAiDefault :: !CatalogModel
+    , xaiDefault :: !CatalogModel
+    , openRouterDefault :: !CatalogModel
+    , geminiDefault :: !CatalogModel
+    , claudeDefault :: !CatalogModel
+    }
+    deriving (Eq, Show)
+
+-- | Models in their configured presentation order. Catalog internals cannot
+-- be updated independently of the indexes and validated defaults.
+catalogModels :: ModelCatalog -> [CatalogModel]
+catalogModels catalog = catalog.modelEntries
 
 data ConfigFile = ConfigFile
     { configVersion :: !Int
@@ -245,7 +262,7 @@ catalogModelForConnection catalog connectionId modelId
 
 catalogModelsForConnection :: Text -> ModelCatalog -> [CatalogModel]
 catalogModelsForConnection wanted =
-    filter ((== wanted) . (.catalogModelConnectionId)) . (.catalogModels)
+    filter ((== wanted) . (.catalogModelConnectionId)) . catalogModels
 
 connectionBuiltinProvider :: ModelConnection -> Maybe Provider
 connectionBuiltinProvider connection = case connection.connectionKind of
@@ -264,15 +281,13 @@ connectionSupportsDialect connection provider dialect
                 && dialect == ClaudeCodeDialect)
     | otherwise = providerSupportsDialect provider dialect
 
-catalogDefaultForProvider :: ModelCatalog -> Provider -> Maybe CatalogModel
-catalogDefaultForProvider catalog provider =
-    case
-        [ model
-        | model <- catalogModelsForConnection (builtinConnectionId provider) catalog
-        , model.catalogModelDefault
-        ] of
-        model : _ -> Just model
-        [] -> Nothing
+catalogDefaultForProvider :: ModelCatalog -> Provider -> CatalogModel
+catalogDefaultForProvider catalog = \case
+    OpenAIProvider -> catalog.catalogDefaults.openAiDefault
+    XAIProvider -> catalog.catalogDefaults.xaiDefault
+    OpenRouterProvider -> catalog.catalogDefaults.openRouterDefault
+    GeminiProvider -> catalog.catalogDefaults.geminiDefault
+    ClaudeCodeProvider -> catalog.catalogDefaults.claudeDefault
 
 -- | Decode and validate one standalone file. This is mainly useful for tests;
 -- normal startup should use 'mergeModelConfigs' so defaults can be overlaid.
@@ -463,10 +478,16 @@ validateConfig source config = do
         Map.traverseWithKey validateModelConnection config.configConnections
     models <- validationToEither $
         traverse (validateCatalogModel connections) config.configModels
-    traverse_ (validateBuiltinDefault models) allBuiltinProviders
+    defaults <- ProviderDefaults
+        <$> validateBuiltinDefault connections models OpenAIProvider
+        <*> validateBuiltinDefault connections models XAIProvider
+        <*> validateBuiltinDefault connections models OpenRouterProvider
+        <*> validateBuiltinDefault connections models GeminiProvider
+        <*> validateBuiltinDefault connections models ClaudeCodeProvider
     pure ModelCatalog
         { catalogConnections = connections
-        , catalogModels = models
+        , modelEntries = models
+        , catalogDefaults = defaults
         , catalogModelsById =
             Map.fromList
                 [ (model.catalogModelId, model)
@@ -710,14 +731,23 @@ supportedReasoningEfforts :: [Text]
 supportedReasoningEfforts =
     ["none", "low", "medium", "high", "xhigh", "max"]
 
-validateBuiltinDefault :: [CatalogModel] -> Provider -> Either Text ()
-validateBuiltinDefault models provider =
+validateBuiltinDefault
+    :: Map Text ModelConnection
+    -> [CatalogModel]
+    -> Provider
+    -> Either Text CatalogModel
+validateBuiltinDefault connections models provider = do
+    case Map.lookup (builtinConnectionId provider) connections of
+        Just ModelConnection{connectionKind = BuiltinConnection configured}
+            | configured == provider -> pure ()
+        _ -> Left ("connection " <> builtinConnectionId provider
+            <> " must be a builtin connection for its provider")
     case filter
         (\model ->
             model.catalogModelConnectionId == builtinConnectionId provider
                 && model.catalogModelDefault)
         models of
-        [_] -> Right ()
+        [model] -> Right model
         [] ->
             Left ("connection " <> builtinConnectionId provider
                 <> " must have exactly one default model")
@@ -787,7 +817,7 @@ modelMergeKey model =
 
 allBuiltinProviders :: [Provider]
 allBuiltinProviders =
-    [OpenAIProvider, XAIProvider, OpenRouterProvider, GeminiProvider]
+    [OpenAIProvider, XAIProvider, OpenRouterProvider, GeminiProvider, ClaudeCodeProvider]
 
 gatewaySupportsDialect :: DialectId -> Bool
 gatewaySupportsDialect = \case

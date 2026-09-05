@@ -8,6 +8,8 @@ module Agent.CLI.Session.Runtime.Types
     , StartupRuntime(..)
     ) where
 
+import Agent.CLI.ActiveAccount (ActiveAccountRef)
+import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.AgentViewport
     ( AgentEntry
     , AgentTarget
@@ -180,7 +182,7 @@ data SessionRequest = SessionRequest
             (CompactOutcome -> [TurnInput] -> IO CompactionInstall))
     , skillsRef :: !(IORef SkillCatalog)
     , skillInvocationsRef :: !(IORef [SkillInvocation])
-    , escPaused :: !(IORef Bool)
+    , stdinControl :: !StdinControl
     , interrupt :: !InterruptState
     , multiCtx :: !(Maybe MultiAgentContext)
     , rootTurnRef :: !(IORef (Maybe RootTurnId))
@@ -190,9 +192,7 @@ data SessionRequest = SessionRequest
     , agentTypes :: !GrokSubagentSpecs
     , legacyTarget :: !(Maybe LegacySubagentTarget)
     , usageRef :: !(IORef TokenUsage)
-    , accountRef :: !(IORef Text)
-    , accountIdRef :: !(IORef Text)
-    , selectionRef :: !(IORef Text)
+    , accountRef :: !ActiveAccountRef
     , accountLabel :: !(Credential -> IO Text)
     , selectAccount :: !(Maybe (Text -> IO (Either ApiError Text)))
     , onPersisted :: !(SessionHandle -> IO ())
@@ -210,7 +210,7 @@ data StartupRuntime = StartupRuntime
     , startupNetworkRecovery :: !(Maybe NetworkRecovery)
     , startupDatabaseStore :: !Store
     , startupInterrupt :: !InterruptState
-    , startupEscPaused :: !(IORef Bool)
+    , startupStdinControl :: !StdinControl
     , startupUiRuntimeRef :: !(IORef (Maybe FullscreenRuntime))
     , startupFullscreen :: !(Maybe FullscreenRuntime)
     , startupTerminal :: !TerminalCapabilities

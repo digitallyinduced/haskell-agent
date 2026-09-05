@@ -19,7 +19,7 @@ module Agent.CLI.Plan
     , planDecisionFollowUp
     ) where
 
-import Agent.CLI.CancelWatch (withStdinPaused)
+import Agent.CLI.CancelWatch (StdinControl, withStdinPaused)
 import Agent.CLI.Input
     ( ReplLine(..)
     , readChoiceSelection
@@ -53,7 +53,6 @@ import Agent.Provider (Provider)
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe (throwIO)
 import Data.Char (toLower)
-import Data.IORef (IORef)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -65,15 +64,15 @@ import System.Console.ANSI
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin)
 
--- | Build plan-mode prompts. @escPaused@ pauses the Esc cancel watcher so
+-- | Build plan-mode prompts. @stdinControl@ pauses the Esc cancel watcher so
 -- arrow keys / single-key answers are not stolen mid-turn.
-cliPlanHooks :: Provider -> InterruptState -> IORef Bool -> IO Bool -> PlanModeHooks
-cliPlanHooks provider interrupt escPaused resolveColor = PlanModeHooks
-    { planConfirmEnter = withStdinPaused escPaused . confirmEnter resolveColor
+cliPlanHooks :: Provider -> InterruptState -> StdinControl -> IO Bool -> PlanModeHooks
+cliPlanHooks provider interrupt stdinControl resolveColor = PlanModeHooks
+    { planConfirmEnter = withStdinPaused stdinControl . confirmEnter resolveColor
     , planDecideExit =
-        withStdinPaused escPaused . decideExit provider interrupt resolveColor
+        withStdinPaused stdinControl . decideExit provider interrupt resolveColor
     , planAskQuestion = \q opts ->
-        withStdinPaused escPaused
+        withStdinPaused stdinControl
             (askQuestion provider interrupt resolveColor q opts)
     }
 
