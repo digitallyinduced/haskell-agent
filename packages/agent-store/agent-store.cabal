@@ -78,6 +78,7 @@ library
                     , Agent.Store.Postgres.SessionItem.Mapping.Statements.Tagged
                     , Agent.Store.Postgres.SessionItem.Read
                     , Agent.Store.Postgres.SessionItem.Write
+                    , Agent.Store.Postgres.Skill.Mapping.Codec
                     , Agent.Store.Postgres.Skill.Mapping.Types
                     , Agent.Store.Postgres.Skill.Mapping.Statements.InsertRevision
                     , Agent.Store.Postgres.Skill.Mapping.Statements.InsertSkill
