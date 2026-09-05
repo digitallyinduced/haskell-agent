@@ -61,6 +61,7 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , withPortalCaptureRunningWith
     , withPortalCaptureReadiness
     , withPortalInputReadiness
+    , withPortalStateInvalidation
     )
 import Agent.CLI.ComputerUse.Linux.X11
     ( XdotoolInvocation(..)
@@ -89,6 +90,7 @@ import Control.Concurrent
     ( newEmptyMVar
     , newMVar
     , putMVar
+    , readMVar
     , takeMVar
     , threadDelay
     )
@@ -1171,6 +1173,30 @@ spec = do
                     , "resume"
                     , "suspend"
                     ]
+
+        it "invalidates a capture session when its operation is cancelled" do
+            state <- newMVar (PortalReady ("session" :: Text.Text))
+            started <- newEmptyMVar
+            blocked <- newEmptyMVar
+            closed <- newIORef ([] :: [Text.Text])
+            withAsync
+                (withPortalStateInvalidation
+                    state
+                    (== "session")
+                    "capture interrupted"
+                    (\session -> modifyIORef' closed (<> [session]))
+                    (putMVar started () >> (takeMVar blocked :: IO ())))
+                \operation -> do
+                    takeMVar started
+                    cancel operation
+                    waitCatch operation
+                        >>= (`shouldSatisfy`
+                            either (const True) (const False))
+            readMVar state >>= \case
+                PortalUninitialized -> pure ()
+                _ -> expectationFailure
+                    "cancelled capture session was not invalidated"
+            readIORef closed `shouldReturn` ["session"]
 
         it "requires one monitor stream and both input grants" do
             parsePortalStartResults portalStartResults

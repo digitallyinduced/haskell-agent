@@ -19,6 +19,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , sessionClosedRule
     , validatePortalOwnerUser
     , waitForPortalFrameAfter
+    , withPortalStateInvalidation
     , withPortalCaptureRunningWith
     , withPortalCaptureReadiness
     , withPortalInputReadiness
@@ -756,6 +757,22 @@ invalidatePortalStateWhenWith stateVar matches err closeSession =
                         PortalFailed _ -> pure PortalUninitialized
                         state -> pure state
 
+withPortalStateInvalidation
+    :: MVar (PortalState session)
+    -> (session -> Bool)
+    -> Text
+    -> (session -> IO ())
+    -> IO value
+    -> IO value
+withPortalStateInvalidation stateVar matches err closeSession action =
+    action
+        `onException`
+            invalidatePortalStateWhenWith
+                stateVar
+                matches
+                err
+                closeSession
+
 inspectPortalDisplay :: PortalRuntime -> IO (Either Text ComputerDisplay)
 inspectPortalDisplay runtime =
     ensurePortalReady runtime >>= \case
@@ -849,7 +866,21 @@ withPortalSessionOperation runtime operation action = do
     state <- readMVar runtime.portalState
     case state of
         PortalReady session -> do
-            attempted <- tryAny (action session)
+            let matchesSession current =
+                    current.portalSessionPath
+                        == session.portalSessionPath
+                interruptedError =
+                    "Wayland portal "
+                        <> operation
+                        <> " was interrupted."
+            attempted <-
+                tryAny $
+                    withPortalStateInvalidation
+                        runtime.portalState
+                        matchesSession
+                        interruptedError
+                        (closePortalSession runtime)
+                        (action session)
             case attempted of
                 Left exception -> do
                     let err =
@@ -859,9 +890,7 @@ withPortalSessionOperation runtime operation action = do
                                 <> exceptionText exception
                     invalidatePortalStateWhenWith
                         runtime.portalState
-                        (\current ->
-                            current.portalSessionPath
-                                == session.portalSessionPath)
+                        matchesSession
                         err
                         (closePortalSession runtime)
                     pure (Left err)
