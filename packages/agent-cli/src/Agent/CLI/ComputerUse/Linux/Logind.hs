@@ -1,10 +1,13 @@
 module Agent.CLI.ComputerUse.Linux.Logind
     ( LogindGuard(..)
     , LogindSessionTarget(..)
+    , WaylandPortalTarget(..)
     , newLogindGuard
     , processSessionRequest
     , validateLogindSession
     , validateLogindState
+    , validateWaylandPortalSessions
+    , waylandPortalTarget
     , withLogindReadiness
     ) where
 
@@ -18,16 +21,19 @@ import Control.Concurrent.MVar
     )
 import Control.Concurrent.Async (race)
 import Control.Exception.Safe (catchAny, onException, tryAny)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word32)
 import DBus
-    ( IsVariant
+    ( Address
+    , IsVariant
     , MemberName
     , MethodCall(..)
     , MethodError
     , ObjectPath
     , Variant
+    , address
     , fromVariant
     , methodCall
     , methodReturnBody
@@ -39,20 +45,32 @@ import DBus.Client
     , connectSystem
     , disconnect
     )
+import qualified System.FilePath.Posix as Posix
 import System.Posix.Process (getProcessID)
 import System.Posix.Types (ProcessID)
+import System.Posix.User (getEffectiveUserID)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
 data LogindGuard = LogindGuard
     { checkLogindGuard :: IO (Either Text ())
     , closeLogindGuard :: IO ()
+    , logindWaylandPortalTarget :: !(Maybe WaylandPortalTarget)
     }
 
 data LogindSessionTarget
     = LogindX11Session !Text
     | LogindWaylandSession
     deriving (Eq, Show)
+
+data WaylandPortalTarget = WaylandPortalTarget
+    { waylandPortalAddress :: !Address
+    , waylandPortalUserId :: !Word32
+    , waylandPortalUserPath :: !ObjectPath
+    , waylandPortalSessionPath :: !ObjectPath
+    , waylandPortalDisplayId :: !Text
+    , waylandPortalRuntimePath :: !Text
+    } deriving (Eq, Show)
 
 newLogindGuard :: LogindSessionTarget -> IO (Either Text LogindGuard)
 newLogindGuard target = do
@@ -75,11 +93,17 @@ newLogindGuard target = do
         flip onException
             (disconnect client `catchAny` const (pure ())) do
                 sessionPath <- resolveSessionPath client
+                portalTarget <- case target of
+                    LogindX11Session _ -> pure Nothing
+                    LogindWaylandSession -> do
+                        resolved <- resolveWaylandPortalTarget client sessionPath
+                        Just <$> either (fail . Text.unpack) pure resolved
                 state <- newMVar (Just client)
                 pure LogindGuard
                     { checkLogindGuard =
-                        checkGuard target state sessionPath
+                        checkGuard target portalTarget state sessionPath
                     , closeLogindGuard = closeGuard state
+                    , logindWaylandPortalTarget = portalTarget
                     }
 
 resolveSessionPath :: Client -> IO ObjectPath
@@ -116,10 +140,11 @@ callForPath client member body = do
 
 checkGuard
     :: LogindSessionTarget
+    -> Maybe WaylandPortalTarget
     -> MVar (Maybe Client)
     -> ObjectPath
     -> IO (Either Text ())
-checkGuard target state sessionPath =
+checkGuard target portalTarget state sessionPath =
     withMVar state \case
         Nothing ->
             pure (Left "The Linux computer-use session has been closed.")
@@ -127,6 +152,7 @@ checkGuard target state sessionPath =
             attempted <- tryAny $
                 timeout logindCallTimeout
                     (do
+                        currentSessionPath <- resolveSessionPath client
                         active <-
                             getSessionProperty client sessionPath "Active"
                         locked <-
@@ -139,13 +165,28 @@ checkGuard target state sessionPath =
                                 Just <$> getSessionProperty
                                     client sessionPath "Display"
                             LogindWaylandSession -> pure Nothing
-                        pure
-                            (validateLogindSession
+                        portalBinding <- case (target, portalTarget) of
+                            (LogindWaylandSession, Just expected) ->
+                                checkWaylandPortalTarget client expected
+                            (LogindWaylandSession, Nothing) ->
+                                pure
+                                    (Left
+                                        "Computer use cannot associate the Wayland portal with the current systemd-logind session.")
+                            (LogindX11Session _, _) -> pure (Right ())
+                        finalSessionPath <- resolveSessionPath client
+                        pure do
+                            if currentSessionPath == sessionPath
+                                && finalSessionPath == sessionPath
+                                then Right ()
+                                else Left
+                                    "Computer use cannot verify that the process remains in the selected systemd-logind session."
+                            validateLogindSession
                                 target
                                 active
                                 locked
                                 sessionType
-                                sessionDisplay))
+                                sessionDisplay
+                            portalBinding)
                     >>= \case
                         Nothing ->
                             fail
@@ -159,23 +200,247 @@ checkGuard target state sessionPath =
                         )
                 Right result -> result
 
+resolveWaylandPortalTarget
+    :: Client
+    -> ObjectPath
+    -> IO (Either Text WaylandPortalTarget)
+resolveWaylandPortalTarget client sessionPath = do
+    effectiveUserId <- fromIntegral <$> getEffectiveUserID
+    sessionUser <-
+        getSessionProperty client sessionPath "User"
+            :: IO (Word32, ObjectPath)
+    let (_, userPath) = sessionUser
+    primaryDisplay <-
+        getUserProperty client userPath "Display"
+            :: IO (Text, ObjectPath)
+    runtimePath <-
+        getUserProperty client userPath "RuntimePath"
+            :: IO Text
+    userSessions <- getStableUserSessions client userPath
+    pure
+        (waylandPortalTarget
+            sessionPath
+            effectiveUserId
+            sessionUser
+            primaryDisplay
+            runtimePath
+            userSessions)
+
+checkWaylandPortalTarget
+    :: Client
+    -> WaylandPortalTarget
+    -> IO (Either Text ())
+checkWaylandPortalTarget client expected = do
+    effectiveUserId <- fromIntegral <$> getEffectiveUserID
+    sessionUser <-
+        getSessionProperty
+            client
+            expected.waylandPortalSessionPath
+            "User"
+            :: IO (Word32, ObjectPath)
+    primaryDisplay <-
+        getUserProperty
+            client
+            expected.waylandPortalUserPath
+            "Display"
+            :: IO (Text, ObjectPath)
+    runtimePath <-
+        getUserProperty
+            client
+            expected.waylandPortalUserPath
+            "RuntimePath"
+            :: IO Text
+    userSessions <-
+        getStableUserSessions
+            client
+            expected.waylandPortalUserPath
+    pure
+        (validateWaylandPortalIdentity
+            expected.waylandPortalSessionPath
+            expected.waylandPortalUserId
+            expected.waylandPortalUserPath
+            expected.waylandPortalDisplayId
+            expected.waylandPortalRuntimePath
+            effectiveUserId
+            sessionUser
+            primaryDisplay
+            runtimePath
+            userSessions)
+
+waylandPortalTarget
+    :: ObjectPath
+    -> Word32
+    -> (Word32, ObjectPath)
+    -> (Text, ObjectPath)
+    -> Text
+    -> [(Text, ObjectPath, Text)]
+    -> Either Text WaylandPortalTarget
+waylandPortalTarget
+    sessionPath
+    effectiveUserId
+    (sessionUserId, userPath)
+    (primaryDisplayId, primaryDisplayPath)
+    runtimePath
+    userSessions
+        | Left err <-
+            validateWaylandPortalIdentity
+                sessionPath
+                sessionUserId
+                userPath
+                primaryDisplayId
+                runtimePath
+                effectiveUserId
+                (sessionUserId, userPath)
+                (primaryDisplayId, primaryDisplayPath)
+                runtimePath
+                userSessions = Left err
+        | otherwise =
+            case address
+                "unix"
+                (Map.singleton
+                    "path"
+                    (Text.unpack runtimePath Posix.</> "bus")) of
+                Nothing -> Left associationError
+                Just busAddress ->
+                    Right WaylandPortalTarget
+                        { waylandPortalAddress = busAddress
+                        , waylandPortalUserId = sessionUserId
+                        , waylandPortalUserPath = userPath
+                        , waylandPortalSessionPath = sessionPath
+                        , waylandPortalDisplayId = primaryDisplayId
+                        , waylandPortalRuntimePath = runtimePath
+                        }
+  where
+    associationError = waylandAssociationError
+
+validateWaylandPortalIdentity
+    :: ObjectPath
+    -> Word32
+    -> ObjectPath
+    -> Text
+    -> Text
+    -> Word32
+    -> (Word32, ObjectPath)
+    -> (Text, ObjectPath)
+    -> Text
+    -> [(Text, ObjectPath, Text)]
+    -> Either Text ()
+validateWaylandPortalIdentity
+    expectedSessionPath
+    expectedUserId
+    expectedUserPath
+    expectedDisplayId
+    expectedRuntimePath
+    effectiveUserId
+    (sessionUserId, userPath)
+    (primaryDisplayId, primaryDisplayPath)
+    runtimePath
+    userSessions
+        | effectiveUserId /= expectedUserId = Left associationError
+        | sessionUserId /= expectedUserId = Left associationError
+        | userPath /= expectedUserPath = Left associationError
+        | Text.null expectedDisplayId = Left associationError
+        | primaryDisplayId /= expectedDisplayId = Left associationError
+        | primaryDisplayPath /= expectedSessionPath = Left associationError
+        | runtimePath /= expectedRuntimePath = Left associationError
+        | Text.null runtimePath = Left associationError
+        | Text.any (== '\NUL') runtimePath = Left associationError
+        | not (Posix.isAbsolute (Text.unpack runtimePath)) =
+            Left associationError
+        | otherwise =
+            validateWaylandPortalSessions
+                (expectedDisplayId, expectedSessionPath)
+                userSessions
+  where
+    associationError = waylandAssociationError
+
+validateWaylandPortalSessions
+    :: (Text, ObjectPath)
+    -> [(Text, ObjectPath, Text)]
+    -> Either Text ()
+validateWaylandPortalSessions expectedDisplay sessions =
+    case filter matchesExpected sessions of
+        [(sessionId, sessionPath, sessionType)]
+            | (sessionId, sessionPath) == expectedDisplay
+            , sessionType == "wayland"
+            , all allowedSession sessions ->
+                Right ()
+        _ -> Left waylandAssociationError
+  where
+    matchesExpected (sessionId, sessionPath, _) =
+        sessionId == fst expectedDisplay
+            || sessionPath == snd expectedDisplay
+    allowedSession session@(_, _, sessionType) =
+        matchesExpected session || sessionType == "tty"
+
+getStableUserSessions
+    :: Client
+    -> ObjectPath
+    -> IO [(Text, ObjectPath, Text)]
+getStableUserSessions client userPath = do
+    before <-
+        getUserProperty client userPath "Sessions"
+            :: IO [(Text, ObjectPath)]
+    typed <- traverse addSessionType before
+    after <-
+        getUserProperty client userPath "Sessions"
+            :: IO [(Text, ObjectPath)]
+    if before == after
+        then pure typed
+        else fail (Text.unpack waylandAssociationError)
+  where
+    addSessionType (sessionId, sessionPath) = do
+        sessionType <-
+            getSessionProperty client sessionPath "Type"
+                :: IO Text
+        pure (sessionId, sessionPath, sessionType)
+
+waylandAssociationError :: Text
+waylandAssociationError =
+    "Computer use cannot associate the Wayland portal with the current systemd-logind session."
+
 getSessionProperty
     :: IsVariant value
     => Client
     -> ObjectPath
     -> Text
     -> IO value
-getSessionProperty client sessionPath propertyName = do
+getSessionProperty client path =
+    getLoginProperty
+        client
+        path
+        "org.freedesktop.login1.Session"
+
+getUserProperty
+    :: IsVariant value
+    => Client
+    -> ObjectPath
+    -> Text
+    -> IO value
+getUserProperty client path =
+    getLoginProperty
+        client
+        path
+        "org.freedesktop.login1.User"
+
+getLoginProperty
+    :: IsVariant value
+    => Client
+    -> ObjectPath
+    -> Text
+    -> Text
+    -> IO value
+getLoginProperty client path interfaceName propertyName = do
     result <- call client
         ( (methodCall
-            sessionPath
+            path
             "org.freedesktop.DBus.Properties"
             "Get"
           )
             { methodCallDestination = Just "org.freedesktop.login1"
             , methodCallBody =
                 [ toVariant
-                    ("org.freedesktop.login1.Session" :: Text)
+                    interfaceName
                 , toVariant propertyName
                 ]
             }

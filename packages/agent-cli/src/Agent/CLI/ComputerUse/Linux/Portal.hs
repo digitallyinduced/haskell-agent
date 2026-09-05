@@ -5,10 +5,12 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , portalDisplayForFrame
     , portalDisplayForStream
     , portalKeysym
+    , portalMethodCall
     , portalMouseButtonCode
     , portalRequestPathForSender
     , requestResponseRule
     , sessionClosedRule
+    , validatePortalOwnerUser
     , withPortalCaptureReadiness
     , withPortalInputReadiness
     ) where
@@ -28,7 +30,10 @@ import Agent.CLI.ComputerUse.Input
     , parseModifiers
     , parseMouseButton
     )
-import Agent.CLI.ComputerUse.Linux.Logind (withLogindReadiness)
+import Agent.CLI.ComputerUse.Linux.Logind
+    ( WaylandPortalTarget(..)
+    , withLogindReadiness
+    )
 import Agent.Loop (ImageAttachment(..))
 import Agent.Responses.Types
     ( ComputerAction(..)
@@ -65,6 +70,7 @@ import Control.Exception.Safe
     , catchAny
     , finally
     , generalBracket
+    , mask
     , onException
     , throwIO
     , tryAny
@@ -81,6 +87,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Bits ((.&.), (.|.))
 import Data.Char (isAlphaNum, ord)
 import Data.Int (Int32)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -101,7 +108,6 @@ import DBus
     , formatBusName
     , formatObjectPath
     , fromVariant
-    , getSessionAddress
     , methodCall
     , methodReturnBody
     , objectPath_
@@ -193,33 +199,45 @@ data CapturedPortalFrame = CapturedPortalFrame
     }
 
 newPortalBackend
-    :: IO (Either Text ())
+    :: WaylandPortalTarget
+    -> IO (Either Text ())
     -> IO (Either Text ComputerBackend)
-newPortalBackend readiness = do
+newPortalBackend target readiness = do
     attempted <- tryAny do
-        (client, uniqueName) <- connectPortal
-        ownerName <-
-            resolvePortalOwner client
-                `onException`
-                    (disconnect client `catchAny` const (pure ()))
-        state <-
-            newMVar PortalUninitialized
-                `onException`
-                    (disconnect client `catchAny` const (pure ()))
-        let runtime = PortalRuntime
-                { portalClient = client
-                , portalUniqueName = uniqueName
-                , portalOwnerName = ownerName
-                , portalState = state
-                , portalReadiness = readiness
-                }
-        pure ComputerBackend
-            { computerBackendEnsureReady = ensurePortalReady runtime
-            , computerBackendInspectDisplay = inspectPortalDisplay runtime
-            , computerBackendExecuteAction = executePortalAction runtime
-            , computerBackendCaptureDisplay = capturePortalDisplay runtime
-            , computerBackendClose = closePortalRuntime runtime
-            }
+        either (fail . Text.unpack) pure =<< readiness
+        (client, uniqueName) <- connectPortal target
+        flip onException
+            (disconnect client `catchAny` const (pure ())) do
+                ownerName <- resolvePortalOwner client
+                verifyPortalOwnerUser
+                    client
+                    target.waylandPortalUserId
+                    ownerName
+                let portalReadiness =
+                        checkPortalReadiness
+                            client
+                            target.waylandPortalUserId
+                            ownerName
+                            readiness
+                either (fail . Text.unpack) pure =<< portalReadiness
+                state <- newMVar PortalUninitialized
+                let runtime = PortalRuntime
+                        { portalClient = client
+                        , portalUniqueName = uniqueName
+                        , portalOwnerName = ownerName
+                        , portalState = state
+                        , portalReadiness = portalReadiness
+                        }
+                pure ComputerBackend
+                    { computerBackendEnsureReady = ensurePortalReady runtime
+                    , computerBackendInspectDisplay =
+                        inspectPortalDisplay runtime
+                    , computerBackendExecuteAction =
+                        executePortalAction runtime
+                    , computerBackendCaptureDisplay =
+                        capturePortalDisplay runtime
+                    , computerBackendClose = closePortalRuntime runtime
+                    }
     pure case attempted of
         Left exception ->
             Left
@@ -228,13 +246,9 @@ newPortalBackend readiness = do
                 )
         Right backend -> Right backend
 
-connectPortal :: IO (Client, BusName)
-connectPortal =
-    getSessionAddress >>= \case
-        Nothing ->
-            fail
-                "DBUS_SESSION_BUS_ADDRESS is unavailable for the Wayland portal"
-        Just address -> connectWithName portalClientOptions address
+connectPortal :: WaylandPortalTarget -> IO (Client, BusName)
+connectPortal target =
+    connectWithName portalClientOptions target.waylandPortalAddress
 
 portalClientOptions :: ClientOptions SocketTransport
 portalClientOptions =
@@ -265,6 +279,57 @@ resolvePortalOwner client = do
             fail
                 "The session bus returned an invalid owner for the desktop portal."
 
+verifyPortalOwnerUser :: Client -> Word32 -> BusName -> IO ()
+verifyPortalOwnerUser client expectedUserId ownerName = do
+    reply <-
+        portalCallBounded
+            directCallTimeout
+            client
+            ((methodCall dbusPath dbusInterface "GetConnectionUnixUser")
+                { methodCallDestination = Just dbusDestination
+                , methodCallBody =
+                    [toVariant (formatBusName ownerName)]
+                })
+    actualUserId <- case methodReturnBody reply of
+        [value]
+            | Just userId <- fromVariant value ->
+                pure userId
+        _ ->
+            fail
+                "The session bus returned an invalid user for the desktop portal."
+    either (fail . Text.unpack) pure
+        (validatePortalOwnerUser expectedUserId actualUserId)
+
+validatePortalOwnerUser :: Word32 -> Word32 -> Either Text ()
+validatePortalOwnerUser expectedUserId actualUserId
+    | actualUserId == expectedUserId = Right ()
+    | otherwise =
+        Left
+            "The desktop portal does not belong to the verified graphical-session user."
+
+checkPortalReadiness
+    :: Client
+    -> Word32
+    -> BusName
+    -> IO (Either Text ())
+    -> IO (Either Text ())
+checkPortalReadiness client expectedUserId expectedOwner readiness =
+    readiness >>= \case
+        Left err -> pure (Left err)
+        Right () -> do
+            attempted <- tryAny do
+                currentOwner <- resolvePortalOwner client
+                unless (currentOwner == expectedOwner) $
+                    fail (Text.unpack portalAssociationError)
+                verifyPortalOwnerUser client expectedUserId expectedOwner
+            pure case attempted of
+                Left _ -> Left portalAssociationError
+                Right () -> Right ()
+
+portalAssociationError :: Text
+portalAssociationError =
+    "Computer use cannot associate the desktop portal with the verified systemd-logind session."
+
 ensurePortalReady :: PortalRuntime -> IO (Either Text ())
 ensurePortalReady runtime =
     runtime.portalReadiness >>= \case
@@ -272,7 +337,8 @@ ensurePortalReady runtime =
         Right () ->
             modifyMVar runtime.portalState \case
                 PortalUninitialized -> do
-                    attempted <- tryAny (initializePortalSession runtime)
+                    attempted <-
+                        tryAny (initializePortalSessionChecked runtime)
                     pure case attempted of
                         Left exception ->
                             let err =
@@ -288,6 +354,21 @@ ensurePortalReady runtime =
                         ( PortalClosed
                         , Left "The Wayland computer-use session has been closed."
                         )
+
+initializePortalSessionChecked :: PortalRuntime -> IO PortalSession
+initializePortalSessionChecked runtime = do
+    completed <- newIORef Nothing
+    checked <-
+        withLogindReadiness runtime.portalReadiness $
+            mask \restore -> do
+                session <- restore (initializePortalSession runtime)
+                writeIORef completed (Just session)
+                pure (Right session)
+    case checked of
+        Right session -> pure session
+        Left err -> do
+            readIORef completed >>= mapM_ (closePortalSession runtime)
+            fail (Text.unpack err)
 
 initializePortalSession :: PortalRuntime -> IO PortalSession
 initializePortalSession runtime = do
@@ -394,6 +475,7 @@ getPortalWord32Property runtime interfaceName propertyName = do
             directCallTimeout
             runtime.portalClient
             (portalMethodCall
+                runtime.portalOwnerName
                 propertiesInterface
                 "Get"
                 [ toVariant interfaceName
@@ -430,6 +512,7 @@ portalRequest runtime interface member bodyForOptions = do
             Map.singleton "handle_token" (toVariant token)
         request =
             portalMethodCall
+                runtime.portalOwnerName
                 interface
                 member
                 (bodyForOptions requestOptions)
@@ -556,6 +639,7 @@ closePortalRequest runtime requestPath =
         timeout closeCallTimeout
             (portalCall runtime.portalClient
                 (portalObjectCall
+                    runtime.portalOwnerName
                     requestPath
                     requestInterface
                     "Close"
@@ -568,6 +652,7 @@ closePortalSessionPath runtime sessionPath =
         timeout closeCallTimeout
             (portalCall runtime.portalClient
                 (portalObjectCall
+                    runtime.portalOwnerName
                     sessionPath
                     sessionInterface
                     "Close"
@@ -920,7 +1005,11 @@ notifyPortal runtime member body =
         portalCallBounded
             directCallTimeout
             runtime.portalClient
-            (portalMethodCall remoteDesktopInterface member body)
+            (portalMethodCall
+                runtime.portalOwnerName
+                remoteDesktopInterface
+                member
+                body)
 
 capturePortalFrame
     :: PortalRuntime
@@ -966,6 +1055,7 @@ openPipeWireRemote runtime session = do
             directCallTimeout
             runtime.portalClient
             (portalMethodCall
+                runtime.portalOwnerName
                 screenCastInterface
                 "OpenPipeWireRemote"
                 [ toVariant session.portalSessionPath
@@ -1327,22 +1417,24 @@ namedKeyKeysym = \case
     KeyUp -> 0xff52
 
 portalMethodCall
-    :: InterfaceName
-    -> MemberName
-    -> [Variant]
-    -> MethodCall
-portalMethodCall =
-    portalObjectCall portalDesktopPath
-
-portalObjectCall
-    :: ObjectPath
+    :: BusName
     -> InterfaceName
     -> MemberName
     -> [Variant]
     -> MethodCall
-portalObjectCall path interface member body =
+portalMethodCall owner =
+    portalObjectCall owner portalDesktopPath
+
+portalObjectCall
+    :: BusName
+    -> ObjectPath
+    -> InterfaceName
+    -> MemberName
+    -> [Variant]
+    -> MethodCall
+portalObjectCall owner path interface member body =
     (methodCall path interface member)
-        { methodCallDestination = Just portalDestination
+        { methodCallDestination = Just owner
         , methodCallBody = body
         }
 

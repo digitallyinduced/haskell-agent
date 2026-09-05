@@ -27,9 +27,12 @@ import Agent.CLI.ComputerUse.Linux
     )
 import Agent.CLI.ComputerUse.Linux.Logind
     ( LogindSessionTarget(..)
+    , WaylandPortalTarget(..)
     , processSessionRequest
     , validateLogindSession
     , validateLogindState
+    , validateWaylandPortalSessions
+    , waylandPortalTarget
     )
 import Agent.CLI.ComputerUse.Input (MouseButton(..))
 import Agent.CLI.ComputerUse.Linux.Portal
@@ -38,10 +41,12 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , portalDisplayForFrame
     , portalDisplayForStream
     , portalKeysym
+    , portalMethodCall
     , portalMouseButtonCode
     , portalRequestPathForSender
     , requestResponseRule
     , sessionClosedRule
+    , validatePortalOwnerUser
     , withPortalCaptureReadiness
     , withPortalInputReadiness
     )
@@ -64,6 +69,7 @@ import Agent.Responses.Types
 import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..))
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (finally, throwString, tryAny)
+import Control.Monad (forM_)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
@@ -80,7 +86,15 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Word (Word32, Word64)
-import DBus (Variant, busName_, fromVariant, objectPath_, toVariant)
+import DBus
+    ( MethodCall(..)
+    , Variant
+    , address
+    , busName_
+    , fromVariant
+    , objectPath_
+    , toVariant
+    )
 import DBus.Client (MatchRule(..))
 import Test.Hspec
 
@@ -648,6 +662,123 @@ spec = do
             readIORef completed `shouldReturn` False
 
     describe "Linux Wayland portal computer use" do
+        it "derives the portal bus from the verified logind user" do
+            let sessionPath =
+                    objectPath_ "/org/freedesktop/login1/session/_32"
+                userPath =
+                    objectPath_ "/org/freedesktop/login1/user/_1000"
+                ttyPath =
+                    objectPath_ "/org/freedesktop/login1/session/_33"
+                sessions =
+                    [ ("2", sessionPath, "wayland")
+                    , ("3", ttyPath, "tty")
+                    ]
+            target <- case waylandPortalTarget
+                sessionPath
+                (1000 :: Word32)
+                (1000, userPath)
+                ("2", sessionPath)
+                "/run/user/1000"
+                sessions of
+                    Left err -> expectationFailure (Text.unpack err) >> fail "unreachable"
+                    Right value -> pure value
+            address
+                "unix"
+                (Map.singleton "path" "/run/user/1000/bus")
+                `shouldBe` Just target.waylandPortalAddress
+            target.waylandPortalUserId `shouldBe` 1000
+            target.waylandPortalUserPath `shouldBe` userPath
+            target.waylandPortalSessionPath `shouldBe` sessionPath
+            target.waylandPortalDisplayId `shouldBe` "2"
+            target.waylandPortalRuntimePath `shouldBe` "/run/user/1000"
+
+        it "rejects a portal target not owned by the process session" do
+            let sessionPath =
+                    objectPath_ "/org/freedesktop/login1/session/_32"
+                otherPath =
+                    objectPath_ "/org/freedesktop/login1/session/_99"
+                userPath =
+                    objectPath_ "/org/freedesktop/login1/user/_1000"
+                sessions = [("2", sessionPath, "wayland")]
+                rejected =
+                    "Computer use cannot associate the Wayland portal with the current systemd-logind session."
+            waylandPortalTarget
+                sessionPath
+                (1001 :: Word32)
+                (1000, userPath)
+                ("2", sessionPath)
+                "/run/user/1000"
+                sessions
+                `shouldBe` Left rejected
+            waylandPortalTarget
+                sessionPath
+                (1000 :: Word32)
+                (1000, userPath)
+                ("9", otherPath)
+                "/run/user/1000"
+                sessions
+                `shouldBe` Left rejected
+            waylandPortalTarget
+                sessionPath
+                (1000 :: Word32)
+                (1000, userPath)
+                ("2", sessionPath)
+                "relative/runtime"
+                sessions
+                `shouldBe` Left rejected
+
+        it "allows only the current Wayland session plus TTY sessions" do
+            let sessionPath =
+                    objectPath_ "/org/freedesktop/login1/session/_32"
+                ttyPath =
+                    objectPath_ "/org/freedesktop/login1/session/_33"
+                otherPath =
+                    objectPath_ "/org/freedesktop/login1/session/_34"
+                expected = ("2", sessionPath)
+                rejected =
+                    Left
+                        "Computer use cannot associate the Wayland portal with the current systemd-logind session."
+            validateWaylandPortalSessions
+                expected
+                [ ("2", sessionPath, "wayland")
+                , ("3", ttyPath, "tty")
+                ]
+                `shouldBe` Right ()
+            forM_
+                ["wayland", "x11", "mir", "web", "unspecified"]
+                \sessionType ->
+                    validateWaylandPortalSessions
+                        expected
+                        [ ("2", sessionPath, "wayland")
+                        , ("4", otherPath, sessionType)
+                        ]
+                        `shouldBe` rejected
+            validateWaylandPortalSessions
+                expected
+                [("3", ttyPath, "tty")]
+                `shouldBe` rejected
+            validateWaylandPortalSessions
+                expected
+                [ ("2", sessionPath, "wayland")
+                , ("2", otherPath, "tty")
+                ]
+                `shouldBe` rejected
+
+        it "authenticates and pins the resolved portal owner" do
+            let owner = busName_ ":1.24"
+            validatePortalOwnerUser (1000 :: Word32) 1000
+                `shouldBe` Right ()
+            validatePortalOwnerUser (1000 :: Word32) 1001
+                `shouldBe` Left
+                    "The desktop portal does not belong to the verified graphical-session user."
+            methodCallDestination
+                (portalMethodCall
+                    owner
+                    "org.freedesktop.portal.RemoteDesktop"
+                    "Start"
+                    [])
+                `shouldBe` Just owner
+
         it "derives race-free request paths from the unique bus name" do
             portalRequestPathForSender ":1.42" "request_ab12"
                 `shouldBe`

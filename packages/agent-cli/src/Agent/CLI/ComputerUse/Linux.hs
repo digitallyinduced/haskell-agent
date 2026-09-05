@@ -72,21 +72,29 @@ newLinuxBackend = do
                                         (Right
                                             (attachLogindGuard logind backend))
                                 LogindWaylandSession -> do
-                                    portal <-
-                                        newPortalBackend
-                                            logind.checkLogindGuard
-                                            `onException`
-                                                logind.closeLogindGuard
-                                    case portal of
-                                        Left err -> do
+                                    case logind.logindWaylandPortalTarget of
+                                        Nothing -> do
                                             logind.closeLogindGuard
-                                            pure (Left err)
-                                        Right backend ->
                                             pure
-                                                (Right
-                                                    (attachLogindGuard
-                                                        logind
-                                                        backend))
+                                                (Left
+                                                    "Computer use cannot associate the Wayland portal with the current systemd-logind session.")
+                                        Just portalTarget -> do
+                                            portal <-
+                                                newPortalBackend
+                                                    portalTarget
+                                                    logind.checkLogindGuard
+                                                    `onException`
+                                                        logind.closeLogindGuard
+                                            case portal of
+                                                Left err -> do
+                                                    logind.closeLogindGuard
+                                                    pure (Left err)
+                                                Right backend ->
+                                                    pure
+                                                        (Right
+                                                            (attachLogindGuard
+                                                                logind
+                                                                backend))
 
 logindSessionTarget
     :: LinuxSessionType

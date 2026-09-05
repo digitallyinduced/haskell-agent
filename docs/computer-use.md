@@ -66,6 +66,15 @@ The implementation uses only the standard
 The portal stream includes the cursor. Screenshots are read from PipeWire and
 normalized to the portal's logical dimensions before being returned.
 
+The portal connection is bound conservatively to the process's verified
+`systemd-logind` session. The session-bus address is derived from logind's
+`User.RuntimePath`; an ambient `DBUS_SESSION_BUS_ADDRESS` is ignored. The
+portal's unique bus owner and Unix user are pinned for calls and signals.
+Because the user session bus and portal are shared between graphical logins,
+computer use fails closed if logind cannot prove that the current session is
+the user's primary Wayland display or if the same user has another non-TTY
+session.
+
 Required components for a non-Nix installation:
 
 - `xdg-desktop-portal`
@@ -87,6 +96,9 @@ and includes these dependencies only on Linux.
   graphical session rather than trying to set a session environment variable.
 - **Session inactive or locked:** unlock and activate the same graphical
   session. The check intentionally fails closed when logind is unavailable.
+- **Portal cannot be associated with the session:** end other graphical or
+  unclassified logind sessions for the same user, then launch the CLI again
+  from the intended Wayland login. TTY sessions may remain open.
 - **Portal request denied or cancelled:** approve the chooser and select one
   monitor. Selecting no monitor or more than one is rejected.
 - **Portal capability error:** update the desktop portal/backend. It must
