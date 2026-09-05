@@ -22,6 +22,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , requestResponseRule
     , runPortalBackendOperationWith
     , sessionClosedRule
+    , stopPortalCaptureProcessWith
     , validatePortalOwnerUser
     , waitForPortalFrameAfter
     , withPortalStateInvalidation
@@ -235,6 +236,10 @@ data PortalState session
     | PortalFailed !Text
     | PortalClosing !session
     | PortalClosed
+
+data PortalReadinessStep
+    = PortalReadinessDone !(Either Text ())
+    | PortalReadinessRetry
 
 data PortalRuntime = PortalRuntime
     { portalClient :: !Client
@@ -590,35 +595,60 @@ ensurePortalReady runtime =
             ensurePortalStateReadyWith
                 runtime.portalState
                 (initializePortalSessionChecked runtime)
+                (closePortalSession runtime)
 
 ensurePortalStateReadyWith
     :: MVar (PortalState session)
     -> IO session
+    -> (session -> IO ())
     -> IO (Either Text ())
-ensurePortalStateReadyWith stateVar initialize =
-    modifyMVarMasked stateVar \case
-        PortalUninitialized -> do
-            attempted <- tryAny initialize
-            pure case attempted of
-                Left exception ->
-                    let err =
-                            "Wayland portal initialization failed: "
-                                <> exceptionText exception
-                    in (PortalUninitialized, Left err)
-                Right session ->
-                    (PortalReady session, Right ())
-        state@(PortalReady _) -> pure (state, Right ())
-        state@(PortalFailed err) -> pure (state, Left err)
-        state@(PortalClosing _) ->
-            pure
-                ( state
-                , Left "The Wayland computer-use session is being closed."
-                )
-        PortalClosed ->
-            pure
-                ( PortalClosed
-                , Left "The Wayland computer-use session has been closed."
-                )
+ensurePortalStateReadyWith stateVar initialize closeSession = do
+    readinessStep <-
+        Exception.mask \restore ->
+            modifyMVarMasked stateVar \case
+                PortalUninitialized -> do
+                    attempted <- tryAny (restore initialize)
+                    pure case attempted of
+                        Left exception ->
+                            let err =
+                                    "Wayland portal initialization failed: "
+                                        <> exceptionText exception
+                            in
+                                ( PortalUninitialized
+                                , PortalReadinessDone (Left err)
+                                )
+                        Right session ->
+                            ( PortalReady session
+                            , PortalReadinessDone (Right ())
+                            )
+                state@(PortalReady _) ->
+                    pure (state, PortalReadinessDone (Right ()))
+                state@(PortalFailed err) ->
+                    pure (state, PortalReadinessDone (Left err))
+                PortalClosing session -> do
+                    closed <- tryAny (restore (closeSession session))
+                    pure case closed of
+                        Left exception ->
+                            ( PortalClosing session
+                            , PortalReadinessDone
+                                (Left
+                                    ( "Wayland portal cleanup failed: "
+                                        <> exceptionText exception
+                                    ))
+                            )
+                        Right () ->
+                            (PortalUninitialized, PortalReadinessRetry)
+                PortalClosed ->
+                    pure
+                        ( PortalClosed
+                        , PortalReadinessDone
+                            (Left
+                                "The Wayland computer-use session has been closed.")
+                        )
+    case readinessStep of
+        PortalReadinessDone outcome -> pure outcome
+        PortalReadinessRetry ->
+            ensurePortalStateReadyWith stateVar initialize closeSession
 
 initializePortalSessionChecked :: PortalRuntime -> IO PortalSession
 initializePortalSessionChecked runtime = do
@@ -1822,7 +1852,9 @@ closePortalCapture capture =
                 failed@(PortalFrameFailed _) -> failed
                 _ -> PortalFrameFailed
                     "The GStreamer portal capture has been closed."
-        void (tryAny (stopPortalCaptureProcess capture.portalCaptureProcess))
+        stopped <-
+            tryAllExceptions
+                (stopPortalCaptureProcess capture.portalCaptureProcess)
         forM_
             [ capture.portalCaptureFrameReader
             , capture.portalCaptureErrorReader
@@ -1832,23 +1864,49 @@ closePortalCapture capture =
                 void (waitCatch worker)
         void (tryAny (hClose capture.portalCaptureOutput))
         void (tryAny (hClose capture.portalCaptureErrors))
+        either Exception.throwIO pure stopped
 
 stopPortalCaptureProcess :: ProcessHandle -> IO ()
-stopPortalCaptureProcess processHandle = do
-    void (tryAny (resumePortalCaptureProcess processHandle))
-    void (tryAny (interruptProcessGroupOf processHandle))
-    void (tryAny (terminateProcess processHandle))
-    timeout closeCallTimeout (waitForProcess processHandle) >>= \case
+stopPortalCaptureProcess processHandle =
+    stopPortalCaptureProcessWith
+        (resumePortalCaptureProcess processHandle)
+        (interruptProcessGroupOf processHandle)
+        (terminateProcess processHandle)
+        (getPid processHandle)
+        (Posix.signalProcessGroup Posix.sigKILL)
+        (timeout closeCallTimeout (waitForProcess processHandle))
+
+stopPortalCaptureProcessWith
+    :: IO ()
+    -> IO ()
+    -> IO ()
+    -> IO (Maybe processGroup)
+    -> (processGroup -> IO ())
+    -> IO (Maybe exitResult)
+    -> IO ()
+stopPortalCaptureProcessWith
+    resumeProcess
+    interruptProcess
+    terminateProcess'
+    getProcessGroup
+    killProcessGroup
+    waitForExit = do
+    void (tryAny resumeProcess)
+    void (tryAny interruptProcess)
+    void (tryAny terminateProcess')
+    waitForExit >>= \case
         Just _ -> pure ()
         Nothing -> do
-            getPid processHandle >>= mapM_
+            getProcessGroup >>= mapM_
                 (\processGroup ->
                     void
                         (tryAny
-                            (Posix.signalProcessGroup Posix.sigKILL processGroup)))
-            void $
-                timeout closeCallTimeout
-                    (waitForProcess processHandle)
+                            (killProcessGroup processGroup)))
+            waitForExit >>= \case
+                Just _ -> pure ()
+                Nothing ->
+                    fail
+                        "The GStreamer portal capture process did not exit after SIGKILL."
 
 pausePortalCaptureProcess :: ProcessHandle -> IO ()
 pausePortalCaptureProcess =

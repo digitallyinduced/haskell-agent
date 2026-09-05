@@ -61,6 +61,7 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , requestResponseRule
     , runPortalBackendOperationWith
     , sessionClosedRule
+    , stopPortalCaptureProcessWith
     , validatePortalOwnerUser
     , waitForPortalFrameAfter
     , withPortalCaptureRunningWith
@@ -1225,7 +1226,11 @@ spec = do
                     if attempt == 1
                         then throwString "portal temporarily unavailable"
                         else pure ("session" :: Text.Text)
-            first <- ensurePortalStateReadyWith state initialize
+            first <-
+                ensurePortalStateReadyWith
+                    state
+                    initialize
+                    (const (pure ()))
             first `shouldSatisfy` \case
                 Left err ->
                     "Wayland portal initialization failed:"
@@ -1233,11 +1238,97 @@ spec = do
                         && "portal temporarily unavailable"
                             `Text.isInfixOf` err
                 Right () -> False
-            ensurePortalStateReadyWith state initialize
+            ensurePortalStateReadyWith state initialize (const (pure ()))
                 `shouldReturn` Right ()
-            ensurePortalStateReadyWith state initialize
+            ensurePortalStateReadyWith state initialize (const (pure ()))
                 `shouldReturn` Right ()
             readIORef attempts `shouldReturn` 2
+
+        it "retries retained cleanup from readiness before initializing" do
+            state <-
+                newMVar (PortalClosing ("stale session" :: Text.Text))
+            closeAttempts <- newIORef (0 :: Int)
+            initializationAttempts <- newIORef (0 :: Int)
+            let closeSession _ = do
+                    attempt <-
+                        atomicModifyIORef' closeAttempts \current ->
+                            let next = current + 1
+                            in (next, next)
+                    if attempt == 1
+                        then throwString "capture process still running"
+                        else pure ()
+                initialize = do
+                    modifyIORef' initializationAttempts (+ 1)
+                    pure ("fresh session" :: Text.Text)
+            first <-
+                ensurePortalStateReadyWith state initialize closeSession
+            first `shouldSatisfy` \case
+                Left err ->
+                    "Wayland portal cleanup failed:"
+                        `Text.isPrefixOf` err
+                        && "capture process still running"
+                            `Text.isInfixOf` err
+                Right () -> False
+            readMVar state >>= \case
+                PortalClosing session ->
+                    session `shouldBe` "stale session"
+                _ ->
+                    expectationFailure
+                        "failed readiness cleanup lost the portal session"
+            ensurePortalStateReadyWith state initialize closeSession
+                `shouldReturn` Right ()
+            readMVar state >>= \case
+                PortalReady session ->
+                    session `shouldBe` "fresh session"
+                _ ->
+                    expectationFailure
+                        "readiness did not initialize after retained cleanup"
+            readIORef closeAttempts `shouldReturn` 2
+            readIORef initializationAttempts `shouldReturn` 1
+
+        it "does not restore a stale closing session when reinitialization is cancelled" do
+            state <-
+                newMVar (PortalClosing ("stale session" :: Text.Text))
+            closed <- newIORef ([] :: [Text.Text])
+            initializationAttempts <- newIORef (0 :: Int)
+            initializeStarted <- newEmptyMVar
+            blocker <- newEmptyMVar
+            let closeSession session =
+                    modifyIORef' closed (<> [session])
+                initialize = do
+                    attempt <-
+                        atomicModifyIORef' initializationAttempts \current ->
+                            let next = current + 1
+                            in (next, next)
+                    if attempt == 1
+                        then do
+                            putMVar initializeStarted ()
+                            takeMVar blocker
+                            pure "unreachable session"
+                        else pure "fresh session"
+            withAsync
+                (ensurePortalStateReadyWith state initialize closeSession)
+                \readying -> do
+                    takeMVar initializeStarted
+                    cancel readying
+                    waitCatch readying
+                        >>= (`shouldSatisfy`
+                            either (const True) (const False))
+            readMVar state >>= \case
+                PortalUninitialized -> pure ()
+                _ ->
+                    expectationFailure
+                        "cancelled reinitialization restored the stale session"
+            ensurePortalStateReadyWith state initialize closeSession
+                `shouldReturn` Right ()
+            readMVar state >>= \case
+                PortalReady session ->
+                    session `shouldBe` "fresh session"
+                _ ->
+                    expectationFailure
+                        "readiness did not recover after cancelled initialization"
+            readIORef closed `shouldReturn` ["stale session"]
+            readIORef initializationAttempts `shouldReturn` 2
 
         it "retains a session until cancelled runtime cleanup is retried" do
             state <-
@@ -1291,7 +1382,7 @@ spec = do
                 (== "different session")
                 "stale close signal"
                 closeSession
-            ensurePortalStateReadyWith state initialize
+            ensurePortalStateReadyWith state initialize closeSession
                 `shouldReturn` Right ()
             readIORef closed `shouldReturn` []
             readIORef attempts `shouldReturn` 0
@@ -1307,17 +1398,18 @@ spec = do
                     waitCatch invalidating
                         >>= (`shouldSatisfy`
                             either (const False) (const True))
-            ensurePortalStateReadyWith state initialize
+            ensurePortalStateReadyWith state initialize closeSession
                 `shouldReturn` Right ()
-            ensurePortalStateReadyWith state initialize
+            ensurePortalStateReadyWith state initialize closeSession
                 `shouldReturn` Right ()
             readIORef closed `shouldReturn` ["stale session"]
             readIORef attempts `shouldReturn` 1
 
-        it "retains an invalidated session until cancelled cleanup is retried" do
+        it "retries cancelled invalidation cleanup from readiness" do
             state <-
                 newMVar (PortalReady ("stale session" :: Text.Text))
             attempts <- newIORef (0 :: Int)
+            initializationAttempts <- newIORef (0 :: Int)
             closeStarted <- newEmptyMVar
             blocker <- newEmptyMVar
             let closeSession _ = do
@@ -1334,6 +1426,9 @@ spec = do
                         (== "stale session")
                         "portal session closed remotely"
                         closeSession
+                initialize = do
+                    modifyIORef' initializationAttempts (+ 1)
+                    pure ("fresh session" :: Text.Text)
             withAsync invalidate \invalidating -> do
                 takeMVar closeStarted
                 cancel invalidating
@@ -1346,13 +1441,52 @@ spec = do
                 _ ->
                     expectationFailure
                         "cancelled invalidation lost the portal session"
-            invalidate
+            ensurePortalStateReadyWith state initialize closeSession
+                `shouldReturn` Right ()
             readMVar state >>= \case
-                PortalUninitialized -> pure ()
+                PortalReady session ->
+                    session `shouldBe` "fresh session"
                 _ ->
                     expectationFailure
-                        "retried invalidation did not release the portal session"
+                        "readiness did not recover the invalidated portal session"
             readIORef attempts `shouldReturn` 2
+            readIORef initializationAttempts `shouldReturn` 1
+
+        it "fails when a portal capture survives SIGKILL" do
+            events <- newIORef ([] :: [Text.Text])
+            waits <- newIORef (0 :: Int)
+            let record event = modifyIORef' events (<> [event])
+                waitForExit = do
+                    modifyIORef' waits (+ 1)
+                    record "wait"
+                    pure (Nothing :: Maybe ())
+            attempted <-
+                tryAny $
+                    stopPortalCaptureProcessWith
+                        (record "resume")
+                        (record "interrupt")
+                        (record "terminate")
+                        (record "get-process-group" >> pure (Just (42 :: Int)))
+                        (\processGroup ->
+                            record
+                                ("kill-" <> Text.pack (show processGroup)))
+                        waitForExit
+            attempted `shouldSatisfy` \case
+                Left exception ->
+                    "did not exit after SIGKILL"
+                        `Text.isInfixOf` Text.pack (show exception)
+                Right () -> False
+            readIORef events
+                `shouldReturn`
+                    [ "resume"
+                    , "interrupt"
+                    , "terminate"
+                    , "wait"
+                    , "get-process-group"
+                    , "kill-42"
+                    , "wait"
+                    ]
+            readIORef waits `shouldReturn` 2
 
         it "reads consecutive frames from one persistent PNG stream" do
             let firstFrame =
