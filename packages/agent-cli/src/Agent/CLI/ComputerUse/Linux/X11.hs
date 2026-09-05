@@ -593,8 +593,7 @@ withX11TemporaryPathWith acquire closeResource removePath action =
   where
     cleanup (path, resource) =
         (closeResource resource `catchAny` const (pure ()))
-            `finally`
-                (removePath path `catchAny` const (pure ()))
+            `finally` removePath path
 
 encodeCaptured
     :: ComputerDisplay

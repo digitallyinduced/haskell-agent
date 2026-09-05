@@ -654,6 +654,28 @@ spec = do
                 `shouldReturn`
                     ["acquire", "close-1", "close-2", "remove"]
 
+        it "surfaces an X11 temp-path removal failure" do
+            events <- newIORef ([] :: [Text.Text])
+            let record event =
+                    modifyIORef' events (<> [event])
+                capture =
+                    withX11TemporaryPathWith
+                        (record "acquire" >> pure ("capture.png", ()))
+                        (\() -> record "close")
+                        (\_ -> record "remove" >> throwString "remove failed")
+                        (\_ ->
+                            record "action"
+                                >> pure ("captured" :: Text.Text))
+            result <- tryAny capture
+            result `shouldSatisfy` \case
+                Left exception ->
+                    "remove failed"
+                        `Text.isInfixOf` Text.pack (show exception)
+                Right _ -> False
+            readIORef events
+                `shouldReturn`
+                    ["acquire", "close", "action", "close", "remove"]
+
         it "prefers native Wayland over the XWayland DISPLAY" do
             detectLinuxSessionType
                 (Just "wayland")
