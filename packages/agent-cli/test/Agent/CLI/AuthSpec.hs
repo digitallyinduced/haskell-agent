@@ -1,5 +1,6 @@
 module Agent.CLI.AuthSpec (spec) where
 
+import Data.List.NonEmpty (NonEmpty((:|)))
 import Agent.CLI.Auth
 import Agent.CLI.CredentialStore
 import Agent.CLI.Dictation
@@ -1100,9 +1101,7 @@ spec = do
     describe "preferredOpenAiTokenProvider" do
         it "keeps using the selected account until it fails" do
             pool <- OpenAI.newPool
-                [ testAuthStateFor "acc-1"
-                , testAuthStateFor "acc-2"
-                ]
+                (testAuthStateFor "acc-1" :| [testAuthStateFor "acc-2"])
                 (pure . Right)
             fallback <- OpenAICredential.poolTokenProvider pool
             preferred <- newIORef (Just "acc-2")
@@ -1144,9 +1143,7 @@ spec = do
 
         it "falls back when the preferred account is already cooling down" do
             pool <- OpenAI.newPool
-                [ testAuthStateFor "acc-1"
-                , testAuthStateFor "acc-2"
-                ]
+                (testAuthStateFor "acc-1" :| [testAuthStateFor "acc-2"])
                 (pure . Right)
             fallback <- OpenAICredential.poolTokenProvider pool
             preferred <- newIORef (Just "acc-2")
@@ -1168,9 +1165,7 @@ spec = do
 
         it "keeps the selection when another credential reports failure" do
             pool <- OpenAI.newPool
-                [ testAuthStateFor "acc-1"
-                , testAuthStateFor "acc-2"
-                ]
+                (testAuthStateFor "acc-1" :| [testAuthStateFor "acc-2"])
                 (pure . Right)
             fallback <- OpenAICredential.poolTokenProvider pool
             preferred <- newIORef (Just "acc-2")

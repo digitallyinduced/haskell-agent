@@ -1,5 +1,6 @@
 module Agent.OpenAI.FunctionalSpec where
 
+import Data.List.NonEmpty (NonEmpty((:|)))
 import Test.Hspec
 
 import qualified Agent.OpenAI.Auth as Auth
@@ -28,7 +29,7 @@ spec = describe "Codex functional streaming" do
                 pendingWith "set CODEX_AUTH_JSON or CODEX_ACCESS_TOKEN (+ CODEX_ACCOUNT_ID or CODEX_ID_TOKEN) with a fresh access token to run the live Codex functional test"
             Just authState -> do
                 model <- fmap (Text.pack . fromMaybe "gpt-5.5") (lookupEnv "CODEX_TEST_MODEL")
-                pool <- Auth.newPool [authState] \state -> pure (Right state)
+                pool <- Auth.newPool (authState :| []) \state -> pure (Right state)
                 withCodexWs pool \conn _accountId -> do
                     first <- runHelloTurn conn model Nothing "Reply with exactly: hello world" "hello world"
                     _second <- runHelloTurn conn model (Just first.responseId) "Reply with exactly: hello again" "hello again"

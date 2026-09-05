@@ -1,5 +1,6 @@
 module Agent.OpenAI.AuthSpec (spec) where
 
+import Data.List.NonEmpty (NonEmpty((:|)))
 import Agent.OpenAI.Auth
 import Agent.OpenAI.Auth.Refresh (RefreshResponse(RefreshResponse), decodeRefreshResponse)
 import Agent.Error
@@ -157,7 +158,7 @@ spec = do
     describe "newPool + getAccessToken" $ do
         it "dispenses fresh tokens without calling the refresh callback" $ do
             callCounter <- newIORef (0 :: Int)
-            pool <- newPool [mkFreshAuth "acc-1"] (countingRefresh callCounter)
+            pool <- newPool (mkFreshAuth "acc-1" :| []) (countingRefresh callCounter)
             result <- getAccessToken pool
             result `shouldSatisfy` isRight
             readIORef callCounter `shouldReturn` 0
@@ -180,7 +181,7 @@ spec = do
                             takeMVar releaseFirstRefresh
                         else putMVar laterRefreshStarted ()
                     pure (Right refreshed)
-            pool <- newPool [mkExpiredAuth "acc"] refresh
+            pool <- newPool (mkExpiredAuth "acc" :| []) refresh
 
             withAsync (getAccessToken pool) \firstCheckout -> do
                 takeMVar firstRefreshStarted
@@ -203,7 +204,7 @@ spec = do
 
         it "alternates between accounts on consecutive calls (round-robin)" $ do
             callCounter <- newIORef (0 :: Int)
-            let states = [ mkFreshAuth "acc-1", mkFreshAuth "acc-2" ]
+            let states = (mkFreshAuth "acc-1" :| [mkFreshAuth "acc-2"])
             pool <- newPool states (countingRefresh callCounter)
             ids <- mapM (const (accountIdOf <$> getAccessToken pool)) [1 .. 3 :: Int]
             -- Three consecutive calls with N=2 accounts must hit both, and
@@ -215,7 +216,7 @@ spec = do
                 _ -> expectationFailure "expected three round-robin samples"
 
         it "checks out a requested account without depending on round-robin" $ do
-            let states = [ mkFreshAuth "acc-1", mkFreshAuth "acc-2" ]
+            let states = (mkFreshAuth "acc-1" :| [mkFreshAuth "acc-2"])
             pool <- newPool states neverRefresh
 
             getAccessTokenForAccount pool "acc-2"
@@ -227,7 +228,7 @@ spec = do
 
         it "respects cooldown for a requested account" $ do
             pool <- newPool
-                [mkFreshAuth "paced", mkFreshAuth "healthy"]
+                (mkFreshAuth "paced" :| [mkFreshAuth "healthy"])
                 neverRefresh
             reportRateLimit pool "paced" (Just 60)
 
@@ -239,7 +240,7 @@ spec = do
                             <> show other)
 
         it "reports an unknown requested account" $ do
-            pool <- newPool [mkFreshAuth "known"] neverRefresh
+            pool <- newPool (mkFreshAuth "known" :| []) neverRefresh
             getAccessTokenForAccount pool "missing" >>= \case
                 Left CredentialError{} -> pure ()
                 other ->
@@ -249,7 +250,7 @@ spec = do
 
         it "fails over when the selected account cannot refresh" $ do
             attempts <- newIORef ([] :: [Text])
-            let states = [ mkExpiredAuth "acc-broken", mkExpiredAuth "acc-ok" ]
+            let states = (mkExpiredAuth "acc-broken" :| [mkExpiredAuth "acc-ok"])
                 refresh state = do
                     previous <- readIORef attempts
                     modifyIORef' attempts (<> [state.accountId])
@@ -267,7 +268,7 @@ spec = do
 
         it "fails over when the selected account has a local credential error" $ do
             attempts <- newIORef ([] :: [Text])
-            let states = [ mkExpiredAuth "acc-broken", mkExpiredAuth "acc-ok" ]
+            let states = (mkExpiredAuth "acc-broken" :| [mkExpiredAuth "acc-ok"])
                 refresh state = do
                     previous <- readIORef attempts
                     modifyIORef' attempts (<> [state.accountId])
@@ -288,7 +289,7 @@ spec = do
         it "retains a token-endpoint rejection without its response body" do
             let secretBody = "TOP_SECRET_REFRESH_RESPONSE"
                 refresh _ = pure $ Left $ HttpError 403 secretBody
-            pool <- newPool [mkExpiredAuth "acc-broken"] refresh
+            pool <- newPool (mkExpiredAuth "acc-broken" :| []) refresh
 
             result <- getAccessToken pool
 
@@ -308,7 +309,7 @@ spec = do
     describe "reportRateLimit" $ do
         it "skips rate-limited accounts on subsequent picks" $ do
             callCounter <- newIORef (0 :: Int)
-            let states = [ mkFreshAuth "acc-1", mkFreshAuth "acc-2" ]
+            let states = (mkFreshAuth "acc-1" :| [mkFreshAuth "acc-2"])
             pool <- newPool states (countingRefresh callCounter)
             reportRateLimit pool "acc-1" (Just 60)
             -- Every pick for the next 60s must land on acc-2.
@@ -316,7 +317,7 @@ spec = do
             ids `shouldSatisfy` all (== "acc-2")
 
         it "does not shorten an existing longer cooldown" $ do
-            pool <- newPool [mkFreshAuth "only-acc"] neverRefresh
+            pool <- newPool (mkFreshAuth "only-acc" :| []) neverRefresh
             reportRateLimit pool "only-acc" (Just 3600)
             [before] <- snapshotAccounts pool
             reportRateLimit pool "only-acc" (Just 60)
@@ -324,7 +325,7 @@ spec = do
             after.snapshotCooldownUntil `shouldBe` before.snapshotCooldownUntil
 
         it "returns CredentialsExhausted when every account is cooling down" $ do
-            pool <- newPool [mkFreshAuth "only-acc"] neverRefresh
+            pool <- newPool (mkFreshAuth "only-acc" :| []) neverRefresh
             reportRateLimit pool "only-acc" (Just 60)
             result <- getAccessToken pool
             case result of
@@ -344,9 +345,7 @@ spec = do
                     modifyIORef' checks (auth.accountId :)
                     pure (Right (auth.accountId == "reset-account"))
             pool <- newDiscoveringPoolWithRateLimitRevalidation
-                [ mkFreshAuth "still-limited"
-                , mkFreshAuth "reset-account"
-                ]
+                (mkFreshAuth "still-limited" :| [mkFreshAuth "reset-account"])
                 neverRefresh
                 noDiscovery
                 revalidate
@@ -373,7 +372,7 @@ spec = do
                     modifyIORef' checks (+ 1)
                     pure (Right True)
             pool <- newDiscoveringPoolWithRateLimitRevalidation
-                [mkFreshAuth "burst-limited"]
+                (mkFreshAuth "burst-limited" :| [])
                 neverRefresh
                 noDiscovery
                 revalidate
@@ -392,9 +391,7 @@ spec = do
                     modifyIORef' checks (auth.accountId :)
                     pure (Right True)
             pool <- newDiscoveringPoolWithRateLimitRevalidation
-                [ mkFreshAuth "window-reset"
-                , mkFreshAuth "burst-limited"
-                ]
+                (mkFreshAuth "window-reset" :| [mkFreshAuth "burst-limited"])
                 neverRefresh
                 noDiscovery
                 revalidate
@@ -412,7 +409,7 @@ spec = do
 
         it "revalidates an explicitly requested cooling account" do
             pool <- newDiscoveringPoolWithRateLimitRevalidation
-                [mkFreshAuth "requested-account"]
+                (mkFreshAuth "requested-account" :| [])
                 neverRefresh
                 noDiscovery
                 (const (pure (Right True)))
@@ -437,7 +434,7 @@ spec = do
                     writeIORef checkedToken (Just auth.accessToken)
                     pure (Right True)
             pool <- newDiscoveringPoolWithRateLimitRevalidation
-                [mkExpiredAuth "reset-account"]
+                (mkExpiredAuth "reset-account" :| [])
                 refresh
                 noDiscovery
                 revalidate
@@ -457,7 +454,7 @@ spec = do
                     modifyIORef' checks (+ 1)
                     pure (Right False)
             pool <- newDiscoveringPoolWithRateLimitRevalidation
-                [mkFreshAuth "still-limited"]
+                (mkFreshAuth "still-limited" :| [])
                 neverRefresh
                 noDiscovery
                 revalidate
@@ -478,7 +475,7 @@ spec = do
                     takeMVar releaseCheck
                     pure (Right True)
             pool <- newDiscoveringPoolWithRateLimitRevalidation
-                [mkFreshAuth "reset-account"]
+                (mkFreshAuth "reset-account" :| [])
                 neverRefresh
                 noDiscovery
                 revalidate
@@ -497,7 +494,7 @@ spec = do
                     modifyIORef' discoveryCalls (<> [excluded])
                     pure (Right [mkFreshAuth "newly-healthy"])
             pool <- newDiscoveringPool
-                [mkFreshAuth "initial-account"]
+                (mkFreshAuth "initial-account" :| [])
                 neverRefresh
                 discover
             reportRateLimit pool "initial-account" (Just 60)
@@ -515,7 +512,7 @@ spec = do
                     modifyIORef' discoveryCalls (+ 1)
                     pure (Right [mkFreshAuth "new-account"])
             pool <- newDiscoveringPool
-                [mkFreshAuth "initial-account"]
+                (mkFreshAuth "initial-account" :| [])
                 neverRefresh
                 discover
 
@@ -536,7 +533,7 @@ spec = do
                     takeMVar releaseDiscovery
                     pure (Right [mkFreshAuth "discovered-account"])
             pool <- newDiscoveringPool
-                [mkFreshAuth "initial-account"]
+                (mkFreshAuth "initial-account" :| [])
                 neverRefresh
                 discover
 
@@ -568,7 +565,7 @@ spec = do
                         else pure
                             (Right [mkFreshAuth "recovered-account"])
             pool <- newDiscoveringPool
-                [mkFreshAuth "initial-account"]
+                (mkFreshAuth "initial-account" :| [])
                 neverRefresh
                 discover
 
@@ -581,7 +578,7 @@ spec = do
             let brokerUnavailable _ =
                     pure (Left (HttpError 503 "broker temporarily unavailable"))
             pool <- newDiscoveringPool
-                [mkFreshAuth "only-account"]
+                (mkFreshAuth "only-account" :| [])
                 neverRefresh
                 brokerUnavailable
             reportRateLimit pool "only-account" (Just 60)
@@ -619,7 +616,7 @@ spec = do
 
     describe "reportAuthBroken" $ do
         it "cools the account down" $ do
-            let states = [ mkFreshAuth "acc-a", mkFreshAuth "acc-b" ]
+            let states = (mkFreshAuth "acc-a" :| [mkFreshAuth "acc-b"])
             pool <- newPool states neverRefresh
             reportAuthBroken pool "acc-a"
             ids <- mapM (const (accountIdOf <$> getAccessToken pool)) [1 .. 3 :: Int]
@@ -627,7 +624,7 @@ spec = do
 
         it "retries an auth-broken account after about one minute" $ do
             now <- getCurrentTime
-            pool <- newPool [mkFreshAuth "only-account"] neverRefresh
+            pool <- newPool (mkFreshAuth "only-account" :| []) neverRefresh
             reportAuthBroken pool "only-account"
 
             result <- getAccessToken pool
@@ -650,7 +647,7 @@ spec = do
                 refresh _ = do
                     modifyIORef' callCounter (+ 1)
                     pure (Right rotated)
-            pool <- newPool [startState] refresh
+            pool <- newPool (startState :| []) refresh
             outcome <- forceRefresh pool "acc"
             outcome `shouldSatisfy` isRight
             readIORef callCounter `shouldReturn` 1
@@ -671,7 +668,7 @@ spec = do
                     putMVar refreshStarted ()
                     takeMVar releaseRefresh
                     pure (Right rotated)
-            pool <- newPool [startState] refresh
+            pool <- newPool (startState :| []) refresh
 
             withAsync (forceRefresh pool "acc") \forcedRefresh -> do
                 takeMVar refreshStarted
@@ -692,7 +689,7 @@ spec = do
                             Right (rotated.accessToken, rotated.accountId)
 
         it "returns Left with an AuthenticationError when the accountId is unknown" $ do
-            pool <- newPool [mkFreshAuth "acc"] neverRefresh
+            pool <- newPool (mkFreshAuth "acc" :| []) neverRefresh
             outcome <- forceRefresh pool "does-not-exist"
             outcome `shouldSatisfy` isLeft
 
@@ -701,7 +698,7 @@ spec = do
                 changedIdentity =
                     (mkFreshAuth "other")
                         { accessToken = (mkFreshAuth "rotated").accessToken }
-            pool <- newPool [startState] (const (pure (Right changedIdentity)))
+            pool <- newPool (startState :| []) (const (pure (Right changedIdentity)))
 
             forceRefresh pool "acc" >>= \case
                 Left CredentialError{} -> pure ()
@@ -728,7 +725,7 @@ spec = do
                 refresh _ = do
                     modifyIORef' callCounter (+ 1)
                     pure (Right rotated)
-            pool <- newPool [startState] refresh
+            pool <- newPool (startState :| []) refresh
 
             outcome <- refreshAfterAuthFailure pool "acc"
 
@@ -749,7 +746,7 @@ spec = do
                     putMVar refreshStarted ()
                     takeMVar releaseRefresh
                     pure (Right rotated)
-            pool <- newPool [startState] refresh
+            pool <- newPool (startState :| []) refresh
             beforeCooldown <- getCurrentTime
             cooldownReportStarted <- newEmptyMVar
 
@@ -783,7 +780,7 @@ spec = do
                     maybe False (> addUTCTime 3500 beforeCooldown)
 
         it "cools a rejected account when forced refresh fails" $ do
-            let states = [mkFreshAuth "broken", mkFreshAuth "healthy"]
+            let states = (mkFreshAuth "broken" :| [mkFreshAuth "healthy"])
                 refresh state
                     | state.accountId == "broken" =
                         pure (Left (ProviderError AuthenticationError "refresh rejected" Nothing))
@@ -800,7 +797,7 @@ spec = do
             let refreshError =
                     ConnectionError "TOP_SECRET_REFRESH_EXCEPTION"
                 refresh _ = pure (Left refreshError)
-            pool <- newPool [mkFreshAuth "broken"] refresh
+            pool <- newPool (mkFreshAuth "broken" :| []) refresh
 
             refreshAfterAuthFailure pool "broken" >>= \case
                 Left err -> err `shouldBe` refreshError
@@ -820,18 +817,18 @@ spec = do
 
     describe "allAccountIds + readAccountState" $ do
         it "lists every account currently in the pool" $ do
-            let states = [ mkFreshAuth "a", mkFreshAuth "b", mkFreshAuth "c" ]
+            let states = (mkFreshAuth "a" :| [mkFreshAuth "b", mkFreshAuth "c"])
             pool <- newPool states neverRefresh
             ids <- allAccountIds pool
             uniq ids `shouldMatchList` ["a", "b", "c"]
 
         it "returns Nothing for unknown accountIds" $ do
-            pool <- newPool [mkFreshAuth "known"] neverRefresh
+            pool <- newPool (mkFreshAuth "known" :| []) neverRefresh
             mState <- readAccountState pool "unknown"
             mState `shouldSatisfy` isNothing
 
         it "snapshots cooldown alongside auth state" $ do
-            pool <- newPool [mkFreshAuth "paced"] neverRefresh
+            pool <- newPool (mkFreshAuth "paced" :| []) neverRefresh
             reportRateLimit pool "paced" (Just 120)
             snaps <- snapshotAccounts pool
             case snaps of

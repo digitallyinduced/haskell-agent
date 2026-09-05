@@ -4,6 +4,12 @@ module Agent.CLI.Session.Runner.Execution
     , SessionRunnerContinuation(..)
     , runSession
     ) where
+import qualified Agent.CLI.Session.Activity as Activity
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    , readSessionRequestModel
+    , modifySessionRequestOptions
+    )
 import Agent.CLI.CodeModeRuntime
 import Agent.CLI.Claude
     ( ClaudeSessionRuntime(..)
@@ -327,7 +333,7 @@ withSessionTitleRuntime
 withSessionTitleRuntime host SessionRequest{..} SessionBackend{..} =
     withSessionTitleManager
         btwBackend
-        (readIORef paramsRef)
+        (readSessionRequestParams paramsRef)
         host.hostTitleEvent
 
 -- | Mutable controls shared by rendering, tools, persistence, and the agent
@@ -340,7 +346,6 @@ data SessionControlRuntime = SessionControlRuntime
     , controlAllowedToolsRef :: !(IORef (Set.Set Text.Text))
     , controlComputerUseEnabledRef :: !(IORef Bool)
     , controlLastAssistantRef :: !(IORef (Maybe Text.Text))
-    , controlModelRef :: !(IORef Text.Text)
     , controlUnavailableProvidersRef :: !(IORef (Set.Set Provider))
     , controlStartupUnavailableRef :: !(IORef (Maybe (STM ApiError)))
     , controlRestartEffortRef :: !(IORef (Maybe Text.Text))
@@ -381,14 +386,13 @@ newSessionControlRuntime host SessionRequest{..} = do
                     computerToolName
                     (sessionDirectTools refreshTools codeModeRuntime))
     lastAssistantRef <- newIORef Nothing
-    modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     unavailableProvidersRef <- newIORef unavailableProviders
     startupUnavailableRef <- newIORef startupUnavailable
     restartEffortRef <- newIORef Nothing
     lastFailedTurnRef <- newIORef Nothing
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     let loadSelectedAgent agentId = do
-            effectiveModel <- readIORef modelRef
+            effectiveModel <- readSessionRequestModel paramsRef
             lookupOrCreateSubagentSession
                 subagentSessions
                 storeRoot
@@ -470,7 +474,6 @@ newSessionControlRuntime host SessionRequest{..} = do
         , controlAllowedToolsRef = allowedToolsRef
         , controlComputerUseEnabledRef = computerUseEnabledRef
         , controlLastAssistantRef = lastAssistantRef
-        , controlModelRef = modelRef
         , controlUnavailableProvidersRef = unavailableProvidersRef
         , controlStartupUnavailableRef = startupUnavailableRef
         , controlRestartEffortRef = restartEffortRef
@@ -722,7 +725,7 @@ buildSessionLoopEventRuntime
         , renderLock = host.hostIoLock
         , renderStdout = host.hostStdoutHandle
         , renderStderr = host.hostStderrHandle
-        , renderModelRef = controls.controlModelRef
+        , renderModel = readSessionRequestModel paramsRef
         , renderNativeProgress =
             host.hostStderrTty
                 && terminal.terminalNativeProgress
@@ -765,7 +768,7 @@ buildSessionLoopEventRuntime
                 case event of
                     TurnFinished _ -> do
                         occupancy <- readIORef contextOccupancyRef
-                        params <- readIORef paramsRef
+                        params <- readSessionRequestParams paramsRef
                         history <- readLiveTranscript conversationRef
                         contextWindow <- currentContextWindow
                         emitUiEvent runtime $
@@ -1022,7 +1025,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
                             nativeCapabilities.nativeProviderHostedTools
                             dialect
                             enabledTools
-        modifyIORef' paramsRef
+        modifySessionRequestOptions paramsRef
             (setRequestInstructionsAndTools
                 instructionText
                 (Just toolSchemas))
@@ -1264,39 +1267,28 @@ newSessionPersistenceRuntime
     -> IO SessionPersistenceRuntime
 newSessionPersistenceRuntime
         host skillsRuntime SessionRequest{..} = do
-    turnActivityRef <- newIORef Nothing
-    turnIsActiveRef <- newIORef False
+    turnActivity <- Activity.newTurnActivity
     nativeSessionIdRef <- newIORef Nothing
-    let acquireTurnActivity handle = mask_ do
-            current <- readIORef turnActivityRef
-            if isNothing current
-                then
+    let acquireTurnActivity handle =
+            Activity.acquireTurnActivity turnActivity $
+                -- The marker is best effort; the lifetime session lock
+                -- remains authoritative.
+                either (const Nothing) Just <$>
                     acquireSessionActivityLock
-                        handle.sessionDir
-                        handle.sessionMeta.metaId >>= \case
-                            -- The activity lock is an external status marker;
-                            -- the lifetime session lock remains authoritative.
-                            Left _ -> pure False
-                            Right lock -> do
-                                writeIORef turnActivityRef (Just lock)
-                                pure True
-                else pure False
-        beginTurnActivity = mask_ do
-            -- Mark first so a concurrently completed first persistence sees
-            -- the active turn and attempts the activity marker itself.
-            writeIORef turnIsActiveRef True
-            case persist of
-                PersistenceDisabled -> pure ()
-                PersistenceEnabled slotRef ->
-                    readIORef slotRef >>= \case
-                        PersistencePending{} -> pure ()
-                        PersistenceActive handle ->
-                            void (acquireTurnActivity handle)
-        endTurnActivity = do
-            writeIORef turnIsActiveRef False
-            atomicModifyIORef' turnActivityRef
-                (\current -> (Nothing, current))
-                >>= mapM_ releaseSessionLock
+                        handle.sessionDir handle.sessionMeta.metaId
+        endTurnActivity =
+            Activity.endTurnActivity turnActivity releaseSessionLock
+        beginTurnActivity = mask_ $
+            (do
+                Activity.beginTurnActivity turnActivity
+                case persist of
+                    PersistenceDisabled -> pure ()
+                    PersistenceEnabled slotRef ->
+                        readIORef slotRef >>= \case
+                            PersistencePending{} -> pure ()
+                            PersistenceActive handle ->
+                                void (acquireTurnActivity handle))
+                `onException` endTurnActivity
         notifyNativeSessionId sessionId = do
             shouldNotify <-
                 atomicModifyIORef' nativeSessionIdRef \current ->
@@ -1316,11 +1308,7 @@ newSessionPersistenceRuntime
             -- Preserve the established lock order: own the session before
             -- attempting its best-effort activity marker.
             onPersisted handle
-            active <- readIORef turnIsActiveRef
-            acquired <-
-                if active
-                    then acquireTurnActivity handle
-                    else pure False
+            acquired <- acquireTurnActivity handle
             notifyNativeSessionId handle.sessionMeta.metaId
                 `onException`
                     when acquired endTurnActivity
@@ -1630,7 +1618,7 @@ installSessionActions
                                     runtime.runtimeInput
                         showImmediate (formatQueuedPrompts prompts)
                     ReplContext -> do
-                        currentParams <- readIORef env.sessionParams
+                        currentParams <- readSessionRequestParams env.sessionParams
                         history <- readLiveTranscript conversationRef
                         occupancy <- readIORef contextOccupancyRef
                         contextWindow <- currentContextWindow

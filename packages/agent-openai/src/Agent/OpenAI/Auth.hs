@@ -86,6 +86,7 @@ import Data.IORef
     )
 import Data.Containers.ListUtils (nubOrd)
 import Data.Foldable (toList)
+import Data.List.NonEmpty (NonEmpty)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Maybe (catMaybes, fromMaybe)
@@ -201,17 +202,15 @@ authFailureRetrySeconds = 60
 
 -- | Build a pool from a non-empty list of 'AuthState' values and a refresh
 -- callback. The callback is invoked when an access token needs rotating.
---
--- Throws @error@ if @initial@ is empty.
 newPool
-    :: [AuthState]
+    :: NonEmpty AuthState
     -> (AuthState -> IO (Either ApiError AuthState))
     -> IO Pool
 newPool initial refresh =
     newPoolWithDiscovery initial refresh Nothing Nothing
 
 newDiscoveringPool
-    :: [AuthState]
+    :: NonEmpty AuthState
     -> (AuthState -> IO (Either ApiError AuthState))
     -> AccountDiscovery
     -> IO Pool
@@ -223,7 +222,7 @@ newDiscoveringPool initial refresh discover =
 -- callback is used to check current provider usage and clear only rate-limit
 -- cooldowns that have actually reset.
 newDiscoveringPoolWithRateLimitRevalidation
-    :: [AuthState]
+    :: NonEmpty AuthState
     -> (AuthState -> IO (Either ApiError AuthState))
     -> AccountDiscovery
     -> RateLimitRevalidation
@@ -237,15 +236,13 @@ newDiscoveringPoolWithRateLimitRevalidation
         (Just revalidate)
 
 newPoolWithDiscovery
-    :: [AuthState]
+    :: NonEmpty AuthState
     -> (AuthState -> IO (Either ApiError AuthState))
     -> Maybe AccountDiscovery
     -> Maybe RateLimitRevalidation
     -> IO Pool
-newPoolWithDiscovery initial refresh discovery revalidation = do
-    when (null initial) $
-        error "Agent.OpenAI.Auth.newPool: called with empty account list"
-    buildPool initial Nothing refresh discovery revalidation
+newPoolWithDiscovery initial refresh discovery revalidation =
+    buildPool (toList initial) Nothing refresh discovery revalidation
 
 -- | Build a broker-backed pool when no account is currently available but the
 -- broker supplied the earliest reset.

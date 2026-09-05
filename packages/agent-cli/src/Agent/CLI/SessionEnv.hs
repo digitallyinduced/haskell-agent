@@ -4,6 +4,9 @@ module Agent.CLI.SessionEnv
     , SessionEnv(..)
     ) where
 
+import Agent.CLI.Session.Request
+    ( SessionRequestState
+    )
 import Agent.CLI.ActiveAccount (ActiveAccountRef)
 import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.Interrupt (InterruptState)
@@ -32,7 +35,6 @@ import Agent.GrokBuild.Dialect.Runtime (GrokRuntimeControl)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
 import Agent.MCP (McpFleet, McpToolRegistration)
 import qualified Agent.OpenAI.Auth as OpenAI
-import Agent.Responses.Types (ResponseCreateParams)
 import Agent.OpenAI.Models.Types (ModelInfo)
 import System.OsPath (OsPath)
 import Agent.Provider (Credential, Provider, TokenProvider)
@@ -72,7 +74,7 @@ data SessionEnv = SessionEnv
     , sessionConversation :: !(IORef LiveConversation)
     , sessionAutomaticCompaction
         :: !(IORef (Maybe AutomaticCompactionBoundary))
-    , sessionParams :: !(IORef ResponseCreateParams)
+    , sessionParams :: !(SessionRequestState)
     , sessionContextOccupancy :: !(IORef (Maybe OccupancySnapshot))
     , sessionContextWindow :: !(IO (Maybe Int))
     , sessionPolicy :: !(IORef ApprovalPolicy)

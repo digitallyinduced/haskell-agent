@@ -3,6 +3,11 @@ module Agent.CLI.Runtime.Orchestration.Session
     , runAgentSession
     ) where
 
+import Agent.CLI.Session.Request
+    ( SessionRequestState
+    , newSessionRequestState
+    , readSessionRequestParams
+    )
 import Agent.CLI.ActiveAccount
     ( ActiveAccount(..)
     , ActiveAccountRef
@@ -350,7 +355,7 @@ data SessionCodeRuntime = SessionCodeRuntime
 data SessionPromptRuntime = SessionPromptRuntime
     { sessionCodeRuntime :: SessionCodeRuntime
     , sessionParams :: ResponseCreateParams
-    , sessionParamsRef :: IORef ResponseCreateParams
+    , sessionParamsRef :: SessionRequestState
     , sessionPolicyRef :: IORef ApprovalPolicy
     , sessionClaudeRuntimeSlot :: ClaudeSessionRuntimeSlot
     , sessionClaudeBridgeTools :: [AppTool]
@@ -564,6 +569,8 @@ prepareSessionPromptRuntime AgentSessionRequest
     , initialContext
     , policy
     , allTools
+    , persist
+    , startup
     } sessionCodeRuntime = do
     let compatiblePromptSnapshot =
             compatibleSessionPromptSnapshot
@@ -603,7 +610,9 @@ prepareSessionPromptRuntime AgentSessionRequest
                 && isNothing sessionRestoredPromptSnapshot
         sessionClaudeBridgeTools =
             filter isClaudeBridgeTool allTools
-    sessionParamsRef <- newIORef sessionParams
+    sessionParamsRef <-
+        newSessionRequestState persist sessionParams
+            >>= either (startupDie startup) pure
     sessionPolicyRef <- newIORef policy
     sessionClaudeRuntimeSlot <- newClaudeSessionRuntimeSlot
     sessionAutomaticCompactionRef <- newIORef Nothing
@@ -647,7 +656,7 @@ sessionCurrentModelContextWindow
     -> (Text -> Text)
     -> IO (Maybe Int)
 sessionCurrentModelContextWindow request promptRuntime mapTransportModel = do
-    currentParams <- readIORef promptRuntime.sessionParamsRef
+    currentParams <- readSessionRequestParams promptRuntime.sessionParamsRef
     pure $
         sessionCatalogContextWindowForParams
             request
@@ -1269,7 +1278,7 @@ handleOpenAiStartupResult request nativeCapabilities shouldProbeAtStartup = \cas
                 now <- getCurrentTime
                 startupDie request.startup (formatApiErrorAt now err)
         in case request.transition of
-            Just active | active.transitionCause == AutomaticFallback ->
+            Just active | AutomaticFallback _ <- active.transitionCause ->
                 pure (RunProviderStartFailed err)
             _ | shouldProbeAtStartup
               , not (isGatewayLoadedAuth request.loaded)
