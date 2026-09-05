@@ -1,5 +1,5 @@
 { mkDerivation, aeson, agent-cli, agent-cli-runtime, agent-core
-, agent-store, async, base, bytestring, containers, crypton
+, agent-store, async, base, base64-bytestring, bytestring, containers, crypton
 , directory, filepath, hspec, http-types, lib, memory
 , optparse-applicative, process, safe-exceptions, stm, temporary
 , text, time, unix, uuid-types, wai, wai-extra, warp
@@ -13,7 +13,7 @@ mkDerivation {
   enableSeparateDataOutput = true;
   libraryHaskellDepends = [
     aeson agent-cli agent-cli-runtime agent-core agent-store async base
-    bytestring containers crypton directory filepath http-types memory
+    base64-bytestring bytestring containers crypton directory filepath http-types memory
     optparse-applicative process safe-exceptions stm text time unix
     uuid-types wai warp
   ];

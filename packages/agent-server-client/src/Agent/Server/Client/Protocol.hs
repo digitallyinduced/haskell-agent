@@ -3,6 +3,7 @@ module Agent.Server.Client.Protocol
     ( AgentServerCreateSessionRequest (..)
     , AgentServerSession (..)
     , AgentServerCreateTurnRequest (..)
+    , AgentServerTurnImage (..)
     , AgentServerTurnStatus (..)
     , AgentServerTurn (..)
     , AgentServerTurnList (..)
@@ -31,6 +32,7 @@ import Data.Aeson
 import Data.Aeson.Types (Parser)
 import Data.Bifunctor qualified as Bifunctor
 import Data.ByteString qualified as ByteString
+import Data.ByteString.Base64 qualified as Base64
 import Data.Foldable (forM_)
 import Data.Int (Int64)
 import Data.Maybe (fromMaybe)
@@ -71,14 +73,33 @@ instance FromJSON AgentServerSession where
 data AgentServerCreateTurnRequest = AgentServerCreateTurnRequest
     { createTurnClientRequestId :: !Text
     , createTurnInput :: !Text
+    , createTurnImages :: ![AgentServerTurnImage]
     }
     deriving (Eq, Show)
 
 instance ToJSON AgentServerCreateTurnRequest where
     toJSON request =
-        object
+        object $
             [ "clientRequestId" .= request.createTurnClientRequestId
             , "input" .= request.createTurnInput
+            ]
+                <> [ "images" .= request.createTurnImages
+                   | not (null request.createTurnImages)
+                   ]
+
+data AgentServerTurnImage = AgentServerTurnImage
+    { turnImageMimeType :: !Text
+    , turnImageBytes :: !ByteString.ByteString
+    }
+    deriving (Eq, Show)
+
+instance ToJSON AgentServerTurnImage where
+    toJSON image =
+        object
+            [ "mimeType" .= image.turnImageMimeType
+            , "data"
+                .= TextEncoding.decodeUtf8
+                    (Base64.encode image.turnImageBytes)
             ]
 
 data AgentServerTurnStatus

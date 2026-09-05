@@ -22,7 +22,7 @@ import Agent.CLI.Options ( CliOptions )
 import Agent.CLI.Project ( ProjectSettings )
 import Agent.Connectivity.NetworkPath ( NetworkRecovery )
 import Agent.CLI.Permission ( PermissionChoice )
-import Agent.Loop ( LoopEvent )
+import Agent.Loop ( LoopEvent, TurnInput )
 import Agent.Provider ( Credential, TokenProvider )
 import Agent.Store.Postgres ( Store )
 import Agent.ToolDispatch ( ToolCall )
@@ -126,6 +126,7 @@ fullNativeRunCapabilities = NativeRunCapabilities
 
 data NativeRunHooks = NativeRunHooks
     { nativeOnLoopEvent :: !(LoopEvent -> IO ())
+    , nativeInitialTurnInputs :: !(Maybe [TurnInput])
     , nativeOnSessionId :: !(Text -> IO ())
     , nativeRegisterCancel :: !(IO () -> IO ())
     , nativeRegisterAgentSnapshot :: !(IO [AgentEntry] -> IO ())

@@ -19,6 +19,7 @@ spec = describe "agent-server client protocol" do
                     { createTurnClientRequestId =
                         "01991f6d-7200-7000-8000-000000000003"
                     , createTurnInput = "hello"
+                    , createTurnImages = []
                     }
         ( Aeson.eitherDecode (Aeson.encode request) ::
                 Either String Aeson.Value
@@ -30,6 +31,35 @@ spec = describe "agent-server client protocol" do
                                     Text
                                  )
                     , "input" Aeson..= ("hello" :: Text)
+                    ]
+                )
+
+    it "base64-encodes attached images with their media type" do
+        let request =
+                AgentServerCreateTurnRequest
+                    { createTurnClientRequestId = "request-1"
+                    , createTurnInput = ""
+                    , createTurnImages =
+                        [ AgentServerTurnImage
+                            { turnImageMimeType = "image/png"
+                            , turnImageBytes = "\x89PNG"
+                            }
+                        ]
+                    }
+        ( Aeson.eitherDecode (Aeson.encode request) ::
+                Either String Aeson.Value
+            )
+            `shouldBe` Right
+                ( Aeson.object
+                    [ "clientRequestId" Aeson..= ("request-1" :: Text)
+                    , "input" Aeson..= ("" :: Text)
+                    , "images"
+                        Aeson..=
+                            [ Aeson.object
+                                [ "mimeType" Aeson..= ("image/png" :: Text)
+                                , "data" Aeson..= ("iVBORw==" :: Text)
+                                ]
+                            ]
                     ]
                 )
 

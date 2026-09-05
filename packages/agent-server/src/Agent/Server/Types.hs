@@ -42,7 +42,9 @@ module Agent.Server.Types
     ) where
 
 import Agent.CLI.GatewayBoundary (GatewayBoundary(..))
+import Agent.Loop (ImageAttachment(..))
 import Agent.Server.Identifier (isUUIDText)
+import Control.Monad (unless, when)
 import Data.Aeson
     ( FromJSON(..)
     , Object
@@ -52,14 +54,18 @@ import Data.Aeson
     , withObject
     , (.:)
     , (.:?)
+    , (.!=)
     , (.=)
     )
 import Data.Aeson.Key (Key)
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Aeson.Types (Parser)
+import Data.ByteString qualified as ByteString
+import Data.ByteString.Base64 qualified as Base64
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Text.Encoding qualified as TextEncoding
 import Data.Time.Clock (UTCTime)
 
 newtype TenantId = TenantId Text
@@ -150,6 +156,7 @@ data TurnSpec = TurnSpec
     { turnSpecSessionId :: !Text
     , turnSpecClientRequestId :: !ClientRequestId
     , turnSpecPrompt :: !Text
+    , turnSpecImages :: ![ImageAttachment]
     , turnSpecBoundary :: !AccessBoundary
     }
     deriving (Eq, Show)
@@ -386,6 +393,7 @@ instance FromJSON ForkSessionRequest where
 data CreateTurnRequest = CreateTurnRequest
     { createTurnClientRequestId :: !(Maybe ClientRequestId)
     , createTurnInput :: !Text
+    , createTurnImages :: ![ImageAttachment]
     }
     deriving (Eq, Show)
 
@@ -393,7 +401,7 @@ instance FromJSON CreateTurnRequest where
     parseJSON = withObject "CreateTurnRequest" \value -> do
         rejectUnknownFields
             "CreateTurnRequest"
-            ["clientRequestId", "input"]
+            ["clientRequestId", "input", "images"]
             value
         rawRequestId <- value .:? "clientRequestId"
         requestId <- case rawRequestId of
@@ -405,7 +413,53 @@ instance FromJSON CreateTurnRequest where
                             (ClientRequestId
                                 (Text.toLower candidate)))
                 | otherwise -> fail "clientRequestId must be a UUID"
-        CreateTurnRequest requestId <$> value .: "input"
+        input <- value .:? "input" .!= ""
+        imageValues <- value .:? "images" .!= []
+        when (length imageValues > maxTurnImageCount) $
+            fail "images must contain at most one item"
+        images <- traverse parseTurnImage imageValues
+        pure (CreateTurnRequest requestId input images)
+
+maxTurnImageCount, maxTurnImageBytesEach :: Int
+maxTurnImageCount = 1
+maxTurnImageBytesEach = 20 * 1024 * 1024
+
+parseTurnImage :: Value -> Parser ImageAttachment
+parseTurnImage = withObject "TurnImage" \value -> do
+    rejectUnknownFields "TurnImage" ["mimeType", "data"] value
+    mime <- value .: "mimeType"
+    unless (mime `elem` supportedTurnImageTypes) $
+        fail "image mimeType must be image/jpeg, image/png, image/gif, image/webp, or image/bmp"
+    encoded <- value .: "data"
+    bytes <-
+        either
+            (const (fail "image data must be valid base64"))
+            pure
+            (Base64.decode (TextEncoding.encodeUtf8 encoded))
+    when (ByteString.null bytes) $
+        fail "image data must not be empty"
+    when (ByteString.length bytes > maxTurnImageBytesEach) $
+        fail "each image is limited to 20 MiB decoded"
+    unless (matchesTurnImageSignature mime bytes) $
+        fail "image data does not match its mimeType"
+    pure ImageAttachment{imageMime = mime, imageBytes = bytes}
+
+supportedTurnImageTypes :: [Text]
+supportedTurnImageTypes =
+    ["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp"]
+
+matchesTurnImageSignature :: Text -> ByteString.ByteString -> Bool
+matchesTurnImageSignature "image/jpeg" = ByteString.isPrefixOf "\xff\xd8\xff"
+matchesTurnImageSignature "image/png" =
+    ByteString.isPrefixOf "\x89PNG\r\n\x1a\n"
+matchesTurnImageSignature "image/gif" = \bytes ->
+    "GIF87a" `ByteString.isPrefixOf` bytes
+        || "GIF89a" `ByteString.isPrefixOf` bytes
+matchesTurnImageSignature "image/webp" = \bytes ->
+    "RIFF" `ByteString.isPrefixOf` bytes
+        && ByteString.take 4 (ByteString.drop 8 bytes) == "WEBP"
+matchesTurnImageSignature "image/bmp" = ByteString.isPrefixOf "BM"
+matchesTurnImageSignature _ = const False
 
 data ResolveRequest = ResolveRequest
     { resolveRequestDecision :: !Text

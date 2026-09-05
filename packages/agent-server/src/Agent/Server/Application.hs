@@ -13,6 +13,7 @@ import Agent.Server.Auth
     , corsResponseHeaders
     , isCorsPreflight
     )
+import Agent.Loop (ImageAttachment(..))
 import Agent.Server.Backend (Backend(..), SessionMutationLease(..))
 import Agent.Server.Identifier (isUUIDText, newUUIDv7Text)
 import Agent.Server.Supervisor
@@ -50,6 +51,7 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (foldM, void)
+import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson
     ( FromJSON
     , Value
@@ -629,6 +631,27 @@ resolveHumanRequestResponse
                                         headers
                                         (toJSONValue resolved)
 
+turnReservationInput :: CreateTurnRequest -> Text
+turnReservationInput request
+    | null request.createTurnImages = request.createTurnInput
+    | otherwise =
+        "image-turn-v1:"
+            <> Text.pack (show (hash payload :: Digest SHA256))
+  where
+    promptBytes = TextEncoding.encodeUtf8 request.createTurnInput
+    payload =
+        lengthPrefix promptBytes
+            <> promptBytes
+            <> foldMap encodeImage request.createTurnImages
+    encodeImage image =
+        let mimeBytes = TextEncoding.encodeUtf8 image.imageMime
+         in lengthPrefix mimeBytes
+                <> mimeBytes
+                <> lengthPrefix image.imageBytes
+                <> image.imageBytes
+    lengthPrefix bytes =
+        ByteString8.pack (show (ByteString.length bytes) <> ":")
+
 createTurn
     :: Backend
     -> Supervisor
@@ -637,7 +660,8 @@ createTurn
     -> CreateTurnRequest
     -> IO (Either ApiError TurnRecord)
 createTurn backend supervisor boundary sessionId request
-    | Text.null (Text.strip request.createTurnInput) =
+    | Text.null (Text.strip request.createTurnInput)
+        && null request.createTurnImages =
         pure $
             Left ApiError
                 { apiErrorStatus = 422
@@ -656,6 +680,7 @@ createTurn backend supervisor boundary sessionId request
                 { turnSpecSessionId = sessionId
                 , turnSpecClientRequestId = clientRequestId
                 , turnSpecPrompt = request.createTurnInput
+                , turnSpecImages = request.createTurnImages
                 , turnSpecBoundary = boundary
                 }
             validateSession =
@@ -671,7 +696,7 @@ createTurn backend supervisor boundary sessionId request
                                 boundary
                                 sessionId
                                 clientRequestId
-                                request.createTurnInput
+                                (turnReservationInput request)
                                 turnId
                                 now
                     case reservation of
