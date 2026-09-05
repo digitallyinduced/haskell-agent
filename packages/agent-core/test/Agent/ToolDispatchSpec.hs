@@ -41,12 +41,13 @@ spec = describe "dispatchToolCall" do
 
     it "retags tool results without changing their payload or outcome" do
         let blocking =
-                ToolCallResultWithOutcome
+                ToolCallResult
                     "call-1"
                     "done"
                     FunctionCallKind
+                    BlockingToolCall
                     [ToolResultImage "data:image/png;base64,eA==" Nothing]
-                    ToolFailed
+                    (Just ToolFailed)
             asynchronous =
                 withToolCallResultMode AsyncToolCall blocking
         toolCallResultMode asynchronous `shouldBe` AsyncToolCall
@@ -54,6 +55,40 @@ spec = describe "dispatchToolCall" do
         toolCallResultImages asynchronous `shouldBe` toolCallResultImages blocking
         withToolCallResultMode BlockingToolCall asynchronous
             `shouldBe` blocking
+
+    it "retags every result shape without changing its payload or execution facts" do
+        let results =
+                [ ToolCallResult "call" "output" kind mode images outcome
+                | kind <- [FunctionCallKind, CustomCallKind, ComputerCallKind, ComputerFunctionCallKind]
+                , mode <- [BlockingToolCall, AsyncToolCall]
+                , images <- [[], [ToolResultImage "data:image/png;base64,eA==" Nothing]]
+                , outcome <- Nothing : map Just
+                    [ ToolSucceeded, ToolFailed, ToolDenied, ToolCancelled
+                    , ShellRunning 42, ShellExited 0, ShellExited 1
+                    , ShellCancelled, ShellTimedOut
+                    ]
+                ]
+        mapM_ (\result -> do
+            withToolCallOutcome Nothing result `shouldBe` result
+            mapM_ (\mode -> do
+                let retagged = withToolCallResultMode mode result
+                retagged `shouldBe` result { toolResultMode = mode }
+                withToolCallResultMode result.toolResultMode retagged
+                    `shouldBe` result
+                withToolCallOutcome (Just ToolFailed) retagged
+                    `shouldBe` result
+                        { toolResultMode = mode
+                        , toolResultOutcome = Just ToolFailed
+                        }
+                ) [BlockingToolCall, AsyncToolCall]
+            ) results
+
+    it "keeps unknown execution facts distinct from a known success" do
+        let unknown = ToolCallResult "call" "output" FunctionCallKind
+                BlockingToolCall [] Nothing
+        toolCallResultOutcome unknown `shouldBe` Nothing
+        unknown `shouldNotBe` withToolCallOutcome (Just ToolSucceeded) unknown
+        withToolCallResultMode BlockingToolCall unknown `shouldBe` unknown
 
     it "requires tools to opt in to asynchronous calls" do
         let tool =
@@ -222,7 +257,7 @@ spec = describe "dispatchToolCall" do
             ]
             (customToolCall "call-1" "patch" "*** Begin Patch")
         result `shouldBe`
-            ToolCallResultWithOutcome "call-1" "patch:*** Begin Patch" CustomCallKind [] ToolSucceeded
+            ToolCallResult "call-1" "patch:*** Begin Patch" CustomCallKind BlockingToolCall [] (Just ToolSucceeded)
 
     it "supports no-argument tools" do
         result <- dispatchToolCall testConfig
@@ -387,12 +422,13 @@ testConfig = ToolDispatchConfig
     }
 
 functionResult :: Text -> Text -> ToolCallResult
-functionResult callId output = ToolCallResultWithOutcome
+functionResult callId output = ToolCallResult
     { callId
     , output
     , callKind = FunctionCallKind
+    , toolResultMode = BlockingToolCall
     , toolResultImages = []
-    , toolResultOutcome = ToolSucceeded
+    , toolResultOutcome = Just ToolSucceeded
     }
 
 computerTool :: IO (Either Text Text) -> AppTool

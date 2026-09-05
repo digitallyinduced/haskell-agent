@@ -25,6 +25,7 @@ import Agent.Loop (LoopEvent(..))
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     , functionToolCall
     )
 import qualified Data.Aeson as Aeson
@@ -194,6 +195,9 @@ spec = do
                         , UiLoop
                             (ToolFinished ToolCallResult
                                 { callId = "todo-1"
+                                , toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
                                 , output = "- [in_progress] 1: Review Model.hs"
                                 , callKind = FunctionCallKind
                                 })

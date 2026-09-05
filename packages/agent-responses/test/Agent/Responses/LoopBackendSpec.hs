@@ -279,11 +279,17 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
     it "marks only async tool results on continuation items" do
         let blocking = toolResultToItem ToolCallResult
                 { callId = "blocking-call"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 , output = "done"
                 , callKind = FunctionCallKind
                 }
-            asynchronous = toolResultToItem AsyncToolCallResult
+            asynchronous = toolResultToItem ToolCallResult
                 { callId = "async-call"
+                , toolResultMode = AsyncToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 , output = "done"
                 , callKind = CustomCallKind
                 }
@@ -307,6 +313,9 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 }
             result = ToolCallResult
                 { callId = "call-1"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 , output = encoded
                 , callKind = ComputerFunctionCallKind
                 }
@@ -340,6 +349,9 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     }
             result = ToolCallResult
                 { callId = "call-native"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 , output = encoded
                 , callKind = ComputerFunctionCallKind
                 }
@@ -364,6 +376,9 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 turnInputsToItems
                     [ CompletedTool ToolCallResult
                         { callId = "call-function"
+                        , toolResultMode = BlockingToolCall
+                        , toolResultImages = []
+                        , toolResultOutcome = Nothing
                         , output = encoded
                         , callKind = ComputerFunctionCallKind
                         }
@@ -417,11 +432,17 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             inputs =
                 [ CompletedTool ToolCallResult
                     { callId = "call-success"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = successful
                     , callKind = ComputerFunctionCallKind
                     }
                 , CompletedTool ToolCallResult
                     { callId = "call-failed"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = "Computer input failed after changing the UI."
                     , callKind = ComputerFunctionCallKind
                     }
@@ -565,6 +586,9 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             toolResultToItem
                 ToolCallResult
                     { callId = "call-failed"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = "Tool call rejected by user."
                     , callKind = ComputerCallKind
                     } of
@@ -593,6 +617,9 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 [ CompletedTool
                     ToolCallResult
                         { callId = "call-large"
+                        , toolResultMode = BlockingToolCall
+                        , toolResultImages = []
+                        , toolResultOutcome = Nothing
                         , output = encoded
                         , callKind = ComputerCallKind
                         }
@@ -627,8 +654,10 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             other -> expectationFailure ("unexpected items: " <> show other)
 
     it "encodes rich function outputs as image content followed by the hint" do
-        case toolResultToItem ToolCallResultWithImages
+        case toolResultToItem ToolCallResult
                 { callId = "image-call"
+                , toolResultMode = BlockingToolCall
+                , toolResultOutcome = Nothing
                 , output = "saved under generated_images"
                 , callKind = FunctionCallKind
                 , toolResultImages =

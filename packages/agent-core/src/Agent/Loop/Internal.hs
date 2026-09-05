@@ -31,7 +31,6 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallMode(..)
     , ToolOutcome(..)
-    , withToolCallOutcome
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , toolCallMode
@@ -1236,22 +1235,24 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
             result <- case approval of
                 ToolApprovalDenied denial ->
                     pure $
-                        withToolCallResultMode (toolCallMode call) $
-                            withToolCallOutcome (Just ToolDenied) $
-                                ToolCallResult
-                                    { callId = call.callId
-                                    , output = denial
-                                    , callKind = call.callKind
-                                    }
+                        ToolCallResult
+                            { callId = call.callId
+                            , output = denial
+                            , callKind = call.callKind
+                            , toolResultMode = toolCallMode call
+                            , toolResultImages = []
+                            , toolResultOutcome = Just ToolDenied
+                            }
                 ToolApprovalRejected ->
                     pure $
-                        withToolCallResultMode (toolCallMode call) $
-                            withToolCallOutcome (Just ToolDenied) $
-                                ToolCallResult
-                                    { callId = call.callId
-                                    , output = "Tool call rejected by user."
-                                    , callKind = call.callKind
-                                    }
+                        ToolCallResult
+                            { callId = call.callId
+                            , output = "Tool call rejected by user."
+                            , callKind = call.callKind
+                            , toolResultMode = toolCallMode call
+                            , toolResultImages = []
+                            , toolResultOutcome = Just ToolDenied
+                            }
                 ToolApprovalGranted ->
                     dispatchRegisteredToolCall
                         config.loopDispatch

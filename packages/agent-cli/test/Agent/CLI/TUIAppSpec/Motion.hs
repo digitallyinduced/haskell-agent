@@ -17,7 +17,7 @@ import Agent.CLI.TUI.App
     )
 import Agent.CLI.TUI.Types (TerminalFocus(..))
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
-import Agent.ToolDispatch (ToolCallKind(..), ToolCallResult(..), functionToolCall)
+import Agent.ToolDispatch (ToolCallKind(..), ToolCallMode(..), ToolCallResult(..), functionToolCall)
 import Agent.TUI.Model
 import Agent.TUI.Motion
 import qualified Data.Map.Strict as Map
@@ -293,6 +293,9 @@ spec = do
                             (ToolFinished
                                 ToolCallResult
                                     { callId = "tool-1"
+                                    , toolResultMode = BlockingToolCall
+                                    , toolResultImages = []
+                                    , toolResultOutcome = Nothing
                                     , output = "exit: 0"
                                     , callKind = FunctionCallKind
                                     }))
@@ -318,6 +321,9 @@ spec = do
                             (ToolFinished
                                 ToolCallResult
                                     { callId = "inspect-1"
+                                    , toolResultMode = BlockingToolCall
+                                    , toolResultImages = []
+                                    , toolResultOutcome = Nothing
                                     , output = "contents"
                                     , callKind = FunctionCallKind
                                     }))
@@ -354,6 +360,9 @@ spec = do
                             (ToolFinished
                                 ToolCallResult
                                     { callId = "tool-2"
+                                    , toolResultMode = BlockingToolCall
+                                    , toolResultImages = []
+                                    , toolResultOutcome = Nothing
                                     , output = "Error: failed"
                                     , callKind = FunctionCallKind
                                     }))

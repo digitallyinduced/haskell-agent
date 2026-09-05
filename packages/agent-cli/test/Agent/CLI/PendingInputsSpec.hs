@@ -40,6 +40,7 @@ import Agent.Loop
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     , ToolResultImage(..)
     )
 import Control.Concurrent
@@ -69,8 +70,10 @@ spec = do
                     ]
             richResult =
                 CompletedTool
-                    (ToolCallResultWithImages
+                    (ToolCallResult
                         { callId = "id"
+                        , toolResultMode = BlockingToolCall
+                        , toolResultOutcome = Nothing
                         , output = "ok"
                         , callKind = FunctionCallKind
                         , toolResultImages =

@@ -57,7 +57,7 @@ spec = describe "Agent.Tools.ViewImage" do
             BS.writeFile (workspace </> "error.png") pngBytes
             result <- runTool tool "{\"path\":\"error.png\"}"
             case result of
-                ToolCallResultWithOutcome{output, toolResultImages = [image]} -> do
+                ToolCallResult{output, toolResultImages = [image]} -> do
                     output `shouldBe` "Viewed image file: error.png"
                     image.imageDetail `shouldBe` Just "high"
                     image.imageUrl `shouldSatisfy`
@@ -69,7 +69,7 @@ spec = describe "Agent.Tools.ViewImage" do
             BS.writeFile (workspace </> "error.webp") webpBytes
             result <- runTool tool "{\"path\":\"error.webp\"}"
             case result of
-                ToolCallResultWithOutcome{toolResultImages = [image]} ->
+                ToolCallResult{toolResultImages = [image]} ->
                     image.imageUrl `shouldSatisfy`
                         Text.isPrefixOf "data:image/webp;base64,"
                 _ -> expectationFailure ("expected WebP image result, got " <> show result)
