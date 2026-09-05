@@ -79,6 +79,10 @@ import Agent.Json.Decode qualified as Hermes
 import Agent.OpenAI.Usage (UsageSnapshot, decodeUsageResponse)
 import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
 import Agent.OsPath (unsafeToFilePath)
+import Agent.Server.Client.GatewayIdentity
+    ( GatewayCredential(..)
+    , gatewayCredentialIdentity
+    )
 import Control.Concurrent (ThreadId, myThreadId, threadDelay)
 import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar
@@ -179,13 +183,6 @@ import System.Process (rawSystem)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 
-data GatewayCredential = GatewayCredential
-    { gatewayBaseUrl :: !Text
-    , gatewayWebSocketUrl :: !Text
-    , gatewayAccessToken :: !Text
-    }
-    deriving (Eq)
-
 data GatewayModelProtocol
     = GatewayResponsesProtocol
     | GatewayAnthropicProtocol
@@ -196,60 +193,6 @@ data GatewayModel = GatewayModel
     , gatewayModelProtocol :: !GatewayModelProtocol
     }
     deriving (Eq, Show)
-
--- | Stable, non-secret binding for sessions created with one exact gateway
--- credential. Reauthorization deliberately produces a different identity:
--- without a gateway-issued organization identifier, treating a replacement
--- bearer as the same routing boundary could send prior context to another
--- organization.
-gatewayCredentialIdentity :: GatewayCredential -> Text
-gatewayCredentialIdentity credential =
-    "gateway-sha256:"
-        <> TextEncoding.decodeUtf8
-            (Base64Url.encodeUnpadded
-                (ByteArray.convert
-                    (hash material :: Digest SHA256)))
-  where
-    material =
-        TextEncoding.encodeUtf8 $
-            Text.intercalate
-                "\NUL"
-                [ "haskell-agent gateway session binding v1"
-                , canonicalGatewayIdentityUrl
-                    ""
-                    credential.gatewayBaseUrl
-                , canonicalGatewayIdentityUrl
-                    "/v1/responses"
-                    credential.gatewayWebSocketUrl
-                , credential.gatewayAccessToken
-                ]
-
-canonicalGatewayIdentityUrl :: Text -> Text -> Text
-canonicalGatewayIdentityUrl defaultPath raw =
-    case URI.parseURI (Text.unpack (Text.strip raw)) of
-        Just uri
-            | Just authority <- URI.uriAuthority uri
-            , let scheme = Text.toLower (Text.pack (URI.uriScheme uri))
-            , Right port <-
-                gatewayOriginPort
-                    "invalid gateway identity URL"
-                    scheme
-                    (URI.uriPort authority) ->
-                let host =
-                        Text.toLower (Text.pack (URI.uriRegName authority))
-                    rawPath = Text.pack (URI.uriPath uri)
-                    path
-                        | Text.null rawPath = defaultPath
-                        | Text.null defaultPath =
-                            Text.dropWhileEnd (== '/') rawPath
-                        | otherwise = rawPath
-                in scheme
-                    <> "//"
-                    <> host
-                    <> ":"
-                    <> Text.pack (show port)
-                    <> path
-        _ -> Text.strip raw
 
 newtype GatewayModelCatalogResponse = GatewayModelCatalogResponse
     { gatewayModelCatalogData :: [GatewayModel]
@@ -319,23 +262,6 @@ instance Show GatewayAuthorization where
         "GatewayAuthorization { authorizationBaseUrl = "
             <> show authorization.authorizationBaseUrl
             <> ", authorizationDevice = <redacted> }"
-
-instance Show GatewayCredential where
-    show credential =
-        "GatewayCredential { gatewayBaseUrl = "
-            <> show credential.gatewayBaseUrl
-            <> ", gatewayWebSocketUrl = "
-            <> show credential.gatewayWebSocketUrl
-            <> ", gatewayAccessToken = <redacted> }"
-
-instance Aeson.ToJSON GatewayCredential where
-    toJSON credential =
-        Aeson.object
-            [ "version" .= (1 :: Int)
-            , "base_url" .= credential.gatewayBaseUrl
-            , "websocket_url" .= credential.gatewayWebSocketUrl
-            , "access_token" .= credential.gatewayAccessToken
-            ]
 
 data GatewayAuthorizationCodeResponse = GatewayAuthorizationCodeResponse
     { authorizationAccessToken :: !Text

@@ -159,6 +159,9 @@ prepareDirectories :: ManagedPostgresConfig -> IO ()
 prepareDirectories config = do
     createPrivateDirectory config.postgresPaths.postgresRootDirectory
     createPrivateDirectory config.postgresPaths.postgresSocketDirectory
+    createPrivateDirectory
+        config.postgresPaths.postgresServerTurnActionLockDirectory
+    createPrivateDirectory (serverTurnActionLockDirectory config)
 
 createPrivateDirectory :: FilePath -> IO ()
 createPrivateDirectory path = do

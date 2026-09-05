@@ -1,0 +1,76 @@
+cabal-version:      3.0
+name:               agent-server-client
+version:            0.1.0.0
+synopsis:           Typed REST and SSE client for agent-server
+description:        Lightweight client and public wire protocol for the versioned agent-server API.
+build-type:         Simple
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+category:           Web
+
+common common-options
+    default-language: GHC2021
+    default-extensions:
+        BlockArguments
+      , DuplicateRecordFields
+      , LambdaCase
+      , NamedFieldPuns
+      , NoFieldSelectors
+      , OverloadedRecordDot
+      , OverloadedStrings
+      , ScopedTypeVariables
+      , TypeApplications
+    ghc-options:
+        -Wall
+        -Wcompat
+        -Werror=incomplete-patterns
+        -Werror=missing-fields
+
+library
+    import:           common-options
+    exposed-modules:
+        Agent.Server.Client
+      , Agent.Server.Client.GatewayIdentity
+      , Agent.Server.Client.Protocol
+    hs-source-dirs:   src
+    build-depends:
+        aeson >=2.0
+      , async
+      , base >=4.17 && <5
+      , base64-bytestring
+      , bytestring
+      , crypton
+      , http-client
+      , http-client-tls
+      , http-types
+      , network-uri
+      , safe-exceptions
+      , text >=2.0
+      , time
+      , unix
+      , uuid
+
+test-suite agent-server-client-tests
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    main-is:          Main.hs
+    other-modules:
+        Agent.Server.ClientSpec
+      , Agent.Server.Client.GatewayIdentitySpec
+      , Agent.Server.Client.ProtocolSpec
+    hs-source-dirs:   test
+    ghc-options:      -threaded
+    build-depends:
+        agent-server-client
+      , aeson
+      , base >=4.17 && <5
+      , bytestring
+      , directory
+      , hspec >=2.11 && <2.12
+      , http-types
+      , text
+      , unix
+      , wai
+      , warp

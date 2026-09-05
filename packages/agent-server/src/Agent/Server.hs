@@ -54,6 +54,8 @@ runServer = do
                                 Backend
                                     { backendTurnBoundaryGuard =
                                         turnBoundaryGuard
+                                    , backendTurnPersistence =
+                                        turnPersistence
                                     , backendRunTurn = runTurn
                                     } = backend
                                 supervisorConfig = SupervisorConfig
@@ -73,9 +75,10 @@ runServer = do
                                         config.resolvedEventReplayLimit
                                     }
                             bracket
-                                (newSupervisorWithBoundaryGuard
+                                (newSupervisorWithBoundaryGuardAndPersistence
                                     supervisorConfig
                                     turnBoundaryGuard
+                                    turnPersistence
                                     runTurn)
                                 closeSupervisor
                                 \supervisor -> do
