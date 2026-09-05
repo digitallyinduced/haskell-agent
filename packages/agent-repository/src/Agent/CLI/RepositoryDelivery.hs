@@ -437,104 +437,74 @@ liftDelivery = ExceptT
 statusAtSnapshot
     :: RepositorySnapshot
     -> IO (Either DeliveryError DeliveryStatus)
-statusAtSnapshot snapshot =
-    case snapshot.snapshotHead of
-        Nothing ->
+statusAtSnapshot snapshot = runExceptT do
+    headOid <- maybe
+        (throwE (DeliveryInvalidRequest
+            "delivery requires a branch with at least one commit"))
+        pure
+        snapshot.snapshotHead
+    branchBytes <- liftIO
+        (runGit root ["symbolic-ref", "--quiet", "HEAD"] BS.empty
+            localTimeoutMicros)
+        >>= either
+            (const (throwE (DeliveryInvalidRequest
+                "delivery requires a named local branch")))
             pure
-                (Left
-                    (DeliveryInvalidRequest
-                        "delivery requires a branch with at least one commit"))
-        Just headOid ->
-            runGit root ["symbolic-ref", "--quiet", "HEAD"] BS.empty
-                localTimeoutMicros >>= \case
-                    Left _ ->
-                        pure
-                            (Left
-                                (DeliveryInvalidRequest
-                                    "delivery requires a named local branch"))
-                    Right branchBytes ->
-                        let fullBranch = decodeTrimmed branchBytes
-                        in case Text.stripPrefix "refs/heads/" fullBranch of
-                            Nothing ->
-                                pure
-                                    (Left
-                                        (DeliveryInvalidRequest
-                                            "Git returned an invalid local branch"))
-                            Just branch
-                                | not (validateBranchName branch) ->
-                                    pure
-                                        (Left
-                                            (DeliveryInvalidRequest
-                                                "local branch name is not safe for delivery"))
-                                | otherwise ->
-                                    readUpstream root fullBranch >>= \case
-                                        Left err -> pure (Left err)
-                                        Right (remote, upstreamRef) ->
-                                            readUpstreamStatus
-                                                root headOid branch remote upstreamRef
+    let fullBranch = decodeTrimmed branchBytes
+    branch <- maybe
+        (throwE (DeliveryInvalidRequest
+            "Git returned an invalid local branch"))
+        pure
+        (Text.stripPrefix "refs/heads/" fullBranch)
+    unless (validateBranchName branch) $
+        throwE (DeliveryInvalidRequest
+            "local branch name is not safe for delivery")
+    (remote, upstreamRef) <- liftDelivery (readUpstream root fullBranch)
+    readUpstreamStatus headOid branch remote upstreamRef
   where
     root = snapshot.snapshotRoot
-    readUpstreamStatus root headOid branch remote upstreamRef =
-        runGit root ["rev-parse", "--verify", "@{upstream}"] BS.empty
-            localTimeoutMicros >>= \case
-                Left _ ->
+    readUpstreamStatus headOid branch remote upstreamRef = do
+        upstream <- liftIO $
+            runGit root ["rev-parse", "--verify", "@{upstream}"] BS.empty
+                localTimeoutMicros
+        case upstream of
+            Left _ -> do
+                countBytes <- liftDelivery $
                     runGit root ["rev-list", "--count", "HEAD"] BS.empty
-                        localTimeoutMicros >>= \case
-                            Left err -> pure (Left err)
-                            Right countBytes ->
-                                case reads (BS8.unpack (stripLineEnding countBytes)) of
-                                    [(ahead, "")]
-                                        | ahead > 0 ->
-                                            finishStatus
-                                                (zeroObjectId headOid)
-                                                ahead
-                                                0
-                                    _ ->
-                                        pure
-                                            (Left
-                                                (DeliveryCommandFailed
-                                                    "Git returned an invalid commit count"))
-                Right upstreamBytes ->
-                    let upstreamOid = decodeTrimmed upstreamBytes
-                    in runGit
-                        root
-                        [ "rev-list"
-                        , "--left-right"
-                        , "--count"
-                        , "HEAD...@{upstream}"
-                        ]
-                        BS.empty
-                        localTimeoutMicros >>= \case
-                            Left err -> pure (Left err)
-                            Right counts ->
-                                case parseAheadBehind counts of
-                                    Nothing ->
-                                        pure
-                                            (Left
-                                                (DeliveryCommandFailed
-                                                    "Git returned invalid ahead/behind counts"))
-                                    Just (ahead, behind) ->
-                                        finishStatus upstreamOid ahead behind
-      where
-        finishStatus upstreamOid ahead behind =
-            readValidatedRemote root headOid remote >>= \case
-                Left err -> pure (Left err)
-                Right validatedRemote ->
+                        localTimeoutMicros
+                case reads (BS8.unpack (stripLineEnding countBytes)) of
+                    [(ahead, "")] | ahead > 0 ->
+                        finishStatus (zeroObjectId headOid) ahead 0
+                    _ -> throwE (DeliveryCommandFailed
+                        "Git returned an invalid commit count")
+            Right upstreamBytes -> do
+                counts <- liftDelivery $
+                    runGit root
+                        ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]
+                        BS.empty localTimeoutMicros
+                (ahead, behind) <- maybe
+                    (throwE (DeliveryCommandFailed
+                        "Git returned invalid ahead/behind counts"))
                     pure
-                        (Right
-                            DeliveryStatus
-                                { deliverySnapshotId = snapshot.snapshotId
-                                , deliveryRoot = root
-                                , deliveryHeadOid = headOid
-                                , deliveryBranch = branch
-                                , deliveryRemote = remote
-                                , deliveryRemoteFingerprint =
-                                    validatedRemote.validatedRemoteFingerprint
-                                , deliveryUpstreamRef = upstreamRef
-                                , deliveryUpstreamOid = upstreamOid
-                                , deliveryAhead = ahead
-                                , deliveryBehind = behind
-                                })
+                    (parseAheadBehind counts)
+                finishStatus (decodeTrimmed upstreamBytes) ahead behind
+      where
+        finishStatus upstreamOid ahead behind = do
+            validatedRemote <- liftDelivery $
+                readValidatedRemote root headOid remote
+            pure DeliveryStatus
+                { deliverySnapshotId = snapshot.snapshotId
+                , deliveryRoot = root
+                , deliveryHeadOid = headOid
+                , deliveryBranch = branch
+                , deliveryRemote = remote
+                , deliveryRemoteFingerprint =
+                    validatedRemote.validatedRemoteFingerprint
+                , deliveryUpstreamRef = upstreamRef
+                , deliveryUpstreamOid = upstreamOid
+                , deliveryAhead = ahead
+                , deliveryBehind = behind
+                }
 
 readUpstream
     :: FilePath
@@ -750,53 +720,33 @@ refreshPushedStatus pushed validatedRemote = do
 revalidateLocalMutation
     :: DeliveryStatus
     -> IO (Either DeliveryError ())
-revalidateLocalMutation expected =
-    repositoryDeliveryStatus
-        expected.deliveryRoot
-        expected.deliverySnapshotId >>= \case
-            Left err -> pure (Left err)
-            Right current
-                | current == expected -> pure (Right ())
-                | otherwise ->
-                    pure
-                        (Left
-                            (DeliveryStale
-                                "repository state changed immediately before delivery"))
+revalidateLocalMutation expected = runExceptT do
+    current <- liftDelivery $
+        repositoryDeliveryStatus
+            expected.deliveryRoot expected.deliverySnapshotId
+    unless (current == expected) $
+        throwE (DeliveryStale
+            "repository state changed immediately before delivery")
 
 revalidatePullRequestMutation
     :: DeliveryStatus
     -> ValidatedRemote
     -> IO (Either DeliveryError ())
-revalidatePullRequestMutation expected expectedRemote =
-    repositoryDeliveryStatus
-        expected.deliveryRoot
-        expected.deliverySnapshotId >>= \case
-            Left err -> pure (Left err)
-            Right current
-                | current /= expected ->
-                    pure
-                        (Left
-                            (DeliveryStale
-                                "branch or upstream state changed before pull-request creation"))
-                | otherwise ->
-                    validatedRemoteForStatus current >>= \case
-                        Left err -> pure (Left err)
-                        Right remote
-                            | remote /= expectedRemote ->
-                                pure
-                                    (Left
-                                        (DeliveryStale
-                                            "the remote destination changed before pull-request creation"))
-                            | otherwise ->
-                                queryRemoteHead current expectedRemote >>= \case
-                                    Left err -> pure (Left err)
-                                    Right oid
-                                        | oid /= Just current.deliveryHeadOid ->
-                                            pure
-                                                (Left
-                                                    (DeliveryStale
-                                                        "the pushed branch changed before pull-request creation"))
-                                        | otherwise -> pure (Right ())
+revalidatePullRequestMutation expected expectedRemote = runExceptT do
+    current <- liftDelivery $
+        repositoryDeliveryStatus
+            expected.deliveryRoot expected.deliverySnapshotId
+    unless (current == expected) $
+        throwE (DeliveryStale
+            "branch or upstream state changed before pull-request creation")
+    remote <- liftDelivery (validatedRemoteForStatus current)
+    unless (remote == expectedRemote) $
+        throwE (DeliveryStale
+            "the remote destination changed before pull-request creation")
+    oid <- liftDelivery (queryRemoteHead current expectedRemote)
+    unless (oid == Just current.deliveryHeadOid) $
+        throwE (DeliveryStale
+            "the pushed branch changed before pull-request creation")
 
 ensureBaseAndNoOpenPullRequest
     :: DeliveryStatus
