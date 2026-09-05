@@ -55,7 +55,7 @@ spec = do
                     , model.modelTarget.targetModelId
                     ))
                 (safeHead (rankedModels catalog))
-                `shouldBe` Just (OpenAIProvider, "gpt-5.6-sol")
+                `shouldBe` Just (OpenAIProvider, "gpt-6-astra")
 
     describe "fallbackCandidates" do
         let exhausted =
@@ -71,7 +71,7 @@ spec = do
                 (fallbackCandidates catalog Set.empty XAIProvider
                     "grok-4.6" exhausted)
                 `shouldBe`
-                    [ (OpenAIProvider, "gpt-5.6-sol")
+                    [ (OpenAIProvider, "gpt-6-astra")
                     , (GeminiProvider, "gemini-3.7-flash")
                     , (OpenRouterProvider, "stealth/ox-alpha")
                     ]
@@ -144,6 +144,18 @@ spec = do
                 `shouldBe` [GeminiProvider, OpenRouterProvider]
 
         it "steps down through same-provider models on model access errors" do
+            map (.modelTarget.targetModelId)
+                (fallbackCandidates catalog Set.empty OpenAIProvider
+                    "gpt-6-astra"
+                    (ProviderError PermissionError "not available" Nothing))
+                `shouldBe`
+                    [ "gpt-5.6-sol"
+                    , "gpt-5.6-terra"
+                    , "gpt-5.6-luna"
+                    , "grok-4.6"
+                    , "gemini-3.7-flash"
+                    , "stealth/ox-alpha"
+                    ]
             map (.modelTarget.targetModelId)
                 (fallbackCandidates catalog Set.empty OpenAIProvider
                     "gpt-5.6-sol"
