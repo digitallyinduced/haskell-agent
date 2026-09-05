@@ -3,6 +3,14 @@ module Agent.CLI.Runtime.Orchestration.Session
     , runAgentSession
     ) where
 
+import Agent.CLI.ActiveAccount
+    ( ActiveAccount(..)
+    , ActiveAccountRef
+    , modifyActiveAccount
+    , readActiveAccount
+    , writeActiveAccount
+    )
+import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.Auth
     ( LoadedAuth(loadedTokenProvider, loadedOpenAiPool)
     , isGatewayLoadedAuth
@@ -137,9 +145,9 @@ import Agent.CLI.Session.Runtime.Types
                      startupWindowTitle, automaticCompactionRef,
                      projectRoot, home, cwd, tokenProvider, openAiPool, startupContext,
                      automaticCompactionHookRef, skillsRef, skillInvocationsRef,
-                     escPaused, interrupt, multiCtx, rootTurnRef, subagentSessions,
+                     stdinControl, interrupt, multiCtx, rootTurnRef, subagentSessions,
                      pendingNotices, storeRoot, agentTypes, legacyTarget, usageRef,
-                     accountRef, accountIdRef, selectionRef, accountLabel,
+                     accountRef, accountLabel,
                      selectAccount, onPersisted, compactRunner, codeModeRuntime),
       StartupRuntime(startupBackground, startupDatabaseStore,
                      startupNetworkRecovery, startupSessionState,
@@ -243,9 +251,7 @@ data AgentSessionRequest closeResult windowTitleResult = AgentSessionRequest
     , connectedGateway :: Maybe GatewayCredential
     , learnAboutUserRequested :: Bool
     , sessionTmp :: OsPath
-    , activeAccountIdRef :: IORef Text
-    , activeAccountRef :: IORef Text
-    , activeSelectionRef :: IORef Text
+    , activeAccountRef :: ActiveAccountRef
     , agentTypesRef :: GrokSubagentSpecs
     , allTools :: [AppTool]
     , recordImageGenerationInputs :: [ImageAttachment] -> IO ()
@@ -269,7 +275,7 @@ data AgentSessionRequest closeResult windowTitleResult = AgentSessionRequest
     , initialContextPreload :: InitialContextPreload
     , dialect :: Dialect
     , effortText :: Text
-    , escPaused :: IORef Bool
+    , stdinControl :: StdinControl
     , extraTools :: [AppTool]
     , fullscreen :: Maybe FullscreenRuntime
     , gatewayTools :: [AppTool]
@@ -1003,7 +1009,7 @@ buildProviderSessionRequest
                 promptRuntime.sessionAutomaticCompactionHookRef
             , skillsRef = request.skillsRef
             , skillInvocationsRef = request.skillInvocationsRef
-            , escPaused = request.escPaused
+            , stdinControl = request.stdinControl
             , interrupt = request.interrupt
             , multiCtx = request.multiCtx
             , rootTurnRef = request.rootTurnRef
@@ -1014,8 +1020,6 @@ buildProviderSessionRequest
             , legacyTarget = request.legacySubagentTarget
             , usageRef = liveRuntime.sessionUsageRef
             , accountRef = request.activeAccountRef
-            , accountIdRef = request.activeAccountIdRef
-            , selectionRef = request.activeSelectionRef
             , accountLabel = request.resolveActiveAccountLabel
             , selectAccount = sessionSelectAccount
             , onPersisted = request.claimCurrentSession
@@ -1165,12 +1169,15 @@ prepareProviderConfig request promptRuntime nativeCapabilities = case request.pr
         , accounts = OpenAiAccounts
             { selectablePool = if isGatewayLoadedAuth request.loaded
                 then Nothing else request.loaded.loadedOpenAiPool
-            , readActiveAccountId = readIORef request.activeAccountIdRef
+            , readActiveAccountId =
+                (.activeAccountId) <$> readActiveAccount request.activeAccountRef
             , resolveAccountLabel = request.resolveActiveAccountLabel
-            , installAccount = \credential label -> do
-                writeIORef request.activeAccountIdRef credential.accountId
-                writeIORef request.activeSelectionRef credential.accountId
-                writeIORef request.activeAccountRef label
+            , installAccount = \credential label ->
+                writeActiveAccount request.activeAccountRef ActiveAccount
+                    { activeAccountId = credential.accountId
+                    , activeSelectionId = credential.accountId
+                    , activeAccountLabel = label
+                    }
             , preferAccount = writeIORef request.preferredOpenAiAccountRef . Just
             }
         }
@@ -1222,7 +1229,8 @@ prepareProviderConfig request promptRuntime nativeCapabilities = case request.pr
                             color <- resolveColor request.stderrHandle
                             putTextLn request.stderrHandle $
                                 roleWarn color $ glyphWarn <> notice
-                writeIORef request.activeAccountRef label
+                modifyActiveAccount request.activeAccountRef \current ->
+                    current { activeAccountLabel = label }
             }
 
 installProviderSubagents

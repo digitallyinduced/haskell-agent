@@ -1,10 +1,15 @@
 -- | Model, effort, and account selection commands.
 module Agent.CLI.Runtime.Repl.Selection
     ( handleSelectionAction
+    , SelectionInput(..)
     , handleSelectionInput
     , selectRequestedAccount
     ) where
 
+import Agent.CLI.ActiveAccount
+    ( ActiveAccount(..)
+    , readActiveAccount
+    )
 import Agent.CLI.AccountPicker
     ( AccountPickerOption(..),
       accountPickerMatches,
@@ -16,7 +21,7 @@ import Agent.CLI.Auth ( geminiAuthErrorNeedsReconnect )
 import Agent.CLI.Command
     ( currentEffort,
       currentModel,
-      ReplAction(ReplSetModel, ReplShowEffort, ReplSetEffort, ReplToggleFast,
+      SelectionAction(ReplSetModel, ReplShowEffort, ReplSetEffort, ReplToggleFast,
                  ReplShowModel, ReplShowTheme, ReplSetTheme) )
 import Agent.CLI.Config
     ( HarnessConfig(configTheme)
@@ -25,8 +30,6 @@ import Agent.CLI.Config
 import Agent.CLI.Error ( formatApiErrorInlineAt )
 import Agent.CLI.GatewayClient ( refreshGatewayModels )
 import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
-import Agent.CLI.Input
-    ( ReplLine(ReplChooseAccount, ReplChooseModel, ReplChooseEffort) )
 import Agent.CLI.Login ( connectProviderAccount )
 import Agent.CLI.Models
     ( gatewayModelOptions,
@@ -100,16 +103,22 @@ import System.IO ( stdout, stderr )
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn )
 
+-- | Selection shortcuts emitted by the interactive editor.
+data SelectionInput
+    = ChooseModel !Text
+    | ChooseEffort !Text
+    | ChooseAccount !Text
+
 handleSelectionInput
     :: SessionEnv
     -> IO RunResult
     -> (PendingTurn -> IO RunResult)
-    -> ReplLine
+    -> SelectionInput
     -> IO RunResult
 handleSelectionInput env continue retryPendingTurn input =
     handleSelection env continue retryPendingTurn (Left input)
 
-handleSelectionAction :: SessionEnv -> IO RunResult -> ReplAction -> IO RunResult
+handleSelectionAction :: SessionEnv -> IO RunResult -> SelectionAction -> IO RunResult
 handleSelectionAction env continue action =
     handleSelection env continue (\_ -> continue) (Right action)
 
@@ -147,8 +156,9 @@ selectRequestedAccountWithoutGateway env requestedProvider selector =
                 (Left
                     "Account selection needs the fullscreen account picker; use /login in minimal mode")
         Just runtime -> do
-            currentSelectionId <- readIORef env.sessionAccountSelectionId
-            currentAccountId <- readIORef env.sessionAccountId
+            account <- readActiveAccount env.sessionAccount
+            let currentSelectionId = account.activeSelectionId
+                currentAccountId = account.activeAccountId
             loaded <- withActivity runtime $
                 loadAllAccountPickerOptions env.sessionProvider
             let options =
@@ -249,7 +259,7 @@ selectRequestedAccountWithoutGateway env requestedProvider selector =
                     pure (Right Nothing)
         | otherwise = do
             params <- readIORef env.sessionParams
-            currentAccount <- readIORef env.sessionAccount
+            currentAccount <- (.activeAccountLabel) <$> readActiveAccount env.sessionAccount
             requestAccountProviderSwitch
                 env.sessionModelCatalog
                 (Just runtime)
@@ -279,7 +289,7 @@ handleSelection
     :: SessionEnv
     -> IO RunResult
     -> (PendingTurn -> IO RunResult)
-    -> Either ReplLine ReplAction
+    -> Either SelectionInput SelectionAction
     -> IO RunResult
 handleSelection
         env@SessionEnv
@@ -296,19 +306,17 @@ handleSelection
             , sessionProjectRoot = projectRoot
             , sessionHome = home
             , sessionDraft = draftRef
-            , sessionAccountId = accountIdRef
-            , sessionAccountSelectionId = selectionRef
             , sessionSelectAccount = selectAccount
             , sessionTokenProvider = tokenProvider
             , sessionFullscreen = fullscreen
             }
         continue
         retryPendingTurn = \case
-    Left (ReplChooseModel keptDraft) -> do
+    Left (ChooseModel keptDraft) -> do
         writeIORef draftRef keptDraft
         chooseModel continue
-    Left (ReplChooseEffort _) -> chooseEffort continue
-    Left (ReplChooseAccount keptDraft) -> do
+    Left (ChooseEffort _) -> chooseEffort continue
+    Left (ChooseAccount keptDraft) -> do
         writeIORef draftRef keptDraft
         chooseAccount continue
     Right ReplShowEffort -> do
@@ -393,7 +401,6 @@ handleSelection
                 continue
             Just theme ->
                 setTheme theme continue
-    _ -> error "handleSelection: unsupported input"
   where
     displayInfo message minimalAction = case fullscreen of
         Nothing -> minimalAction
@@ -628,8 +635,9 @@ handleSelection
     chooseAccountFromOptions next =
         case fullscreen of
             Just runtime -> do
-                currentSelectionId <- readIORef selectionRef
-                currentAccountId <- readIORef accountIdRef
+                account <- readActiveAccount env.sessionAccount
+                let currentSelectionId = account.activeSelectionId
+                    currentAccountId = account.activeAccountId
                 options <- withReplActivity
                     "Loading account usage…"
                     (loadAllAccountPickerOptionsCached databasePool provider)
@@ -756,7 +764,7 @@ handleSelection
                                         next
                         | otherwise = do
                             params <- readIORef paramsRef
-                            currentAccount <- readIORef env.sessionAccount
+                            currentAccount <- (.activeAccountLabel) <$> readActiveAccount env.sessionAccount
                             requestAccountProviderSwitch
                                 catalog fullscreen provider connectionId
                                 (currentModel params) currentAccount

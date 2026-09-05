@@ -26,18 +26,16 @@ spec = describe "Agent.CLI.ModelConfig" do
         bytes <- readPackagedDefaults
         let decoded = decodeModelConfig "models.default.json" bytes
         catalog <- expectRight decoded
-        fmap (.catalogModelId)
-            (catalogDefaultForProvider catalog OpenAIProvider)
-            `shouldBe` Just "gpt-5.6-sol"
-        fmap (.catalogModelId)
-            (catalogDefaultForProvider catalog XAIProvider)
-            `shouldBe` Just "grok-4.6"
-        fmap (.catalogModelId)
-            (catalogDefaultForProvider catalog GeminiProvider)
-            `shouldBe` Just "gemini-3.7-flash"
-        fmap (.catalogModelId)
-            (catalogDefaultForProvider catalog OpenRouterProvider)
-            `shouldBe` Just "stealth/ox-alpha"
+        (catalogDefaultForProvider catalog OpenAIProvider).catalogModelId
+            `shouldBe` "gpt-5.6-sol"
+        (catalogDefaultForProvider catalog XAIProvider).catalogModelId
+            `shouldBe` "grok-4.6"
+        (catalogDefaultForProvider catalog GeminiProvider).catalogModelId
+            `shouldBe` "gemini-3.7-flash"
+        (catalogDefaultForProvider catalog OpenRouterProvider).catalogModelId
+            `shouldBe` "stealth/ox-alpha"
+        (catalogDefaultForProvider catalog ClaudeCodeProvider).catalogModelId
+            `shouldBe` "sonnet"
         catalogContextWindowFor catalog "xai" "grok-4.6"
             `shouldBe` Just 500_000
         map (catalogContextWindowFor catalog "gemini")
@@ -75,7 +73,7 @@ spec = describe "Agent.CLI.ModelConfig" do
                 , "gemini-3.1-pro-preview"
                 , "gemini-3.5-flash-lite"
                 ]
-        Map.lookup organizationGatewayConnectionId catalog.catalogConnections
+        catalogConnection catalog organizationGatewayConnectionId
             `shouldBe`
                 Just ModelConnection
                     { connectionId = organizationGatewayConnectionId
@@ -86,7 +84,7 @@ spec = describe "Agent.CLI.ModelConfig" do
                 ( model.catalogModelReasoningEfforts
                 , model.catalogModelDefaultReasoningEffort
                 ))
-            (findModel "opus" catalog.catalogModels)
+            (findModel "opus" (catalogModels catalog))
             `shouldBe`
                 Just
                     ( Just ["low", "medium", "high", "xhigh", "max"]
@@ -97,7 +95,7 @@ spec = describe "Agent.CLI.ModelConfig" do
                 ( model.catalogModelReasoningEfforts
                 , model.catalogModelDefaultReasoningEffort
                 ))
-            (Map.lookup "gpt-5.6-sol" catalog.catalogModelsById)
+            (catalogModelById catalog "gpt-5.6-sol")
             `shouldBe`
                 Just
                     ( Just ["low", "medium", "high", "xhigh", "max"]
@@ -109,7 +107,7 @@ spec = describe "Agent.CLI.ModelConfig" do
                 , model.catalogModelDefaultReasoningEffort
                 , model.catalogModelDefault
                 ))
-            (Map.lookup "gpt-6-astra" catalog.catalogModelsById)
+            (catalogModelById catalog "gpt-6-astra")
             `shouldBe`
                 Just
                     ( Just ["low", "medium", "high", "xhigh", "max"]
@@ -216,7 +214,7 @@ spec = describe "Agent.CLI.ModelConfig" do
             (mergeModelConfigs
                 ("models.default.json", defaults)
                 (Just ("models.json", overlay)))
-        Map.lookup "ollama" catalog.catalogConnections
+        catalogConnection catalog "ollama"
             `shouldBe`
                 Just ModelConnection
                     { connectionId = "ollama"
@@ -231,7 +229,7 @@ spec = describe "Agent.CLI.ModelConfig" do
                     }
         let custom =
                 filter ((== "qwen-local") . (.catalogModelId))
-                    catalog.catalogModels
+                    (catalogModels catalog)
         fmap (.catalogModelWireId) custom
             `shouldBe` ["qwen2.5-coder:32b"]
         fmap (.catalogModelDialect) custom
@@ -287,7 +285,7 @@ spec = describe "Agent.CLI.ModelConfig" do
                 (Just ("models.json", overlay)))
         let matching =
                 filter ((== "gpt-5.6-sol") . (.catalogModelId))
-                    catalog.catalogModels
+                    (catalogModels catalog)
         length matching `shouldBe` 1
         fmap (.catalogModelWireId) matching
             `shouldBe` ["gpt-5.6-sol"]
@@ -348,6 +346,22 @@ spec = describe "Agent.CLI.ModelConfig" do
             , "model local-model reasoning_efforts must not contain duplicates"
             , "model local-model default_reasoning_effort must be listed in reasoning_efforts"
             ]
+
+    it "rejects a missing Claude default during configuration validation" do
+        defaults <- readPackagedDefaults
+        let overlay = "{\"version\":1,\"models\":[{\"id\":\"sonnet\",\"connection\":\"claude-code\",\"dialect\":\"claude-code\",\"default\":false}]}"
+        mergeModelConfigs
+            ("models.default.json", defaults)
+            (Just ("models.json", overlay))
+            `shouldSatisfy` leftContains "claude-code must have exactly one default model"
+
+    it "rejects an ambiguous Claude default during configuration validation" do
+        defaults <- readPackagedDefaults
+        let overlay = "{\"version\":1,\"models\":[{\"id\":\"opus\",\"connection\":\"claude-code\",\"dialect\":\"claude-code\",\"default\":true}]}"
+        mergeModelConfigs
+            ("models.default.json", defaults)
+            (Just ("models.json", overlay))
+            `shouldSatisfy` leftContains "claude-code has more than one default model"
 
     it "requires an API-key environment variable unless auth is optional" do
         defaults <- readPackagedDefaults
@@ -417,7 +431,7 @@ spec = describe "Agent.CLI.ModelConfig" do
             catalog <- expectRight loaded
             fmap (.catalogModelWireId)
                 (filter ((== "local-model") . (.catalogModelId))
-                    catalog.catalogModels)
+                    (catalogModels catalog))
                 `shouldBe` ["local-model"]
 
 leftContains :: Text -> Either Text value -> Bool

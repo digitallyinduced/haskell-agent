@@ -203,6 +203,46 @@ spec = describe "dispatchToolCall" do
         result <- dispatchToolCall testConfig [] (functionToolCall "call-1" "missing" "{}")
         result `shouldBe` functionResult "call-1" "ERR unknown:missing"
 
+    it "preserves snapshots and images through typed and freeform streaming adapters" do
+        let image = ToolResultImage "data:image/png;base64,aW1hZ2U=" Nothing
+            run emit message = do
+                emit ("partial:" <> message)
+                pure (Right (ToolHandlerResult message [image]))
+            handlers =
+                [ ( typedStreamingRichTool "echo" echoArgsDecoder
+                        (\emit (EchoArgs message) -> run emit message)
+                  , functionToolCall "typed" "echo" "{\"message\":\"hello\"}"
+                  )
+                , ( streamingRichTextTool "echo" run
+                  , customToolCall "freeform" "echo" "hello"
+                  )
+                ]
+        mapM_ (\(handler, call) -> do
+            snapshots <- newIORef []
+            let config = testConfig
+                    { toolDispatchOnOutput = \seenCall value ->
+                        modifyIORef' snapshots (<> [(seenCall, value)])
+                    }
+            outcome <- dispatchToolHandlerDetailed config (Just handler) call
+            outcome.toolDispatchSucceeded `shouldBe` True
+            outcome.toolDispatchResult.output `shouldBe` "hello"
+            toolCallResultImages outcome.toolDispatchResult `shouldBe` [image]
+            readIORef snapshots `shouldReturn` [(call, "partial:hello")]
+            ) handlers
+
+    it "forwards the original call to a passthrough broker without decoding it" do
+        calls <- newIORef []
+        let call = (customToolCall "broker-call" "collaboration.spawn_agent" "not JSON")
+                { argumentsEncrypted = True }
+            handler = passthroughTool "spawn_agent" \emit received -> do
+                modifyIORef' calls (<> [received])
+                emit "forwarded"
+                pure (Left "broker rejected request")
+        outcome <- dispatchToolCallDetailed testConfig [handler] call
+        readIORef calls `shouldReturn` [call]
+        outcome.toolDispatchSucceeded `shouldBe` False
+        outcome.toolDispatchResult.output `shouldBe` "ERR broker rejected request"
+
     it "formats exceptions and invokes the exception hook" do
         seen <- newIORef []
         let config = testConfig

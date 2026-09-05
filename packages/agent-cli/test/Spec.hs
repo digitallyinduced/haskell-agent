@@ -27,6 +27,7 @@ import Test.Hspec.Runner
     )
 import Text.Read (readMaybe)
 
+import qualified Agent.CLI.ActiveAccountSpec as ActiveAccountSpec
 import qualified Agent.CLI.AccountSelectionSpec as AccountSelectionSpec
 import qualified Agent.CLI.AgentSessionsSpec as AgentSessionsSpec
 import qualified Agent.CLI.AgentViewportSpec as AgentViewportSpec
@@ -153,6 +154,7 @@ main = do
 
 specs :: Spec
 specs = do
+    ActiveAccountSpec.spec
     AccountSelectionSpec.spec
     AgentViewportSpec.spec
     AgentViewportRuntimeSpec.spec
