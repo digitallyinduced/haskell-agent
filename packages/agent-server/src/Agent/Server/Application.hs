@@ -18,6 +18,7 @@ import Agent.Server.Identifier (isUUIDText, newUUIDv7Text)
 import Agent.Server.Supervisor
     ( CheckedSubmitError(..)
     , EventSubscriptionError(..)
+    , HumanRequestResolutionError(..)
     , SubmitError(..)
     , SessionMutationError(..)
     , Supervisor
@@ -275,7 +276,7 @@ dispatchBoundary
         ("POST", ["v1", "turns", rawTurnId, "cancel"]) ->
             cancelTurnResponse backend supervisor boundary rawTurnId headers
         ("GET", ["v1", "turns", rawTurnId, "agents"]) ->
-            turnAgentsResponse supervisor boundary rawTurnId headers
+            turnAgentsResponse backend supervisor boundary rawTurnId headers
         ("GET", ["v1", "requests"]) ->
             humanRequestsResponse supervisor boundary headers request
         ("POST", ["v1", "requests", rawRequestId, "resolve"]) ->
@@ -523,17 +524,23 @@ cancelTurnResponse backend supervisor boundary rawTurnId headers =
                         (toJSONValue turn))
 
 turnAgentsResponse
-    :: Supervisor
+    :: Backend
+    -> Supervisor
     -> AccessBoundary
     -> Text
     -> [Header]
     -> IO (Either ApiError Response)
-turnAgentsResponse supervisor boundary rawTurnId headers =
+turnAgentsResponse backend supervisor boundary rawTurnId headers =
     case canonicalTurnId rawTurnId of
         Nothing -> pure (Left turnNotFound)
         Just turnId ->
             lookupTurnAgents supervisor boundary turnId >>= \case
-                Nothing -> pure (Left turnNotFound)
+                Nothing ->
+                    backend.backendLookupTurn boundary turnId >>= \case
+                        Left err -> pure (Left err)
+                        Right Nothing -> pure (Left turnNotFound)
+                        Right (Just _) ->
+                            pure (Left turnAgentsUnavailable)
                 Just agents ->
                     pure $
                         Right $
@@ -595,15 +602,21 @@ resolveHumanRequestResponse
                     boundary
                     (RequestId (Text.toLower rawRequestId))
                     response >>= \case
-                        Left message ->
+                        Left HumanRequestResolutionNotFound ->
+                            pure (Left humanRequestNotFound)
+                        Left
+                            (HumanRequestResolutionStoreUnavailable message) ->
                             pure $
                                 Left ApiError
-                                    { apiErrorStatus =
-                                        if "not found"
-                                            `Text.isInfixOf`
-                                                Text.toLower message
-                                        then 404
-                                        else 409
+                                    { apiErrorStatus = 503
+                                    , apiErrorCode = "store_unavailable"
+                                    , apiErrorMessage = message
+                                    , apiErrorDetails = Nothing
+                                    }
+                        Left (HumanRequestResolutionConflict message) ->
+                            pure $
+                                Left ApiError
+                                    { apiErrorStatus = 409
                                     , apiErrorCode = "request_not_resolved"
                                     , apiErrorMessage = message
                                     , apiErrorDetails = Nothing
@@ -1548,6 +1561,15 @@ turnNotFound = ApiError
     { apiErrorStatus = 404
     , apiErrorCode = "turn_not_found"
     , apiErrorMessage = "turn not found"
+    , apiErrorDetails = Nothing
+    }
+
+turnAgentsUnavailable :: ApiError
+turnAgentsUnavailable = ApiError
+    { apiErrorStatus = 409
+    , apiErrorCode = "turn_agents_unavailable"
+    , apiErrorMessage =
+        "turn agent snapshot is unavailable on this server instance"
     , apiErrorDetails = Nothing
     }
 

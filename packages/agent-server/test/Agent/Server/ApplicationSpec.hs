@@ -191,6 +191,66 @@ spec = describe "agent-server WAI application" do
             response.simpleStatus `shouldBe` status200
             takeMVar observed `shouldReturn` Just expectedTurnId
 
+    it "returns 503 when durable human request resolution loses the store" do
+        let requestId = "01999999-1111-7111-8111-111111111121"
+            backend =
+                fakeBackend
+                    { backendTurnPersistence =
+                        inMemoryTurnPersistence
+                            { turnPersistenceResolveHumanRequest =
+                                \_ _ _ ->
+                                    pure (Left "PostgreSQL is unavailable")
+                            }
+                    }
+        withBackendApplication backend immediateRunner \application -> do
+            response <-
+                perform
+                    application
+                    methodPost
+                    ["v1", "requests", requestId, "resolve"]
+                    validHeaders
+                    "{\"decision\":\"approve\"}"
+            response.simpleStatus `shouldBe` status503
+            LBS8.unpack response.simpleBody
+                `shouldContain` "\"code\":\"store_unavailable\""
+
+    it "distinguishes a remote turn from an unavailable agent snapshot" do
+        createdAt <- getCurrentTime
+        let turnId = TurnId "01999999-1111-7111-8111-111111111122"
+            remoteTurn boundary =
+                TurnRecord
+                    { turnRecordId = turnId
+                    , turnRecordSessionId = "session-a"
+                    , turnRecordClientRequestId =
+                        ClientRequestId
+                            "01999999-1111-7111-8111-111111111123"
+                    , turnRecordBoundary = boundary
+                    , turnRecordStatus = TurnRunning
+                    , turnRecordCreatedAt = createdAt
+                    , turnRecordStartedAt = Just createdAt
+                    , turnRecordFinishedAt = Nothing
+                    , turnRecordError = Nothing
+                    }
+            backend =
+                fakeBackend
+                    { backendLookupTurn = \boundary requestedTurnId ->
+                        pure . Right $
+                            if requestedTurnId == turnId
+                                then Just (remoteTurn boundary)
+                                else Nothing
+                    }
+        withBackendApplication backend immediateRunner \application -> do
+            response <-
+                perform
+                    application
+                    methodGet
+                    ["v1", "turns", turnId.unTurnId, "agents"]
+                    validHeaders
+                    ""
+            response.simpleStatus `shouldBe` status409
+            LBS8.unpack response.simpleBody
+                `shouldContain` "\"code\":\"turn_agents_unavailable\""
+
     it "re-admits an owned queued reservation missing from memory" do
         createdAt <- getCurrentTime
         ran <- newEmptyMVar

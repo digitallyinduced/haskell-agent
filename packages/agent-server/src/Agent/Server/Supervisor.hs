@@ -13,6 +13,7 @@ module Agent.Server.Supervisor
     , TurnRunner
     , TurnBoundaryGuard
     , HumanRequestPersistenceResolution(..)
+    , HumanRequestResolutionError(..)
     , HumanRequestCleanup(..)
     , TurnPersistence(..)
     , inMemoryTurnPersistence
@@ -158,6 +159,12 @@ data HumanRequestPersistenceResolution
     = HumanRequestResolvedDurably !HumanRequest
     | HumanRequestNotFoundDurably
     | HumanRequestLocalOnly
+    deriving (Eq, Show)
+
+data HumanRequestResolutionError
+    = HumanRequestResolutionNotFound
+    | HumanRequestResolutionConflict !Text
+    | HumanRequestResolutionStoreUnavailable !Text
     deriving (Eq, Show)
 
 data HumanRequestCleanup
@@ -896,7 +903,7 @@ resolveHumanRequest
     -> AccessBoundary
     -> RequestId
     -> HumanResponse
-    -> IO (Either Text HumanRequest)
+    -> IO (Either HumanRequestResolutionError HumanRequest)
 resolveHumanRequest supervisor boundary requestId response = do
     durable <-
         supervisor.supervisorPersistence.turnPersistenceResolveHumanRequest
@@ -904,9 +911,10 @@ resolveHumanRequest supervisor boundary requestId response = do
             requestId
             response
     case durable of
-        Left err -> pure (Left err)
+        Left err ->
+            pure (Left (HumanRequestResolutionStoreUnavailable err))
         Right HumanRequestNotFoundDurably ->
-            pure (Left "request not found")
+            pure (Left HumanRequestResolutionNotFound)
         Right (HumanRequestResolvedDurably request) ->
             resolveLocal (Just request)
         Right HumanRequestLocalOnly ->
@@ -920,12 +928,12 @@ resolveHumanRequest supervisor boundary requestId response = do
                 Nothing ->
                     pure $
                         maybe
-                            (Left "request not found")
+                            (Left HumanRequestResolutionNotFound)
                             Right
                             durableRequest
                 Just pending
                     | pending.pendingInputView.humanRequestBoundary /= boundary ->
-                        pure (Left "request not found")
+                        pure (Left HumanRequestResolutionNotFound)
                     | durableRequest == Nothing
                         && not
                             ( validHumanAnswer
@@ -934,7 +942,9 @@ resolveHumanRequest supervisor boundary requestId response = do
                             ) ->
                         pure
                             ( Left
-                                "decision is not one of the allowed options"
+                                ( HumanRequestResolutionConflict
+                                    "decision is not one of the allowed options"
+                                )
                             )
                     | otherwise -> do
                         accepted <-
@@ -945,7 +955,9 @@ resolveHumanRequest supervisor boundary requestId response = do
                             then
                                 pure
                                     ( Left
-                                        "request has already been resolved"
+                                        ( HumanRequestResolutionConflict
+                                            "request has already been resolved"
+                                        )
                                     )
                             else
                                 case completePendingInputInState
@@ -954,7 +966,8 @@ resolveHumanRequest supervisor boundary requestId response = do
                                         requestId
                                         state of
                                     Nothing ->
-                                        pure (Left "request not found")
+                                        pure
+                                            (Left HumanRequestResolutionNotFound)
                                     Just (request, event, state') -> do
                                         writeTVar
                                             supervisor.supervisorState

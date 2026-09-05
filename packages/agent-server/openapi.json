@@ -462,6 +462,14 @@
               }
             }
           },
+          "409": {
+            "description": "The turn exists, but its process-local agent snapshot is unavailable on this server instance.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          },
           "default": { "$ref": "#/components/responses/Error" }
         }
       }
