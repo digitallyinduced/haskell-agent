@@ -70,9 +70,7 @@ import Codec.Picture
 import Codec.Picture.Types (convertImage)
 import Control.Concurrent
     ( MVar
-    , modifyMVar
     , modifyMVarMasked
-    , modifyMVar_
     , newEmptyMVar
     , newMVar
     , readMVar
@@ -980,20 +978,24 @@ invalidatePortalStateWhenWith
     -> Text
     -> (session -> IO ())
     -> IO ()
-invalidatePortalStateWhenWith stateVar matches err closeSession =
-    mask \restore -> do
-        session <-
-            modifyMVar stateVar \case
-                PortalReady value
-                    | matches value ->
-                        pure (PortalFailed err, Just value)
-                state -> pure (state, Nothing)
-        forM_ session \value ->
-            restore (closeSession value)
-                `finally`
-                    modifyMVar_ stateVar \case
-                        PortalFailed _ -> pure PortalUninitialized
-                        state -> pure state
+invalidatePortalStateWhenWith stateVar matches _err closeSession =
+    Exception.mask \restore -> do
+        let closeAndReset session = do
+                closed <-
+                    tryAllExceptions (restore (closeSession session))
+                pure case closed of
+                    Left exception ->
+                        (PortalClosing session, Left exception)
+                    Right () ->
+                        (PortalUninitialized, Right ())
+            step = \case
+                PortalReady session
+                    | matches session -> closeAndReset session
+                PortalClosing session
+                    | matches session -> closeAndReset session
+                state -> pure (state, Right ())
+        outcome <- modifyMVarMasked stateVar step
+        either Exception.throwIO pure outcome
 
 withPortalStateInvalidation
     :: MVar (PortalState session)

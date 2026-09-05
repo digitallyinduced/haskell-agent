@@ -51,7 +51,7 @@ mkDerivation {
     aeson agent-core agent-json agent-mcp agent-responses
     agent-responses-types agent-store async base brick bytestring
     containers deepseq directory filepath JuicyPixels process
-    safe-exceptions text time unix vty
+    safe-exceptions stm text time unix vty
   ];
   description = "Command-line interface for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

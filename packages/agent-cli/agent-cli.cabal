@@ -451,6 +451,8 @@ benchmark portal-capture-bench
                     , bytestring
                     , process >= 1.6.26
                     , safe-exceptions
+                    , stm
+                    , text
                     , unix
 
 test-suite agent-cli-test

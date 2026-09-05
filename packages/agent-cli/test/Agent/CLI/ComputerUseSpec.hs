@@ -1303,9 +1303,6 @@ spec = do
                     closeSession)
                 \invalidating -> do
                     takeMVar closeStarted
-                    ensurePortalStateReadyWith state initialize
-                        `shouldReturn`
-                            Left "portal session closed remotely"
                     putMVar allowClose ()
                     waitCatch invalidating
                         >>= (`shouldSatisfy`
@@ -1316,6 +1313,46 @@ spec = do
                 `shouldReturn` Right ()
             readIORef closed `shouldReturn` ["stale session"]
             readIORef attempts `shouldReturn` 1
+
+        it "retains an invalidated session until cancelled cleanup is retried" do
+            state <-
+                newMVar (PortalReady ("stale session" :: Text.Text))
+            attempts <- newIORef (0 :: Int)
+            closeStarted <- newEmptyMVar
+            blocker <- newEmptyMVar
+            let closeSession _ = do
+                    attempt <-
+                        atomicModifyIORef' attempts \current ->
+                            let next = current + 1
+                            in (next, next)
+                    if attempt == 1
+                        then putMVar closeStarted () >> takeMVar blocker
+                        else pure ()
+                invalidate =
+                    invalidatePortalStateWhenWith
+                        state
+                        (== "stale session")
+                        "portal session closed remotely"
+                        closeSession
+            withAsync invalidate \invalidating -> do
+                takeMVar closeStarted
+                cancel invalidating
+                waitCatch invalidating
+                    >>= (`shouldSatisfy`
+                        either (const True) (const False))
+            readMVar state >>= \case
+                PortalClosing session ->
+                    session `shouldBe` "stale session"
+                _ ->
+                    expectationFailure
+                        "cancelled invalidation lost the portal session"
+            invalidate
+            readMVar state >>= \case
+                PortalUninitialized -> pure ()
+                _ ->
+                    expectationFailure
+                        "retried invalidation did not release the portal session"
+            readIORef attempts `shouldReturn` 2
 
         it "reads consecutive frames from one persistent PNG stream" do
             let firstFrame =

@@ -1,15 +1,31 @@
 module Main (main) where
 
 import Agent.CLI.ComputerUse.Linux.Portal
-    ( PortalPngFrame(..)
+    ( CapturedPortalFrame(..)
+    , PortalFrameState(..)
+    , PortalPngFrame(..)
+    , beginPortalCaptureRequestWith
+    , publishPortalFrameWith
     , readPortalPngFrame
-    , withPortalCaptureRunningWith
+    , waitForPortalFrameAfter
     )
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (race)
+import Control.Concurrent
+    ( MVar
+    , newMVar
+    , threadDelay
+    , withMVar
+    )
+import Control.Concurrent.Async (race, withAsync)
+import Control.Concurrent.STM
+    ( TVar
+    , newTVarIO
+    , readTVarIO
+    )
 import Control.Exception.Safe
     ( bracket
     , catchAny
+    , finally
+    , mask
     , onException
     , tryAny
     )
@@ -22,11 +38,14 @@ import Control.Monad
     )
 import qualified Data.ByteString as BS
 import Data.IORef
-    ( modifyIORef'
+    ( IORef
+    , modifyIORef'
     , newIORef
     , readIORef
     )
 import Data.List (sort)
+import qualified Data.Text as Text
+import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Stats
     ( RTSStats(..)
@@ -76,6 +95,16 @@ data Workload
 data RunningCapture = RunningCapture
     { runningCaptureProcess :: !ProcessHandle
     , runningCaptureOutput :: !Handle
+    }
+
+data GenerationAwareCapture = GenerationAwareCapture
+    { generationCaptureProcess :: !ProcessHandle
+    , generationCaptureOutput :: !Handle
+    , generationCaptureFrameState :: !(TVar PortalFrameState)
+    , generationCaptureRequestLock :: !(MVar ())
+    , generationCaptureRequestGeneration :: !(TVar Word64)
+    , generationCaptureProcessLock :: !(MVar ())
+    , generationCaptureTotals :: !(IORef FrameTotals)
     }
 
 data FrameTotals = FrameTotals
@@ -237,37 +266,109 @@ printSample workloadName strategyName sampleCount sample =
 
 runStrategy :: Strategy -> Workload -> Int -> Int -> IO FrameTotals
 runStrategy strategy workload width height =
-    withSyntheticCapture width height \capture -> do
-        let resume =
-                signalCaptureProcess
-                    Posix.sigCONT
-                    capture.runningCaptureProcess
-            suspend =
-                signalCaptureProcess
-                    Posix.sigSTOP
-                    capture.runningCaptureProcess
-            readFrame = readFrameTotals capture.runningCaptureOutput
-        initial <- case strategy of
-            Continuous -> readFrame
-            RequestGated ->
-                withPortalCaptureRunningWith resume suspend readFrame
-        workloadTotals <- case (strategy, workload) of
-            (Continuous, Idle milliseconds) ->
-                drainFramesFor (milliseconds * 1000) readFrame
-            (RequestGated, Idle milliseconds) -> do
+    withSyntheticCapture width height \capture ->
+        case strategy of
+            Continuous -> runContinuousStrategy capture workload
+            RequestGated -> runGenerationAwareStrategy capture workload
+
+runContinuousStrategy :: RunningCapture -> Workload -> IO FrameTotals
+runContinuousStrategy capture workload = do
+    let readFrame = readFrameTotals capture.runningCaptureOutput
+    initial <- readFrame
+    workloadTotals <- case workload of
+        Idle milliseconds ->
+            drainFramesFor (milliseconds * 1000) readFrame
+        Active captures ->
+            combineFrameTotals <$> replicateM captures readFrame
+    pure (addFrameTotals initial workloadTotals)
+
+runGenerationAwareStrategy :: RunningCapture -> Workload -> IO FrameTotals
+runGenerationAwareStrategy capture workload = do
+    frameState <- newTVarIO PortalFramePending
+    requestLock <- newMVar ()
+    requestGeneration <- newTVarIO 0
+    processLock <- newMVar ()
+    totals <- newIORef emptyFrameTotals
+    let generationCapture = GenerationAwareCapture
+            { generationCaptureProcess = capture.runningCaptureProcess
+            , generationCaptureOutput = capture.runningCaptureOutput
+            , generationCaptureFrameState = frameState
+            , generationCaptureRequestLock = requestLock
+            , generationCaptureRequestGeneration = requestGeneration
+            , generationCaptureProcessLock = processLock
+            , generationCaptureTotals = totals
+            }
+    withAsync (runGenerationAwareReader generationCapture) \_reader -> do
+        void (waitForGenerationFrame generationCapture 0)
+        case workload of
+            Idle milliseconds -> do
                 threadDelay (milliseconds * 1000)
-                pure emptyFrameTotals
-            (Continuous, Active captures) ->
-                combineFrameTotals <$> replicateM captures readFrame
-            (RequestGated, Active captures) ->
-                combineFrameTotals
-                    <$> replicateM
+                readIORef totals
+            Active captures ->
+                void
+                    (replicateM
                         captures
-                        (withPortalCaptureRunningWith
-                            resume
-                            suspend
-                            readFrame)
-        pure (addFrameTotals initial workloadTotals)
+                        (captureGenerationAwareFrame generationCapture))
+                    >> readIORef totals
+
+runGenerationAwareReader :: GenerationAwareCapture -> IO ()
+runGenerationAwareReader capture = loop 0
+  where
+    loop frameGeneration = do
+        pngFrame <- readPortalPngFrame capture.generationCaptureOutput
+        modifyIORef'
+            capture.generationCaptureTotals
+            (`addFrameTotals` portalFrameTotals pngFrame)
+        published <-
+            publishPortalFrameWith
+                capture.generationCaptureProcessLock
+                capture.generationCaptureRequestGeneration
+                capture.generationCaptureFrameState
+                (suspendGenerationCapture capture)
+                frameGeneration
+                pngFrame
+        nextGeneration <-
+            if published
+                then pure frameGeneration
+                else readTVarIO capture.generationCaptureRequestGeneration
+        loop nextGeneration
+
+captureGenerationAwareFrame
+    :: GenerationAwareCapture
+    -> IO CapturedPortalFrame
+captureGenerationAwareFrame capture =
+    withMVar capture.generationCaptureRequestLock \() ->
+        mask \restore -> do
+            baseline <-
+                beginPortalCaptureRequestWith
+                    capture.generationCaptureProcessLock
+                    capture.generationCaptureRequestGeneration
+                    capture.generationCaptureFrameState
+                    (resumeGenerationCapture capture)
+            restore (waitForGenerationFrame capture baseline)
+                `finally`
+                    withMVar
+                        capture.generationCaptureProcessLock
+                        (const (suspendGenerationCapture capture))
+
+waitForGenerationFrame
+    :: GenerationAwareCapture
+    -> Word64
+    -> IO CapturedPortalFrame
+waitForGenerationFrame capture baseline =
+    waitForPortalFrameAfter
+        1_000_000
+        baseline
+        capture.generationCaptureFrameState
+        >>= either (fail . Text.unpack) pure
+
+resumeGenerationCapture :: GenerationAwareCapture -> IO ()
+resumeGenerationCapture capture =
+    signalCaptureProcess Posix.sigCONT capture.generationCaptureProcess
+
+suspendGenerationCapture :: GenerationAwareCapture -> IO ()
+suspendGenerationCapture capture =
+    signalCaptureProcess Posix.sigSTOP capture.generationCaptureProcess
 
 drainFramesFor :: Int -> IO FrameTotals -> IO FrameTotals
 drainFramesFor microseconds readFrame = do
@@ -285,12 +386,16 @@ drainFramesFor microseconds readFrame = do
 readFrameTotals :: Handle -> IO FrameTotals
 readFrameTotals input = do
     frame <- readPortalPngFrame input
+    pure (portalFrameTotals frame)
+
+portalFrameTotals :: PortalPngFrame -> FrameTotals
+portalFrameTotals frame =
     let byteCount = toInteger (BS.length frame.portalPngFrameBytes)
         checksum =
             byteCount
                 + toInteger frame.portalPngFrameWidth
                 + toInteger frame.portalPngFrameHeight
-    pure FrameTotals
+    in FrameTotals
         { frameTotalCount = 1
         , frameTotalBytes = byteCount
         , frameTotalChecksum = checksum
