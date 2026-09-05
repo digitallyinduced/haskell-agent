@@ -34,7 +34,7 @@ import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -716,6 +716,85 @@ spec = describe "turn supervisor" do
             listHumanRequests supervisor localAccessBoundary Nothing
                 `shouldReturn` Right []
 
+    it "bounds merged human request pages without truncating a turn lookup" do
+        now <- getCurrentTime
+        let durableTurnId =
+                TurnId "01999999-3333-7333-8333-333333333333"
+            durableRequests =
+                [ HumanRequest
+                    { humanRequestId =
+                        RequestId
+                            ( "01999999-4444-7444-8444-"
+                                <> Text.justifyRight
+                                    12
+                                    '0'
+                                    (Text.pack (show index))
+                            )
+                    , humanRequestTurnId = durableTurnId
+                    , humanRequestSessionId = "durable-session"
+                    , humanRequestBoundary = localAccessBoundary
+                    , humanRequestKind = ToolApprovalRequest
+                    , humanRequestPrompt = "Approve durable request?"
+                    , humanRequestOptions = ["approve", "cancel"]
+                    , humanRequestCreatedAt = addUTCTime (-3600) now
+                    }
+                | index <- [1 .. 201 :: Int]
+                ]
+            persistence =
+                inMemoryTurnPersistence
+                    { turnPersistenceListHumanRequests =
+                        \boundary turnId ->
+                            pure . Right $
+                                [ request
+                                | request <- durableRequests
+                                , request.humanRequestBoundary == boundary
+                                , maybe
+                                    True
+                                    (== request.humanRequestTurnId)
+                                    turnId
+                                ]
+                    }
+            runner control _ = do
+                void $
+                    control.turnControlRequestInput
+                        HumanRequestSpec
+                            { humanRequestSpecKind = PlanQuestionRequest
+                            , humanRequestSpecPrompt = "Choose"
+                            , humanRequestSpecOptions = ["continue"]
+                            }
+                pure (Right testOutput)
+        bracket
+            ( newSupervisorWithBoundaryGuardAndPersistence
+                defaultConfig
+                (\_ action -> Right <$> action)
+                persistence
+                runner
+            )
+            closeSupervisor
+            \supervisor -> do
+                localTurn <-
+                    submitTurn supervisor (turnSpec "session-a")
+                        >>= expectRight
+                localRequest <-
+                    awaitRequestForTurn
+                        supervisor
+                        localTurn.turnRecordId
+                globalRequests <-
+                    listHumanRequests
+                        supervisor
+                        localAccessBoundary
+                        Nothing
+                        >>= expectRight
+                length globalRequests `shouldBe` 200
+                localRequest `elem` globalRequests `shouldBe` True
+                exactRequests <-
+                    listHumanRequests
+                        supervisor
+                        localAccessBoundary
+                        (Just durableTurnId)
+                        >>= expectRight
+                exactRequests `shouldMatchList` durableRequests
+
     it "hands human input across supervisor instances" do
         sharedRequests <- newTVarIO Map.empty
         resolved <- newEmptyMVar
@@ -994,7 +1073,14 @@ awaitTurnStatus supervisor turnId expected =
                 >> awaitTurnStatus supervisor turnId expected
 
 awaitRequest :: Supervisor -> IO HumanRequest
-awaitRequest supervisor = go (100 :: Int)
+awaitRequest supervisor = awaitRequestMatching supervisor Nothing
+
+awaitRequestForTurn :: Supervisor -> TurnId -> IO HumanRequest
+awaitRequestForTurn supervisor turnId =
+    awaitRequestMatching supervisor (Just turnId)
+
+awaitRequestMatching :: Supervisor -> Maybe TurnId -> IO HumanRequest
+awaitRequestMatching supervisor turnId = go (100 :: Int)
   where
     go attempts
         | attempts <= 0 =
@@ -1004,7 +1090,7 @@ awaitRequest supervisor = go (100 :: Int)
             listHumanRequests
                 supervisor
                 localAccessBoundary
-                Nothing
+                turnId
                 >>= \case
                     Right (request : _) -> pure request
                     Right [] -> threadDelay 10000 >> go (attempts - 1)

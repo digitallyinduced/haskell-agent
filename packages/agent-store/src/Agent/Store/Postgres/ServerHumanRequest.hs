@@ -363,7 +363,7 @@ listServerHumanRequestsStatement =
                \ AND ($3::uuid IS NULL OR server_request.turn_id = $3::uuid)\
                \ ORDER BY server_request.created_at DESC,\
                \ server_request.request_id DESC\
-               \ LIMIT 200"
+               \ LIMIT CASE WHEN $3::uuid IS NULL THEN 200 END"
         )
         ( boundaryEncoder fst
             <> ( snd

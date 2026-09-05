@@ -894,13 +894,23 @@ listHumanRequests supervisor boundary turnId = do
     pure do
         persisted <- durable
         let combined = persisted <> local
+            sorted =
+                sortOn
+                    ( \request ->
+                        ( Down request.humanRequestCreatedAt
+                        , Down request.humanRequestId
+                        )
+                    )
+                    ( Map.elems $
+                        Map.fromList
+                            [ (request.humanRequestId, request)
+                            | request <- combined
+                            ]
+                    )
         pure $
-            sortOn (Down . (.humanRequestCreatedAt)) $
-                Map.elems $
-                    Map.fromList
-                        [ (request.humanRequestId, request)
-                        | request <- combined
-                        ]
+            case turnId of
+                Nothing -> take maximumHumanRequestPageSize sorted
+                Just _ -> sorted
 
 resolveHumanRequest
     :: Supervisor
@@ -2199,6 +2209,9 @@ humanRequestCleanupTimeoutMicros = 1000 * 1000
 
 maximumHumanRequestBytes :: Int64
 maximumHumanRequestBytes = 64 * 1024
+
+maximumHumanRequestPageSize :: Int
+maximumHumanRequestPageSize = 200
 
 terminalPersistenceShutdownTimeoutMicros :: Int
 terminalPersistenceShutdownTimeoutMicros = 5 * 1000 * 1000
