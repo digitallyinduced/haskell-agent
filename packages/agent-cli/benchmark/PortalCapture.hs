@@ -4,9 +4,14 @@ import Agent.CLI.ComputerUse.Linux.Portal
     ( CapturedPortalFrame(..)
     , PortalFrameState(..)
     , PortalPngFrame(..)
+    , PortalPngFrameBuffer
     , beginPortalCaptureRequestWith
-    , publishPortalFrameWith
+    , drainPortalPngFrameBuffer
+    , newPortalPngFrameBuffer
+    , pausePortalCaptureProcessAndWait
     , readPortalPngFrame
+    , readPortalPngFrameBuffered
+    , runPortalFrameReaderWith
     , waitForPortalFrameAfter
     )
 import Control.Concurrent
@@ -19,12 +24,11 @@ import Control.Concurrent.Async (race, withAsync)
 import Control.Concurrent.STM
     ( TVar
     , newTVarIO
-    , readTVarIO
     )
+import qualified Control.Exception as Exception
 import Control.Exception.Safe
     ( bracket
     , catchAny
-    , finally
     , mask
     , onException
     , tryAny
@@ -55,9 +59,11 @@ import GHC.Stats
 import System.CPUTime (getCPUTime)
 import System.Environment (getArgs)
 import System.IO
-    ( Handle
+    ( BufferMode(NoBuffering)
+    , Handle
     , hClose
     , hSetBinaryMode
+    , hSetBuffering
     )
 import System.Mem (performMajorGC)
 import System.Posix.Process
@@ -104,6 +110,7 @@ data GenerationAwareCapture = GenerationAwareCapture
     , generationCaptureRequestLock :: !(MVar ())
     , generationCaptureRequestGeneration :: !(TVar Word64)
     , generationCaptureProcessLock :: !(MVar ())
+    , generationCaptureBuffer :: !PortalPngFrameBuffer
     , generationCaptureTotals :: !(IORef FrameTotals)
     }
 
@@ -289,6 +296,7 @@ runGenerationAwareStrategy capture workload = do
     requestGeneration <- newTVarIO 0
     processLock <- newMVar ()
     totals <- newIORef emptyFrameTotals
+    buffer <- newPortalPngFrameBuffer
     let generationCapture = GenerationAwareCapture
             { generationCaptureProcess = capture.runningCaptureProcess
             , generationCaptureOutput = capture.runningCaptureOutput
@@ -296,6 +304,7 @@ runGenerationAwareStrategy capture workload = do
             , generationCaptureRequestLock = requestLock
             , generationCaptureRequestGeneration = requestGeneration
             , generationCaptureProcessLock = processLock
+            , generationCaptureBuffer = buffer
             , generationCaptureTotals = totals
             }
     withAsync (runGenerationAwareReader generationCapture) \_reader -> do
@@ -312,26 +321,24 @@ runGenerationAwareStrategy capture workload = do
                     >> readIORef totals
 
 runGenerationAwareReader :: GenerationAwareCapture -> IO ()
-runGenerationAwareReader capture = loop 0
-  where
-    loop frameGeneration = do
-        pngFrame <- readPortalPngFrame capture.generationCaptureOutput
-        modifyIORef'
-            capture.generationCaptureTotals
-            (`addFrameTotals` portalFrameTotals pngFrame)
-        published <-
-            publishPortalFrameWith
-                capture.generationCaptureProcessLock
-                capture.generationCaptureRequestGeneration
-                capture.generationCaptureFrameState
-                (suspendGenerationCapture capture)
-                frameGeneration
-                pngFrame
-        nextGeneration <-
-            if published
-                then pure frameGeneration
-                else readTVarIO capture.generationCaptureRequestGeneration
-        loop nextGeneration
+runGenerationAwareReader capture =
+    runPortalFrameReaderWith
+        (readPortalPngFrameBuffered
+            capture.generationCaptureOutput
+            capture.generationCaptureBuffer)
+        (\pngFrame ->
+            modifyIORef'
+                capture.generationCaptureTotals
+                (`addFrameTotals` portalFrameTotals pngFrame))
+        capture.generationCaptureProcessLock
+        capture.generationCaptureRequestGeneration
+        capture.generationCaptureFrameState
+        (do
+            pausePortalCaptureProcessAndWait
+                capture.generationCaptureProcess
+            drainPortalPngFrameBuffer
+                capture.generationCaptureOutput
+                capture.generationCaptureBuffer)
 
 captureGenerationAwareFrame
     :: GenerationAwareCapture
@@ -346,7 +353,7 @@ captureGenerationAwareFrame capture =
                     capture.generationCaptureFrameState
                     (resumeGenerationCapture capture)
             restore (waitForGenerationFrame capture baseline)
-                `finally`
+                `Exception.onException`
                     withMVar
                         capture.generationCaptureProcessLock
                         (const (suspendGenerationCapture capture))
@@ -473,6 +480,7 @@ startSyntheticCapture width height = do
                         , runningCaptureOutput = output
                         }
             hSetBinaryMode output True
+                >> hSetBuffering output NoBuffering
                 `onException` stopSyntheticCapture capture
             pure capture
         _ -> fail "Unable to capture the synthetic GStreamer output."

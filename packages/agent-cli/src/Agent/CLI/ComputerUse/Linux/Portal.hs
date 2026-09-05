@@ -3,6 +3,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , PortalBackendState(..)
     , PortalFrameState(..)
     , PortalPngFrame(..)
+    , PortalPngFrameBuffer
     , PortalState(..)
     , PortalStream(..)
     , beginPortalCaptureRequestWith
@@ -11,6 +12,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , ensurePortalStateReadyWith
     , invalidatePortalStateWhenWith
     , newPortalBackend
+    , newPortalPngFrameBuffer
     , parsePortalStartResults
     , portalDisplayForFrame
     , portalDisplayForStream
@@ -19,16 +21,22 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , portalMouseButtonCode
     , portalRequestPathForSender
     , publishPortalFrameWith
+    , drainPortalPngFrameBuffer
     , readPortalPngFrame
+    , readPortalPngFrameBuffered
     , requestResponseRule
     , runPortalBackendOperationWith
+    , runPortalFrameReaderWith
     , sessionClosedRule
+    , pausePortalCaptureProcessAndWait
     , stopPortalCaptureProcessWith
     , validatePortalOwnerUser
+    , waitForPortalCaptureProcessStatusWith
     , waitForPortalFrameAfter
     , withPortalStateInvalidation
     , withPortalCaptureRunningWith
     , withPortalCaptureReadiness
+    , withPortalCaptureStartupCleanup
     , withPortalInputReadiness
     ) where
 
@@ -85,7 +93,6 @@ import Control.Concurrent.Async
     ( Async
     , async
     , cancel
-    , waitCatch
     )
 import Control.Concurrent.STM
     ( STM
@@ -121,7 +128,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Bits ((.&.), (.|.))
 import Data.Char (isAlphaNum, ord)
 import Data.Int (Int32)
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -165,14 +172,18 @@ import qualified DBus.Socket as Socket
 import DBus.Transport (SocketTransport)
 import Numeric (showHex)
 import System.Entropy (getEntropy)
+import System.Exit (ExitCode(..))
 import System.IO
-    ( Handle
+    ( BufferMode(NoBuffering)
+    , Handle
     , hClose
     , hSetBinaryMode
+    , hSetBuffering
     )
 import System.Posix.IO (closeFd, fdToHandle)
+import System.Posix.Process (ProcessStatus(..), getProcessStatus)
 import qualified System.Posix.Signals as Posix
-import System.Posix.Types (Fd)
+import System.Posix.Types (Fd, ProcessID)
 import System.Process
     ( CreateProcess(..)
     , ProcessHandle
@@ -184,6 +195,7 @@ import System.Process
     , terminateProcess
     , waitForProcess
     )
+import qualified System.Process.Internals as ProcessInternals
 import System.Timeout (timeout)
 
 type PortalOptions = Map Text Variant
@@ -199,6 +211,9 @@ data PortalStream = PortalStream
     , portalStreamMappingId :: !(Maybe Text)
     , portalStreamPipeWireSerial :: !(Maybe Word64)
     } deriving (Eq, Show)
+
+newtype PortalPngFrameBuffer =
+    PortalPngFrameBuffer (IORef BS.ByteString)
 
 data PortalSession = PortalSession
     { portalSessionPath :: !ObjectPath
@@ -1409,7 +1424,7 @@ capturePortalFrame capture =
                     baseline
                     capture.portalCaptureFrameState
                     >>= either (fail . Text.unpack) pure)
-                `finally`
+                `Exception.onException`
                     suspendPortalCaptureWith
                         capture.portalCaptureProcessLock
                         (pausePortalCaptureProcess capture.portalCaptureProcess)
@@ -1596,6 +1611,7 @@ startGstreamerPortalCapture
 startGstreamerPortalCapture pipeWireHandle nodeId = do
     frameState <- newTVarIO PortalFramePending
     errorBuffer <- newTVarIO BS.empty
+    pngBuffer <- newPortalPngFrameBuffer
     requestLock <- newMVar ()
     requestGeneration <- newTVarIO 0
     processLock <- newMVar ()
@@ -1630,45 +1646,50 @@ startGstreamerPortalCapture pipeWireHandle nodeId = do
                 )
         case (maybeOutput, maybeErrors) of
             (Just outputHandle, Just errorHandle) -> do
-                flip onException
-                    (closeBarePortalCapture
-                        processHandle
-                        outputHandle
-                        errorHandle) do
-                            hSetBinaryMode outputHandle True
-                            hSetBinaryMode errorHandle True
-                            errorReader <-
-                                async
-                                    (drainPortalCaptureErrors
-                                        errorHandle
-                                        errorBuffer)
-                            frameReader <-
-                                async
+                withPortalCaptureStartupCleanup
+                    (do
+                        hSetBinaryMode outputHandle True
+                        hSetBuffering outputHandle NoBuffering
+                        hSetBinaryMode errorHandle True
+                        errorReader <-
+                            async
+                                (drainPortalCaptureErrors
+                                    errorHandle
+                                    errorBuffer)
+                        frameReader <-
+                            withPortalCaptureStartupCleanup
+                                (async
                                     (runPortalFrameReader
                                         processHandle
                                         outputHandle
+                                        pngBuffer
                                         errorBuffer
                                         frameState
                                         requestGeneration
-                                        processLock)
-                                    `onException` do
-                                        cancel errorReader
-                                        void (waitCatch errorReader)
-                            let capture = PortalCapture
-                                    { portalCaptureProcess = processHandle
-                                    , portalCaptureOutput = outputHandle
-                                    , portalCaptureErrors = errorHandle
-                                    , portalCaptureFrameReader = frameReader
-                                    , portalCaptureErrorReader = errorReader
-                                    , portalCaptureFrameState = frameState
-                                    , portalCaptureRequestLock = requestLock
-                                    , portalCaptureRequestGeneration =
-                                        requestGeneration
-                                    , portalCaptureProcessLock = processLock
-                                    }
-                            void (restore (latestPortalFrame capture))
-                                `onException` closePortalCapture capture
-                            pure capture
+                                        processLock))
+                                (do
+                                    cancel errorReader)
+                        let capture = PortalCapture
+                                { portalCaptureProcess = processHandle
+                                , portalCaptureOutput = outputHandle
+                                , portalCaptureErrors = errorHandle
+                                , portalCaptureFrameReader = frameReader
+                                , portalCaptureErrorReader = errorReader
+                                , portalCaptureFrameState = frameState
+                                , portalCaptureRequestLock = requestLock
+                                , portalCaptureRequestGeneration =
+                                    requestGeneration
+                                , portalCaptureProcessLock = processLock
+                                }
+                        void $
+                            withPortalCaptureStartupCleanup
+                                (restore (latestPortalFrame capture))
+                                (closePortalCapture capture)
+                        pure capture)
+                    (closeBarePortalCapture
+                        processHandle
+                        outputHandle
+                        errorHandle)
             _ -> do
                 closeBarePortalCaptureWith
                     (stopPortalCaptureProcess processHandle)
@@ -1679,6 +1700,7 @@ startGstreamerPortalCapture pipeWireHandle nodeId = do
 runPortalFrameReader
     :: ProcessHandle
     -> Handle
+    -> PortalPngFrameBuffer
     -> TVar BS.ByteString
     -> TVar PortalFrameState
     -> TVar Word64
@@ -1687,11 +1709,20 @@ runPortalFrameReader
 runPortalFrameReader
         processHandle
         outputHandle
+        pngBuffer
         errorBuffer
         frameState
         requestGeneration
         processLock =
-    loop 0
+    runPortalFrameReaderWith
+        (readPortalPngFrameBuffered outputHandle pngBuffer)
+        (const (pure ()))
+        processLock
+        requestGeneration
+        frameState
+        (do
+            pausePortalCaptureProcessAndWait processHandle
+            drainPortalPngFrameBuffer outputHandle pngBuffer)
         `catchAny` \exception -> do
             details <- portalCaptureErrorDetails errorBuffer
             let err
@@ -1706,21 +1737,38 @@ runPortalFrameReader
                         modifyTVar' frameState \case
                             failed@(PortalFrameFailed _) -> failed
                             _ -> PortalFrameFailed err
+runPortalFrameReaderWith
+    :: IO PortalPngFrame
+    -> (PortalPngFrame -> IO ())
+    -> MVar ()
+    -> TVar Word64
+    -> TVar PortalFrameState
+    -> IO ()
+    -> IO ()
+runPortalFrameReaderWith
+        readFrame
+        observeFrame
+        processLock
+        requestGeneration
+        frameState
+        quiesce =
+    loop 0
   where
-    -- Carry the generation chosen before each blocking read. A request bumps
-    -- the generation before resuming GStreamer, so a PNG that was already
-    -- buffered or in progress while idle cannot satisfy that request.
+    -- The capture graph has no explicit queue.  A stop acknowledgement and
+    -- pipe drain forms the request boundary; retaining a partial PNG means the
+    -- first post-resume frame is conservatively attributed to the old request.
     loop frameGeneration = do
-        pngFrame <- readPortalPngFrame outputHandle
-        (_, nextGeneration) <-
+        pngFrame <- readFrame
+        observeFrame pngFrame
+        (_, currentGeneration) <-
             publishPortalFrameForReaderWith
                 processLock
                 requestGeneration
                 frameState
-                (pausePortalCaptureProcess processHandle)
+                quiesce
                 frameGeneration
                 pngFrame
-        loop nextGeneration
+        loop currentGeneration
 
 drainPortalCaptureErrors
     :: Handle
@@ -1744,8 +1792,25 @@ portalCaptureErrorDetails errorBuffer =
         <$> readTVarIO errorBuffer
 
 readPortalPngFrame :: Handle -> IO PortalPngFrame
-readPortalPngFrame input = do
-    signature <- readPortalBytes input (BS.length pngSignature)
+readPortalPngFrame input =
+    readPortalPngFrameWith (readPortalBytes input)
+
+newPortalPngFrameBuffer :: IO PortalPngFrameBuffer
+newPortalPngFrameBuffer =
+    PortalPngFrameBuffer <$> newIORef BS.empty
+
+readPortalPngFrameBuffered
+    :: Handle
+    -> PortalPngFrameBuffer
+    -> IO PortalPngFrame
+readPortalPngFrameBuffered input buffer =
+    readPortalPngFrameWith (readPortalBufferedBytes input buffer)
+
+readPortalPngFrameWith
+    :: (Int -> IO BS.ByteString)
+    -> IO PortalPngFrame
+readPortalPngFrameWith readBytes = do
+    signature <- readBytes (BS.length pngSignature)
     unless (signature == pngSignature) $
         fail "GStreamer returned an invalid PNG stream."
     chunks <- readChunks [] (toInteger (BS.length signature))
@@ -1758,7 +1823,7 @@ readPortalPngFrame input = do
         }
   where
     readChunks chunks consumed = do
-        header <- readPortalBytes input 8
+        header <- readBytes 8
         let payloadLength =
                 portalBigEndianWord (BS.take 4 header)
             chunkType = BS.drop 4 header
@@ -1768,9 +1833,7 @@ readPortalPngFrame input = do
                 || consumed + chunkBytes > maximumPortalPngBytes) $
             fail "The portal PNG frame is too large."
         body <-
-            readPortalBytes
-                input
-                (fromInteger payloadLength + 4)
+            readBytes (fromInteger payloadLength + 4)
         let chunk = header <> body
         if chunkType == "IEND"
             then do
@@ -1781,6 +1844,81 @@ readPortalPngFrame input = do
                 readChunks
                     (chunk : chunks)
                     (consumed + chunkBytes)
+
+readPortalBufferedBytes
+    :: Handle
+    -> PortalPngFrameBuffer
+    -> Int
+    -> IO BS.ByteString
+readPortalBufferedBytes input (PortalPngFrameBuffer buffer) byteCount = do
+    buffered <- readIORef buffer
+    let (prefix, retained) = BS.splitAt byteCount buffered
+    writeIORef buffer retained
+    if BS.length prefix == byteCount
+        then pure prefix
+        else
+            (prefix <>)
+                <$> readPortalBytes
+                    input
+                    (byteCount - BS.length prefix)
+
+-- The caller must have stopped and acknowledged the writer before draining.
+-- Empty nonblocking reads are therefore a stable pipe boundary, not a race
+-- with a concurrently writing GStreamer process.
+drainPortalPngFrameBuffer
+    :: Handle
+    -> PortalPngFrameBuffer
+    -> IO ()
+drainPortalPngFrameBuffer input (PortalPngFrameBuffer buffer) = do
+    buffered <- readIORef buffer
+    available <- readAvailable []
+    retained <- discardCompleteFrames (buffered <> BS.concat (reverse available))
+    writeIORef buffer (BS.copy retained)
+  where
+    readAvailable chunks = do
+        chunk <- BS.hGetNonBlocking input 65536
+        if BS.null chunk
+            then pure chunks
+            else readAvailable (chunk : chunks)
+
+    discardCompleteFrames bytes =
+        portalPngFrameLength bytes >>= \case
+            Nothing -> pure bytes
+            Just frameLength -> do
+                let frameBytes = BS.take frameLength bytes
+                void (validatePortalPngHeader frameBytes)
+                discardCompleteFrames (BS.drop frameLength bytes)
+
+portalPngFrameLength :: BS.ByteString -> IO (Maybe Int)
+portalPngFrameLength bytes
+    | BS.length bytes < BS.length pngSignature = pure Nothing
+    | BS.take (BS.length pngSignature) bytes /= pngSignature =
+        fail "GStreamer returned an invalid PNG stream."
+    | otherwise = chunks (BS.length pngSignature)
+  where
+    chunks consumed
+        | BS.length bytes < consumed + 8 = pure Nothing
+        | otherwise = do
+            let payloadLength =
+                    portalBigEndianWord
+                        (BS.take 4 (BS.drop consumed bytes))
+                chunkType = BS.take 4 (BS.drop (consumed + 4) bytes)
+                chunkBytes = payloadLength + 12
+                nextConsumed = toInteger consumed + chunkBytes
+            when
+                (payloadLength > toInteger (maxBound :: Int)
+                    || nextConsumed > maximumPortalPngBytes) $
+                fail "The portal PNG frame is too large."
+            if toInteger (BS.length bytes) < nextConsumed
+                then pure Nothing
+                else
+                    if chunkType == "IEND"
+                        then do
+                            unless (payloadLength == 0) $
+                                fail
+                                    "The portal PNG frame has an invalid terminator."
+                            pure (Just (fromInteger nextConsumed))
+                        else chunks (fromInteger nextConsumed)
 
 decodePortalPngFrame :: PortalPngFrame -> IO (Image PixelRGB8)
 decodePortalPngFrame frame = do
@@ -1862,6 +2000,13 @@ closeBarePortalCaptureWith
         void (tryAny closeErrors)
         either Exception.throwIO pure stopped
 
+withPortalCaptureStartupCleanup
+    :: IO value
+    -> IO ()
+    -> IO value
+withPortalCaptureStartupCleanup =
+    Exception.onException
+
 closePortalCapture :: PortalCapture -> IO ()
 closePortalCapture capture =
     mask \_ -> do
@@ -1872,14 +2017,16 @@ closePortalCapture capture =
                     "The GStreamer portal capture has been closed."
         stopped <-
             tryAllExceptions
-                (stopPortalCaptureProcess capture.portalCaptureProcess)
+                (withMVar
+                    capture.portalCaptureProcessLock
+                    (const
+                        (stopPortalCaptureProcess
+                            capture.portalCaptureProcess)))
         forM_
             [ capture.portalCaptureFrameReader
             , capture.portalCaptureErrorReader
             ]
-            \worker -> do
-                cancel worker
-                void (waitCatch worker)
+            cancel
         void (tryAny (hClose capture.portalCaptureOutput))
         void (tryAny (hClose capture.portalCaptureErrors))
         either Exception.throwIO pure stopped
@@ -1929,6 +2076,83 @@ stopPortalCaptureProcessWith
 pausePortalCaptureProcess :: ProcessHandle -> IO ()
 pausePortalCaptureProcess =
     signalPortalCaptureProcess Posix.sigSTOP
+
+pausePortalCaptureProcessAndWait :: ProcessHandle -> IO ()
+pausePortalCaptureProcessAndWait processHandle = do
+    stopped <-
+        timeout captureRefreshTimeout
+            (waitForPortalCaptureProcessStatusWith
+                processHandle
+                (Posix.signalProcessGroup Posix.sigSTOP))
+    case stopped of
+        Just (Stopped _) -> pure ()
+        Just status ->
+            fail
+                ("The GStreamer portal capture did not stop: "
+                    <> show status)
+        Nothing ->
+            fail "The GStreamer portal capture did not acknowledge SIGSTOP."
+
+waitForPortalCaptureProcessStatusWith
+    :: ProcessHandle
+    -> (ProcessID -> IO ())
+    -> IO ProcessStatus
+waitForPortalCaptureProcessStatusWith processHandle beforeWait =
+    -- Raw waitpid is needed to observe SIGSTOP.  Serialize with process's
+    -- public wait operations and reconcile terminal status into its handle so
+    -- a later waitForProcess cannot block on a status consumed here.
+    withMVar (ProcessInternals.waitpidLock processHandle) \() ->
+        Exception.mask \restore -> do
+            processGroup <-
+                getPid processHandle >>= \case
+                    Nothing ->
+                        fail
+                            "The GStreamer portal capture process has exited."
+                    Just processGroup -> pure processGroup
+            beforeWait processGroup
+            let awaitStatus = do
+                    -- unix marks waitpid interruptible even with WNOHANG.
+                    -- Keep a nonblocking poll and ProcessHandle reconciliation
+                    -- atomic so cancellation cannot reap an exit behind
+                    -- System.Process's back.
+                    status <-
+                        Exception.uninterruptibleMask_ $
+                            ProcessInternals.modifyProcessHandle
+                                processHandle
+                                \processState ->
+                                    case processState of
+                                        ProcessInternals.ClosedHandle exitCode ->
+                                            pure
+                                                ( processState
+                                                , Just (Exited exitCode)
+                                                )
+                                        _ -> do
+                                            observed <-
+                                                getProcessStatus
+                                                    False
+                                                    True
+                                                    processGroup
+                                            let nextState =
+                                                    case observed of
+                                                        Just (Exited exitCode) ->
+                                                            ProcessInternals.ClosedHandle
+                                                                exitCode
+                                                        Just
+                                                            (Terminated signal _) ->
+                                                                ProcessInternals.ClosedHandle
+                                                                    (ExitFailure
+                                                                        (negate
+                                                                            (fromIntegral
+                                                                                signal)))
+                                                        _ -> processState
+                                            pure (nextState, observed)
+                    case status of
+                        Nothing -> do
+                            restore
+                                (threadDelay captureStopPollInterval)
+                            awaitStatus
+                        Just observed -> pure observed
+            awaitStatus
 
 resumePortalCaptureProcess :: ProcessHandle -> IO ()
 resumePortalCaptureProcess =
@@ -2308,10 +2532,12 @@ leftButtonCode :: Int32
 leftButtonCode = 0x110
 
 requestTimeout, captureTimeout, captureRefreshTimeout :: Int
+captureStopPollInterval :: Int
 directCallTimeout, closeCallTimeout :: Int
 requestTimeout = 120000000
 captureTimeout = 20000000
 captureRefreshTimeout = 1000000
+captureStopPollInterval = 1000
 directCallTimeout = 10000000
 closeCallTimeout = 2000000
 

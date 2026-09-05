@@ -48,8 +48,10 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , beginPortalCaptureRequestWith
     , closeBarePortalCaptureWith
     , closePortalStateWith
+    , drainPortalPngFrameBuffer
     , ensurePortalStateReadyWith
     , invalidatePortalStateWhenWith
+    , newPortalPngFrameBuffer
     , parsePortalStartResults
     , portalDisplayForFrame
     , portalDisplayForStream
@@ -57,16 +59,19 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , portalMethodCall
     , portalMouseButtonCode
     , portalRequestPathForSender
-    , publishPortalFrameWith
     , readPortalPngFrame
+    , readPortalPngFrameBuffered
     , requestResponseRule
     , runPortalBackendOperationWith
+    , runPortalFrameReaderWith
     , sessionClosedRule
     , stopPortalCaptureProcessWith
     , validatePortalOwnerUser
+    , waitForPortalCaptureProcessStatusWith
     , waitForPortalFrameAfter
     , withPortalCaptureRunningWith
     , withPortalCaptureReadiness
+    , withPortalCaptureStartupCleanup
     , withPortalInputReadiness
     , withPortalStateInvalidation
     )
@@ -105,7 +110,6 @@ import Control.Concurrent.Async (cancel, waitCatch, withAsync)
 import Control.Concurrent.STM
     ( atomically
     , newTVarIO
-    , readTVarIO
     , writeTVar
     )
 import Control.Exception
@@ -140,8 +144,22 @@ import DBus
     , toVariant
     )
 import DBus.Client (MatchRule(..))
-import System.IO (hClose, hSetBinaryMode)
+import System.Exit (ExitCode(..))
+import System.IO
+    ( BufferMode(NoBuffering)
+    , hClose
+    , hSetBinaryMode
+    , hSetBuffering
+    )
 import System.Posix.IO (createPipe, fdToHandle)
+import System.Posix.Process (ProcessStatus(..))
+import System.Process
+    ( CreateProcess(..)
+    , createProcess
+    , proc
+    , terminateProcess
+    , waitForProcess
+    )
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -1489,20 +1507,54 @@ spec = do
                     ]
             readIORef waits `shouldReturn` 2
 
-        it "preserves partial capture stop failures after closing pipes" do
+        it "reconciles a process handle when a stop wait observes exit" do
+            (_, _, _, processHandle) <-
+                createProcess
+                    (proc "sh" ["-c", "exit 23"])
+                        { create_group = True }
+            flip finally
+                (do
+                    void (tryAny (terminateProcess processHandle))
+                    void
+                        (timeout
+                            1000000
+                            (waitForProcess processHandle))) do
+                observed <-
+                    timeout
+                        1000000
+                        (waitForPortalCaptureProcessStatusWith
+                            processHandle
+                            (const (pure ())))
+                observed
+                    `shouldBe`
+                        Just (Exited (ExitFailure 23))
+                timeout 1000000 (waitForProcess processHandle)
+                    `shouldReturn` Just (ExitFailure 23)
+
+        it "propagates startup cleanup failures from interruptible masking" do
             events <- newIORef ([] :: [Text.Text])
+            cleanupMasking <- newIORef Unmasked
             let record event = modifyIORef' events (<> [event])
             attempted <-
                 tryAny $
-                    closeBarePortalCaptureWith
-                        (record "stop" >> throwString "capture still running")
-                        (record "close-output" >> throwString "output close failed")
-                        (record "close-errors" >> throwString "error close failed")
+                    withPortalCaptureStartupCleanup
+                        (throwString "capture setup failed" :: IO ())
+                        (closeBarePortalCaptureWith
+                            (do
+                                getMaskingState >>= writeIORef cleanupMasking
+                                record "stop"
+                                throwString "capture still running")
+                            (record "close-output"
+                                >> throwString "output close failed")
+                            (record "close-errors"
+                                >> throwString "error close failed"))
             attempted `shouldSatisfy` \case
                 Left exception ->
                     "capture still running"
                         `Text.isInfixOf` Text.pack (show exception)
                 Right () -> False
+            readIORef cleanupMasking
+                `shouldReturn` MaskedInterruptible
             readIORef events
                 `shouldReturn`
                     [ "stop"
@@ -1573,49 +1625,97 @@ spec = do
                         , portalFramePng = freshFrame
                         }
 
-        it "discards a frame whose read began before the request" do
+        it "does not publish frames buffered before a stop/drain boundary" do
             let staleFrame = PortalPngFrame "stale" 3 2
-                queuedFrame = PortalPngFrame "queued" 4 3
-                freshFrame = PortalPngFrame "fresh" 5 4
+                firstQueuedImage =
+                    generateImage
+                        (\_ _ -> PixelRGB8 20 30 40)
+                        2
+                        2
+                secondQueuedImage =
+                    generateImage
+                        (\_ _ -> PixelRGB8 50 60 70)
+                        3
+                        2
+                freshImage =
+                    generateImage
+                        (\_ _ -> PixelRGB8 80 90 100)
+                        4
+                        2
+                firstQueuedBytes =
+                    LBS.toStrict (encodePng firstQueuedImage)
+                secondQueuedBytes =
+                    LBS.toStrict (encodePng secondQueuedImage)
+                freshBytes = LBS.toStrict (encodePng freshImage)
+                partialGuardBytes = BS.take 17 secondQueuedBytes
+                completedGuardBytes = BS.drop 17 secondQueuedBytes
             processLock <- newMVar ()
             requestGeneration <- newTVarIO 0
             frameState <-
                 newTVarIO (PortalFrameAvailable 41 staleFrame)
             events <- newIORef ([] :: [Text.Text])
-            oldGeneration <- readTVarIO requestGeneration
-            baseline <-
-                beginPortalCaptureRequestWith
-                    processLock
-                    requestGeneration
-                    frameState
-                    (modifyIORef' events (<> ["resume"]))
-            baseline `shouldBe` 41
-            publishPortalFrameWith
-                processLock
-                requestGeneration
-                frameState
-                (modifyIORef' events (<> ["suspend"]))
-                oldGeneration
-                queuedFrame
-                `shouldReturn` False
-            readTVarIO frameState
-                `shouldReturn` PortalFrameAvailable 41 staleFrame
-            currentGeneration <- readTVarIO requestGeneration
-            publishPortalFrameWith
-                processLock
-                requestGeneration
-                frameState
-                (modifyIORef' events (<> ["suspend"]))
-                currentGeneration
-                freshFrame
-                `shouldReturn` True
-            waitForPortalFrameAfter 100000 baseline frameState
-                `shouldReturn`
-                    Right CapturedPortalFrame
-                        { portalFrameSequence = 42
-                        , portalFramePng = freshFrame
-                        }
-            readIORef events `shouldReturn` ["resume", "suspend"]
+            (readFd, writeFd) <- createPipe
+            input <- fdToHandle readFd
+            output <- fdToHandle writeFd
+            hSetBinaryMode input True
+            hSetBinaryMode output True
+            hSetBuffering output NoBuffering
+            flip finally
+                (do
+                    void (tryAny (hClose input))
+                    void (tryAny (hClose output))) do
+                buffer <- newPortalPngFrameBuffer
+                BS.hPut output
+                    ( firstQueuedBytes
+                        <> secondQueuedBytes
+                        <> partialGuardBytes
+                    )
+                withAsync
+                    (runPortalFrameReaderWith
+                        (readPortalPngFrameBuffered input buffer)
+                        (const (pure ()))
+                        processLock
+                        requestGeneration
+                        frameState
+                        (do
+                            modifyIORef' events (<> ["suspend"])
+                            drainPortalPngFrameBuffer input buffer))
+                    \reader -> do
+                        initial <-
+                            waitForPortalFrameAfter 1000000 41 frameState
+                        initial `shouldSatisfy` \case
+                            Right CapturedPortalFrame
+                                { portalFramePng = frame } ->
+                                    frame.portalPngFrameBytes == firstQueuedBytes
+                            Left _ -> False
+                        baseline <-
+                            beginPortalCaptureRequestWith
+                                processLock
+                                requestGeneration
+                                frameState
+                                (modifyIORef' events (<> ["resume"]))
+                        baseline `shouldBe` 42
+                        BS.hPut output (completedGuardBytes <> freshBytes)
+                        fresh <-
+                            waitForPortalFrameAfter
+                                1000000
+                                baseline
+                                frameState
+                        fresh `shouldSatisfy` \case
+                            Right CapturedPortalFrame
+                                { portalFramePng = frame } ->
+                                    frame.portalPngFrameBytes == freshBytes
+                            Left _ -> False
+                        readIORef events
+                            `shouldReturn`
+                                [ "suspend"
+                                , "resume"
+                                , "suspend"
+                                ]
+                        cancel reader
+                        waitCatch reader
+                            >>= (`shouldSatisfy`
+                                either (const True) (const False))
 
         it "suspends a capture process after success and failure" do
             events <- newIORef ([] :: [Text.Text])
