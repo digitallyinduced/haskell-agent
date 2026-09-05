@@ -160,7 +160,9 @@ defaultServerConfig = ServerConfig
     , serverMaxEventSubscribers = 256
     , serverMaxEventSubscribersPerTenant = 8
     , serverEventReplayLimit = 1000
-    , serverMaximumRequestBytes = 1024 * 1024
+    -- Enough for one 20 MiB decoded image after base64 expansion,
+    -- while retaining a hard request-level allocation bound.
+    , serverMaximumRequestBytes = 32 * 1024 * 1024
     }
 
 parseServerConfig :: IO ServerConfig

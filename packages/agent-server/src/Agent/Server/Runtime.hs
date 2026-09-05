@@ -1220,6 +1220,8 @@ runTurn environment control spec =
                                             NativeTurnRequest
                                                 { nativeTurnPrompt =
                                                     spec.turnSpecPrompt
+                                                , nativeTurnImages =
+                                                    spec.turnSpecImages
                                                 , nativeTurnSession =
                                                     NativeResumeSession
                                                         spec.turnSpecSessionId
@@ -1275,6 +1277,7 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
     { nativeOnLoopEvent = \event ->
         let (eventType, value) = projectLoopEvent event
         in control.turnControlEmit eventType value
+    , nativeInitialTurnInputs = Nothing
     , nativeOnSessionId = \_ -> pure ()
     , nativeRegisterCancel = control.turnControlRegisterCancel
     , nativeRegisterAgentSnapshot = \snapshot ->

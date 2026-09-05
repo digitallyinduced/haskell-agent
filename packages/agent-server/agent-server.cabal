@@ -62,6 +62,7 @@ library
                     , aeson >= 2.0
                     , async
                     , base >= 4.17 && < 5
+                    , base64-bytestring
                     , bytestring
                     , containers
                     , crypton

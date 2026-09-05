@@ -8,6 +8,7 @@ import Agent.Server.Auth
 import Agent.Server.Backend (Backend (..), SessionMutationLease (..))
 import Agent.Server.Supervisor
 import Agent.Server.Types
+import Agent.Loop (ImageAttachment(..))
 import Control.Concurrent.Async (cancel, wait, waitCatch, withAsync)
 import Control.Concurrent.MVar (
     MVar,
@@ -25,6 +26,7 @@ import Control.Monad (void)
 import Data.Aeson (Value (..), eitherDecode, object, (.=))
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString.Lazy.Char8 qualified as LBS8
+import Data.Either (isLeft)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (find)
 import Data.Set qualified as Set
@@ -67,6 +69,33 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "agent-server WAI application" do
+    it "decodes image-only turn requests" do
+        request <-
+            case eitherDecode
+                "{\"images\":[{\"mimeType\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}]}"
+            of
+                Left err -> expectationFailure err >> fail "unreachable"
+                Right decoded -> pure decoded
+        request.createTurnInput `shouldBe` ""
+        request.createTurnImages
+            `shouldBe` [ImageAttachment "image/png" "\x89PNG\r\n\x1a\n"]
+
+    it "rejects invalid image base64 and media types" do
+        let decode body = eitherDecode body :: Either String CreateTurnRequest
+        decode "{\"input\":\"x\",\"images\":[{\"mimeType\":\"image/png\",\"data\":\"\"}]}"
+            `shouldSatisfy` isLeft
+        decode "{\"input\":\"x\",\"images\":[{\"mimeType\":\"image/png\",\"data\":\"!\"}]}"
+            `shouldSatisfy` isLeft
+        decode "{\"input\":\"x\",\"images\":[{\"mimeType\":\"image/svg+xml\",\"data\":\"PHN2Zz4=\"}]}"
+            `shouldSatisfy` isLeft
+        decode "{\"input\":\"x\",\"images\":[{\"mimeType\":\"image/png\",\"data\":\"R0lGODlh\"}]}"
+            `shouldSatisfy` isLeft
+
+    it "rejects more than one image per turn" do
+        let image = "{\"mimeType\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}"
+        (eitherDecode ("{\"images\":[" <> image <> "," <> image <> "]}") :: Either String CreateTurnRequest)
+            `shouldSatisfy` isLeft
+
     it "rejects requests without the strict loopback Host" do
         withApplication immediateRunner \application -> do
             response <-

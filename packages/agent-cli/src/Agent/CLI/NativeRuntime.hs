@@ -25,6 +25,11 @@ import Agent.CLI.AgentSessions
     , closeSessionThreadManager
     , newSessionThreadManager
     )
+import Agent.Loop
+    ( ImageAttachment
+    , TurnAttachment(ImageAttachmentItem)
+    , userMessageWithAttachments
+    )
 import Agent.CLI.Options
     ( Command(..)
     , CliOptions(..)
@@ -96,6 +101,7 @@ data NativeSessionTarget
 -- interactive approval and plan-mode callbacks.
 data NativeTurnRequest = NativeTurnRequest
     { nativeTurnPrompt :: !Text
+    , nativeTurnImages :: ![ImageAttachment]
     , nativeTurnSession :: !NativeSessionTarget
     , nativeTurnProvider :: !(Maybe Provider)
     , nativeTurnModel :: !(Maybe Text)
@@ -197,8 +203,19 @@ runNativeTurn runtime output hooks request =
                     { nativeInteractionMode =
                         request.nativeTurnInteractionMode
                     , nativeShellMode = request.nativeTurnShellMode
+                    , nativeInitialTurnInputs =
+                        Just
+                            [ userMessageWithAttachments
+                                initialPrompt
+                                (map ImageAttachmentItem request.nativeTurnImages)
+                            ]
                     }
                 options
+  where
+    initialPrompt
+        | Text.null (Text.strip request.nativeTurnPrompt)
+        , not (null request.nativeTurnImages) = "Image attached."
+        | otherwise = request.nativeTurnPrompt
 
 -- | Lower a typed native request into the existing orchestration options.
 --

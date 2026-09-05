@@ -39,6 +39,7 @@ module Agent.Server.Supervisor
     , deleteCancellationTaskIfOwned
     ) where
 
+import Agent.Loop (ImageAttachment(..))
 import Agent.Server.Identifier (newUUIDv7Text)
 import Agent.Server.Types
 import Control.Concurrent (ThreadId, myThreadId, threadDelay)
@@ -86,6 +87,7 @@ import Control.Exception.Safe
     )
 import Control.Monad (forM_, void, when)
 import Data.Aeson (Value, encode, object, toJSON, (.=))
+import Data.ByteString qualified as ByteString
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Foldable (toList)
 import Data.Int (Int64)
@@ -616,12 +618,20 @@ enqueueTurnRecord supervisor reservationHeld spec record
                                 else
                                     if Seq.length state.stateQueue
                                         >= supervisor.supervisorConfig.supervisorMaxQueuedTurns
+                                        || queuedImageBytes state.stateTurns
+                                            + turnImageBytes spec
+                                            > maximumQueuedImageBytes
                                         then pure (Left SubmitQueueFull)
                                         else
                                             if queuedForTenant
                                                 spec.turnSpecBoundary.accessTenantId
                                                 state.stateTurns
                                                 >= supervisor.supervisorConfig.supervisorMaxQueuedTurnsPerTenant
+                                                || queuedImageBytesForTenant
+                                                    spec.turnSpecBoundary.accessTenantId
+                                                    state.stateTurns
+                                                    + turnImageBytes spec
+                                                    > maximumQueuedImageBytesPerTenant
                                                 then pure (Left SubmitTenantQueueFull)
                                                 else do
                                                     let turnId = record.turnRecordId
@@ -1305,6 +1315,7 @@ reserveRunnable supervisor = do
                                                         slot.turnSlotSpec
                                                             { turnSpecPrompt =
                                                                 ""
+                                                            , turnSpecImages = []
                                                             }
                                                     }
                                                 state.stateTurns
@@ -1936,6 +1947,35 @@ queuedForTenant tenantId turns =
         , slot.turnSlotRecord.turnRecordStatus == TurnQueued
         , slot.turnSlotRecord.turnRecordBoundary.accessTenantId == tenantId
         ]
+
+-- Keep decoded image payloads bounded while they wait in the in-memory queue.
+-- Running turns clear their queued copy before execution.
+maximumQueuedImageBytes, maximumQueuedImageBytesPerTenant :: Int
+maximumQueuedImageBytes = 80 * 1024 * 1024
+maximumQueuedImageBytesPerTenant = 40 * 1024 * 1024
+
+turnImageBytes :: TurnSpec -> Int
+turnImageBytes spec =
+    sum (map (ByteString.length . imageBytes) spec.turnSpecImages)
+
+queuedImageBytes :: Map TurnId TurnSlot -> Int
+queuedImageBytes =
+    sum
+        . map (turnImageBytes . turnSlotSpec)
+        . filter ((== TurnQueued) . turnRecordStatus . turnSlotRecord)
+        . Map.elems
+
+queuedImageBytesForTenant :: TenantId -> Map TurnId TurnSlot -> Int
+queuedImageBytesForTenant tenantId =
+    sum
+        . map (turnImageBytes . turnSlotSpec)
+        . filter
+            ( \slot ->
+                slot.turnSlotRecord.turnRecordStatus == TurnQueued
+                    && slot.turnSlotRecord.turnRecordBoundary.accessTenantId
+                        == tenantId
+            )
+        . Map.elems
 
 runningForTenant
     :: TenantId
