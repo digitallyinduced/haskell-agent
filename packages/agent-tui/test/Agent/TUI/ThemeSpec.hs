@@ -188,13 +188,16 @@ spec = do
                 allSyntaxClasses
                 `shouldBe` replicate (length allSyntaxClasses) V.Default
 
-        it "uses distinct full-row backgrounds for added and removed lines" do
+        it "uses dark green and red full-row diff backgrounds" do
             let added =
                     attrMapLookup Theme.diffAddedAttr Theme.terminalDefault
                 removed =
                     attrMapLookup Theme.diffRemovedAttr Theme.terminalDefault
-            V.attrBackColor added `shouldBe` V.SetTo (Color240 22)
-            V.attrBackColor removed `shouldBe` V.SetTo (Color240 52)
+            -- Use explicit RGB values. Vty's Color240 constructor is offset
+            -- past ANSI 0-15, so Color240 22 renders as ANSI 38 (cyan), not
+            -- the intended xterm dark green at ANSI 22.
+            V.attrBackColor added `shouldBe` V.SetTo (RGBColor 0 95 0)
+            V.attrBackColor removed `shouldBe` V.SetTo (RGBColor 95 0 0)
             V.attrForeColor added `shouldBe` V.SetTo V.brightGreen
             V.attrForeColor removed `shouldBe` V.SetTo V.brightRed
 
