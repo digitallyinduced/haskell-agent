@@ -66,6 +66,7 @@ foreign-library haskell-agent-bridge
                     , Agent.CLI.MacOS.ComputerBridge
                     , Agent.CLI.MacOS.EngineMailbox
                     , Agent.CLI.MacOS.NativeLoopEvent
+                    , Agent.CLI.MacOS.RepositoryWorkers
                     , Agent.CLI.MacOS.ResourceAdmin
     c-sources:        cbits/HaskellAgentBridgeRuntime.c
     include-dirs:     include
@@ -106,6 +107,8 @@ test-suite agent-native-bridge-test
                     , Agent.CLI.MacOS.EngineMailboxSpec
                     , Agent.CLI.MacOS.NativeLoopEvent
                     , Agent.CLI.MacOS.NativeLoopEventSpec
+                    , Agent.CLI.MacOS.RepositoryWorkers
+                    , Agent.CLI.MacOS.RepositoryWorkersSpec
                     , Agent.CLI.MacOS.TaskSchedulerSpec
                     , Agent.CLI.McpAdminSpec
                     , Agent.CLI.ResourceAdminSpec
@@ -135,7 +138,8 @@ test-suite agent-native-bridge-test
         include-dirs: include
         other-modules: Agent.CLI.MacOS.Bridge
                      , Agent.CLI.MacOS.ComputerBridge
-                     , Agent.CLI.MacOS.ResourceAdmin
+                     , Agent.CLI.MacOS.RepositoryWorkers
+                    , Agent.CLI.MacOS.ResourceAdmin
                      , Agent.CLI.MacOS.BrowserBridgeFFISpec
                      , Agent.CLI.MacOS.ComputerBridgeSpec
                      , Agent.CLI.MacOS.BridgeSpec

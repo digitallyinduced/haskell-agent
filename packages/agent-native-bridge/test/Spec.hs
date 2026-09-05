@@ -7,6 +7,7 @@ import Test.Hspec (hspec)
 import qualified Agent.CLI.BrowserToolsSpec as BrowserToolsSpec
 import qualified Agent.CLI.MacOS.EngineMailboxSpec as EngineMailboxSpec
 import qualified Agent.CLI.MacOS.NativeLoopEventSpec as NativeLoopEventSpec
+import qualified Agent.CLI.MacOS.RepositoryWorkersSpec as RepositoryWorkersSpec
 import qualified Agent.CLI.MacOS.TaskSchedulerSpec as TaskSchedulerSpec
 import qualified Agent.CLI.McpAdminSpec as McpAdminSpec
 import qualified Agent.CLI.ResourceAdminSpec as ResourceAdminSpec
@@ -26,6 +27,7 @@ main = hspec do
     NativeLoopEventSpec.spec
     ResourceAdminSpec.spec
     TaskSchedulerSpec.spec
+    RepositoryWorkersSpec.spec
 #ifdef darwin_HOST_OS
     BrowserBridgeFFISpec.spec
     BridgeFFISpec.spec
