@@ -1,6 +1,16 @@
 -- | Function-based computer use backed by local desktop capture and input.
 module Agent.CLI.ComputerUse
     ( ComputerObservation(..)
+    , AccessibilitySnapshot(..)
+    , AccessibilityPatchOperation(..)
+    , AccessibilityObservation(..)
+    , AccessibilityDeltaState
+    , initialAccessibilityDeltaState
+    , decodeAccessibilitySnapshot
+    , advanceAccessibilityObservation
+    , unavailableAccessibilityObservation
+    , resetAccessibilityDeltaState
+    , applyAccessibilityPatch
     , ComputerUseBackend(..)
     , ScreenshotEncoding(..)
     , ComputerUseRuntime
@@ -41,6 +51,7 @@ import qualified Agent.CLI.ComputerUse.Input as Input
 import qualified Agent.CLI.ComputerUse.Linux as Linux
 import qualified Agent.Json.Decode as Json
 import Agent.Loop (ImageAttachment(..))
+import Agent.CLI.ComputerUse.Accessibility
 import Agent.Responses.Types
     ( ComputerAction(..)
     , ComputerCall(..)
@@ -329,7 +340,7 @@ executeComputerCall =
 
 data ComputerObservation = ComputerObservation
     { computerObservationImage :: !ImageAttachment
-    , computerObservationAccessibility :: !(Maybe Text)
+    , computerObservationAccessibility :: !(Maybe AccessibilityObservation)
     } deriving (Eq, Show)
 
 -- | One computer-use transaction. The backend owns display discovery,
@@ -658,7 +669,7 @@ encodeComputerOutput call observation =
             , computerOutputStatus = Nothing
             , computerOutputExtra = maybe
                 KeyMap.empty
-                (KeyMap.singleton "accessibility_state" . Aeson.String)
+                (KeyMap.singleton "accessibility_state" . Aeson.toJSON)
                 observation.computerObservationAccessibility
             }
   where
