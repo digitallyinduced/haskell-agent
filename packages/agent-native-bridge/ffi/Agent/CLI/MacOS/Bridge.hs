@@ -10,11 +10,8 @@ module Agent.CLI.MacOS.Bridge
     , browserToolsWhenEnabled
     , composeNativeTools
     , invokeBrowserCommand
-    , repositoryCancelAllAdmissionSmoke
-    , repositoryCancelClassificationSmoke
-    , repositoryCancelAllReentrancySmoke
-    , repositoryCheckDestroyReentrancySmoke
-    , repositoryTerminalThrowSmoke
+    , RepositoryCheckHandle(..)
+    , ha_repository_check_destroy
     , TurnStart(..)
     , nativeExceptionMessage
     , nativeRequestRequiresGatewayLock
@@ -33,6 +30,13 @@ module Agent.CLI.MacOS.Bridge
     ) where
 
 import Agent.CLI.MacOS.ResourceAdmin ()
+import Agent.CLI.MacOS.RepositoryWorkers
+    ( cancelRepositoryWorkers
+    , isRepositoryCallbackThread
+    , startRepositoryWorker
+    , tryRepositorySynchronous
+    , withRepositoryCallbackThread
+    )
 import Agent.CLI.MacOS.ComputerBridge
     ( ComputerCallback
     , ComputerHost(..)
@@ -249,19 +253,13 @@ import Agent.Tools.Types
     , AppToolGroup(..)
     , appToolsFromGroups
     )
-import Control.Concurrent
-    ( ThreadId
-    , forkIO
-    , myThreadId
-    , threadDelay
-    )
+import Control.Concurrent (forkIO)
 import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
     , cancel
     , mapConcurrently
     , waitCatch
-    , withAsync
     )
 import Control.Concurrent.MVar
     ( MVar
@@ -272,7 +270,6 @@ import Control.Concurrent.MVar
     , putMVar
     , readMVar
     , withMVar
-    , tryReadMVar
     , takeMVar
     )
 import Control.Concurrent.STM
@@ -291,19 +288,14 @@ import Control.Concurrent.STM
     )
 import Control.Applicative ((<|>))
 import Control.Exception.Safe
-    ( SomeAsyncException
-    , SomeException
+    ( SomeException
     , bracket
-    , catchAsync
     , finally
     , fromException
-    , isAsyncException
     , mask
     , onException
-    , throwIO
     , throwString
     , tryAny
-    , uninterruptibleMask_
     )
 import Control.Monad
     ( foldM
@@ -329,7 +321,6 @@ import Data.IORef
     , readIORef
     , writeIORef
     )
-import System.IO.Unsafe (unsafePerformIO)
 import Data.Int (Int64)
 import Data.Foldable (toList)
 import Data.List (partition)
@@ -338,7 +329,7 @@ import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
-import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -2086,217 +2077,8 @@ prepareRepositoryResult callback context action =
                 (emitRepositorySuccess
                     callback context snapshot.snapshotId)
 
-startRepositoryWorker :: IO () -> IO (IO ()) -> IO Bool
-startRepositoryWorker onCancelled prepare =
-    tryRepositorySynchronous
-        (mask \_ -> do
-            gate <- newEmptyMVar
-            admitted <- modifyMVar repositoryWorkers \state ->
-                case state.repositoryWorkerBarrier of
-                    Just _ -> pure (state, False)
-                    Nothing -> do
-                        let workerId = state.repositoryWorkerNextId
-                        worker <- asyncWithUnmask \unmask -> do
-                            withRepositoryCallbackThread
-                                (((Just <$> (readMVar gate >> unmask prepare))
-                                    `catchAsync`
-                                        \(_ :: SomeAsyncException) ->
-                                            onCancelled >> pure Nothing)
-                                    >>= mapM_ id)
-                                `finally`
-                                unregisterRepositoryWorker workerId
-                        pure
-                            ( state
-                                { repositoryWorkerNextId = workerId + 1
-                                , repositoryWorkerActive =
-                                    Map.insert
-                                        workerId
-                                        worker
-                                        state.repositoryWorkerActive
-                                }
-                            , True
-                            )
-            when admitted (putMVar gate ())
-            pure admitted)
-        >>= \case
-            Left _ -> pure False
-            Right admitted -> pure admitted
-
-unregisterRepositoryWorker :: Int -> IO ()
-unregisterRepositoryWorker workerId =
-    modifyMVar repositoryWorkers \state ->
-        pure
-            ( state
-                { repositoryWorkerActive =
-                    Map.delete workerId state.repositoryWorkerActive
-                }
-            , ()
-            )
-
 ha_repository_cancel_all :: IO ()
-ha_repository_cancel_all =
-    isRepositoryCallbackThread >>= \case
-        True -> pure ()
-        False -> mask \restore -> do
-            admission <- modifyMVar repositoryWorkers \state ->
-                case state.repositoryWorkerBarrier of
-                    Just barrier ->
-                        pure (state, Left barrier)
-                    Nothing -> do
-                        barrier <- newEmptyMVar
-                        pure
-                            ( state
-                                { repositoryWorkerActive = Map.empty
-                                , repositoryWorkerBarrier = Just barrier
-                                }
-                            , Right
-                                ( barrier
-                                , Map.elems state.repositoryWorkerActive
-                                )
-                            )
-            case admission of
-                Left activeBarrier -> restore (readMVar activeBarrier)
-                Right (barrier, workers) ->
-                    restore
-                        (mapM_ cancel workers >> mapM_ waitCatch workers)
-                        `finally` do
-                            modifyMVar repositoryWorkers \state ->
-                                pure
-                                    ( state
-                                        { repositoryWorkerBarrier = Nothing }
-                                    , ()
-                                    )
-                            putMVar barrier ()
-
--- Deterministic regression hook for the admission-barrier lifecycle. This is
--- a Haskell test hook, not part of the C ABI.
-repositoryCancelAllAdmissionSmoke :: IO Bool
-repositoryCancelAllAdmissionSmoke = do
-    entered <- newEmptyMVar
-    cancelled <- newEmptyMVar
-    firstAccepted <- startRepositoryWorker (putMVar cancelled ()) do
-        putMVar entered ()
-        uninterruptibleMask_ (threadDelay 250_000)
-        pure (pure ())
-    if not firstAccepted
-        then pure False
-        else do
-            readMVar entered
-            withAsync ha_repository_cancel_all \canceller -> do
-                rejectedDuringBarrier <- awaitRejection 1000
-                _ <- waitCatch canceller
-                cancellationDelivered <- readMVar cancelled >> pure True
-                completed <- newEmptyMVar
-                acceptedAfter <- startRepositoryWorker
-                    (pure ())
-                    (pure (putMVar completed ()))
-                finishedAfter <- if acceptedAfter
-                    then readMVar completed >> pure True
-                    else pure False
-                pure
-                    ( rejectedDuringBarrier
-                        && cancellationDelivered
-                        && finishedAfter
-                    )
-  where
-    awaitRejection attempts
-        | attempts <= (0 :: Int) = pure False
-        | otherwise =
-            startRepositoryWorker (pure ()) (pure (pure ())) >>= \case
-                False -> pure True
-                True -> threadDelay 1000 >> awaitRejection (attempts - 1)
-
-repositoryCancelAllReentrancySmoke :: IO Bool
-repositoryCancelAllReentrancySmoke = do
-    completed <- newEmptyMVar
-    accepted <- startRepositoryWorker (pure ()) do
-        pure do
-            ha_repository_cancel_all
-            putMVar completed ()
-    if accepted
-        then readMVar completed >> pure True
-        else pure False
-
-repositoryCancelClassificationSmoke :: IO Bool
-repositoryCancelClassificationSmoke = do
-    entered <- newEmptyMVar
-    cancelled <- newEmptyMVar
-    synthesizedFailure <- newEmptyMVar
-    accepted <- startRepositoryWorker (putMVar cancelled ()) do
-        putMVar entered ()
-        tryRepositorySynchronous (threadDelay 30_000_000) >>= \case
-            Left _ -> putMVar synthesizedFailure ()
-            Right () -> pure ()
-        pure (pure ())
-    if not accepted
-        then pure False
-        else do
-            readMVar entered
-            ha_repository_cancel_all
-            cancellation <- tryReadMVar cancelled
-            failure <- tryReadMVar synthesizedFailure
-            pure (isJust cancellation && isNothing failure)
-
-repositoryTerminalThrowSmoke :: IO Bool
-repositoryTerminalThrowSmoke = do
-    cancelled <- newEmptyMVar
-    terminal <- newEmptyMVar
-    finished <- newEmptyMVar
-    accepted <- startRepositoryWorker (putMVar cancelled ()) do
-        pure
-            ((putMVar terminal () >> throwString "terminal callback failed")
-                `finally` putMVar finished ())
-    if not accepted
-        then pure False
-        else do
-            readMVar terminal
-            readMVar finished
-            ha_repository_cancel_all
-            cancellation <- tryReadMVar cancelled
-            pure (isNothing cancellation)
-
-{-# NOINLINE repositoryWorkers #-}
-repositoryWorkers :: MVar RepositoryWorkerState
-repositoryWorkers = unsafePerformIO
-    (newMVar RepositoryWorkerState
-        { repositoryWorkerNextId = 0
-        , repositoryWorkerActive = Map.empty
-        , repositoryWorkerBarrier = Nothing
-        })
-
-data RepositoryWorkerState = RepositoryWorkerState
-    { repositoryWorkerNextId :: !Int
-    , repositoryWorkerActive :: !(Map Int (Async ()))
-    , repositoryWorkerBarrier :: !(Maybe (MVar ()))
-    }
-
-{-# NOINLINE repositoryCallbackThreads #-}
-repositoryCallbackThreads :: MVar (Set.Set ThreadId)
-repositoryCallbackThreads = unsafePerformIO (newMVar Set.empty)
-
-withRepositoryCallbackThread :: IO value -> IO value
-withRepositoryCallbackThread action = do
-    thread <- myThreadId
-    modifyMVar repositoryCallbackThreads \threads ->
-        pure (Set.insert thread threads, ())
-    action `finally`
-        modifyMVar repositoryCallbackThreads \threads ->
-            pure (Set.delete thread threads, ())
-
-isRepositoryCallbackThread :: IO Bool
-isRepositoryCallbackThread = do
-    thread <- myThreadId
-    Set.member thread <$> readMVar repositoryCallbackThreads
-
-tryRepositorySynchronous
-    :: IO value
-    -> IO (Either SomeException value)
-tryRepositorySynchronous action =
-    tryAny action >>= \case
-        Left exception
-            | isAsyncException exception -> throwIO exception
-            | otherwise -> pure (Left exception)
-        Right value -> pure (Right value)
+ha_repository_cancel_all = cancelRepositoryWorkers
 
 data RepositoryCheckHandle = RepositoryCheckHandle
     { repositoryCheckValue :: !(IORef (Maybe RepositoryReview.RepositoryCheck))
@@ -2453,25 +2235,6 @@ ha_repository_check_destroy pointer
                 handle <- deRefStablePtr stable
                 _ <- waitCatch handle.repositoryCheckOwner
                 freeStablePtr stable
-
-repositoryCheckDestroyReentrancySmoke :: IO Bool
-repositoryCheckDestroyReentrancySmoke = do
-    gate <- newEmptyMVar
-    owner <- asyncWithUnmask \unmask -> unmask (readMVar gate)
-    value <- newIORef Nothing
-    cancelled <- newIORef False
-    stable <- newStablePtr RepositoryCheckHandle
-        { repositoryCheckValue = value
-        , repositoryCheckCancelRequested = cancelled
-        , repositoryCheckOwner = owner
-        }
-    let pointer = castStablePtrToPtr stable
-    result <- tryAny
-        (withRepositoryCallbackThread
-            (ha_repository_check_destroy pointer))
-    putMVar gate ()
-    ha_repository_check_destroy pointer
-    pure (isRight result)
 
 copyRepositoryCheckArguments
     :: Ptr () -> CSize -> IO (Either () [Text])
