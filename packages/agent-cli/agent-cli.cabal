@@ -85,13 +85,11 @@ library
                     , Agent.CLI.Runtime.Orchestration.Background
                     , Agent.CLI.Runtime.Orchestration.Flow
                     , Agent.CLI.Runtime.Orchestration.Initialized
-                    , Agent.CLI.Runtime.Orchestration.Providers
                     , Agent.CLI.Runtime.Orchestration.Providers.Claude
                     , Agent.CLI.Runtime.Orchestration.Providers.Common
                     , Agent.CLI.Runtime.Orchestration.Providers.Gemini
                     , Agent.CLI.Runtime.Orchestration.Providers.OpenAI
                     , Agent.CLI.Runtime.Orchestration.Providers.OpenRouter
-                    , Agent.CLI.Runtime.Orchestration.Providers.Types
                     , Agent.CLI.Runtime.Orchestration.Providers.XAI
                     , Agent.CLI.Runtime.Orchestration.Restart
                     , Agent.CLI.Runtime.Orchestration.Session
@@ -229,6 +227,8 @@ library
                     , Agent.CLI.Render
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Runtime.MetaConsole
+                    , Agent.CLI.Runtime.Orchestration.Providers
+                    , Agent.CLI.Runtime.Orchestration.Providers.Types
                     , Agent.CLI.Resume
                     , Agent.CLI.Session.ConversationStore
                     , Agent.CLI.Session.History
