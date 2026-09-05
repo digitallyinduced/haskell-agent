@@ -8,6 +8,9 @@ module Agent.CLI.Runtime.Repl
     , preparePromptSkillInputsWithPaste
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    )
 import Agent.CLI.ActiveAccount
     ( ActiveAccount(..)
     , readActiveAccount
@@ -184,7 +187,7 @@ replWithDraft env@SessionEnv
             map skillInvocationCommand
                 (filter (.invocationSkill.skillUserInvocable) skillInvocations)
     activeToolNames <- readActiveToolNames
-    params <- readIORef paramsRef
+    params <- readSessionRequestParams paramsRef
     gatewayAccess <- readIORef gatewayModelsRef
     modelIds <- case gatewayAccess of
         Nothing -> pure (catalogModelIds catalog)

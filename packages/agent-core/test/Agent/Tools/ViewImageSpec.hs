@@ -6,6 +6,7 @@ import Agent.ToolDispatch
     , ToolDispatchConfig(..)
     , dispatchToolCall
     , functionToolCall
+    , toolCallResultImages
     )
 import Agent.ToolDSL (PropertySchema(..))
 import Agent.Tools.Scheduling
@@ -56,7 +57,7 @@ spec = describe "Agent.Tools.ViewImage" do
             BS.writeFile (workspace </> "error.png") pngBytes
             result <- runTool tool "{\"path\":\"error.png\"}"
             case result of
-                ToolCallResultWithImages{output, toolResultImages = [image]} -> do
+                ToolCallResultWithOutcome{output, toolResultImages = [image]} -> do
                     output `shouldBe` "Viewed image file: error.png"
                     image.imageDetail `shouldBe` Just "high"
                     image.imageUrl `shouldSatisfy`
@@ -68,7 +69,7 @@ spec = describe "Agent.Tools.ViewImage" do
             BS.writeFile (workspace </> "error.webp") webpBytes
             result <- runTool tool "{\"path\":\"error.webp\"}"
             case result of
-                ToolCallResultWithImages{toolResultImages = [image]} ->
+                ToolCallResultWithOutcome{toolResultImages = [image]} ->
                     image.imageUrl `shouldSatisfy`
                         Text.isPrefixOf "data:image/webp;base64,"
                 _ -> expectationFailure ("expected WebP image result, got " <> show result)
@@ -103,11 +104,8 @@ spec = describe "Agent.Tools.ViewImage" do
             missing.output `shouldSatisfy`
                 Text.isInfixOf "File not found: missing.png"
             outside <- runTool tool "{\"path\":\"/etc/hosts\"}"
-            case outside of
-                ToolCallResultWithImages{} ->
-                    expectationFailure "outside path returned an image"
-                ToolCallResult{output} ->
-                    output `shouldNotSatisfy` Text.isPrefixOf "Viewed"
+            toolCallResultImages outside `shouldBe` []
+            outside.output `shouldNotSatisfy` Text.isPrefixOf "Viewed"
 
     it "claims a read on the resolved image path" do
         withTool \workspace tool -> do

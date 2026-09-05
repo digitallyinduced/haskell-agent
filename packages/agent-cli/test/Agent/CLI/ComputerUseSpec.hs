@@ -1909,7 +1909,8 @@ spec = do
                     , status = Nothing
                     }
                 output = FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = "call-function"
                     , name = Nothing
                     , namespace = Nothing

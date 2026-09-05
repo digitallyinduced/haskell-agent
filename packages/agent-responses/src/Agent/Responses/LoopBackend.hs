@@ -65,7 +65,8 @@ import Agent.Responses.Request
     )
 import Agent.Responses.Types
 import Agent.ToolDispatch
-    ( ToolCall(..)
+    ( toolCallResultOutcome
+    , ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
     , ToolResultImage(..)
@@ -339,7 +340,8 @@ stripResponsesLiteImageDetails = \case
             }
     FunctionCallOutputItem callOutput ->
         FunctionCallOutputItem FunctionCallOutput
-            { itemId = callOutput.itemId
+            { localOutcome = callOutput.localOutcome
+            , itemId = callOutput.itemId
             , callId = callOutput.callId
             , name = callOutput.name
             , namespace = callOutput.namespace
@@ -350,7 +352,8 @@ stripResponsesLiteImageDetails = \case
             }
     CustomToolCallOutputItem callOutput ->
         CustomToolCallOutputItem CustomToolCallOutput
-            { itemId = callOutput.itemId
+            { localOutcome = callOutput.localOutcome
+            , itemId = callOutput.itemId
             , callId = callOutput.callId
             , name = callOutput.name
             , output = stripRawJsonImageDetails callOutput.output
@@ -487,7 +490,8 @@ legacyComputerFunctionCall call = FunctionCall
 legacyComputerFunctionOutput :: ComputerCallOutput -> ResponseItem
 legacyComputerFunctionOutput output =
     FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = Nothing
+        , itemId = Nothing
         , callId = output.computerOutputCallId
         , name = Nothing
         , namespace = Nothing
@@ -527,7 +531,8 @@ normalizeLegacyComputerFunctionOutput
     -> ResponseItem
 normalizeLegacyComputerFunctionOutput output screenshot =
     FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = output.localOutcome
+        , itemId = Nothing
         , callId = output.callId
         , name = Nothing
         , namespace = Nothing
@@ -689,7 +694,8 @@ imageDataUrl mime bytes =
 toolResultToItem :: ToolCallResult -> ResponseItem
 toolResultToItem result = case result.callKind of
     FunctionCallKind -> FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = toolCallResultOutcome result
+        , itemId = Nothing
         , callId = result.callId
         , name = Nothing
         , namespace = Nothing
@@ -699,7 +705,8 @@ toolResultToItem result = case result.callKind of
 
         }
     CustomCallKind -> CustomToolCallOutputItem CustomToolCallOutput
-        { itemId = Nothing
+        { localOutcome = toolCallResultOutcome result
+        , itemId = Nothing
         , callId = result.callId
         , name = Nothing
         , output = toolResultOutput result
@@ -707,7 +714,8 @@ toolResultToItem result = case result.callKind of
         }
     ComputerCallKind ->
         FunctionCallOutputItem FunctionCallOutput
-            { itemId = Nothing
+            { localOutcome = toolCallResultOutcome result
+            , itemId = Nothing
             , callId = result.callId
             , name = Nothing
             , namespace = Nothing
@@ -718,7 +726,8 @@ toolResultToItem result = case result.callKind of
             }
     ComputerFunctionCallKind ->
         FunctionCallOutputItem FunctionCallOutput
-            { itemId = Nothing
+            { localOutcome = toolCallResultOutcome result
+            , itemId = Nothing
             , callId = result.callId
             , name = Nothing
             , namespace = Nothing

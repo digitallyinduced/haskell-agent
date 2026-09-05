@@ -42,6 +42,7 @@ module Agent.Responses.Types.Items
     , ContextCompactionItem(..)
     ) where
 
+import Agent.ToolOutcome (ToolOutcome)
 import Agent.Responses.Types.Common
 import Agent.Responses.Types.Content
 import Agent.Responses.Types.Items.Known
@@ -320,7 +321,8 @@ data FunctionCallOutput = FunctionCallOutput
     , provider    :: !(Maybe Text)
     , output      :: !RawJson
     , status      :: !(Maybe ItemStatus)
-
+    -- Local execution facts; never part of provider JSON.
+    , localOutcome :: !(Maybe ToolOutcome)
     } deriving stock (Eq, Show)
 
 instance ToJSON FunctionCallOutput where
@@ -368,7 +370,8 @@ data CustomToolCallOutput = CustomToolCallOutput
     , name        :: !(Maybe Text)
     , output      :: !RawJson
     , status      :: !(Maybe ItemStatus)
-
+    -- Local execution facts; never part of provider JSON.
+    , localOutcome :: !(Maybe ToolOutcome)
     } deriving stock (Eq, Show)
 
 instance ToJSON CustomToolCallOutput where
@@ -959,6 +962,7 @@ functionCallOutputDecoder = Hermes.object $
         <*> optionalAtKey "provider" Hermes.text
         <*> Hermes.atKey "output" rawJsonDecoder
         <*> optionalAtKey "status" itemStatusDecoder
+        <*> pure Nothing
 
 customToolCallDecoder :: Hermes.Decoder CustomToolCall
 customToolCallDecoder = Hermes.object $
@@ -978,6 +982,7 @@ customToolCallOutputDecoder = Hermes.object $
         <*> optionalAtKey "name" Hermes.text
         <*> Hermes.atKey "output" rawJsonDecoder
         <*> optionalAtKey "status" itemStatusDecoder
+        <*> pure Nothing
 
 reasoningSummaryPartDecoder :: Hermes.Decoder ReasoningSummaryPart
 reasoningSummaryPartDecoder = Hermes.object $

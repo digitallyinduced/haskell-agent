@@ -104,7 +104,8 @@ toolOutputRequest model history call = defaultResponseCreateParams
     , input = Just (ResponseInputItems
         (history <>
         [ FunctionCallOutputItem FunctionCallOutput
-            { itemId = Nothing
+            { localOutcome = Nothing
+            , itemId = Nothing
             , callId = call.callId
             , name = Nothing
             , namespace = Nothing

@@ -29,6 +29,22 @@ echoArgsDecoder = objectArgs $ \object -> EchoArgs
 
 spec :: Spec
 spec = describe "dispatchToolCall" do
+    it "retains success even when successful output looks like an error or denial" do
+        mapM_ (\message -> do
+            result <- dispatchToolCall testConfig
+                [noArgsTool "echo" (pure (Right message))]
+                (functionToolCall "call" "echo" "{}")
+            result.output `shouldBe` message
+            toolCallResultOutcome result `shouldBe` Just ToolSucceeded)
+            ["Error: quoted log entry", "tool call rejected by user", "Exit code: 42", "cancelled"]
+
+    it "retains failure independently of custom output formatting" do
+        let config = testConfig { toolDispatchFormatResult = either id id }
+        result <- dispatchToolCall config [noArgsTool "fail" (pure (Left "plain explanation"))]
+            (functionToolCall "call" "fail" "{}")
+        result.output `shouldBe` "plain explanation"
+        toolCallResultOutcome result `shouldBe` Just ToolFailed
+
     it "keeps plaintext tool arguments useful in Show output" do
         let rendered =
                 show (functionToolCall "call-visible" "echo" "{\"message\":\"hello\"}")
@@ -161,7 +177,7 @@ spec = describe "dispatchToolCall" do
             ]
             (customToolCall "call-1" "patch" "*** Begin Patch")
         result `shouldBe`
-            ToolCallResult "call-1" "patch:*** Begin Patch" CustomCallKind
+            ToolCallResultWithOutcome "call-1" "patch:*** Begin Patch" CustomCallKind [] ToolSucceeded
 
     it "supports no-argument tools" do
         result <- dispatchToolCall testConfig
@@ -201,7 +217,7 @@ spec = describe "dispatchToolCall" do
 
     it "formats unknown tools consistently" do
         result <- dispatchToolCall testConfig [] (functionToolCall "call-1" "missing" "{}")
-        result `shouldBe` functionResult "call-1" "ERR unknown:missing"
+        result `shouldBe` withToolCallOutcome (Just ToolFailed) (functionResult "call-1" "ERR unknown:missing")
 
     it "preserves snapshots and images through typed and freeform streaming adapters" do
         let image = ToolResultImage "data:image/png;base64,aW1hZ2U=" Nothing
@@ -252,7 +268,7 @@ spec = describe "dispatchToolCall" do
         result <- dispatchToolCall config
             [noArgsTool "explode" (Exception.throwIO (userError "boom"))]
             (functionToolCall "call-1" "explode" "{}")
-        result `shouldBe` functionResult "call-1" "EX explode"
+        result `shouldBe` withToolCallOutcome (Just ToolFailed) (functionResult "call-1" "EX explode")
         readIORef seen `shouldReturn` ["explode"]
 
     it "does not let a synchronous exception hook replace the tool failure" do
@@ -263,7 +279,7 @@ spec = describe "dispatchToolCall" do
         result <- dispatchToolCall config
             [noArgsTool "explode" (Exception.throwIO (userError "boom"))]
             (functionToolCall "call-1" "explode" "{}")
-        result `shouldBe` functionResult "call-1" "EX explode"
+        result `shouldBe` withToolCallOutcome (Just ToolFailed) (functionResult "call-1" "EX explode")
 
     it "does not turn asynchronous cancellation into tool output" do
         dispatchToolCall testConfig
@@ -326,10 +342,12 @@ testConfig = ToolDispatchConfig
     }
 
 functionResult :: Text -> Text -> ToolCallResult
-functionResult callId output = ToolCallResult
+functionResult callId output = ToolCallResultWithOutcome
     { callId
     , output
     , callKind = FunctionCallKind
+    , toolResultImages = []
+    , toolResultOutcome = ToolSucceeded
     }
 
 computerTool :: IO (Either Text Text) -> AppTool

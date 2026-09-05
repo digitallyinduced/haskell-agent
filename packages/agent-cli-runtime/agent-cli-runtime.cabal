@@ -72,6 +72,7 @@ library
                     , Agent.CLI.Session.TitlePolicy
                     , Agent.CLI.Session.Types
                     , Agent.CLI.Session.Activity
+                    , Agent.CLI.Session.Request
                     , Agent.CLI.SessionLock
                     , Agent.CLI.Transcription
     build-depends:    agent-claude >= 0.1 && < 0.2
@@ -130,6 +131,7 @@ test-suite agent-cli-runtime-test
                     , Agent.CLI.ModelConfigSpec
                     , Agent.CLI.ModelsSpec
                     , Agent.CLI.SessionActivitySpec
+                    , Agent.CLI.SessionRequestSpec
                     , Agent.CLI.SessionSpec
     build-depends:    agent-cli-runtime
                     , agent-core

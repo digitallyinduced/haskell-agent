@@ -294,7 +294,8 @@ displayToolCall call =
 displayToolOutput :: Text -> Text -> ItemStatus -> ResponseItem
 displayToolOutput callId output status =
     FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = Nothing
+        , itemId = Nothing
         , callId
         , name = Nothing
         , namespace = Nothing

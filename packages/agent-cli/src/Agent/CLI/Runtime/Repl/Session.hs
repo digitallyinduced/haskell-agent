@@ -3,6 +3,9 @@ module Agent.CLI.Runtime.Repl.Session
     ( handleSessionAction
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    )
 import Agent.CLI.Afk
     ( AfkTarget(..), handoffLocal, handoffRemote, parseAfkTarget )
 import Agent.CLI.Command
@@ -713,7 +716,7 @@ handleShowSessionInfoAction :: SessionActionRuntime -> IO RunResult
 handleShowSessionInfoAction runtime = do
     let env = runtime.actionEnv
     color <- resolveColor stdout
-    params <- readIORef env.sessionParams
+    params <- readSessionRequestParams env.sessionParams
     usage <- readIORef env.sessionUsage
     shellMode <- env.sessionShellMode
     (persistenceState, sessionId, sessionTitle) <-
@@ -845,7 +848,7 @@ handleWorktreeAction runtime = do
             runtime.actionContinue
         Right path -> do
             color <- resolveColor stderr
-            params <- readIORef env.sessionParams
+            params <- readSessionRequestParams env.sessionParams
             let message = "worktree: " <> toText path
             runtimeDisplayInfo runtime message $
                 putTextLn stderr
@@ -975,7 +978,7 @@ handleNewAction runtime = do
                         (glyphOk <> "started a fresh conversation"))
             runtime.actionContinue
         PersistenceEnabled slotRef -> do
-            params <- readIORef env.sessionParams
+            params <- readSessionRequestParams env.sessionParams
             slot <- readIORef slotRef
             let model = currentModel params
                 effort = reasoningEffortText (currentEffort params)
