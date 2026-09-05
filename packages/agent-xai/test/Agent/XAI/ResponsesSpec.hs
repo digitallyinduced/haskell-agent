@@ -90,6 +90,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 message = MessageItem ResponseMessage
                     { messageId = Just "msg_1"
@@ -367,6 +368,7 @@ sampleRequest = defaultResponseCreateParams
             , parameters = Just $
                 rawJsonFromEncoding (Aeson.toEncoding (Aeson.object []))
             , strict = Nothing
+            , async = Nothing
             }
         , knownResponseTool ToolWebSearch
         , knownResponseTool ToolComputer

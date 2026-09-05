@@ -1,5 +1,16 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PatternSynonyms #-}
+
 module Agent.ToolDispatch
-    ( ToolCall(..)
+    ( ToolCall(ToolCall, callId, name, arguments, callKind, argumentsEncrypted)
+    , ToolCallMode(..)
+    , callMode
+    , toolCallMode
+    , withToolCallMode
+    , setToolCallArguments
     , ToolCallKind(..)
     , isComputerToolCallKind
     , ToolCallResult(..)
@@ -7,6 +18,8 @@ module Agent.ToolDispatch
     , ToolResultImage(..)
     , ToolHandlerResult(..)
     , toolCallResultImages
+    , toolCallResultMode
+    , withToolCallResultMode
     , ToolDispatchConfig(..)
     , ToolHandler
     , typedTool
@@ -45,6 +58,7 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import GHC.Records (HasField(..))
 
 -- | How the originating model turn encoded this call. Adapters need this to
 -- emit @function_call_output@ versus @custom_tool_call_output@.
@@ -60,6 +74,13 @@ data ToolCallKind
     | ComputerFunctionCallKind
     deriving (Eq, Show)
 
+-- | Whether the provider permits the application to complete this call after
+-- the originating model turn has continued.
+data ToolCallMode
+    = BlockingToolCall
+    | AsyncToolCall
+    deriving (Eq, Show)
+
 isComputerToolCallKind :: ToolCallKind -> Bool
 isComputerToolCallKind = \case
     ComputerCallKind -> True
@@ -67,13 +88,99 @@ isComputerToolCallKind = \case
     _ -> False
 
 -- | Provider-neutral function or custom tool call emitted by a model transport.
-data ToolCall = ToolCall
-    { callId :: !Text
-    , name :: !Text
-    , arguments :: !Text
-    , callKind :: !ToolCallKind
-    , argumentsEncrypted :: !Bool
-    } deriving (Eq)
+data ToolCall =
+    ToolCallInternal
+        !Text
+        !Text
+        !Text
+        !ToolCallKind
+        !Bool
+        !ToolCallMode
+    deriving (Eq)
+
+-- | Source-compatible blocking-call constructor. The execution mode is kept
+-- outside the historical five-field surface so existing positional and record
+-- construction remains valid.
+pattern ToolCall
+    :: Text
+    -> Text
+    -> Text
+    -> ToolCallKind
+    -> Bool
+    -> ToolCall
+pattern ToolCall
+    { callId
+    , name
+    , arguments
+    , callKind
+    , argumentsEncrypted
+    } <- ToolCallInternal
+        callId
+        name
+        arguments
+        callKind
+        argumentsEncrypted
+        _
+  where
+    ToolCall callId name arguments callKind argumentsEncrypted =
+        ToolCallInternal
+            callId
+            name
+            arguments
+            callKind
+            argumentsEncrypted
+            BlockingToolCall
+
+{-# COMPLETE ToolCall #-}
+
+instance HasField "callId" ToolCall Text where
+    getField (ToolCallInternal value _ _ _ _ _) = value
+
+instance HasField "name" ToolCall Text where
+    getField (ToolCallInternal _ value _ _ _ _) = value
+
+instance HasField "arguments" ToolCall Text where
+    getField (ToolCallInternal _ _ value _ _ _) = value
+
+instance HasField "callKind" ToolCall ToolCallKind where
+    getField (ToolCallInternal _ _ _ value _ _) = value
+
+instance HasField "argumentsEncrypted" ToolCall Bool where
+    getField (ToolCallInternal _ _ _ _ value _) = value
+
+toolCallMode :: ToolCall -> ToolCallMode
+toolCallMode
+    (ToolCallInternal _ _ _ _ _ mode) =
+        mode
+
+-- | Execution-mode accessor named after the logical 'ToolCall' field.
+-- 'toolCallMode' remains available where a less ambiguous name is useful.
+callMode :: ToolCall -> ToolCallMode
+callMode = toolCallMode
+
+withToolCallMode :: ToolCallMode -> ToolCall -> ToolCall
+withToolCallMode mode
+    (ToolCallInternal callId name arguments callKind argumentsEncrypted _) =
+        ToolCallInternal
+            callId
+            name
+            arguments
+            callKind
+            argumentsEncrypted
+            mode
+
+-- | Replace streamed arguments without accidentally resetting an async call
+-- to the compatibility constructor's blocking default.
+setToolCallArguments :: Text -> ToolCall -> ToolCall
+setToolCallArguments newArguments
+    (ToolCallInternal callId name _ callKind argumentsEncrypted mode) =
+        ToolCallInternal
+            callId
+            name
+            newArguments
+            callKind
+            argumentsEncrypted
+            mode
 
 instance Show ToolCall where
     show call =
@@ -82,6 +189,7 @@ instance Show ToolCall where
             <> ", arguments = " <> shownArguments
             <> ", callKind = " <> show call.callKind
             <> ", argumentsEncrypted = " <> show call.argumentsEncrypted
+            <> ", callMode = " <> show (toolCallMode call)
             <> " }"
       where
         shownArguments
@@ -136,6 +244,17 @@ data ToolCallResult
         , callKind :: !ToolCallKind
         , toolResultImages :: ![ToolResultImage]
         }
+    | AsyncToolCallResult
+        { callId :: !Text
+        , output :: !Text
+        , callKind :: !ToolCallKind
+        }
+    | AsyncToolCallResultWithImages
+        { callId :: !Text
+        , output :: !Text
+        , callKind :: !ToolCallKind
+        , toolResultImages :: ![ToolResultImage]
+        }
     deriving (Eq)
 
 instance Show ToolCallResult where
@@ -143,6 +262,7 @@ instance Show ToolCallResult where
         "ToolCallResult { callId = " <> show result.callId
             <> ", output = " <> show result.output
             <> ", callKind = " <> show result.callKind
+            <> ", callMode = " <> show (toolCallResultMode result)
             <> imageSummary
             <> " }"
       where
@@ -154,6 +274,30 @@ toolCallResultImages :: ToolCallResult -> [ToolResultImage]
 toolCallResultImages = \case
     ToolCallResult{} -> []
     ToolCallResultWithImages{toolResultImages} -> toolResultImages
+    AsyncToolCallResult{} -> []
+    AsyncToolCallResultWithImages{toolResultImages} -> toolResultImages
+
+toolCallResultMode :: ToolCallResult -> ToolCallMode
+toolCallResultMode = \case
+    ToolCallResult{} -> BlockingToolCall
+    ToolCallResultWithImages{} -> BlockingToolCall
+    AsyncToolCallResult{} -> AsyncToolCall
+    AsyncToolCallResultWithImages{} -> AsyncToolCall
+
+-- | Retag a result while preserving its payload and any attached images.
+withToolCallResultMode :: ToolCallMode -> ToolCallResult -> ToolCallResult
+withToolCallResultMode mode result =
+    case (mode, toolCallResultImages result) of
+        (BlockingToolCall, []) ->
+            ToolCallResult result.callId result.output result.callKind
+        (BlockingToolCall, images) ->
+            ToolCallResultWithImages
+                result.callId result.output result.callKind images
+        (AsyncToolCall, []) ->
+            AsyncToolCallResult result.callId result.output result.callKind
+        (AsyncToolCall, images) ->
+            AsyncToolCallResultWithImages
+                result.callId result.output result.callKind images
 
 functionToolCall :: Text -> Text -> Text -> ToolCall
 functionToolCall callId name arguments = ToolCall
@@ -337,18 +481,29 @@ dispatchToolHandlerDetailed config maybeHandler call = do
             Left exception -> do
                 _ <- tryAny (config.toolDispatchOnException callName exception)
                 pure resultOutput
-    let dispatchedResult
-            | null resultImages =
+    let dispatchedResult = case (toolCallMode call, resultImages) of
+            (BlockingToolCall, []) ->
                 ToolCallResult
                     call.callId
                     finalizedOutput
                     call.callKind
-            | otherwise =
+            (BlockingToolCall, images) ->
                 ToolCallResultWithImages
                     call.callId
                     finalizedOutput
                     call.callKind
-                    resultImages
+                    images
+            (AsyncToolCall, []) ->
+                AsyncToolCallResult
+                    call.callId
+                    finalizedOutput
+                    call.callKind
+            (AsyncToolCall, images) ->
+                AsyncToolCallResultWithImages
+                    call.callId
+                    finalizedOutput
+                    call.callKind
+                    images
         succeeded = case result of
             Right (Right _) -> True
             Right (Left _) -> False

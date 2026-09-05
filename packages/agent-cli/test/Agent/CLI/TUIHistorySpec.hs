@@ -357,6 +357,7 @@ spec = describe "bounded fullscreen history window" do
                             , arguments = "{\"command\":\"pwd\"}"
                             , encryptedFunctionArgs = Nothing
                             , status = Nothing
+                            , async = Nothing
                             }
                         , FunctionCallOutputItem FunctionCallOutput
                             { itemId = Nothing
@@ -367,6 +368,7 @@ spec = describe "bounded fullscreen history window" do
                             , output = rawJsonFromEncoding
                                 (Aeson.toEncoding ("/tmp/project" :: Text.Text))
                             , status = Nothing
+                            , async = Nothing
                             }
                         , assistantMessage "Done"
                         ])
@@ -491,6 +493,7 @@ spec = describe "bounded fullscreen history window" do
                     , arguments
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemInProgress
+                    , async = Nothing
                     }
             output callId body status =
                 FunctionCallOutputItem FunctionCallOutput
@@ -503,6 +506,7 @@ spec = describe "bounded fullscreen history window" do
                         rawJsonFromEncoding
                             (Aeson.toEncoding (body :: Text.Text))
                     , status = Just status
+                    , async = Nothing
                     }
             turnValue =
                 (sessionTurn TranscriptAppend "fix it" [userMessage "fix it"])
@@ -550,6 +554,7 @@ spec = describe "bounded fullscreen history window" do
                     , arguments
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemInProgress
+                    , async = Nothing
                     }
             output body status =
                 FunctionCallOutputItem FunctionCallOutput
@@ -562,6 +567,7 @@ spec = describe "bounded fullscreen history window" do
                         rawJsonFromEncoding
                             (Aeson.toEncoding (body :: Text.Text))
                     , status = Just status
+                    , async = Nothing
                     }
             boundary =
                 UnknownResponseItem
@@ -618,6 +624,7 @@ spec = describe "bounded fullscreen history window" do
                         , arguments = "{\"command\":\"pwd\"}"
                         , encryptedFunctionArgs = Nothing
                         , status = Nothing
+                        , async = Nothing
                         }
                     , FunctionCallOutputItem FunctionCallOutput
                         { itemId = Nothing
@@ -628,6 +635,7 @@ spec = describe "bounded fullscreen history window" do
                         , output = rawJsonFromEncoding
                             (Aeson.toEncoding ("/tmp/project" :: Text.Text))
                         , status = Nothing
+                        , async = Nothing
                         }
                     ])
                     { turnAssistantText = Just "already visible"
@@ -841,6 +849,7 @@ toolOutputItem parts =
         , provider = Nothing
         , output = rawJsonFromEncoding (Aeson.toEncoding parts)
         , status = Nothing
+        , async = Nothing
         }
 
 projectedToolResult :: ResponseItem -> Text.Text
@@ -864,6 +873,7 @@ projectedToolResult outputItem =
                     , arguments = "{\"path\":\"example.png\"}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 , outputItem
                 ])

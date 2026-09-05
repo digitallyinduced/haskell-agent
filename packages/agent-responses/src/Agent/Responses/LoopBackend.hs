@@ -40,6 +40,7 @@ import Agent.Json (RawJson, rawJsonBytes, rawJsonFromEncoding)
 import Agent.JsonText (jsonTextFieldPartial)
 import Agent.Loop
     ( Backend(..)
+    , BackendCallbacks(..)
     , BackendResult(..)
     , BackendSnapshot(..)
     , FileAttachment(..)
@@ -52,6 +53,7 @@ import Agent.Loop
     , TurnOutput(..)
     , emptyTokenUsage
     , advanceBackendSnapshot
+    , backendWithCallbacks
     )
 import Agent.Provider
     ( Credential
@@ -67,11 +69,16 @@ import Agent.Responses.Types
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
+    , ToolCallMode(..)
     , ToolCallResult(..)
     , ToolResultImage(..)
     , canonicalToolName
     , isComputerToolCallKind
+    , toolCallMode
     , toolCallResultImages
+    , toolCallResultMode
+    , setToolCallArguments
+    , withToolCallMode
     )
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
@@ -170,14 +177,18 @@ statelessResponsesBackendWithMode
         showRawReasoning
         send
         getParams =
-    Backend \snapshot _legacyPreviousResponseId inputs onEvent -> do
+    backendWithCallbacks
+        \snapshot _legacyPreviousResponseId inputs callbacks -> do
         baseParams <- getParams
         projectEvent <- newStreamEventToLoopEvents showRawReasoning
         let newItems = turnInputsToItems inputs
             requestItems = snapshot.backendItems <> newItems
             request = withRequestInput baseParams requestItems
-        result <- send request \event ->
-            projectEvent event >>= mapM_ onEvent
+        result <- send request \event -> do
+            projectEvent event >>= mapM_ callbacks.onLoopEvent
+            case completedAsyncToolCall event of
+                Just call -> callbacks.onAsyncToolCall call
+                Nothing -> pure ()
         case result of
             Left err -> pure (Left err)
             Right response ->
@@ -346,7 +357,7 @@ stripResponsesLiteImageDetails = \case
             , provider = callOutput.provider
             , output = stripRawJsonImageDetails callOutput.output
             , status = callOutput.status
-
+            , async = callOutput.async
             }
     CustomToolCallOutputItem callOutput ->
         CustomToolCallOutputItem CustomToolCallOutput
@@ -355,7 +366,7 @@ stripResponsesLiteImageDetails = \case
             , name = callOutput.name
             , output = stripRawJsonImageDetails callOutput.output
             , status = callOutput.status
-
+            , async = callOutput.async
             }
     item -> item
   where
@@ -482,6 +493,7 @@ legacyComputerFunctionCall call = FunctionCall
             Aeson.object ["actions" Aeson..= call.computerActions]
     , encryptedFunctionArgs = Nothing
     , status = call.computerCallStatus
+    , async = Nothing
     }
 
 legacyComputerFunctionOutput :: ComputerCallOutput -> ResponseItem
@@ -497,6 +509,7 @@ legacyComputerFunctionOutput output =
                 then ("Computer action completed." :: Text)
                 else "Computer action did not complete."
         , status = output.computerOutputStatus
+        , async = Nothing
         }
 
 legacyComputerScreenshot :: ComputerCallOutput -> Maybe Text
@@ -519,6 +532,7 @@ normalizeLegacyComputerFunctionCall call = FunctionCall
     , arguments = call.arguments
     , encryptedFunctionArgs = call.encryptedFunctionArgs
     , status = call.status
+    , async = call.async
     }
 
 normalizeLegacyComputerFunctionOutput
@@ -541,6 +555,7 @@ normalizeLegacyComputerFunctionOutput output screenshot =
                         (Aeson.toEncoding ("Computer action completed." :: Text))
                     Nothing -> output.output
         , status = output.status
+        , async = output.async
         }
 
 legacyFunctionScreenshot :: FunctionCallOutput -> Maybe Text
@@ -696,7 +711,7 @@ toolResultToItem result = case result.callKind of
         , provider = Nothing
         , output = toolResultOutput result
         , status = Nothing
-
+        , async = asyncResultField result
         }
     CustomCallKind -> CustomToolCallOutputItem CustomToolCallOutput
         { itemId = Nothing
@@ -704,6 +719,7 @@ toolResultToItem result = case result.callKind of
         , name = Nothing
         , output = toolResultOutput result
         , status = Nothing
+        , async = asyncResultField result
         }
     ComputerCallKind ->
         FunctionCallOutputItem FunctionCallOutput
@@ -715,6 +731,7 @@ toolResultToItem result = case result.callKind of
             , output = rawJsonFromEncoding . Aeson.toEncoding $
                 computerFunctionTextOutput result.output
             , status = Nothing
+            , async = Nothing
             }
     ComputerFunctionCallKind ->
         FunctionCallOutputItem FunctionCallOutput
@@ -726,6 +743,7 @@ toolResultToItem result = case result.callKind of
             , output = rawJsonFromEncoding . Aeson.toEncoding $
                 computerFunctionTextOutput result.output
             , status = Nothing
+            , async = Nothing
             }
 
 toolResultOutput :: ToolCallResult -> RawJson
@@ -909,7 +927,7 @@ responseItemToToolCall :: ResponseItem -> Maybe ToolCall
 responseItemToToolCall = \case
     FunctionCallItem call
         | isComputerFunctionCall call ->
-            Just ToolCall
+            Just $ withToolCallMode (callModeFromField call.async) ToolCall
                 { callId = call.callId
                 , name = "computer"
                 , arguments = call.arguments
@@ -920,7 +938,7 @@ responseItemToToolCall = \case
                 }
     FunctionCallItem call ->
         let toolName = namespacedToolName call.namespace call.name
-        in Just ToolCall
+        in Just $ withToolCallMode (callModeFromField call.async) ToolCall
             { callId = call.callId
             , name = toolName
             , arguments = call.arguments
@@ -930,7 +948,8 @@ responseItemToToolCall = \case
                     toolName
                     call.encryptedFunctionArgs
             }
-    CustomToolCallItem call -> Just ToolCall
+    CustomToolCallItem call ->
+        Just $ withToolCallMode (callModeFromField call.async) ToolCall
         { callId = call.callId
         , name = namespacedToolName call.namespace call.name
         , arguments = call.input
@@ -944,6 +963,26 @@ responseItemToToolCall = \case
         , callKind = ComputerCallKind
         , argumentsEncrypted = any isSensitiveComputerAction call.computerActions
         }
+    _ -> Nothing
+
+callModeFromField :: Maybe Bool -> ToolCallMode
+callModeFromField = \case
+    Just True -> AsyncToolCall
+    _ -> BlockingToolCall
+
+asyncResultField :: ToolCallResult -> Maybe Bool
+asyncResultField result =
+    case toolCallResultMode result of
+        AsyncToolCall -> Just True
+        BlockingToolCall -> Nothing
+
+completedAsyncToolCall :: ResponseStreamEvent -> Maybe ToolCall
+completedAsyncToolCall = \case
+    ResponseOutputItemDoneEvent { item } -> do
+        call <- responseItemToToolCall item
+        case toolCallMode call of
+            AsyncToolCall -> Just call
+            BlockingToolCall -> Nothing
     _ -> Nothing
 
 isComputerFunctionCall :: FunctionCall -> Bool
@@ -1748,19 +1787,7 @@ supportsLiveArgumentPreview call =
         && canonicalToolName call.name /= "computer"
 
 withToolArguments :: ToolCall -> Text -> ToolCall
-withToolArguments ToolCall
-    { callId
-    , name
-    , callKind
-    , argumentsEncrypted
-    } arguments =
-        ToolCall
-            { callId
-            , name
-            , arguments
-            , callKind
-            , argumentsEncrypted
-            }
+withToolArguments call arguments = setToolCallArguments arguments call
 
 countToolArgumentChars
     :: Text

@@ -14,6 +14,7 @@ import Agent.Loop
     , BackendSnapshot(..)
     , TurnInput(..)
     , advanceBackendSnapshot
+    , backendWithCallbacks
     )
 import Agent.OpenAI.Compaction
     ( estimateItemsTokens
@@ -24,7 +25,9 @@ import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
 import Agent.ToolDispatch
     ( ToolCallResult(..)
+    , toolCallResultMode
     , toolCallResultImages
+    , withToolCallResultMode
     )
 import Control.Applicative ((<|>))
 import Data.IORef (IORef, readIORef)
@@ -42,10 +45,11 @@ boundCompletedToolContinuations
     -> IO ResponseCreateParams
     -> IORef (Maybe OccupancySnapshot)
     -> BackendMiddleware
-boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Backend submit) =
-    Backend \snapshot previous inputs onEvent ->
+boundCompletedToolContinuations contextWindowFor getParams contextTokensRef backend =
+    backendWithCallbacks \snapshot previous inputs callbacks ->
         if not (any isCompletedTool inputs)
-            then submit snapshot previous inputs onEvent
+            then backend.submitTurnWithCallbacks
+                snapshot previous inputs callbacks
             else do
                 params <- getParams
                 occupancy <- readIORef contextTokensRef
@@ -89,22 +93,24 @@ boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Bac
                                 requestTokens
                                 inputs
                 if requestTokens inputs <= contextWindow
-                    then submit snapshot previous inputs onEvent
+                    then backend.submitTurnWithCallbacks
+                        snapshot previous inputs callbacks
                     else if requestTokens truncated <= contextWindow
-                        then submit snapshot previous truncated onEvent
+                        then backend.submitTurnWithCallbacks
+                            snapshot previous truncated callbacks
                         else submitTrimmedHistory
                             params
                             contextWindow
                             snapshot
                             history
                             truncated
-                            onEvent
+                            callbacks
   where
     isCompletedTool = \case
         CompletedTool{} -> True
         _ -> False
 
-    submitTrimmedHistory params contextWindow snapshot history inputs onEvent = do
+    submitTrimmedHistory params contextWindow snapshot history inputs callbacks = do
         let callIds = pendingToolCallIds inputs
             (danglingCalls, prefix) =
                 partition (isPendingToolCall callIds) history
@@ -121,9 +127,9 @@ boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Bac
                     params
                     (fittedHistory <> turnInputsToItems inputs)
         if fittedTokens <= contextWindow
-            then submit
+            then backend.submitTurnWithCallbacks
                 (advanceBackendSnapshot snapshot fittedHistory Nothing)
-                Nothing inputs onEvent
+                Nothing inputs callbacks
             else pure (Left toolContinuationTooLargeError)
 
 pendingToolCallIds :: [TurnInput] -> [Text]
@@ -175,18 +181,19 @@ capCompletedToolOutputs maximumCharacters =
     capToolResult result =
         let cappedOutput =
                 capToolOutput maximumCharacters result.output
-        in case toolCallResultImages result of
-            [] -> ToolCallResult
-                { callId = result.callId
-                , output = cappedOutput
-                , callKind = result.callKind
-                }
-            images -> ToolCallResultWithImages
-                { callId = result.callId
-                , output = cappedOutput
-                , callKind = result.callKind
-                , toolResultImages = images
-                }
+        in withToolCallResultMode (toolCallResultMode result) $
+            case toolCallResultImages result of
+                [] -> ToolCallResult
+                    { callId = result.callId
+                    , output = cappedOutput
+                    , callKind = result.callKind
+                    }
+                images -> ToolCallResultWithImages
+                    { callId = result.callId
+                    , output = cappedOutput
+                    , callKind = result.callKind
+                    , toolResultImages = images
+                    }
 
 capToolOutput :: Int -> Text -> Text
 capToolOutput maximumCharacters text

@@ -100,6 +100,7 @@ toolOutputRequest model history call = defaultResponseCreateParams
             , output = rawJsonFromEncoding $ Aeson.toEncoding $ Aeson.object
                 ["echoed" Aeson..= ("openrouter functional tool ok" :: Text)]
             , status = Nothing
+            , async = Nothing
             }
         , userMessage "The tool ran. Reply with exactly: done"
         ]))
@@ -118,6 +119,7 @@ echoTool = FunctionToolValue FunctionTool
         , "additionalProperties" Aeson..= False
         ]
     , strict = Just True
+    , async = Nothing
     }
 
 userMessage :: Text -> ResponseItem

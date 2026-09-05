@@ -202,6 +202,7 @@ spec = do
                                     , description = Nothing
                                     , parameters = Nothing
                                     , strict = Just True
+                                    , async = Nothing
                                     }
                                 ]
                         , toolChoice =
@@ -682,6 +683,7 @@ spec = do
                                     , description = Nothing
                                     , parameters = Nothing
                                     , strict = Just True
+                                    , async = Nothing
                                     }
                                 ]
                         , previousResponseId = Just "resp-old"
@@ -923,6 +925,7 @@ spec = do
                                 Just (Text.replicate 4_000 "schema")
                             , parameters = Nothing
                             , strict = Just True
+                            , async = Nothing
                             }
                         ]
                     }
@@ -980,6 +983,7 @@ spec = do
                                 Just (Text.replicate 4_000 "schema")
                             , parameters = Nothing
                             , strict = Just True
+                            , async = Nothing
                             }
                         ]
                     }
@@ -1964,6 +1968,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory = [userTextItem "run it", danglingCall]
                 toolOutputText = Text.replicate 400 "x"
@@ -2043,6 +2048,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory = [userTextItem "run it", danglingCall]
                 originalOutput =
@@ -2193,6 +2199,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory =
                     [ userTextItem
@@ -2249,6 +2256,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory = [userTextItem "run it", danglingCall]
                 originalOutput = Text.replicate 80_000 "x"
@@ -2348,6 +2356,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory =
                     [ userTextItem
@@ -2410,6 +2419,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory =
                     [ userTextItem

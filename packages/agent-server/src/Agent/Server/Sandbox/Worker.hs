@@ -30,9 +30,11 @@ import Agent.Server.Tenant
     )
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallMode(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
+    , withToolCallMode
     , ToolDispatchOutcome(..)
     , ToolResultImage(..)
     , toolCallResultImages
@@ -64,6 +66,7 @@ import Data.Aeson
     , object
     , withObject
     , (.:)
+    , (.:?)
     , (.=)
     )
 import Data.Aeson.Key (Key)
@@ -518,16 +521,23 @@ parseToolCall :: Value -> AesonTypes.Parser ToolCall
 parseToolCall = withObject "ToolCall" \payload -> do
     rejectUnknownFields
         "ToolCall"
-        [ "id", "name", "arguments", "kind", "argumentsEncrypted" ]
+        [ "id", "name", "arguments", "kind", "argumentsEncrypted", "async" ]
         payload
     encrypted <- payload .: "argumentsEncrypted"
     when encrypted (fail "encrypted sandbox tool arguments are unsupported")
-    ToolCall
+    mode <- parseToolCallMode <$> payload .:? "async"
+    call <- ToolCall
         <$> payload .: "id"
         <*> payload .: "name"
         <*> payload .: "arguments"
         <*> (payload .: "kind" >>= parseToolCallKind)
         <*> pure False
+    pure (withToolCallMode mode call)
+
+parseToolCallMode :: Maybe Bool -> ToolCallMode
+parseToolCallMode = \case
+    Just True -> AsyncToolCall
+    _ -> BlockingToolCall
 
 parseToolCallKind :: Text -> AesonTypes.Parser ToolCallKind
 parseToolCallKind = \case

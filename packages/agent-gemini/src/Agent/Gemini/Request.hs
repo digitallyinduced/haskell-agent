@@ -257,6 +257,7 @@ projectCustomToolCall projection call =
         , arguments = call.input
         , encryptedFunctionArgs = Nothing
         , status = call.status
+        , async = call.async
         }
 
 projectCustomToolOutput
@@ -272,6 +273,7 @@ projectCustomToolOutput projection callOutput =
         , provider = Just "gemini"
         , output = callOutput.output
         , status = callOutput.status
+        , async = callOutput.async
         }
 
 projectFunctionOutput :: Projection -> FunctionCallOutput -> Projection

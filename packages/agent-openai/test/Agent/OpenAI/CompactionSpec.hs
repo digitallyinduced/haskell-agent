@@ -254,6 +254,7 @@ spec = do
                             ]
                         ]))
                     , strict = Nothing
+                    , async = Nothing
                     }
                 params = (defaultResponseCreateParams :: ResponseCreateParams)
                     { tools = Just [tool]
@@ -279,6 +280,7 @@ spec = do
                             "x"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 trimmed =
                     trimRemoteCompactionRequestToFit
@@ -311,6 +313,7 @@ spec = do
                             (remoteCompactionMaxStringLength + 1)
                             "x"
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 trimmed =
                     trimRemoteCompactionRequestToFit
@@ -341,6 +344,7 @@ spec = do
                     , arguments
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 trimmed =
                     trimResponseHistoryToFit
@@ -379,6 +383,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 history =
                     [ user "old"
@@ -634,6 +639,7 @@ spec = do
                     , provider = Nothing
                     , output = raw (Aeson.String (Text.replicate 10_000 "x"))
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -658,6 +664,7 @@ spec = do
                     , provider = Nothing
                     , output = raw (Aeson.String "ok")
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -688,6 +695,7 @@ spec = do
                     , provider = Nothing
                     , output = raw (Aeson.String (Text.replicate 20_000 "y"))
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -723,6 +731,7 @@ spec = do
                     , namespace = Nothing
                     , output = Aeson.String "ok"
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -773,6 +782,7 @@ spec = do
                     , arguments = Text.replicate 20_000 "x"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 output = FunctionCallOutputItem FunctionCallOutput
                     { itemId = Nothing
@@ -781,6 +791,7 @@ spec = do
                     , namespace = Nothing
                     , output = Aeson.String "ok"
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 recent = user "recent"
                 trimmed =
@@ -1307,6 +1318,7 @@ spec = do
         , provider = Nothing
         , output
         , status = Just ItemCompleted
+        , async = Nothing
         }
     assistant text = MessageItem ResponseMessage
         { messageId = Nothing

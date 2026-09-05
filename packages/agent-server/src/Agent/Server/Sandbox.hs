@@ -18,6 +18,8 @@ import Agent.Server.Tenant
     )
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallMode(..)
+    , toolCallMode
     , ToolCallKind(..)
     , ToolHandlerResult(..)
     , ToolResultImage(..)
@@ -594,15 +596,19 @@ encodeToolRequest sandbox running requestId sessionId cwd dialect call =
             , "cwd" .= cwd
             , "dialect" .= dialectSlug dialect
             , "call" .= object
-                [ "id" .= call.callId
-                , "name" .= call.name
-                , "arguments" .=
-                    translateArgumentsToGuest
-                        sandbox.sandboxTenant
-                        call
-                , "kind" .= callKindText call.callKind
-                , "argumentsEncrypted" .= call.argumentsEncrypted
-                ]
+                ( [ "id" .= call.callId
+                  , "name" .= call.name
+                  , "arguments" .=
+                        translateArgumentsToGuest
+                            sandbox.sandboxTenant
+                            call
+                  , "kind" .= callKindText call.callKind
+                  , "argumentsEncrypted" .= call.argumentsEncrypted
+                  ]
+                    <> [ "async" .= True
+                       | toolCallMode call == AsyncToolCall
+                       ]
+                )
             ]
 
 parseReady :: Value -> Either Text BrokerReady

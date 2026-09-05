@@ -79,6 +79,9 @@ import Agent.CLI.Style
 import Agent.CLI.Terminal
 import Agent.CLI.Request
 import Agent.CLI.Tools
+import Agent.CLI.ModelConfig
+    ( catalogSupportsAsyncToolCallsForTransport
+    )
 import Agent.CLI.Error
 import Agent.CLI.Dialects
 import Agent.CLI.Dictation (dictationTargetForSession)
@@ -895,6 +898,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         }
   where
     nativeCapabilities = host.hostNativeCapabilities
+    modelRef = controls.controlModelRef
     computerUseEnabledRef = controls.controlComputerUseEnabledRef
     sessionTools = sessionDirectTools refreshTools codeModeRuntime
     computerUseAvailable =
@@ -987,6 +991,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         ShellNone -> "none"
     refreshSessionParams ghciEnabled bashEnabled computerUseEnabled = do
         sessionTmp <- readIORef toolEnv.toolSessionTmp
+        effectiveModel <- readIORef modelRef
         today <- utctDay <$> getCurrentTime
         let enabledTools =
                 activeSessionTools
@@ -1011,15 +1016,23 @@ buildSessionShellRuntime host controls SessionRequest{..} =
                             today
                             (isOneShot options)
             toolSchemas =
+                let modelSupportsAsync =
+                        catalogSupportsAsyncToolCallsForTransport
+                            catalog
+                            connectionId
+                            effectiveModel
+                in
                 case codeModeRuntime of
                     Just _ ->
-                        schemasFromAppToolsCodeModeWithHostedSearch
+                        schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
                             nativeCapabilities.nativeProviderHostedTools
+                            modelSupportsAsync
                             dialect
                             (providerVisibleTools enabledTools)
                     Nothing ->
-                        schemasFromAppToolsWithHostedSearch
+                        schemasFromAppToolsWithHostedSearchAndAsyncCapability
                             nativeCapabilities.nativeProviderHostedTools
+                            modelSupportsAsync
                             dialect
                             enabledTools
         modifyIORef' paramsRef

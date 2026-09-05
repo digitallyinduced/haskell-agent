@@ -522,6 +522,7 @@ functionCallItem callId name arguments status =
         , arguments
         , encryptedFunctionArgs = Nothing
         , status
+        , async = Nothing
         }
 
 functionOutputItem :: Text -> Maybe ItemStatus -> ResponseItem
@@ -534,6 +535,7 @@ functionOutputItem callId status =
         , provider = Nothing
         , output = rawJsonFromEncoding (Aeson.toEncoding ("ok" :: Text))
         , status
+        , async = Nothing
         }
 
 functionOutputText :: Text -> Text -> ResponseItem
@@ -546,6 +548,7 @@ functionOutputText callId output =
         , provider = Nothing
         , output = rawJsonFromEncoding (Aeson.toEncoding output)
         , status = Just ItemCompleted
+        , async = Nothing
         }
 
 agentMessageItem :: Text -> ResponseItem

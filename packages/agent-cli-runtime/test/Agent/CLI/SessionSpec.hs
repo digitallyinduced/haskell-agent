@@ -230,6 +230,7 @@ genFunctionCall =
         <*> genText
         <*> genMaybe (genSmallList genText)
         <*> genMaybe genItemStatus
+        <*> genMaybe arbitrary
 
 genFunctionCallOutput :: Gen FunctionCallOutput
 genFunctionCallOutput =
@@ -241,6 +242,7 @@ genFunctionCallOutput =
         <*> genMaybe genText
         <*> genRawJson
         <*> genMaybe genItemStatus
+        <*> genMaybe arbitrary
 
 genCustomToolCall :: Gen CustomToolCall
 genCustomToolCall =
@@ -251,6 +253,7 @@ genCustomToolCall =
         <*> genMaybe genText
         <*> genText
         <*> genMaybe genItemStatus
+        <*> genMaybe arbitrary
 
 genCustomToolCallOutput :: Gen CustomToolCallOutput
 genCustomToolCallOutput =
@@ -260,6 +263,49 @@ genCustomToolCallOutput =
         <*> genMaybe genText
         <*> genRawJson
         <*> genMaybe genItemStatus
+        <*> genMaybe arbitrary
+
+asyncPersistenceItems :: Maybe Bool -> [ResponseItem]
+asyncPersistenceItems asyncValue =
+    [ FunctionCallItem FunctionCall
+        { itemId = Just "function-call"
+        , callId = "function"
+        , name = "shell"
+        , namespace = Nothing
+        , provider = Nothing
+        , arguments = "{}"
+        , encryptedFunctionArgs = Nothing
+        , status = Just ItemCompleted
+        , async = asyncValue
+        }
+    , FunctionCallOutputItem FunctionCallOutput
+        { itemId = Just "function-output"
+        , callId = "function"
+        , name = Just "shell"
+        , namespace = Nothing
+        , provider = Nothing
+        , output = rawJsonValue ("done" :: Text.Text)
+        , status = Just ItemCompleted
+        , async = asyncValue
+        }
+    , CustomToolCallItem CustomToolCall
+        { itemId = Just "custom-call"
+        , callId = "custom"
+        , name = "apply_patch"
+        , namespace = Nothing
+        , input = "*** Begin Patch"
+        , status = Just ItemCompleted
+        , async = asyncValue
+        }
+    , CustomToolCallOutputItem CustomToolCallOutput
+        { itemId = Just "custom-output"
+        , callId = "custom"
+        , name = Just "apply_patch"
+        , output = rawJsonValue ("done" :: Text.Text)
+        , status = Just ItemCompleted
+        , async = asyncValue
+        }
+    ]
 
 genComputerCall :: Gen ComputerCall
 genComputerCall =
@@ -917,6 +963,7 @@ spec = describe "Agent.CLI.Session" do
                         , arguments = "{\"command\":\"pwd\"}"
                         , encryptedFunctionArgs = Nothing
                         , status = Just ItemCompleted
+                        , async = Just True
                         }
                     , FunctionCallOutputItem FunctionCallOutput
                         { itemId = Just "output-item"
@@ -927,6 +974,7 @@ spec = describe "Agent.CLI.Session" do
                         , output = rawJsonValue (Aeson.object
                             ["stdout" Aeson..= ("/tmp/project" :: Text.Text)])
                         , status = Just ItemCompleted
+                        , async = Just True
                         }
                     , CustomToolCallItem CustomToolCall
                         { itemId = Nothing
@@ -935,6 +983,7 @@ spec = describe "Agent.CLI.Session" do
                         , namespace = Nothing
                         , input = "*** Begin Patch"
                         , status = Nothing
+                        , async = Just False
                         }
                     , CustomToolCallOutputItem CustomToolCallOutput
                         { itemId = Nothing
@@ -942,6 +991,7 @@ spec = describe "Agent.CLI.Session" do
                         , name = Just "apply_patch"
                         , output = rawJsonValue ("Done" :: Text.Text)
                         , status = Just ItemCompleted
+                        , async = Nothing
                         }
                     , ReasoningItemValue ReasoningItem
                         { itemId = Just "reasoning-1"
@@ -983,6 +1033,34 @@ spec = describe "Agent.CLI.Session" do
                     ]
             traverse fromStoredResponseItem (map toStoredResponseItem items)
                 `shouldBe` Right items
+
+        it "preserves async flags and treats absent stored flags as legacy" do
+            let items =
+                    concatMap asyncPersistenceItems
+                        [Nothing, Just False, Just True]
+                stored = map toStoredResponseItem items
+            traverse fromStoredResponseItem stored `shouldBe` Right items
+            case map toStoredResponseItem (asyncPersistenceItems Nothing) of
+                [ StoredFunctionCallItem functionCall
+                    , StoredFunctionCallOutputItem functionOutput
+                    , StoredCustomToolCallItem customCall
+                    , StoredCustomToolCallOutputItem customOutput
+                    ] ->
+                        map (.storedOpaqueObjectText)
+                            [ functionCall.storedFunctionCallExtraFields
+                            , functionOutput.storedFunctionCallOutputExtraFields
+                            , customCall.storedCustomToolCallExtraFields
+                            , customOutput.storedCustomToolCallOutputExtraFields
+                            ]
+                            `shouldBe`
+                                [ "{}"
+                                , "{\"name\":\"shell\"}"
+                                , "{}"
+                                , "{}"
+                                ]
+                unexpected ->
+                    expectationFailure
+                        ("unexpected stored async fixtures: " <> show unexpected)
 
         modifyMaxSuccess (const 500) $
             prop "round-trips generated response items through storage" $
@@ -1323,13 +1401,16 @@ spec = describe "Agent.CLI.Session" do
                         , phase = Nothing
                         , passthrough = Nothing
                         }
+                    asyncItems =
+                        concatMap asyncPersistenceItems
+                            [Nothing, Just False, Just True]
                     normalTurn = SessionTurn
                         { turnAt = fixedTime
                         , turnUserText = "hi there"
                         , turnAssistantText = Just "hello"
                         , turnError = Nothing
                         , turnResponseId = Just "resp-1"
-                        , turnItems = [item]
+                        , turnItems = item : asyncItems
                         , turnDisplayItems = []
                         , turnUsage = Just TokenUsage
                             { inputTokens = 10
@@ -1518,13 +1599,16 @@ spec = describe "Agent.CLI.Session" do
                     metaPath = dir </> unsafeEncodeUtf "meta.json"
                     transcriptPath = dir </> unsafeEncodeUtf "transcript.jsonl"
                     meta = testMeta sessionId
+                    items =
+                        concatMap asyncPersistenceItems
+                            [Nothing, Just False, Just True]
                     turn = SessionTurn
                         { turnAt = fixedTime
                         , turnUserText = "from disk"
                         , turnAssistantText = Just "imported"
                         , turnError = Nothing
                         , turnResponseId = Nothing
-                        , turnItems = []
+                        , turnItems = items
                         , turnDisplayItems = []
                         , turnUsage = Nothing
                         , turnEffect = TranscriptAppend
@@ -2142,6 +2226,7 @@ promptFunctionTool toolName documentation =
         , description = Just documentation
         , parameters = Nothing
         , strict = Just True
+        , async = Nothing
         }
 
 fixedTime :: UTCTime

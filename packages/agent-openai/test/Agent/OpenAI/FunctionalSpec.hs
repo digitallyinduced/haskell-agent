@@ -174,6 +174,7 @@ echoTextTool =
             , "additionalProperties" Aeson..= False
             ])))
         , OpenAI.strict = Just True
+        , OpenAI.async = Nothing
         }
 
 webSearchRequest :: Text -> OpenAI.ResponseCreateParams
@@ -209,6 +210,7 @@ functionOutput callId output = OpenAI.FunctionCallOutputItem OpenAI.FunctionCall
     , OpenAI.output =
         rawJsonFromEncoding (Aeson.toEncoding (Aeson.String output))
     , OpenAI.status = Nothing
+    , OpenAI.async = Nothing
     }
 
 userMessage :: Text -> OpenAI.ResponseItem

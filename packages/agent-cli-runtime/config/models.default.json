@@ -48,6 +48,7 @@
       "label": "frontier",
       "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
       "default_reasoning_effort": "low",
+      "supports_async_tool_calls": true,
       "fallback_priority": 0
     },
     {

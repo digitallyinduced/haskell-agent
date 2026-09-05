@@ -3,6 +3,7 @@ module Agent.Responses.LoopBackendSpec (spec) where
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( Backend(..)
+    , BackendCallbacks(..)
     , BackendResult(..)
     , BackendSnapshot(..)
     , FileAttachment(..)
@@ -46,8 +47,10 @@ import Agent.Responses.Types
     , ComputerCallOutput(..)
     , CustomToolCall(..)
     , CustomToolCallOutput(..)
+    , CustomTool(..)
     , FunctionCall(..)
     , FunctionCallOutput(..)
+    , FunctionTool(..)
     , InternalChatMetadata(..)
     , ItemStatus(..)
     , LocalShellCall(..)
@@ -57,6 +60,7 @@ import Agent.Responses.Types
     , ResponseMessage(..)
     , ResponseRole(..)
     , Response
+    , ResponseTool(..)
     , ResponseStreamEvent(..)
     , StreamEventType(..)
     , ResponseInput(..)
@@ -79,15 +83,92 @@ import qualified Data.Text.Encoding as TextEncoding
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
+    , ToolCallMode(..)
     , ToolCallResult(..)
     , ToolResultImage(..)
+    , toolCallMode
     )
 import Test.Hspec
 
 spec :: Spec
 spec = do
+    wireAsyncSpec
     backendSpec
     streamProjectionSpec
+
+wireAsyncSpec :: Spec
+wireAsyncSpec = describe "Responses async wire fields" do
+    it "decodes async function and custom calls without changing legacy defaults" do
+        let decodeItem value =
+                Json.decodeEither responseItemDecoder
+                    (LBS.toStrict (Aeson.encode value))
+            functionValue :: Maybe Bool -> Aeson.Value
+            functionValue flag = Aeson.object
+                ( [ "type" Aeson..= ("function_call" :: Text.Text)
+                  , "call_id" Aeson..= ("function-call" :: Text.Text)
+                  , "name" Aeson..= ("read_file" :: Text.Text)
+                  , "arguments" Aeson..= ("{}" :: Text.Text)
+                  ]
+                    <> maybe [] (\value -> ["async" Aeson..= value]) flag
+                )
+            customValue :: Maybe Bool -> Aeson.Value
+            customValue flag = Aeson.object
+                ( [ "type" Aeson..= ("custom_tool_call" :: Text.Text)
+                  , "call_id" Aeson..= ("custom-call" :: Text.Text)
+                  , "name" Aeson..= ("apply_patch" :: Text.Text)
+                  , "input" Aeson..= ("patch" :: Text.Text)
+                  ]
+                    <> maybe [] (\value -> ["async" Aeson..= value]) flag
+                )
+        decodeItem (functionValue (Just True))
+            `shouldSatisfy` \case
+                Right (FunctionCallItem FunctionCall{async = Just True}) -> True
+                _ -> False
+        decodeItem (functionValue (Just False))
+            `shouldSatisfy` \case
+                Right (FunctionCallItem FunctionCall{async = Just False}) -> True
+                _ -> False
+        decodeItem (functionValue Nothing)
+            `shouldSatisfy` \case
+                Right (FunctionCallItem FunctionCall{async = Nothing}) -> True
+                _ -> False
+        decodeItem (customValue (Just True))
+            `shouldSatisfy` \case
+                Right (CustomToolCallItem CustomToolCall{async = Just True}) -> True
+                _ -> False
+        decodeItem (customValue (Just False))
+            `shouldSatisfy` \case
+                Right (CustomToolCallItem CustomToolCall{async = Just False}) -> True
+                _ -> False
+        decodeItem (customValue Nothing)
+            `shouldSatisfy` \case
+                Right (CustomToolCallItem CustomToolCall{async = Nothing}) -> True
+                _ -> False
+
+    it "encodes async tools explicitly and omits absent capability" do
+        let function flag = FunctionToolValue FunctionTool
+                { name = "read_file"
+                , description = Nothing
+                , parameters = Nothing
+                , strict = Nothing
+                , async = flag
+                }
+            custom flag = CustomToolValue CustomTool
+                { name = "apply_patch"
+                , description = Nothing
+                , format = Nothing
+                , async = flag
+                }
+            hasAsync expected = \case
+                Aeson.Object object ->
+                    KeyMap.lookup "async" object == expected
+                _ -> False
+        Aeson.toJSON (function (Just True))
+            `shouldSatisfy` hasAsync (Just (Aeson.Bool True))
+        Aeson.toJSON (custom (Just True))
+            `shouldSatisfy` hasAsync (Just (Aeson.Bool True))
+        Aeson.toJSON (function Nothing) `shouldSatisfy` hasAsync Nothing
+        Aeson.toJSON (custom Nothing) `shouldSatisfy` hasAsync Nothing
 
 backendSpec :: Spec
 backendSpec = describe "tokenProviderStatelessResponsesBackend" do
@@ -137,6 +218,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     "{\"actions\":[{\"type\":\"type\",\"text\":\"secret\"}]}"
                 , encryptedFunctionArgs = Nothing
                 , status = Nothing
+                , async = Nothing
                 }
         case responseItemToToolCall (FunctionCallItem call) of
             Just projected -> do
@@ -157,6 +239,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     "{\"actions\":[{\"type\":\"screenshot\"}]}"
                 , encryptedFunctionArgs = Nothing
                 , status = Nothing
+                , async = Nothing
                 }
         case responseItemToToolCall (FunctionCallItem call) of
             Just projected -> do
@@ -164,6 +247,53 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 projected.callKind `shouldBe` ComputerFunctionCallKind
             Nothing -> expectationFailure
                 "standard computer function was not routed"
+
+    it "projects async mode only for calls marked async true" do
+        let function flag = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = "function-call"
+                , name = "read_file"
+                , namespace = Nothing
+                , provider = Nothing
+                , arguments = "{}"
+                , encryptedFunctionArgs = Nothing
+                , status = Nothing
+                , async = flag
+                }
+            custom flag = CustomToolCallItem CustomToolCall
+                { itemId = Nothing
+                , callId = "custom-call"
+                , name = "apply_patch"
+                , namespace = Nothing
+                , input = "patch"
+                , status = Nothing
+                , async = flag
+                }
+            mode item = toolCallMode <$> responseItemToToolCall item
+        mode (function (Just True)) `shouldBe` Just AsyncToolCall
+        mode (function (Just False)) `shouldBe` Just BlockingToolCall
+        mode (function Nothing) `shouldBe` Just BlockingToolCall
+        mode (custom (Just True)) `shouldBe` Just AsyncToolCall
+        mode (custom Nothing) `shouldBe` Just BlockingToolCall
+
+    it "marks only async tool results on continuation items" do
+        let blocking = toolResultToItem ToolCallResult
+                { callId = "blocking-call"
+                , output = "done"
+                , callKind = FunctionCallKind
+                }
+            asynchronous = toolResultToItem AsyncToolCallResult
+                { callId = "async-call"
+                , output = "done"
+                , callKind = CustomCallKind
+                }
+        blocking `shouldSatisfy` \case
+            FunctionCallOutputItem FunctionCallOutput{async = Nothing} -> True
+            _ -> False
+        asynchronous `shouldSatisfy` \case
+            CustomToolCallOutputItem CustomToolCallOutput{async = Just True} ->
+                True
+            _ -> False
 
     it "returns computer results as text plus a fresh user screenshot" do
         let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
@@ -376,6 +506,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                         "{\"actions\":[{\"type\":\"screenshot\"}]}"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
             output =
                 FunctionCallOutput
@@ -398,6 +529,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                                 ]
                             ]
                     , status = Nothing
+                    , async = Nothing
                     }
             request =
                 withRequestInput
@@ -679,6 +811,77 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
         readIORef events `shouldReturn`
             [ReasoningDelta "checking the implementation"]
 
+    it "announces async calls only when a completed output item arrives" do
+        announced <- newIORef []
+        let partialCall = FunctionCall
+                { itemId = Just "async-item"
+                , callId = "async-call"
+                , name = "read_file"
+                , namespace = Nothing
+                , provider = Nothing
+                , arguments = ""
+                , encryptedFunctionArgs = Nothing
+                , status = Nothing
+                , async = Just True
+                }
+            completedCall = partialCall
+                { arguments = "{\"path\":\"README.md\"}"
+                , status = Just ItemCompleted
+                }
+            blockingCall = FunctionCall
+                { itemId = Just "blocking-item"
+                , callId = "blocking-call"
+                , name = "read_file"
+                , namespace = Nothing
+                , provider = Nothing
+                , arguments = "{\"path\":\"README.md\"}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                , async = Nothing
+                }
+            send _params onStreamEvent = do
+                onStreamEvent ResponseOutputItemAddedEvent
+                    { item = FunctionCallItem partialCall
+                    , outputIndex = Just 0
+                    , sequenceNumber = Just 1
+                    }
+                onStreamEvent ResponseFunctionCallArgumentsDeltaEvent
+                    { delta = Just "{\"path\":\"README.md\"}"
+                    , streamItemId = Just "async-item"
+                    , streamOutputIndex = Just 0
+                    , sequenceNumber = Just 2
+                    }
+                onStreamEvent ResponseOutputItemDoneEvent
+                    { item = FunctionCallItem completedCall
+                    , outputIndex = Just 0
+                    , sequenceNumber = Just 3
+                    }
+                onStreamEvent ResponseOutputItemDoneEvent
+                    { item = FunctionCallItem blockingCall
+                    , outputIndex = Just 1
+                    , sequenceNumber = Just 4
+                    }
+                pure (Left (ConnectionError "stop after calls"))
+            backend =
+                statelessResponsesBackend send
+                    (pure defaultResponseCreateParams)
+
+        result <- backend.submitTurnWithCallbacks
+            emptyBackendSnapshot
+            Nothing
+            [UserMessage "hello"]
+            BackendCallbacks
+                { onLoopEvent = const (pure ())
+                , onAsyncToolCall =
+                    \call -> modifyIORef' announced (<> [call])
+                }
+
+        result `shouldBe` Left (ConnectionError "stop after calls")
+        calls <- readIORef announced
+        map (.callId) calls `shouldBe` ["async-call"]
+        map toolCallMode calls `shouldBe` [AsyncToolCall]
+        map (.arguments) calls `shouldBe` ["{\"path\":\"README.md\"}"]
+
     it "can hide raw reasoning while retaining reasoning summaries" do
         events <- newIORef []
         let send _params onStreamEvent = do
@@ -841,6 +1044,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , provider = Nothing
                 , output = toolOutputValue
                 , status = Nothing
+                , async = Nothing
 
                 }
             params = paramsWithInputItems [additional]
@@ -924,6 +1128,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , arguments = "{}"
                 , encryptedFunctionArgs = Nothing
                 , status = Just ItemCompleted
+                , async = Nothing
                 }
             output = FunctionCallOutputItem FunctionCallOutput
                 { itemId = Nothing
@@ -934,6 +1139,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , output = rawJsonFromEncoding
                     (Aeson.toEncoding ("ok" :: Text.Text))
                 , status = Just ItemIncomplete
+                , async = Nothing
                 }
             customOutput = CustomToolCallOutputItem CustomToolCallOutput
                 { itemId = Nothing
@@ -942,6 +1148,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , output = rawJsonFromEncoding
                     (Aeson.toEncoding ("ok" :: Text.Text))
                 , status = Just ItemCompleted
+                , async = Nothing
                 }
             customCall = CustomToolCallItem CustomToolCall
                 { itemId = Just "ctc-1"
@@ -950,6 +1157,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , namespace = Nothing
                 , input = "*** Begin Patch"
                 , status = Just ItemCompleted
+                , async = Nothing
                 }
             shell = LocalShellCallItem LocalShellCall
                 { itemId = Just "lsh-1"
@@ -1457,6 +1665,7 @@ functionCallAddedAt index functionItemId functionCallId functionName =
             , arguments = ""
             , encryptedFunctionArgs = Nothing
             , status = Nothing
+            , async = Nothing
 
             }
         , outputIndex = Just index
@@ -1476,6 +1685,7 @@ encryptedCollaborationCallAdded =
             , arguments = ""
             , encryptedFunctionArgs = Just ["message"]
             , status = Nothing
+            , async = Nothing
 
             }
         , outputIndex = Just 0
@@ -1500,6 +1710,7 @@ functionCallDone functionItemId functionCallId functionName functionArguments =
             , arguments = functionArguments
             , encryptedFunctionArgs = Nothing
             , status = Nothing
+            , async = Nothing
 
             }
         , outputIndex = Just 0
@@ -1517,6 +1728,7 @@ customToolCallAdded customItemId customCallId customName =
             , namespace = Nothing
             , input = ""
             , status = Nothing
+            , async = Nothing
 
             }
         , outputIndex = Just 0
@@ -1539,6 +1751,7 @@ customToolCallDone customItemId customCallId customName customInput =
             , namespace = Nothing
             , input = customInput
             , status = Nothing
+            , async = Nothing
 
             }
         , outputIndex = Just 0

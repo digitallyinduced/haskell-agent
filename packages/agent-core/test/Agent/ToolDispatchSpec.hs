@@ -6,12 +6,16 @@ import Agent.ToolDispatch
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolAsyncCapability(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     , dispatchRegisteredToolCall
     , dispatchRegisteredToolCallDetailed
+    , jsonAppTool
     , mkToolRegistry
     , toolAcceptsCall
+    , appToolSupportsAsync
+    , withAsyncToolCalls
     )
 import qualified Control.Exception as Exception
 import Data.IORef (modifyIORef', newIORef, readIORef)
@@ -29,6 +33,32 @@ echoArgsDecoder = objectArgs $ \object -> EchoArgs
 
 spec :: Spec
 spec = describe "dispatchToolCall" do
+    it "defaults constructed calls to blocking and compares call mode" do
+        let blocking = functionToolCall "call-1" "echo" "{}"
+            asynchronous = withToolCallMode AsyncToolCall blocking
+        toolCallMode blocking `shouldBe` BlockingToolCall
+        blocking `shouldNotBe` asynchronous
+
+    it "retags tool results without changing their payload" do
+        let blocking =
+                ToolCallResult "call-1" "done" FunctionCallKind
+            asynchronous =
+                withToolCallResultMode AsyncToolCall blocking
+        toolCallResultMode asynchronous `shouldBe` AsyncToolCall
+        withToolCallResultMode BlockingToolCall asynchronous
+            `shouldBe` blocking
+
+    it "requires tools to opt in to asynchronous calls" do
+        let tool =
+                jsonAppTool
+                    "echo"
+                    "echo"
+                    []
+                    AlwaysReadOnly
+                    (noArgsTool "echo" (pure (Right "ok")))
+        appToolSupportsAsync tool `shouldBe` False
+        appToolSupportsAsync (withAsyncToolCalls tool) `shouldBe` True
+
     it "keeps plaintext tool arguments useful in Show output" do
         let rendered =
                 show (functionToolCall "call-visible" "echo" "{\"message\":\"hello\"}")
@@ -341,4 +371,5 @@ computerTool action = AppTool
     , appToolApproval = AlwaysPrompt
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }

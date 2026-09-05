@@ -106,7 +106,11 @@ spec = describe "Agent.Tools.ViewImage" do
             case outside of
                 ToolCallResultWithImages{} ->
                     expectationFailure "outside path returned an image"
+                AsyncToolCallResultWithImages{} ->
+                    expectationFailure "outside path returned an image"
                 ToolCallResult{output} ->
+                    output `shouldNotSatisfy` Text.isPrefixOf "Viewed"
+                AsyncToolCallResult{output} ->
                     output `shouldNotSatisfy` Text.isPrefixOf "Viewed"
 
     it "claims a read on the resolved image path" do

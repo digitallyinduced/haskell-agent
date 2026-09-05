@@ -32,8 +32,9 @@ import Agent.Claude
     , withClaudeCodeBackendWithHost
     )
 import Agent.Loop
-    ( Backend(Backend, submitTurn)
+    ( Backend(submitTurnWithCallbacks)
     , BackendSnapshot(..)
+    , backendWithCallbacks
     )
 import Agent.OsPath (unsafeToFilePath)
 import Data.IORef (newIORef, readIORef, writeIORef)
@@ -79,7 +80,7 @@ withClaudeProvider ClaudeConfig{..}
                 claudeCompactionInputLimit
                     <$> claudeContextWindow
             btwBackend privateParams =
-                Backend \state previous inputs onEvent -> do
+                backendWithCallbacks \state previous inputs callbacks -> do
                     privateTranscript <-
                         newIORef state.backendItems
                     let privateBackend =
@@ -90,11 +91,11 @@ withClaudeProvider ClaudeConfig{..}
                                     }
                                 (pure privateParams)
                                 privateTranscript
-                    privateBackend.submitTurn
+                    privateBackend.submitTurnWithCallbacks
                         state
                         previous
                         inputs
-                        onEvent
+                        callbacks
             compactRunner focus = do
                 contextWindow <- claudeContextWindow
                 inputLimit <- claudeSummaryInputLimit

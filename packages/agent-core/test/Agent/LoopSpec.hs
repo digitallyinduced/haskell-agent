@@ -26,13 +26,14 @@ import Agent.Tools.Scheduling
     , schedulingPlansConflict
     )
 import Agent.Tools.Types
-    ( AppTool
+    ( AppTool(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
     , ToolRegistry
     , jsonAppToolWithExecution
     , mkToolRegistry
     , toolExecutionPolicyFor
+    , withAsyncToolCalls
     , withToolResourceClaims
     )
 import Codec.Picture
@@ -365,6 +366,7 @@ spec = describe "runLoop" do
                     , provider = Nothing
                     , output = rawHistoryOutput
                     , status = Nothing
+                    , async = Nothing
                     }
             initialState =
                 initialBackendSnapshot
@@ -1380,6 +1382,293 @@ spec = describe "runLoop" do
         result <- runLoop config Nothing "go"
         result `shouldSatisfy` either (const False) (const True)
         readIORef resolverCalls `shouldReturn` 0
+
+    it "starts async calls while streaming, deduplicates the committed call, and waits before finalizing" do
+        handlerStarted <- newEmptyMVar
+        backendReturned <- newEmptyMVar
+        releaseHandler <- newEmptyMVar
+        invocations <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        step <- newIORef (0 :: Int)
+        let call = asyncFunctionToolCall "async-1" "slow" "{}"
+            tool = asyncNoArgsTool "slow" do
+                modifyIORef' invocations (+ 1)
+                putMVar handlerStarted ()
+                takeMVar releaseHandler
+                pure (Right "finished")
+            backend = backendWithCallbacks \state _previous inputs callbacks -> do
+                modifyIORef' submissions (<> [inputs])
+                current <- atomicModifyIORef' step \value ->
+                    (value + 1, value + 1)
+                case current of
+                    1 -> do
+                        callbacks.onAsyncToolCall call
+                        timeout concurrencyProbeMicros (readMVar handlerStarted)
+                            >>= \case
+                                Nothing ->
+                                    Exception.throwIO $
+                                        userError "async handler did not start"
+                                Just () -> pure ()
+                        putMVar backendReturned ()
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput
+                                    "resp-async-1"
+                                    [call]
+                                    (Just "premature answer")
+                            , backendState = appendStateMarker state
+                            }
+                    _ ->
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput
+                                    "resp-async-2"
+                                    []
+                                    (Just "done")
+                            , backendState = appendStateMarker state
+                            }
+        config0 <- testConfig backend
+        withAsync
+            (runLoop
+                config0 { loopTools = registryFromTools [tool] }
+                Nothing
+                "go")
+            \running -> do
+                timeout concurrencyProbeMicros (readMVar backendReturned)
+                    `shouldReturn` Just ()
+                timeout 100000 (wait running) `shouldReturn` Nothing
+                putMVar releaseHandler ()
+                wait running `shouldReturn` Right LoopResult
+                    { finalResponseId = "resp-async-2"
+                    , finalText = Just "done"
+                    , turnsUsed = 2
+                    , tokenUsage = emptyTokenUsage
+                    }
+        readIORef invocations `shouldReturn` 1
+        readIORef submissions >>= \case
+            [ [UserMessage "go"]
+              , [CompletedTool completed]
+              ] -> do
+                completed.callId `shouldBe` "async-1"
+                completed.output `shouldBe` "finished"
+            seen ->
+                expectationFailure $
+                    "unexpected async submissions: " <> show seen
+
+    it "fails closed when an async call_id is reused for a different call" do
+        firstInvocations <- newIORef (0 :: Int)
+        secondInvocations <- newIORef (0 :: Int)
+        let first = asyncFunctionToolCall "duplicate" "first" "{}"
+            conflicting = asyncFunctionToolCall "duplicate" "second" "{}"
+            backend = backendWithCallbacks \_state _previous _inputs callbacks -> do
+                callbacks.onAsyncToolCall first
+                callbacks.onAsyncToolCall conflicting
+                Exception.throwIO $
+                    userError "conflicting async callback unexpectedly returned"
+            tools =
+                [ asyncNoArgsTool "first" do
+                    modifyIORef' firstInvocations (+ 1)
+                    pure (Right "first")
+                , asyncNoArgsTool "second" do
+                    modifyIORef' secondInvocations (+ 1)
+                    pure (Right "second")
+                ]
+        config0 <- testConfig backend
+        result <-
+            runLoop
+                config0 { loopTools = registryFromTools tools }
+                Nothing
+                "go"
+        result `shouldSatisfy` \case
+            Left (LoopUnexpected message) ->
+                "Conflicting tool calls reused call_id duplicate"
+                    `Text.isInfixOf` message
+            _ -> False
+        readIORef firstInvocations >>= (`shouldSatisfy` (<= 1))
+        readIORef secondInvocations `shouldReturn` 0
+
+    it "submits async results in completion order" do
+        slowStarted <- newEmptyMVar
+        releaseSlow <- newEmptyMVar
+        submissions <- newIORef []
+        step <- newIORef (0 :: Int)
+        let slowCall = asyncFunctionToolCall "slow-call" "slow" "{}"
+            fastCall = asyncFunctionToolCall "fast-call" "fast" "{}"
+            tools =
+                [ asyncNoArgsTool "slow" do
+                    putMVar slowStarted ()
+                    takeMVar releaseSlow
+                    pure (Right "slow")
+                , asyncNoArgsTool "fast" do
+                    readMVar slowStarted
+                    pure (Right "fast")
+                ]
+            backend = backendWithCallbacks \state _previous inputs callbacks -> do
+                modifyIORef' submissions (<> [inputs])
+                current <- atomicModifyIORef' step \value ->
+                    (value + 1, value + 1)
+                case current of
+                    1 -> do
+                        callbacks.onAsyncToolCall slowCall
+                        callbacks.onAsyncToolCall fastCall
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput
+                                    "resp-order-1"
+                                    [slowCall, fastCall]
+                                    Nothing
+                            , backendState = appendStateMarker state
+                            }
+                    2 -> do
+                        putMVar releaseSlow ()
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput
+                                    "resp-order-2"
+                                    []
+                                    (Just "waiting")
+                            , backendState = appendStateMarker state
+                            }
+                    _ ->
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput
+                                    "resp-order-3"
+                                    []
+                                    (Just "done")
+                            , backendState = appendStateMarker state
+                            }
+        config0 <- testConfig backend
+        result <-
+            runLoop
+                config0 { loopTools = registryFromTools tools }
+                Nothing
+                "go"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-order-3"
+            , finalText = Just "done"
+            , turnsUsed = 3
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        fmap completedCallIds seen
+            `shouldBe` [[], ["fast-call"], ["slow-call"]]
+
+    it "rejects async execution for a blocking-only tool" do
+        invocations <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        step <- newIORef (0 :: Int)
+        let call = asyncFunctionToolCall "blocked-async" "blocking" "{}"
+            backend = backendWithCallbacks \state _previous inputs callbacks -> do
+                modifyIORef' submissions (<> [inputs])
+                current <- atomicModifyIORef' step \value ->
+                    (value + 1, value + 1)
+                if current == 1
+                    then do
+                        callbacks.onAsyncToolCall call
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput "resp-blocked-1" [call] Nothing
+                            , backendState = appendStateMarker state
+                            }
+                    else
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput
+                                    "resp-blocked-2"
+                                    []
+                                    (Just "done")
+                            , backendState = appendStateMarker state
+                            }
+            blockingTool =
+                noArgsAppTool "blocking" do
+                    modifyIORef' invocations (+ 1)
+                    pure (Right "unexpected")
+        config0 <- testConfig backend
+        result <-
+            runLoop
+                config0 { loopTools = registryFromTools [blockingTool] }
+                Nothing
+                "go"
+        result `shouldSatisfy` either (const False) (const True)
+        readIORef invocations `shouldReturn` 0
+        readIORef submissions >>= \case
+            [_, [CompletedTool completed]] ->
+                completed.output
+                    `shouldSatisfy`
+                        Text.isInfixOf
+                            "does not support asynchronous execution"
+            seen ->
+                expectationFailure $
+                    "unexpected blocking-only submissions: " <> show seen
+
+    it "cancels and joins an async handler with the loop" do
+        handlerStarted <- newEmptyMVar
+        handlerFinished <- newEmptyMVar
+        providerRelease <- newEmptyMVar
+        handlerRelease <- newEmptyMVar
+        cancelFlag <- newCancelFlag
+        let call = asyncFunctionToolCall "cancel-async" "slow" "{}"
+            tool = asyncNoArgsTool "slow" $
+                Exception.finally
+                    (putMVar handlerStarted ()
+                        >> takeMVar handlerRelease
+                        >> pure (Right "unexpected"))
+                    (putMVar handlerFinished ())
+            backend = backendWithCallbacks \state _previous _inputs callbacks -> do
+                callbacks.onAsyncToolCall call
+                takeMVar providerRelease
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-cancel" [call] Nothing
+                    , backendState = appendStateMarker state
+                    }
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools [tool]
+                , loopCancel = cancelFlag
+                , loopInterrupt = putMVar providerRelease ()
+                }
+        withAsync (runLoop config Nothing "go") \running -> do
+            timeout concurrencyProbeMicros (readMVar handlerStarted)
+                `shouldReturn` Just ()
+            requestCancel cancelFlag
+            timeout concurrencyProbeMicros (wait running)
+                `shouldReturn` Just (Left (LoopCancelled []))
+            readMVar handlerFinished `shouldReturn` ()
+
+    it "cancels promptly while an admitted async call is awaiting approval" do
+        approvalStarted <- newEmptyMVar
+        releaseApproval <- newEmptyMVar
+        handlerInvocations <- newIORef (0 :: Int)
+        cancelFlag <- newCancelFlag
+        let call = asyncFunctionToolCall "approval-async" "guarded" "{}"
+            tool = asyncNoArgsTool "guarded" do
+                modifyIORef' handlerInvocations (+ 1)
+                pure (Right "unexpected")
+            backend = backendWithCallbacks \state _previous _inputs callbacks -> do
+                callbacks.onAsyncToolCall call
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-approval" [call] Nothing
+                    , backendState = appendStateMarker state
+                    }
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools [tool]
+                , loopApprove = \_ -> do
+                    putMVar approvalStarted ()
+                    takeMVar releaseApproval
+                    pure (Right True)
+                , loopCancel = cancelFlag
+                }
+        withAsync (runLoop config Nothing "go") \running -> do
+            timeout concurrencyProbeMicros (readMVar approvalStarted)
+                `shouldReturn` Just ()
+            requestCancel cancelFlag
+            timeout concurrencyProbeMicros (wait running)
+                `shouldReturn` Just (Left (LoopCancelled []))
+        readIORef handlerInvocations `shouldReturn` 0
 
     it "detects overlapping filesystem resource claims" do
         let root = unsafeEncodeUtf "/workspace/src"
@@ -2496,6 +2785,31 @@ resourceTool name resource action =
             AlwaysReadOnly
             TurnSequential
             (noArgsTool name action))
+
+noArgsAppTool :: Text -> IO (Either Text Text) -> AppTool
+noArgsAppTool name action =
+    jsonAppToolWithExecution
+        name
+        ""
+        []
+        AlwaysReadOnly
+        ParallelSafe
+        (noArgsTool name action)
+
+asyncNoArgsTool :: Text -> IO (Either Text Text) -> AppTool
+asyncNoArgsTool name action =
+    withAsyncToolCalls (noArgsAppTool name action)
+
+asyncFunctionToolCall :: Text -> Text -> Text -> ToolCall
+asyncFunctionToolCall callId name arguments =
+    withToolCallMode AsyncToolCall
+        (functionToolCall callId name arguments)
+
+completedCallIds :: [TurnInput] -> [Text]
+completedCallIds inputs =
+    [ result.callId
+    | CompletedTool result <- inputs
+    ]
 
 concurrencyProbeMicros :: Int
 concurrencyProbeMicros = 5000000

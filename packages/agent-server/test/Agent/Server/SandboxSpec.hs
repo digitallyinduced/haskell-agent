@@ -30,7 +30,9 @@ import Agent.Tools.Types
     ( ApprovalRule(..)
     , AppTool(..)
     , AppToolGroup(..)
+    , appToolSupportsAsync
     , jsonAppTool
+    , withAsyncToolCalls
     )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
@@ -99,6 +101,16 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "tenant sandbox protocol" do
+    it "preserves async capability on proxied execution tools" do
+        case composeSandboxTools
+            (error "sandbox handler is not evaluated")
+            validSessionId
+            "/workspace"
+            CodexDialect
+            [ExecutionToolGroup [withAsyncToolCalls testSandboxTool]] of
+                proxied : _ -> appToolSupportsAsync proxied `shouldBe` True
+                [] -> expectationFailure "expected proxied execution tool"
+
     it "routes structured workspace paths without rewriting command text" do
         withFakeSandbox "normal" \tenant sandbox _ -> do
             routed <-

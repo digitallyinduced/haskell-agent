@@ -226,16 +226,16 @@ stripItemStatus :: ResponseItem -> ResponseItem
 stripItemStatus = \case
     MessageItem (ResponseMessage itemId content role _ phase passthrough) ->
         MessageItem (ResponseMessage itemId content role Nothing phase passthrough)
-    FunctionCallItem (FunctionCall itemId callId name namespace provider arguments encryptedArgs _) ->
+    FunctionCallItem (FunctionCall itemId callId name namespace provider arguments encryptedArgs _ async) ->
         FunctionCallItem
-            (FunctionCall itemId callId name namespace provider arguments encryptedArgs Nothing)
-    FunctionCallOutputItem (FunctionCallOutput itemId callId name namespace provider output _) ->
+            (FunctionCall itemId callId name namespace provider arguments encryptedArgs Nothing async)
+    FunctionCallOutputItem (FunctionCallOutput itemId callId name namespace provider output _ async) ->
         FunctionCallOutputItem
-            (FunctionCallOutput itemId callId name namespace provider output Nothing)
-    CustomToolCallItem (CustomToolCall itemId callId name namespace input _) ->
-        CustomToolCallItem (CustomToolCall itemId callId name namespace input Nothing)
-    CustomToolCallOutputItem (CustomToolCallOutput itemId callId name output _) ->
-        CustomToolCallOutputItem (CustomToolCallOutput itemId callId name output Nothing)
+            (FunctionCallOutput itemId callId name namespace provider output Nothing async)
+    CustomToolCallItem (CustomToolCall itemId callId name namespace input _ async) ->
+        CustomToolCallItem (CustomToolCall itemId callId name namespace input Nothing async)
+    CustomToolCallOutputItem (CustomToolCallOutput itemId callId name output _ async) ->
+        CustomToolCallOutputItem (CustomToolCallOutput itemId callId name output Nothing async)
     ReasoningItemValue (ReasoningItem itemId summary content encryptedContent _) ->
         ReasoningItemValue
             (ReasoningItem itemId summary content encryptedContent Nothing)

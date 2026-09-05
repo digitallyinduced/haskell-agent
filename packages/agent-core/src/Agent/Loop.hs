@@ -1,8 +1,11 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 -- | Provider-neutral agent loop: submit a user turn, dispatch tool calls,
 -- feed results back, and repeat until the model answers in visible text or
 -- hits a cap.
 module Agent.Loop
-    ( Backend(..)
+    ( Backend(Backend, submitTurn, submitTurnWithCallbacks)
+    , BackendCallbacks(..)
     , BackendMiddleware
     , BackendContinuation(..)
     , BackendRevision(..)
@@ -26,6 +29,7 @@ module Agent.Loop
     , addTokenUsage
     , advanceBackendSnapshot
     , backendContinuationToken
+    , backendWithCallbacks
     , clearBackendContinuation
     , defaultLoopMaxTurns
     , defaultLoopMaxEmptyContinuations
@@ -60,10 +64,9 @@ import qualified Data.Text as Text
 -- ordinary function composition: in @(outer . inner) backend@, @outer@
 -- observes the request first and the result last.
 --
--- A backend submission may stream events and may produce tool calls, but host
--- tool approval and execution happen in the surrounding loop after the
--- submission returns. Middleware that retries its wrapped backend therefore
--- retries only the provider step, not already-completed host tools.
+-- A backend submission may stream events and announce async tool calls. A
+-- middleware that retries a provider step must therefore preserve the complete
+-- callback set and account for any host-side effects already admitted.
 type BackendMiddleware = Backend -> Backend
 
 defaultLoopMaxTurns :: Int

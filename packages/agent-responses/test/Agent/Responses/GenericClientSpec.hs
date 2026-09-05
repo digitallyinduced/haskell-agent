@@ -42,7 +42,7 @@ spec = do
                     , description = Nothing
                     , parameters = Nothing
                     , strict = Nothing
-
+                    , async = Nothing
                     }
                 request = case defaultResponseCreateParams of
                     ResponseCreateParams{..} -> ResponseCreateParams
@@ -76,6 +76,7 @@ spec = do
                     { name = "shell"
                     , description = Just "Run a command"
                     , format = Just grammar
+                    , async = Nothing
                     }
                 namespace = NamespaceToolValue NamespaceTool
                     { name = "tools"

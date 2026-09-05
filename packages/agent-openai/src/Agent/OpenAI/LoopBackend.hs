@@ -42,6 +42,7 @@ import Agent.Error
 import qualified Agent.Responses.LoopBackend as Responses
 import Agent.Loop
     ( Backend(..)
+    , BackendCallbacks(..)
     , BackendContinuation(..)
     , BackendMiddleware
     , BackendResult(..)
@@ -49,6 +50,7 @@ import Agent.Loop
     , LoopEvent(..)
     , TurnInput(..)
     , advanceBackendSnapshot
+    , backendWithCallbacks
     , backendContinuationToken
     )
 import Agent.OpenAI.Error (isResponseChainCompatibilityError)
@@ -82,7 +84,12 @@ import Agent.Responses.LoopBackend
     , normalizeResponseInputItems
     )
 import Agent.Responses.Types
-import Agent.ToolDispatch (ToolCallKind(..), ToolCallResult(..))
+import Agent.ToolDispatch
+    ( ToolCallKind(..)
+    , ToolCallMode(..)
+    , ToolCallResult(..)
+    , toolCallMode
+    )
 import qualified Agent.Transport.WebSocket as WebSocket
 import Control.Concurrent (threadDelay)
 import Control.Applicative ((<|>))
@@ -517,35 +524,53 @@ openAiBackendWithTransportFallback
     -> Backend
     -> Backend
 openAiBackendWithTransportFallback fallbackActive primary fallback =
-    Backend \state legacyPreviousResponseId inputs onEvent -> do
+    backendWithCallbacks \state legacyPreviousResponseId inputs callbacks -> do
         active <- readIORef fallbackActive
         if active
-            then fallback.submitTurn state legacyPreviousResponseId inputs onEvent
-            else tryPrimary state legacyPreviousResponseId inputs onEvent
+            then fallback.submitTurnWithCallbacks
+                state legacyPreviousResponseId inputs callbacks
+            else tryPrimary state legacyPreviousResponseId inputs callbacks
   where
-    tryPrimary state legacyPreviousResponseId inputs onEvent = do
+    tryPrimary state legacyPreviousResponseId inputs callbacks = do
         observationRef <- newIORef emptyAttemptObservation
+        asyncAdmitted <- newIORef False
         result <-
-            primary.submitTurn state legacyPreviousResponseId inputs \event -> do
-                -- Commit before forwarding so exceptions from the outer
-                -- callback cannot leave retry bookkeeping stale.
-                atomicModifyIORef' observationRef \observation ->
-                    (observeFallbackLoopEvent event observation, ())
-                onEvent event
+            primary.submitTurnWithCallbacks
+                state
+                legacyPreviousResponseId
+                inputs
+                callbacks
+                    { onLoopEvent = \event -> do
+                        -- Commit before forwarding so exceptions from the
+                        -- outer callback cannot leave retry bookkeeping stale.
+                        atomicModifyIORef' observationRef \observation ->
+                            (observeFallbackLoopEvent event observation, ())
+                        callbacks.onLoopEvent event
+                    , onAsyncToolCall = \call -> do
+                        writeIORef asyncAdmitted True
+                        callbacks.onAsyncToolCall call
+                    }
         case result of
             Left err
                 | isOpenAiWebSocketTransportFailure err -> do
-                    writeIORef fallbackActive True
-                    observation <- readIORef observationRef
-                    if observation.observedVisibleOutput
-                        then onEvent (ResponseRestarted fallbackRestartMessage)
-                        else
-                            -- A tool block the dead socket announced must not
-                            -- linger as running next to the replayed attempt.
-                            when observation.observedToolOutput
-                                (onEvent ResponseAttemptDiscarded)
-                    fallback.submitTurn
-                        state legacyPreviousResponseId inputs onEvent
+                    admitted <- readIORef asyncAdmitted
+                    if admitted
+                        then pure result
+                        else do
+                            writeIORef fallbackActive True
+                            observation <- readIORef observationRef
+                            if observation.observedVisibleOutput
+                                then callbacks.onLoopEvent
+                                    (ResponseRestarted fallbackRestartMessage)
+                                else
+                                    -- A tool block the dead socket announced
+                                    -- must not linger as running next to the
+                                    -- replayed attempt.
+                                    when observation.observedToolOutput
+                                        (callbacks.onLoopEvent
+                                            ResponseAttemptDiscarded)
+                            fallback.submitTurnWithCallbacks
+                                state legacyPreviousResponseId inputs callbacks
             _ -> pure result
 
 hasLegacyComputerContinuation :: [ResponseItem] -> [TurnInput] -> Bool
@@ -603,11 +628,12 @@ isOpenAiReplayUnsafeWebSocketTransportFailure = \case
 -- compaction may mint the token needed by the immediately following request,
 -- and recovery retries must replay the same turn state rather than clearing it.
 withCodexTurnStateScope :: IO CodexTurnState -> BackendMiddleware
-withCodexTurnStateScope getTurnState (Backend submit) =
-    Backend \state legacyPreviousResponseId inputs onEvent -> do
+withCodexTurnStateScope getTurnState backend =
+    backendWithCallbacks \state legacyPreviousResponseId inputs callbacks -> do
         when (startsNewLogicalTurn inputs) $
             getTurnState >>= resetCodexTurnState
-        submit state legacyPreviousResponseId inputs onEvent
+        backend.submitTurnWithCallbacks
+            state legacyPreviousResponseId inputs callbacks
   where
     startsNewLogicalTurn turnInputs =
         not (null turnInputs) && not (any isCompletedTool turnInputs)
@@ -706,7 +732,7 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
     -> Backend
 openAiBackendWithRetryPoliciesAndReasoningVisibility
         showRawReasoning transientPolicy reconnectPolicy send getParams =
-    Backend \snapshot legacyPreviousResponseId inputs onLoopEvent -> do
+    backendWithCallbacks \snapshot legacyPreviousResponseId inputs callbacks -> do
         baseParams <- sanitizeCodexRequest <$> getParams
         let history = snapshot.backendItems
             previousResponseId =
@@ -728,13 +754,13 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                         (fullRequest, Nothing)
                     Nothing | not (null history) -> (fullRequest, Nothing)
                     _ -> (deltaRequest, previousResponseId)
-        result <- sendRetrying onLoopEvent initialRequest initialPrevious
+        result <- sendRetrying callbacks initialRequest initialPrevious
         recovered <- case result of
             Left err
                 | isJust initialPrevious
                 , isResponseChainCompatibilityError err
                 , not (null history) ->
-                    sendRetrying onLoopEvent fullRequest Nothing
+                    sendRetrying callbacks fullRequest Nothing
                 | otherwise -> pure (Left err)
             Right response -> pure (Right response)
         case recovered of
@@ -754,7 +780,7 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                                 })
                     }
   where
-    sendRetrying onLoopEvent request previousResponseId = do
+    sendRetrying callbacks request previousResponseId = do
         go defaultRetryStatus defaultRetryStatus
       where
         go transientStatus reconnectStatus = do
@@ -779,8 +805,18 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                             }
                         , ()
                         )
-                    onLoopEvent loopEvent
+                    callbacks.onLoopEvent loopEvent
                     ) loopEvents
+                case event of
+                    ResponseOutputItemDoneEvent { item }
+                        | Just call <- Responses.responseItemToToolCall item
+                        , AsyncToolCall <- toolCallMode call -> do
+                            atomicModifyIORef' attemptState \state ->
+                                (state { attemptObservation =
+                                    state.attemptObservation
+                                        { observedAsyncTool = True } }, ())
+                            callbacks.onAsyncToolCall call
+                    _ -> pure ()
             observation <- (.attemptObservation) <$> readIORef attemptState
             let emitted = observation.observedRawOutput
             case result of
@@ -789,6 +825,7 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                     -- connection-recovery sender and the transport fallback;
                     -- only a socket that died mid-response is retried here.
                     | emitted
+                    , not observation.observedAsyncTool
                     , isReconnectableTransportFailure apiError ->
                         applyPolicy reconnectPolicy reconnectStatus >>= \case
                             Nothing -> settle observation apiError result
@@ -796,7 +833,7 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                                 let delayMicros =
                                         fromMaybe 0 nextStatus.rsPreviousDelay
                                     attempt = nextStatus.rsIterNumber
-                                onLoopEvent $ ActivityUpdated $
+                                callbacks.onLoopEvent $ ActivityUpdated $
                                     formatReconnectScheduled
                                         apiError attempt delayMicros
                                 threadDelay delayMicros
@@ -806,11 +843,12 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                                 -- failed; hidden activity such as an announced
                                 -- tool call is removed.
                                 if observation.observedVisibleOutput
-                                    then onLoopEvent
+                                    then callbacks.onLoopEvent
                                         (ResponseRestarted
                                             connectionRestartMessage)
-                                    else onLoopEvent ResponseAttemptDiscarded
-                                onLoopEvent $ ActivityUpdated $
+                                    else callbacks.onLoopEvent
+                                        ResponseAttemptDiscarded
+                                callbacks.onLoopEvent $ ActivityUpdated $
                                     "Reconnecting to Codex (attempt "
                                         <> Text.pack (show attempt) <> ")…"
                                 go transientStatus nextStatus
@@ -822,10 +860,10 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                                 let delayMicros =
                                         fromMaybe 0 nextStatus.rsPreviousDelay
                                     attempt = nextStatus.rsIterNumber
-                                onLoopEvent $ ActivityUpdated $
+                                callbacks.onLoopEvent $ ActivityUpdated $
                                     formatRetryScheduled apiError attempt delayMicros
                                 threadDelay delayMicros
-                                onLoopEvent $ ActivityUpdated $
+                                callbacks.onLoopEvent $ ActivityUpdated $
                                     "Retrying Codex request (attempt "
                                         <> Text.pack (show attempt) <> ")…"
                                 go nextStatus reconnectStatus
@@ -836,7 +874,10 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
             -- after this backend gives up; every other failure after output
             -- is terminal because the provider may have committed the sample.
             settle observation apiError result = do
-                pure $ if observation.observedVisibleOutput
+                pure $ if observation.observedAsyncTool
+                        then Left (replayUnsafeError
+                            "asynchronous tool call" apiError)
+                    else if observation.observedVisibleOutput
                         || isReconnectableTransportFailure apiError
                     then result
                     else Left (replayUnsafeError "model output" apiError)
@@ -845,6 +886,7 @@ data AttemptObservation = AttemptObservation
     { observedRawOutput :: !Bool
     , observedVisibleOutput :: !Bool
     , observedToolOutput :: !Bool
+    , observedAsyncTool :: !Bool
     }
 
 emptyAttemptObservation :: AttemptObservation
@@ -852,6 +894,7 @@ emptyAttemptObservation = AttemptObservation
     { observedRawOutput = False
     , observedVisibleOutput = False
     , observedToolOutput = False
+    , observedAsyncTool = False
     }
 
 observeRawOutput
