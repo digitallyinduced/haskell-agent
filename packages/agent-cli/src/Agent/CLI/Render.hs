@@ -602,95 +602,17 @@ renderEventUnlocked config = \case
             unless (Text.null summary) $
                 putTextLn config.renderStderr
                     (roleMuted config.renderColor summary)
-    ToolStarted call -> do
-        commitThinkingUnlocked config
-        alreadyVisible <- modifyRenderState config \state ->
-            ( state
-                { stateToolCalls = Map.insert call.callId call state.stateToolCalls
-                , stateActivity =
-                    summarizeToolCallRelative config.renderWorkspace call
-                }
-            , Map.member call.callId state.stateToolCalls
-            )
-        unless (alreadyVisible || isTodoTool call.name) do
-            putTextLn config.renderStderr
-                (formatToolStartedRelative
-                    config.renderColor
-                    config.renderWorkspace
-                    call)
-            let extra =
-                    formatToolBodyRelative
-                        config.renderColor
-                        config.renderWorkspace
-                        call
-            unless (Text.null extra) do
-                putTextLn config.renderStderr extra
-        when config.renderShowThinking do
-            visible <- (.stateThinkingVisible) <$> readRenderState config
-            if visible
-                then paintThinkingFrame config
-                else startThinkingSpinnerUnlocked config
+    ToolStarted call ->
+        renderToolStartedUnlocked config call
     -- The append-only renderer cannot safely repaint accumulated snapshots
     -- without duplicating output in terminal scrollback. The retained TUI
     -- handles these updates; minimal mode prints the final ToolFinished result.
     ToolOutputUpdated _callId _output ->
         pure ()
-    ToolFinished result -> do
-        calls <- modifyRenderState config \state ->
-            ( state{stateToolCalls = Map.delete result.callId state.stateToolCalls}
-            , state.stateToolCalls
-            )
-        let maybeCall = Map.lookup result.callId calls
-            formatted = maybe result.output
-                (\call ->
-                    formatToolOutputRelative
-                        config.renderWorkspace
-                        call
-                        result.output)
-                maybeCall
-            painted = case maybeCall of
-                Just call
-                    | isTodoTool call.name -> Nothing
-                _ ->
-                    Just
-                        (roleToolOutput
-                            config.renderColor
-                            (truncateToolOutput formatted))
-        case painted of
-            Nothing -> pure ()
-            Just line -> putTextLn config.renderStderr line
-    ToolUpdated call -> do
-        previous <- modifyRenderState config \state ->
-            ( state
-                { stateToolCalls =
-                    Map.insert call.callId call state.stateToolCalls
-                , stateActivity =
-                    summarizeToolCallRelative config.renderWorkspace call
-                }
-            , Map.lookup call.callId state.stateToolCalls
-            )
-        -- An early streamed start may only show a placeholder. Append the
-        -- canonical rendering once when the done item supplies arguments;
-        -- the later execution-time ToolStarted is deduplicated by call id.
-        when
-            ( maybe False
-                (Text.null . Text.strip . (.arguments))
-                previous
-                && not (Text.null (Text.strip call.arguments))
-                && not (isTodoTool call.name)
-            ) do
-                putTextLn config.renderStderr
-                    (formatToolStartedRelative
-                        config.renderColor
-                        config.renderWorkspace
-                        call)
-                let extra =
-                        formatToolBodyRelative
-                            config.renderColor
-                            config.renderWorkspace
-                            call
-                unless (Text.null extra) do
-                    putTextLn config.renderStderr extra
+    ToolFinished result ->
+        renderToolFinishedUnlocked config result
+    ToolUpdated call ->
+        renderToolUpdatedUnlocked config call
     -- Partial arguments can be repainted by the retained fullscreen UI, but
     -- cannot be updated safely in append-only terminal scrollback.
     ToolArgumentsUpdated _ ->
@@ -710,6 +632,96 @@ renderEventUnlocked config = \case
         pure ()
     NativeAgentFinished{} ->
         pure ()
+
+renderToolStartedUnlocked :: RenderConfig -> ToolCall -> IO ()
+renderToolStartedUnlocked config call = do
+    commitThinkingUnlocked config
+    alreadyVisible <- modifyRenderState config \state ->
+        ( state
+            { stateToolCalls = Map.insert call.callId call state.stateToolCalls
+            , stateActivity =
+                summarizeToolCallRelative config.renderWorkspace call
+            }
+        , Map.member call.callId state.stateToolCalls
+        )
+    unless (alreadyVisible || isTodoTool call.name) do
+        putTextLn config.renderStderr
+            (formatToolStartedRelative
+                config.renderColor
+                config.renderWorkspace
+                call)
+        let extra =
+                formatToolBodyRelative
+                    config.renderColor
+                    config.renderWorkspace
+                    call
+        unless (Text.null extra) do
+            putTextLn config.renderStderr extra
+    when config.renderShowThinking do
+        visible <- (.stateThinkingVisible) <$> readRenderState config
+        if visible
+            then paintThinkingFrame config
+            else startThinkingSpinnerUnlocked config
+
+renderToolFinishedUnlocked :: RenderConfig -> ToolCallResult -> IO ()
+renderToolFinishedUnlocked config result = do
+    calls <- modifyRenderState config \state ->
+        ( state{stateToolCalls = Map.delete result.callId state.stateToolCalls}
+        , state.stateToolCalls
+        )
+    let maybeCall = Map.lookup result.callId calls
+        formatted = maybe result.output
+            (\call ->
+                formatToolOutputRelative
+                    config.renderWorkspace
+                    call
+                    result.output)
+            maybeCall
+        painted = case maybeCall of
+            Just call
+                | isTodoTool call.name -> Nothing
+            _ ->
+                Just
+                    (roleToolOutput
+                        config.renderColor
+                        (truncateToolOutput formatted))
+    case painted of
+        Nothing -> pure ()
+        Just line -> putTextLn config.renderStderr line
+
+renderToolUpdatedUnlocked :: RenderConfig -> ToolCall -> IO ()
+renderToolUpdatedUnlocked config call = do
+    previous <- modifyRenderState config \state ->
+        ( state
+            { stateToolCalls =
+                Map.insert call.callId call state.stateToolCalls
+            , stateActivity =
+                summarizeToolCallRelative config.renderWorkspace call
+            }
+        , Map.lookup call.callId state.stateToolCalls
+        )
+    -- An early streamed start may only show a placeholder. Append the
+    -- canonical rendering once when the done item supplies arguments;
+    -- the later execution-time ToolStarted is deduplicated by call id.
+    when
+        ( maybe False
+            (Text.null . Text.strip . (.arguments))
+            previous
+            && not (Text.null (Text.strip call.arguments))
+            && not (isTodoTool call.name)
+        ) do
+            putTextLn config.renderStderr
+                (formatToolStartedRelative
+                    config.renderColor
+                    config.renderWorkspace
+                    call)
+            let extra =
+                    formatToolBodyRelative
+                        config.renderColor
+                        config.renderWorkspace
+                        call
+            unless (Text.null extra) do
+                putTextLn config.renderStderr extra
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
 -- The terminal theme owns the default assistant background.
