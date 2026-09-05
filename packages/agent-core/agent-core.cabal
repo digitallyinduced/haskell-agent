@@ -96,8 +96,13 @@ library
                     , Agent.Tools.ViewImage
                     , Agent.Transport.WebSocket
     other-modules:    Agent.Image.Normalize
+                    , Agent.Loop.Backend
+                    , Agent.Loop.DisplayJournal
                     , Agent.Loop.EventPump
+                    , Agent.Loop.Input
                     , Agent.Loop.Internal
+                    , Agent.Loop.Output
+                    , Agent.Loop.TokenUsage
                     , Agent.Subagents.Registry.Internal.Core
                     , Agent.Subagents.Registry.Internal.Operations
                     , Agent.Subagents.Registry.Internal.Types
