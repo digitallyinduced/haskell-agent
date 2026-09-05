@@ -40,6 +40,7 @@ import Agent.CLI.ComputerUse.Linux.Logind
 import Agent.CLI.ComputerUse.Input (MouseButton(..))
 import Agent.CLI.ComputerUse.Linux.Portal
     ( CapturedPortalFrame(..)
+    , PortalBackendState(..)
     , PortalFrameState(..)
     , PortalPngFrame(..)
     , PortalState(..)
@@ -55,6 +56,7 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , portalRequestPathForSender
     , readPortalPngFrame
     , requestResponseRule
+    , runPortalBackendOperationWith
     , sessionClosedRule
     , validatePortalOwnerUser
     , waitForPortalFrameAfter
@@ -999,6 +1001,98 @@ spec = do
                     "Start"
                     [])
                 `shouldBe` Just owner
+
+        it "reconnects the portal runtime after its bus owner changes" do
+            let oldOwner = "owner-a" :: Text.Text
+                newOwner = "owner-b" :: Text.Text
+                associationError =
+                    "Computer use cannot associate the desktop portal with the verified systemd-logind session."
+            backendState <-
+                newMVar (PortalBackendOpen (Just oldOwner))
+            initializationCount <- newIORef (0 :: Int)
+            closedOwners <- newIORef []
+            operationOwners <- newIORef []
+            let initialize = do
+                    modifyIORef' initializationCount (+ 1)
+                    pure (Right newOwner)
+                closeOwner owner =
+                    modifyIORef' closedOwners (<> [owner])
+                operation owner = do
+                    modifyIORef' operationOwners (<> [owner])
+                    pure $
+                        if owner == oldOwner
+                            then Left associationError
+                            else Right ()
+            runPortalBackendOperationWith
+                backendState
+                initialize
+                closeOwner
+                (== associationError)
+                True
+                operation
+                `shouldReturn` Right ()
+            readIORef initializationCount `shouldReturn` 1
+            readIORef closedOwners `shouldReturn` [oldOwner]
+            readIORef operationOwners
+                `shouldReturn` [oldOwner, newOwner]
+            readMVar backendState >>= \case
+                PortalBackendOpen (Just owner) ->
+                    owner `shouldBe` newOwner
+                _ ->
+                    expectationFailure
+                        "the replacement portal runtime was not retained"
+
+        it "evicts but does not repeat a side-effecting portal operation" do
+            let oldOwner = "owner-a" :: Text.Text
+                newOwner = "owner-b" :: Text.Text
+                associationError =
+                    "Computer use cannot associate the desktop portal with the verified systemd-logind session."
+            backendState <-
+                newMVar (PortalBackendOpen (Just oldOwner))
+            initializationCount <- newIORef (0 :: Int)
+            closedOwners <- newIORef []
+            operationCount <- newIORef (0 :: Int)
+            let initialize = do
+                    modifyIORef' initializationCount (+ 1)
+                    pure (Right newOwner)
+                closeOwner owner =
+                    modifyIORef' closedOwners (<> [owner])
+                operation _ = do
+                    modifyIORef' operationCount (+ 1)
+                    pure
+                        (Left associationError :: Either Text.Text ())
+            runPortalBackendOperationWith
+                backendState
+                initialize
+                closeOwner
+                (== associationError)
+                False
+                operation
+                `shouldReturn` Left associationError
+            readIORef initializationCount `shouldReturn` 0
+            readIORef closedOwners `shouldReturn` [oldOwner]
+            readIORef operationCount `shouldReturn` 1
+            readMVar backendState >>= \case
+                PortalBackendOpen Nothing -> pure ()
+                _ ->
+                    expectationFailure
+                        "the stale portal runtime was not evicted"
+            runPortalBackendOperationWith
+                backendState
+                initialize
+                closeOwner
+                (== associationError)
+                True
+                (const (pure (Right ())))
+                `shouldReturn` Right ()
+            readIORef initializationCount `shouldReturn` 1
+            readIORef operationCount `shouldReturn` 1
+            readMVar backendState >>= \case
+                PortalBackendOpen (Just owner) ->
+                    owner `shouldBe` newOwner
+                _ ->
+                    expectationFailure
+                        "the next readiness check did not reconnect"
 
         it "derives race-free request paths from the unique bus name" do
             portalRequestPathForSender ":1.42" "request_ab12"

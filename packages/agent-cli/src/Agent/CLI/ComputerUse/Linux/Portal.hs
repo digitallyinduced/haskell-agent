@@ -1,5 +1,6 @@
 module Agent.CLI.ComputerUse.Linux.Portal
     ( CapturedPortalFrame(..)
+    , PortalBackendState(..)
     , PortalFrameState(..)
     , PortalPngFrame(..)
     , PortalState(..)
@@ -16,6 +17,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , portalRequestPathForSender
     , readPortalPngFrame
     , requestResponseRule
+    , runPortalBackendOperationWith
     , sessionClosedRule
     , validatePortalOwnerUser
     , waitForPortalFrameAfter
@@ -92,6 +94,7 @@ import Control.Concurrent.STM
     , readTVarIO
     , retry
     )
+import qualified Control.Exception as Exception
 import Control.Exception.Safe
     ( SomeException
     , bracket
@@ -238,6 +241,12 @@ data PortalRuntime = PortalRuntime
     , portalReadiness :: !(IO (Either Text ()))
     }
 
+data PortalBackendState runtime
+    = PortalBackendOpen !(Maybe runtime)
+    | PortalBackendRefreshing !runtime
+    | PortalBackendClosing !runtime
+    | PortalBackendClosed
+
 data CapturedPortalFrame = CapturedPortalFrame
     { portalFrameSequence :: !Word64
     , portalFramePng :: !PortalPngFrame
@@ -247,7 +256,55 @@ newPortalBackend
     :: WaylandPortalTarget
     -> IO (Either Text ())
     -> IO (Either Text ComputerBackend)
-newPortalBackend target readiness = do
+newPortalBackend target readiness =
+    mask \restore -> do
+        initialized <- restore (newPortalRuntime target readiness)
+        case initialized of
+            Left err -> pure (Left err)
+            Right runtime -> do
+                backendState <-
+                    newMVar (PortalBackendOpen (Just runtime))
+                let run retryAfterRefresh =
+                        runPortalBackendOperationWith
+                            backendState
+                            (newPortalRuntime target readiness)
+                            closePortalRuntime
+                            (Text.isInfixOf portalAssociationError)
+                            retryAfterRefresh
+                    -- A readiness check is safe to replay. Input may already
+                    -- have happened before its post-check detects replacement.
+                pure $
+                    Right ComputerBackend
+                        { computerBackendEnsureReady =
+                            run True ensurePortalReady
+                        , computerBackendInspectDisplay =
+                            run False inspectPortalDisplay
+                        , computerBackendExecuteAction =
+                            \display action ->
+                                run False
+                                    (\current ->
+                                        executePortalAction
+                                            current
+                                            display
+                                            action)
+                        , computerBackendCaptureDisplay =
+                            \encoding ->
+                                run False
+                                    (\current ->
+                                        capturePortalDisplay
+                                            current
+                                            encoding)
+                        , computerBackendClose =
+                            closePortalBackendWith
+                                backendState
+                                closePortalRuntime
+                        }
+
+newPortalRuntime
+    :: WaylandPortalTarget
+    -> IO (Either Text ())
+    -> IO (Either Text PortalRuntime)
+newPortalRuntime target readiness = do
     attempted <- tryAny do
         either (fail . Text.unpack) pure =<< readiness
         (client, uniqueName) <- connectPortal target
@@ -273,23 +330,167 @@ newPortalBackend target readiness = do
                         , portalState = state
                         , portalReadiness = portalReadiness
                         }
-                pure ComputerBackend
-                    { computerBackendEnsureReady = ensurePortalReady runtime
-                    , computerBackendInspectDisplay =
-                        inspectPortalDisplay runtime
-                    , computerBackendExecuteAction =
-                        executePortalAction runtime
-                    , computerBackendCaptureDisplay =
-                        capturePortalDisplay runtime
-                    , computerBackendClose = closePortalRuntime runtime
-                    }
+                pure runtime
     pure case attempted of
         Left exception ->
             Left
                 ( "Unable to connect to the Wayland desktop portal: "
                     <> exceptionText exception
                 )
-        Right backend -> Right backend
+        Right runtime -> Right runtime
+
+runPortalBackendOperationWith
+    :: MVar (PortalBackendState runtime)
+    -> IO (Either Text runtime)
+    -> (runtime -> IO ())
+    -> (Text -> Bool)
+    -> Bool
+    -> (runtime -> IO (Either Text value))
+    -> IO (Either Text value)
+runPortalBackendOperationWith
+        stateVar
+        initialize
+        closeRuntime
+        shouldRefresh
+        retryAfterRefresh
+        operation =
+    Exception.mask \restore -> do
+        let initializeAndRun allowRefresh = do
+                initialized <- tryAllExceptions (restore initialize)
+                case initialized of
+                    Left exception ->
+                        pure
+                            ( PortalBackendOpen Nothing
+                            , Left exception
+                            )
+                    Right (Left err) ->
+                        pure
+                            ( PortalBackendOpen Nothing
+                            , Right (Left err)
+                            )
+                    Right (Right runtime) ->
+                        runInitialized allowRefresh runtime
+
+            runInitialized allowRefresh runtime = do
+                attempted <-
+                    tryAllExceptions (restore (operation runtime))
+                case attempted of
+                    Left exception ->
+                        pure
+                            ( PortalBackendOpen (Just runtime)
+                            , Left exception
+                            )
+                    Right result@(Right _) ->
+                        pure
+                            ( PortalBackendOpen (Just runtime)
+                            , Right result
+                            )
+                    Right result@(Left err)
+                        | shouldRefresh err ->
+                            retireAndMaybeRefresh
+                                allowRefresh
+                                runtime
+                                result
+                        | otherwise ->
+                            pure
+                                ( PortalBackendOpen (Just runtime)
+                                , Right result
+                                )
+
+            retireAndMaybeRefresh allowRefresh runtime original = do
+                retired <-
+                    tryAllExceptions (restore (closeRuntime runtime))
+                case retired of
+                    Left exception ->
+                        pure
+                            ( PortalBackendRefreshing runtime
+                            , Left exception
+                            )
+                    Right ()
+                        | allowRefresh -> initializeAndRun False
+                        | otherwise ->
+                            pure
+                                ( PortalBackendOpen Nothing
+                                , Right original
+                                )
+
+            finishRefresh runtime = do
+                retired <-
+                    tryAllExceptions (restore (closeRuntime runtime))
+                case retired of
+                    Left exception ->
+                        pure
+                            ( PortalBackendRefreshing runtime
+                            , Left exception
+                            )
+                    Right () ->
+                        initializeAndRun retryAfterRefresh
+
+            finishClose runtime = do
+                closed <-
+                    tryAllExceptions (restore (closeRuntime runtime))
+                pure case closed of
+                    Left exception ->
+                        ( PortalBackendClosing runtime
+                        , Left exception
+                        )
+                    Right () ->
+                        ( PortalBackendClosed
+                        , Right (Left portalBackendClosedError)
+                        )
+
+            step = \case
+                PortalBackendOpen Nothing ->
+                    initializeAndRun retryAfterRefresh
+                PortalBackendOpen (Just runtime) ->
+                    runInitialized retryAfterRefresh runtime
+                PortalBackendRefreshing runtime ->
+                    finishRefresh runtime
+                PortalBackendClosing runtime ->
+                    finishClose runtime
+                PortalBackendClosed ->
+                    pure
+                        ( PortalBackendClosed
+                        , Right (Left portalBackendClosedError)
+                        )
+        outcome <- modifyMVarMasked stateVar step
+        either Exception.throwIO pure outcome
+
+closePortalBackendWith
+    :: MVar (PortalBackendState runtime)
+    -> (runtime -> IO ())
+    -> IO ()
+closePortalBackendWith stateVar closeRuntime =
+    Exception.mask \restore -> do
+        let closeAndFinish runtime = do
+                closed <-
+                    tryAllExceptions (restore (closeRuntime runtime))
+                pure case closed of
+                    Left exception ->
+                        (PortalBackendClosing runtime, Left exception)
+                    Right () ->
+                        (PortalBackendClosed, Right ())
+
+            step = \case
+                PortalBackendOpen Nothing ->
+                    pure (PortalBackendClosed, Right ())
+                PortalBackendOpen (Just runtime) ->
+                    closeAndFinish runtime
+                PortalBackendRefreshing runtime ->
+                    closeAndFinish runtime
+                PortalBackendClosing runtime ->
+                    closeAndFinish runtime
+                PortalBackendClosed ->
+                    pure (PortalBackendClosed, Right ())
+        outcome <- modifyMVarMasked stateVar step
+        either Exception.throwIO pure outcome
+
+tryAllExceptions :: IO value -> IO (Either SomeException value)
+tryAllExceptions = Exception.try
+
+portalBackendClosedError :: Text
+portalBackendClosedError =
+    "The Wayland computer-use backend has been closed."
 
 connectPortal :: WaylandPortalTarget -> IO (Client, BusName)
 connectPortal target =
