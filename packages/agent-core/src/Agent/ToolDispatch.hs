@@ -1,5 +1,3 @@
-{-# LANGUAGE ExistentialQuantification #-}
-
 module Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
@@ -184,32 +182,38 @@ data ToolDispatchConfig = ToolDispatchConfig
     , toolDispatchFinalizeOutput :: ToolCall -> Text -> IO Text
     }
 
-data ToolHandler
-    = forall args. TypedTool Text (Decoder args) (args -> IO (Either Text Text))
-    | forall args. TypedToolWithCall Text (Decoder args) (ToolCall -> args -> IO (Either Text Text))
-    | forall args. TypedRichToolWithCall Text (Decoder args) (ToolCall -> args -> IO (Either Text ToolHandlerResult))
-    | forall args. TypedStreamingTool Text (Decoder args) ((Text -> IO ()) -> args -> IO (Either Text Text))
-    | forall args. TypedStreamingRichTool Text (Decoder args) ((Text -> IO ()) -> args -> IO (Either Text ToolHandlerResult))
-    | TextTool Text (Text -> IO (Either Text Text))
-    | StreamingTextTool Text ((Text -> IO ()) -> Text -> IO (Either Text Text))
-    | StreamingRichTextTool Text ((Text -> IO ()) -> Text -> IO (Either Text ToolHandlerResult))
-    -- | Boundary adapter which receives the original call without decoding or
-    -- rewriting its arguments. Used by out-of-process tool brokers.
-    | PassthroughTool Text ((Text -> IO ()) -> ToolCall -> IO (Either Text ToolHandlerResult))
-    | NoArgsTool Text (IO (Either Text Text))
+-- | Every handler has the same execution interface. Smart constructors capture
+-- argument decoding and result adaptation, leaving dispatch independent of the
+-- input format, streaming support, and output richness.
+--
+-- The original call remains separate from the canonical argument text so
+-- passthrough brokers can forward it without rewriting its payload.
+data ToolHandler = ToolHandler
+    { toolHandlerName :: !Text
+    , toolHandlerRun
+        :: (Text -> IO ())
+        -> ToolCall
+        -> Text
+        -> IO (Either Text ToolHandlerResult)
+    }
 
 typedTool :: Text -> Decoder args -> (args -> IO (Either Text Text)) -> ToolHandler
-typedTool = TypedTool
+typedTool name decoder run =
+    typedToolWithCall name decoder (\_call -> run)
 
 typedToolWithCall :: Text -> Decoder args -> (ToolCall -> args -> IO (Either Text Text)) -> ToolHandler
-typedToolWithCall = TypedToolWithCall
+typedToolWithCall name decoder run =
+    typedRichToolWithCall name decoder \call args ->
+        plainResult <$> run call args
 
 typedRichToolWithCall
     :: Text
     -> Decoder args
     -> (ToolCall -> args -> IO (Either Text ToolHandlerResult))
     -> ToolHandler
-typedRichToolWithCall = TypedRichToolWithCall
+typedRichToolWithCall name decoder run =
+    ToolHandler name \_emit call value ->
+        decodeAndRun decoder value (run call)
 
 -- | A typed tool that can publish accumulated output snapshots while running.
 -- The final result remains authoritative.
@@ -218,21 +222,26 @@ typedStreamingTool
     -> Decoder args
     -> ((Text -> IO ()) -> args -> IO (Either Text Text))
     -> ToolHandler
-typedStreamingTool = TypedStreamingTool
+typedStreamingTool name decoder run =
+    typedStreamingRichTool name decoder \emit args ->
+        plainResult <$> run emit args
 
 typedStreamingRichTool
     :: Text
     -> Decoder args
     -> ((Text -> IO ()) -> args -> IO (Either Text ToolHandlerResult))
     -> ToolHandler
-typedStreamingRichTool = TypedStreamingRichTool
+typedStreamingRichTool name decoder run =
+    ToolHandler name \emit _call value ->
+        decodeAndRun decoder value (run emit)
 
 -- | A freeform tool whose input is plain text rather than JSON.
 textTool
     :: Text
     -> (Text -> IO (Either Text Text))
     -> ToolHandler
-textTool = TextTool
+textTool name run =
+    streamingTextTool name (\_emit -> run)
 
 -- | A streaming freeform tool. Its input is not JSON, so no JSON decoder is
 -- involved.
@@ -240,22 +249,29 @@ streamingTextTool
     :: Text
     -> ((Text -> IO ()) -> Text -> IO (Either Text Text))
     -> ToolHandler
-streamingTextTool = StreamingTextTool
+streamingTextTool name run =
+    streamingRichTextTool name \emit value ->
+        plainResult <$> run emit value
 
 streamingRichTextTool
     :: Text
     -> ((Text -> IO ()) -> Text -> IO (Either Text ToolHandlerResult))
     -> ToolHandler
-streamingRichTextTool = StreamingRichTextTool
+streamingRichTextTool name run =
+    ToolHandler name \emit _call value -> run emit value
 
 passthroughTool
     :: Text
     -> ((Text -> IO ()) -> ToolCall -> IO (Either Text ToolHandlerResult))
     -> ToolHandler
-passthroughTool = PassthroughTool
+passthroughTool name run =
+    ToolHandler name \emit call _value -> run emit call
 
 noArgsTool :: Text -> IO (Either Text Text) -> ToolHandler
-noArgsTool = NoArgsTool
+noArgsTool name run = textTool name (\_value -> run)
+
+plainResult :: Either Text Text -> Either Text ToolHandlerResult
+plainResult = fmap \text -> ToolHandlerResult text []
 
 dispatchToolCall :: ToolDispatchConfig -> [ToolHandler] -> ToolCall -> IO ToolCallResult
 dispatchToolCall config handlers call =
@@ -410,17 +426,7 @@ multiAgentBareNames =
     ]
 
 handlerName :: ToolHandler -> Text
-handlerName = \case
-    TypedTool name _ _ -> name
-    TypedToolWithCall name _ _ -> name
-    TypedRichToolWithCall name _ _ -> name
-    TypedStreamingTool name _ _ -> name
-    TypedStreamingRichTool name _ _ -> name
-    TextTool name _ -> name
-    StreamingTextTool name _ -> name
-    StreamingRichTextTool name _ -> name
-    PassthroughTool name _ -> name
-    NoArgsTool name _ -> name
+handlerName handler = handler.toolHandlerName
 
 runHandler
     :: (Text -> IO ())
@@ -428,25 +434,8 @@ runHandler
     -> Text
     -> ToolHandler
     -> IO (Either Text ToolHandlerResult)
-runHandler emitOutput call value = \case
-    TypedTool _ decoder run ->
-        plainResult <$> decodeAndRun decoder value run
-    TypedToolWithCall _ decoder run ->
-        plainResult <$> decodeAndRun decoder value (run call)
-    TypedRichToolWithCall _ decoder run ->
-        decodeAndRun decoder value (run call)
-    TypedStreamingTool _ decoder run ->
-        plainResult <$> decodeAndRun decoder value (run emitOutput)
-    TypedStreamingRichTool _ decoder run ->
-        decodeAndRun decoder value (run emitOutput)
-    TextTool _ run -> plainResult <$> run value
-    StreamingTextTool _ run -> plainResult <$> run emitOutput value
-    StreamingRichTextTool _ run -> run emitOutput value
-    PassthroughTool _ run -> run emitOutput call
-    NoArgsTool _ run ->
-        plainResult <$> run
-  where
-    plainResult = fmap \text -> ToolHandlerResult text []
+runHandler emitOutput call value handler =
+    handler.toolHandlerRun emitOutput call value
 
 decodeAndRun
     :: Decoder args
