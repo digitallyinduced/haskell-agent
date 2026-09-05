@@ -308,7 +308,7 @@ spec = describe "requestParams" do
                         [webSearchTool, functionTool "lookup", computerTool]
                         "high"
             lite =
-                setRequestModel OpenAIProvider "gpt-5.6-terra" generic
+                setRequestModel OpenAIProvider "gpt-6-astra" generic
             restored =
                 setRequestModel OpenAIProvider "gpt-generic-2" lite
 

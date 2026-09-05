@@ -1066,12 +1066,13 @@ spec = do
 
     describe "Codex model metadata" do
         it "derives the 90% auto-compaction limit for curated 272k models" do
-            codexModelMetadata "gpt-5.6-luna"
+            codexModelMetadata "gpt-6-astra"
                 `shouldBe` Just CodexModelMetadata
                     { modelContextWindow = 272_000
                     , modelEffectiveContextWindow = 258_400
                     , modelAutoCompactTokenLimit = 244_800
                     }
+            isCodexResponsesLiteModel "gpt-6-astra" `shouldBe` True
             codexAutoCompactTokenLimitFor (Just "gpt-5.6-sol")
                 `shouldBe` 244_800
 
