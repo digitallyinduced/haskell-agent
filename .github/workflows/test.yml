@@ -25,6 +25,7 @@ jobs:
           - name: CLI package tests
             targets: .#checks.x86_64-linux.agent-cli
             evaluate_flake: true
+            timeout_minutes: 60
           - name: Telegram package tests
             targets: .#checks.x86_64-linux.agent-telegram
           - name: Server package tests
