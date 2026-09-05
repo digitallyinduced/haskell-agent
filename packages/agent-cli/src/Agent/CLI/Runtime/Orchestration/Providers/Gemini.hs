@@ -1,24 +1,28 @@
 module Agent.CLI.Runtime.Orchestration.Providers.Gemini
-    ( runGeminiProvider
+    ( withGeminiProvider
     ) where
 
 import Agent.CLI.Runtime.Orchestration.Providers.Common
-    ( HttpProviderSession(..)
-    , runHttpProvider
+    ( HttpProviderTransport(..)
+    , withHttpProvider
     )
-import Agent.CLI.Runtime.Orchestration.Providers.Types (AgentProviderRequest(..))
-import Agent.CLI.Runtime.Types (RunResult)
+import Agent.CLI.Runtime.Orchestration.Providers.Types
+    ( ProviderHost(..), ProviderRuntime )
 import Agent.Gemini.LoopBackend (tokenProviderStatelessGeminiBackend)
-import Agent.Provider (runWithTokenProvider)
+import Agent.Provider (TokenProvider, runWithTokenProvider)
 import Data.IORef (newIORef)
 import qualified Agent.Gemini.Client as GeminiClient
 import qualified Agent.Gemini.Options as Gemini
 
-runGeminiProvider :: AgentProviderRequest -> IO RunResult
-runGeminiProvider request@AgentProviderRequest{tokenProvider} = do
+withGeminiProvider
+    :: TokenProvider
+    -> ProviderHost
+    -> (ProviderRuntime -> IO a)
+    -> IO a
+withGeminiProvider tokenProvider host use = do
     geminiOptions <- Gemini.clientOptionsFromEnv
     geminiOccupancy <- newIORef Nothing
-    runHttpProvider request HttpProviderSession
+    withHttpProvider host HttpProviderTransport
         { httpMakeBackend =
             tokenProviderStatelessGeminiBackend
                 tokenProvider
@@ -28,4 +32,4 @@ runGeminiProvider request@AgentProviderRequest{tokenProvider} = do
                 GeminiClient.createResponseWith geminiOptions credential compactRequest
         , httpTransportModel = id
         , httpOccupancy = geminiOccupancy
-        }
+        } use
