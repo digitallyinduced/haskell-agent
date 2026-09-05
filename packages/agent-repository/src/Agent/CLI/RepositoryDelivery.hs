@@ -2342,7 +2342,7 @@ repositoryPullRequest root = runExceptT do
     output <- liftDelivery (runGh root
         [ "pr", "list", "--repo", githubRepoArgument repository
         , "--head", Text.unpack remoteBranch, "--state", "all", "--limit", "100"
-        , "--json", "number,url,state,isDraft,statusCheckRollup,headRepository"
+        , "--json", "number,url,state,isDraft,statusCheckRollup,headRepository,headRepositoryOwner"
         ] BS.empty networkTimeoutMicros)
     -- Discard a response if the user switched branches while GitHub was queried.
     current <- liftDelivery (runGit root ["symbolic-ref", "--quiet", "HEAD"] BS.empty localTimeoutMicros)
@@ -2360,8 +2360,15 @@ parseRepositoryPullRequest repository bytes = do
   where
     -- A same-named branch in somebody else's fork is not this checkout's PR.
     matchesHead = Aeson.withObject "pull request" \o -> do
-        headRepository <- o .: "headRepository"
-        Aeson.withObject "head repository" (\repo -> (== repository) <$> repo .: "nameWithOwner") headRepository
+        headRepository <- o .:? "headRepository"
+        headOwner <- o .:? "headRepositoryOwner"
+        case (headRepository, headOwner) of
+            (Just repo, Just owner) -> do
+                name <- Aeson.withObject "head repository" (.: "name") repo
+                login <- Aeson.withObject "head owner" (.: "login") owner
+                -- Older gh releases leave headRepository.nameWithOwner empty.
+                pure (Text.toCaseFold (login <> "/" <> name) == Text.toCaseFold repository)
+            _ -> pure False
     parse = Aeson.withObject "pull request" \o -> do
         number <- o .: "number"
         url <- o .: "url"

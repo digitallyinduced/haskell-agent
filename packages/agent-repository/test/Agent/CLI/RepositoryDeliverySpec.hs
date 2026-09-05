@@ -41,7 +41,7 @@ spec :: Spec
 spec = describe "repository delivery service" do
     describe "sidebar pull request status" do
         let parse checks = parseRepositoryPullRequest "owner/repo" (BS8.pack
-                ("[{\"headRepository\":{\"nameWithOwner\":\"owner/repo\"},\"number\":42,\"url\":\"https://github.com/owner/repo/pull/42\",\"state\":\"OPEN\",\"isDraft\":false,\"statusCheckRollup\":" <> checks <> "}]"))
+                ("[{\"headRepository\":{\"name\":\"repo\",\"nameWithOwner\":\"\"},\"headRepositoryOwner\":{\"login\":\"owner\"},\"number\":42,\"url\":\"https://github.com/owner/repo/pull/42\",\"state\":\"OPEN\",\"isDraft\":false,\"statusCheckRollup\":" <> checks <> "}]"))
             check status conclusion = "{\"__typename\":\"CheckRun\",\"status\":\"" <> status <> "\",\"conclusion\":\"" <> conclusion <> "\"}"
             ci checks = fmap (fmap (\pr -> pr.repositoryPullRequestCI)) (parse checks)
         it "distinguishes no PR from no checks" do
@@ -57,7 +57,11 @@ spec = describe "repository delivery service" do
             ci ("[" <> check "COMPLETED" "NEW_STATE" <> "]") `shouldBe` Right (Just 0)
         it "rejects malformed and incomplete PR responses" do
             parseRepositoryPullRequest "owner/repo" "{}" `shouldSatisfy` isLeft
-            parseRepositoryPullRequest "owner/repo" "[{\"headRepository\":{\"nameWithOwner\":\"owner/repo\"},\"number\":42,\"url\":\"https://github.com/owner/repo/pull/42\"}]" `shouldSatisfy` isLeft
+            parseRepositoryPullRequest "owner/repo" "[{\"headRepository\":{\"name\":\"repo\",\"nameWithOwner\":\"\"},\"headRepositoryOwner\":{\"login\":\"owner\"},\"number\":42,\"url\":\"https://github.com/owner/repo/pull/42\"}]" `shouldSatisfy` isLeft
+
+        it "ignores same-named branches from another fork and deleted head repositories" do
+            parseRepositoryPullRequest "owner/repo" "[{\"headRepository\":{\"name\":\"repo\"},\"headRepositoryOwner\":{\"login\":\"someone-else\"}}]" `shouldBe` Right Nothing
+            parseRepositoryPullRequest "owner/repo" "[{\"headRepository\":null,\"headRepositoryOwner\":null}]" `shouldBe` Right Nothing
 
     it "validates branch and remote names without option/ref injection" do
         validateBranchName "feature/safe-name" `shouldBe` True
