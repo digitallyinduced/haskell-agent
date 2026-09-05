@@ -102,6 +102,7 @@ library
                     , hasql
                     , hasql-pool
                     , hasql-transaction
+                    , pqi
                     , pqi-ffi
                     , process
                     , safe-exceptions

@@ -679,35 +679,33 @@ runWhileOwnerAndActionFenceHealthy owner fence action = do
         Just (Right ()) ->
             readTVarIO owner.turnStoreOwnerHealthy >>= \case
                 False -> pure (Left unhealthyOwnerApiError)
-                True ->
-                    race waitUntilUnhealthy action >>= \case
-                        Left () -> pure (Left unhealthyOwnerApiError)
-                        Right value -> pure (Right value)
+                True -> do
+                    monitored <-
+                        ServerTurnStore.withServerTurnOwnerActionFenceMonitor
+                            fence
+                            \waitForActionFenceFailure ->
+                                race
+                                    ( waitUntilUnhealthy
+                                        waitForActionFenceFailure
+                                    )
+                                    action
+                                    >>= \case
+                                        Left () ->
+                                            pure (Left unhealthyOwnerApiError)
+                                        Right value -> pure (Right value)
+                    case monitored of
+                        Left _ -> pure (Left unhealthyOwnerApiError)
+                        Right result -> pure result
         _ -> pure (Left unhealthyOwnerApiError)
   where
-    waitUntilUnhealthy =
+    waitUntilUnhealthy waitForActionFenceFailure =
         void $
             race
                 ( atomically do
                     healthy <- readTVar owner.turnStoreOwnerHealthy
                     check (not healthy)
                 )
-                (waitUntilActionFenceFails fence)
-
-waitUntilActionFenceFails ::
-    ServerTurnStore.ServerTurnOwnerActionFence ->
-    IO ()
-waitUntilActionFenceFails fence = do
-    threadDelay actionFenceCheckIntervalMicroseconds
-    checked <-
-        timeout ownerHeartbeatTimeoutMicroseconds $
-            ServerTurnStore.checkServerTurnOwnerActionFence fence
-    case checked of
-        Just (Right ()) -> waitUntilActionFenceFails fence
-        _ -> pure ()
-
-actionFenceCheckIntervalMicroseconds :: Int
-actionFenceCheckIntervalMicroseconds = 1000 * 1000
+                waitForActionFenceFailure
 
 requestSessionMutationRelease ::
     Store ->

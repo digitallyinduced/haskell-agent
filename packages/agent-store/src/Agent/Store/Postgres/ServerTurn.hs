@@ -20,6 +20,8 @@ module Agent.Store.Postgres.ServerTurn (
     abandonServerTurnOwnerLease,
     openServerTurnOwnerActionFence,
     checkServerTurnOwnerActionFence,
+    withServerTurnOwnerActionFenceMonitor,
+    waitForServerTurnOwnerActionFenceFailure,
     closeServerTurnOwnerActionFence,
     reserveServerTurn,
     reserveServerSessionMutation,
@@ -42,6 +44,7 @@ import Agent.Store.Postgres.Connection (
     openStoreConnection,
     withConnectionSession,
     withSession,
+    withStoreConnectionFailureMonitor,
  )
 import Agent.Store.Postgres.Hasql (mkStatement)
 import Agent.Store.Types (StoreError (..))
@@ -293,6 +296,33 @@ checkServerTurnOwnerActionFence
             ServerTurnOwnerActionFenceOpen connection ->
                 withConnectionSession connection $
                     Session.statement () checkServerTurnOwnerActionFenceStatement
+
+{- | Arm the dedicated action-fence monitor before invoking an action.
+
+The event manager watches the exact idle socket which holds the advisory lock,
+so a server restart or socket failure wakes the caller without a timer-based
+polling window. The callback receives an interruptible wait for that failure.
+-}
+withServerTurnOwnerActionFenceMonitor ::
+    ServerTurnOwnerActionFence ->
+    (IO () -> IO a) ->
+    IO (Either StoreError a)
+withServerTurnOwnerActionFenceMonitor
+    (ServerTurnOwnerActionFence state)
+    action =
+        withMVar state \case
+            ServerTurnOwnerActionFenceClosed ->
+                pure . Left . StoreDataError $
+                    "server turn owner action fence is closed"
+            ServerTurnOwnerActionFenceOpen connection ->
+                withStoreConnectionFailureMonitor connection action
+
+-- | Wait for the dedicated action-fence connection to fail.
+waitForServerTurnOwnerActionFenceFailure ::
+    ServerTurnOwnerActionFence ->
+    IO (Either StoreError ())
+waitForServerTurnOwnerActionFenceFailure fence =
+    withServerTurnOwnerActionFenceMonitor fence id
 
 closeServerTurnOwnerActionFence :: ServerTurnOwnerActionFence -> IO ()
 closeServerTurnOwnerActionFence

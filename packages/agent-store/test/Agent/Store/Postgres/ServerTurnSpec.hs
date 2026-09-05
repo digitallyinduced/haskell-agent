@@ -42,6 +42,55 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "PostgreSQL server turn store" do
+    it "wakes the action fence monitor when PostgreSQL disconnects" $
+        withSystemTempDirectory "ha-fence" \stateDirectory -> do
+            let config = defaultManagedPostgresConfig stateDirectory ""
+                cleanup = void (stopManagedPostgres config)
+            ( openStore config >>= \case
+                    Left err ->
+                        expectationFailure ("could not open store: " <> show err)
+                    Right store ->
+                        finally
+                            ( withServerTurnOwner
+                                (trustedPool store)
+                                instanceOne
+                                \_ -> do
+                                    withServerTurnOwnerActionFence
+                                        (trustedPool store)
+                                        instanceOne
+                                        \fence -> do
+                                            monitored <-
+                                                withServerTurnOwnerActionFenceMonitor
+                                                    fence
+                                                    (timeout 100000)
+                                            monitored `shouldSatisfy` \case
+                                                Right Nothing -> True
+                                                _ -> False
+                                    withServerTurnOwnerActionFence
+                                        (trustedPool store)
+                                        instanceOne
+                                        \fence -> do
+                                            disconnected <-
+                                                withServerTurnOwnerActionFenceMonitor
+                                                    fence
+                                                    \waitForFailure -> do
+                                                        timeout
+                                                            100000
+                                                            waitForFailure
+                                                            `shouldReturn` Nothing
+                                                        timeout 5000000 do
+                                                            stopManagedPostgres
+                                                                config
+                                                                `shouldReturn` Right ()
+                                                            waitForFailure
+                                            disconnected `shouldSatisfy` \case
+                                                Right (Just ()) -> True
+                                                _ -> False
+                            )
+                            (closeStore store)
+                )
+                `finally` cleanup
+
     it "keeps admission idempotent and terminal output restart-safe" $
         withSystemTempDirectory "ha-server-turn" \stateDirectory -> do
             let config = defaultManagedPostgresConfig stateDirectory ""
