@@ -6,6 +6,7 @@ module Agent.CLI.Usage
     , formatGrokLimitStatus
     , formatOpenAiLimitStatus
     , formatOpenRouterLimitStatus
+    , formatModelUsageSummary
     , formatUsageReport
     , formatUsageSummary
     , formatUsageWindow
@@ -186,6 +187,30 @@ formatUsageSummary now cooldownUntil result =
         Just usageLimit
             | usageLimit.limitReached -> ["limit reached"]
         _ -> []
+    summarizeWindow window =
+        usageWindowShortLabel window
+            <> " "
+            <> Text.pack (show (max 0 (100 - window.usedPercent)))
+            <> "% left"
+
+-- | Compact gateway-model usage suitable for a model-picker row.
+formatModelUsageSummary :: UsageSnapshot -> Maybe Text
+formatModelUsageSummary snapshot = do
+    limits <- snapshot.rateLimit
+    let windows =
+            [ window
+            | Just window <-
+                [limits.primaryWindow, limits.secondaryWindow]
+            ]
+        summaries = map summarizeWindow windows
+        parts
+            | not limits.allowed = "unavailable" : summaries
+            | limits.limitReached = "limit reached" : summaries
+            | otherwise = summaries
+    case parts of
+        [] -> Nothing
+        _ -> Just (Text.intercalate " · " parts)
+  where
     summarizeWindow window =
         usageWindowShortLabel window
             <> " "
