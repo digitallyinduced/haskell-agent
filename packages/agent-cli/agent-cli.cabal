@@ -461,6 +461,9 @@ test-suite agent-cli-test
                     , Agent.CLI.ComputerUseSpec
                     , Agent.CLI.ConfigSpec
                     , Agent.CLI.CompactionSpec
+                    , Agent.CLI.CompactionSpec.Fixtures
+                    , Agent.CLI.CompactionSpec.ManualOpenAI
+                    , Agent.CLI.CompactionSpec.TaskPlan
                     , Agent.CLI.ContextSpec
                     , Agent.CLI.ConversationStoreSpec
                     , Agent.CLI.ConnectivitySpec
@@ -517,6 +520,8 @@ test-suite agent-cli-test
                     , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec
                     , Agent.CLI.TUIAppSpec
+                    , Agent.CLI.TUIAppSpec.AgentFixtures
+                    , Agent.CLI.TUIAppSpec.Motion
                     , Agent.CLI.TUIBridgeSpec
                     , Agent.CLI.TUIComposerSpec
                     , Agent.CLI.TUIImagePreviewSpec
