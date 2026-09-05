@@ -49,6 +49,7 @@ library
                     , Agent.Server.Identifier
                     , Agent.Server.PrivateFile
                     , Agent.Server.Runtime
+                    , Agent.Server.Runtime.TurnStore
                     , Agent.Server.Sandbox
                     , Agent.Server.Sandbox.Worker
                     , Agent.Server.Supervisor

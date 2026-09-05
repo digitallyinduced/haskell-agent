@@ -25,6 +25,7 @@ packages:
     packages/agent-claude
     packages/agent-runtime-daemon
     packages/agent-server
+    packages/agent-server-client
 
 tests: True
 multi-repl: True
