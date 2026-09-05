@@ -5,7 +5,7 @@
 mkDerivation {
   pname = "agent-repository";
   version = "0.1.0.0";
-  src = packages/agent-repository;
+  src = ./.;
   libraryHaskellDepends = [
     aeson async base bytestring containers crypton directory filelock
     filepath process safe-exceptions text time transformers unix
