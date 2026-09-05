@@ -6,7 +6,7 @@ import Agent.ToolDispatch
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import qualified Control.Exception as Exception
+import Control.Exception.Safe (throwIO)
 import Data.IORef
 import qualified Data.Text as Text
 import System.Timeout (timeout)
@@ -136,7 +136,7 @@ spec = do
                 TurnStarted -> do
                     putMVar sinkStarted ()
                     takeMVar releaseSink
-                    Exception.throwIO (userError "renderer exploded")
+                    throwIO (userError "renderer exploded")
                 _ -> pure ()
         config0 <- testConfig backend
         let config = config0 { loopOnEvent = onEvent }
