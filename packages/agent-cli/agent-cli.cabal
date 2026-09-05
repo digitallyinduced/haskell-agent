@@ -85,13 +85,11 @@ library
                     , Agent.CLI.Runtime.Orchestration.Background
                     , Agent.CLI.Runtime.Orchestration.Flow
                     , Agent.CLI.Runtime.Orchestration.Initialized
-                    , Agent.CLI.Runtime.Orchestration.Providers
                     , Agent.CLI.Runtime.Orchestration.Providers.Claude
                     , Agent.CLI.Runtime.Orchestration.Providers.Common
                     , Agent.CLI.Runtime.Orchestration.Providers.Gemini
                     , Agent.CLI.Runtime.Orchestration.Providers.OpenAI
                     , Agent.CLI.Runtime.Orchestration.Providers.OpenRouter
-                    , Agent.CLI.Runtime.Orchestration.Providers.Types
                     , Agent.CLI.Runtime.Orchestration.Providers.XAI
                     , Agent.CLI.Runtime.Orchestration.Restart
                     , Agent.CLI.Runtime.Orchestration.Session
@@ -171,6 +169,12 @@ library
                     , Agent.CLI.Context
                     , Agent.CLI.Command
                     , Agent.CLI.ComputerUse
+                    , Agent.CLI.ComputerUse.Backend
+                    , Agent.CLI.ComputerUse.Input
+                    , Agent.CLI.ComputerUse.Linux
+                    , Agent.CLI.ComputerUse.Linux.Logind
+                    , Agent.CLI.ComputerUse.Linux.Portal
+                    , Agent.CLI.ComputerUse.Linux.X11
                     , Agent.CLI.Config
                     , Agent.CLI.McpOAuthStore
                     , Agent.CLI.McpOAuth
@@ -224,6 +228,8 @@ library
                     , Agent.CLI.Render
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Runtime.MetaConsole
+                    , Agent.CLI.Runtime.Orchestration.Providers
+                    , Agent.CLI.Runtime.Orchestration.Providers.Types
                     , Agent.CLI.Resume
                     , Agent.CLI.Session.ConversationStore
                     , Agent.CLI.Session.History
@@ -307,6 +313,7 @@ library
                     , containers
                     , crypton
                     , directory
+                    , dbus >= 1.4 && < 1.5
                     , entropy
                     , filelock
                     , filepath
@@ -432,6 +439,22 @@ benchmark concurrency-bench
                     , text
                     , time
 
+benchmark portal-capture-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          PortalCapture.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , process >= 1.6.26
+                    , safe-exceptions
+                    , stm
+                    , text
+                    , unix
+
 test-suite agent-cli-test
     import:           common-options
     type:             exitcode-stdio-1.0
@@ -547,6 +570,7 @@ test-suite agent-cli-test
                     , colour
                     , containers
                     , directory
+                    , dbus >= 1.4 && < 1.5
                     , filepath
                     , haskeline >= 0.8 && < 0.9
                     , hspec >= 2.11 && < 2.12

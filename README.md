@@ -185,15 +185,15 @@ Start an interactive session:
 agent-cli
 ```
 
-On macOS, supported OpenAI sessions can use the local desktop by default in an
-interactive terminal. Non-interactive runs keep the tool hidden unless
-`--computer-use` is supplied explicitly. Computer-use requests require
-separate approval, including under `--yolo`; choose **Always allow this tool
-this session** to let the workflow continue without prompting for every
-action. A provider safety check still requires fresh approval.
+On Linux and macOS, supported OpenAI sessions can use the local desktop by
+default in an interactive terminal. One-shot and non-interactive runs keep the
+tool hidden unless `--computer-use` is supplied explicitly. Computer-use
+requests require separate approval, including under `--yolo`; choose **Always
+allow this tool this session** to let the workflow continue without prompting
+for every action. A provider safety check still requires fresh approval.
 `/computer-use` toggles the capability, while
 `/computer-use on` and `/computer-use off` set it explicitly. Disabling or
-re-enabling clears the workflow approval. Grant Screen Recording and
+re-enabling clears the workflow approval. On macOS, grant Screen Recording and
 Accessibility access to the terminal application in **System Settings →
 Privacy & Security** before using it. Start with
 `agent-cli --no-computer-use` to hide the tool from the model, then enable it
@@ -217,6 +217,12 @@ agent with a Nix-provided GHC when enabling it:
 ```console
 nix shell nixpkgs#ghc -c agent-cli --ghci
 ```
+
+On Linux, native X11 uses `xrandr`, `maim`, and `xdotool`. Native Wayland uses
+the standard ScreenCast and RemoteDesktop portals with PipeWire. The Nix
+package includes the required command-line and GStreamer dependencies. See the
+[computer-use guide](docs/computer-use.md) for permissions, session behavior,
+non-Nix prerequisites, and desktop-specific checks.
 
 For GHCi-only operation, disable Bash explicitly:
 

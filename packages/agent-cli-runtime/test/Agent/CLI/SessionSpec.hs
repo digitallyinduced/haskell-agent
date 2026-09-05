@@ -23,6 +23,7 @@ import Agent.Loop (TokenUsage(..))
 import Agent.Telemetry (TurnTelemetry(..))
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
+import Agent.ToolOutcome (ToolOutcome(..))
 import Agent.Store.SessionItem
 import Agent.ToolOutcome (ToolOutcome(..))
 import Agent.Store.Postgres

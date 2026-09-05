@@ -150,7 +150,7 @@ data CliOptions = CliOptions
     , optBash :: !Bool
       -- ^ Expose the provider's explicit shell execution tool (default: True).
     , optComputerUse :: !Bool
-      -- ^ Allow the model to request control of the local macOS desktop.
+      -- ^ Allow the model to request control of the local Linux/macOS desktop.
       -- Interactive terminal sessions default to 'True'.
     , optComputerUseExplicit :: !Bool
       -- ^ Whether a computer-use flag was supplied explicitly. This lets
@@ -500,7 +500,7 @@ optionUpdateParser = asum
     , boolFlagUpdate "no-bash" False "Disable shell execution tools"
         (\value options -> options { optBash = value })
     , boolFlagUpdate "computer-use" True
-        "Enable local macOS computer use (default with a TTY)"
+        "Enable local Linux/macOS computer use (default with a TTY)"
         (\value options -> options
             { optComputerUse = value
             , optComputerUseExplicit = True
@@ -700,9 +700,9 @@ usage = unlines
     , "      --no-ghci           Disable the persistent GHCi tool (default)"
     , "      --bash              Enable explicit shell execution tools (default)"
     , "      --no-bash           Disable explicit shell execution tools"
-    , "      --computer-use      Enable local macOS desktop control"
+    , "      --computer-use      Enable local Linux/macOS desktop control"
     , "                          (default only with an interactive TTY)"
-    , "      --no-computer-use   Disable local macOS desktop control"
+    , "      --no-computer-use   Disable local desktop control"
     , "      --fullscreen        Use the retained full-screen TUI"
     , "      --minimal           Use terminal-native append-only rendering"
     , "      --motion MODE       Animation policy: full, reduced, or off"
@@ -746,7 +746,7 @@ usage = unlines
     , "the live concurrent subagent cap and saves it to project settings."
     , "/shell shows the active shell tools; /shell ghci or /shell bash switches"
     , "the current session. /shell both and /shell none are also available."
-    , "/computer-use toggles local macOS desktop control; on/off are explicit."
+    , "/computer-use toggles local Linux/macOS desktop control; on/off are explicit."
     , "Choose Always this tool to approve the current computer-use workflow."
     , "/always-approve (or :yolo) toggles auto-approve and saves it under"
     , "<project>/.haskell-agent/settings.json. Permission prompts offer Allow once"

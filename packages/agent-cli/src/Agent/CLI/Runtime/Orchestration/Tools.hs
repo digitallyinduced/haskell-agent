@@ -459,6 +459,7 @@ data LocalToolRuntime = LocalToolRuntime
 data CodingRuntime = CodingRuntime
     { runtimeCoding :: CodingTools
     , runtimeExtraTools :: [AppTool]
+    , runtimeComputerUse :: Maybe ComputerUse.ComputerUseRuntime
     , runtimeCloseExtraTools :: IO ()
     }
 
@@ -507,34 +508,43 @@ runAgentTools request = withResourceScope \resourceScope -> do
     let scratchRuntime =
             acquiredScratchRuntime
                 { scratchCleanup = releaseResource scratchKey }
-    (acquiredResources, (initialContext, initialContextPreload)) <-
+    ( (acquiredResources, (computerUseKey, runtimeComputerUse))
+      , (initialContext, initialContextPreload)
+      ) <-
         concurrently
-            ( allocateFourResourcesConcurrently
-                resourceScope
-                (acquireMcpRuntime
-                    request
-                    toolStartup
-                    toolModelRuntime
-                    collaborationRuntime
-                    scratchRuntime)
-                (.runtimeCloseMcp)
-                (acquireLocalToolRuntime
-                    request
-                    toolModelRuntime
-                    toolHostHooks
-                    collaborationRuntime
-                    scratchRuntime)
-                (.localCoding.codingClose)
-                (acquireWebFetchRuntime
-                    request
-                    toolStartup
-                    toolModelRuntime)
-                (mapM_ closeWebFetchRuntime)
-                (acquireLspStartup
-                    request
-                    toolStartup
-                    toolModelRuntime)
-                (mapM_ closeLspRuntime . (.lspStartupRuntime))
+            ( concurrently
+                ( allocateFourResourcesConcurrently
+                    resourceScope
+                    (acquireMcpRuntime
+                        request
+                        toolStartup
+                        toolModelRuntime
+                        collaborationRuntime
+                        scratchRuntime)
+                    (.runtimeCloseMcp)
+                    (acquireLocalToolRuntime
+                        request
+                        toolModelRuntime
+                        toolHostHooks
+                        collaborationRuntime
+                        scratchRuntime)
+                    (.localCoding.codingClose)
+                    (acquireWebFetchRuntime
+                        request
+                        toolStartup
+                        toolModelRuntime)
+                    (mapM_ closeWebFetchRuntime)
+                    (acquireLspStartup
+                        request
+                        toolStartup
+                        toolModelRuntime)
+                    (mapM_ closeLspRuntime . (.lspStartupRuntime))
+                )
+                ( allocateResource
+                    resourceScope
+                    (acquireComputerUseRuntime toolModelRuntime)
+                    (mapM_ ComputerUse.closeComputerUseRuntime)
+                )
             )
             (prepareInitialContextPreload request toolModelRuntime)
     let ( (mcpKey, acquiredMcpRuntime)
@@ -557,9 +567,10 @@ runAgentTools request = withResourceScope \resourceScope -> do
             maybe [] (pure . webFetchRuntimeTool) webFetchRuntime
                 <> maybe [] (pure . lspRuntimeTool) lspRuntime
         runtimeCloseExtraTools =
-            concurrently_
-                (releaseResource lspKey)
-                (releaseResource webFetchKey)
+            releaseResource computerUseKey
+                `finally` concurrently_
+                    (releaseResource lspKey)
+                    (releaseResource webFetchKey)
         codingRuntime = CodingRuntime{..}
     mapM_
         (reportStartupWarning request.startup)
@@ -1519,6 +1530,17 @@ acquireLspStartup AgentToolsRequest
     | otherwise =
         newLspRuntime harnessConfig.configLsp baseToolEnv
 
+acquireComputerUseRuntime
+    :: ToolModelRuntime
+    -> IO (Maybe ComputerUse.ComputerUseRuntime)
+acquireComputerUseRuntime ToolModelRuntime
+    { toolProvider = provider
+    }
+    | provider == OpenAIProvider
+        && os `elem` ["darwin", "linux"] =
+        Just <$> ComputerUse.newComputerUseRuntime
+    | otherwise = pure Nothing
+
 prepareInitialContextPreload
     :: AgentToolsRequest windowTitleResult
     -> ToolModelRuntime
@@ -1753,6 +1775,7 @@ assembleSessionToolsRuntime AgentToolsRequest
     } CodingRuntime
     { runtimeCoding = coding
     , runtimeExtraTools = extraTools
+    , runtimeComputerUse = computerUseRuntime
     , runtimeCloseExtraTools = closeExtraTools
     } SessionControlRuntime
     { controlSkillInvocationsRef = skillInvocationsRef
@@ -1787,10 +1810,8 @@ assembleSessionToolsRuntime AgentToolsRequest
         nativeToolGroups =
             maybe [] (.nativeToolGroups) startup.startupNativeHooks
         computerTools =
-            [ ComputerUse.computerUseTool
-            | provider == OpenAIProvider
-            , os == "darwin"
-            ]
+            maybe [] (pure . ComputerUse.computerUseRuntimeTool)
+                computerUseRuntime
         activeComputerTools =
             [ tool
             | resolveComputerUseEnabled options startup.startupStdinTty
