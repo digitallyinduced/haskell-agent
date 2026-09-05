@@ -24,6 +24,7 @@ import Agent.Telemetry (TurnTelemetry(..))
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
 import Agent.Store.SessionItem
+import Agent.ToolOutcome (ToolOutcome(..))
 import Agent.Store.Postgres
     ( Store
     , closeStore
@@ -243,6 +244,7 @@ genFunctionCallOutput =
         <*> genRawJson
         <*> genMaybe genItemStatus
         <*> genMaybe arbitrary
+        <*> genMaybe genToolOutcome
 
 genCustomToolCall :: Gen CustomToolCall
 genCustomToolCall =
@@ -264,6 +266,22 @@ genCustomToolCallOutput =
         <*> genRawJson
         <*> genMaybe genItemStatus
         <*> genMaybe arbitrary
+        <*> genMaybe genToolOutcome
+
+genToolOutcome :: Gen ToolOutcome
+genToolOutcome =
+    oneof
+        [ elements
+            [ ToolSucceeded
+            , ToolFailed
+            , ToolDenied
+            , ToolCancelled
+            , ShellCancelled
+            , ShellTimedOut
+            ]
+        , ShellRunning <$> chooseInt (0, 1000)
+        , ShellExited <$> chooseInt (-128, 255)
+        ]
 
 asyncPersistenceItems :: Maybe Bool -> [ResponseItem]
 asyncPersistenceItems asyncValue =
@@ -287,6 +305,7 @@ asyncPersistenceItems asyncValue =
         , output = rawJsonValue ("done" :: Text.Text)
         , status = Just ItemCompleted
         , async = asyncValue
+        , localOutcome = Nothing
         }
     , CustomToolCallItem CustomToolCall
         { itemId = Just "custom-call"
@@ -304,6 +323,7 @@ asyncPersistenceItems asyncValue =
         , output = rawJsonValue ("done" :: Text.Text)
         , status = Just ItemCompleted
         , async = asyncValue
+        , localOutcome = Nothing
         }
     ]
 
@@ -978,7 +998,8 @@ spec = describe "Agent.CLI.Session" do
                         , async = Just True
                         }
                     , FunctionCallOutputItem FunctionCallOutput
-                        { itemId = Just "output-item"
+                        { localOutcome = Nothing
+                        , itemId = Just "output-item"
                         , callId = "call-1"
                         , name = Nothing
                         , namespace = Nothing
@@ -998,7 +1019,8 @@ spec = describe "Agent.CLI.Session" do
                         , async = Just False
                         }
                     , CustomToolCallOutputItem CustomToolCallOutput
-                        { itemId = Nothing
+                        { localOutcome = Nothing
+                        , itemId = Nothing
                         , callId = "custom-1"
                         , name = Just "apply_patch"
                         , output = rawJsonValue ("Done" :: Text.Text)

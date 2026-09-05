@@ -622,7 +622,8 @@ functionOutputItem
     -> ResponseItem
 functionOutputItem callId content isError =
     FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = Nothing
+        , itemId = Nothing
         , callId
         , name = Nothing
         , namespace = Nothing

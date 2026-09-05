@@ -19,6 +19,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 
+import Agent.ToolOutcome (toolOutcomeDecoder)
 import Agent.Responses.Types
     ( CustomToolCall(..)
     , CustomToolCallOutput(..)
@@ -80,7 +81,8 @@ toStoredResponseItem = \case
                 itemStatusText <$> output.status
             , storedFunctionCallOutputExtraFields =
                 encodeKnownFields
-                    [ ("name", Aeson.toJSON <$> output.name)
+                    [ ("local_tool_outcome", Aeson.toJSON <$> output.localOutcome)
+                    , ("name", Aeson.toJSON <$> output.name)
                     , ("namespace", Aeson.toJSON <$> output.namespace)
                     , ("provider", Aeson.toJSON <$> output.provider)
                     , ("async", Aeson.toJSON <$> output.async)
@@ -110,7 +112,9 @@ toStoredResponseItem = \case
                 itemStatusText <$> output.status
             , storedCustomToolCallOutputExtraFields =
                 encodeKnownFields
-                    [("async", Aeson.toJSON <$> output.async)]
+                    [ ("local_tool_outcome", Aeson.toJSON <$> output.localOutcome)
+                    , ("async", Aeson.toJSON <$> output.async)
+                    ]
             }
     ComputerCallItem item ->
         storedTypedKnownItem "computer_call" item
@@ -226,8 +230,11 @@ fromStoredResponseItem = \case
             "provider" Hermes.text output.storedFunctionCallOutputExtraFields
         async <- decodeOptionalField "stored function-call-output extra fields"
             "async" Hermes.bool output.storedFunctionCallOutputExtraFields
+        localOutcome <- decodeOptionalField "stored tool output extra fields"
+            "local_tool_outcome" toolOutcomeDecoder output.storedFunctionCallOutputExtraFields
         Right $ FunctionCallOutputItem FunctionCallOutput
-            { itemId = output.storedFunctionCallOutputProviderItemId
+            { localOutcome
+            , itemId = output.storedFunctionCallOutputProviderItemId
             , callId = output.storedFunctionCallOutputCallId
             , name
             , namespace
@@ -260,8 +267,11 @@ fromStoredResponseItem = \case
             output.storedCustomToolCallOutputStatus
         async <- decodeOptionalField "stored custom-tool-call-output extra fields"
             "async" Hermes.bool output.storedCustomToolCallOutputExtraFields
+        localOutcome <- decodeOptionalField "stored tool output extra fields"
+            "local_tool_outcome" toolOutcomeDecoder output.storedCustomToolCallOutputExtraFields
         Right $ CustomToolCallOutputItem CustomToolCallOutput
-            { itemId = output.storedCustomToolCallOutputProviderItemId
+            { localOutcome
+            , itemId = output.storedCustomToolCallOutputProviderItemId
             , callId = output.storedCustomToolCallOutputCallId
             , name = output.storedCustomToolCallOutputName
             , output = value

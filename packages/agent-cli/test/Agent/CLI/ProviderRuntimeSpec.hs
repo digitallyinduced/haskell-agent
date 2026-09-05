@@ -1,10 +1,13 @@
 module Agent.CLI.ProviderRuntimeSpec (spec) where
 
+import Agent.CLI.Session.Request (newSessionRequestState, readSessionRequestParams, setSessionRequestModel)
+import Agent.CLI.Session (Persistence(..))
+import qualified Data.Text as Text
 import Agent.CLI.Compaction (CompactionInstall(..), reportedOccupancy)
 import Agent.CLI.ProviderRuntime
 import Agent.CLI.Session.ConversationStore (newConversationStore)
 import Agent.CLI.Session.History (readLivePreviousResponseId, readLiveTranscript)
-import Agent.Provider (BillingMode(..), TokenProvider, tokenProvider)
+import Agent.Provider (Provider(..), BillingMode(..), TokenProvider, tokenProvider)
 import Agent.Responses.Types (defaultResponseCreateParams)
 import qualified Agent.Responses.Types as Responses (ResponseCreateParams(model))
 import Control.Exception.Safe (throwString)
@@ -31,8 +34,7 @@ spec = describe "provider runtime composition" do
             host <- newHost
             result <- withProviderRuntime config host \runtime -> do
                 runtime.currentContextWindow `shouldReturn` Just 32_768
-                writeIORef host.compaction.paramsRef
-                    defaultResponseCreateParams{Responses.model = Just "large"}
+                setSessionRequestModel host.compaction.paramsRef OpenAIProvider "large"
                 runtime.currentContextWindow `shouldReturn` Just 65_536
                 pure "consumer result"
             result `shouldBe` ("consumer result" :: String)
@@ -56,7 +58,9 @@ noNetworkTokens = tokenProvider ApiBilled \_ ->
 
 newHost :: IO ProviderHost
 newHost = do
-    paramsRef <- newIORef defaultResponseCreateParams{Responses.model = Just "small"}
+    paramsRef <- newSessionRequestState PersistenceDisabled
+        defaultResponseCreateParams{Responses.model = Just "small"}
+        >>= either (fail . Text.unpack) pure
     contextTokensRef <- newIORef Nothing
     conversationRef <- newIORef =<< newConversationStore (Just "previous-response") [] []
     let contextWindow params = case params.model of
@@ -69,7 +73,7 @@ newHost = do
             , contextTokensRef
             , conversationRef
             , contextWindowForParams = \_ _ -> contextWindow
-            , currentModelContextWindow = \_ -> Just . contextWindow <$> readIORef paramsRef
+            , currentModelContextWindow = \_ -> Just . contextWindow <$> readSessionRequestParams paramsRef
             , installAutomaticCompact = \_ _ -> pure CompactionNotInstalled
             , taskPlan = Nothing
             , recordCompactionUsage = \_ -> pure ()

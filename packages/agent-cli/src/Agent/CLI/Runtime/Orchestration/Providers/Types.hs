@@ -11,6 +11,9 @@ module Agent.CLI.Runtime.Orchestration.Providers.Types
     , ProviderSubagents(..)
     ) where
 
+import Agent.CLI.Session.Request
+    ( SessionRequestState
+    )
 import Agent.CLI.Compaction (CompactOutcome, CompactionInstall, OccupancySnapshot)
 import Agent.CLI.Session.History (LiveConversation)
 import Agent.CLI.Session.Runtime.Types (SessionBackend)
@@ -82,7 +85,7 @@ data ProviderHost = ProviderHost
 -- transport-specific summarization and context limits; installation stays
 -- behind the shared compaction helpers and the session's automatic hook.
 data ProviderCompaction = ProviderCompaction
-    { paramsRef :: IORef ResponseCreateParams
+    { paramsRef :: SessionRequestState
     , contextTokensRef :: IORef (Maybe OccupancySnapshot)
     , contextWindowForParams :: (Text -> Text) -> Int -> ResponseCreateParams -> Int
     , currentModelContextWindow :: (Text -> Text) -> IO (Maybe Int)

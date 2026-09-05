@@ -38,6 +38,8 @@ import Agent.Telemetry (TurnTelemetry)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallMode(..)
+    , ToolOutcome(..)
+    , withToolCallOutcome
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , ToolResultImage(..)
@@ -230,6 +232,11 @@ normalizeTurnInputImages = \case
             { toolResultImages =
                 fmap normalizeToolResultImage toolResultImages
             }
+
+    normalizeToolResultImages result@ToolCallResultWithOutcome{toolResultImages} =
+        result { toolResultImages = fmap normalizeToolResultImage toolResultImages }
+    normalizeToolResultImages result@AsyncToolCallResultWithOutcome{toolResultImages} =
+        result { toolResultImages = fmap normalizeToolResultImage toolResultImages }
 
     normalizeToolResultImage :: ToolResultImage -> ToolResultImage
     normalizeToolResultImage image@ToolResultImage{imageUrl} =
@@ -1911,18 +1918,22 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
             result <- case approval of
                 ToolApprovalDenied denial ->
                     pure $
-                        withToolCallResultMode (toolCallMode call) ToolCallResult
-                            { callId = call.callId
-                            , output = denial
-                            , callKind = call.callKind
-                            }
+                        withToolCallResultMode (toolCallMode call) $
+                            withToolCallOutcome (Just ToolDenied) $
+                                ToolCallResult
+                                    { callId = call.callId
+                                    , output = denial
+                                    , callKind = call.callKind
+                                    }
                 ToolApprovalRejected ->
                     pure $
-                        withToolCallResultMode (toolCallMode call) ToolCallResult
-                            { callId = call.callId
-                            , output = "Tool call rejected by user."
-                            , callKind = call.callKind
-                            }
+                        withToolCallResultMode (toolCallMode call) $
+                            withToolCallOutcome (Just ToolDenied) $
+                                ToolCallResult
+                                    { callId = call.callId
+                                    , output = "Tool call rejected by user."
+                                    , callKind = call.callKind
+                                    }
                 ToolApprovalGranted ->
                     dispatchRegisteredToolCall
                         config.loopDispatch

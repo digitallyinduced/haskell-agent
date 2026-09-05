@@ -10,6 +10,9 @@ module Agent.CLI.Turn
     , takeGrokFirstTurnContext
     ) where
 
+import Agent.CLI.Session.Request
+    ( withPersistentSessionRequest
+    )
 import Agent.Cancel (resetCancel)
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Compaction (AutomaticCompactionBoundary)
@@ -138,8 +141,7 @@ import Agent.Loop
     )
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
-    ( ResponseCreateParams(model, promptCacheKey)
-    , ResponseItem
+    ( ResponseItem
     )
 import Agent.Store.Postgres (normalizePostgresTimestamp)
 import Agent.Subagents (RootTurnId)
@@ -427,65 +429,54 @@ persistTurnPromptSnapshot
     -> Maybe Text
     -> IO ()
 persistTurnPromptSnapshot request sentStartupContext pendingGrokContext =
-    case env.sessionPersist of
-        PersistenceDisabled -> pure ()
-        PersistenceEnabled slotRef -> do
-            created <- isPendingPersistence <$> readIORef slotRef
-            params <- readIORef env.sessionParams
-            modelName <- maybe
-                (fail "provider request is missing a model")
-                pure
-                params.model
-            cacheKey <- maybe
-                (fail "persistent provider request is missing a cache key")
-                pure
-                params.promptCacheKey
-            now <- normalizePostgresTimestamp <$> getCurrentTime
-            let (instructionText, toolSchemas) = requestPromptParts params
-                snapshot = SessionPromptSnapshot
-                    { promptSnapshotVersion = 1
-                    , promptSnapshotCreatedAt = now
-                    , promptSnapshotProvider = env.sessionProvider
-                    , promptSnapshotConnection = env.sessionConnection
-                    , promptSnapshotModel = modelName
-                    , promptSnapshotDialect = dialectId env.sessionDialect
-                    , promptSnapshotCwd = env.sessionCwd
-                    , promptSnapshotInstructions = instructionText
-                    , promptSnapshotTools = toolSchemas
-                    , promptSnapshotGeneratedContext = sentStartupContext
-                    , promptSnapshotGrokContext = pendingGrokContext
-                    , promptSnapshotCacheKey = cacheKey
-                    }
-            -- Persist the exact provider-visible prefix before it can be
-            -- sent. Pending sessions create metadata and epoch atomically.
-            handle <- ensureSessionWithPromptSnapshot slotRef snapshot
-            env.sessionOnPersisted handle
-            writeIORef env.sessionPlanMode.planSessionDir
-                (Just handle.sessionDir)
-            writeIORef env.sessionStoreRoot (Just handle.sessionDir)
-            when
-                ( handle.sessionMeta.metaTitle == "untitled"
-                    && not
-                        (Text.null
-                            (Text.strip request.busyPromptText))
-                )
-                (env.sessionSetWindowTitle
-                    (cliWindowTitle handle.sessionMeta.metaCwd
-                        (Just
-                            (sessionTitleFromPrompt
-                                request.busyPromptText))))
-            when created do
-                case env.sessionFullscreen of
-                    Just runtime ->
-                        emitUiEvent runtime
-                            (UiSystemMessage
-                                ("session: " <> handle.sessionMeta.metaId))
-                    Nothing -> do
-                        color <- resolveColor env.sessionRender.renderStderr
-                        putTextLn env.sessionRender.renderStderr
-                            (roleMuted color
-                                (glyphSession <> "session: "
-                                    <> handle.sessionMeta.metaId))
+    withPersistentSessionRequest env.sessionParams $ \slotRef modelName cacheKey params -> do
+        created <- isPendingPersistence <$> readIORef slotRef
+        now <- normalizePostgresTimestamp <$> getCurrentTime
+        let (instructionText, toolSchemas) = requestPromptParts params
+            snapshot = SessionPromptSnapshot
+                { promptSnapshotVersion = 1
+                , promptSnapshotCreatedAt = now
+                , promptSnapshotProvider = env.sessionProvider
+                , promptSnapshotConnection = env.sessionConnection
+                , promptSnapshotModel = modelName
+                , promptSnapshotDialect = dialectId env.sessionDialect
+                , promptSnapshotCwd = env.sessionCwd
+                , promptSnapshotInstructions = instructionText
+                , promptSnapshotTools = toolSchemas
+                , promptSnapshotGeneratedContext = sentStartupContext
+                , promptSnapshotGrokContext = pendingGrokContext
+                , promptSnapshotCacheKey = cacheKey
+                }
+        -- Persist the exact provider-visible prefix before it can be
+        -- sent. Pending sessions create metadata and epoch atomically.
+        handle <- ensureSessionWithPromptSnapshot slotRef snapshot
+        env.sessionOnPersisted handle
+        writeIORef env.sessionPlanMode.planSessionDir
+            (Just handle.sessionDir)
+        writeIORef env.sessionStoreRoot (Just handle.sessionDir)
+        when
+            ( handle.sessionMeta.metaTitle == "untitled"
+                && not
+                    (Text.null
+                        (Text.strip request.busyPromptText))
+            )
+            (env.sessionSetWindowTitle
+                (cliWindowTitle handle.sessionMeta.metaCwd
+                    (Just
+                        (sessionTitleFromPrompt
+                            request.busyPromptText))))
+        when created do
+            case env.sessionFullscreen of
+                Just runtime ->
+                    emitUiEvent runtime
+                        (UiSystemMessage
+                            ("session: " <> handle.sessionMeta.metaId))
+                Nothing -> do
+                    color <- resolveColor env.sessionRender.renderStderr
+                    putTextLn env.sessionRender.renderStderr
+                        (roleMuted color
+                            (glyphSession <> "session: "
+                                <> handle.sessionMeta.metaId))
   where
     env = request.busyEnv
 
@@ -728,7 +719,7 @@ finishCancelledTurn executed cancelled = do
         (finishConversation
             executed.executedCommittedTurn
             (ConversationCancelled retained))
-    model <- readIORef render.renderModelRef
+    model <- render.renderModel
     case fullscreen of
         Just runtime -> do
             emitUiEvent runtime (UiTurnEnded BlockCancelled)
@@ -831,7 +822,7 @@ finishGeneralFailureTurn executed err = do
         (finishConversation
             executed.executedCommittedTurn
             (ConversationFailed retained))
-    model <- readIORef render.renderModelRef
+    model <- render.renderModel
     case fullscreen of
         Just runtime -> do
             emitUiEvent runtime (UiTurnEnded BlockFailed)
@@ -923,7 +914,7 @@ reportSuccessfulTurn :: ExecutedBusyTurn -> LoopResult -> IO ()
 reportSuccessfulTurn executed loopResult = do
     let env = executed.executedRequest.busyEnv
         render = env.sessionRender
-    model <- readIORef render.renderModelRef
+    model <- render.renderModel
     tokenRate <-
         stateLastTokensPerSecond <$> readIORef render.renderState
     let turns = Text.pack (show loopResult.turnsUsed)

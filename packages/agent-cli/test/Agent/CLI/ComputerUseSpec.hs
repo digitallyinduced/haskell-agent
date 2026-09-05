@@ -448,7 +448,8 @@ spec = do
                     , async = Just True
                     }
                 output = FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = "call-function"
                     , name = Nothing
                     , namespace = Nothing

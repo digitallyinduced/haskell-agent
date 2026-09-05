@@ -38,6 +38,10 @@ module Agent.CLI.Compaction
     , reportedOccupancy
     ) where
 
+import Agent.CLI.Session.Request
+    ( SessionRequestState
+    , readSessionRequestParams
+    )
 import Agent.CLI.Error (formatApiError)
 import Agent.CLI.Compaction.Continuation
     ( boundCompletedToolContinuations
@@ -175,7 +179,7 @@ data CompactAttempt error = CompactAttempt
 runProviderCompact
     :: Provider
     -> Maybe TokenProvider
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -190,7 +194,7 @@ runProviderCompactWith
     -> (TokenUsage -> IO ())
     -> Provider
     -> Maybe TokenProvider
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -206,14 +210,14 @@ runProviderCompactWithContextWindow
     -> (TokenUsage -> IO ())
     -> Provider
     -> Maybe TokenProvider
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
 runProviderCompactWithContextWindow contextWindow openAiSender recordUsage
         provider tokenProvider
         paramsRef transcriptRef focus = do
-    params <- readIORef paramsRef
+    params <- readSessionRequestParams paramsRef
     history <- readIORef transcriptRef
     attempt <- runAttemptAndRecord recordUsage $ case provider of
         OpenAIProvider ->
@@ -317,7 +321,7 @@ runBackendCompactWithContextWindow
     :: Int
     -> (ResponseCreateParams -> Backend)
     -> (TokenUsage -> IO ())
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -331,13 +335,13 @@ runBackendCompactWithLimits
     -> Int
     -> (ResponseCreateParams -> Backend)
     -> (TokenUsage -> IO ())
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
 runBackendCompactWithLimits contextWindow inputLimit makeBackend recordUsage
         paramsRef transcriptRef focus = do
-    params <- readIORef paramsRef
+    params <- readSessionRequestParams paramsRef
     history <- readIORef transcriptRef
     either (Left . formatApiError) Right
         <$> runBackendCompactHistoryWithLimits
@@ -527,7 +531,7 @@ compactApiFailure message =
 runResponsesCompactWith
     :: (ResponseCreateParams -> IO (Either ApiError Response))
     -> (TokenUsage -> IO ())
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -538,7 +542,7 @@ runResponsesCompactWithContextWindow
     :: Maybe Int
     -> (ResponseCreateParams -> IO (Either ApiError Response))
     -> (TokenUsage -> IO ())
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -553,7 +557,7 @@ runXaiResponsesCompactWithContextWindow
     :: Maybe Int
     -> (ResponseCreateParams -> IO (Either ApiError Response))
     -> (TokenUsage -> IO ())
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -566,14 +570,14 @@ runResponsesCompactPreparedWithContextWindow
     -> Maybe Int
     -> (ResponseCreateParams -> IO (Either ApiError Response))
     -> (TokenUsage -> IO ())
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
 runResponsesCompactPreparedWithContextWindow
         prepareHistory contextWindow sender recordUsage
         paramsRef transcriptRef focus = do
-    params <- readIORef paramsRef
+    params <- readSessionRequestParams paramsRef
     history <- readIORef transcriptRef
     attempt <- runAttemptAndRecord recordUsage $
         if null history

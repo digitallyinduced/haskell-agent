@@ -13,6 +13,9 @@ module Agent.CLI.Runtime.MetaConsole
     , runMetaPlanner
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    )
 import Agent.Cancel (CancelFlag)
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Command
@@ -350,7 +353,7 @@ metaConfigRequiresRestart = any isMetaConfigAction
 -- are intentionally absent.
 buildMetaContext :: SessionEnv -> HarnessConfig -> IO Aeson.Value
 buildMetaContext env config = do
-    params <- readIORef env.sessionParams
+    params <- readSessionRequestParams env.sessionParams
     policy <- readIORef env.sessionPolicy
     shellMode <- env.sessionShellMode
     gatewayAccess <- readIORef env.sessionGatewayModels

@@ -632,7 +632,8 @@ spec = do
 
         it "rewrites a trailing oversized tool output to fit the request window" do
             let oversized = FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
@@ -657,7 +658,8 @@ spec = do
         it "truncates oversized messages without rewriting a tiny trailing output" do
             let huge = user (Text.replicate 20_000 "x")
                 tiny = FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
@@ -688,7 +690,8 @@ spec = do
         it "revisits old messages after rewriting later oversized outputs" do
             let huge = user (Text.replicate 20_000 "x")
                 output = FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
@@ -725,7 +728,8 @@ spec = do
                         ]
                     }
                 recent = FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
@@ -785,7 +789,8 @@ spec = do
                     , async = Nothing
                     }
                 output = FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = ""
                     , name = Nothing
                     , namespace = Nothing
@@ -1311,7 +1316,8 @@ spec = do
         , passthrough = Nothing
         }
     toolOutput output = FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = Nothing
+        , itemId = Nothing
         , callId = "call-image"
         , name = Nothing
         , namespace = Nothing

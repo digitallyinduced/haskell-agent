@@ -510,7 +510,8 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     }
             output =
                 FunctionCallOutput
-                    { itemId = Just "legacy-output-item"
+                    { localOutcome = Nothing
+                    , itemId = Just "legacy-output-item"
                     , callId = "legacy-function-call"
                     , name = Nothing
                     , namespace = Nothing
@@ -1037,7 +1038,8 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , "image_url" Aeson..= ("data:image/png;base64,AA==" :: Text.Text)
                 ]))
             toolOutput = FunctionCallOutputItem FunctionCallOutput
-                { itemId = Nothing
+                { localOutcome = Nothing
+                , itemId = Nothing
                 , callId = "call-1"
                 , name = Nothing
                 , namespace = Nothing
@@ -1131,7 +1133,8 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , async = Nothing
                 }
             output = FunctionCallOutputItem FunctionCallOutput
-                { itemId = Nothing
+                { localOutcome = Nothing
+                , itemId = Nothing
                 , callId = "call-1"
                 , name = Nothing
                 , namespace = Nothing
@@ -1142,7 +1145,8 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , async = Nothing
                 }
             customOutput = CustomToolCallOutputItem CustomToolCallOutput
-                { itemId = Nothing
+                { localOutcome = Nothing
+                , itemId = Nothing
                 , callId = "call-2"
                 , name = Nothing
                 , output = rawJsonFromEncoding

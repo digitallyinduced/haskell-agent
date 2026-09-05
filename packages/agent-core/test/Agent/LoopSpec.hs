@@ -359,7 +359,8 @@ spec = describe "runLoop" do
                     }
             functionHistoryItem =
                 FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Just "history-function-output"
+                    { localOutcome = Nothing
+                    , itemId = Just "history-function-output"
                     , callId = "history-call"
                     , name = Just "image"
                     , namespace = Nothing
@@ -470,7 +471,7 @@ spec = describe "runLoop" do
         case seen of
             [ _
               , ( Just "resp-tool-image"
-                , [ CompletedTool ToolCallResultWithImages{
+                , [ CompletedTool ToolCallResultWithOutcome{
                         toolResultImages = [normalized]
                     }
                   ]
@@ -1713,8 +1714,9 @@ spec = describe "runLoop" do
             }
         seen <- readIORef submissions
         case seen of
-            [_, (Just "resp-1", [CompletedTool denied])] ->
+            [_, (Just "resp-1", [CompletedTool denied])] -> do
                 denied.output `shouldBe` "Tool call rejected by user."
+                toolCallResultOutcome denied `shouldBe` Just ToolDenied
             other -> expectationFailure ("unexpected submissions: " <> show other)
 
     it "defaults to a 2000-turn budget" do
@@ -1848,7 +1850,7 @@ spec = describe "runLoop" do
         config <- testConfig backend
         execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
         execution.executionPendingInputs `shouldBe`
-            [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind)]
+            [CompletedTool (ToolCallResultWithOutcome "c1" "echo:hi" FunctionCallKind [] ToolSucceeded)]
 
     it "interrupts the provider in-band before tearing down a cancelled submission" do
         started <- newEmptyMVar
@@ -1941,7 +1943,7 @@ spec = describe "runLoop" do
         execution.executionResult `shouldBe` Left (LoopCancelled [])
         execution.executionProgress `shouldBe` ResponseCommitted
         execution.executionPendingInputs `shouldBe`
-            [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind)]
+            [CompletedTool (ToolCallResultWithOutcome "c1" "echo:hi" FunctionCallKind [] ToolSucceeded)]
 
     it "retains committed state when a later callback throws" do
         submissions <- newIORef []
@@ -2820,9 +2822,11 @@ echoArgsDecoder :: Json.Decoder EchoArgs
 echoArgsDecoder = objectArgs $ \object -> EchoArgs <$> reqText object "message"
 
 functionResult :: Text -> Text -> ToolCallResult
-functionResult callId output = ToolCallResult
+functionResult callId output = ToolCallResultWithOutcome
     { callId
     , output
+    , toolResultImages = []
+    , toolResultOutcome = ToolSucceeded
     , callKind = FunctionCallKind
     }
 

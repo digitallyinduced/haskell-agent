@@ -6,6 +6,10 @@ module Agent.CLI.Runtime.Repl.Selection
     , selectRequestedAccount
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    , modifySessionRequestOptions
+    )
 import Agent.CLI.ActiveAccount
     ( ActiveAccount(..)
     , readActiveAccount
@@ -258,7 +262,7 @@ selectRequestedAccountWithoutGateway env requestedProvider selector =
                             ("account switched to " <> label))
                     pure (Right Nothing)
         | otherwise = do
-            params <- readIORef env.sessionParams
+            params <- readSessionRequestParams env.sessionParams
             currentAccount <- (.activeAccountLabel) <$> readActiveAccount env.sessionAccount
             requestAccountProviderSwitch
                 env.sessionModelCatalog
@@ -321,7 +325,7 @@ handleSelection
         chooseAccount continue
     Right ReplShowEffort -> do
         color <- resolveColor stdout
-        params <- readIORef paramsRef
+        params <- readSessionRequestParams paramsRef
         let message =
                 "effort: "
                     <> reasoningEffortText
@@ -337,7 +341,7 @@ handleSelection
         continue
     Right ReplToggleFast -> do
         color <- resolveColor stdout
-        params <- readIORef paramsRef
+        params <- readSessionRequestParams paramsRef
         let enabled = params.serviceTier == Just "priority"
             supported = maybe False
                 (\info ->
@@ -356,8 +360,8 @@ handleSelection
                     message =
                         if next then "fast mode enabled"
                         else "fast mode disabled"
-                writeIORef paramsRef
-                    params { serviceTier = if next then Just "priority" else Nothing }
+                modifySessionRequestOptions paramsRef $ \current ->
+                    current { serviceTier = if next then Just "priority" else Nothing }
                 displayInfo message $
                     Text.putStrLn (roleMuted color (glyphOk <> message))
         continue
@@ -438,7 +442,7 @@ handleSelection
                 displayError message $
                     Text.hPutStrLn stderr (roleError color message)
     chooseEffort next = do
-        params <- readIORef paramsRef
+        params <- readSessionRequestParams paramsRef
         effortChoice
             fullscreen
             (reasoningEffortsForDialect (dialectId dialect))
@@ -447,7 +451,7 @@ handleSelection
             Just level -> setEffort level >> next
     chooseModel next = do
         color <- resolveColor stderr
-        params <- readIORef paramsRef
+        params <- readSessionRequestParams paramsRef
         gatewayAccess <- readIORef gatewayModelsRef
         let current = currentModel params
         modelChoiceWithEffort
@@ -765,7 +769,7 @@ handleSelection
                                         retryPendingTurn
                                         next
                         | otherwise = do
-                            params <- readIORef paramsRef
+                            params <- readSessionRequestParams paramsRef
                             currentAccount <- (.activeAccountLabel) <$> readActiveAccount env.sessionAccount
                             requestAccountProviderSwitch
                                 catalog fullscreen provider connectionId

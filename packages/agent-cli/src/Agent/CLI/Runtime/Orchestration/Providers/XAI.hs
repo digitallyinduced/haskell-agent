@@ -2,6 +2,9 @@ module Agent.CLI.Runtime.Orchestration.Providers.XAI
     ( withXaiProvider
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    )
 import Agent.CLI.Compaction
     ( autoCompactBackendWith
     , boundCompletedToolContinuations
@@ -25,7 +28,7 @@ import Agent.CLI.Session.Runtime.Types
 import Agent.Provider (TokenProvider, runWithTokenProvider)
 import Agent.Responses.Types (ResponseCreateParams(model))
 import Agent.XAI.LoopBackend (xaiBackendWithClientOptions)
-import Data.IORef (newIORef, readIORef)
+import Data.IORef (newIORef)
 import Data.Maybe (fromMaybe)
 import qualified Agent.XAI.Client as XAIClient
 import qualified Agent.XAI.Options as XAI
@@ -72,7 +75,7 @@ withXaiProvider tokenProvider hostedTools
                 }
         xaiCompactThreshold =
             xaiCompactThresholdFor
-                <$> readIORef paramsRef
+                <$> readSessionRequestParams paramsRef
         protectXaiOverflow occupancy getParams backend =
             boundCompletedToolContinuations
                 xaiContextWindow
@@ -85,7 +88,7 @@ withXaiProvider tokenProvider hostedTools
                 tokenProvider
                 (pure privateParams)
         compactHistory history _inputs = do
-            currentParams <- readIORef paramsRef
+            currentParams <- readSessionRequestParams paramsRef
             runXaiBackendCompactHistoryWithContextWindow
                 (xaiContextWindow currentParams)
                 btwBackend
@@ -93,7 +96,7 @@ withXaiProvider tokenProvider hostedTools
                 currentParams
                 history
                 Nothing
-                >>= decorateAutomaticCompact (readIORef paramsRef) taskPlan
+                >>= decorateAutomaticCompact (readSessionRequestParams paramsRef) taskPlan
                     xaiContextWindow
         -- Reconnection wraps only the continuation. Keeping automatic
         -- compaction outside it prevents a failed continuation from
@@ -103,17 +106,17 @@ withXaiProvider tokenProvider hostedTools
                 networkRecovery $
                 protectXaiOverflow
                     contextTokensRef
-                    (readIORef paramsRef)
+                    (readSessionRequestParams paramsRef)
                     (xaiBackendWithClientOptions
                         xaiOptionsFor
                         tokenProvider
-                        (readIORef paramsRef))
+                        (readSessionRequestParams paramsRef))
         compactingBackend =
             autoCompactBackendWith
                 xaiCompactThreshold
                 compactHistory
                 installAutomaticCompact
-                (readIORef paramsRef)
+                (readSessionRequestParams paramsRef)
                 contextTokensRef
                 requestBackend
         compactRunner focus = do
@@ -139,7 +142,7 @@ withXaiProvider tokenProvider hostedTools
                         paramsRef
                         historyRef
                         requestedFocus
-                        >>= decorateManualCompact (readIORef paramsRef) taskPlan
+                        >>= decorateManualCompact (readSessionRequestParams paramsRef) taskPlan
                             xaiContextWindow)
                 focus
     use ProviderRuntime
@@ -149,7 +152,7 @@ withXaiProvider tokenProvider hostedTools
             , interruptBackend = pure ()
             , resetBackendState = pure ()
             }
-        , currentContextWindow = Just . xaiContextWindow <$> readIORef paramsRef
+        , currentContextWindow = Just . xaiContextWindow <$> readSessionRequestParams paramsRef
         , compactRunner
         , accountSelection = HttpAccountSelection
         , subagents = XaiSubagents xaiContextWindow xaiCompactThresholdFor

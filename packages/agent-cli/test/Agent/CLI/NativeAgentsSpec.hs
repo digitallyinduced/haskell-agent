@@ -110,7 +110,8 @@ spec = describe "provider-native agent tracking" do
                 , async = Nothing
                 }
             output = FunctionCallOutputItem FunctionCallOutput
-                { itemId = Nothing
+                { localOutcome = Nothing
+                , itemId = Nothing
                 , callId = "agent-1"
                 , name = Nothing
                 , namespace = Nothing
@@ -144,7 +145,8 @@ spec = describe "provider-native agent tracking" do
                 , async = Nothing
                 }
             wrongOutput = FunctionCallOutputItem FunctionCallOutput
-                { itemId = Nothing
+                { localOutcome = Nothing
+                , itemId = Nothing
                 , callId = "claude-unpaired"
                 , name = Nothing
                 , namespace = Nothing
@@ -178,7 +180,8 @@ spec = describe "provider-native agent tracking" do
                 , async = Nothing
                 }
             output identifier = FunctionCallOutputItem FunctionCallOutput
-                { itemId = Nothing
+                { localOutcome = Nothing
+                , itemId = Nothing
                 , callId = identifier
                 , name = Nothing
                 , namespace = Nothing

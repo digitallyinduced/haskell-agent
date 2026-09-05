@@ -5,6 +5,9 @@ module Agent.CLI.Runtime.Orchestration.Providers.Common
     , decorateManualCompact
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    )
 import Agent.CLI.Compaction
     ( CompactOutcome
     , OccupancySnapshot
@@ -21,7 +24,7 @@ import Agent.CLI.Session.History (readLiveTranscript)
 import Agent.CLI.Session.Runtime.Types (SessionBackend(..))
 import Agent.Connectivity (withConnectionRecoveryOn)
 import Agent.Loop (Backend)
-import Data.IORef (IORef, newIORef, readIORef)
+import Data.IORef (IORef, newIORef)
 import Agent.Error
     ( ApiError(ProviderError)
     , ErrorType(InvalidRequestError)
@@ -99,8 +102,8 @@ withHttpProvider
         backend =
             withConnectionRecoveryOn networkRecovery $
                 protectOverflow
-                    (readIORef paramsRef)
-                    (httpMakeBackend (readIORef paramsRef))
+                    (readSessionRequestParams paramsRef)
+                    (httpMakeBackend (readSessionRequestParams paramsRef))
         compactRunner focus = do
             contextWindow <- currentModelContextWindow httpTransportModel
             historyRef <- newIORef =<< readLiveTranscript conversationRef
@@ -114,7 +117,7 @@ withHttpProvider
                         historyRef
                         requestedFocus
                         >>= decorateManualCompact
-                            (readIORef paramsRef) taskPlan contextWindowFor)
+                            (readSessionRequestParams paramsRef) taskPlan contextWindowFor)
                 focus
     use ProviderRuntime
         { sessionBackend = SessionBackend
@@ -123,7 +126,7 @@ withHttpProvider
             , interruptBackend = pure ()
             , resetBackendState = pure ()
             }
-        , currentContextWindow = Just . contextWindowFor <$> readIORef paramsRef
+        , currentContextWindow = Just . contextWindowFor <$> readSessionRequestParams paramsRef
         , compactRunner
         , accountSelection = HttpAccountSelection
         , subagents = HttpSubagents \childParams ->
