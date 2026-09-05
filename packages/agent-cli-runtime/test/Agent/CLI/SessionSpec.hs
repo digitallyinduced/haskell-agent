@@ -23,6 +23,7 @@ import Agent.Loop (TokenUsage(..))
 import Agent.Telemetry (TurnTelemetry(..))
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
+import Agent.ToolOutcome (ToolOutcome(..))
 import Agent.Store.SessionItem
 import Agent.Store.Postgres
     ( Store
@@ -241,6 +242,7 @@ genFunctionCallOutput =
         <*> genMaybe genText
         <*> genRawJson
         <*> genMaybe genItemStatus
+        <*> genMaybe genToolOutcome
 
 genCustomToolCall :: Gen CustomToolCall
 genCustomToolCall =
@@ -260,6 +262,20 @@ genCustomToolCallOutput =
         <*> genMaybe genText
         <*> genRawJson
         <*> genMaybe genItemStatus
+        <*> genMaybe genToolOutcome
+
+genToolOutcome :: Gen ToolOutcome
+genToolOutcome =
+    oneof
+        [ pure ToolSucceeded
+        , pure ToolFailed
+        , pure ToolDenied
+        , pure ToolCancelled
+        , ShellRunning <$> chooseInt (0, 1000)
+        , ShellExited <$> chooseInt (-10, 10)
+        , pure ShellCancelled
+        , pure ShellTimedOut
+        ]
 
 genComputerCall :: Gen ComputerCall
 genComputerCall =
