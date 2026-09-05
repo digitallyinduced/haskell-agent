@@ -71,6 +71,14 @@
       "fallback_priority": 10
     },
     {
+      "id": "grok-4.6",
+      "connection": "organization-gateway",
+      "dialect": "grok-build",
+      "context_window": 500000,
+      "reasoning_efforts": ["low", "medium", "high", "xhigh"],
+      "default_reasoning_effort": "high"
+    },
+    {
       "id": "gemini-3.7-flash",
       "connection": "gemini",
       "dialect": "generic-responses",

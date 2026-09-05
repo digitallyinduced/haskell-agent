@@ -103,6 +103,7 @@ import Agent.CLI.Session.Runtime.Types
     ( StartupCancelled(..),
       StartupFailure(..),
       StartupRuntime(startupSessionState, StartupRuntime, startupToolEnv,
+                     startupHarnessConfig,
                      startupNetworkRecovery, startupDatabaseStore,
                      startupInterrupt, startupEscPaused,
                      startupUiRuntimeRef, startupFullscreen, startupTerminal,
@@ -137,7 +138,7 @@ import Agent.CLI.Terminal
       resolveColor,
       TerminalCapabilities(terminalNativeProgress) )
 import Agent.CLI.Worktree
-    ( createManagedWorktreeWithProgress, worktreeProgressMessage )
+    ( createManagedWorktreeFromConfigWithProgress, worktreeProgressMessage )
 import Agent.Cancel ( requestCancel )
 import Agent.OsPath ( toText )
 import Agent.Provider ( Provider(OpenAIProvider) )
@@ -649,6 +650,7 @@ data AgentIterationResources = AgentIterationResources
     , iterationStartupTimings :: IORef [(Text, NominalDiffTime)]
     , iterationSyntaxLoadDuration :: IORef (Maybe NominalDiffTime)
     , iterationStartupFinished :: IORef Bool
+    , iterationHarnessConfig :: HarnessConfig
     , iterationConfiguredTheme :: ThemeKind
     , iterationHome :: OsPath
     , iterationRoot :: OsPath
@@ -729,11 +731,12 @@ prepareAgentIterationResources request = do
     home <- case nativeRunHomeHint request.iterationRunMode of
         Nothing -> getHomeDirectory
         Just path -> pure path
-    configuredTheme <-
+    harnessConfig <-
         loadHarnessConfig home >>= \case
             Left err ->
                 failAgentIterationPreparation request err
-            Right config -> pure config.configTheme
+            Right config -> pure config
+    let configuredTheme = harnessConfig.configTheme
     let root = sessionsRoot home
     databaseStore <-
         case
@@ -778,6 +781,7 @@ prepareAgentIterationResources request = do
         , iterationStartupTimings = startupTimingsRef
         , iterationSyntaxLoadDuration = syntaxLoadDurationRef
         , iterationStartupFinished = startupFinishedRef
+        , iterationHarnessConfig = harnessConfig
         , iterationConfiguredTheme = configuredTheme
         , iterationHome = home
         , iterationRoot = root
@@ -1004,6 +1008,7 @@ prepareAgentIterationInterface request resources = do
                     (\target -> readIORef agentSelectRef >>= ($ target))
         buildStartupRuntime toolEnv = StartupRuntime
             { startupToolEnv = toolEnv
+            , startupHarnessConfig = resources.iterationHarnessConfig
             , startupNetworkRecovery =
                 request.iterationProcessRuntime.processNetworkRecovery
             , startupDatabaseStore = resources.iterationDatabaseStore
@@ -1122,8 +1127,9 @@ resolveAgentIterationCwd request resources interface resumeLock =
         Nothing
             | request.iterationOptions.optWorktree -> do
                 readMVar interface.iterationFirstFrameReady
-                createManagedWorktreeWithProgress
+                createManagedWorktreeFromConfigWithProgress
                     reportWorktreeProgress
+                    resources.iterationHarnessConfig
                     resources.iterationHome
                     resources.iterationSource
                     >>= either worktreeFailed worktreeCreated
