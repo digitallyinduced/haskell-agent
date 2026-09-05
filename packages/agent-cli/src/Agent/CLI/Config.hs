@@ -17,6 +17,7 @@ module Agent.CLI.Config
     , saveHarnessConfig
     , updateHarnessConfig
     , withHarnessConfigSnapshot
+    , mcpServerEnabledForRuntime
     , useProgressiveMcp
     ) where
 
@@ -92,6 +93,21 @@ data McpServerConfig = McpServerConfig
     -- legacy @initialize@ handshake; @modern@ and @legacy@ skip the probe.
     }
     deriving (Eq)
+
+-- | Decide whether a configured MCP server can run inside a restricted
+-- runtime. Remote HTTP MCP remains host-local and needs no command execution;
+-- stdio MCP requires the broader host-extension capability.
+mcpServerEnabledForRuntime
+    :: Bool
+    -- ^ MCP tools are available to this runtime.
+    -> Bool
+    -- ^ Host-side command extensions are available to this runtime.
+    -> McpServerConfig
+    -> Bool
+mcpServerEnabledForRuntime allowMcpTools allowHostCommands server =
+    server.mcpEnabled
+        && allowMcpTools
+        && (allowHostCommands || isJust server.mcpUrl)
 
 -- | Optional OAuth client settings for a remote MCP server: pre-registered
 -- credentials, a Client ID Metadata Document URL, and default scopes. The

@@ -16,6 +16,7 @@ pkgs.writeShellApplication {
   ];
   text = ''
     set -eu
+    set -o pipefail
     umask 077
 
     fail() {
@@ -98,6 +99,78 @@ pkgs.writeShellApplication {
     exec 9>"$vm_state/lock"
     flock -n 9 || fail "a sandbox VM is already active for this tenant"
 
+    snapshot_host_addresses() {
+      destination=$1
+      ipv4_snapshot="$destination.ipv4"
+      ipv6_snapshot="$destination.ipv6"
+
+      if ! ip -o -4 address show \
+        | awk '{ sub(/\/.*/, "", $4); print "4 " $4 }' \
+        >"$ipv4_snapshot"
+      then
+        rm -f -- "$ipv4_snapshot" "$ipv6_snapshot"
+        return 1
+      fi
+      if ! ip -o -6 address show \
+        | awk '{ sub(/\/.*/, "", $4); print "6 " $4 }' \
+        >"$ipv6_snapshot"
+      then
+        rm -f -- "$ipv4_snapshot" "$ipv6_snapshot"
+        return 1
+      fi
+      if ! sort -u -- "$ipv4_snapshot" "$ipv6_snapshot" >"$destination"; then
+        rm -f -- "$ipv4_snapshot" "$ipv6_snapshot"
+        return 1
+      fi
+      rm -f -- "$ipv4_snapshot" "$ipv6_snapshot"
+    }
+
+    address_from_event() {
+      printf '%s\n' "$1" | awk '
+        {
+          for (field = 1; field < NF; field++) {
+            if ($field == "inet" || $field == "inet6") {
+              address = $(field + 1)
+              sub(/\/.*/, "", address)
+              if (address == "") exit 1
+              print ($field == "inet" ? "4 " : "6 ") address
+              matches++
+            }
+          }
+        }
+        END { if (matches != 1) exit 1 }
+      '
+    }
+
+    address_monitor_subscribed() {
+      monitor_pid=$1
+      [ -d "/proc/$monitor_pid/fd" ] || return 1
+      for descriptor in "/proc/$monitor_pid/fd/"*; do
+        socket_target="$(readlink -- "$descriptor" 2>/dev/null)" || continue
+        case "$socket_target" in
+          'socket:['*']')
+            socket_inode="''${socket_target#socket:[}"
+            socket_inode="''${socket_inode%]}"
+            ;;
+          *) continue ;;
+        esac
+        socket_groups="$(
+          awk -v inode="$socket_inode" -v pid="$monitor_pid" \
+            'NR > 1 && $2 == 0 && $3 == pid && $10 == inode { print $4 }' \
+            /proc/net/netlink
+        )" || return 1
+        for group_mask in $socket_groups; do
+          case "$group_mask" in
+            ""|*[!0-9A-Fa-f]*) continue ;;
+          esac
+          if (( (0x$group_mask & 0x110) == 0x110 )); then
+            return 0
+          fi
+        done
+      done
+      return 1
+    }
+
     runtime_dir="$(mktemp -d "$vm_state/runtime.XXXXXXXX")"
     broker_socket="$runtime_dir/broker.sock"
     vm_pid=
@@ -129,53 +202,89 @@ pkgs.writeShellApplication {
     # retain both ends, because monitor exit must appear as EOF to the reader.
     address_events="$runtime_dir/address-events"
     address_watch_ready="$runtime_dir/address-watch-ready"
+    address_snapshot="$runtime_dir/host-addresses"
+    address_snapshot_ready="$runtime_dir/host-addresses-ready"
+    address_current="$runtime_dir/host-addresses-current"
     vm_pid_file="$runtime_dir/vm.pid"
     mkfifo -- "$address_events"
     exec 8<>"$address_events"
-    ip monitor address >&8 8>&- 2>/dev/null &
+    ip -o monitor address >&8 8>&- 2>/dev/null &
     address_monitor_pid=$!
     (
       exec 8>&-
+      terminate_monitored_vm() {
+        while [ ! -s "$vm_pid_file" ]; do
+          sleep 0.01
+        done
+        read -r monitored_vm_pid <"$vm_pid_file" || exit 0
+        kill -TERM "$monitored_vm_pid" 2>/dev/null || true
+      }
       : >"$address_watch_ready"
-      IFS= read -r _ || true
-      while [ ! -s "$vm_pid_file" ]; do
-        sleep 0.01
+      while IFS= read -r address_event; do
+        while [ ! -e "$address_snapshot_ready" ]; do
+          sleep 0.01
+        done
+        # A same-set event is harmless only when it concerns an address
+        # already covered by the immutable firewall snapshot. This also
+        # catches a fast add/remove pair even if the live set has reverted
+        # before the watcher runs.
+        case "$address_event" in
+          Deleted*)
+            terminate_monitored_vm
+            exit 0
+            ;;
+        esac
+        if ! event_address=$(address_from_event "$address_event"); then
+          terminate_monitored_vm
+          exit 0
+        fi
+        if ! grep -Fxq -- "$event_address" "$address_snapshot"; then
+          terminate_monitored_vm
+          exit 0
+        fi
+        if ! snapshot_host_addresses "$address_current"; then
+          terminate_monitored_vm
+          exit 0
+        fi
+        if ! cmp -s -- "$address_snapshot" "$address_current"; then
+          terminate_monitored_vm
+          exit 0
+        fi
       done
-      read -r monitored_vm_pid <"$vm_pid_file" || exit 0
-      kill -TERM "$monitored_vm_pid" 2>/dev/null || true
+      # Losing the monitor is also fail-closed: without it the immutable
+      # firewall snapshot can no longer be trusted.
+      terminate_monitored_vm
     ) <"$address_events" &
     address_watch_pid=$!
 
     attempts=0
-    while [ ! -e "$address_watch_ready" ]; do
+    while [ ! -e "$address_watch_ready" ] \
+      || ! address_monitor_subscribed "$address_monitor_pid"
+    do
       kill -0 "$address_monitor_pid" 2>/dev/null \
         || fail "host address monitor failed during startup"
       kill -0 "$address_watch_pid" 2>/dev/null \
         || fail "host address watcher failed during startup"
       attempts=$((attempts + 1))
       [ "$attempts" -lt 100 ] \
-        || fail "host address watcher did not become ready"
+        || fail "host address monitor did not become ready"
       sleep 0.01
     done
     exec 8>&-
 
-    kernel_params=("agent.tenant_id=$tenant_id")
-    while read -r address; do
+    snapshot_host_addresses "$address_snapshot" \
+      || fail "could not snapshot host addresses"
+    : >"$address_snapshot_ready"
+
+    kernel_params=("systemd.set_credential=agent.tenant_id:$tenant_id")
+    while read -r family address; do
       [ -n "$address" ] || continue
-      kernel_params+=("agent.block_ipv4=$address")
-    done < <(
-      ip -o -4 address show \
-        | awk '{ sub(/\/.*/, "", $4); print $4 }' \
-        | sort -u
-    )
-    while read -r address; do
-      [ -n "$address" ] || continue
-      kernel_params+=("agent.block_ipv6=$address")
-    done < <(
-      ip -o -6 address show \
-        | awk '{ sub(/\/.*/, "", $4); print $4 }' \
-        | sort -u
-    )
+      case "$family" in
+        4) kernel_params+=("agent.block_ipv4=$address") ;;
+        6) kernel_params+=("agent.block_ipv6=$address") ;;
+        *) fail "host address snapshot is invalid" ;;
+      esac
+    done <"$address_snapshot"
 
     QEMU_KERNEL_PARAMS="''${kernel_params[*]}" \
     TMPDIR="$runtime_dir" \
@@ -196,9 +305,9 @@ pkgs.writeShellApplication {
     printf '%s\n' "$vm_pid" >"$vm_pid_file"
 
     # A persistent guest must never outlive the host-address snapshot encoded
-    # in its immutable firewall set. Any address change or monitor failure
-    # terminates QEMU; the server lazily starts a fresh VM with a new snapshot
-    # on the next call.
+    # in its immutable firewall set. A real address-set change or monitor
+    # failure terminates QEMU; harmless lifetime notifications with an
+    # unchanged set leave the VM running.
     attempts=0
     while [ ! -S "$broker_socket" ]; do
       kill -0 "$vm_pid" 2>/dev/null \
