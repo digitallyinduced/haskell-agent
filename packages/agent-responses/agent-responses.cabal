@@ -55,6 +55,10 @@ library
                     , Agent.Responses.ResponseMerge
                     , Agent.Responses.StreamAssembly
                     , Agent.Responses.LoopBackend
+    other-modules:    Agent.Responses.LoopBackend.Input
+                    , Agent.Responses.LoopBackend.Output
+                    , Agent.Responses.LoopBackend.StreamProjection
+                    , Agent.Responses.LoopBackend.ToolArgumentPreview
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2

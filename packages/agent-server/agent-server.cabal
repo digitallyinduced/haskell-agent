@@ -40,6 +40,10 @@ library
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_server
     other-modules:    Paths_agent_server
+                    , Agent.Server.Runtime.Attachments
+                    , Agent.Server.Runtime.SessionCodec
+                    , Agent.Server.Supervisor.EventReplay
+                    , Agent.Server.Supervisor.Persistence
     exposed-modules:  Agent.Server
                     , Agent.Server.Application
                     , Agent.Server.Auth

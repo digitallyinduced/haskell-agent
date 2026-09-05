@@ -208,7 +208,7 @@ handleEffortControlClick applyUiEvent = do
                         _ -> pure ()
                 modify' \currentState ->
                     currentState
-                        { appChoice = Just ChoiceOverlay
+                        { appChoice = Just $ PendingDialog choose ChoiceOverlay
                             { choicePresentation = ChoiceDialog
                             , choiceTitle = "Reasoning effort"
                             , choiceBody =
@@ -221,7 +221,6 @@ handleEffortControlClick applyUiEvent = do
                             , choiceAdjustmentIndices = []
                             , choiceCloseOnTurnEnd = True
                             }
-                        , appChoiceReply = Just choose
                         }
                 vScrollToBeginning (viewportScroll OverlayViewport)
             else

@@ -16,6 +16,7 @@ import Agent.CLI.TUI.Types
     ( AppState(..)
     , ChoiceOverlay(..)
     , ChoicePresentation(..)
+    , PendingDialog(..)
     , TextInputMode(..)
     , TextOverlay(..)
     )
@@ -650,7 +651,7 @@ applyAction action harness =
                 { harnessApp =
                     harness.harnessApp
                         { appChoice =
-                            Just ChoiceOverlay
+                            Just $ PendingDialog (const (pure ())) ChoiceOverlay
                                 { choicePresentation = presentation
                                 , choiceTitle = title
                                 , choiceBody = body
@@ -671,7 +672,7 @@ applyAction action harness =
                     harness.harnessApp
                         { appChoice = Nothing
                         , appTextPrompt =
-                            Just TextOverlay
+                            Just $ PendingDialog (const (pure ())) TextOverlay
                                 { textTitle = title
                                 , textBody = body
                                 , textDraft = draft
