@@ -3,7 +3,7 @@
 , containers, crypton-connection, directory, filepath, hspec
 , JuicyPixels, lib, process, QuickCheck, resourcet, retry
 , safe-exceptions, stm, template-haskell, text, text-builder, time
-, tls, transformers, unix, vector, websockets, yaml
+, tls, transformers, unix, vector, websockets, yaml, zlib
 }:
 mkDerivation {
   pname = "agent-core";
@@ -15,13 +15,13 @@ mkDerivation {
     base64-bytestring bytestring containers crypton-connection
     directory filepath JuicyPixels process resourcet retry
     safe-exceptions stm template-haskell text time tls transformers
-    unix vector websockets yaml
+    unix vector websockets yaml zlib
   ];
   testHaskellDepends = [
     aeson agent-json agent-responses-types async base base64-bytestring
     bytestring containers crypton-connection directory filepath hspec
     JuicyPixels process QuickCheck retry safe-exceptions stm text time
-    tls unix websockets yaml
+    tls unix websockets yaml zlib
   ];
   benchmarkHaskellDepends = [
     aeson agent-json async base bytestring directory filepath process

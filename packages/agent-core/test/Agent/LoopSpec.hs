@@ -1,10 +1,20 @@
 module Agent.LoopSpec (spec) where
 
+import Agent.Json (RawJson, rawJsonBytes, rawJsonDecoder)
 import qualified Agent.Json.Decode as Json
 import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Error (ApiError(..))
 import Agent.Loop
-import Agent.Responses.Types (ResponseItem(..), TaggedObject(..))
+import Agent.Responses.Types
+    ( FunctionCallOutput(..)
+    , MessageContent(..)
+    , ReasoningItem(..)
+    , ResponseContentPart(..)
+    , ResponseItem(..)
+    , ResponseMessage(..)
+    , ResponseRole(..)
+    , TaggedObject(..)
+    )
 import Agent.Telemetry (TurnTelemetry(..))
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
@@ -26,16 +36,22 @@ import Agent.Tools.Types
     , withToolResourceClaims
     )
 import Codec.Picture
-    ( PixelRGB8(..)
+    ( Image
+    , PixelRGB8(..)
+    , PixelRGBA8(..)
     , convertRGB8
+    , convertRGBA8
     , decodeImage
     , encodeBitmap
     , encodeJpegAtQuality
+    , encodePng
     , generateImage
     , imageHeight
     , imageWidth
+    , pixelAt
     )
 import Codec.Picture.Types (convertImage)
+import qualified Codec.Compression.Zlib as Zlib
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (cancel, wait, withAsync)
 import Control.Concurrent.MVar
@@ -46,13 +62,24 @@ import Control.Concurrent.MVar
     , tryReadMVar
     )
 import qualified Control.Exception as Exception
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Bits (complement, shiftR, xor, (.&.))
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Base64 as Base64
+import Data.ByteString.Builder
+    ( Builder
+    , byteString
+    , toLazyByteString
+    , word8
+    , word32BE
+    )
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
+import Data.Word (Word32)
 import System.Timeout (timeout)
 import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
@@ -196,6 +223,216 @@ spec = describe "runLoop" do
             submissionsSeen ->
                 expectationFailure $
                     "unexpected submissions: " <> show submissionsSeen
+
+    it "rejects unsafe encoded dimensions before decoding a raster" do
+        finished <-
+            timeout 2000000 $
+                runSingleImageSubmission "image/png" unsafeDimensionPng
+        case finished of
+            Nothing ->
+                expectationFailure
+                    "image dimension preflight did not return promptly"
+            Just (Left failure) ->
+                expectationFailure failure
+            Just (Right (result, submittedImage)) -> do
+                result `shouldBe` completedImageLoopResult
+                submittedImage.imageMime `shouldBe` "image/png"
+                submittedImage.imageBytes `shouldBe` unsafeDimensionPng
+
+    it "bounds PNG inflation before allocating the decoded raster" do
+        _ <- Exception.evaluate (ByteString.length pngInflationBomb)
+        finished <-
+            timeout 500000 $
+                runSingleImageSubmission "image/png" pngInflationBomb
+        case finished of
+            Nothing ->
+                expectationFailure
+                    "PNG inflation preflight did not return promptly"
+            Just (Left failure) ->
+                expectationFailure failure
+            Just (Right (result, submittedImage)) -> do
+                result `shouldBe` completedImageLoopResult
+                submittedImage.imageMime `shouldBe` "image/png"
+                submittedImage.imageBytes `shouldBe` pngInflationBomb
+
+    it "bounds PNG chunk metadata before collecting image data" do
+        _ <-
+            Exception.evaluate
+                (ByteString.length pngWithExcessiveImageDataChunks)
+        finished <-
+            timeout 500000 $
+                runSingleImageSubmission
+                    "image/png"
+                    pngWithExcessiveImageDataChunks
+        case finished of
+            Nothing ->
+                expectationFailure
+                    "PNG chunk preflight did not return promptly"
+            Just (Left failure) ->
+                expectationFailure failure
+            Just (Right (result, submittedImage)) -> do
+                result `shouldBe` completedImageLoopResult
+                submittedImage.imageMime `shouldBe` "image/png"
+                submittedImage.imageBytes
+                    `shouldBe` pngWithExcessiveImageDataChunks
+
+    it "does not decode GIF frames without a bounded frame preflight" do
+        finished <-
+            timeout 2000000 $
+                runSingleImageSubmission "image/gif" oversizedGifFrame
+        case finished of
+            Nothing ->
+                expectationFailure
+                    "unsupported GIF normalization did not return promptly"
+            Just (Left failure) ->
+                expectationFailure failure
+            Just (Right (result, submittedImage)) -> do
+                result `shouldBe` completedImageLoopResult
+                submittedImage.imageMime `shouldBe` "image/gif"
+                submittedImage.imageBytes `shouldBe` oversizedGifFrame
+
+    it "resizes transparent pixels in premultiplied-alpha space" do
+        let sourceBytes =
+                LazyByteString.toStrict
+                    (encodePng transparentEdgeFixture)
+        submission <- runSingleImageSubmission "image/png" sourceBytes
+        case submission of
+            Left failure ->
+                expectationFailure failure
+            Right (result, submittedImage) -> do
+                result `shouldBe` completedImageLoopResult
+                submittedImage.imageMime `shouldBe` "image/png"
+                submittedImage.imageBytes `shouldNotBe` sourceBytes
+                case decodeImage submittedImage.imageBytes of
+                    Left decodeError ->
+                        expectationFailure decodeError
+                    Right dynamicImage ->
+                        pixelAt (convertRGBA8 dynamicImage) 0 0
+                            `shouldBe` PixelRGBA8 255 255 255 128
+
+    it "normalizes retained backend history only for provider submission" do
+        submittedState <- newIORef Nothing
+        let sourceUrl = imageDataUrl "image/bmp" oversizedFixtureBytes
+            rawSourceUrl =
+                "DATA:IMAGE/BMP;BASE64,"
+                    <> TextEncoding.decodeUtf8
+                        (Base64.encode oversizedFixtureBytes)
+            rawHistoryOutput =
+                rawJsonFixture $
+                    "{\"type\":\"input_image\",\"image_url\":\""
+                        <> "DATA:IMAGE\\/BMP;BASE64,"
+                        <> Base64.encode oversizedFixtureBytes
+                        <> "\"}"
+            messageHistoryItem =
+                MessageItem ResponseMessage
+                    { messageId = Just "history-message"
+                    , content =
+                        MessageContentParts
+                            [ InputImagePart
+                                { detail = Just "high"
+                                , fileId = Nothing
+                                , imageUrl = Just sourceUrl
+                                , promptCacheBreakpoint = Nothing
+                                }
+                            ]
+                    , role = RoleUser
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+            reasoningHistoryItem =
+                ReasoningItemValue ReasoningItem
+                    { itemId = Just "history-reasoning"
+                    , summary = []
+                    , content =
+                        Just
+                            [ InputImagePart
+                                { detail = Just "high"
+                                , fileId = Nothing
+                                , imageUrl = Just sourceUrl
+                                , promptCacheBreakpoint = Nothing
+                                }
+                            ]
+                    , encryptedContent = Nothing
+                    , status = Nothing
+                    }
+            functionHistoryItem =
+                FunctionCallOutputItem FunctionCallOutput
+                    { itemId = Just "history-function-output"
+                    , callId = "history-call"
+                    , name = Just "image"
+                    , namespace = Nothing
+                    , provider = Nothing
+                    , output = rawHistoryOutput
+                    , status = Nothing
+                    }
+            initialState =
+                initialBackendSnapshot
+                    [ messageHistoryItem
+                    , reasoningHistoryItem
+                    , functionHistoryItem
+                    ]
+            backend = Backend \state _previous _inputs _onEvent -> do
+                writeIORef submittedState (Just state)
+                pure (Left (ConnectionError "down"))
+        storedState <- newIORef initialState
+        config0 <- testConfig backend
+        let config = config0
+                { loopBackendState = BackendStateStore
+                    { readBackendState = readIORef storedState
+                    , commitBackendState = \state -> do
+                        writeIORef storedState state
+                        pure state
+                    }
+                }
+        execution <-
+            runLoopInputsDetailed config Nothing [UserMessage "continue"]
+        execution.executionResult
+            `shouldBe` Left (LoopTransport (ConnectionError "down"))
+        readIORef storedState `shouldReturn` initialState
+        readIORef submittedState >>= \case
+            Just BackendSnapshot{
+                backendItems =
+                    [ MessageItem ResponseMessage{
+                        content =
+                            MessageContentParts
+                                [ InputImagePart{
+                                    imageUrl = Just normalizedMessageUrl
+                                }
+                                ]
+                    }
+                    , ReasoningItemValue ReasoningItem{
+                        content =
+                            Just
+                                [ InputImagePart{
+                                    imageUrl = Just normalizedReasoningUrl
+                                }
+                                ]
+                    }
+                    , FunctionCallOutputItem FunctionCallOutput{
+                        output = normalizedRawOutput
+                    }
+                    ]
+            } -> do
+                assertNormalizedDataUrl
+                    oversizedFixtureBytes
+                    sourceUrl
+                    normalizedMessageUrl
+                assertNormalizedDataUrl
+                    oversizedFixtureBytes
+                    sourceUrl
+                    normalizedReasoningUrl
+                case rawJsonImageUrl normalizedRawOutput of
+                    Left failure ->
+                        expectationFailure failure
+                    Right normalizedRawUrl ->
+                        assertNormalizedDataUrl
+                            oversizedFixtureBytes
+                            rawSourceUrl
+                            normalizedRawUrl
+            state ->
+                expectationFailure $
+                    "unexpected submitted backend state: " <> show state
 
     it "normalizes oversized tool images before follow-up submission" do
         submissions <- newIORef []
@@ -2275,6 +2512,144 @@ functionResult callId output = ToolCallResult
     , callKind = FunctionCallKind
     }
 
+completedImageLoopResult :: Either LoopError LoopResult
+completedImageLoopResult =
+    Right LoopResult
+        { finalResponseId = "resp-image-check"
+        , finalText = Just "saw it"
+        , turnsUsed = 1
+        , tokenUsage = emptyTokenUsage
+        }
+
+runSingleImageSubmission
+    :: Text
+    -> ByteString.ByteString
+    -> IO
+        ( Either
+            String
+            (Either LoopError LoopResult, ImageAttachment)
+        )
+runSingleImageSubmission mime bytes = do
+    submissions <- newIORef []
+    backend <- scriptedBackend submissions
+        [ Right $ emptyTurnOutput "resp-image-check" [] (Just "saw it")
+        ]
+    config <- testConfig backend
+    result <-
+        runLoopInputs config Nothing
+            [ userMessageWithAttachments
+                "see this"
+                [ImageAttachmentItem (ImageAttachment mime bytes)]
+            ]
+    readIORef submissions >>= \case
+        [(Nothing, [submitted])] ->
+            case turnInputImages submitted of
+                [image] -> do
+                    _ <- Exception.evaluate (ByteString.length image.imageBytes)
+                    pure (Right (result, image))
+                images ->
+                    pure . Left $
+                        "expected one submitted image, got "
+                            <> show (length images)
+        submissionsSeen ->
+            pure . Left $
+                "unexpected submissions: " <> show submissionsSeen
+
+unsafeDimensionPng :: ByteString.ByteString
+unsafeDimensionPng =
+    LazyByteString.toStrict $
+        encodePng (generateImage (\_ _ -> PixelRGB8 0 0 0) 8193 1)
+
+pngInflationBomb :: ByteString.ByteString
+pngInflationBomb =
+    LazyByteString.toStrict . toLazyByteString $
+        byteString "\137PNG\r\n\SUB\n"
+            <> pngChunk "IHDR" header
+            <> pngChunk "IDAT" compressedPayload
+            <> pngChunk "IEND" ""
+  where
+    header =
+        LazyByteString.toStrict . toLazyByteString $
+            word32BE 2001
+                <> word32BE 1
+                <> word8 8
+                <> word8 2
+                <> word8 0
+                <> word8 0
+                <> word8 0
+    compressedPayload =
+        LazyByteString.toStrict . Zlib.compress $
+            LazyByteString.replicate (256 * 1024 * 1024) 0
+
+pngWithExcessiveImageDataChunks :: ByteString.ByteString
+pngWithExcessiveImageDataChunks =
+    LazyByteString.toStrict . toLazyByteString $
+        byteString "\137PNG\r\n\SUB\n"
+            <> pngChunk "IHDR" header
+            <> mconcat (replicate 4097 (pngChunk "IDAT" ""))
+            <> pngChunk "IDAT" compressedPayload
+            <> pngChunk "IEND" ""
+  where
+    header =
+        LazyByteString.toStrict . toLazyByteString $
+            word32BE 2001
+                <> word32BE 1
+                <> word8 8
+                <> word8 2
+                <> word8 0
+                <> word8 0
+                <> word8 0
+    compressedPayload =
+        LazyByteString.toStrict . Zlib.compress $
+            LazyByteString.replicate 6004 0
+
+pngChunk :: ByteString.ByteString -> ByteString.ByteString -> Builder
+pngChunk chunkType payload =
+    word32BE (fromIntegral (ByteString.length payload))
+        <> byteString chunkType
+        <> byteString payload
+        <> word32BE (pngCrc32 (chunkType <> payload))
+
+pngCrc32 :: ByteString.ByteString -> Word32
+pngCrc32 =
+    complement
+        . ByteString.foldl' updateCrc maxBound
+  where
+    updateCrc crc byte =
+        updateBits 8 (crc `xor` fromIntegral byte)
+
+    updateBits :: Int -> Word32 -> Word32
+    updateBits remaining value
+        | remaining <= 0 = value
+        | value .&. 1 == 1 =
+            updateBits
+                (remaining - 1)
+                ((value `shiftR` 1) `xor` 0xedb88320)
+        | otherwise =
+            updateBits (remaining - 1) (value `shiftR` 1)
+
+oversizedGifFrame :: ByteString.ByteString
+oversizedGifFrame =
+    ByteString.pack
+        [ 0x47, 0x49, 0x46, 0x38, 0x39, 0x61
+        , 0xd1, 0x07, 0x01, 0x00
+        , 0x00, 0x00, 0x00
+        , 0x2c
+        , 0x00, 0x00, 0x00, 0x00
+        , 0xff, 0xff, 0xff, 0xff
+        , 0x00
+        , 0x02, 0x01, 0x00, 0x00
+        , 0x3b
+        ]
+
+transparentEdgeFixture :: Image PixelRGBA8
+transparentEdgeFixture =
+    generateImage pixel 4000 1
+  where
+    pixel x _
+        | even x = PixelRGBA8 255 255 255 255
+        | otherwise = PixelRGBA8 0 0 0 0
+
 oversizedFixtureBytes :: ByteString.ByteString
 oversizedFixtureBytes =
     LazyByteString.toStrict (encodeBitmap sourceImage)
@@ -2342,6 +2717,52 @@ assertNormalizedImage sourceBytes mime bytes = do
             width `shouldSatisfy` (<= 2000)
             height `shouldSatisfy` (<= 2000)
             width * height `shouldSatisfy` (<= 2408448)
+
+imageDataUrl :: Text -> ByteString.ByteString -> Text
+imageDataUrl mime bytes =
+    "data:"
+        <> mime
+        <> ";base64,"
+        <> TextEncoding.decodeUtf8 (Base64.encode bytes)
+
+rawJsonFixture :: ByteString.ByteString -> RawJson
+rawJsonFixture bytes =
+    either (error . show) id
+        (Json.decodeEither rawJsonDecoder bytes)
+
+rawJsonImageUrl :: RawJson -> Either String Text
+rawJsonImageUrl raw =
+    case Aeson.decodeStrict' (rawJsonBytes raw) of
+        Just (Aeson.Object object) ->
+            case KeyMap.lookup "image_url" object of
+                Just (Aeson.String imageUrl) -> Right imageUrl
+                _ -> Left "normalized raw JSON has no image_url string"
+        _ -> Left "normalized tool output is not a JSON object"
+
+assertNormalizedDataUrl
+    :: ByteString.ByteString
+    -> Text
+    -> Text
+    -> Expectation
+assertNormalizedDataUrl sourceBytes sourceUrl normalizedUrl = do
+    normalizedUrl `shouldNotBe` sourceUrl
+    let (metadata, payloadWithComma) =
+            Text.breakOn "," normalizedUrl
+    metadata
+        `shouldSatisfy`
+            (`elem`
+                [ "data:image/png;base64"
+                , "data:image/jpeg;base64"
+                ])
+    case Base64.decode
+        (TextEncoding.encodeUtf8 (Text.drop 1 payloadWithComma)) of
+        Left decodeError ->
+            expectationFailure decodeError
+        Right normalizedBytes ->
+            assertNormalizedImage
+                sourceBytes
+                (Text.drop 5 (Text.dropEnd 7 metadata))
+                normalizedBytes
 
 scriptedBackend
     :: IORef [(Maybe Text, [TurnInput])]

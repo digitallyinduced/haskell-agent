@@ -134,6 +134,7 @@ library
                     , vector
                     , websockets
                     , yaml
+                    , zlib
 
 benchmark grep-streaming-bench
     import:           common-opts
@@ -301,3 +302,4 @@ test-suite agent-core-test
                     , unix
                     , websockets
                     , yaml
+                    , zlib
