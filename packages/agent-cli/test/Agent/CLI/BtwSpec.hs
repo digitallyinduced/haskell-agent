@@ -228,7 +228,8 @@ computerOutputItem computerOutputCallId =
 
 functionOutputItem :: Text.Text -> ResponseItem
 functionOutputItem callId = FunctionCallOutputItem FunctionCallOutput
-    { itemId = Nothing
+    { localOutcome = Nothing
+    , itemId = Nothing
     , callId
     , name = Nothing
     , namespace = Nothing

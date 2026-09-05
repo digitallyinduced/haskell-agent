@@ -109,7 +109,8 @@ spec = describe "provider-native agent tracking" do
                 , status = Just ItemCompleted
                 }
             output = FunctionCallOutputItem FunctionCallOutput
-                { itemId = Nothing
+                { localOutcome = Nothing
+                , itemId = Nothing
                 , callId = "agent-1"
                 , name = Nothing
                 , namespace = Nothing
@@ -141,7 +142,8 @@ spec = describe "provider-native agent tracking" do
                 , status = Just ItemCompleted
                 }
             wrongOutput = FunctionCallOutputItem FunctionCallOutput
-                { itemId = Nothing
+                { localOutcome = Nothing
+                , itemId = Nothing
                 , callId = "claude-unpaired"
                 , name = Nothing
                 , namespace = Nothing
@@ -173,7 +175,8 @@ spec = describe "provider-native agent tracking" do
                 , status = Just ItemCompleted
                 }
             output identifier = FunctionCallOutputItem FunctionCallOutput
-                { itemId = Nothing
+                { localOutcome = Nothing
+                , itemId = Nothing
                 , callId = identifier
                 , name = Nothing
                 , namespace = Nothing

@@ -547,7 +547,8 @@ rewriteOversizedToolOutput :: ResponseItem -> Maybe ResponseItem
 rewriteOversizedToolOutput = \case
     FunctionCallOutputItem output ->
         Just $ FunctionCallOutputItem FunctionCallOutput
-            { itemId = output.itemId
+            { localOutcome = output.localOutcome
+            , itemId = output.itemId
             , callId = output.callId
             , name = output.name
             , namespace = output.namespace
@@ -566,7 +567,8 @@ rewriteOversizedToolOutput = \case
             }
     CustomToolCallOutputItem output ->
         Just $ CustomToolCallOutputItem CustomToolCallOutput
-            { itemId = output.itemId
+            { localOutcome = output.localOutcome
+            , itemId = output.itemId
             , callId = output.callId
             , name = output.name
             , output = truncatedOutputJson

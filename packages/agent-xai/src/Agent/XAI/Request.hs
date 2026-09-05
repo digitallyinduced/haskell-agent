@@ -229,13 +229,13 @@ stripItemStatus = \case
     FunctionCallItem (FunctionCall itemId callId name namespace provider arguments encryptedArgs _) ->
         FunctionCallItem
             (FunctionCall itemId callId name namespace provider arguments encryptedArgs Nothing)
-    FunctionCallOutputItem (FunctionCallOutput itemId callId name namespace provider output _) ->
+    FunctionCallOutputItem (FunctionCallOutput itemId callId name namespace provider output _ outcome) ->
         FunctionCallOutputItem
-            (FunctionCallOutput itemId callId name namespace provider output Nothing)
+            (FunctionCallOutput itemId callId name namespace provider output Nothing outcome)
     CustomToolCallItem (CustomToolCall itemId callId name namespace input _) ->
         CustomToolCallItem (CustomToolCall itemId callId name namespace input Nothing)
-    CustomToolCallOutputItem (CustomToolCallOutput itemId callId name output _) ->
-        CustomToolCallOutputItem (CustomToolCallOutput itemId callId name output Nothing)
+    CustomToolCallOutputItem (CustomToolCallOutput itemId callId name output _ outcome) ->
+        CustomToolCallOutputItem (CustomToolCallOutput itemId callId name output Nothing outcome)
     ReasoningItemValue (ReasoningItem itemId summary content encryptedContent _) ->
         ReasoningItemValue
             (ReasoningItem itemId summary content encryptedContent Nothing)
