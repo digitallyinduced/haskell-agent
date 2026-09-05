@@ -141,6 +141,11 @@ test-suite agent-cli-runtime-test
                     , Agent.CLI.SessionActivitySpec
                     , Agent.CLI.SessionRequestSpec
                     , Agent.CLI.SessionSpec
+                    , Agent.CLI.SessionSpec.Compatibility
+                    , Agent.CLI.SessionSpec.Fixtures
+                    , Agent.CLI.SessionSpec.JsonCodec
+                    , Agent.CLI.SessionSpec.Persistence
+                    , Agent.CLI.SessionSpec.ResponseItems
     build-depends:    agent-cli-runtime
                     , agent-core
                     , agent-json
