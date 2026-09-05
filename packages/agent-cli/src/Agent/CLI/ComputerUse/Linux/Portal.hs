@@ -5,6 +5,8 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , PortalPngFrame(..)
     , PortalState(..)
     , PortalStream(..)
+    , beginPortalCaptureRequestWith
+    , closePortalStateWith
     , ensurePortalStateReadyWith
     , invalidatePortalStateWhenWith
     , newPortalBackend
@@ -15,6 +17,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , portalMethodCall
     , portalMouseButtonCode
     , portalRequestPathForSender
+    , publishPortalFrameWith
     , readPortalPngFrame
     , requestResponseRule
     , runPortalBackendOperationWith
@@ -107,8 +110,7 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad
-    ( forever
-    , forM
+    ( forM
     , forM_
     , unless
     , void
@@ -213,6 +215,8 @@ data PortalCapture = PortalCapture
     , portalCaptureErrorReader :: !(Async ())
     , portalCaptureFrameState :: !(TVar PortalFrameState)
     , portalCaptureRequestLock :: !(MVar ())
+    , portalCaptureRequestGeneration :: !(TVar Word64)
+    , portalCaptureProcessLock :: !(MVar ())
     }
 
 data PortalPngFrame = PortalPngFrame
@@ -231,6 +235,7 @@ data PortalState session
     = PortalUninitialized
     | PortalReady !session
     | PortalFailed !Text
+    | PortalClosing !session
     | PortalClosed
 
 data PortalRuntime = PortalRuntime
@@ -606,6 +611,11 @@ ensurePortalStateReadyWith stateVar initialize =
                     (PortalReady session, Right ())
         state@(PortalReady _) -> pure (state, Right ())
         state@(PortalFailed err) -> pure (state, Left err)
+        state@(PortalClosing _) ->
+            pure
+                ( state
+                , Left "The Wayland computer-use session is being closed."
+                )
         PortalClosed ->
             pure
                 ( PortalClosed
@@ -933,12 +943,36 @@ closePortalSession runtime session =
 
 closePortalRuntime :: PortalRuntime -> IO ()
 closePortalRuntime runtime = do
-    session <-
-        modifyMVar runtime.portalState \case
-            PortalReady value -> pure (PortalClosed, Just value)
-            _ -> pure (PortalClosed, Nothing)
-    mapM_ (closePortalSession runtime) session
+    closePortalStateWith
+        runtime.portalState
+        (closePortalSession runtime)
     disconnect runtime.portalClient `catchAny` const (pure ())
+
+closePortalStateWith
+    :: MVar (PortalState session)
+    -> (session -> IO ())
+    -> IO ()
+closePortalStateWith stateVar closeSession =
+    Exception.mask \restore -> do
+        let closeAndFinish session = do
+                closed <-
+                    tryAllExceptions (restore (closeSession session))
+                pure case closed of
+                    Left exception ->
+                        (PortalClosing session, Left exception)
+                    Right () ->
+                        (PortalClosed, Right ())
+            step = \case
+                PortalReady session -> closeAndFinish session
+                PortalClosing session -> closeAndFinish session
+                PortalUninitialized ->
+                    pure (PortalClosed, Right ())
+                PortalFailed _ ->
+                    pure (PortalClosed, Right ())
+                PortalClosed ->
+                    pure (PortalClosed, Right ())
+        outcome <- modifyMVarMasked stateVar step
+        either Exception.throwIO pure outcome
 
 invalidatePortalStateWhenWith
     :: MVar (PortalState session)
@@ -1100,6 +1134,8 @@ withPortalSessionOperation runtime operation action = do
                     pure (Left err)
                 Right value -> pure (Right value)
         PortalFailed err -> pure (Left err)
+        PortalClosing _ ->
+            pure (Left "The Wayland computer-use session is being closed.")
         PortalClosed ->
             pure (Left "The Wayland computer-use session has been closed.")
         PortalUninitialized ->
@@ -1326,21 +1362,104 @@ notifyPortal runtime member body =
 
 capturePortalFrame :: PortalCapture -> IO CapturedPortalFrame
 capturePortalFrame capture =
-    withMVar capture.portalCaptureRequestLock \() -> do
-        baseline <-
-            readTVarIO capture.portalCaptureFrameState >>= \case
-                PortalFramePending -> pure 0
-                PortalFrameAvailable sequenceNumber _ ->
-                    pure sequenceNumber
-                PortalFrameFailed err -> fail (Text.unpack err)
-        withPortalCaptureRunningWith
-            (resumePortalCaptureProcess capture.portalCaptureProcess)
-            (pausePortalCaptureProcess capture.portalCaptureProcess)
-            (waitForPortalFrameAfter
-                captureRefreshTimeout
-                baseline
-                capture.portalCaptureFrameState
-                >>= either (fail . Text.unpack) pure)
+    withMVar capture.portalCaptureRequestLock \() ->
+        mask \restore -> do
+            baseline <-
+                beginPortalCaptureRequestWith
+                    capture.portalCaptureProcessLock
+                    capture.portalCaptureRequestGeneration
+                    capture.portalCaptureFrameState
+                    (resumePortalCaptureProcess capture.portalCaptureProcess)
+            restore
+                (waitForPortalFrameAfter
+                    captureRefreshTimeout
+                    baseline
+                    capture.portalCaptureFrameState
+                    >>= either (fail . Text.unpack) pure)
+                `finally`
+                    suspendPortalCaptureWith
+                        capture.portalCaptureProcessLock
+                        (pausePortalCaptureProcess capture.portalCaptureProcess)
+
+beginPortalCaptureRequestWith
+    :: MVar ()
+    -> TVar Word64
+    -> TVar PortalFrameState
+    -> IO ()
+    -> IO Word64
+beginPortalCaptureRequestWith processLock requestGeneration frameState resume =
+    Exception.mask_ $
+        withMVar processLock \() -> do
+            baseline <-
+                readTVarIO frameState >>= \case
+                    PortalFramePending -> pure 0
+                    PortalFrameAvailable sequenceNumber _ ->
+                        pure sequenceNumber
+                    PortalFrameFailed err -> fail (Text.unpack err)
+            atomically (modifyTVar' requestGeneration (+ 1))
+            resume
+            pure baseline
+
+publishPortalFrameWith
+    :: MVar ()
+    -> TVar Word64
+    -> TVar PortalFrameState
+    -> IO ()
+    -> Word64
+    -> PortalPngFrame
+    -> IO Bool
+publishPortalFrameWith
+        processLock
+        requestGeneration
+        frameState
+        suspend
+        frameGeneration
+        pngFrame =
+    fst <$>
+        publishPortalFrameForReaderWith
+            processLock
+            requestGeneration
+            frameState
+            suspend
+            frameGeneration
+            pngFrame
+
+publishPortalFrameForReaderWith
+    :: MVar ()
+    -> TVar Word64
+    -> TVar PortalFrameState
+    -> IO ()
+    -> Word64
+    -> PortalPngFrame
+    -> IO (Bool, Word64)
+publishPortalFrameForReaderWith
+        processLock
+        requestGeneration
+        frameState
+        suspend
+        frameGeneration
+        pngFrame =
+    Exception.mask_ $
+        withMVar processLock \() -> do
+            currentGeneration <- readTVarIO requestGeneration
+            if frameGeneration /= currentGeneration
+                then pure (False, currentGeneration)
+                else do
+                    suspend
+                    atomically $
+                        modifyTVar' frameState \case
+                            PortalFramePending ->
+                                PortalFrameAvailable 1 pngFrame
+                            PortalFrameAvailable sequenceNumber _ ->
+                                PortalFrameAvailable
+                                    (sequenceNumber + 1)
+                                    pngFrame
+                            failed@(PortalFrameFailed _) -> failed
+                    pure (True, currentGeneration)
+
+suspendPortalCaptureWith :: MVar () -> IO () -> IO ()
+suspendPortalCaptureWith processLock suspend =
+    Exception.mask_ (withMVar processLock (const suspend))
 
 withPortalCaptureRunningWith
     :: IO ()
@@ -1445,6 +1564,8 @@ startGstreamerPortalCapture pipeWireHandle nodeId = do
     frameState <- newTVarIO PortalFramePending
     errorBuffer <- newTVarIO BS.empty
     requestLock <- newMVar ()
+    requestGeneration <- newTVarIO 0
+    processLock <- newMVar ()
     mask \restore -> do
         (_, maybeOutput, maybeErrors, processHandle) <-
             createProcess
@@ -1494,7 +1615,9 @@ startGstreamerPortalCapture pipeWireHandle nodeId = do
                                         processHandle
                                         outputHandle
                                         errorBuffer
-                                        frameState)
+                                        frameState
+                                        requestGeneration
+                                        processLock)
                                     `onException` do
                                         cancel errorReader
                                         void (waitCatch errorReader)
@@ -1506,6 +1629,9 @@ startGstreamerPortalCapture pipeWireHandle nodeId = do
                                     , portalCaptureErrorReader = errorReader
                                     , portalCaptureFrameState = frameState
                                     , portalCaptureRequestLock = requestLock
+                                    , portalCaptureRequestGeneration =
+                                        requestGeneration
+                                    , portalCaptureProcessLock = processLock
                                     }
                             void (restore (latestPortalFrame capture))
                                 `onException` closePortalCapture capture
@@ -1523,18 +1649,17 @@ runPortalFrameReader
     -> Handle
     -> TVar BS.ByteString
     -> TVar PortalFrameState
+    -> TVar Word64
+    -> MVar ()
     -> IO ()
-runPortalFrameReader processHandle outputHandle errorBuffer frameState =
-    (forever do
-        pngFrame <- readPortalPngFrame outputHandle
-        pausePortalCaptureProcess processHandle
-        atomically $
-            modifyTVar' frameState \case
-                PortalFramePending ->
-                    PortalFrameAvailable 1 pngFrame
-                PortalFrameAvailable sequenceNumber _ ->
-                    PortalFrameAvailable (sequenceNumber + 1) pngFrame
-                failed@(PortalFrameFailed _) -> failed)
+runPortalFrameReader
+        processHandle
+        outputHandle
+        errorBuffer
+        frameState
+        requestGeneration
+        processLock =
+    loop 0
         `catchAny` \exception -> do
             details <- portalCaptureErrorDetails errorBuffer
             let err
@@ -1543,10 +1668,27 @@ runPortalFrameReader processHandle outputHandle errorBuffer frameState =
                             <> exceptionText exception
                     | otherwise =
                         "GStreamer portal capture failed: " <> details
-            atomically $
-                modifyTVar' frameState \case
-                    failed@(PortalFrameFailed _) -> failed
-                    _ -> PortalFrameFailed err
+            Exception.mask_ $
+                withMVar processLock \() ->
+                    atomically $
+                        modifyTVar' frameState \case
+                            failed@(PortalFrameFailed _) -> failed
+                            _ -> PortalFrameFailed err
+  where
+    -- Carry the generation chosen before each blocking read. A request bumps
+    -- the generation before resuming GStreamer, so a PNG that was already
+    -- buffered or in progress while idle cannot satisfy that request.
+    loop frameGeneration = do
+        pngFrame <- readPortalPngFrame outputHandle
+        (_, nextGeneration) <-
+            publishPortalFrameForReaderWith
+                processLock
+                requestGeneration
+                frameState
+                (pausePortalCaptureProcess processHandle)
+                frameGeneration
+                pngFrame
+        loop nextGeneration
 
 drainPortalCaptureErrors
     :: Handle

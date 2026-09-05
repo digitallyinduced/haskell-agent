@@ -45,6 +45,8 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , PortalPngFrame(..)
     , PortalState(..)
     , PortalStream(..)
+    , beginPortalCaptureRequestWith
+    , closePortalStateWith
     , ensurePortalStateReadyWith
     , invalidatePortalStateWhenWith
     , parsePortalStartResults
@@ -54,6 +56,7 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , portalMethodCall
     , portalMouseButtonCode
     , portalRequestPathForSender
+    , publishPortalFrameWith
     , readPortalPngFrame
     , requestResponseRule
     , runPortalBackendOperationWith
@@ -97,7 +100,12 @@ import Control.Concurrent
     , threadDelay
     )
 import Control.Concurrent.Async (cancel, waitCatch, withAsync)
-import Control.Concurrent.STM (atomically, newTVarIO, writeTVar)
+import Control.Concurrent.STM
+    ( atomically
+    , newTVarIO
+    , readTVarIO
+    , writeTVar
+    )
 import Control.Exception
     ( MaskingState(..)
     , getMaskingState
@@ -172,6 +180,27 @@ spec = do
                     runtime ScreenshotPng call
                 third `shouldSatisfy` either (const False) (const True)
                 readIORef attempts `shouldReturn` 2)
+                `finally` closeComputerUseRuntime runtime
+
+        it "retains a desktop lease across compatibility-style calls" do
+            initializeCount <- newIORef (0 :: Int)
+            leasedBackend <-
+                newLeasedDesktopComputerUseBackend (testBackend x11Display)
+            let initialize = do
+                    modifyIORef' initializeCount (+ 1)
+                    pure (Right leasedBackend)
+                screenshotCall =
+                    exampleCall { computerActions = [ScreenshotAction] }
+                succeeds = either (const False) (const True)
+            runtime <- newComputerUseRuntimeWithBackend initialize
+            (do
+                first <- executeComputerCallWithRuntime
+                    runtime ScreenshotPng screenshotCall
+                first `shouldSatisfy` succeeds
+                second <- executeComputerCallWithRuntime
+                    runtime ScreenshotPng exampleCall
+                second `shouldSatisfy` succeeds
+                readIORef initializeCount `shouldReturn` 1)
                 `finally` closeComputerUseRuntime runtime
 
         it "keeps successful acquisition masked through runtime ownership" do
@@ -1210,6 +1239,40 @@ spec = do
                 `shouldReturn` Right ()
             readIORef attempts `shouldReturn` 2
 
+        it "retains a session until cancelled runtime cleanup is retried" do
+            state <-
+                newMVar (PortalReady ("session" :: Text.Text))
+            attempts <- newIORef (0 :: Int)
+            closeStarted <- newEmptyMVar
+            blocker <- newEmptyMVar
+            let closeSession _ = do
+                    attempt <-
+                        atomicModifyIORef' attempts \current ->
+                            let next = current + 1
+                            in (next, next)
+                    if attempt == 1
+                        then putMVar closeStarted () >> takeMVar blocker
+                        else pure ()
+            withAsync (closePortalStateWith state closeSession) \closing -> do
+                takeMVar closeStarted
+                cancel closing
+                waitCatch closing
+                    >>= (`shouldSatisfy`
+                        either (const True) (const False))
+            readMVar state >>= \case
+                PortalClosing session ->
+                    session `shouldBe` "session"
+                _ ->
+                    expectationFailure
+                        "cancelled cleanup did not retain the portal session"
+            closePortalStateWith state closeSession
+            readMVar state >>= \case
+                PortalClosed -> pure ()
+                _ ->
+                    expectationFailure
+                        "retried cleanup did not close the portal state"
+            readIORef attempts `shouldReturn` 2
+
         it "retries after cleaning up a matching remote portal close" do
             state <- newMVar (PortalReady ("stale session" :: Text.Text))
             closeStarted <- newEmptyMVar
@@ -1316,6 +1379,50 @@ spec = do
                         { portalFrameSequence = 42
                         , portalFramePng = freshFrame
                         }
+
+        it "discards a frame whose read began before the request" do
+            let staleFrame = PortalPngFrame "stale" 3 2
+                queuedFrame = PortalPngFrame "queued" 4 3
+                freshFrame = PortalPngFrame "fresh" 5 4
+            processLock <- newMVar ()
+            requestGeneration <- newTVarIO 0
+            frameState <-
+                newTVarIO (PortalFrameAvailable 41 staleFrame)
+            events <- newIORef ([] :: [Text.Text])
+            oldGeneration <- readTVarIO requestGeneration
+            baseline <-
+                beginPortalCaptureRequestWith
+                    processLock
+                    requestGeneration
+                    frameState
+                    (modifyIORef' events (<> ["resume"]))
+            baseline `shouldBe` 41
+            publishPortalFrameWith
+                processLock
+                requestGeneration
+                frameState
+                (modifyIORef' events (<> ["suspend"]))
+                oldGeneration
+                queuedFrame
+                `shouldReturn` False
+            readTVarIO frameState
+                `shouldReturn` PortalFrameAvailable 41 staleFrame
+            currentGeneration <- readTVarIO requestGeneration
+            publishPortalFrameWith
+                processLock
+                requestGeneration
+                frameState
+                (modifyIORef' events (<> ["suspend"]))
+                currentGeneration
+                freshFrame
+                `shouldReturn` True
+            waitForPortalFrameAfter 100000 baseline frameState
+                `shouldReturn`
+                    Right CapturedPortalFrame
+                        { portalFrameSequence = 42
+                        , portalFramePng = freshFrame
+                        }
+            readIORef events `shouldReturn` ["resume", "suspend"]
 
         it "suspends a capture process after success and failure" do
             events <- newIORef ([] :: [Text.Text])

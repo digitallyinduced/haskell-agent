@@ -72,7 +72,7 @@ import Control.Concurrent
     , threadDelay
     , withMVar
     )
-import Control.Exception.Safe (bracket, finally, mask, onException, tryAny)
+import Control.Exception.Safe (finally, mask, onException, tryAny)
 import Control.Monad (foldM)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -153,7 +153,7 @@ closeComputerUseRuntime runtime =
             pure ComputerRuntimeClosed
 
 computerUseTool :: AppTool
-computerUseTool = computerUseToolWithExecutor executeComputerCallWith
+computerUseTool = computerUseRuntimeTool defaultComputerUseRuntime
 
 computerUseToolWith :: ComputerUseBackend -> AppTool
 computerUseToolWith backend =
@@ -324,7 +324,8 @@ computerCallFromInput call input = ComputerCall
     }
 
 executeComputerCall :: ComputerCall -> IO (Either Text Text)
-executeComputerCall = executeComputerCallWith ScreenshotPng
+executeComputerCall =
+    executeComputerCallWithRuntime defaultComputerUseRuntime ScreenshotPng
 
 data ComputerObservation = ComputerObservation
     { computerObservationImage :: !ImageAttachment
@@ -344,13 +345,13 @@ data ComputerUseBackend = ComputerUseBackend
          )
     }
 
-executeComputerCallWith
-    :: ScreenshotEncoding
-    -> ComputerCall
-    -> IO (Either Text Text)
-executeComputerCallWith encoding call =
-    bracket newComputerUseRuntime closeComputerUseRuntime \runtime ->
-        executeComputerCallWithRuntime runtime encoding call
+-- The compatibility exports have no lifetime handle. Keep their lazily-created
+-- runtime for the process lifetime so Linux preserves the screenshot lease
+-- needed by a later input call. Lifecycle-managed callers should allocate,
+-- pass, and close an explicit 'ComputerUseRuntime' instead.
+{-# NOINLINE defaultComputerUseRuntime #-}
+defaultComputerUseRuntime :: ComputerUseRuntime
+defaultComputerUseRuntime = unsafePerformIO newComputerUseRuntime
 
 executeComputerCallWithRuntime
     :: ComputerUseRuntime
