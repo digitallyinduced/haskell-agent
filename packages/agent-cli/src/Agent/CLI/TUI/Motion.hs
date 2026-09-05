@@ -24,6 +24,7 @@ import Agent.CLI.AgentViewport
     )
 import Agent.CLI.TUI.Types
     ( AppState(..)
+    , choiceOverlay
     , ChoiceOverlay(choicePresentation)
     , ChoicePresentation(ChoiceDocument)
     , FullscreenRuntime(..)
@@ -175,7 +176,7 @@ userActionPending state =
         || maybe False
             (\choice ->
                 choice.choicePresentation /= ChoiceDocument)
-            state.appChoice
+            (choiceOverlay state)
         || isJust state.appResume
         || isJust state.appMetaConsole
         || isJust state.appUi.uiPermission
