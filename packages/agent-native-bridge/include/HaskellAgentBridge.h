@@ -139,7 +139,7 @@ int32_t ha_engine_set_browser_callback(
 );
 
 enum {
-    HA_COMPUTER_ABI_VERSION = 1,
+    HA_COMPUTER_ABI_VERSION = 2,
     HA_COMPUTER_QUERY_DISPLAY = 1,
     HA_COMPUTER_RUN_AND_OBSERVE = 2
 };
@@ -198,7 +198,8 @@ enum {
     HA_COMPUTER_MAX_TOTAL_POINTS = 10240,
     HA_COMPUTER_MAX_TEXT_BYTES = 327680,
     HA_COMPUTER_ERROR_CAPACITY = 65536,
-    HA_COMPUTER_OUTPUT_CAPACITY = 16777216
+    HA_COMPUTER_OUTPUT_CAPACITY = 16777216,
+    HA_COMPUTER_ACCESSIBILITY_CAPACITY = 524288
 };
 
 typedef struct ha_computer_point_v1 {
@@ -245,8 +246,8 @@ typedef struct ha_computer_action_v1 {
  * dimensions and requested_image_format zero, and a writable error buffer. On
  * success it writes a nonzero opaque lease to output_display_token and positive
  * logical main-display dimensions to output_width and output_height, sets
- * output_image_format and output_length to zero, and does not write image
- * bytes.
+ * output_image_format, output_length, and accessibility_output_length to zero,
+ * and does not write image or accessibility bytes.
  *
  * RUN_AND_OBSERVE executes the complete ordered action batch, waits for the UI
  * to settle, and captures exactly one final main-display observation. It must
@@ -257,7 +258,13 @@ typedef struct ha_computer_action_v1 {
  * serialize leases across every callback context controlling the same desktop
  * and invalidate a lease when a transaction starts changing input state.
  * requested_image_format is PNG or JPEG. On success, output contains encoded
- * image bytes, output_length is their length, output_display_token is a
+ * image bytes, output_length is their length, accessibility_output contains
+ * an optional UTF-8 JSON accessibility snapshot shaped as
+ * {"schema_version":1,"scope":<JSON>,"contents":<JSON>}, and
+ * accessibility_output_length is its length. scope must identify the focused
+ * application/window closely enough that a scope change invalidates a prior
+ * tree; contents is the bounded, redacted accessibility tree.
+ * output_display_token is a
  * nonzero successor lease distinct from expected_display_token,
  * output_width/output_height are the observed logical image dimensions, and
  * output_image_format is PNG or JPEG. The encoded image is normalized to
@@ -274,13 +281,20 @@ typedef struct ha_computer_action_v1 {
  * unused fields, malformed UTF-8, and counts above the HA_COMPUTER_MAX_*
  * limits with HA_COMPUTER_STATUS_INVALID_ARGUMENT.
  *
- * output/output_length/output_display_token/output_width/output_height and
- * output_image_format are nonnull callback-scoped writable pointers. On
+ * output/output_length/accessibility_output_length/output_display_token,
+ * output_width/output_height and output_image_format are nonnull
+ * callback-scoped writable pointers. accessibility_output may be NULL only
+ * when accessibility_output_capacity is zero (as it is for QUERY_DISPLAY).
+ * A successful RUN may report an empty accessibility snapshot without
+ * failing the screenshot. On
  * failure, set the display token, dimensions, and image format to zero and
  * write a useful UTF-8 error to output when possible. Never report
- * output_length above output_capacity. The runtime supplies
+ * output_length above output_capacity. On failure also set
+ * accessibility_output_length to zero. The runtime supplies
  * HA_COMPUTER_ERROR_CAPACITY for QUERY_DISPLAY and HA_COMPUTER_OUTPUT_CAPACITY
- * for RUN_AND_OBSERVE.
+ * for RUN_AND_OBSERVE, plus HA_COMPUTER_ACCESSIBILITY_CAPACITY for its
+ * accessibility buffer. Never report accessibility_output_length above
+ * accessibility_output_capacity.
  *
  * The callback runs synchronously on an agent tool worker, never the setter's
  * caller or AppKit main thread, and must not call engine functions. No input
@@ -307,6 +321,9 @@ typedef int32_t (*ha_computer_callback)(
     uint8_t *output,
     size_t output_capacity,
     size_t *output_length,
+    uint8_t *accessibility_output,
+    size_t accessibility_output_capacity,
+    size_t *accessibility_output_length,
     uint64_t *output_display_token,
     int32_t *output_width,
     int32_t *output_height,

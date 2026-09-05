@@ -171,6 +171,7 @@ library
                     , Agent.CLI.Context
                     , Agent.CLI.Command
                     , Agent.CLI.ComputerUse
+                    , Agent.CLI.ComputerUse.Accessibility
                     , Agent.CLI.Config
                     , Agent.CLI.McpOAuthStore
                     , Agent.CLI.McpOAuth
@@ -411,6 +412,18 @@ benchmark history-retention-bench
     ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
+                    , text
+
+benchmark accessibility-delta-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          AccessibilityDelta.hs
+    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , aeson
+                    , base >= 4.17 && < 5
+                    , bytestring
                     , text
 
 benchmark concurrency-bench

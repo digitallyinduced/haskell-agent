@@ -787,8 +787,50 @@ computerFunctionTextOutput rawOutput =
                         "Computer action completed.\n\n"
                             <> "Current macOS accessibility state:\n"
                             <> state
+                Just state@(Aeson.Object fields) ->
+                    "Computer action completed.\n\n"
+                        <> accessibilityStateHeading fields
+                        <> "\n"
+                        <> jsonValueText state
                 _ -> "Computer action completed."
         Left _ -> rawOutput
+
+accessibilityStateHeading :: Aeson.Object -> Text
+accessibilityStateHeading fields =
+    case KeyMap.lookup "kind" fields of
+        Just (Aeson.String "full") ->
+            "Full macOS accessibility snapshot"
+                <> revisionSuffix "revision"
+                <> ":"
+        Just (Aeson.String "delta") ->
+            "macOS accessibility changes"
+                <> case ( fieldText "base_revision"
+                        , fieldText "revision"
+                        ) of
+                    (Just baseRevision, Just revision) ->
+                        ", revision "
+                            <> baseRevision
+                            <> " -> "
+                            <> revision
+                    _ -> ""
+                <> ":"
+        Just (Aeson.String "unavailable") ->
+            "macOS accessibility state unavailable"
+                <> revisionSuffix "revision"
+                <> ":"
+        _ -> "Current macOS accessibility state:"
+  where
+    revisionSuffix key =
+        maybe "" (", revision " <>) (fieldText key)
+
+    fieldText key =
+        jsonValueText <$> KeyMap.lookup key fields
+
+jsonValueText :: Aeson.Value -> Text
+jsonValueText =
+    Text.decodeUtf8
+        . LBS.toStrict
+        . Aeson.encode
 
 latestComputerScreenshot :: [TurnInput] -> Maybe Text
 latestComputerScreenshot inputs =

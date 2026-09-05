@@ -9,6 +9,7 @@ module Agent.CLI.MacOS.ComputerBridge
     , ComputerRegistration(..)
     , ComputerSession
     , computerActionStructSize
+    , computerAccessibilityCapacity
     , computerErrorCapacity
     , computerOutputCapacity
     , computerStatusMessage
@@ -25,6 +26,14 @@ import Agent.CLI.ComputerUse
     , ComputerUseBackend(..)
     , ScreenshotEncoding(..)
     , computerUseToolWith
+    )
+import Agent.CLI.ComputerUse.Accessibility
+    ( AccessibilityDeltaState
+    , AccessibilityObservation
+    , advanceAccessibilityObservation
+    , decodeAccessibilitySnapshot
+    , initialAccessibilityDeltaState
+    , unavailableAccessibilityObservation
     )
 import Agent.Loop (ImageAttachment(..))
 import Agent.Responses.Types
@@ -142,6 +151,9 @@ type ComputerCallback =
     -> Ptr Word8
     -> CSize
     -> Ptr CSize
+    -> Ptr Word8
+    -> CSize
+    -> Ptr CSize
     -> Ptr Word64
     -> Ptr CInt
     -> Ptr CInt
@@ -161,14 +173,22 @@ newtype ComputerHost = ComputerHost
     }
 
 newtype ComputerSession = ComputerSession
-    { computerSessionObservation :: MVar (Maybe NativeComputerDisplay)
+    { computerSessionState :: MVar ComputerSessionState
+    }
+
+data ComputerSessionState = ComputerSessionState
+    { computerSessionDisplay :: !(Maybe NativeComputerDisplay)
+    , computerSessionAccessibility :: !AccessibilityDeltaState
     }
 
 newComputerHost :: IO ComputerHost
 newComputerHost = ComputerHost <$> newMVar Nothing
 
 newComputerSession :: IO ComputerSession
-newComputerSession = ComputerSession <$> newMVar Nothing
+newComputerSession = ComputerSession <$> newMVar ComputerSessionState
+    { computerSessionDisplay = Nothing
+    , computerSessionAccessibility = initialAccessibilityDeltaState
+    }
 
 computerToolWhenEnabled :: ComputerHost -> IO (Maybe AppTool)
 computerToolWhenEnabled host =
@@ -349,10 +369,11 @@ invokeComputerTransaction
     -> ((Int, Int) -> Either Text ())
     -> IO (Either Text ComputerObservation)
 invokeComputerTransaction host encoding actions validateDisplay =
-    fmap (fmap fst) $
+    fmap (fmap (\(observation, _, _) -> observation)) $
         invokeComputerTransactionWithLease
             host
             Nothing
+            initialAccessibilityDeltaState
             encoding
             actions
             validateDisplay
@@ -369,38 +390,49 @@ invokeComputerSessionTransaction
     -> ((Int, Int) -> Either Text ())
     -> IO (Either Text ComputerObservation)
 invokeComputerSessionTransaction host session encoding actions validateDisplay =
-    modifyMVar session.computerSessionObservation \previous -> do
+    modifyMVar session.computerSessionState \previous -> do
         result <-
             if null actions
                 then invokeComputerTransactionWithLease
-                    host Nothing encoding actions validateDisplay
-                else case previous of
+                    host Nothing previous.computerSessionAccessibility
+                    encoding actions validateDisplay
+                else case previous.computerSessionDisplay of
                     Nothing -> pure (Left
                         "Take a fresh computer screenshot before sending input actions.")
                     Just display ->
                         invokeComputerTransactionWithLease
                             host
                             (Just display)
+                            previous.computerSessionAccessibility
                             encoding
                             actions
                             validateDisplay
         case result of
             Left err -> pure (previous, Left err)
-            Right (observation, successor) ->
-                pure (Just successor, Right observation)
+            Right (observation, successor, accessibilityState) ->
+                pure
+                    ( ComputerSessionState
+                        (Just successor)
+                        accessibilityState
+                    , Right observation
+                    )
 
 invokeComputerTransactionWithLease
     :: ComputerHost
     -> Maybe NativeComputerDisplay
+    -> AccessibilityDeltaState
     -> ScreenshotEncoding
     -> [ComputerAction]
     -> ((Int, Int) -> Either Text ())
     -> IO
         (Either
             Text
-            (ComputerObservation, NativeComputerDisplay))
+            ( ComputerObservation
+            , NativeComputerDisplay
+            , AccessibilityDeltaState
+            ))
 invokeComputerTransactionWithLease
-        host priorDisplay encoding actions validateDisplay =
+        host priorDisplay accessibilityState encoding actions validateDisplay =
     case encodeComputerActions actions of
         Left err -> pure (Left err)
         Right batch ->
@@ -424,6 +456,7 @@ invokeComputerTransactionWithLease
                                     invokeComputerRunAndObserve
                                         registration
                                         display
+                                        accessibilityState
                                         encoding
                                         batch)
                 >>= \case
@@ -435,10 +468,11 @@ invokeComputerDisplay
     :: ComputerRegistration
     -> IO (Either Text NativeComputerDisplay)
 invokeComputerDisplay registration =
-    invokeComputer computerErrorCapacity registration query >>= \case
+    invokeComputer computerErrorCapacity 0 registration query >>= \case
         Left err -> pure (Left err)
-        Right (bytes, token, width, height, imageFormat)
+        Right (bytes, accessibility, token, width, height, imageFormat)
             | not (BS.null bytes)
+                || not (BS.null accessibility)
                 || token == 0
                 || width <= 0
                 || height <= 0
@@ -452,12 +486,13 @@ invokeComputerDisplay registration =
                     , nativeDisplayHeight = height
                     })
   where
-    query registration' output capacity outputLength outputToken
+    query registration' output capacity outputLength accessibilityOutput
+            accessibilityCapacity accessibilityLength outputToken
             width height imageFormat =
         invokeComputerCallback
             registration'.computerCallback
             registration'.computerContext
-            1
+            2
             1
             0
             0
@@ -472,6 +507,9 @@ invokeComputerDisplay registration =
             output
             capacity
             outputLength
+            accessibilityOutput
+            accessibilityCapacity
+            accessibilityLength
             outputToken
             width
             height
@@ -480,18 +518,24 @@ invokeComputerDisplay registration =
 invokeComputerRunAndObserve
     :: ComputerRegistration
     -> NativeComputerDisplay
+    -> AccessibilityDeltaState
     -> ScreenshotEncoding
     -> ComputerBatch
     -> IO
         (Either
             Text
-            (ComputerObservation, NativeComputerDisplay))
-invokeComputerRunAndObserve registration display encoding batch =
+            ( ComputerObservation
+            , NativeComputerDisplay
+            , AccessibilityDeltaState
+            ))
+invokeComputerRunAndObserve
+        registration display accessibilityState encoding batch =
     withArray batch.computerBatchActions \actionPointer ->
         withArray batch.computerBatchPoints \pointPointer ->
             BS.useAsCStringLen batch.computerBatchText
                 \(textPointer, textLength) ->
-                    invokeComputer computerOutputCapacity registration
+                    invokeComputer computerOutputCapacity
+                        computerAccessibilityCapacity registration
                         (run
                             actionPointer
                             pointPointer
@@ -499,7 +543,7 @@ invokeComputerRunAndObserve registration display encoding batch =
                             textLength)
                         >>= \case
                             Left err -> pure (Left err)
-                            Right (bytes, token, width, height, imageFormat)
+                            Right (bytes, accessibility, token, width, height, imageFormat)
                                 | token == 0
                                     || token == display.nativeDisplayToken
                                     || width /= display.nativeDisplayWidth
@@ -516,10 +560,17 @@ invokeComputerRunAndObserve registration display encoding batch =
                                     case imageMime imageFormat bytes of
                                         Left err -> pure (Left err)
                                         Right mime ->
-                                            pure (Right
+                                            let
+                                                ( accessibilityObservation
+                                                  , successorAccessibilityState
+                                                  ) =
+                                                    decodeAccessibility
+                                                        accessibility
+                                                        accessibilityState
+                                            in pure (Right
                                                 ( ComputerObservation
                                                     (ImageAttachment mime bytes)
-                                                    Nothing
+                                                    accessibilityObservation
                                                 , NativeComputerDisplay
                                                     { nativeDisplayToken =
                                                         token
@@ -528,18 +579,20 @@ invokeComputerRunAndObserve registration display encoding batch =
                                                     , nativeDisplayHeight =
                                                         height
                                                     }
+                                                , successorAccessibilityState
                                                 ))
   where
     requestedFormat = case encoding of
         ScreenshotPng -> 1
         ScreenshotJpeg -> 2
     run actionPointer pointPointer textPointer textLength
-            registration' output capacity outputLength outputToken
+            registration' output capacity outputLength accessibilityOutput
+            accessibilityCapacity accessibilityLength outputToken
             width height imageFormat =
         invokeComputerCallback
             registration'.computerCallback
             registration'.computerContext
-            1
+            2
             2
             display.nativeDisplayToken
             display.nativeDisplayWidth
@@ -554,6 +607,9 @@ invokeComputerRunAndObserve registration display encoding batch =
             output
             capacity
             outputLength
+            accessibilityOutput
+            accessibilityCapacity
+            accessibilityLength
             outputToken
             width
             height
@@ -561,6 +617,9 @@ invokeComputerRunAndObserve registration display encoding batch =
 
 type ComputerInvocation =
     ComputerRegistration
+    -> Ptr Word8
+    -> CSize
+    -> Ptr CSize
     -> Ptr Word8
     -> CSize
     -> Ptr CSize
@@ -572,46 +631,67 @@ type ComputerInvocation =
 
 invokeComputer
     :: Int
+    -> Int
     -> ComputerRegistration
     -> ComputerInvocation
-    -> IO (Either Text (BS.ByteString, Word64, CInt, CInt, CInt))
-invokeComputer capacity registration invocation =
+    -> IO (Either Text (BS.ByteString, BS.ByteString, Word64, CInt, CInt, CInt))
+invokeComputer capacity accessibilityCapacity registration invocation =
     bracket (mallocBytes capacity) free \output -> do
         fillBytes output 0 capacity
-        allocaResult \outputLength outputToken width height imageFormat -> do
-            status <- invocation
-                registration
-                output
-                (fromIntegral capacity)
-                outputLength
-                outputToken
-                width
-                height
-                imageFormat
-            CSize length <- peek outputLength
-            observedToken <- peek outputToken
-            observedWidth <- peek width
-            observedHeight <- peek height
-            observedFormat <- peek imageFormat
-            if length > fromIntegral capacity
-                then pure (Left
-                    "The native computer host reported output beyond its buffer.")
-                else do
-                    bytes <- BS.packCStringLen
-                        (castPtr output, fromIntegral length)
-                    if status == 0
-                        then pure (Right
-                            ( bytes
-                            , observedToken
-                            , observedWidth
-                            , observedHeight
-                            , observedFormat
-                            ))
-                        else pure (Left
-                            (computerFailureMessage status bytes))
+        bracket (mallocBytes (max 1 accessibilityCapacity)) free
+            \accessibilityOutputBuffer -> do
+            fillBytes accessibilityOutputBuffer 0 accessibilityCapacity
+            let accessibilityOutput
+                    | accessibilityCapacity == 0 = nullPtr
+                    | otherwise = accessibilityOutputBuffer
+            allocaResult \outputLength accessibilityLength outputToken width height imageFormat -> do
+                status <- invocation
+                    registration
+                    output
+                    (fromIntegral capacity)
+                    outputLength
+                    accessibilityOutput
+                    (fromIntegral accessibilityCapacity)
+                    accessibilityLength
+                    outputToken
+                    width
+                    height
+                    imageFormat
+                CSize length <- peek outputLength
+                CSize accessibilityLengthValue <- peek accessibilityLength
+                observedToken <- peek outputToken
+                observedWidth <- peek width
+                observedHeight <- peek height
+                observedFormat <- peek imageFormat
+                if length > fromIntegral capacity
+                    then pure (Left
+                        "The native computer host reported output beyond its buffer.")
+                    else if accessibilityLengthValue
+                            > fromIntegral accessibilityCapacity
+                        then pure (Left
+                            "The native computer host reported accessibility output beyond its buffer.")
+                    else do
+                        bytes <- BS.packCStringLen
+                            (castPtr output, fromIntegral length)
+                        accessibility <- BS.packCStringLen
+                            ( castPtr accessibilityOutputBuffer
+                            , fromIntegral accessibilityLengthValue
+                            )
+                        if status == 0
+                            then pure (Right
+                                ( bytes
+                                , accessibility
+                                , observedToken
+                                , observedWidth
+                                , observedHeight
+                                , observedFormat
+                                ))
+                            else pure (Left
+                                (computerFailureMessage status bytes))
 
 allocaResult
     :: ( Ptr CSize
+        -> Ptr CSize
         -> Ptr Word64
         -> Ptr CInt
         -> Ptr CInt
@@ -621,18 +701,21 @@ allocaResult
     -> IO value
 allocaResult action =
     allocaBytes (sizeOf (undefined :: CSize)) \outputLength ->
-        allocaBytes (sizeOf (undefined :: Word64)) \outputToken ->
+        allocaBytes (sizeOf (undefined :: CSize)) \accessibilityLength ->
+          allocaBytes (sizeOf (undefined :: Word64)) \outputToken ->
             allocaBytes (sizeOf (undefined :: CInt)) \width ->
                 allocaBytes (sizeOf (undefined :: CInt)) \height ->
                     allocaBytes (sizeOf (undefined :: CInt))
                         \imageFormat -> do
                             poke outputLength 0
+                            poke accessibilityLength 0
                             poke outputToken 0
                             poke width 0
                             poke height 0
                             poke imageFormat 0
                             action
                                 outputLength
+                                accessibilityLength
                                 outputToken
                                 width
                                 height
@@ -683,3 +766,32 @@ computerErrorCapacity = 64 * 1024
 
 computerOutputCapacity :: Int
 computerOutputCapacity = 16 * 1024 * 1024
+
+computerAccessibilityCapacity :: Int
+computerAccessibilityCapacity = 512 * 1024
+
+decodeAccessibility
+    :: BS.ByteString
+    -> AccessibilityDeltaState
+    -> (Maybe AccessibilityObservation, AccessibilityDeltaState)
+decodeAccessibility bytes state
+    | BS.null bytes =
+        let (observation, successor) =
+                unavailableAccessibilityObservation
+                    "Native accessibility snapshot unavailable."
+                    state
+        in (Just observation, successor)
+    | otherwise =
+        case decodeAccessibilitySnapshot bytes of
+            Left err ->
+                let (observation, successor) =
+                        unavailableAccessibilityObservation
+                            ( "The native computer host returned invalid accessibility JSON: "
+                                <> err
+                            )
+                            state
+                in (Just observation, successor)
+            Right snapshot ->
+                let (observation, successor) =
+                        advanceAccessibilityObservation state snapshot
+                in (Just observation, successor)
