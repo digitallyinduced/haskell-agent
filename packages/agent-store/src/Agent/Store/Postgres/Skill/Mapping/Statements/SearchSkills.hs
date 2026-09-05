@@ -9,6 +9,11 @@ import qualified Hasql.Encoders as Encoders
 import Hasql.Statement (Statement)
 
 import Agent.Store.Postgres.Hasql (mkStatement)
+import Agent.Store.Postgres.Skill.Mapping.Codec
+    ( skillRowDecoder
+    , skillColumns
+    , applicableScopesEncoder
+    )
 import Agent.Store.Postgres.Skill.Mapping.Types
 
 searchSkillsStatement
@@ -30,9 +35,7 @@ searchSkillsStatement = mkStatement
            \ ORDER BY ts_rank_cd(s.search_vector, query.value) DESC,\
            \ s.priority DESC, s.updated_at DESC\
            \ LIMIT $5")
-    ( ((.applicableUserScopeId) . (.skillSearchScopes) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.applicableRepositoryScopeId) . (.skillSearchScopes) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.applicableCheckoutScopeId) . (.skillSearchScopes) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+    ( ((.skillSearchScopes) >$< applicableScopesEncoder)
         <> ((.skillSearchQuery) >$< Encoders.param (Encoders.nonNullable Encoders.text))
         <> ((.skillSearchLimit) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     )
@@ -40,10 +43,7 @@ searchSkillsStatement = mkStatement
     True
 
 skillSelectSqlWithPrefix :: Text
-skillSelectSqlWithPrefix =
-    "SELECT s.skill_id::text, s.scope_kind, s.scope_id::text, s.slug, s.title,\
-    \ s.description, s.applies_when, s.instructions_text, s.activation_mode,\
-    \ s.priority, s.status, s.current_revision, s.created_at, s.updated_at"
+skillSelectSqlWithPrefix = "SELECT " <> skillColumns "s."
 
 applicableWhereSqlWithPrefix :: Text
 applicableWhereSqlWithPrefix =
@@ -52,21 +52,3 @@ applicableWhereSqlWithPrefix =
     \ OR (s.scope_kind = 'repository' AND s.scope_id = $2::uuid)\
     \ OR (s.scope_kind = 'checkout' AND s.scope_id = $3::uuid)\
     \ )"
-
-skillRowDecoder :: Decoders.Row SkillRow
-skillRowDecoder =
-    SkillRow
-        <$> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.int4)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
-        <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
-        <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
