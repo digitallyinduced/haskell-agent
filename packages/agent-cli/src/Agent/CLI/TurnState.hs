@@ -67,32 +67,65 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Encoding as AesonEncoding
 import Data.List (isPrefixOf)
 import Data.Maybe (isJust)
+import Data.Sequence (Seq, (|>))
+import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 
 data DisplayProjection = DisplayProjection
+    { completedAttempts :: !(Seq DisplayAttempt)
+    , currentAttempt :: !DisplayAttempt
+    }
+
+data DisplayAttempt = DisplayAttempt
     { displayItems :: ![ResponseItem]
     , displayCanAppendText :: !Bool
     }
+
+emptyDisplayAttempt :: DisplayAttempt
+emptyDisplayAttempt = DisplayAttempt [] False
 
 -- | Normalize the transient provider event journal into stable response
 -- items used only by session-history projection. These items must never enter
 -- model context.
 uncommittedDisplayItems :: LoopExecution -> [ResponseItem]
 uncommittedDisplayItems execution =
-    (.displayItems) $
+    flattenDisplayProjection $
         foldl'
             projectDisplayEvent
             DisplayProjection
-                { displayItems = []
-                , displayCanAppendText = False
+                { completedAttempts = Seq.empty
+                , currentAttempt = emptyDisplayAttempt
                 }
             execution.executionUncommittedDisplayEvents
 
+-- Keep the historical boundary encoding at the output boundary only. Empty
+-- attempts matter too: consecutive restarts must retain consecutive markers.
+flattenDisplayProjection :: DisplayProjection -> [ResponseItem]
+flattenDisplayProjection projection =
+    foldMap
+        (\attempt -> attempt.displayItems <> [displayAttemptBoundary])
+        projection.completedAttempts
+        <> projection.currentAttempt.displayItems
+
 projectDisplayEvent :: DisplayProjection -> LoopEvent -> DisplayProjection
 projectDisplayEvent projection = \case
+    ResponseRestarted _ ->
+        DisplayProjection
+            { completedAttempts =
+                projection.completedAttempts |> projection.currentAttempt
+            , currentAttempt = emptyDisplayAttempt
+            }
+    event ->
+        projection
+            { currentAttempt =
+                projectDisplayAttempt projection.currentAttempt event
+            }
+
+projectDisplayAttempt :: DisplayAttempt -> LoopEvent -> DisplayAttempt
+projectDisplayAttempt projection = \case
     TextDelta delta
         | Text.null delta -> projection
         | projection.displayCanAppendText ->
@@ -106,12 +139,6 @@ projectDisplayEvent projection = \case
                     projection.displayItems <> [displayAssistantItem delta]
                 , displayCanAppendText = True
                 }
-    ResponseRestarted _ ->
-        projection
-            { displayItems =
-                projection.displayItems <> [displayAttemptBoundary]
-            , displayCanAppendText = False
-            }
     ToolStarted call ->
         projectDisplayCall call projection
     ToolUpdated call ->
@@ -142,14 +169,13 @@ projectDisplayEvent projection = \case
     ToolRetracted callId ->
         projection
             { displayItems =
-                updateCurrentDisplayAttempt
-                    (filter (not . belongsToDisplayCall callId))
+                filter (not . belongsToDisplayCall callId)
                     projection.displayItems
             , displayCanAppendText = False
             }
     _ -> projection
 
-projectDisplayCall :: ToolCall -> DisplayProjection -> DisplayProjection
+projectDisplayCall :: ToolCall -> DisplayAttempt -> DisplayAttempt
 projectDisplayCall call projection =
     projection
         { displayItems =
@@ -159,8 +185,7 @@ projectDisplayCall call projection =
 
 replaceDisplayCall :: ToolCall -> [ResponseItem] -> [ResponseItem]
 replaceDisplayCall call =
-    updateOrAppendCurrentDisplayAttempt
-        (isDisplayCall call.callId)
+    updateOrAppendDisplayItem
         (isDisplayCall call.callId)
         (displayToolCall call)
 
@@ -170,43 +195,22 @@ replaceDisplayOutput
     -> [ResponseItem]
     -> [ResponseItem]
 replaceDisplayOutput callId replacement =
-    updateOrAppendCurrentDisplayAttempt
-        (isDisplayOutput callId)
+    updateOrAppendDisplayItem
         (isDisplayOutput callId)
         replacement
 
-updateOrAppendCurrentDisplayAttempt
+updateOrAppendDisplayItem
     :: (ResponseItem -> Bool)
-    -> (ResponseItem -> Bool)
     -> ResponseItem
     -> [ResponseItem]
     -> [ResponseItem]
-updateOrAppendCurrentDisplayAttempt exists replace replacement items =
-    let (prior, current) = splitCurrentDisplayAttempt items
-    in if any exists current
+updateOrAppendDisplayItem matches replacement items =
+    if any matches items
         then
-            prior
-                <> map
-                    (\item ->
-                        if replace item then replacement else item)
-                    current
+            map
+                (\item -> if matches item then replacement else item)
+                items
         else items <> [replacement]
-
-updateCurrentDisplayAttempt
-    :: ([ResponseItem] -> [ResponseItem])
-    -> [ResponseItem]
-    -> [ResponseItem]
-updateCurrentDisplayAttempt update items =
-    let (prior, current) = splitCurrentDisplayAttempt items
-    in prior <> update current
-
-splitCurrentDisplayAttempt
-    :: [ResponseItem]
-    -> ([ResponseItem], [ResponseItem])
-splitCurrentDisplayAttempt items =
-    let (currentReversed, priorReversed) =
-            break isDisplayAttemptBoundary (reverse items)
-    in (reverse priorReversed, reverse currentReversed)
 
 displayAttemptBoundary :: ResponseItem
 displayAttemptBoundary =

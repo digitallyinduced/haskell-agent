@@ -34,6 +34,7 @@ import Agent.Responses.Types
     , ResponseMessage(..)
     , MessageContent(..)
     , ResponseRole(..)
+    , TaggedObject(..)
     )
 import Agent.ToolDispatch
     ( ToolCallKind(..)
@@ -48,11 +49,43 @@ import Agent.Tools.PlanMode
     , newPlanModeEnv
     )
 import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.List (intersperse)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
+import Test.QuickCheck (elements, forAll, listOf, property, (===))
+
+projectEvents :: [LoopEvent] -> [ResponseItem]
+projectEvents events =
+    uncommittedDisplayItems
+        ((uncommittedExecution prepared)
+            { executionUncommittedDisplayEvents = events })
+
+expectedDisplayBoundary :: ResponseItem
+expectedDisplayBoundary =
+    UnknownResponseItem (TaggedObject "haskell_agent_display_attempt_boundary")
+
+displayAttemptEvents :: [LoopEvent]
+displayAttemptEvents =
+    [ TextDelta ""
+    , TextDelta "hello"
+    , TextDelta " world"
+    , ToolStarted first
+    , ToolUpdated updated
+    , ToolArgumentsUpdated updated
+    , ToolStarted other
+    , ToolOutputUpdated "same" "running"
+    , ToolOutputUpdated "other" "other output"
+    , ToolFinished (ToolCallResult "same" "done" FunctionCallKind BlockingToolCall [] Nothing)
+    , ToolRetracted "same"
+    , ToolRetracted "other"
+    ]
+  where
+    first = functionToolCall "same" "shell_command" "{}"
+    updated = functionToolCall "same" "shell_command" "{\"command\":\"pwd\"}"
+    other = functionToolCall "other" "read_file" "{}"
 
 spec :: Spec
 spec = do
@@ -71,6 +104,53 @@ spec = do
                     ]
 
     describe "uncommittedDisplayItems" do
+        it "preserves empty attempts and the historical restart marker" do
+            projectEvents
+                [ ResponseRestarted "first"
+                , TextDelta ""
+                , ResponseRestarted "second"
+                , ResponseRestarted "third"
+                ]
+                `shouldBe` replicate 3 expectedDisplayBoundary
+
+        it "projects retry attempts independently, including reused and retracted ids" $
+            property $
+                forAll (listOf (listOf (elements displayAttemptEvents))) \attempts ->
+                    let events =
+                            concat
+                                (intersperse [ResponseRestarted "retry"] attempts)
+                        expected =
+                            concat
+                                (intersperse [expectedDisplayBoundary]
+                                    (map projectEvents attempts))
+                    in projectEvents events === expected
+
+        it "retracts only the current attempt's call and output" do
+            let call = functionToolCall "same" "shell_command" "{}"
+                first = [ToolStarted call, ToolOutputUpdated "same" "first"]
+            projectEvents
+                (first
+                    <> [ ResponseRestarted "retry"
+                       , ToolStarted call
+                       , ToolOutputUpdated "same" "second"
+                       , ToolRetracted "same"
+                       ])
+                `shouldBe` projectEvents first <> [expectedDisplayBoundary]
+
+        it "does not coalesce text across a tool event even if that tool is retracted" do
+            let call = functionToolCall "c1" "shell_command" "{}"
+            projectEvents
+                [ TextDelta "before"
+                , ToolStarted call
+                , ToolRetracted "c1"
+                , TextDelta "after"
+                , TextDelta ""
+                , TextDelta "!"
+                ]
+                `shouldBe`
+                    projectEvents [TextDelta "before"]
+                        <> projectEvents [TextDelta "after!"]
+
         it "normalizes failed text, tools, and retry attempts for history only" do
             let call =
                     functionToolCall

@@ -97,6 +97,12 @@ library
                     , Agent.CLI.Runtime.Orchestration.Session
                     , Agent.CLI.Runtime.Orchestration.Startup
                     , Agent.CLI.Runtime.Orchestration.Tools
+                    , Agent.CLI.Runtime.Orchestration.Tools.Request
+                    , Agent.CLI.Runtime.Orchestration.Tools.Model
+                    , Agent.CLI.Runtime.Orchestration.Tools.Collaboration
+                    , Agent.CLI.Runtime.Orchestration.Tools.Scratch
+                    , Agent.CLI.Runtime.Orchestration.Tools.Mcp
+                    , Agent.CLI.Runtime.Orchestration.Tools.HostHooks
                     , Agent.CLI.Runtime.Orchestration.Types
                     , Agent.CLI.Runtime.HistorySource
                     , Agent.CLI.Runtime.Persistence
@@ -455,6 +461,9 @@ test-suite agent-cli-test
                     , Agent.CLI.ComputerUseSpec
                     , Agent.CLI.ConfigSpec
                     , Agent.CLI.CompactionSpec
+                    , Agent.CLI.CompactionSpec.Fixtures
+                    , Agent.CLI.CompactionSpec.ManualOpenAI
+                    , Agent.CLI.CompactionSpec.TaskPlan
                     , Agent.CLI.ContextSpec
                     , Agent.CLI.ConversationStoreSpec
                     , Agent.CLI.ConnectivitySpec
@@ -511,6 +520,8 @@ test-suite agent-cli-test
                     , Agent.CLI.SubagentStoreSpec
                     , Agent.CLI.ToolsSpec
                     , Agent.CLI.TUIAppSpec
+                    , Agent.CLI.TUIAppSpec.AgentFixtures
+                    , Agent.CLI.TUIAppSpec.Motion
                     , Agent.CLI.TUIBridgeSpec
                     , Agent.CLI.TUIComposerSpec
                     , Agent.CLI.TUIImagePreviewSpec

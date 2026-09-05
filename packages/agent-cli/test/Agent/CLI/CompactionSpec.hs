@@ -1,7 +1,8 @@
 module Agent.CLI.CompactionSpec (spec) where
 
-import Agent.CLI.Session.Request (SessionRequestState, newSessionRequestState)
-import Agent.CLI.Session (Persistence(..))
+import Agent.CLI.CompactionSpec.Fixtures
+import qualified Agent.CLI.CompactionSpec.ManualOpenAI as ManualOpenAI
+import qualified Agent.CLI.CompactionSpec.TaskPlan as TaskPlan
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
     , CompactionInstall(..)
@@ -13,11 +14,9 @@ import Agent.CLI.Compaction
     , autoCompactOpenAiBackendWithSenderHookAndDecorator
     , autoCompactOpenAiBackendWithThreshold
     , codexAutoCompactTokenLimit
-    , compactOpenAIWith
     , claudeAutoCompactTokenLimit
     , claudeCompactionInputLimit
     , decorateCompactOutcomeWithTaskPlan
-    , decorateCompactOutcomeWithTaskPlanWithin
     , estimatedOccupancy
     , installCompactOutcome
     , reportedOccupancy
@@ -32,7 +31,6 @@ import Agent.CLI.Compaction
     )
 import Agent.Connectivity (withConnectionRecoveryUsing)
 import Agent.Error (ApiError(..), ErrorType(..))
-import Agent.Json.Decode qualified as Hermes
 import Agent.Loop
 import Agent.OpenAI.Compaction
     ( assistantSummaryItem
@@ -53,17 +51,14 @@ import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
 import Agent.XAI.LoopBackend (xaiCompactionCheckpointOriginItem)
 import Agent.Tools.TaskPlan
-    ( CurrentTaskPlan(..)
-    , TaskPlan(..)
+    ( TaskPlan(..)
     , TaskPlanItem(..)
     , TaskPlanStatus(..)
-    , isTaskPlanContextText
     , newTaskPlanEnv
     , replaceTaskPlan
     , taskPlanContextText
     )
 import qualified Data.Aeson as Aeson
-import Data.Aeson ((.=))
 import Agent.Provider
     ( BillingMode(..)
     , Provider(..)
@@ -78,10 +73,8 @@ import Control.Exception
     , try
     )
 import Data.IORef
-import Control.Monad.Trans.Except (runExceptT)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LBS
-import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Test.Hspec
@@ -1224,304 +1217,9 @@ spec = do
             result `shouldSatisfy` either (const False) (const True)
             readIORef hookCalls `shouldReturn` 1
 
-    describe "compactOpenAIWith" do
-        it "uses remote compaction v2 on normal Responses" do
-            requests <- newIORef []
-            let provider = tokenProvider SubscriptionBilled \_ ->
-                    error "remote compaction unexpectedly requested credentials"
-                send _ request = do
-                    modifyIORef' requests (<> [request])
-                    pure (Right remoteCompactionResponse)
-                history = [userTextItem "old context"]
-                params = defaultResponseCreateParams
-                    { instructions = Just "keep these instructions"
-                    , tools = Just []
-                    , stream = Just False
-                    }
-            result <- runExceptT $
-                compactOpenAIWith send
-                    (Just provider)
-                    params
-                    history
-                    100
-                    Nothing
-            case result of
-                Left err -> expectationFailure (show err)
-                Right outcome -> do
-                    outcome.compactSummary
-                        `shouldBe` "Context compacted remotely."
-                    outcome.compactHistory
-                        `shouldSatisfy` hasCompactionCheckpoint
-            seen <- readIORef requests
-            length seen `shouldBe` 1
-            map (.instructions) seen `shouldBe` [Just "keep these instructions"]
-            map (.tools) seen `shouldBe` [Just []]
-            map (.parallelToolCalls) seen `shouldBe` [Just True]
-            map (.previousResponseId) seen `shouldBe` [Nothing]
-            map (.store) seen `shouldBe` [Just False]
-            map (.stream) seen `shouldBe` [Just True]
-            map (.toolChoice) seen
-                `shouldBe` [Just (ToolChoiceMode ToolChoiceAuto)]
-            map requestItems seen
-                `shouldBe` [history <> [compactionTriggerItem]]
+    ManualOpenAI.spec
 
-        it "disables parallel tool calls for Responses Lite remote compaction" do
-            requests <- newIORef []
-            let provider = tokenProvider SubscriptionBilled \_ ->
-                    error "remote compaction unexpectedly requested credentials"
-                send _ request = do
-                    modifyIORef' requests (<> [request])
-                    pure (Right remoteCompactionResponse)
-                history = [userTextItem "old context"]
-                params = defaultResponseCreateParams
-                    { model = Just "gpt-5.6-sol"
-                    , instructions = Just "keep these instructions"
-                    , store = Just True
-                    , tools = Just []
-                    }
-            result <- runExceptT $
-                compactOpenAIWith send
-                    (Just provider)
-                    params
-                    history
-                    100
-                    Nothing
-            case result of
-                Left err -> expectationFailure (show err)
-                Right outcome ->
-                    outcome.compactSummary
-                        `shouldBe` "Context compacted remotely."
-            map (.parallelToolCalls) <$> readIORef requests
-                `shouldReturn` [Just False]
-
-        it "rejects remote checkpoints that cannot fit the installed snapshot" do
-            let provider = tokenProvider SubscriptionBilled \_ ->
-                    error "remote compaction unexpectedly requested credentials"
-                contextWindow =
-                    codexEffectiveContextWindowFor
-                        defaultResponseCreateParams.model
-                oversizedResponse =
-                    responseWithOutput
-                        [ Aeson.object
-                            [ "type" .= ("compaction" :: Text)
-                            , "encrypted_content" .=
-                                Text.replicate (contextWindow * 4 + 10_000) "x"
-                            ]
-                        ]
-                send _ _ = pure (Right oversizedResponse)
-                history = [userTextItem "old context"]
-            result <- runExceptT $
-                compactOpenAIWith send
-                    (Just provider)
-                    defaultResponseCreateParams
-                    history
-                    100
-                    Nothing
-            result `shouldSatisfy` \case
-                Left message ->
-                    "remote compacted snapshot request cannot fit"
-                        `Text.isInfixOf` message
-                Right _ -> False
-
-        it "keeps focused manual compaction on local summarization" do
-            requests <- newIORef []
-            let provider = tokenProvider SubscriptionBilled \_ ->
-                    error "local summarization unexpectedly requested credentials"
-                send _ request = do
-                    modifyIORef' requests (<> [request])
-                    pure (Right (summaryResponse "local summary"))
-                history = [userTextItem "old context"]
-            result <- runExceptT $
-                compactOpenAIWith send
-                    (Just provider)
-                    defaultResponseCreateParams
-                    history
-                    100
-                    (Just "focus on auth")
-            case result of
-                Left err -> expectationFailure (show err)
-                Right outcome -> do
-                    outcome.compactSummary `shouldBe` "local summary"
-                    outcome.compactHistory
-                        `shouldBe`
-                            [ userTextItem "old context"
-                            , assistantSummaryItem "local summary"
-                            ]
-            seen <- readIORef requests
-            map (.tools) seen `shouldBe` [Nothing]
-            map (.parallelToolCalls) seen `shouldBe` [Just False]
-            map (.stream) seen `shouldBe` [Just True]
-
-        it "returns friendly provider errors from manual compaction" do
-            let provider = tokenProvider SubscriptionBilled \_ ->
-                    error "compaction unexpectedly requested credentials"
-                send _ _ =
-                    pure $ Left $
-                        ProviderError UsageLimitReached
-                            "quota exhausted"
-                            (Just 120)
-                history = [userTextItem "old context"]
-            result <- runExceptT $
-                compactOpenAIWith send
-                    (Just provider)
-                    defaultResponseCreateParams
-                    history
-                    100
-                    Nothing
-            case result of
-                Left err -> do
-                    err `shouldSatisfy`
-                        Text.isInfixOf "Usage limit reached"
-                    err `shouldSatisfy`
-                        Text.isInfixOf "Try again in 2m"
-                    err `shouldNotSatisfy`
-                        Text.isInfixOf "ProviderError"
-                Right _ ->
-                    expectationFailure "expected compaction to fail"
-
-    describe "task-plan compaction context" do
-        it "removes generated task plans before remote compaction" do
-            let stale =
-                    taskPlanContextText $
-                        CurrentTaskPlan 8 $
-                            TaskPlan Nothing
-                                [TaskPlanItem "stale" TaskPlanInProgress]
-                history =
-                    [ taskPlanMessage RoleDeveloper stale
-                    , userTextItem stale
-                    , userTextItem "retained"
-                    ]
-            params <- testRequestState defaultResponseCreateParams
-            transcript <- newIORef history
-            requests <- newIORef []
-            result <-
-                runProviderCompactWith
-                    (Just \request -> do
-                        modifyIORef' requests (<> [request])
-                        pure (Right remoteCompactionResponse))
-                    (const (pure ()))
-                    OpenAIProvider
-                    Nothing
-                    params
-                    transcript
-                    Nothing
-            result `shouldSatisfy` either (const False) (const True)
-            map requestItems <$> readIORef requests
-                `shouldReturn`
-                    [ [ userTextItem "retained"
-                      , compactionTriggerItem
-                      ]
-                    ]
-
-        it "removes generated task plans before local summarization" do
-            let stale =
-                    taskPlanContextText $
-                        CurrentTaskPlan 8 $
-                            TaskPlan Nothing
-                                [TaskPlanItem "stale" TaskPlanInProgress]
-                history =
-                    [ taskPlanMessage RoleDeveloper stale
-                    , userTextItem stale
-                    , userTextItem "retained"
-                    ]
-                focus = Just "focus on the remaining work"
-            params <- testRequestState defaultResponseCreateParams
-            transcript <- newIORef history
-            requests <- newIORef []
-            result <-
-                runProviderCompactWith
-                    (Just \request -> do
-                        modifyIORef' requests (<> [request])
-                        pure (Right (summaryResponse "local summary")))
-                    (const (pure ()))
-                    OpenAIProvider
-                    Nothing
-                    params
-                    transcript
-                    focus
-            result `shouldSatisfy` either (const False) (const True)
-            map requestItems <$> readIORef requests
-                `shouldReturn`
-                    [ [ userTextItem "retained"
-                      , userTextItem (summarizationPrompt focus)
-                      ]
-                    ]
-
-        it "replaces stale generated copies from authoritative state" do
-            let stale =
-                    taskPlanContextText $
-                        CurrentTaskPlan 8 $
-                            TaskPlan Nothing
-                                [TaskPlanItem "stale" TaskPlanPending]
-                plan = TaskPlan
-                    (Just "continue here")
-                    [TaskPlanItem "current" TaskPlanInProgress]
-                current = CurrentTaskPlan 1 plan
-                outcome = CompactOutcome
-                    { compactBeforeTokens = 20
-                    , compactAfterTokens = 10
-                    , compactHistory =
-                        [userTextItem stale, userTextItem "retained"]
-                    , compactSummary = "summary"
-                    }
-            env <- newTaskPlanEnv Nothing Nothing
-            replaceTaskPlan env plan `shouldReturn` Right current
-            decorated <-
-                decorateCompactOutcomeWithTaskPlan (Just env) outcome
-            filter responseItemHasTaskPlan decorated.compactHistory
-                `shouldSatisfy` \case
-                    [MessageItem message] ->
-                        message.role == RoleDeveloper
-                            && responseMessageHasText
-                                (taskPlanContextText current)
-                                message
-                    _ -> False
-
-        it "does not reconstruct a plan from pre-compaction history" do
-            let stale =
-                    taskPlanContextText $
-                        CurrentTaskPlan 8 $
-                            TaskPlan Nothing
-                                [TaskPlanItem "stale" TaskPlanInProgress]
-                outcome = CompactOutcome
-                    { compactBeforeTokens = 20
-                    , compactAfterTokens = 10
-                    , compactHistory =
-                        [userTextItem stale, userTextItem "retained"]
-                    , compactSummary = "summary"
-                    }
-            env <- newTaskPlanEnv Nothing Nothing
-            decorated <-
-                decorateCompactOutcomeWithTaskPlan (Just env) outcome
-            decorated.compactHistory
-                `shouldBe` [userTextItem "retained"]
-
-        it "rejects a generated plan that cannot fit the compacted request" do
-            let plan = TaskPlan Nothing
-                    [TaskPlanItem "current" TaskPlanInProgress]
-                outcome = CompactOutcome
-                    { compactBeforeTokens = 20
-                    , compactAfterTokens = 1
-                    , compactHistory = []
-                    , compactSummary = "summary"
-                    }
-                rawLimit =
-                    estimateRequestTokensWithItems
-                        defaultResponseCreateParams
-                        outcome.compactHistory
-            env <- newTaskPlanEnv Nothing Nothing
-            _ <- replaceTaskPlan env plan
-            result <-
-                decorateCompactOutcomeWithTaskPlanWithin
-                    rawLimit
-                    defaultResponseCreateParams
-                    (Just env)
-                    outcome
-            result `shouldSatisfy` \case
-                Left message ->
-                    "authoritative task plan does not fit"
-                        `Text.isInfixOf` message
-                Right _ -> False
+    TaskPlan.spec
 
     describe "autoCompactOpenAiBackendWith" do
         it "decorates before publishing and continuing automatic compaction" do
@@ -2586,137 +2284,3 @@ spec = do
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
-
-responseItemHasTaskPlan :: ResponseItem -> Bool
-responseItemHasTaskPlan = \case
-    MessageItem message ->
-        any isTaskPlanContextText (responseMessageTexts message)
-    _ -> False
-
-taskPlanMessage :: ResponseRole -> Text -> ResponseItem
-taskPlanMessage role text =
-    MessageItem ResponseMessage
-        { messageId = Nothing
-        , content = MessageContentParts [InputTextPart text Nothing]
-        , role = role
-        , status = Nothing
-        , phase = Nothing
-        , passthrough = Nothing
-        }
-
-responseMessageHasText :: Text -> ResponseMessage -> Bool
-responseMessageHasText expected =
-    elem expected . responseMessageTexts
-
-responseMessageTexts :: ResponseMessage -> [Text]
-responseMessageTexts message =
-    case message.content of
-        MessageContentText text -> [text]
-        MessageContentParts parts ->
-            [ text
-            | part <- parts
-            , text <- case part of
-                InputTextPart{text} -> [text]
-                OutputTextPart{text} -> [text]
-                PlainTextPart{text} -> [text]
-                _ -> []
-            ]
-
-successful
-    :: BackendSnapshot
-    -> TurnOutput
-    -> Either ApiError BackendResult
-successful state output =
-    Right BackendResult
-        { backendOutput = output
-        , backendState = state
-        }
-
-requestItems :: ResponseCreateParams -> [ResponseItem]
-requestItems request = case request.input of
-    Just (ResponseInputItems items) -> items
-    _ -> []
-
-remoteCompactionResponse :: Response
-remoteCompactionResponse =
-    responseWithOutput
-        [ Aeson.object
-            [ "type" .= ("compaction" :: Text)
-            , "encrypted_content" .= ("opaque" :: Text)
-            ]
-        ]
-
-responseWithoutCompaction :: Response
-responseWithoutCompaction =
-    responseWithOutput []
-
-responseWithOutput :: [Aeson.Value] -> Response
-responseWithOutput output =
-    decodeResponseFixture $ Aeson.object
-        [ "id" .= ("resp-compact" :: Text)
-        , "created_at" .= (0 :: Int)
-        , "status" .= ("completed" :: Text)
-        , "model" .= ("gpt-test" :: Text)
-        , "output" .= output
-        , "usage" .= Aeson.object
-            [ "input_tokens" .= compactionUsage.inputTokens
-            , "output_tokens" .= compactionUsage.outputTokens
-            , "total_tokens" .=
-                (compactionUsage.inputTokens + compactionUsage.outputTokens)
-            , "input_tokens_details" .= Aeson.object
-                [ "cached_tokens" .= compactionUsage.cachedTokens
-                ]
-            ]
-        ]
-
-decodeResponseFixture :: Aeson.Value -> Response
-decodeResponseFixture fixture =
-    case Hermes.decodeEither responseDecoder
-            (LBS.toStrict (Aeson.encode fixture)) of
-        Right response -> response
-        Left err -> error (Text.unpack (Hermes.jsonErrorMessage err))
-
-compactionUsage :: TokenUsage
-compactionUsage = TokenUsage
-    { inputTokens = 80
-    , outputTokens = 6
-    , cachedTokens = 40
-    }
-
-withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
-withModel nextModel ResponseCreateParams { model = _, .. } =
-    ResponseCreateParams { model = nextModel, .. }
-
-summaryResponse :: Text -> Response
-summaryResponse summary =
-    summaryResponseWithStatus "completed" summary
-
-summaryResponseWithStatus :: Text -> Text -> Response
-summaryResponseWithStatus responseStatus summary =
-    decodeResponseFixture $ Aeson.object
-        [ "id" .= ("resp-summary" :: Text)
-        , "created_at" .= (0 :: Int)
-        , "status" .= responseStatus
-        , "model" .= ("gpt-test" :: Text)
-        , "output" .=
-            [ Aeson.object
-                [ "type" .= ("message" :: Text)
-                , "role" .= ("assistant" :: Text)
-                , "content" .=
-                    [ Aeson.object
-                        [ "type" .= ("output_text" :: Text)
-                        , "text" .= summary
-                        ]
-                    ]
-                ]
-            ]
-        ]
-
--- Compaction now receives the same validated request state as live sessions.
-testRequestState :: ResponseCreateParams -> IO SessionRequestState
-testRequestState params =
-    newSessionRequestState PersistenceDisabled
-        (case params.model of
-            Nothing -> params { model = Just "gpt-5.6-sol" }
-            Just _ -> params)
-        >>= either (fail . Text.unpack) pure
