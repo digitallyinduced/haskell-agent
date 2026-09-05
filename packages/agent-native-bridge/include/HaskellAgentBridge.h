@@ -1601,6 +1601,25 @@ int32_t ha_repository_commit(
  * title, and 1 MiB body. Return codes are 0 accepted, 1 null callback, 2
  * invalid input, and 3 internal start failure.
  */
+/* Read-only current-checkout PR metadata. Input is nonempty UTF-8, copied
+ * before return. Returns 0 accepted, 1 null callback, 2 invalid input, 3 failed
+ * start; rejected calls never invoke the callback. Accepted calls invoke it
+ * exactly once on a runtime worker (including cancellation on runtime shutdown).
+ * All output buffers are callback-scoped UTF-8, never owned by the caller.
+ * status: 0 PR found, 1 no PR, -1 unavailable, -3 cancelled.
+ * number/url are populated only for status 0; otherwise url is NULL/0.
+ * state: 1 open, 2 draft, 3 merged, 4 closed.
+ * ci: 0 unknown, 1 no checks, 2 pending, 3 passed, 4 failed.
+ */
+typedef void (*ha_repository_pr_status_callback)(
+    void *context, int32_t status, int64_t number,
+    const char *url, size_t url_length, int32_t state, int32_t ci
+);
+int32_t ha_repository_pr_status(
+    const uint8_t *path, size_t path_length,
+    ha_repository_pr_status_callback callback, void *context
+);
+
 int32_t ha_repository_delivery_status(
     const uint8_t *path, size_t path_length,
     const uint8_t *snapshot_id, size_t snapshot_id_length,

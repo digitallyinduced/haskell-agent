@@ -491,6 +491,19 @@ static void repository_result_callback(
     (void)error_length;
 }
 
+static atomic_int pr_status_callbacks;
+static atomic_int pr_status_valid;
+
+static void repository_pr_status_callback(
+    void *context, int32_t status, int64_t number,
+    const char *url, size_t url_length, int32_t state, int32_t ci
+) {
+    (void)context;
+    atomic_store(&pr_status_valid, status == -1 && number == 0 && url == NULL
+        && url_length == 0 && state == 0 && ci == 0);
+    atomic_fetch_add(&pr_status_callbacks, 1);
+}
+
 static void repository_delivery_status_callback(
         void *context, int32_t status,
         const uint8_t *snapshot_id, size_t snapshot_id_length,
@@ -678,7 +691,8 @@ int ha_repository_review_abi_smoke(void) {
             NULL) != 1) {
         return 25;
     }
-    if (ha_repository_delivery_status(
+    if (ha_repository_pr_status(value, sizeof(value) - 1, NULL, NULL) != 1
+        || ha_repository_delivery_status(
             value, sizeof(value) - 1,
             value, sizeof(value) - 1,
             NULL, NULL) != 1
@@ -703,7 +717,8 @@ int ha_repository_review_abi_smoke(void) {
             NULL, NULL) != 1) {
         return 29;
     }
-    if (ha_repository_delivery_status(
+    if (ha_repository_pr_status(NULL, 0, repository_pr_status_callback, NULL) != 2
+        || ha_repository_delivery_status(
             NULL, 0,
             value, sizeof(value) - 1,
             repository_delivery_status_callback, NULL) != 2
@@ -768,7 +783,16 @@ int ha_repository_review_abi_smoke(void) {
     }
     ha_repository_check_cancel(NULL);
     ha_repository_check_destroy(NULL);
+    const uint8_t missing_path[] = "/nonexistent-haskell-agent-pr-status-smoke";
+    atomic_store(&pr_status_callbacks, 0);
+    atomic_store(&pr_status_valid, 0);
+    if (ha_repository_pr_status(missing_path, sizeof(missing_path) - 1,
+            repository_pr_status_callback, NULL) != 0) return 40;
+    for (int attempt = 0; attempt < 10000 && atomic_load(&pr_status_callbacks) == 0; ++attempt) {
+        usleep(1000);
+    }
     ha_repository_cancel_all();
+    if (atomic_load(&pr_status_callbacks) != 1 || !atomic_load(&pr_status_valid)) return 41;
     return 0;
 }
 

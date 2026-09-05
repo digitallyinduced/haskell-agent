@@ -6977,3 +6977,38 @@ sendCallbackBytes callback context bytes length =
         context
         (castPtr bytes)
         (fromIntegral length)
+
+
+-- Narrow asynchronous read-only PR/CI surface; no JSON crosses the ABI.
+type RepositoryPullRequestStatusCallback =
+    Ptr () -> CInt -> CLLong -> CString -> CSize -> CInt -> CInt -> IO ()
+
+foreign import ccall "dynamic"
+    invokeRepositoryPullRequestStatusCallback
+        :: FunPtr RepositoryPullRequestStatusCallback -> RepositoryPullRequestStatusCallback
+
+foreign export ccall ha_repository_pr_status
+    :: Ptr Word8 -> CSize -> FunPtr RepositoryPullRequestStatusCallback -> Ptr () -> IO CInt
+
+ha_repository_pr_status
+    :: Ptr Word8 -> CSize -> FunPtr RepositoryPullRequestStatusCallback -> Ptr () -> IO CInt
+ha_repository_pr_status pathBytes pathLength callback context
+    | callback == nullFunPtr = pure 1
+    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit) = pure 2
+    | otherwise = copyRequiredTexts [(pathBytes, pathLength)] >>= \case
+        Right [path] -> do
+            terminal <- newMVar False
+            let empty status = invokeRepositoryPullRequestStatusCallback callback context status 0 nullPtr 0 0 0
+                emit Nothing = empty 1
+                emit (Just pr) = withText pr.repositoryPullRequestUrl \url size ->
+                    invokeRepositoryPullRequestStatusCallback callback context 0
+                        (fromIntegral pr.repositoryPullRequestNumber) url size
+                        (fromIntegral pr.repositoryPullRequestState)
+                        (fromIntegral pr.repositoryPullRequestCI)
+            started <- startRepositoryWorker
+                (emitDeliveryOnce terminal (empty (-3))) $
+                prepareDeliveryResult terminal
+                    (RepositoryDelivery.repositoryPullRequest (Text.unpack path))
+                    (empty (-1)) (\_ _ -> empty (-1)) emit
+            pure (if started then 0 else 3)
+        _ -> pure 2

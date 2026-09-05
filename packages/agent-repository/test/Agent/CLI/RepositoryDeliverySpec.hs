@@ -9,6 +9,8 @@ import System.Timeout (timeout)
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (bracket)
 import qualified Data.Text as Text
+import qualified Data.ByteString.Char8 as BS8
+import Data.Either (isLeft)
 import System.Directory
     ( createDirectory
     , doesDirectoryExist
@@ -37,6 +39,26 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "repository delivery service" do
+    describe "sidebar pull request status" do
+        let parse checks = parseRepositoryPullRequest "owner/repo" (BS8.pack
+                ("[{\"headRepository\":{\"nameWithOwner\":\"owner/repo\"},\"number\":42,\"url\":\"https://github.com/owner/repo/pull/42\",\"state\":\"OPEN\",\"isDraft\":false,\"statusCheckRollup\":" <> checks <> "}]"))
+            check status conclusion = "{\"__typename\":\"CheckRun\",\"status\":\"" <> status <> "\",\"conclusion\":\"" <> conclusion <> "\"}"
+            ci checks = fmap (fmap (\pr -> pr.repositoryPullRequestCI)) (parse checks)
+        it "distinguishes no PR from no checks" do
+            parseRepositoryPullRequest "owner/repo" "[]" `shouldBe` Right Nothing
+            ci "[]" `shouldBe` Right (Just 1)
+        it "requires all checks to pass and includes legacy commit statuses" do
+            ci ("[" <> check "COMPLETED" "SUCCESS" <> "," <> check "IN_PROGRESS" "" <> "]") `shouldBe` Right (Just 2)
+            ci "[{\"__typename\":\"StatusContext\",\"state\":\"SUCCESS\"}]" `shouldBe` Right (Just 3)
+        it "keeps failures visible even while another check is pending" do
+            ci ("[" <> check "COMPLETED" "FAILURE" <> "," <> check "QUEUED" "" <> "]") `shouldBe` Right (Just 4)
+            ci ("[" <> check "COMPLETED" "CANCELLED" <> "]") `shouldBe` Right (Just 4)
+        it "does not turn unknown conclusions into success" do
+            ci ("[" <> check "COMPLETED" "NEW_STATE" <> "]") `shouldBe` Right (Just 0)
+        it "rejects malformed and incomplete PR responses" do
+            parseRepositoryPullRequest "owner/repo" "{}" `shouldSatisfy` isLeft
+            parseRepositoryPullRequest "owner/repo" "[{\"headRepository\":{\"nameWithOwner\":\"owner/repo\"},\"number\":42,\"url\":\"https://github.com/owner/repo/pull/42\"}]" `shouldSatisfy` isLeft
+
     it "validates branch and remote names without option/ref injection" do
         validateBranchName "feature/safe-name" `shouldBe` True
         validateBranchName "-force" `shouldBe` False

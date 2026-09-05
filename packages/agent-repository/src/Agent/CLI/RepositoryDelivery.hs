@@ -1,5 +1,8 @@
 module Agent.CLI.RepositoryDelivery
     ( DeliveryStatus(..)
+    , RepositoryPullRequest(..)
+    , repositoryPullRequest
+    , parseRepositoryPullRequest
     , PushPreview(..)
     , PullRequestPreview(..)
     , DeliveryError(..)
@@ -41,6 +44,8 @@ import Control.Monad.Trans.Except
     )
 import Crypto.Hash (Digest, SHA1, SHA256, hash)
 import qualified Data.Aeson as Aeson
+import Data.Aeson ((.:), (.:?), (.!=))
+import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
@@ -2310,3 +2315,87 @@ deliveryConfirmations = unsafePerformIO do
             (pure . Map.filter
                 (\stored -> stored.storedDeadlineNanos > monotonicNow))
     pure confirmations
+
+
+-- | Read-only sidebar metadata for the checkout's current branch. The native
+-- caller throttles refreshes; failures must never be presented as passing CI.
+data RepositoryPullRequest = RepositoryPullRequest
+    { repositoryPullRequestNumber :: !Int
+    , repositoryPullRequestUrl :: !Text
+    , repositoryPullRequestState :: !Int -- open, draft, merged, closed: 1..4
+    , repositoryPullRequestCI :: !Int -- unknown, none, pending, passed, failed: 0..4
+    } deriving (Eq, Show)
+
+repositoryPullRequest :: FilePath -> IO (Either DeliveryError (Maybe RepositoryPullRequest))
+repositoryPullRequest root = runExceptT do
+    branchBytes <- liftDelivery (runGit root ["symbolic-ref", "--quiet", "HEAD"] BS.empty localTimeoutMicros)
+    branch <- maybe (throwE (DeliveryUnavailable "no named branch")) pure
+        (Text.stripPrefix "refs/heads/" (decodeTrimmed branchBytes))
+    unless (validateBranchName branch) (throwE (DeliveryInvalidRequest "invalid branch"))
+    headBytes <- liftDelivery (runGit root ["rev-parse", "--verify", "HEAD"] BS.empty localTimeoutMicros)
+    upstream <- liftIO (readUpstream root ("refs/heads/" <> branch))
+    let (remoteName, remoteBranch) = case upstream of
+            Right (remote, ref) -> (remote, fromMaybe branch (Text.stripPrefix "refs/heads/" ref))
+            Left _ -> ("origin", branch)
+    remote <- liftDelivery (readValidatedRemote root (decodeTrimmed headBytes) remoteName)
+    repository <- maybe (throwE (DeliveryUnavailable "not a GitHub repository")) pure remote.validatedGitHubRepository
+    output <- liftDelivery (runGh root
+        [ "pr", "list", "--repo", githubRepoArgument repository
+        , "--head", Text.unpack remoteBranch, "--state", "all", "--limit", "100"
+        , "--json", "number,url,state,isDraft,statusCheckRollup,headRepository"
+        ] BS.empty networkTimeoutMicros)
+    -- Discard a response if the user switched branches while GitHub was queried.
+    current <- liftDelivery (runGit root ["symbolic-ref", "--quiet", "HEAD"] BS.empty localTimeoutMicros)
+    when (current /= branchBytes) (throwE (DeliveryStale "branch changed during PR lookup"))
+    either (throwE . DeliveryCommandFailed . Text.pack) pure
+        (parseRepositoryPullRequest repository output)
+
+parseRepositoryPullRequest :: Text -> BS.ByteString -> Either String (Maybe RepositoryPullRequest)
+parseRepositoryPullRequest repository bytes = do
+    values <- Aeson.eitherDecodeStrict' bytes :: Either String [Aeson.Value]
+    matching <- traverse (AesonTypes.parseEither matchesHead) values
+    case [value | (value, True) <- zip values matching] of
+        [] -> Right Nothing
+        value : _ -> Just <$> AesonTypes.parseEither parse value
+  where
+    -- A same-named branch in somebody else's fork is not this checkout's PR.
+    matchesHead = Aeson.withObject "pull request" \o -> do
+        headRepository <- o .: "headRepository"
+        Aeson.withObject "head repository" (\repo -> (== repository) <$> repo .: "nameWithOwner") headRepository
+    parse = Aeson.withObject "pull request" \o -> do
+        number <- o .: "number"
+        url <- o .: "url"
+        unless (number > 0 && url == "https://github.com/" <> repository <> "/pull/" <> Text.pack (show (number :: Int)))
+            (fail "invalid pull request URL")
+        state <- o .: "state" :: AesonTypes.Parser Text
+        draft <- o .: "isDraft"
+        checks <- o .:? "statusCheckRollup" .!= []
+        statuses <- traverse parseCheck checks
+        let ci | null statuses = 1
+               | 4 `elem` statuses = 4
+               | 2 `elem` statuses = 2
+               | 0 `elem` statuses = 0
+               | otherwise = 3
+        prState <- case state of
+            "OPEN" -> pure (if draft then 2 else 1)
+            "MERGED" -> pure 3
+            "CLOSED" -> pure 4
+            _ -> fail "unknown pull request state"
+        pure (RepositoryPullRequest number url prState ci)
+    parseCheck = Aeson.withObject "check" \o -> do
+        kind <- o .: "__typename" :: AesonTypes.Parser Text
+        case kind of
+            "CheckRun" -> do
+                status <- o .: "status" :: AesonTypes.Parser Text
+                conclusion <- o .:? "conclusion" .!= ""
+                pure $ if status `elem` ["QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED"] then 2
+                    else if status /= "COMPLETED" then 0
+                    else classify conclusion
+            "StatusContext" -> classify <$> o .: "state"
+            _ -> pure 0
+    classify :: Text -> Int
+    classify value
+        | value `elem` ["SUCCESS", "NEUTRAL", "SKIPPED"] = 3
+        | value `elem` ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"] = 4
+        | value `elem` ["PENDING", "EXPECTED"] = 2
+        | otherwise = 0
