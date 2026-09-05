@@ -1637,40 +1637,56 @@ drainTQueue queue =
 runAsyncToolManager :: LoopConfig -> AsyncToolManager -> IO ()
 runAsyncToolManager config manager = do
     request <- atomically (readTQueue manager.asyncToolRequests)
-    race
-        (waitCancel config.loopCancel)
-        (do
-            prepared <-
-                prepareManagedToolCall
-                    config
-                    request.managedRecord.managedCall
-            plan <- schedulingPlanForPrepared config prepared
-            pure (prepared, plan))
-        >>= \case
-            Left () -> do
-                -- Approval and scheduling are allowed to perform IO. Keep
-                -- cancellation structured around that whole preparation step
-                -- so a blocking approval cannot strand result waiters.
-                completeManagedToolRequest manager request (Right Nothing)
-                runAsyncToolManager config manager
-            Right (prepared, plan) -> do
-                atomically $
-                    modifyTVar'
-                        manager.asyncToolScheduled
-                        (IntMap.insert request.managedSequence plan)
-                withAsync
-                    (runManagedToolWorker
-                        config
-                        manager
-                        request
-                        prepared
-                        plan)
-                    \worker ->
-                        withAsync
-                            (waitCatch worker
-                                >>= completeManagedToolRequest manager request)
-                            \_monitor ->
-                                runAsyncToolManager config manager
+    cancelledBefore <- isCancelled config.loopCancel
+    if cancelledBefore
+        then completeCancelledRequest request
+        else
+            race
+                (waitCancel config.loopCancel)
+                (do
+                    prepared <-
+                        prepareManagedToolCall
+                            config
+                            request.managedRecord.managedCall
+                    plan <- schedulingPlanForPrepared config prepared
+                    pure (prepared, plan))
+                >>= \case
+                    Left () ->
+                        completeCancelledRequest request
+                    Right (prepared, plan) -> do
+                        cancelledAfter <- isCancelled config.loopCancel
+                        if cancelledAfter
+                            then completeCancelledRequest request
+                            else do
+                                atomically $
+                                    modifyTVar'
+                                        manager.asyncToolScheduled
+                                        (IntMap.insert
+                                            request.managedSequence
+                                            plan)
+                                withAsync
+                                    (runManagedToolWorker
+                                        config
+                                        manager
+                                        request
+                                        prepared
+                                        plan)
+                                    \worker ->
+                                        withAsync
+                                            (waitCatch worker
+                                                >>= completeManagedToolRequest
+                                                    manager
+                                                    request)
+                                            \_monitor ->
+                                                runAsyncToolManager
+                                                    config
+                                                    manager
+  where
+    -- Approval and scheduling are allowed to perform IO. Complete cancelled
+    -- requests so blocking result waiters cannot be stranded.
+    completeCancelledRequest request = do
+        completeManagedToolRequest manager request (Right Nothing)
+        runAsyncToolManager config manager
 
 prepareManagedToolCall :: LoopConfig -> ToolCall -> IO PreparedToolCall
 prepareManagedToolCall config call

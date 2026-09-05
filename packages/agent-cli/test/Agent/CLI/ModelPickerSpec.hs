@@ -13,6 +13,7 @@ import Agent.Provider (Provider(..))
 import Agent.ReasoningEffort (ReasoningEffort(..))
 import Control.Exception.Safe (bracket)
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Test.Hspec
@@ -142,6 +143,39 @@ spec = do
             frame `shouldNotSatisfy`
                 Text.isInfixOf
                     (organizationGatewayConnectionId <> "/gpt-5.6-sol")
+
+        it "shows gateway usage beside each model alias" do
+            let gatewayOption modelId =
+                    let option = rawModelOption OpenAIProvider modelId
+                    in option
+                        { modelTarget =
+                            option.modelTarget
+                                { targetConnectionId =
+                                    organizationGatewayConnectionId
+                                }
+                        }
+                options =
+                    map gatewayOption ["gpt-5.6-sol", "claude-sonnet-5"]
+            models <-
+                initialPickerStateForOptions
+                    "organization gateway"
+                    options
+                    organizationGatewayConnectionId
+                    OpenAIProvider
+                    "gpt-5.6-sol"
+                    CodexDialect
+            let state =
+                    (initialModelPickerState EffortHigh models)
+                        { modelPickerUsage =
+                            Map.fromList
+                                [ ("gpt-5.6-sol", "5h 69% left · 7d 28% left")
+                                , ("claude-sonnet-5", "5h 42% left")
+                                ]
+                        }
+                frame = renderModelPickerFrame False state
+            frame `shouldSatisfy`
+                Text.isInfixOf "5h 69% left · 7d 28% left"
+            frame `shouldSatisfy` Text.isInfixOf "5h 42% left"
 
         it "makes untrusted catalog control characters inert" do
             let hostile =

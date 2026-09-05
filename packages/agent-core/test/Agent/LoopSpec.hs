@@ -63,6 +63,7 @@ import Control.Concurrent.MVar
     , tryReadMVar
     )
 import qualified Control.Exception as Exception
+import Control.Monad (when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Bits (complement, shiftR, xor, (.&.))
@@ -1317,6 +1318,7 @@ spec = describe "runLoop" do
 
     it "evaluates dynamic-call approvals serially in model order" do
         approvalOrder <- newIORef []
+        approvalsFinished <- newEmptyMVar
         releaseFirst <- newEmptyMVar
         firstStarted <- newEmptyMVar
         let first = do
@@ -1343,10 +1345,14 @@ spec = describe "runLoop" do
                 { loopTools = registryFromTools tools
                 , loopApprove = \call -> do
                     modifyIORef' approvalOrder (<> [call.name])
+                    when (call.name == "independent") $
+                        putMVar approvalsFinished ()
                     pure (Right True)
                 }
         withAsync (runLoop config Nothing "go") \running -> do
             timeout concurrencyProbeMicros (takeMVar firstStarted)
+                `shouldReturn` Just ()
+            timeout concurrencyProbeMicros (takeMVar approvalsFinished)
                 `shouldReturn` Just ()
             readIORef approvalOrder
                 `shouldReturn` ["first", "conflicting", "independent"]
