@@ -30,7 +30,7 @@ import Data.List (find)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Time.Clock (getCurrentTime)
+import Data.Time.Clock (addUTCTime, getCurrentTime)
 import Network.HTTP.Types (
     Header,
     Method,
@@ -247,6 +247,59 @@ spec = describe "agent-server WAI application" do
                     LBS8.unpack response.simpleBody
                         `shouldContain` expectedMessage
         mapM_ assertConflict cases
+
+    it "bounds merged turn pages after adding local history" do
+        createdAt <- addUTCTime (-60) <$> getCurrentTime
+        let durableTurn :: AccessBoundary -> Int -> TurnRecord
+            durableTurn boundary index =
+                TurnRecord
+                    { turnRecordId =
+                        TurnId
+                            ( "01999999-1111-7111-8111-"
+                                <> Text.justifyRight
+                                    12
+                                    '0'
+                                    (Text.pack (show index))
+                            )
+                    , turnRecordSessionId = "session-a"
+                    , turnRecordClientRequestId =
+                        ClientRequestId
+                            "01999999-1111-7111-8111-222222222222"
+                    , turnRecordBoundary = boundary
+                    , turnRecordStatus = TurnCompleted
+                    , turnRecordCreatedAt = createdAt
+                    , turnRecordStartedAt = Just createdAt
+                    , turnRecordFinishedAt = Just createdAt
+                    , turnRecordError = Nothing
+                    }
+            backend =
+                fakeBackend
+                    { backendListTurns = \boundary _ ->
+                        pure . Right $
+                            map (durableTurn boundary) [1 .. 200]
+                    }
+        withBackendApplication backend immediateRunner \application -> do
+            created <-
+                perform
+                    application
+                    methodPost
+                    ["v1", "sessions", "session-a", "turns"]
+                    validHeaders
+                    "{\"clientRequestId\":\"01999999-1111-7111-8111-333333333333\",\"input\":\"hello\"}"
+            created.simpleStatus `shouldBe` status202
+            localTurnId <- responseTurnId created
+
+            listed <-
+                perform
+                    application
+                    methodGet
+                    ["v1", "turns"]
+                    validHeaders
+                    ""
+            listed.simpleStatus `shouldBe` status200
+            turnIds <- responseTurnIds listed
+            length turnIds `shouldBe` 200
+            turnIds `shouldSatisfy` elem localTurnId
 
     it "distinguishes a remote turn from an unavailable agent snapshot" do
         createdAt <- getCurrentTime
@@ -1367,6 +1420,35 @@ responseTurnId response =
         decoded ->
             expectationFailure
                 ("could not decode turn response: " <> show decoded)
+                >> fail "unreachable"
+
+responseTurnIds :: SResponse -> IO [Text]
+responseTurnIds response =
+    case eitherDecode response.simpleBody of
+        Right (Object value) ->
+            case KeyMap.lookup "data" value of
+                Just (Array turns) ->
+                    mapM extractTurnId (foldr (:) [] turns)
+                other ->
+                    expectationFailure
+                        ("turn list response has no data array: " <> show other)
+                        >> fail "unreachable"
+        decoded ->
+            expectationFailure
+                ("could not decode turn list response: " <> show decoded)
+                >> fail "unreachable"
+  where
+    extractTurnId = \case
+        Object turn ->
+            case KeyMap.lookup "id" turn of
+                Just (String turnId) -> pure turnId
+                other ->
+                    expectationFailure
+                        ("turn list entry has no text id: " <> show other)
+                        >> fail "unreachable"
+        other ->
+            expectationFailure
+                ("turn list entry is not an object: " <> show other)
                 >> fail "unreachable"
 
 validHeaders :: [Header]

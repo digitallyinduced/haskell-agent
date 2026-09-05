@@ -882,8 +882,18 @@ listKnownTurns backend supervisor boundary sessionId =
                            | turn <- active
                            , Map.notMember turn.turnRecordId durableIds
                            ]
-            pure . Right $
-                sortOn (Down . (.turnRecordCreatedAt)) merged
+            pure . Right . take maximumTurnPageSize $
+                sortOn
+                    ( \turn ->
+                        Down
+                            ( turn.turnRecordCreatedAt
+                            , turn.turnRecordId
+                            )
+                    )
+                    merged
+
+maximumTurnPageSize :: Int
+maximumTurnPageSize = 200
 
 cancelKnownTurn
     :: Backend
