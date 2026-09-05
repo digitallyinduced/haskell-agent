@@ -2,6 +2,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     ( PortalStream(..)
     , newPortalBackend
     , parsePortalStartResults
+    , portalDisplayForFrame
     , portalDisplayForStream
     , portalKeysym
     , portalMouseButtonCode
@@ -605,8 +606,14 @@ inspectPortalDisplay runtime =
     ensurePortalReady runtime >>= \case
         Left err -> pure (Left err)
         Right () ->
-            withPortalSessionOperation runtime "display inspection"
-                (pure . portalDisplay)
+            withPortalCaptureReadiness runtime.portalReadiness $
+                withPortalSessionOperation runtime "display inspection"
+                    \session -> do
+                        frame <- capturePortalFrame runtime session
+                        pure
+                            (portalDisplayForImage
+                                session
+                                frame.portalFrameImage)
 
 capturePortalDisplay
     :: PortalRuntime
@@ -619,14 +626,15 @@ capturePortalDisplay runtime encoding =
             withPortalCaptureReadiness runtime.portalReadiness $
                 withPortalSessionOperation runtime "screen capture" \session -> do
                     frame <- capturePortalFrame runtime session
+                    let image = frame.portalFrameImage
                     pure CapturedDisplay
                         { capturedComputerDisplay =
-                            portalDisplay session
+                            portalDisplayForImage session image
                         , capturedComputerImage =
                             encodePortalFrame
                                 encoding
                                 session.portalSessionStream
-                                frame.portalFrameImage
+                                image
                         }
 
 withPortalCaptureReadiness
@@ -655,7 +663,12 @@ executePortalAction runtime expected action =
                 withPortalSessionOperation runtime "input injection" \session -> do
                     let stream = session.portalSessionStream
                         expectedIdentity =
-                            portalDisplay session
+                            portalDisplayForFrame
+                                session.portalSessionPath
+                                stream
+                                ( expected.computerDisplayFrameWidth
+                                , expected.computerDisplayFrameHeight
+                                )
                     unless
                         (expectedIdentity == expected)
                         (fail
@@ -1098,17 +1111,29 @@ resizeImage targetWidth targetHeight source
             targetWidth
             targetHeight
 
-portalDisplay :: PortalSession -> ComputerDisplay
-portalDisplay session =
-    portalDisplayForStream
+portalDisplayForImage
+    :: PortalSession
+    -> Image PixelRGB8
+    -> ComputerDisplay
+portalDisplayForImage session image =
+    portalDisplayForFrame
         session.portalSessionPath
         session.portalSessionStream
+        (imageWidth image, imageHeight image)
 
 portalDisplayForStream :: ObjectPath -> PortalStream -> ComputerDisplay
 portalDisplayForStream sessionPath stream =
-    -- Captured frames are normalized to the negotiated logical stream size
-    -- before they are returned to the model, so inspection does not need to
-    -- open PipeWire merely to discover physical frame dimensions.
+    portalDisplayForFrame
+        sessionPath
+        stream
+        (stream.portalStreamWidth, stream.portalStreamHeight)
+
+portalDisplayForFrame
+    :: ObjectPath
+    -> PortalStream
+    -> (Int, Int)
+    -> ComputerDisplay
+portalDisplayForFrame sessionPath stream (frameWidth, frameHeight) =
     ComputerDisplay
         { computerDisplayId =
             Text.intercalate ":"
@@ -1130,8 +1155,8 @@ portalDisplayForStream sessionPath stream =
         , computerDisplayOriginY = 0
         , computerDisplayWidth = stream.portalStreamWidth
         , computerDisplayHeight = stream.portalStreamHeight
-        , computerDisplayFrameWidth = stream.portalStreamWidth
-        , computerDisplayFrameHeight = stream.portalStreamHeight
+        , computerDisplayFrameWidth = frameWidth
+        , computerDisplayFrameHeight = frameHeight
         }
 
 parsePortalStartResults

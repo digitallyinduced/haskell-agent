@@ -82,9 +82,9 @@ and includes these dependencies only on Linux.
 ## Troubleshooting
 
 - **Session cannot be verified:** ensure the process runs inside the graphical
-  login session and can reach `org.freedesktop.login1` on the system bus.
-  `XDG_SESSION_ID` may identify the session; otherwise the process ID is
-  resolved through logind.
+  login session and can reach `org.freedesktop.login1` on the system bus. The
+  process ID is resolved through logind, so launch the CLI from the intended
+  graphical session rather than trying to set a session environment variable.
 - **Session inactive or locked:** unlock and activate the same graphical
   session. The check intentionally fails closed when logind is unavailable.
 - **Portal request denied or cancelled:** approve the chooser and select one

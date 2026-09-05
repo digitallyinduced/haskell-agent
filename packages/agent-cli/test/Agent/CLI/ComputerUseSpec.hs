@@ -35,6 +35,7 @@ import Agent.CLI.ComputerUse.Input (MouseButton(..))
 import Agent.CLI.ComputerUse.Linux.Portal
     ( PortalStream(..)
     , parsePortalStartResults
+    , portalDisplayForFrame
     , portalDisplayForStream
     , portalKeysym
     , portalMouseButtonCode
@@ -285,6 +286,79 @@ spec = do
                 exampleCall
             actionResult `shouldSatisfy` succeeds
             readIORef executedDisplays `shouldReturn` [changedDisplay]
+
+        it "rejects a changed live portal frame before input" do
+            let sessionPath =
+                    objectPath_
+                        "/org/freedesktop/portal/desktop/session/1_42/session_ab12"
+                firstFrame =
+                    portalDisplayForFrame sessionPath portalStream (3840, 2160)
+                changedFrame =
+                    portalDisplayForFrame sessionPath portalStream (2560, 1440)
+                screenshotCall =
+                    exampleCall { computerActions = [ScreenshotAction] }
+                succeeds = either (const False) (const True)
+            inspectedDisplay <- newIORef firstFrame
+            capturedDisplay <- newIORef firstFrame
+            actionCount <- newIORef (0 :: Int)
+            let backend = ComputerBackend
+                    { computerBackendEnsureReady = pure (Right ())
+                    , computerBackendInspectDisplay =
+                        Right <$> readIORef inspectedDisplay
+                    , computerBackendExecuteAction = \_ _ -> do
+                        modifyIORef' actionCount (+ 1)
+                        pure (Right ())
+                    , computerBackendCaptureDisplay = \_ -> do
+                        display <- readIORef capturedDisplay
+                        pure (Right CapturedDisplay
+                            { capturedComputerDisplay = display
+                            , capturedComputerImage = emptyImage
+                            })
+                    , computerBackendClose = pure ()
+                    }
+            leasedBackend <- newLeasedDesktopComputerUseBackend backend
+
+            firstObservation <- executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                screenshotCall
+            firstObservation `shouldSatisfy` succeeds
+
+            initialAction <- executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                exampleCall
+            initialAction `shouldSatisfy` succeeds
+
+            -- Portal inspection samples a live PipeWire frame, so a changed
+            -- frame is rejected before stale coordinates reach the backend.
+            writeIORef inspectedDisplay changedFrame
+            writeIORef capturedDisplay changedFrame
+            executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                exampleCall
+                `shouldReturn` Left
+                    "The selected display changed during computer use; take a fresh screenshot before continuing."
+            executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                exampleCall
+                `shouldReturn` Left
+                    "Take a fresh computer screenshot before sending input actions."
+            readIORef actionCount `shouldReturn` 1
+
+            refreshedObservation <- executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                screenshotCall
+            refreshedObservation `shouldSatisfy` succeeds
+            finalAction <- executeComputerCallWithBackend
+                leasedBackend
+                ScreenshotPng
+                exampleCall
+            finalAction `shouldSatisfy` succeeds
+            readIORef actionCount `shouldReturn` 2
 
         it "invalidates a lease after a mutating transaction fails" do
             captureFails <- newIORef False
@@ -651,7 +725,7 @@ spec = do
             readIORef cleanedUp `shouldReturn` True
             readIORef completed `shouldReturn` False
 
-        it "uses negotiated stream metadata for display inspection" do
+        it "uses negotiated stream metadata for logical coordinates" do
             let display =
                     portalDisplayForStream
                         (objectPath_
@@ -665,6 +739,21 @@ spec = do
                 `shouldBe` portalStream.portalStreamWidth
             display.computerDisplayFrameHeight
                 `shouldBe` portalStream.portalStreamHeight
+
+        it "keeps captured PipeWire frame dimensions in display identity" do
+            let sessionPath =
+                    objectPath_
+                        "/org/freedesktop/portal/desktop/session/1_42/session_ab12"
+                display =
+                    portalDisplayForFrame sessionPath portalStream (1280, 720)
+            display.computerDisplayWidth
+                `shouldBe` portalStream.portalStreamWidth
+            display.computerDisplayHeight
+                `shouldBe` portalStream.portalStreamHeight
+            display.computerDisplayFrameWidth `shouldBe` 1280
+            display.computerDisplayFrameHeight `shouldBe` 720
+            display
+                `shouldNotBe` portalDisplayForStream sessionPath portalStream
 
     describe "computer action validation" do
         it "preserves supported mouse buttons and modifiers" do
