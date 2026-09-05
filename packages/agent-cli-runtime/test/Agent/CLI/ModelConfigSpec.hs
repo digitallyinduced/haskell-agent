@@ -112,6 +112,20 @@ spec = describe "Agent.CLI.ModelConfig" do
         catalogModelsForConnection organizationGatewayConnectionId catalog
             `shouldBe`
                 [ CatalogModel
+                    { catalogModelId = "grok-4.6"
+                    , catalogModelConnectionId =
+                        organizationGatewayConnectionId
+                    , catalogModelWireId = "grok-4.6"
+                    , catalogModelDialect = GrokBuildDialect
+                    , catalogModelContextWindow = Just 500_000
+                    , catalogModelLabel = Nothing
+                    , catalogModelReasoningEfforts =
+                        Just ["low", "medium", "high", "xhigh"]
+                    , catalogModelDefaultReasoningEffort = Just "high"
+                    , catalogModelDefault = False
+                    , catalogModelFallbackPriority = Nothing
+                    }
+                , CatalogModel
                     { catalogModelId = "company-coder"
                     , catalogModelConnectionId =
                         organizationGatewayConnectionId

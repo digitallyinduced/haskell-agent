@@ -392,8 +392,10 @@ spec = do
                 `shouldBe` Nothing
 
         it "does not block on a long-running URL opener" do
-            result <- timeout 1_000_000
-                (launchExternalUrlCommand ("sleep", ["2"]))
+            -- Keep CI scheduling headroom while remaining well below the
+            -- child lifetime, so waiting for the opener would still fail.
+            result <- timeout 5_000_000
+                (launchExternalUrlCommand ("sleep", ["10"]))
             result `shouldBe` Just True
 
         it "reports an opener that exits unsuccessfully" do
