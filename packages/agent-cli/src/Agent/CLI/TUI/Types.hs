@@ -28,8 +28,13 @@ module Agent.CLI.TUI.Types
     , MetaConsoleOverlay(..)
     , Name(..)
     , PendingAppEvent(..)
+    , PendingDialog(..)
     , PendingUiEvent(..)
+    , ResumeActions(..)
     , ResumeOverlay(..)
+    , choiceOverlay
+    , resumeOverlay
+    , textOverlay
     , SyntaxHighlighterState(..)
     , TerminalFocus(..)
     , TextInputMode(..)
@@ -445,6 +450,30 @@ data FullscreenSessionActions = FullscreenSessionActions
     , sessionAgentSelect :: !(AgentTarget -> IO ())
     }
 
+-- | An open dialog always owns its reply and any actions it needs. Mapping a
+-- dialog edits its presentation without separating it from those capabilities.
+data PendingDialog reply overlay = PendingDialog
+    { dialogReply :: !reply
+    , dialogOverlay :: !overlay
+    }
+    deriving (Functor)
+
+data ResumeActions = ResumeActions
+    { resumeReply :: !(TMVar (Maybe ResumeEntry))
+    , resumeLoad :: !(Text -> IO (Either Text ResumeEntry))
+    , resumeDelete :: !(Text -> IO (Either Text ()))
+    , resumeSearch :: !(Text -> IO (Either Text [ResumeEntry]))
+    }
+
+choiceOverlay :: AppState -> Maybe ChoiceOverlay
+choiceOverlay state = (.dialogOverlay) <$> state.appChoice
+
+resumeOverlay :: AppState -> Maybe ResumeOverlay
+resumeOverlay state = (.dialogOverlay) <$> state.appResume
+
+textOverlay :: AppState -> Maybe TextOverlay
+textOverlay state = (.dialogOverlay) <$> state.appTextPrompt
+
 data AppState = AppState
     { appUi :: !UiState
     , appHistoryWindow :: !HistoryWindow
@@ -455,15 +484,9 @@ data AppState = AppState
     , appRuntime :: !FullscreenRuntime
     , appTheme :: !ThemeKind
     , appSlashIndex :: !Int
-    , appChoice :: !(Maybe ChoiceOverlay)
-    , appChoiceReply :: !(Maybe (Maybe ChoiceSelection -> IO ()))
-    , appResume :: !(Maybe ResumeOverlay)
-    , appResumeReply :: !(Maybe (TMVar (Maybe ResumeEntry)))
-    , appResumeLoad :: !(Maybe (Text -> IO (Either Text ResumeEntry)))
-    , appResumeDelete :: !(Maybe (Text -> IO (Either Text ())))
-    , appResumeSearch :: !(Maybe (Text -> IO (Either Text [ResumeEntry])))
-    , appTextPrompt :: !(Maybe TextOverlay)
-    , appTextReply :: !(Maybe (TMVar (Maybe Text)))
+    , appChoice :: !(Maybe (PendingDialog (Maybe ChoiceSelection -> IO ()) ChoiceOverlay))
+    , appResume :: !(Maybe (PendingDialog ResumeActions ResumeOverlay))
+    , appTextPrompt :: !(Maybe (PendingDialog (Maybe Text -> IO ()) TextOverlay))
     , appMetaConsole :: !(Maybe MetaConsoleOverlay)
     , appSlashDismissed :: !Bool
     , appPasted :: !Bool
@@ -601,7 +624,7 @@ selectedChoice choice = do
 -- | The selected picker row previews its palette before it is persisted.
 activeTheme :: AppState -> ThemeKind
 activeTheme state =
-    case state.appChoice of
+    case choiceOverlay state of
         Just choice
             | choice.choicePresentation == ChoiceTheme ->
                 themeKindAt choice.choiceIndex

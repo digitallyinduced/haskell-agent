@@ -189,7 +189,7 @@ import Agent.CLI.TUI.App.Navigation
 handleResumeKey :: V.Event -> EventM Name AppState ()
 handleResumeKey event = do
     state <- get
-    case state.appResume of
+    case resumeOverlay state of
         Nothing -> pure ()
         Just overlay ->
             let browser = overlay.resumeOverlayBrowser
@@ -209,11 +209,10 @@ handleDeleteConfirmation
     -> EventM Name AppState ()
 handleDeleteConfirmation state browser sessionId = \case
     V.EvKey (V.KChar 'y') [] ->
-        case state.appResumeDelete of
-            Nothing ->
-                setBrowser (setResumeNotice (Just "Session deletion is unavailable.") browser)
-            Just deleteEntry -> do
-                result <- liftIO (deleteEntry sessionId)
+        case state.appResume of
+            Nothing -> pure ()
+            Just pending -> do
+                result <- liftIO (pending.dialogReply.resumeDelete sessionId)
                 case result of
                     Left err -> setBrowser (setResumeNotice (Just err) browser)
                     Right () -> do
@@ -234,11 +233,10 @@ handleResumeSearch browser event
             setBrowser (endResumeSearch browser)
         V.EvKey V.KEnter [] -> do
             state <- get
-            case state.appResumeSearch of
-                Nothing ->
-                    setBrowser (endResumeSearch browser)
-                Just searchEntries -> do
-                    result <- liftIO (searchEntries browser.resumeBrowserQuery)
+            case state.appResume of
+                Nothing -> pure ()
+                Just pending -> do
+                    result <- liftIO (pending.dialogReply.resumeSearch browser.resumeBrowserQuery)
                     case result of
                         Left err ->
                             setBrowser (setResumeNotice (Just err) browser)
@@ -320,14 +318,10 @@ expandSelectedResume browser =
                 setBrowser (toggleResumeExpanded browser)
             | otherwise -> do
                 state <- get
-                case state.appResumeLoad of
-                    Nothing ->
-                        setBrowser
-                            (setResumeNotice
-                                (Just "Session details are unavailable.")
-                                browser)
-                    Just loadEntry -> do
-                        loaded <- liftIO (loadEntry entry.resumeId)
+                case state.appResume of
+                    Nothing -> pure ()
+                    Just pending -> do
+                        loaded <- liftIO (pending.dialogReply.resumeLoad entry.resumeId)
                         case loaded of
                             Left err ->
                                 setBrowser (setResumeNotice (Just err) browser)
@@ -344,7 +338,7 @@ moveAndReveal delta browser = do
 revealSelectedResume :: EventM Name AppState ()
 revealSelectedResume = do
     state <- get
-    case state.appResume >>= selectedResumeBrowser . (.resumeOverlayBrowser) of
+    case resumeOverlay state >>= selectedResumeBrowser . (.resumeOverlayBrowser) of
         Nothing -> pure ()
         Just entry -> makeVisible (ResumeRow entry.resumeId)
 
@@ -353,7 +347,7 @@ setBrowser browser =
     modify' \state ->
         state
             { appResume =
-                (\overlay -> overlay { resumeOverlayBrowser = browser })
+                fmap (\overlay -> overlay { resumeOverlayBrowser = browser })
                     <$> state.appResume
             }
 
@@ -365,22 +359,17 @@ setAndReveal browser = do
 resolveResume :: Bool -> EventM Name AppState ()
 resolveResume confirmed = do
     state <- get
-    case state.appResumeReply of
+    case state.appResume of
         Nothing -> pure ()
-        Just reply ->
+        Just pending ->
             liftIO $ atomically $
-                putTMVar reply $
+                putTMVar pending.dialogReply.resumeReply $
                     if confirmed
-                        then state.appResume
-                            >>= selectedResumeBrowser . (.resumeOverlayBrowser)
+                        then selectedResumeBrowser pending.dialogOverlay.resumeOverlayBrowser
                         else Nothing
     modify' \current ->
         current
             { appResume = Nothing
-            , appResumeReply = Nothing
-            , appResumeLoad = Nothing
-            , appResumeDelete = Nothing
-            , appResumeSearch = Nothing
             }
     resumeNativeProgressIfRunning
 
@@ -404,7 +393,7 @@ openCommandPalette = do
     liftIO (state.appRuntime.runtimeNativeProgress False)
     modify' \current ->
         current
-            { appChoice = Just ChoiceOverlay
+            { appChoice = Just $ PendingDialog reply ChoiceOverlay
                 { choicePresentation = ChoiceDialog
                 , choiceTitle = "Commands & shortcuts"
                 , choiceBody = ""
@@ -416,7 +405,6 @@ openCommandPalette = do
                 , choiceAdjustmentIndices = []
                 , choiceCloseOnTurnEnd = False
                 }
-            , appChoiceReply = Just reply
             , appAgentHover = Nothing
             }
     vScrollToBeginning (viewportScroll OverlayViewport)
@@ -465,7 +453,7 @@ adjustChoiceValue delta choice =
 confirmResumeId :: Text -> EventM Name AppState ()
 confirmResumeId sessionId = do
     state <- get
-    case state.appResume of
+    case resumeOverlay state of
         Nothing -> pure ()
         Just overlay ->
             case
@@ -486,14 +474,14 @@ confirmResumeId sessionId = do
 handleChoiceKey :: V.Event -> EventM Name AppState ()
 handleChoiceKey event = do
     state <- get
-    case state.appChoice of
+    case choiceOverlay state of
         Just choice
             | choice.choiceSearch -> handleFilterChoiceKey event
         _ -> handleStaticChoiceKey event
 
 handleStaticChoiceKey :: V.Event -> EventM Name AppState ()
 handleStaticChoiceKey event = do
-    choice <- gets (.appChoice)
+    choice <- gets choiceOverlay
     case (choice, event) of
         (Just current, V.EvKey V.KUp [])
             | current.choicePresentation == ChoiceDocument ->
@@ -531,12 +519,12 @@ handleStaticChoiceKey event = do
             gets
                 ( maybe False
                     ((== ChoiceTheme) . (.choicePresentation))
-                    . (.appChoice)
+                    . choiceOverlay
                 )
         modify' \state ->
             state
                 { appChoice =
-                    (\choice ->
+                    fmap (\choice ->
                         let count = length choice.choiceRows
                         in if count == 0
                             then choice
@@ -567,7 +555,7 @@ handleFilterChoiceKey event = case event of
     V.EvKey V.KEnter [] -> resolveChoice True
     V.EvKey V.KEsc [] -> do
         state <- get
-        case state.appChoice of
+        case choiceOverlay state of
             Just choice
                 | not (Text.null choice.choiceQuery) ->
                     updateChoiceQuery (const "")
@@ -590,7 +578,7 @@ handleFilterChoiceKey event = case event of
         modify' \state ->
             state
                 { appChoice =
-                    (\choice ->
+                    fmap (\choice ->
                         let count = length (choiceVisibleRows choice)
                         in choice
                             { choiceIndex =
@@ -607,14 +595,14 @@ handleFilterChoiceKey event = case event of
         modify' \state ->
             state
                 { appChoice =
-                    adjustChoiceValue delta <$> state.appChoice
+                    fmap (adjustChoiceValue delta) <$> state.appChoice
                 }
 
     updateChoiceQuery update = do
         modify' \state ->
             state
                 { appChoice =
-                    (\choice ->
+                    fmap (\choice ->
                         choice
                             { choiceQuery = update choice.choiceQuery
                             , choiceIndex = 0
@@ -626,7 +614,7 @@ handleFilterChoiceKey event = case event of
 confirmChoiceAt :: Int -> EventM Name AppState ()
 confirmChoiceAt index = do
     state <- get
-    case state.appChoice of
+    case choiceOverlay state of
         Just choice
             | choice.choiceSearch ->
                 case findIndex
@@ -636,7 +624,7 @@ confirmChoiceAt index = do
                         modify' \current ->
                             current
                                 { appChoice =
-                                    (\overlay ->
+                                    fmap (\overlay ->
                                         overlay
                                             { choiceIndex = visibleIndex })
                                         <$> current.appChoice
@@ -649,7 +637,7 @@ confirmChoiceAt index = do
                 modify' \current ->
                     current
                         { appChoice =
-                            (\overlay -> overlay { choiceIndex = index })
+                            fmap (\overlay -> overlay { choiceIndex = index })
                                 <$> current.appChoice
                         }
                 resolveChoice True
@@ -836,18 +824,17 @@ resolveChoice confirmed = do
     let previewingTheme =
             maybe False
                 ((== ChoiceTheme) . (.choicePresentation))
-                state.appChoice
-    case state.appChoiceReply of
+                (choiceOverlay state)
+    case state.appChoice of
         Nothing -> pure ()
-        Just reply ->
-            liftIO $ reply $
+        Just pending ->
+            liftIO $ pending.dialogReply $
                 if confirmed
-                    then state.appChoice >>= selectedChoice
+                    then selectedChoice pending.dialogOverlay
                     else Nothing
     modify' \current ->
         current
             { appChoice = Nothing
-            , appChoiceReply = Nothing
             }
     -- Cached transcript images already contain resolved attributes.  Closing
     -- a live preview must repaint them with the persisted theme.
@@ -875,7 +862,7 @@ handleTextPromptKey event = case event of
         modify' \state ->
             state
                 { appTextPrompt =
-                    (\prompt ->
+                    fmap (\prompt ->
                         fromMaybe prompt (applyTextPromptEdit event prompt))
                         <$> state.appTextPrompt
                 }
@@ -963,18 +950,16 @@ applyTextPromptEdit event prompt = case event of
 resolveTextPrompt :: Bool -> EventM Name AppState ()
 resolveTextPrompt confirmed = do
     state <- get
-    case state.appTextReply of
+    case state.appTextPrompt of
         Nothing -> pure ()
-        Just reply ->
-            liftIO $ atomically $
-                putTMVar reply $
-                    if confirmed
-                        then (.textDraft) <$> state.appTextPrompt
-                        else Nothing
+        Just pending ->
+            liftIO $ pending.dialogReply $
+                if confirmed
+                    then Just pending.dialogOverlay.textDraft
+                    else Nothing
     modify' \current ->
         current
             { appTextPrompt = Nothing
-            , appTextReply = Nothing
             }
     resumeNativeProgressIfRunning
 

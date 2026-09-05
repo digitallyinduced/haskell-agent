@@ -96,6 +96,8 @@ import Agent.CLI.TUI.Types
     , HistoryCommit(..)
     , MetaConsoleOverlay(..)
     , Name(..)
+    , PendingDialog(..)
+    , ResumeActions(..)
     , ResumeOverlay(..)
     , TerminalFocus(..)
     , TextInputMode(..)
@@ -168,6 +170,7 @@ import Control.Monad (replicateM_)
 import qualified Data.ByteString as ByteString
 import Data.Foldable (find, toList)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
+import Data.Maybe (isNothing)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
@@ -438,7 +441,7 @@ spec = do
                         []
                         0)
                         { appTextPrompt =
-                            Just
+                            Just $ PendingDialog (const (pure ()))
                                 (textOverlay draft (Text.length draft))
                                     { textTitle = "Request changes"
                                     , textBody =
@@ -462,6 +465,81 @@ spec = do
                     RowEnd width -> Text.replicate width " "
             rendered `shouldSatisfy` Text.isInfixOf marker
 
+    describe "pending dialogs" do
+        it "keeps each reply through edits and resolves simultaneous dialogs in priority order" do
+            runtime <- newScriptRuntime initialUiState
+            choiceReply <- newEmptyTMVarIO
+            textReply <- newEmptyTMVarIO
+            resumeReply <- newEmptyTMVarIO
+            searches <- newIORef []
+            let initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+                browser = initialResumeBrowser (posixSecondsToUTCTime 0) []
+                key value = FullscreenScriptVty (V.EvKey value [])
+                openDialogs =
+                    [ FullscreenScriptApp
+                        (AppAskChoice ChoiceDialog "Choose" "" 0
+                            [("first", ""), ("second", "")] choiceReply)
+                    , FullscreenScriptApp
+                        (AppAskText TextInputPlain "Answer" "" "draft" textReply)
+                    , FullscreenScriptApp
+                        (AppAskResume browser
+                            (const (pure (Left "not used")))
+                            (const (pure (Right ())))
+                            (\query -> do
+                                modifyIORef' searches (<> [query])
+                                pure (Right []))
+                            resumeReply)
+                    , key (V.KChar '/')
+                    , key (V.KChar 'x')
+                    , key V.KEnter
+                    , key V.KEsc
+                    , FullscreenScriptHalt
+                    ]
+            (_, afterResume) <-
+                runFullscreenScriptWithState initialState openDialogs
+            readIORef searches `shouldReturn` ["x"]
+            atomically (tryReadTMVar resumeReply)
+                `shouldReturn` Just Nothing
+            atomically (tryReadTMVar textReply) `shouldReturn` Nothing
+            atomically (tryReadTMVar choiceReply) `shouldReturn` Nothing
+            isNothing afterResume.appResume `shouldBe` True
+            (_, afterText) <-
+                runFullscreenScriptWithState afterResume
+                    [ key (V.KChar '!')
+                    , key V.KEnter
+                    , FullscreenScriptHalt
+                    ]
+            atomically (tryReadTMVar textReply)
+                `shouldReturn` Just (Just "draft!")
+            atomically (tryReadTMVar choiceReply) `shouldReturn` Nothing
+            isNothing afterText.appTextPrompt `shouldBe` True
+            (_, afterChoice) <-
+                runFullscreenScriptWithState afterText
+                    [ key V.KDown
+                    , key V.KEnter
+                    , FullscreenScriptHalt
+                    ]
+            atomically (tryReadTMVar choiceReply)
+                `shouldReturn` Just (Just 1)
+            isNothing afterChoice.appChoice `shouldBe` True
+
+        it "cancels edited text without returning the draft" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            let initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, finalState) <-
+                runFullscreenScriptWithState initialState
+                    [ FullscreenScriptApp
+                        (AppAskText TextInputPlain "Answer" "" "draft" reply)
+                    , FullscreenScriptVty (V.EvKey (V.KChar '!') [])
+                    , FullscreenScriptVty (V.EvKey V.KEsc [])
+                    , FullscreenScriptHalt
+                    ]
+            atomically (tryReadTMVar reply) `shouldReturn` Just Nothing
+            isNothing finalState.appTextPrompt `shouldBe` True
+
     describe "search overlay input viewport" do
         it "keeps the tail of a long searchable choice query visible" do
             runtime <- newScriptRuntime initialUiState
@@ -475,7 +553,7 @@ spec = do
                         []
                         0)
                         { appChoice =
-                            Just
+                            Just $ PendingDialog (const (pure ()))
                                 (choiceOverlay False)
                                     { choiceSearch = True
                                     , choiceQuery = query
@@ -486,6 +564,7 @@ spec = do
 
         it "keeps a long resume query visible while editing and afterward" do
             runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
             let marker = "RESUMETAIL"
                 query = Text.replicate 1000 "a" <> marker
                 browser =
@@ -503,19 +582,29 @@ spec = do
                         []
                         0)
                         { appResume =
-                            Just ResumeOverlay
+                            Just $ PendingDialog
+                                ResumeActions
+                                    { resumeReply = reply
+                                    , resumeLoad = const (pure (Left "not used"))
+                                    , resumeDelete = const (pure (Right ()))
+                                    , resumeSearch = const (pure (Right []))
+                                    }
+                                ResumeOverlay
                                 { resumeOverlayBrowser = browser
                                 }
                         }
                 inactiveState =
                     state
                         { appResume =
-                            Just ResumeOverlay
-                                { resumeOverlayBrowser =
-                                    browser
-                                        { resumeBrowserSearching = False
-                                        }
-                                }
+                            fmap
+                                (fmap \overlay ->
+                                    overlay
+                                        { resumeOverlayBrowser =
+                                            browser
+                                                { resumeBrowserSearching = False
+                                                }
+                                        })
+                                state.appResume
                         }
             renderedAppText (80, 24) state
                 `shouldSatisfy` Text.isInfixOf marker
@@ -771,7 +860,7 @@ spec = do
                 runFullscreenScriptWithState
                     initialState
                     (openAndSearch <> [FullscreenScriptHalt])
-            (.choiceQuery) <$> searchedState.appChoice
+            (.dialogOverlay.choiceQuery) <$> searchedState.appChoice
                 `shouldBe` Just ""
             (_, closedState) <-
                 runFullscreenScriptWithState
@@ -780,7 +869,7 @@ spec = do
                         <> [ FullscreenScriptVty (V.EvKey V.KEsc [])
                            , FullscreenScriptHalt
                            ])
-            closedState.appChoice `shouldBe` Nothing
+            isNothing closedState.appChoice `shouldBe` True
 
         it "inserts required command prefixes at the composer cursor" do
             let ui =
@@ -872,7 +961,7 @@ spec = do
             rendered
                 `shouldSatisfy`
                     ByteString.isInfixOf (encoded marker)
-            finalState.appChoice `shouldBe` Nothing
+            isNothing finalState.appChoice `shouldBe` True
             atomically (tryReadTMVar reply)
                 `shouldReturn` Just Nothing
 
