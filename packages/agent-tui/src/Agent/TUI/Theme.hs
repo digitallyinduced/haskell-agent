@@ -448,11 +448,11 @@ terminalDefault =
         , (diffAddedAttr,
             V.defAttr
                 `V.withForeColor` V.brightGreen
-                `V.withBackColor` Color240 22)
+                `V.withBackColor` RGBColor 0 95 0)
         , (diffRemovedAttr,
             V.defAttr
                 `V.withForeColor` V.brightRed
-                `V.withBackColor` Color240 52)
+                `V.withBackColor` RGBColor 95 0 0)
         , (syntaxNormalAttr, palette V.cyan)
         , (syntaxKeywordAttr, palette V.magenta)
         , (syntaxTypeAttr, palette V.yellow)
