@@ -2,6 +2,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     ( PortalState(..)
     , PortalStream(..)
     , ensurePortalStateReadyWith
+    , invalidatePortalStateWith
     , newPortalBackend
     , parsePortalStartResults
     , portalDisplayForFrame
@@ -15,6 +16,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , validatePortalOwnerUser
     , withPortalCaptureReadiness
     , withPortalInputReadiness
+    , withPortalTemporaryPathWith
     ) where
 
 import Agent.CLI.ComputerUse.Backend
@@ -689,13 +691,29 @@ closePortalRuntime runtime = do
     disconnect runtime.portalClient `catchAny` const (pure ())
 
 invalidatePortalRuntime :: PortalRuntime -> Text -> IO ()
-invalidatePortalRuntime runtime err = do
-    session <-
-        modifyMVar runtime.portalState \case
-            PortalReady value -> pure (PortalFailed err, Just value)
-            PortalUninitialized -> pure (PortalFailed err, Nothing)
-            state -> pure (state, Nothing)
-    mapM_ (closePortalSession runtime) session
+invalidatePortalRuntime runtime err =
+    invalidatePortalStateWith
+        runtime.portalState
+        err
+        (closePortalSession runtime)
+
+invalidatePortalStateWith
+    :: MVar (PortalState session)
+    -> Text
+    -> (session -> IO ())
+    -> IO ()
+invalidatePortalStateWith stateVar err closeSession =
+    mask \restore -> do
+        session <-
+            modifyMVar stateVar \case
+                PortalReady value -> pure (PortalFailed err, Just value)
+                state -> pure (state, Nothing)
+        forM_ session \value ->
+            restore (closeSession value)
+                `finally`
+                    modifyMVar_ stateVar \case
+                        PortalFailed _ -> pure PortalUninitialized
+                        state -> pure state
 
 inspectPortalDisplay :: PortalRuntime -> IO (Either Text ComputerDisplay)
 inspectPortalDisplay runtime =
@@ -1161,17 +1179,27 @@ stopPortalCaptureProcess processHandle = do
 withTemporaryPath :: String -> (FilePath -> IO value) -> IO value
 withTemporaryPath template action = do
     temporaryDirectory <- getTemporaryDirectory
-    bracket
+    withPortalTemporaryPathWith
         (openBinaryTempFile temporaryDirectory template)
-        cleanup
-        \(path, handle) -> do
-            hClose handle
-            action path
+        hClose
+        removeFile
+        action
+
+withPortalTemporaryPathWith
+    :: IO (FilePath, resource)
+    -> (resource -> IO ())
+    -> (FilePath -> IO ())
+    -> (FilePath -> IO value)
+    -> IO value
+withPortalTemporaryPathWith acquire closeResource removePath action =
+    bracket acquire cleanup \(path, resource) -> do
+        closeResource resource
+        action path
   where
     cleanup (path, handle) =
-        (hClose handle `catchAny` const (pure ()))
+        (closeResource handle `catchAny` const (pure ()))
             `finally`
-                (removeFile path `catchAny` const (pure ()))
+                removePath path
 
 encodePortalFrame
     :: ScreenshotEncoding

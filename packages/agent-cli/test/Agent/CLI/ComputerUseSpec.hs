@@ -42,6 +42,7 @@ import Agent.CLI.ComputerUse.Linux.Portal
     ( PortalState(..)
     , PortalStream(..)
     , ensurePortalStateReadyWith
+    , invalidatePortalStateWith
     , parsePortalStartResults
     , portalDisplayForFrame
     , portalDisplayForStream
@@ -54,6 +55,7 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , validatePortalOwnerUser
     , withPortalCaptureReadiness
     , withPortalInputReadiness
+    , withPortalTemporaryPathWith
     )
 import Agent.CLI.ComputerUse.Linux.X11
     ( XdotoolInvocation(..)
@@ -1024,6 +1026,62 @@ spec = do
             ensurePortalStateReadyWith state initialize
                 `shouldReturn` Right ()
             readIORef attempts `shouldReturn` 2
+
+        it "retries after closing a failed portal session" do
+            state <- newMVar (PortalReady ("stale session" :: Text.Text))
+            closeStarted <- newEmptyMVar
+            allowClose <- newEmptyMVar
+            closed <- newIORef []
+            attempts <- newIORef (0 :: Int)
+            let closeSession session = do
+                    modifyIORef' closed (<> [session])
+                    putMVar closeStarted ()
+                    takeMVar allowClose
+                initialize = do
+                    modifyIORef' attempts (+ 1)
+                    pure ("fresh session" :: Text.Text)
+            withAsync
+                (invalidatePortalStateWith
+                    state
+                    "portal temporarily unavailable"
+                    closeSession)
+                \invalidating -> do
+                    takeMVar closeStarted
+                    ensurePortalStateReadyWith state initialize
+                        `shouldReturn`
+                            Left "portal temporarily unavailable"
+                    putMVar allowClose ()
+                    waitCatch invalidating
+                        >>= (`shouldSatisfy`
+                            either (const False) (const True))
+            ensurePortalStateReadyWith state initialize
+                `shouldReturn` Right ()
+            ensurePortalStateReadyWith state initialize
+                `shouldReturn` Right ()
+            readIORef closed `shouldReturn` ["stale session"]
+            readIORef attempts `shouldReturn` 1
+
+        it "surfaces a portal temp-path removal failure" do
+            events <- newIORef ([] :: [Text.Text])
+            let record event =
+                    modifyIORef' events (<> [event])
+                capture =
+                    withPortalTemporaryPathWith
+                        (record "acquire" >> pure ("capture.png", ()))
+                        (\() -> record "close")
+                        (\_ -> record "remove" >> throwString "remove failed")
+                        (\_ ->
+                            record "action"
+                                >> pure ("captured" :: Text.Text))
+            result <- tryAny capture
+            result `shouldSatisfy` \case
+                Left exception ->
+                    "remove failed"
+                        `Text.isInfixOf` Text.pack (show exception)
+                Right _ -> False
+            readIORef events
+                `shouldReturn`
+                    ["acquire", "close", "action", "close", "remove"]
 
         it "requires one monitor stream and both input grants" do
             parsePortalStartResults portalStartResults
