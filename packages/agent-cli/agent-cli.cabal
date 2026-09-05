@@ -437,6 +437,20 @@ benchmark concurrency-bench
                     , text
                     , time
 
+benchmark portal-capture-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          PortalCapture.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , process >= 1.6.26
+                    , safe-exceptions
+                    , unix
+
 test-suite agent-cli-test
     import:           common-options
     type:             exitcode-stdio-1.0

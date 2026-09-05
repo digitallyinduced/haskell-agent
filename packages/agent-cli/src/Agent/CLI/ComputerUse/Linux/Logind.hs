@@ -541,9 +541,11 @@ waitForReadinessFailure
     -> IO Text
 waitForReadinessFailure readiness = do
     threadDelay readinessPollDelay
-    readiness >>= \case
-        Left err -> pure err
-        Right () -> waitForReadinessFailure readiness
+    timeout readinessPollDelay readiness >>= \case
+        Nothing ->
+            pure "Linux graphical session readiness verification timed out."
+        Just (Left err) -> pure err
+        Just (Right ()) -> waitForReadinessFailure readiness
 
 closeGuard :: MVar (Maybe Client) -> IO ()
 closeGuard state =

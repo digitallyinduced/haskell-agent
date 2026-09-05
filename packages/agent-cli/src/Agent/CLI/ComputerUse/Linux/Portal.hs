@@ -19,6 +19,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , sessionClosedRule
     , validatePortalOwnerUser
     , waitForPortalFrameAfter
+    , withPortalCaptureRunningWith
     , withPortalCaptureReadiness
     , withPortalInputReadiness
     ) where
@@ -72,6 +73,7 @@ import Control.Concurrent
     , takeMVar
     , threadDelay
     , tryPutMVar
+    , withMVar
     )
 import Control.Concurrent.Async
     ( Async
@@ -163,7 +165,7 @@ import System.IO
     , hSetBinaryMode
     )
 import System.Posix.IO (closeFd, fdToHandle)
-import System.Posix.Signals (sigKILL, signalProcessGroup)
+import qualified System.Posix.Signals as Posix
 import System.Posix.Types (Fd)
 import System.Process
     ( CreateProcess(..)
@@ -206,6 +208,7 @@ data PortalCapture = PortalCapture
     , portalCaptureFrameReader :: !(Async ())
     , portalCaptureErrorReader :: !(Async ())
     , portalCaptureFrameState :: !(TVar PortalFrameState)
+    , portalCaptureRequestLock :: !(MVar ())
     }
 
 data PortalPngFrame = PortalPngFrame
@@ -1089,18 +1092,32 @@ notifyPortal runtime member body =
                 body)
 
 capturePortalFrame :: PortalCapture -> IO CapturedPortalFrame
-capturePortalFrame capture = do
-    baseline <-
-        readTVarIO capture.portalCaptureFrameState >>= \case
-            PortalFramePending -> pure 0
-            PortalFrameAvailable sequenceNumber _ ->
-                pure sequenceNumber
-            PortalFrameFailed err -> fail (Text.unpack err)
-    waitForPortalFrameAfter
-        captureRefreshTimeout
-        baseline
-        capture.portalCaptureFrameState
-        >>= either (fail . Text.unpack) pure
+capturePortalFrame capture =
+    withMVar capture.portalCaptureRequestLock \() -> do
+        baseline <-
+            readTVarIO capture.portalCaptureFrameState >>= \case
+                PortalFramePending -> pure 0
+                PortalFrameAvailable sequenceNumber _ ->
+                    pure sequenceNumber
+                PortalFrameFailed err -> fail (Text.unpack err)
+        withPortalCaptureRunningWith
+            (resumePortalCaptureProcess capture.portalCaptureProcess)
+            (pausePortalCaptureProcess capture.portalCaptureProcess)
+            (waitForPortalFrameAfter
+                captureRefreshTimeout
+                baseline
+                capture.portalCaptureFrameState
+                >>= either (fail . Text.unpack) pure)
+
+withPortalCaptureRunningWith
+    :: IO ()
+    -> IO ()
+    -> IO value
+    -> IO value
+withPortalCaptureRunningWith resume suspend action =
+    mask \restore -> do
+        resume
+        restore action `finally` suspend
 
 waitForPortalFrameAfter
     :: Int
@@ -1194,6 +1211,7 @@ startGstreamerPortalCapture
 startGstreamerPortalCapture pipeWireHandle nodeId = do
     frameState <- newTVarIO PortalFramePending
     errorBuffer <- newTVarIO BS.empty
+    requestLock <- newMVar ()
     mask \restore -> do
         (_, maybeOutput, maybeErrors, processHandle) <-
             createProcess
@@ -1240,6 +1258,7 @@ startGstreamerPortalCapture pipeWireHandle nodeId = do
                             frameReader <-
                                 async
                                     (runPortalFrameReader
+                                        processHandle
                                         outputHandle
                                         errorBuffer
                                         frameState)
@@ -1253,6 +1272,7 @@ startGstreamerPortalCapture pipeWireHandle nodeId = do
                                     , portalCaptureFrameReader = frameReader
                                     , portalCaptureErrorReader = errorReader
                                     , portalCaptureFrameState = frameState
+                                    , portalCaptureRequestLock = requestLock
                                     }
                             void (restore (latestPortalFrame capture))
                                 `onException` closePortalCapture capture
@@ -1266,13 +1286,15 @@ startGstreamerPortalCapture pipeWireHandle nodeId = do
                 fail "GStreamer did not expose the portal capture pipes."
 
 runPortalFrameReader
-    :: Handle
+    :: ProcessHandle
+    -> Handle
     -> TVar BS.ByteString
     -> TVar PortalFrameState
     -> IO ()
-runPortalFrameReader outputHandle errorBuffer frameState =
+runPortalFrameReader processHandle outputHandle errorBuffer frameState =
     (forever do
         pngFrame <- readPortalPngFrame outputHandle
+        pausePortalCaptureProcess processHandle
         atomically $
             modifyTVar' frameState \case
                 PortalFramePending ->
@@ -1436,6 +1458,7 @@ closePortalCapture capture =
 
 stopPortalCaptureProcess :: ProcessHandle -> IO ()
 stopPortalCaptureProcess processHandle = do
+    void (tryAny (resumePortalCaptureProcess processHandle))
     void (tryAny (interruptProcessGroupOf processHandle))
     void (tryAny (terminateProcess processHandle))
     timeout closeCallTimeout (waitForProcess processHandle) >>= \case
@@ -1445,10 +1468,24 @@ stopPortalCaptureProcess processHandle = do
                 (\processGroup ->
                     void
                         (tryAny
-                            (signalProcessGroup sigKILL processGroup)))
+                            (Posix.signalProcessGroup Posix.sigKILL processGroup)))
             void $
                 timeout closeCallTimeout
                     (waitForProcess processHandle)
+
+pausePortalCaptureProcess :: ProcessHandle -> IO ()
+pausePortalCaptureProcess =
+    signalPortalCaptureProcess Posix.sigSTOP
+
+resumePortalCaptureProcess :: ProcessHandle -> IO ()
+resumePortalCaptureProcess =
+    signalPortalCaptureProcess Posix.sigCONT
+
+signalPortalCaptureProcess :: Posix.Signal -> ProcessHandle -> IO ()
+signalPortalCaptureProcess signal processHandle =
+    getPid processHandle >>= \case
+        Nothing -> fail "The GStreamer portal capture process has exited."
+        Just processGroup -> Posix.signalProcessGroup signal processGroup
 
 encodePortalFrame
     :: ScreenshotEncoding

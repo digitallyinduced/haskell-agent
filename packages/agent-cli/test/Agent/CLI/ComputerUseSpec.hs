@@ -58,6 +58,7 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , sessionClosedRule
     , validatePortalOwnerUser
     , waitForPortalFrameAfter
+    , withPortalCaptureRunningWith
     , withPortalCaptureReadiness
     , withPortalInputReadiness
     )
@@ -127,6 +128,7 @@ import DBus
 import DBus.Client (MatchRule(..))
 import System.IO (hClose, hSetBinaryMode)
 import System.Posix.IO (createPipe, fdToHandle)
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -1146,6 +1148,30 @@ spec = do
                         , portalFramePng = freshFrame
                         }
 
+        it "suspends a capture process after success and failure" do
+            events <- newIORef ([] :: [Text.Text])
+            let record event =
+                    modifyIORef' events (<> [event])
+                run action =
+                    withPortalCaptureRunningWith
+                        (record "resume")
+                        (record "suspend")
+                        action
+            run (record "capture" >> pure (7 :: Int))
+                `shouldReturn` 7
+            failed <-
+                tryAny
+                    (run (throwString "capture failed" :: IO ()))
+            failed `shouldSatisfy` either (const True) (const False)
+            readIORef events
+                `shouldReturn`
+                    [ "resume"
+                    , "capture"
+                    , "suspend"
+                    , "resume"
+                    , "suspend"
+                    ]
+
         it "requires one monitor stream and both input grants" do
             parsePortalStartResults portalStartResults
                 `shouldBe` Right portalStream
@@ -1202,6 +1228,36 @@ spec = do
                         `finally` writeIORef cleanedUp True
             withPortalInputReadiness readiness blockedInput
                 `shouldReturn` Left "session locked"
+            readIORef cleanedUp `shouldReturn` True
+            readIORef completed `shouldReturn` False
+
+        it "cancels portal input when a readiness poll stalls" do
+            readinessCalls <- newIORef (0 :: Int)
+            cleanedUp <- newIORef False
+            completed <- newIORef False
+            let readiness = do
+                    call <- atomicModifyIORef' readinessCalls \current ->
+                        let next = current + 1
+                        in (next, next)
+                    if call == 1
+                        then pure (Right ())
+                        else do
+                            threadDelay 1000000
+                            pure (Right ())
+                blockedInput =
+                    ( do
+                        threadDelay 1000000
+                        writeIORef completed True
+                        pure (Right ())
+                    )
+                        `finally` writeIORef cleanedUp True
+            timeout
+                500000
+                (withPortalInputReadiness readiness blockedInput)
+                `shouldReturn`
+                    Just
+                        (Left
+                            "Linux graphical session readiness verification timed out.")
             readIORef cleanedUp `shouldReturn` True
             readIORef completed `shouldReturn` False
 

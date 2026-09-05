@@ -63,8 +63,11 @@ The implementation uses only the standard
 3. The selection is reused for the lifetime of that `agent-cli` process.
 4. The grant is not persisted as a restore token. A new process prompts again.
 
-The portal stream includes the cursor. Screenshots are read from PipeWire and
-normalized to the portal's logical dimensions before being returned.
+The portal stream includes the cursor. A session-owned GStreamer process reads
+screenshots from PipeWire and is suspended between explicit capture requests,
+so an idle computer-use session does not continuously convert and PNG-compress
+frames. Captures are normalized to the portal's logical dimensions before being
+returned.
 
 The portal connection is bound conservatively to the process's verified
 `systemd-logind` session. The session-bus address is derived from logind's
@@ -87,6 +90,28 @@ Required components for a non-Nix installation:
 `gst-launch-1.0` and the `pipewiresrc`, `videoconvert`, and `pngenc` elements
 must be discoverable. The packaged Nix executable sets the plugin search path
 and includes these dependencies only on Linux.
+
+### Wayland capture performance benchmark
+
+The retained benchmark compares the former continuously running capture
+pipeline with the request-gated pipeline. Both variants use a 60-fps synthetic
+source, the production four-fps `videorate` cap, PNG encoding, and the same
+bounded PNG parser as the portal backend. It reports median wall time, parent
+and child CPU time, allocation, frame count, and encoded bytes from alternating
+paired samples.
+
+Run the optimized benchmark on Linux at representative resolutions:
+
+```console
+nix develop -c cabal build --offline agent-cli:bench:portal-capture-bench
+bin=$(nix develop -c cabal list-bin agent-cli:bench:portal-capture-bench)
+nix develop -c "$bin" 1920 1080 3000 8 5 +RTS -T
+nix develop -c "$bin" 3840 2160 3000 8 5 +RTS -T
+```
+
+The positional arguments are width, height, idle milliseconds, active capture
+count, and sample count. The idle workload demonstrates background processing;
+the active workload checks the cost of producing the same requested frames.
 
 ## Troubleshooting
 
