@@ -46,6 +46,7 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , PortalState(..)
     , PortalStream(..)
     , beginPortalCaptureRequestWith
+    , cancelAndJoinPortalCaptureWorker
     , closeBarePortalCaptureWith
     , closePortalStateWith
     , drainPortalPngFrameBuffer
@@ -105,8 +106,15 @@ import Control.Concurrent
     , readMVar
     , takeMVar
     , threadDelay
+    , tryPutMVar
     )
-import Control.Concurrent.Async (cancel, waitCatch, withAsync)
+import Control.Concurrent.Async
+    ( async
+    , cancel
+    , poll
+    , waitCatch
+    , withAsync
+    )
 import Control.Concurrent.STM
     ( atomically
     , newTVarIO
@@ -1561,6 +1569,41 @@ spec = do
                     , "close-output"
                     , "close-errors"
                     ]
+
+        it "joins cancelled capture workers before dropping ownership" do
+            started <- newEmptyMVar
+            blocked <- newEmptyMVar
+            unwinding <- newEmptyMVar
+            release <- newEmptyMVar
+            worker <-
+                async $
+                    (putMVar started () >> takeMVar blocked)
+                        `finally`
+                            (putMVar unwinding () >> takeMVar release)
+            timeout 1000000 (takeMVar started)
+                `shouldReturn` Just ()
+            flip finally
+                (do
+                    void (tryPutMVar release ())
+                    cancel worker
+                    void (waitCatch worker)) do
+                cleanup <-
+                    async (cancelAndJoinPortalCaptureWorker worker)
+                flip finally
+                    (do
+                        void (tryPutMVar release ())
+                        cancel cleanup
+                        void (waitCatch cleanup)) do
+                    timeout 1000000 (takeMVar unwinding)
+                        `shouldReturn` Just ()
+                    poll cleanup
+                        >>= (`shouldSatisfy` maybe True (const False))
+                    putMVar release ()
+                    timeout 1000000 (waitCatch cleanup)
+                        >>= (`shouldSatisfy`
+                            maybe
+                                False
+                                (either (const False) (const True)))
 
         it "reads consecutive frames from one persistent PNG stream" do
             let firstFrame =

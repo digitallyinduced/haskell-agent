@@ -7,6 +7,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , PortalState(..)
     , PortalStream(..)
     , beginPortalCaptureRequestWith
+    , cancelAndJoinPortalCaptureWorker
     , closeBarePortalCaptureWith
     , closePortalStateWith
     , ensurePortalStateReadyWith
@@ -93,6 +94,7 @@ import Control.Concurrent.Async
     ( Async
     , async
     , cancel
+    , waitCatch
     )
 import Control.Concurrent.STM
     ( STM
@@ -1667,8 +1669,8 @@ startGstreamerPortalCapture pipeWireHandle nodeId = do
                                         frameState
                                         requestGeneration
                                         processLock))
-                                (do
-                                    cancel errorReader)
+                                (cancelAndJoinPortalCaptureWorker
+                                    errorReader)
                         let capture = PortalCapture
                                 { portalCaptureProcess = processHandle
                                 , portalCaptureOutput = outputHandle
@@ -2026,10 +2028,17 @@ closePortalCapture capture =
             [ capture.portalCaptureFrameReader
             , capture.portalCaptureErrorReader
             ]
-            cancel
+            cancelAndJoinPortalCaptureWorker
         void (tryAny (hClose capture.portalCaptureOutput))
         void (tryAny (hClose capture.portalCaptureErrors))
         either Exception.throwIO pure stopped
+
+cancelAndJoinPortalCaptureWorker :: Async value -> IO ()
+cancelAndJoinPortalCaptureWorker worker = do
+    -- async's cancel already waits, but keep the join explicit so cleanup's
+    -- ownership barrier remains visible at each capture teardown site.
+    cancel worker
+    void (waitCatch worker)
 
 stopPortalCaptureProcess :: ProcessHandle -> IO ()
 stopPortalCaptureProcess processHandle =
