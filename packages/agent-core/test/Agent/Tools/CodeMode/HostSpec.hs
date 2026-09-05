@@ -4,8 +4,7 @@ import Agent.Loop (defaultLoopDispatch)
 import qualified Agent.Json.Decode as Json
 import Agent.ToolArgs (objectArgsExact, reqInt)
 import Agent.ToolDispatch
-    ( ToolCall(..)
-    , ToolCallKind(..)
+    ( ToolCallKind(..)
     , ToolCallResult(..)
     , ToolHandler
     , customToolCall
@@ -21,6 +20,7 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
+    , appToolSupportsAsync
     , freeformApplyPatchAppToolWithExecution
     , jsonAppToolWithExecution
     )
@@ -776,6 +776,20 @@ spec = describe "code-mode Bun host" do
             Text.isInfixOf "declare const tools: { lookup(args:"
         mixedDescription `shouldSatisfy`
             (not . Text.isInfixOf "### `lookup`")
+
+    it "marks both code-mode host tools async-capable" do
+        worker <- codeModeWorkerPath
+        let invoke _ = pure
+                (Right (ToolCallResult "nested" "value" FunctionCallKind))
+        created <- newCodeModeToolSet
+            CodeToolMode ImageDetailVisible worker invoke []
+        toolSet <- either
+            (\err -> expectationFailure (show err) >> fail "unreachable")
+            pure
+            created
+        map appToolSupportsAsync toolSet.codeModeTools
+            `shouldBe` [True, True]
+        toolSet.closeCodeModeToolSet
 
     it "fails closed before advertising a missing worker" do
         let invoke _ = pure

@@ -241,6 +241,8 @@ import Agent.Store.Postgres.Custom
 import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallMode(..)
+    , toolCallMode
     , ToolCallKind(..)
     , isComputerToolCallKind
     )
@@ -5699,6 +5701,7 @@ requestApprovalFromClient callback context control call = do
                 , "summary" Aeson..= summarizeToolCall call
                 , "arguments" Aeson..= arguments
                 , "argumentsEncrypted" Aeson..= call.argumentsEncrypted
+                , "async" Aeson..= (toolCallMode call == AsyncToolCall)
                 , "truncated" Aeson..= truncated
                 ]
             ]

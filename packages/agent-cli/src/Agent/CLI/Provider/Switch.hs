@@ -110,7 +110,7 @@ import Agent.Error
     ( ApiError(..)
     , CredentialExhaustionReason(..)
     )
-import Agent.Loop (Backend(..), BackendMiddleware)
+import Agent.Loop (Backend(..), BackendMiddleware, backendWithCallbacks)
 import Agent.Provider
     ( AccountFailure(..)
     , BillingMode(..)
@@ -947,9 +947,10 @@ commitBackendOnSuccess
     -> Persistence
     -> BackendMiddleware
 commitBackendOnSuccess
-        scope home projectRoot committed transition persist (Backend submit) =
-    Backend \state previous inputs onEvent -> do
-        result <- submit state previous inputs onEvent
+        scope home projectRoot committed transition persist backend =
+    backendWithCallbacks \state previous inputs callbacks -> do
+        result <-
+            backend.submitTurnWithCallbacks state previous inputs callbacks
         case result of
             Right _ -> do
                 shouldCommit <- atomicModifyIORef' committed \done ->

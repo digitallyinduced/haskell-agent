@@ -38,6 +38,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 ])
         readCodexTurnState turnState `shouldReturn` Just "ts-first"

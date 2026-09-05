@@ -386,6 +386,7 @@ handleSelection
                             choice.modelTarget.targetWireModelId
                             choice.modelTarget.targetDialect
                             paramsRef render conversationRef persist
+                        env.sessionRefreshRequestParams
                         displayInfo message $
                             Text.putStrLn
                                 (roleMuted color (glyphOk <> message))
@@ -493,6 +494,7 @@ handleSelection
                         choice.modelTarget.targetWireModelId
                         choice.modelTarget.targetDialect
                         paramsRef render conversationRef persist
+                    env.sessionRefreshRequestParams
                     setSessionEffort env selectedEffort
                     displayInfo message $
                         Text.putStrLn

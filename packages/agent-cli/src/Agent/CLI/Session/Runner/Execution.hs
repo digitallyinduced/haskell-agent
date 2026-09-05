@@ -85,6 +85,9 @@ import Agent.CLI.Style
 import Agent.CLI.Terminal
 import Agent.CLI.Request
 import Agent.CLI.Tools
+import Agent.CLI.ModelConfig
+    ( catalogSupportsAsyncToolCallsForTransport
+    )
 import Agent.CLI.Error
 import Agent.CLI.Dialects
 import Agent.CLI.Dictation (dictationTargetForSession)
@@ -879,6 +882,7 @@ data SessionShellRuntime = SessionShellRuntime
     , shellComputerUseEnabled :: !(IO Bool)
     , shellSetComputerUseEnabled :: !(Bool -> IO Text.Text)
     , shellSetTempDir :: !(OsPath -> IO ())
+    , shellRefreshRequestParams :: !(IO ())
     }
 
 buildSessionShellRuntime
@@ -895,6 +899,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         , shellComputerUseEnabled = readIORef computerUseEnabledRef
         , shellSetComputerUseEnabled = setComputerUse
         , shellSetTempDir = setSessionTempDir
+        , shellRefreshRequestParams = refreshCurrentSessionParams
         }
   where
     nativeCapabilities = host.hostNativeCapabilities
@@ -990,6 +995,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         ShellNone -> "none"
     refreshSessionParams ghciEnabled bashEnabled computerUseEnabled = do
         sessionTmp <- readIORef toolEnv.toolSessionTmp
+        effectiveModel <- readSessionRequestModel paramsRef
         today <- utctDay <$> getCurrentTime
         let enabledTools =
                 activeSessionTools
@@ -1014,21 +1020,37 @@ buildSessionShellRuntime host controls SessionRequest{..} =
                             today
                             (isOneShot options)
             toolSchemas =
+                let modelSupportsAsync =
+                        catalogSupportsAsyncToolCallsForTransport
+                            catalog
+                            connectionId
+                            effectiveModel
+                in
                 case codeModeRuntime of
                     Just _ ->
-                        schemasFromAppToolsCodeModeWithHostedSearch
+                        schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
                             nativeCapabilities.nativeProviderHostedTools
+                            modelSupportsAsync
                             dialect
                             (providerVisibleTools enabledTools)
                     Nothing ->
-                        schemasFromAppToolsWithHostedSearch
+                        schemasFromAppToolsWithHostedSearchAndAsyncCapability
                             nativeCapabilities.nativeProviderHostedTools
+                            modelSupportsAsync
                             dialect
                             enabledTools
         modifySessionRequestOptions paramsRef
             (setRequestInstructionsAndTools
                 instructionText
                 (Just toolSchemas))
+    refreshCurrentSessionParams = do
+        ghciEnabled <- readIORef ghciEnabledRef
+        bashEnabled <- readIORef bashEnabledRef
+        computerUseEnabled <- readIORef computerUseEnabledRef
+        refreshSessionParams
+            ghciEnabled
+            bashEnabled
+            computerUseEnabled
     setShellMode mode = do
         let (ghciEnabled, bashEnabled) = shellModeFlags mode
         writeIORef ghciEnabledRef ghciEnabled
@@ -1063,13 +1085,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         -- file remains attached to the previous session.
         resetToolSessionTemp tempDir
         setToolSessionTmp toolEnv (Just tempDir)
-        ghciEnabled <- readIORef ghciEnabledRef
-        bashEnabled <- readIORef bashEnabledRef
-        computerUseEnabled <- readIORef computerUseEnabledRef
-        refreshSessionParams
-            ghciEnabled
-            bashEnabled
-            computerUseEnabled
+        refreshCurrentSessionParams
 
 data SessionSubagentRuntime = SessionSubagentRuntime
     { subagentBeginTurn :: !(IO (Maybe RootTurnId))
@@ -1466,6 +1482,8 @@ buildSessionEnv
             loopRuntime.loopRuntimeShell.shellComputerUseEnabled
         , sessionSetComputerUseEnabled =
             loopRuntime.loopRuntimeShell.shellSetComputerUseEnabled
+        , sessionRefreshRequestParams =
+            loopRuntime.loopRuntimeShell.shellRefreshRequestParams
         , sessionBackground = startup.startupBackground
         , sessionStdinControl = stdinControl
         , sessionDraft = startup.startupSessionState.sessionDraft

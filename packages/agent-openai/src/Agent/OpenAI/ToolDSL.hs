@@ -27,6 +27,7 @@ buildTool name description properties = FunctionToolValue FunctionTool
         (rawJsonFromEncoding
             (Aeson.toEncoding (parametersObjectLoose properties)))
     , strict = Just False
+    , async = Nothing
     }
 
 -- | grok-build function tool: optional fields stay optional, @strict@ omitted.
@@ -38,4 +39,5 @@ buildGrokTool name description properties = FunctionToolValue FunctionTool
         (rawJsonFromEncoding
             (Aeson.toEncoding (parametersObjectLoose properties)))
     , strict = Nothing
+    , async = Nothing
     }

@@ -109,6 +109,7 @@ data SessionEnv = SessionEnv
     , sessionSetShellMode :: !(ShellMode -> IO Text)
     , sessionComputerUseEnabled :: !(IO Bool)
     , sessionSetComputerUseEnabled :: !(Bool -> IO Text)
+    , sessionRefreshRequestParams :: !(IO ())
     , sessionBackground :: !Bool
     , sessionStdinControl :: !StdinControl
     , sessionDraft :: !(IORef Text)

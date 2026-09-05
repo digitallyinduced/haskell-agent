@@ -69,6 +69,7 @@ spec = describe "Agent.CLI.Context" do
                             Just (Text.replicate 20 "description ")
                         , parameters = Nothing
                         , strict = Just True
+                        , async = Nothing
                         }]
                     "medium"
             output =

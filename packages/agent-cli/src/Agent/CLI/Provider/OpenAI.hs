@@ -17,6 +17,7 @@ import Agent.Loop
     ( Backend(..)
     , TokenUsage
     , TurnInput
+    , backendWithCallbacks
     )
 import qualified Agent.OpenAI.Client as OpenAIClient
 import Agent.OpenAI.LoopBackend
@@ -175,7 +176,8 @@ lockedOpenAiSession networkRecovery gatewayOnly compactThreshold
                 baseBackend
         turnScopedBackend =
             withCodexTurnStateScope getTurnState compactingBackend
-        serializedBackend = Backend \state previous inputs onEvent ->
+        serializedBackend = backendWithCallbacks \state previous inputs callbacks ->
             withMVar wsLock \_ ->
-                turnScopedBackend.submitTurn state previous inputs onEvent
+                turnScopedBackend.submitTurnWithCallbacks
+                    state previous inputs callbacks
     in (compactSender, serializedBackend)

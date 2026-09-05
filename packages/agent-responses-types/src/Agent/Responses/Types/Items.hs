@@ -105,13 +105,13 @@ data FunctionCall = FunctionCall
     , arguments              :: !Text
     , encryptedFunctionArgs  :: !(Maybe [Text])
     , status                 :: !(Maybe ItemStatus)
-
+    , async                  :: !(Maybe Bool)
     } deriving stock (Eq, Show)
 
 instance ToJSON FunctionCall where
     toJSON FunctionCall
         { itemId, callId, name, namespace, provider, arguments, encryptedFunctionArgs
-        , status } =
+        , status, async } =
             objectWith
                 [ Just (field "type" ("function_call" :: Text))
                 , optionalField "id" itemId
@@ -122,6 +122,7 @@ instance ToJSON FunctionCall where
                 , Just (field "arguments" arguments)
                 , optionalField "encrypted_function_args" encryptedFunctionArgs
                 , optionalField "status" status
+                , optionalField "async" async
                 ]
 
 data ComputerPoint = ComputerPoint { pointX :: !Int, pointY :: !Int }
@@ -321,13 +322,14 @@ data FunctionCallOutput = FunctionCallOutput
     , provider    :: !(Maybe Text)
     , output      :: !RawJson
     , status      :: !(Maybe ItemStatus)
+    , async       :: !(Maybe Bool)
     -- Local execution facts; never part of provider JSON.
     , localOutcome :: !(Maybe ToolOutcome)
     } deriving stock (Eq, Show)
 
 instance ToJSON FunctionCallOutput where
     toJSON FunctionCallOutput
-        { itemId, callId, name, namespace, provider, output, status } =
+        { itemId, callId, name, namespace, provider, output, status, async } =
             objectWith
                 [ Just (field "type" ("function_call_output" :: Text))
                 , optionalField "id" itemId
@@ -337,6 +339,7 @@ instance ToJSON FunctionCallOutput where
                 , optionalField "provider" provider
                 , Just (field "output" output)
                 , optionalField "status" status
+                , optionalField "async" async
                 ]
 
 
@@ -347,12 +350,12 @@ data CustomToolCall = CustomToolCall
     , namespace   :: !(Maybe Text)
     , input       :: !Text
     , status      :: !(Maybe ItemStatus)
-
+    , async       :: !(Maybe Bool)
     } deriving stock (Eq, Show)
 
 instance ToJSON CustomToolCall where
     toJSON CustomToolCall
-        { itemId, callId, name, namespace, input, status } =
+        { itemId, callId, name, namespace, input, status, async } =
             objectWith
                 [ Just (field "type" ("custom_tool_call" :: Text))
                 , optionalField "id" itemId
@@ -361,6 +364,7 @@ instance ToJSON CustomToolCall where
                 , optionalField "namespace" namespace
                 , Just (field "input" input)
                 , optionalField "status" status
+                , optionalField "async" async
                 ]
 
 
@@ -370,13 +374,14 @@ data CustomToolCallOutput = CustomToolCallOutput
     , name        :: !(Maybe Text)
     , output      :: !RawJson
     , status      :: !(Maybe ItemStatus)
+    , async       :: !(Maybe Bool)
     -- Local execution facts; never part of provider JSON.
     , localOutcome :: !(Maybe ToolOutcome)
     } deriving stock (Eq, Show)
 
 instance ToJSON CustomToolCallOutput where
     toJSON CustomToolCallOutput
-        { itemId, callId, name, output, status } =
+        { itemId, callId, name, output, status, async } =
             objectWith
                 [ Just (field "type" ("custom_tool_call_output" :: Text))
                 , optionalField "id" itemId
@@ -384,6 +389,7 @@ instance ToJSON CustomToolCallOutput where
                 , optionalField "name" name
                 , Just (field "output" output)
                 , optionalField "status" status
+                , optionalField "async" async
                 ]
 
 
@@ -951,6 +957,7 @@ functionCallDecoder = Hermes.object $
         <*> Hermes.atKey "arguments" Hermes.text
         <*> optionalAtKey "encrypted_function_args" (Hermes.list Hermes.text)
         <*> optionalAtKey "status" itemStatusDecoder
+        <*> optionalAtKey "async" Hermes.bool
 
 functionCallOutputDecoder :: Hermes.Decoder FunctionCallOutput
 functionCallOutputDecoder = Hermes.object $
@@ -962,6 +969,7 @@ functionCallOutputDecoder = Hermes.object $
         <*> optionalAtKey "provider" Hermes.text
         <*> Hermes.atKey "output" rawJsonDecoder
         <*> optionalAtKey "status" itemStatusDecoder
+        <*> optionalAtKey "async" Hermes.bool
         <*> pure Nothing
 
 customToolCallDecoder :: Hermes.Decoder CustomToolCall
@@ -973,6 +981,7 @@ customToolCallDecoder = Hermes.object $
         <*> optionalAtKey "namespace" Hermes.text
         <*> Hermes.atKey "input" Hermes.text
         <*> optionalAtKey "status" itemStatusDecoder
+        <*> optionalAtKey "async" Hermes.bool
 
 customToolCallOutputDecoder :: Hermes.Decoder CustomToolCallOutput
 customToolCallOutputDecoder = Hermes.object $
@@ -982,6 +991,7 @@ customToolCallOutputDecoder = Hermes.object $
         <*> optionalAtKey "name" Hermes.text
         <*> Hermes.atKey "output" rawJsonDecoder
         <*> optionalAtKey "status" itemStatusDecoder
+        <*> optionalAtKey "async" Hermes.bool
         <*> pure Nothing
 
 reasoningSummaryPartDecoder :: Hermes.Decoder ReasoningSummaryPart

@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module Agent.Loop.Internal where
 
 import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
@@ -34,12 +36,16 @@ import Agent.Responses.Types
     )
 import Agent.Telemetry (TurnTelemetry)
 import Agent.ToolDispatch
-    ( ToolOutcome(..)
+    ( ToolCall(..)
+    , ToolCallMode(..)
+    , ToolOutcome(..)
     , withToolCallOutcome
-    , ToolCall(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , ToolResultImage(..)
+    , setToolCallArguments
+    , toolCallMode
+    , withToolCallResultMode
     )
 import Agent.Tools.Scheduling
     ( ToolSchedulingPlan(..)
@@ -48,18 +54,45 @@ import Agent.Tools.Scheduling
 import Agent.Tools.Types
     ( ToolRegistry
     , dispatchRegisteredToolCall
+    , toolSupportsAsync
     , toolSchedulingPlanFor
     )
 import Control.Concurrent.Async
-    ( mapConcurrently
+    ( Async
+    , mapConcurrently
     , race
     , waitCatch
     , withAsync
+    )
+import Control.Concurrent.MVar (newMVar, withMVar)
+import Control.Concurrent.STM
+    ( STM
+    , TMVar
+    , TQueue
+    , TVar
+    , atomically
+    , check
+    , modifyTVar'
+    , newEmptyTMVar
+    , newEmptyTMVarIO
+    , newTQueueIO
+    , newTVarIO
+    , putTMVar
+    , readTMVar
+    , readTQueue
+    , readTVar
+    , throwSTM
+    , tryPutTMVar
+    , tryReadTMVar
+    , tryReadTQueue
+    , writeTQueue
+    , writeTVar
     )
 import qualified Control.Exception as Exception
 import Control.Exception.Safe
     ( SomeException
     , displayException
+    , isAsyncException
     , mask
     , tryAny
     )
@@ -75,6 +108,9 @@ import Data.IntMap.Strict (IntMap)
 import qualified Data.IntSet as IntSet
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.List.NonEmpty as NonEmpty
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
+import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word64)
@@ -188,8 +224,18 @@ normalizeTurnInputImages = \case
             { toolResultImages =
                 fmap normalizeToolResultImage toolResultImages
             }
+    normalizeToolResultImages result@AsyncToolCallResult{} = result
+    normalizeToolResultImages result@AsyncToolCallResultWithImages{
+        toolResultImages
+    } =
+        result
+            { toolResultImages =
+                fmap normalizeToolResultImage toolResultImages
+            }
 
     normalizeToolResultImages result@ToolCallResultWithOutcome{toolResultImages} =
+        result { toolResultImages = fmap normalizeToolResultImage toolResultImages }
+    normalizeToolResultImages result@AsyncToolCallResultWithOutcome{toolResultImages} =
         result { toolResultImages = fmap normalizeToolResultImage toolResultImages }
 
     normalizeToolResultImage :: ToolResultImage -> ToolResultImage
@@ -492,16 +538,54 @@ nextBackendRevision :: BackendRevision -> BackendRevision
 nextBackendRevision (BackendRevision revision) =
     BackendRevision (revision + 1)
 
-newtype Backend = Backend
-    { submitTurn
-        :: BackendSnapshot
-        -- | Legacy unnamespaced continuation for persisted sessions. New
-        -- backends should prefer the namespaced token in 'BackendSnapshot'.
-        -> Maybe Text
-        -> [TurnInput]
-        -> (LoopEvent -> IO ())
-        -> IO (Either ApiError BackendResult)
+type LegacySubmitTurn =
+    BackendSnapshot
+    -- | Legacy unnamespaced continuation for persisted sessions. New
+    -- backends should prefer the namespaced token in 'BackendSnapshot'.
+    -> Maybe Text
+    -> [TurnInput]
+    -> (LoopEvent -> IO ())
+    -> IO (Either ApiError BackendResult)
+
+type CallbackSubmitTurn =
+    BackendSnapshot
+    -> Maybe Text
+    -> [TurnInput]
+    -> BackendCallbacks
+    -> IO (Either ApiError BackendResult)
+
+data BackendCallbacks = BackendCallbacks
+    { onLoopEvent :: !(LoopEvent -> IO ())
+    , onAsyncToolCall :: !(ToolCall -> IO ())
     }
+
+data Backend = BackendInternal
+    { submitTurn :: LegacySubmitTurn
+    , submitTurnWithCallbacks :: CallbackSubmitTurn
+    }
+
+-- | Compatibility constructor for event-only backends.
+pattern Backend :: LegacySubmitTurn -> Backend
+pattern Backend legacySubmit <- BackendInternal legacySubmit _
+  where
+    Backend legacySubmit =
+        BackendInternal
+            legacySubmit
+            (\snapshot previous inputs callbacks ->
+                legacySubmit snapshot previous inputs callbacks.onLoopEvent)
+
+{-# COMPLETE Backend #-}
+
+-- | Construct a backend that can announce async tool calls while streaming.
+backendWithCallbacks :: CallbackSubmitTurn -> Backend
+backendWithCallbacks callbackSubmit =
+    BackendInternal legacySubmit callbackSubmit
+  where
+    legacySubmit snapshot previous inputs onEvent =
+        callbackSubmit snapshot previous inputs BackendCallbacks
+            { onLoopEvent = onEvent
+            , onAsyncToolCall = const (pure ())
+            }
 
 data BackendStateStore = BackendStateStore
     { readBackendState :: !(IO BackendSnapshot)
@@ -722,6 +806,7 @@ exceptionSummary =
 data LoopRuntime = LoopRuntime
     { loopRuntimeConfig :: LoopConfig
     , loopRuntimeEventPump :: LoopEventPump
+    , loopRuntimeAsyncToolManager :: Maybe AsyncToolManager
     , loopRuntimeProgressRef :: IORef (BackendSnapshot, LoopProgress)
     , loopRuntimePendingRef :: IORef [TurnInput]
     , loopRuntimeUncommittedTextRef :: IORef ([[Text]], [Text])
@@ -752,6 +837,7 @@ initializeLoopRuntime
     -> IO LoopRuntime
 initializeLoopRuntime config0 initialState firstInputs = do
     eventPump <- newEventPump config0.loopOnEvent
+    eventAdmissionLock <- newMVar ()
     progressRef <- newIORef (initialState, NoResponseCommitted)
     uncommittedTextRef <- newIORef ([], [])
     uncommittedDisplayEventsRef <- newIORef []
@@ -760,17 +846,22 @@ initializeLoopRuntime config0 initialState firstInputs = do
     initialSteering <- config0.loopReadSteering
     pendingRef <- newIORef (firstInputs <> initialSteering)
     let config = config0
-            { loopOnEvent = \event -> do
-                recordVisibleLoopEvent
-                    uncommittedTextRef
-                    uncommittedDisplayEventsRef
-                    providerAttemptActiveRef
-                    event
-                emitLoopEvent eventPump event
+            { loopOnEvent = \event ->
+                -- Provider streaming and async host tools can publish at the
+                -- same time. Keep journal mutation and event-pump admission
+                -- in one total order instead of racing the IORefs below.
+                withMVar eventAdmissionLock \_ -> do
+                    recordVisibleLoopEvent
+                        uncommittedTextRef
+                        uncommittedDisplayEventsRef
+                        providerAttemptActiveRef
+                        event
+                    emitLoopEvent eventPump event
             }
     pure LoopRuntime
         { loopRuntimeConfig = config
         , loopRuntimeEventPump = eventPump
+        , loopRuntimeAsyncToolManager = Nothing
         , loopRuntimeProgressRef = progressRef
         , loopRuntimePendingRef = pendingRef
         , loopRuntimeUncommittedTextRef = uncommittedTextRef
@@ -977,11 +1068,16 @@ submitLoopTurn runtime cursor = do
     raced <- mask \restore ->
         withAsync
             (restore $
-                config.loopBackend.submitTurn
+                config.loopBackend.submitTurnWithCallbacks
                     (normalizeBackendSnapshotImages cursor.cursorState)
                     cursor.cursorPreviousResponseId
                     (normalizeTurnInputs cursor.cursorInputs)
-                    onBackendEvent)
+                    BackendCallbacks
+                        { onLoopEvent = onBackendEvent
+                        , onAsyncToolCall =
+                            admitAsyncToolCall
+                                (asyncToolManager runtime)
+                        })
             \submission -> do
                 result <- restore $ race
                     (waitCancel config.loopCancel)
@@ -1065,41 +1161,58 @@ continueCommittedLoop runtime cursor turn = do
                 config.loopOnEvent (TurnFinished turn)
                 case turn.completion of
                     TurnIncomplete{} ->
+                        -- An incomplete provider response is terminal rather
+                        -- than an assistant completion. Leaving the enclosing
+                        -- loop scope cancels and joins any async calls that
+                        -- were announced before the incomplete response.
                         finishLoopCursor runtime cursor
                             (Left (LoopIncomplete turn))
                     TurnCompleted -> do
                         config.loopCommitSteering cursor.cursorSteeringCount
-                        results <-
-                            if null turn.toolCalls
-                                then pure []
-                                else runToolCalls config turn.toolCalls
-                        writeIORef
-                            runtime.loopRuntimePendingRef
-                            (map CompletedTool results)
-                        cancelledAfter <- isCancelled config.loopCancel
-                        if cancelledAfter
-                            then finishLoopCursor runtime cursor
-                                (Left (LoopCancelled results))
-                            else do
-                                steering <- config.loopReadSteering
-                                let continuation =
-                                        map CompletedTool results <> steering
-                                case decideCompletedTurn
-                                    cursor
-                                    turn
-                                    continuation
-                                    (length steering) of
-                                    ContinueLoop nextCursor ->
-                                        runLoopCursor runtime nextCursor
-                                    FinishLoop result ->
-                                        finishLoopCursor runtime cursor
-                                            (Right result)
-                                    WarnAndFinishLoop result -> do
-                                        config.loopOnEvent
-                                            (WarningRaised
-                                                emptyContinuationWarning)
-                                        finishLoopCursor runtime cursor
-                                            (Right result)
+                        racedResults <-
+                            race
+                                (waitCancel config.loopCancel)
+                                (runManagedToolCalls
+                                    (asyncToolManager runtime)
+                                    turn.toolCalls)
+                        case racedResults of
+                            Left () ->
+                                -- The manager itself is scoped by
+                                -- 'runLoopWithEventPump'. Returning here lets
+                                -- that scope cancel and join a handler or an
+                                -- approval callback that has not completed.
+                                finishLoopCursor runtime cursor
+                                    (Left (LoopCancelled []))
+                            Right results -> do
+                                writeIORef
+                                    runtime.loopRuntimePendingRef
+                                    (map CompletedTool results)
+                                cancelledAfter <-
+                                    isCancelled config.loopCancel
+                                if cancelledAfter
+                                    then finishLoopCursor runtime cursor
+                                        (Left (LoopCancelled results))
+                                    else do
+                                        steering <- config.loopReadSteering
+                                        let continuation =
+                                                map CompletedTool results
+                                                    <> steering
+                                        case decideCompletedTurn
+                                            cursor
+                                            turn
+                                            continuation
+                                            (length steering) of
+                                            ContinueLoop nextCursor ->
+                                                runLoopCursor runtime nextCursor
+                                            FinishLoop result ->
+                                                finishLoopCursor runtime cursor
+                                                    (Right result)
+                                            WarnAndFinishLoop result -> do
+                                                config.loopOnEvent
+                                                    (WarningRaised
+                                                        emptyContinuationWarning)
+                                                finishLoopCursor runtime cursor
+                                                    (Right result)
 
 runLoopWithEventPump
     :: LoopRuntime
@@ -1109,9 +1222,12 @@ runLoopWithEventPump
     -> IO LoopExecution
 runLoopWithEventPump runtime initialState previousResponseId firstInputs =
     withAsync (runEventPump runtime.loopRuntimeEventPump) \eventWorker -> do
-        let initialSteering = runtime.loopRuntimeInitialSteering
+        manager <- newAsyncToolManager
+        let managedRuntime =
+                runtime { loopRuntimeAsyncToolManager = Just manager }
+            initialSteering = managedRuntime.loopRuntimeInitialSteering
             run =
-                runLoopCursor runtime LoopCursor
+                runLoopCursor managedRuntime LoopCursor
                     { cursorState = initialState
                     , cursorProgress = NoResponseCommitted
                     , cursorPreviousResponseId = previousResponseId
@@ -1122,22 +1238,51 @@ runLoopWithEventPump runtime initialState previousResponseId firstInputs =
                     , cursorTokenUsage = emptyTokenUsage
                     , cursorEmptyContinuations = 0
                     }
-        raced <-
-            race
-                (waitEventPumpFailure
-                    eventWorker
-                    runtime.loopRuntimeEventPump)
-                run
-        execution <- case raced of
-            Left failure -> do
-                (state, progress) <-
-                    readIORef runtime.loopRuntimeProgressRef
-                handleLoopEventFailure
-                    (unexpectedLoopExecution runtime)
-                    state
-                    progress
-                    failure
-            Right completed -> pure completed
+            handleManagerFailure exception
+                | isAsyncException exception =
+                    Exception.throwIO exception
+                | otherwise = do
+                    (state, progress) <-
+                        readIORef managedRuntime.loopRuntimeProgressRef
+                    unexpectedLoopExecution
+                        managedRuntime
+                        state
+                        progress
+                        exception
+        execution <-
+            withAsync
+                (runAsyncToolManager
+                    managedRuntime.loopRuntimeConfig
+                    manager)
+                \managerWorker -> do
+                    raced <-
+                        race
+                            (race
+                                (waitEventPumpFailure
+                                    eventWorker
+                                    managedRuntime.loopRuntimeEventPump)
+                                (waitAsyncToolManagerFailure
+                                    managerWorker
+                                    manager))
+                            run
+                    case raced of
+                        Left (Left failure) -> do
+                            (state, progress) <-
+                                readIORef
+                                    managedRuntime.loopRuntimeProgressRef
+                            handleLoopEventFailure
+                                (unexpectedLoopExecution managedRuntime)
+                                state
+                                progress
+                                failure
+                        Left (Right exception) ->
+                            handleManagerFailure exception
+                        Right completed ->
+                            atomically
+                                (tryReadTMVar manager.asyncToolFailure)
+                                >>= maybe
+                                    (pure completed)
+                                    handleManagerFailure
         flushEventPump runtime.loopRuntimeEventPump >>= \case
             Left failure ->
                 readIORef runtime.loopRuntimeProgressRef
@@ -1297,7 +1442,7 @@ emitLoopEvent pump = \case
             pump
             (ToolArgumentsSnapshot call.callId)
             (\arguments ->
-                ToolArgumentsUpdated (call { arguments = arguments }))
+                ToolArgumentsUpdated (setToolCallArguments arguments call))
             call.arguments
     ToolOutputUpdated callId output ->
         emitLatestText
@@ -1350,6 +1495,269 @@ handleLoopEventFailure unexpected state progress = \case
         unexpected state progress exception
     EventPumpAsyncFailure exception ->
         Exception.throwIO exception
+
+data AsyncToolManager = AsyncToolManager
+    { asyncToolRequests :: !(TQueue ManagedToolRequest)
+    , asyncToolCalls :: !(TVar (Map Text ManagedToolCall))
+    , asyncToolNextSequence :: !(TVar Int)
+    , asyncToolScheduled :: !(TVar (IntMap ToolSchedulingPlan))
+    , asyncToolOutstanding :: !(TVar Int)
+    , asyncToolCompleted :: !(TQueue ToolCallResult)
+    , asyncToolFailure :: !(TMVar SomeException)
+    }
+
+data ManagedToolCall = ManagedToolCall
+    { managedCall :: !ToolCall
+    , managedResult :: !(TMVar (Maybe ToolCallResult))
+    }
+
+data ManagedToolRequest = ManagedToolRequest
+    { managedSequence :: !Int
+    , managedRecord :: !ManagedToolCall
+    }
+
+data AsyncToolCallConflict = AsyncToolCallConflict !Text
+
+instance Show AsyncToolCallConflict where
+    show (AsyncToolCallConflict message) = Text.unpack message
+
+instance Exception.Exception AsyncToolCallConflict
+
+newAsyncToolManager :: IO AsyncToolManager
+newAsyncToolManager =
+    AsyncToolManager
+        <$> newTQueueIO
+        <*> newTVarIO Map.empty
+        <*> newTVarIO 0
+        <*> newTVarIO IntMap.empty
+        <*> newTVarIO 0
+        <*> newTQueueIO
+        <*> newEmptyTMVarIO
+
+asyncToolManager :: LoopRuntime -> AsyncToolManager
+asyncToolManager runtime =
+    case runtime.loopRuntimeAsyncToolManager of
+        Just manager -> manager
+        Nothing ->
+            error "async tool manager used outside runLoopWithEventPump"
+
+admitAsyncToolCall :: AsyncToolManager -> ToolCall -> IO ()
+admitAsyncToolCall manager call
+    | toolCallMode call /= AsyncToolCall =
+        atomically $
+            throwSTM $
+                AsyncToolCallConflict
+                    ("Backend announced a non-async tool call: " <> call.callId)
+    | otherwise = do
+        _ <- atomically (admitManagedToolCall manager call)
+        pure ()
+
+admitBlockingToolCall
+    :: AsyncToolManager
+    -> ToolCall
+    -> IO (TMVar (Maybe ToolCallResult))
+admitBlockingToolCall manager call =
+    atomically (admitManagedToolCall manager call)
+
+admitManagedToolCall
+    :: AsyncToolManager
+    -> ToolCall
+    -> STM (TMVar (Maybe ToolCallResult))
+admitManagedToolCall manager call = do
+    calls <- readTVar manager.asyncToolCalls
+    case Map.lookup call.callId calls of
+        Just existing
+            | existing.managedCall == call ->
+                pure existing.managedResult
+            | otherwise ->
+                throwSTM $
+                    AsyncToolCallConflict
+                        ("Conflicting tool calls reused call_id " <> call.callId)
+        Nothing -> do
+            result <- newEmptyTMVar
+            sequenceNumber <- readTVar manager.asyncToolNextSequence
+            let record = ManagedToolCall
+                    { managedCall = call
+                    , managedResult = result
+                    }
+            writeTVar
+                manager.asyncToolCalls
+                (Map.insert call.callId record calls)
+            writeTVar
+                manager.asyncToolNextSequence
+                (sequenceNumber + 1)
+            when (toolCallMode call == AsyncToolCall) $
+                modifyTVar' manager.asyncToolOutstanding (+ 1)
+            writeTQueue manager.asyncToolRequests ManagedToolRequest
+                { managedSequence = sequenceNumber
+                , managedRecord = record
+                }
+            pure result
+
+runManagedToolCalls
+    :: AsyncToolManager
+    -> [ToolCall]
+    -> IO [ToolCallResult]
+runManagedToolCalls manager calls = do
+    blocking <- catMaybes <$> traverse admit calls
+    blockingResults <-
+        catMaybes <$> traverse (atomically . readTMVar) blocking
+    completedAsync <- atomically (takeAsyncToolCompletions manager)
+    pure (blockingResults <> completedAsync)
+  where
+    admit call =
+        case toolCallMode call of
+            AsyncToolCall ->
+                admitAsyncToolCall manager call >> pure Nothing
+            BlockingToolCall ->
+                Just <$> admitBlockingToolCall manager call
+
+takeAsyncToolCompletions
+    :: AsyncToolManager
+    -> STM [ToolCallResult]
+takeAsyncToolCompletions manager = do
+    ready <- drainTQueue manager.asyncToolCompleted
+    case ready of
+        _ : _ -> pure ready
+        [] -> do
+            outstanding <- readTVar manager.asyncToolOutstanding
+            if outstanding == 0
+                then pure []
+                else do
+                    first <- readTQueue manager.asyncToolCompleted
+                    rest <- drainTQueue manager.asyncToolCompleted
+                    pure (first : rest)
+
+drainTQueue :: TQueue value -> STM [value]
+drainTQueue queue =
+    tryReadTQueue queue >>= \case
+        Nothing -> pure []
+        Just value -> (value :) <$> drainTQueue queue
+
+runAsyncToolManager :: LoopConfig -> AsyncToolManager -> IO ()
+runAsyncToolManager config manager = do
+    request <- atomically (readTQueue manager.asyncToolRequests)
+    race
+        (waitCancel config.loopCancel)
+        (do
+            prepared <-
+                prepareManagedToolCall
+                    config
+                    request.managedRecord.managedCall
+            plan <- schedulingPlanForPrepared config prepared
+            pure (prepared, plan))
+        >>= \case
+            Left () -> do
+                -- Approval and scheduling are allowed to perform IO. Keep
+                -- cancellation structured around that whole preparation step
+                -- so a blocking approval cannot strand result waiters.
+                completeManagedToolRequest manager request (Right Nothing)
+                runAsyncToolManager config manager
+            Right (prepared, plan) -> do
+                atomically $
+                    modifyTVar'
+                        manager.asyncToolScheduled
+                        (IntMap.insert request.managedSequence plan)
+                withAsync
+                    (runManagedToolWorker
+                        config
+                        manager
+                        request
+                        prepared
+                        plan)
+                    \worker ->
+                        withAsync
+                            (waitCatch worker
+                                >>= completeManagedToolRequest manager request)
+                            \_monitor ->
+                                runAsyncToolManager config manager
+
+prepareManagedToolCall :: LoopConfig -> ToolCall -> IO PreparedToolCall
+prepareManagedToolCall config call
+    | toolCallMode call == AsyncToolCall
+        && not (toolSupportsAsync config.loopTools call) =
+            pure $
+                PreparedToolCall call $
+                    ToolApprovalDenied
+                        ("Tool " <> call.name
+                            <> " does not support asynchronous execution.")
+    | otherwise =
+        prepareToolCall config call
+
+runManagedToolWorker
+    :: LoopConfig
+    -> AsyncToolManager
+    -> ManagedToolRequest
+    -> PreparedToolCall
+    -> ToolSchedulingPlan
+    -> IO (Maybe ToolCallResult)
+runManagedToolWorker config manager request prepared plan = do
+    atomically do
+        scheduled <- readTVar manager.asyncToolScheduled
+        check $
+            not $
+                IntMap.foldrWithKey
+                    (\sequenceNumber earlierPlan conflicts ->
+                        conflicts
+                            || ( sequenceNumber < request.managedSequence
+                                && schedulingPlansConflict earlierPlan plan
+                               ))
+                    False
+                    scheduled
+    race
+        (waitCancel config.loopCancel)
+        (runPreparedToolCall config prepared)
+        >>= \case
+            Left () -> pure Nothing
+            Right result -> pure result
+
+completeManagedToolRequest
+    :: AsyncToolManager
+    -> ManagedToolRequest
+    -> Either SomeException (Maybe ToolCallResult)
+    -> IO ()
+completeManagedToolRequest manager request outcome =
+    atomically do
+        modifyTVar'
+            manager.asyncToolScheduled
+            (IntMap.delete request.managedSequence)
+        let call = request.managedRecord.managedCall
+        case outcome of
+            Left exception -> do
+                -- Do not publish a synthetic empty completion for a crashed
+                -- worker. Keeping any waiter blocked makes the manager-failure
+                -- branch of the enclosing structured race authoritative.
+                _ <- tryPutTMVar manager.asyncToolFailure exception
+                pure ()
+            Right result -> do
+                putTMVar request.managedRecord.managedResult result
+                when (toolCallMode call == AsyncToolCall) do
+                    modifyTVar'
+                        manager.asyncToolOutstanding
+                        (\count -> count - 1)
+                    case result of
+                        Nothing -> pure ()
+                        Just completed ->
+                            writeTQueue
+                                manager.asyncToolCompleted
+                                completed
+
+waitAsyncToolManagerFailure
+    :: Async ()
+    -> AsyncToolManager
+    -> IO SomeException
+waitAsyncToolManagerFailure managerWorker manager =
+    race
+        (waitCatch managerWorker)
+        (atomically (readTMVar manager.asyncToolFailure))
+        >>= \case
+            Left (Left exception) -> pure exception
+            Left (Right ()) ->
+                pure $
+                    Exception.toException $
+                        AsyncToolCallConflict
+                            "Async tool manager stopped unexpectedly."
+            Right exception -> pure exception
 
 -- | Preserve model order between conflicting calls while allowing independent
 -- calls from the same model turn to overlap. Results are returned in model
@@ -1509,11 +1917,23 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
             config.loopOnEvent (ToolStarted call)
             result <- case approval of
                 ToolApprovalDenied denial ->
-                    pure (withToolCallOutcome (Just ToolDenied)
-                        (ToolCallResult call.callId denial call.callKind))
+                    pure $
+                        withToolCallResultMode (toolCallMode call) $
+                            withToolCallOutcome (Just ToolDenied) $
+                                ToolCallResult
+                                    { callId = call.callId
+                                    , output = denial
+                                    , callKind = call.callKind
+                                    }
                 ToolApprovalRejected ->
-                    pure (withToolCallOutcome (Just ToolDenied)
-                        (ToolCallResult call.callId "Tool call rejected by user." call.callKind))
+                    pure $
+                        withToolCallResultMode (toolCallMode call) $
+                            withToolCallOutcome (Just ToolDenied) $
+                                ToolCallResult
+                                    { callId = call.callId
+                                    , output = "Tool call rejected by user."
+                                    , callKind = call.callKind
+                                    }
                 ToolApprovalGranted ->
                     dispatchRegisteredToolCall
                         config.loopDispatch
