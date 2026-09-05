@@ -1,8 +1,7 @@
 module Agent.CLI.ProviderRuntimeSpec (spec) where
 
 import Agent.CLI.Compaction (CompactionInstall(..), reportedOccupancy)
-import Agent.CLI.Runtime.Orchestration.Providers (withProviderRuntime)
-import Agent.CLI.Runtime.Orchestration.Providers.Types
+import Agent.CLI.ProviderRuntime
 import Agent.CLI.Session.ConversationStore (newConversationStore)
 import Agent.CLI.Session.History (readLivePreviousResponseId, readLiveTranscript)
 import Agent.Provider (BillingMode(..), TokenProvider, tokenProvider)

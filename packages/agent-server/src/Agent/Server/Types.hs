@@ -427,8 +427,8 @@ instance FromJSON CreateTurnRequest where
             fail "images and files must contain at most five items in total"
         files <- traverse parseTurnFile fileValues
         when
-            ( sum (map (ByteString.length . imageBytes) images)
-                + sum (map (ByteString.length . fileBytes) files)
+            ( sum (map (ByteString.length . (.imageBytes)) images)
+                + sum (map (ByteString.length . (.fileBytes)) files)
                 > maxTurnAttachmentBytesTotal
             )
             (fail "images and files are limited to 20 MiB decoded in total")

@@ -70,8 +70,9 @@ import Test.Hspec
 spec :: Spec
 spec = describe "agent-server WAI application" do
     it "decodes image-only turn requests" do
+        let decode body = eitherDecode body :: Either String CreateTurnRequest
         request <-
-            case eitherDecode
+            case decode
                 "{\"images\":[{\"mimeType\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}]}"
             of
                 Left err -> expectationFailure err >> fail "unreachable"
