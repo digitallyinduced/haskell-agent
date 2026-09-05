@@ -6,6 +6,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , PortalState(..)
     , PortalStream(..)
     , beginPortalCaptureRequestWith
+    , closeBarePortalCaptureWith
     , closePortalStateWith
     , ensurePortalStateReadyWith
     , invalidatePortalStateWhenWith
@@ -1669,11 +1670,10 @@ startGstreamerPortalCapture pipeWireHandle nodeId = do
                                 `onException` closePortalCapture capture
                             pure capture
             _ -> do
-                void (tryAny (stopPortalCaptureProcess processHandle))
-                forM_ maybeOutput \handle ->
-                    void (tryAny (hClose handle))
-                forM_ maybeErrors \handle ->
-                    void (tryAny (hClose handle))
+                closeBarePortalCaptureWith
+                    (stopPortalCaptureProcess processHandle)
+                    (forM_ maybeOutput hClose)
+                    (forM_ maybeErrors hClose)
                 fail "GStreamer did not expose the portal capture pipes."
 
 runPortalFrameReader
@@ -1839,10 +1839,28 @@ closeBarePortalCapture
     -> Handle
     -> Handle
     -> IO ()
-closeBarePortalCapture processHandle outputHandle errorHandle = do
-    void (tryAny (stopPortalCaptureProcess processHandle))
-    void (tryAny (hClose outputHandle))
-    void (tryAny (hClose errorHandle))
+closeBarePortalCapture processHandle outputHandle errorHandle =
+    closeBarePortalCaptureWith
+        (stopPortalCaptureProcess processHandle)
+        (hClose outputHandle)
+        (hClose errorHandle)
+
+closeBarePortalCaptureWith
+    :: IO ()
+    -> IO ()
+    -> IO ()
+    -> IO ()
+closeBarePortalCaptureWith
+        stopProcess
+        closeOutput
+        closeErrors =
+    mask \_ -> do
+        -- If the process cannot be reaped, preserve that ownership failure
+        -- after making a best effort to release both pipe handles.
+        stopped <- tryAllExceptions stopProcess
+        void (tryAny closeOutput)
+        void (tryAny closeErrors)
+        either Exception.throwIO pure stopped
 
 closePortalCapture :: PortalCapture -> IO ()
 closePortalCapture capture =

@@ -46,6 +46,7 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , PortalState(..)
     , PortalStream(..)
     , beginPortalCaptureRequestWith
+    , closeBarePortalCaptureWith
     , closePortalStateWith
     , ensurePortalStateReadyWith
     , invalidatePortalStateWhenWith
@@ -1487,6 +1488,27 @@ spec = do
                     , "wait"
                     ]
             readIORef waits `shouldReturn` 2
+
+        it "preserves partial capture stop failures after closing pipes" do
+            events <- newIORef ([] :: [Text.Text])
+            let record event = modifyIORef' events (<> [event])
+            attempted <-
+                tryAny $
+                    closeBarePortalCaptureWith
+                        (record "stop" >> throwString "capture still running")
+                        (record "close-output" >> throwString "output close failed")
+                        (record "close-errors" >> throwString "error close failed")
+            attempted `shouldSatisfy` \case
+                Left exception ->
+                    "capture still running"
+                        `Text.isInfixOf` Text.pack (show exception)
+                Right () -> False
+            readIORef events
+                `shouldReturn`
+                    [ "stop"
+                    , "close-output"
+                    , "close-errors"
+                    ]
 
         it "reads consecutive frames from one persistent PNG stream" do
             let firstFrame =
