@@ -18,15 +18,14 @@ module Agent.CLI.RepositoryReview
     , repositoryErrorText
     ) where
 
+import Agent.CLI.RepositoryReview.Checks
+import Agent.CLI.RepositoryReview.Error
+import Agent.CLI.RepositoryReview.GitOutput
+import Agent.CLI.RepositoryReview.ProcessSupport
 import Control.Concurrent (threadDelay)
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async
-    ( Async
-    , asyncWithUnmask
-    , cancel
-    , poll
-    , wait
-    , waitCatch
+    ( wait
     , withAsync
     )
 import Control.Concurrent.MVar
@@ -36,10 +35,8 @@ import Control.Concurrent.MVar
     , withMVar
     )
 import Control.Exception.Safe
-    ( SomeException
-    , bracket
+    ( bracket
     , finally
-    , isAsyncException
     , mask
     , onException
     , throwIO
@@ -50,14 +47,13 @@ import Control.Exception.Safe
 import Control.Monad (foldM, unless, when)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
-import Data.Char (isDigit, toLower)
+import Data.Char (toLower)
 import Data.List (find, nub, sort)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.IORef
-    ( IORef
-    , newIORef
+    ( newIORef
     , readIORef
     , writeIORef
     )
@@ -86,10 +82,8 @@ import System.FilePath
     , (</>)
     )
 import System.Posix.Signals
-    ( Signal
-    , sigKILL
+    ( sigKILL
     , sigTERM
-    , signalProcessGroup
     )
 import System.Posix.Files
     ( fileMode
@@ -112,10 +106,9 @@ import System.Posix.IO
     , openFd
     )
 import System.Posix.Temp (mkdtemp)
-import System.Posix.Types (FileMode, ProcessID)
+import System.Posix.Types (FileMode)
 import System.Process
     ( CreateProcess(..)
-    , ProcessHandle
     , StdStream(CreatePipe)
     , createProcess
     , getPid
@@ -145,25 +138,10 @@ data RepositoryDiffKind
     | RepositoryStagedDiff
     deriving (Eq, Show)
 
-data RepositoryFile = RepositoryFile
-    { repositoryFilePath :: !FilePath
-    , repositoryFileOriginalPath :: !(Maybe FilePath)
-    , repositoryFileIndexStatus :: !Char
-    , repositoryFileWorktreeStatus :: !Char
-    } deriving (Eq, Show)
-
 data RepositoryDiff = RepositoryDiff
     { repositoryDiffPatch :: !BS.ByteString
     , repositoryDiffBinary :: !Bool
     , repositoryDiffHunks :: ![DiffHunk]
-    } deriving (Eq, Show)
-
-data DiffHunk = DiffHunk
-    { hunkOldStart :: !Int
-    , hunkOldCount :: !Int
-    , hunkNewStart :: !Int
-    , hunkNewCount :: !Int
-    , hunkHeader :: !Text
     } deriving (Eq, Show)
 
 data RepositoryMutation
@@ -173,25 +151,6 @@ data RepositoryMutation
     | StageHunks !FilePath ![Int]
     | UnstageHunks !FilePath ![Int]
     | RestoreHunks !FilePath ![Int]
-    deriving (Eq, Show)
-
-data RepositoryCheckStream
-    = RepositoryCheckStdout
-    | RepositoryCheckStderr
-    deriving (Eq, Show)
-
-data RepositoryCheck = RepositoryCheck
-    { repositoryCheckProcess :: !ProcessHandle
-    , repositoryCheckProcessGroup :: !(Maybe ProcessID)
-    , repositoryCheckWorker :: !(Async ())
-    , repositoryCheckCancelled :: !(IORef Bool)
-    }
-
-data RepositoryError
-    = NotARepository !Text
-    | StaleRepositorySnapshot !Text !Text
-    | InvalidRepositoryRequest !Text
-    | RepositoryCommandFailed !Text !Int !Text
     deriving (Eq, Show)
 
 repositorySnapshot :: FilePath -> IO (Either RepositoryError RepositorySnapshot)
@@ -371,230 +330,9 @@ startRepositoryCheck requested expected executable arguments onOutput onExit =
         checked <- requireSnapshot root expected
         case checked of
             Left err -> pure (Left err)
-            Right _
-                | null executable || '\NUL' `elem` executable ->
-                    pure
-                        (Left
-                            (InvalidRepositoryRequest
-                                "check executable is invalid"))
-                | length executable > maxRepositoryArgumentCharacters ->
-                    pure
-                        (Left
-                            (InvalidRepositoryRequest
-                                "check executable exceeds the 1 MiB character limit"))
-                | length arguments > maxRepositoryCheckArguments ->
-                    pure
-                        (Left
-                            (InvalidRepositoryRequest
-                                "check has too many arguments"))
-                | any (elem '\NUL') arguments ->
-                    pure
-                        (Left
-                            (InvalidRepositoryRequest
-                                "check argument contains a NUL byte"))
-                | any null arguments ->
-                    pure
-                        (Left
-                            (InvalidRepositoryRequest
-                                "check argument is empty"))
-                | any
-                    ((> maxRepositoryArgumentCharacters) . length)
-                    arguments ->
-                        pure
-                            (Left
-                                (InvalidRepositoryRequest
-                                    "check argument exceeds the 1 MiB character limit"))
-                | sum (map (toInteger . length) arguments)
-                    > toInteger maxRepositoryCheckTotalCharacters ->
-                        pure
-                            (Left
-                                (InvalidRepositoryRequest
-                                    "check arguments exceed the 8 MiB total limit"))
-                | otherwise -> do
-                    -- Keep asynchronous cancellation masked across process
-                    -- acquisition and construction of its owning worker.
-                    -- Once this returns, every resource is reachable through
-                    -- RepositoryCheck and cancellation is owned by that
-                    -- worker's finalizer.
-                    created <- trySynchronous (mask \_ -> do
-                        (maybeOutput, maybeError, process, processGroup) <-
-                            createCheckProcess root executable arguments
-                        cancelled <- newIORef False
-                        let cleanup = do
-                                closeQuietly maybeOutput
-                                closeQuietly maybeError
-                                signalCheckProcessGroup
-                                    sigKILL processGroup process
-                                _ <- tryAny (waitForProcess process)
-                                pure ()
-                        worker <- asyncWithUnmask
-                            (\unmask ->
-                                unmask
-                                    (withAsync
-                                        (drainCheckOutput
-                                            RepositoryCheckStdout
-                                            maybeOutput)
-                                        \outputReader ->
-                                            withAsync
-                                                (drainCheckOutput
-                                                    RepositoryCheckStderr
-                                                    maybeError)
-                                                \errorReader -> do
-                                                    exitCode <-
-                                                        waitForProcess process
-                                                    -- The requested leader is
-                                                    -- complete. Any process
-                                                    -- still in its dedicated
-                                                    -- group is a residual
-                                                    -- descendant and must not
-                                                    -- outlive the check.
-                                                    signalCheckProcessGroup
-                                                        sigKILL
-                                                        processGroup
-                                                        process
-                                                    -- Reader failures
-                                                    -- (including callback
-                                                    -- failures) must not
-                                                    -- suppress the one terminal
-                                                    -- callback. An escaped
-                                                    -- process outside the
-                                                    -- group still cannot hold
-                                                    -- this worker indefinitely.
-                                                    drained <- timeout
-                                                        processPipeTeardownMicros
-                                                        ((,)
-                                                            <$> waitCatch outputReader
-                                                            <*> waitCatch errorReader)
-                                                    case drained of
-                                                        Just _ -> pure ()
-                                                        Nothing -> do
-                                                            closeQuietly
-                                                                maybeOutput
-                                                            closeQuietly
-                                                                maybeError
-                                                            cancel outputReader
-                                                            cancel errorReader
-                                                    wasCancelled <-
-                                                        readIORef cancelled
-                                                    onExit
-                                                        wasCancelled
-                                                        exitCode)
-                                    `finally` cleanup)
-                                `onException` cleanup
-                        pure RepositoryCheck
-                            { repositoryCheckProcess = process
-                            , repositoryCheckProcessGroup = processGroup
-                            , repositoryCheckWorker = worker
-                            , repositoryCheckCancelled = cancelled
-                            })
-                    pure case created of
-                        Left exception ->
-                            Left
-                                (RepositoryCommandFailed
-                                    (renderCommand executable arguments)
-                                    (-1)
-                                    (Text.pack (show exception)))
-                        Right check -> Right check
-  where
-    drainCheckOutput stream handle =
-        let drain callbackEnabled = do
-                bytes <- BS.hGetSome handle (64 * 1024)
-                if BS.null bytes
-                    then pure ()
-                    else do
-                        nextEnabled <-
-                            if callbackEnabled
-                                then
-                                    trySynchronous (onOutput stream bytes) >>= \case
-                                        Left _ -> pure False
-                                        Right () -> pure True
-                                else pure False
-                        -- A failed foreign callback is disabled for this
-                        -- stream, but the pipe remains actively drained.
-                        drain nextEnabled
-        in drain True `finally` closeQuietly handle
-
-cancelRepositoryCheck :: RepositoryCheck -> IO ()
-cancelRepositoryCheck check = do
-    writeIORef check.repositoryCheckCancelled True
-    signalCheckProcessGroup
-        sigTERM
-        check.repositoryCheckProcessGroup
-        check.repositoryCheckProcess
-    threadDelay 250_000
-    poll check.repositoryCheckWorker >>= \case
-        Nothing ->
-            signalCheckProcessGroup
-                sigKILL
-                check.repositoryCheckProcessGroup
-                check.repositoryCheckProcess
-        Just _ -> pure ()
-    -- Cancellation owns process teardown: do not return while descendants,
-    -- pipe readers, or the terminal callback are still active.
-    waitRepositoryCheck check
-
-waitRepositoryCheck :: RepositoryCheck -> IO ()
-waitRepositoryCheck check = do
-    _ <- waitCatch check.repositoryCheckWorker
-    pure ()
-
-signalCheckProcessGroup
-    :: Signal
-    -> Maybe ProcessID
-    -> ProcessHandle
-    -> IO ()
-signalCheckProcessGroup signal processGroup process = do
-    processId <- maybe (getPid process) (pure . Just) processGroup
-    case processId of
-        Nothing -> do
-            _ <- tryAny (terminateProcess process)
-            pure ()
-        Just pid -> do
-            _ <- tryAny (signalProcessGroup signal pid)
-            pure ()
-
-createCheckProcess
-    :: FilePath
-    -> FilePath
-    -> [String]
-    -> IO (Handle, Handle, ProcessHandle, Maybe ProcessID)
-createCheckProcess root executable arguments = mask \_ -> do
-    (maybeInput, maybeOutput, maybeError, process) <-
-        createProcess
-            (proc executable arguments)
-                { cwd = Just root
-                , std_in = CreatePipe
-                , std_out = CreatePipe
-                , std_err = CreatePipe
-                , close_fds = True
-                , create_group = True
-                }
-    case (maybeInput, maybeOutput, maybeError) of
-        (Just input, Just output, Just errors) -> do
-            let cleanupWithoutGroup = do
-                    closeQuietly input
-                    closeQuietly output
-                    closeQuietly errors
-                    _ <- tryAny (terminateProcess process)
-                    _ <- tryAny (waitForProcess process)
-                    pure ()
-            processGroup <- getPid process
-                `onException` cleanupWithoutGroup
-            let cleanup = do
-                    closeQuietly input
-                    closeQuietly output
-                    closeQuietly errors
-                    signalCheckProcessGroup sigKILL processGroup process
-                    _ <- tryAny (waitForProcess process)
-                    pure ()
-            -- Checks have no stdin API. Closing immediately prevents an
-            -- inherited terminal or pipe from leaving a check blocked.
-            (hClose input >> pure (output, errors, process, processGroup))
-                `onException` cleanup
-        _ -> do
-            _ <- tryAny (terminateProcess process)
-            _ <- tryAny (waitForProcess process)
-            fail "could not create check output pipes"
+            Right _ ->
+                startRepositoryCheckAtRoot
+                    root executable arguments onOutput onExit
 
 snapshotAtRoot :: FilePath -> IO (Either RepositoryError RepositorySnapshot)
 snapshotAtRoot root =
@@ -1037,87 +775,6 @@ hashMaterialWith
 hashMaterialWith run root bytes =
     fmap decodeTrimmed
         <$> run root ["hash-object", "--no-filters", "--stdin"] bytes
-
-parsePorcelain :: BS.ByteString -> Either RepositoryError [RepositoryFile]
-parsePorcelain bytes = go (filter (not . BS.null) (BS.split 0 bytes)) []
-  where
-    go [] acc = Right (reverse acc)
-    go (entry:rest) acc
-        | BS.length entry < 3 =
-            Left (InvalidRepositoryRequest "git returned malformed status")
-        | otherwise =
-            let indexStatus = toStatus (BS.index entry 0)
-                worktreeStatus = toStatus (BS.index entry 1)
-                path = decodePath (BS.drop 3 entry)
-                renamed = indexStatus `elem` ['R', 'C']
-                    || worktreeStatus `elem` ['R', 'C']
-            in if renamed
-                then case rest of
-                    [] ->
-                        Left
-                            (InvalidRepositoryRequest
-                                "git returned an incomplete rename status")
-                    original:remaining ->
-                        go remaining
-                            (RepositoryFile
-                                { repositoryFilePath = path
-                                , repositoryFileOriginalPath =
-                                    Just (decodePath original)
-                                , repositoryFileIndexStatus = indexStatus
-                                , repositoryFileWorktreeStatus = worktreeStatus
-                                }
-                                : acc)
-                else
-                    go rest
-                        (RepositoryFile
-                            { repositoryFilePath = path
-                            , repositoryFileOriginalPath = Nothing
-                            , repositoryFileIndexStatus = indexStatus
-                            , repositoryFileWorktreeStatus = worktreeStatus
-                            }
-                            : acc)
-    toStatus byte
-        | byte == 32 = ' '
-        | otherwise = toEnum (fromIntegral byte)
-
-parseDiffHunks :: BS.ByteString -> [DiffHunk]
-parseDiffHunks =
-    reverse
-        . foldl' collect []
-        . Text.lines
-        . TextEncoding.decodeUtf8With lenientDecode
-  where
-    collect acc line =
-        maybe acc (: acc) (parseHunkHeader line)
-
-parseHunkHeader :: Text -> Maybe DiffHunk
-parseHunkHeader line = do
-    body <- Text.stripPrefix "@@ -" line
-    let (oldRange, afterOld) = Text.breakOn " +" body
-    newAndHeader <- Text.stripPrefix " +" afterOld
-    let (newRange, afterNew) = Text.breakOn " @@" newAndHeader
-    header <- Text.stripPrefix " @@" afterNew
-    (oldStart, oldCount) <- parseRange oldRange
-    (newStart, newCount) <- parseRange newRange
-    pure DiffHunk
-        { hunkOldStart = oldStart
-        , hunkOldCount = oldCount
-        , hunkNewStart = newStart
-        , hunkNewCount = newCount
-        , hunkHeader = Text.strip header
-        }
-
-parseRange :: Text -> Maybe (Int, Int)
-parseRange text = case Text.splitOn "," text of
-    [start] -> (, 1) <$> decimal start
-    [start, count] -> (,) <$> decimal start <*> decimal count
-    _ -> Nothing
-  where
-    decimal value
-        | Text.null value || Text.any (not . isDigit) value = Nothing
-        | otherwise = case reads (Text.unpack value) of
-            [(number, "")] -> Just number
-            _ -> Nothing
 
 runRepositoryRead
     :: FilePath
@@ -2078,37 +1735,9 @@ hGetBounded limit handle = go 0 False []
                     then go total True chunks
                     else go next False (chunk : chunks)
 
-closeQuietly :: Handle -> IO ()
-closeQuietly handle = do
-    _ <- tryAny (hClose handle)
-    pure ()
-
 decodeTrimmed :: BS.ByteString -> Text
 decodeTrimmed =
     Text.strip . TextEncoding.decodeUtf8With lenientDecode
-
-decodePath :: BS.ByteString -> FilePath
-decodePath = Text.unpack . TextEncoding.decodeUtf8With lenientDecode
-
-renderCommand :: FilePath -> [String] -> Text
-renderCommand executable arguments =
-    Text.unwords (Text.pack executable : map (Text.pack . show) arguments)
-
-repositoryErrorText :: RepositoryError -> Text
-repositoryErrorText = \case
-    NotARepository message -> message
-    StaleRepositorySnapshot expected actual ->
-        "repository changed (expected "
-            <> expected
-            <> ", actual "
-            <> actual
-            <> ")"
-    InvalidRepositoryRequest message -> message
-    RepositoryCommandFailed command code message ->
-        command
-            <> " exited "
-            <> Text.pack (show code)
-            <> if Text.null message then "" else ": " <> message
 
 voidResult :: Either error value -> Either error ()
 voidResult = fmap (const ())
@@ -2124,15 +1753,6 @@ maxRepositorySelectedHunks = 4096
 
 maxRepositoryCommitCharacters :: Int
 maxRepositoryCommitCharacters = 8 * 1024 * 1024
-
-maxRepositoryCheckArguments :: Int
-maxRepositoryCheckArguments = 4096
-
-maxRepositoryArgumentCharacters :: Int
-maxRepositoryArgumentCharacters = 1024 * 1024
-
-maxRepositoryCheckTotalCharacters :: Int
-maxRepositoryCheckTotalCharacters = 8 * 1024 * 1024
 
 maxRepositoryProcessOutputBytes :: Int
 maxRepositoryProcessOutputBytes = 64 * 1024 * 1024
@@ -2157,14 +1777,3 @@ repositoryConfigTimeoutMicros = 2_000_000
 
 maxRepositoryDiffCommandMicros :: Int
 maxRepositoryDiffCommandMicros = 15_000_000
-
-processPipeTeardownMicros :: Int
-processPipeTeardownMicros = 1_000_000
-
-trySynchronous :: IO value -> IO (Either SomeException value)
-trySynchronous action =
-    tryAny action >>= \case
-        Left exception
-            | isAsyncException exception -> throwIO exception
-            | otherwise -> pure (Left exception)
-        Right value -> pure (Right value)
