@@ -6,7 +6,9 @@ import Agent.Server.Types
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (
     async,
+    cancel,
     wait,
+    waitCatch,
     withAsync,
  )
 import Control.Concurrent.MVar (
@@ -248,6 +250,78 @@ spec = describe "turn supervisor" do
                 localAccessBoundary
                 "session-a"
                 `shouldReturn` False
+
+    it "makes an interrupted cancellation retryable" do
+        started <- newEmptyMVar
+        terminalEntered <- newEmptyMVar
+        never <- newEmptyMVar
+        attempts <- newIORef (0 :: Int)
+        let runner _ _ =
+                putMVar started ()
+                    >> takeMVar never
+                    >> pure (Right testOutput)
+            persistence =
+                inMemoryTurnPersistence
+                    { turnPersistenceStarted = \_ _ -> pure (Right ())
+                    , turnPersistenceTerminal = \record finishedAt outcome -> do
+                        attempt <-
+                            atomicModifyIORef' attempts \count ->
+                                let next = count + 1
+                                 in (next, next)
+                        if attempt == 1
+                            then putMVar terminalEntered () >> takeMVar never
+                            else
+                                pure
+                                    ( Right
+                                        ( testTerminalRecord
+                                            finishedAt
+                                            outcome
+                                            record
+                                        )
+                                    )
+                    , turnPersistenceShouldCancel = \_ ->
+                        pure (Right False)
+                    }
+        bracket
+            ( newSupervisorWithBoundaryGuardAndPersistence
+                defaultConfig
+                (\_ action -> Right <$> action)
+                persistence
+                runner
+            )
+            closeSupervisor
+            \supervisor -> do
+                submitted <-
+                    submitTurn supervisor (turnSpec "session-a")
+                        >>= expectRight
+                takeWithin started
+                firstCancellation <-
+                    async $
+                        cancelTurn
+                            supervisor
+                            localAccessBoundary
+                            submitted.turnRecordId
+                takeWithin terminalEntered
+                cancel firstCancellation
+                firstResult <- waitCatch firstCancellation
+                firstResult `shouldSatisfy` \case
+                    Left _ -> True
+                    Right _ -> False
+                retried <-
+                    cancelTurn
+                        supervisor
+                        localAccessBoundary
+                        submitted.turnRecordId
+                retried `shouldSatisfy` \case
+                    Right record ->
+                        record.turnRecordStatus == TurnCancelled
+                    Left _ -> False
+                readIORef attempts `shouldReturn` 2
+                sessionHasActiveTurn
+                    supervisor
+                    localAccessBoundary
+                    "session-a"
+                    `shouldReturn` False
 
     it "cancels active workers concurrently during shutdown" do
         firstStarted <- newEmptyMVar

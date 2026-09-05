@@ -139,7 +139,7 @@ openRoleStorePool config role options = mask \restore -> do
             { storePoolInternal = pool
             , storePoolConnectionSettings = settings
             , storePoolServerTurnActionLockDirectoryInternal =
-                config.postgresPaths.postgresServerTurnActionLockDirectory
+                serverTurnActionLockDirectory config
             }
 
 closeStorePool :: StorePool -> IO ()

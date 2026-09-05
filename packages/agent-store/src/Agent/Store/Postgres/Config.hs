@@ -8,6 +8,7 @@ module Agent.Store.Postgres.Config
     , ManagedPostgresConfig(..)
     , defaultManagedPostgresConfig
     , managedPostgresConfigFromEnv
+    , serverTurnActionLockDirectory
     , postgresExecutable
     , socketHost
     , postgresqlConf
@@ -15,10 +16,12 @@ module Agent.Store.Postgres.Config
     ) where
 
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as ByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Word (Word16)
+import Numeric (showHex)
 import System.Environment (lookupEnv)
 import System.FilePath ((</>))
 import Text.Read (readMaybe)
@@ -83,6 +86,20 @@ managedPostgresConfigFromEnv stateDirectory = do
     pure case portValue >>= readMaybe of
         Just port -> config { postgresPort = port }
         Nothing -> config
+
+-- | Isolate host-level owner fences by the exact database in one cluster.
+serverTurnActionLockDirectory :: ManagedPostgresConfig -> FilePath
+serverTurnActionLockDirectory config =
+    config.postgresPaths.postgresServerTurnActionLockDirectory
+        </> "database-" <> databaseNameHex
+  where
+    databaseNameHex =
+        concatMap
+            encodeByte
+            (ByteString.unpack (Text.encodeUtf8 config.postgresDatabase))
+    encodeByte byte
+        | byte < 16 = '0' : showHex byte ""
+        | otherwise = showHex byte ""
 
 postgresExecutable :: ManagedPostgresConfig -> FilePath -> FilePath
 postgresExecutable config executable

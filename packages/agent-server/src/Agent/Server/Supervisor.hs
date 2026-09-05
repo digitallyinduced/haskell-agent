@@ -717,21 +717,26 @@ cancelTurn supervisor boundary turnId = mask \restore -> do
                         void $
                             timeout cancelHookTimeoutMicros
                                 (void (tryAny (restore action)))
-            -- Preserve in-band cancellation when it is responsive, but always
-            -- deliver and join the structured cancellation.
-            interruptInBand `finally` stopWorker
-            if not transitioned
-                then pure (Right record)
-                else do
-                    canonical <-
-                        persistTerminalEventually
-                            supervisor
-                            record
-                            now
-                            TurnWasCancelled
-                    atomically $
-                        publishTerminalRecord supervisor canonical
-                    pure (Right canonical)
+                completeCancellation = do
+                    -- Preserve in-band cancellation when it is responsive, but
+                    -- always deliver and join the structured cancellation.
+                    interruptInBand `finally` stopWorker
+                    if not transitioned
+                        then pure (Right record)
+                        else do
+                            canonical <-
+                                persistTerminalEventually
+                                    supervisor
+                                    record
+                                    now
+                                    TurnWasCancelled
+                            atomically $
+                                publishTerminalRecord supervisor canonical
+                            pure (Right canonical)
+            completeCancellation
+                `onException`
+                    when transitioned
+                        (atomically (releaseCancellationClaim supervisor record))
 
 lookupTurn
     :: Supervisor
@@ -1526,6 +1531,27 @@ publishTerminalRecord supervisor canonical = do
                             }
                 writeTVar supervisor.supervisorState state'
                 publishToSubscribers state' event
+
+releaseCancellationClaim :: Supervisor -> TurnRecord -> STM ()
+releaseCancellationClaim supervisor record =
+    modifyTVar' supervisor.supervisorState \state ->
+        state
+            { stateTurns =
+                Map.adjust
+                    ( \slot ->
+                        if
+                            slot.turnSlotCancelling
+                                && slot.turnSlotRecord == record
+                            then
+                                slot
+                                    { turnSlotCancelling = False
+                                    , turnSlotCancel = Nothing
+                                    }
+                            else slot
+                    )
+                    record.turnRecordId
+                    state.stateTurns
+            }
 
 -- A failed boundary guard must not invoke an event callback for the stale
 -- credential. Retain only a terminal in-memory state, still scoped to the

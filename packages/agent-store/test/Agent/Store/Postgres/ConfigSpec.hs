@@ -28,3 +28,17 @@ spec = do
             rendered `shouldSatisfy` Text.isInfixOf "listen_addresses = ''"
             rendered `shouldSatisfy`
                 Text.isInfixOf "unix_socket_permissions = 0700"
+
+        it "isolates server action locks by exact database" do
+            let config = defaultManagedPostgresConfig "/tmp/agent" ""
+                lockDirectory database =
+                    serverTurnActionLockDirectory
+                        config { postgresDatabase = database }
+            lockDirectory "tenant-a"
+                `shouldBe`
+                    "/tmp/agent/postgres/server-turn-actions/database-74656e616e742d61"
+            lockDirectory "tenant-a"
+                `shouldNotBe` lockDirectory "tenant-b"
+            lockDirectory "../tenant"
+                `shouldBe`
+                    "/tmp/agent/postgres/server-turn-actions/database-2e2e2f74656e616e74"
