@@ -113,7 +113,9 @@ import Agent.CLI.Runtime.Orchestration.Background ()
 import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Startup
     ( setStartupRepository )
-import Agent.CLI.Runtime.Orchestration.Tools ( runAgentTools )
+import Agent.CLI.Runtime.Orchestration.Tools ( AgentToolsRequest(..)
+    , runAgentTools
+    )
 import Agent.CLI.Runtime.Orchestration.Types
     ( ActiveHttpAuth(activeHttpGeneration, ActiveHttpAuth,
                      activeHttpAccountId, activeHttpProvider, activeHttpResolveLabel),
@@ -1256,57 +1258,58 @@ launchInitializedTools
     -> InitializedHttpRuntime
     -> IO RunResult
 launchInitializedTools request workspace targets auth refs httpRuntime =
-    runAgentTools
-        request.initializedRunAgentChild
-        auth.initializedLoaded
-        request.initializedConnectedGateway
-        auth.initializedLearnAboutUserRequested
-        auth.initializedCustomBearerToken
-        refs.initializedActiveAccountIdRef
-        refs.initializedActiveAccountRef
-        refs.initializedActiveSelectionRef
-        startup.startupToolEnv
-        workspace.initializedCatalog
-        workspace.initializedSkills
-        refs.initializedGatewayModelsRef
-        targets.initializedGatewayIdentity
-        ( targets.initializedCheckStartupUsageInBackground
-            && isNothing auth.initializedPreparedAccountUsage
-        )
-        targets.initializedConfiguredTarget
-        targets.initializedCustomResponses
-        request.initializedCwd
-        workspace.initializedDatabaseScopes
-        startup.startupEscPaused
-        fullscreen
-        request.initializedHome
-        startup.startupInterrupt
-        startup.startupStdinTty
-        request.initializedProcessRuntime.processMcpSupervisor
-        request.initializedOptions
-        pendingTurn
-        refs.initializedPreferredOpenAiAccountRef
-        request.initializedProcessRuntime
-        workspace.initializedProjectRoot
-        workspace.initializedProjectSettings
-        targets.initializedProjectTarget
-        httpRuntime.initializedResolveActiveAccountLabel
-        request.initializedResumeLock
-        request.initializedResumed
-        targets.initializedResumedTarget
-        request.initializedRoot
-        httpRuntime.initializedSelectHttpAccount
-        refs.initializedSelectableTokenProvider
-        setWindowTitle
-        startup
-        workspace.initializedStateDirectory
-        startup.startupStderr
-        targets.initializedTargetHint
-        httpRuntime.initializedTokenProvider
-        transition
-        targets.initializedTransitionTarget
-        startup.startupUiRuntimeRef
-        unavailableProviders
+    runAgentTools AgentToolsRequest
+        { runAgentChild = request.initializedRunAgentChild
+        , loaded = auth.initializedLoaded
+        , connectedGateway = request.initializedConnectedGateway
+        , learnAboutUserRequested = auth.initializedLearnAboutUserRequested
+        , customBearerToken = auth.initializedCustomBearerToken
+        , activeAccountIdRef = refs.initializedActiveAccountIdRef
+        , activeAccountRef = refs.initializedActiveAccountRef
+        , activeSelectionRef = refs.initializedActiveSelectionRef
+        , baseToolEnv = startup.startupToolEnv
+        , catalog = workspace.initializedCatalog
+        , initialSkills = workspace.initializedSkills
+        , gatewayModelsRef = refs.initializedGatewayModelsRef
+        , gatewayIdentity = targets.initializedGatewayIdentity
+        , checkStartupUsageInBackground =
+            targets.initializedCheckStartupUsageInBackground
+                && isNothing auth.initializedPreparedAccountUsage
+        , configuredOptionTarget = targets.initializedConfiguredTarget
+        , customResponses = targets.initializedCustomResponses
+        , cwd = request.initializedCwd
+        , databaseScopes = workspace.initializedDatabaseScopes
+        , escPaused = startup.startupEscPaused
+        , fullscreen
+        , home = request.initializedHome
+        , interrupt = startup.startupInterrupt
+        , isTty = startup.startupStdinTty
+        , mcpSupervisor = request.initializedProcessRuntime.processMcpSupervisor
+        , options = request.initializedOptions
+        , pendingTurn
+        , preferredOpenAiAccountRef = refs.initializedPreferredOpenAiAccountRef
+        , processRuntime = request.initializedProcessRuntime
+        , projectRoot = workspace.initializedProjectRoot
+        , projectSettings = workspace.initializedProjectSettings
+        , projectTarget = targets.initializedProjectTarget
+        , resolveActiveAccountLabel = httpRuntime.initializedResolveActiveAccountLabel
+        , resumeLock = request.initializedResumeLock
+        , resumed = request.initializedResumed
+        , resumedTarget = targets.initializedResumedTarget
+        , root = request.initializedRoot
+        , selectHttpAccount = httpRuntime.initializedSelectHttpAccount
+        , selectableTokenProvider = refs.initializedSelectableTokenProvider
+        , setWindowTitle
+        , startup
+        , stateDirectory = workspace.initializedStateDirectory
+        , stderrHandle = startup.startupStderr
+        , targetHint = targets.initializedTargetHint
+        , tokenProvider = httpRuntime.initializedTokenProvider
+        , transition
+        , transitionTarget = targets.initializedTransitionTarget
+        , uiRuntimeRef = startup.startupUiRuntimeRef
+        , unavailableProviders
+        }
   where
     startup = request.initializedStartup
     fullscreen = startup.startupFullscreen

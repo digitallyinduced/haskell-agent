@@ -1,4 +1,7 @@
-module Agent.CLI.Runtime.Orchestration.Tools (runAgentTools) where
+module Agent.CLI.Runtime.Orchestration.Tools
+    ( AgentToolsRequest(..)
+    , runAgentTools
+    ) where
 
 import Agent.CLI.AccountPicker ()
 import Agent.CLI.AccountSelection ()
@@ -136,7 +139,9 @@ import Agent.CLI.Runtime.Orchestration.Types
     , nativePreparedDiscovery
     )
 import Agent.CLI.Runtime.Orchestration.Restart ()
-import Agent.CLI.Runtime.Orchestration.Session ( runAgentSession )
+import Agent.CLI.Runtime.Orchestration.Session ( AgentSessionRequest(..)
+    , runAgentSession
+    )
 import Agent.CLI.Runtime.Orchestration.Startup
     ( reportStartupWarning )
 import Agent.CLI.Runtime.Persistence ( preparePersistence )
@@ -541,111 +546,9 @@ data SessionToolsRuntime = SessionToolsRuntime
     }
 
 runAgentTools
-    :: (AgentRunMode -> CliOptions -> IO DevResult)
-    -> LoadedAuth
-    -> Maybe GatewayCredential
-    -> Bool
-    -> Maybe Text
-    -> IORef Text
-    -> IORef Text
-    -> IORef Text
-    -> ToolEnv
-    -> ModelCatalog
-    -> SkillCatalog
-    -> IORef (Maybe GatewayModelAccess)
-    -> Maybe Text
-    -> Bool
-    -> Maybe ModelTarget
-    -> Maybe (Text, ResponsesConnection)
-    -> OsPath
-    -> DatabaseScopes
-    -> IORef Bool
-    -> Maybe FullscreenRuntime
-    -> OsPath
-    -> InterruptState
-    -> Bool
-    -> MCP.McpSupervisor
-    -> CliOptions
-    -> Maybe PendingTurn
-    -> IORef (Maybe Text)
-    -> AgentProcessRuntime
-    -> OsPath
-    -> ProjectSettings
-    -> Maybe ModelTarget
-    -> (Credential -> IO Text)
-    -> Maybe SessionLock
-    -> Maybe (SessionMeta, [SessionTurn])
-    -> Maybe ModelTarget
-    -> OsPath
-    -> (Text -> IO (Either ApiError Text))
-    -> TokenProvider
-    -> (Text -> IO windowTitleResult)
-    -> StartupRuntime
-    -> FilePath
-    -> Handle
-    -> Maybe ModelTarget
-    -> TokenProvider
-    -> Maybe ProviderTransition
-    -> Maybe ModelTarget
-    -> IORef (Maybe FullscreenRuntime)
-    -> Set Provider
-    -> IO RunResult
-runAgentTools
-    runAgentChild
-    loaded
-    connectedGateway
-    learnAboutUserRequested
-    customBearerToken
-    activeAccountIdRef
-    activeAccountRef
-    activeSelectionRef
-    baseToolEnv
-    catalog
-    initialSkills
-    gatewayModelsRef
-    gatewayIdentity
-    checkStartupUsageInBackground
-    configuredOptionTarget
-    customResponses
-    cwd
-    databaseScopes
-    escPaused
-    fullscreen
-    home
-    interrupt
-    isTty
-    mcpSupervisor
-    options
-    pendingTurn
-    preferredOpenAiAccountRef
-    processRuntime
-    projectRoot
-    projectSettings
-    projectTarget
-    resolveActiveAccountLabel
-    resumeLock
-    resumed
-    resumedTarget
-    root
-    selectHttpAccount
-    selectableTokenProvider
-    setWindowTitle
-    startup
-    stateDirectory
-    stderrHandle
-    targetHint
-    tokenProvider
-    transition
-    transitionTarget
-    uiRuntimeRef
-    unavailableProviders
-    =
-    runAgentToolsRequest AgentToolsRequest{..}
-
-runAgentToolsRequest
     :: AgentToolsRequest windowTitleResult
     -> IO RunResult
-runAgentToolsRequest request = withResourceScope \resourceScope -> do
+runAgentTools request = withResourceScope \resourceScope -> do
     toolStartup <- loadToolStartup request
     let toolModelRuntime = resolveToolModel request toolStartup
         toolHostHooks =
@@ -2044,88 +1947,91 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
     forM_ startup.startupNativeHooks \hooks ->
         when (hooks.nativeInteractionMode == NativePlan) $
             writeIORef planMode.planStateRef PlanPending
-    runAgentSession
-        loaded
-        connectedGateway
-        learnAboutUserRequested
-        sessionTmp
-        activeAccountIdRef
-        activeAccountRef
-        activeSelectionRef
-        agentTypesRef
-        allTools
-        (recordImageGenerationImages imageGenerationHistory)
-        (clearImageGenerationHistory imageGenerationHistory)
-        bashEnabledRef
-        catalog
-        gatewayModelsRef
-        checkStartupUsageInBackground
-        claimCurrentSession
-        claudeBypassEnabled
-        closeAll
-        codeModeCloseRef
-        coding
-        createSubagentWorktree
-        customGenericOptions
-        cwd
-        databaseAppTools
-        databaseScopes
-        dialect
-        effortText
-        escPaused
-        extraTools
-        fullscreen
-        gatewayTools
-        ghciEnabledRef
-        allowedChildModels
-        resolveCollaborationChildModel
-        childModelAllowed
-        home
-        inferredTarget
-        interrupt
-        learnedSkillAppTools
-        legacySubagentTarget
-        mcpFleet
-        mcpInstructions
-        mcpTools
-        model
-        multiCtx
-        noteSessionDir
-        openRouterOptions
-        openaiChild
-        options
-        pendingNotices
-        pendingTurn
-        persist
-        planHooks
-        planMode
-        policy
-        preferredOpenAiAccountRef
-        projectRoot
-        promptRequest
-        provider
-        refreshDialectContext
-        registry
-        resolveActiveAccountLabel
-        resumeTargetChanged
-        resumed
-        root
-        rootTurnRef
-        selectHttpAccount
-        selectableTokenProvider
-        agentSessionAppTools
-        setWindowTitle
-        skillInvocationsRef
-        skillsRef
-        startup
-        stateDirectory
-        stderrHandle
-        subagentForkSource
-        subagentSessions
-        subagentStoreRoot
-        tokenProvider
-        baseToolEnv
-        tools
-        transition
-        transportModel
-        unavailableProviders
+    runAgentSession AgentSessionRequest
+        { loaded
+        , connectedGateway
+        , learnAboutUserRequested
+        , sessionTmp
+        , activeAccountIdRef
+        , activeAccountRef
+        , activeSelectionRef
+        , agentTypesRef
+        , allTools
+        , recordImageGenerationInputs =
+            recordImageGenerationImages imageGenerationHistory
+        , clearImageGenerationHistory =
+            clearImageGenerationHistory imageGenerationHistory
+        , bashEnabledRef
+        , catalog
+        , gatewayModelsRef
+        , checkStartupUsageInBackground
+        , claimCurrentSession
+        , claudeBypassEnabled
+        , closeAll
+        , codeModeCloseRef
+        , coding
+        , createSubagentWorktree
+        , customGenericOptions
+        , cwd
+        , databaseAppTools
+        , databaseScopes
+        , dialect
+        , effortText
+        , escPaused
+        , extraTools
+        , fullscreen
+        , gatewayTools
+        , ghciEnabledRef
+        , allowedChildModels
+        , resolveChildModel = resolveCollaborationChildModel
+        , childModelAllowed
+        , home
+        , inferredTarget
+        , interrupt
+        , learnedSkillAppTools
+        , legacySubagentTarget
+        , mcpFleet
+        , mcpInstructions
+        , mcpTools
+        , model
+        , multiCtx
+        , noteSessionDir
+        , openRouterOptions
+        , openaiChild
+        , options
+        , pendingNotices
+        , pendingTurn
+        , persist
+        , planHooks
+        , planMode
+        , policy
+        , preferredOpenAiAccountRef
+        , projectRoot
+        , promptRequest
+        , provider
+        , refreshDialectContext
+        , registry
+        , resolveActiveAccountLabel
+        , resumeTargetChanged
+        , resumed
+        , root
+        , rootTurnRef
+        , selectHttpAccount
+        , selectableTokenProvider
+        , sessionTools = agentSessionAppTools
+        , setWindowTitle
+        , skillInvocationsRef
+        , skillsRef
+        , startup
+        , stateDirectory
+        , stderrHandle
+        , subagentForkSource
+        , subagentSessions
+        , subagentStoreRoot
+        , tokenProvider
+        , toolEnv = baseToolEnv
+        , tools
+        , transition
+        , transportModel
+        , unavailableProviders
+        }

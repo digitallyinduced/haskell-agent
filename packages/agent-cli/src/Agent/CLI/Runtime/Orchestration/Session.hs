@@ -1,4 +1,7 @@
-module Agent.CLI.Runtime.Orchestration.Session (runAgentSession) where
+module Agent.CLI.Runtime.Orchestration.Session
+    ( AgentSessionRequest(..)
+    , runAgentSession
+    ) where
 
 import Agent.CLI.AccountPicker ()
 import Agent.CLI.AccountSelection ()
@@ -91,7 +94,9 @@ import Agent.CLI.Resume ( resumeNeedsGeneratedContext )
 import Agent.CLI.Runtime.HistorySource ()
 import Agent.CLI.Runtime.Orchestration.Background ()
 import Agent.CLI.Runtime.Orchestration.Providers
-    ( runAgentProviders )
+    ( AgentProviderRequest(..)
+    , runAgentProviders
+    )
 import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Startup
     ( clearNativeProgress, mcpToolCollision, reportStartupWarning )
@@ -427,183 +432,9 @@ data SessionLiveRuntime = SessionLiveRuntime
     }
 
 runAgentSession
-    :: LoadedAuth
-    -> Maybe GatewayCredential
-    -> Bool
-    -> OsPath
-    -> IORef Text
-    -> IORef Text
-    -> IORef Text
-    -> GrokSubagentSpecs
-    -> [AppTool]
-    -> ([ImageAttachment] -> IO ())
-    -> IO ()
-    -> IORef Bool
-    -> ModelCatalog
-    -> IORef (Maybe GatewayModelAccess)
-    -> Bool
-    -> (SessionHandle -> IO ())
-    -> Bool
-    -> IO closeResult
-    -> IORef (IO ())
-    -> CodingTools
-    -> (OsPath -> IO (Either Text SubagentWorktree))
-    -> Maybe GenericClientOptions
-    -> OsPath
-    -> [AppTool]
-    -> DatabaseScopes
-    -> Dialect
-    -> Text
-    -> IORef Bool
-    -> [AppTool]
-    -> Maybe FullscreenRuntime
-    -> [AppTool]
-    -> IORef Bool
-    -> Maybe [Text]
-    -> Maybe (Text -> IO (Maybe CollaborationModelTarget))
-    -> Maybe (Text -> IO Bool)
-    -> OsPath
-    -> ModelTarget
-    -> InterruptState
-    -> [AppTool]
-    -> Maybe LegacySubagentTarget
-    -> MCP.McpFleet
-    -> [(Text, Text)]
-    -> [AppTool]
-    -> Text
-    -> Maybe MultiAgentContext
-    -> (OsPath -> IO ())
-    -> ClientOptions
-    -> Maybe TokenProvider
-    -> CliOptions
-    -> PendingInputs
-    -> Maybe PendingTurn
-    -> Persistence
-    -> PlanModeHooks
-    -> PlanModeEnv
-    -> ApprovalPolicy
-    -> IORef (Maybe Text)
-    -> OsPath
-    -> Maybe ManagedTurnRequest
-    -> Provider
-    -> Bool
-    -> SubagentRegistry
-    -> (Credential -> IO Text)
-    -> Bool
-    -> Maybe (SessionMeta, [SessionTurn])
-    -> OsPath
-    -> IORef (Maybe RootTurnId)
-    -> (Text -> IO (Either ApiError Text))
-    -> TokenProvider
-    -> [AppTool]
-    -> (Text -> IO titleResult)
-    -> IORef [SkillInvocation]
-    -> IORef SkillCatalog
-    -> StartupRuntime
-    -> FilePath
-    -> Handle
-    -> IORef (Maybe (IO [ResponseItem]))
-    -> IORef (Map SubagentId SubagentSession)
-    -> SubagentStoreRoot
-    -> TokenProvider
-    -> ToolEnv
-    -> [AppTool]
-    -> Maybe ProviderTransition
-    -> (Text -> Text)
-    -> Set Provider
-    -> IO RunResult
-runAgentSession
-    loaded
-    connectedGateway
-    learnAboutUserRequested
-    sessionTmp
-    activeAccountIdRef
-    activeAccountRef
-    activeSelectionRef
-    agentTypesRef
-    allTools
-    recordImageGenerationInputs
-    clearImageGenerationHistory
-    bashEnabledRef
-    catalog
-    gatewayModelsRef
-    checkStartupUsageInBackground
-    claimCurrentSession
-    claudeBypassEnabled
-    closeAll
-    codeModeCloseRef
-    coding
-    createSubagentWorktree
-    customGenericOptions
-    cwd
-    databaseAppTools
-    databaseScopes
-    dialect
-    effortText
-    escPaused
-    extraTools
-    fullscreen
-    gatewayTools
-    ghciEnabledRef
-    allowedChildModels
-    resolveChildModel
-    childModelAllowed
-    home
-    inferredTarget
-    interrupt
-    learnedSkillAppTools
-    legacySubagentTarget
-    mcpFleet
-    mcpInstructions
-    mcpTools
-    model
-    multiCtx
-    noteSessionDir
-    openRouterOptions
-    openaiChild
-    options
-    pendingNotices
-    pendingTurn
-    persist
-    planHooks
-    planMode
-    policy
-    preferredOpenAiAccountRef
-    projectRoot
-    promptRequest
-    provider
-    refreshDialectContext
-    registry
-    resolveActiveAccountLabel
-    resumeTargetChanged
-    resumed
-    root
-    rootTurnRef
-    selectHttpAccount
-    selectableTokenProvider
-    sessionTools
-    setWindowTitle
-    skillInvocationsRef
-    skillsRef
-    startup
-    stateDirectory
-    stderrHandle
-    subagentForkSource
-    subagentSessions
-    subagentStoreRoot
-    tokenProvider
-    toolEnv
-    tools
-    transition
-    transportModel
-    unavailableProviders
-    =
-    runAgentSessionRequest AgentSessionRequest{..}
-
-runAgentSessionRequest
     :: AgentSessionRequest closeResult windowTitleResult
     -> IO RunResult
-runAgentSessionRequest request@AgentSessionRequest{closeAll} =
+runAgentSession request@AgentSessionRequest{closeAll} =
     flip finally closeAll do
         validateSessionMcpTools request
         codeRuntime <- prepareSessionCodeRuntime request
@@ -1306,59 +1137,63 @@ launchPreparedSession request promptRuntime liveRuntime = do
     runSessionWithInterruptHandling request progName $
         withSessionStartupAvailability request shouldProbeAtStartup
             \startupUnavailable ->
-                runAgentProviders
-                    (if request.startup.startupBackground
-                        then SessionLocalSwitch
-                        else TopLevelSwitch)
-                    request.loaded
-                    request.connectedGateway
-                    (buildProviderSessionRequest
-                        request
-                        promptRuntime
-                        liveRuntime)
-                    request.activeAccountIdRef
-                    request.activeAccountRef
-                    request.activeSelectionRef
-                    request.catalog
-                    request.claudeBypassEnabled
-                    liveRuntime.sessionContextTokensRef
-                    (sessionContextWindowForParams request)
-                    liveRuntime.sessionConversationRef
-                    (sessionCurrentModelContextWindow
-                        request
-                        promptRuntime)
-                    request.customGenericOptions
-                    request.cwd
-                    request.dialect
-                    request.fullscreen
-                    promptRuntime.sessionAutomaticCompactionHookRef
-                    request.coding.codingTaskPlan
-                    request.home
-                    promptRuntime.sessionInitialPrevious
-                    request.model
-                    request.multiCtx
-                    request.openRouterOptions
-                    request.options
-                    promptRuntime.sessionParams
-                    promptRuntime.sessionParamsRef
-                    request.pendingNotices
-                    request.persist
-                    request.preferredOpenAiAccountRef
-                    request.projectRoot
-                    request.provider
-                    liveRuntime.sessionRecordCompactionUsage
-                    request.resolveActiveAccountLabel
-                    request.selectHttpAccount
-                    request.selectableTokenProvider
-                    shouldProbeAtStartup
-                    request.startup
-                    startupUnavailable
-                    request.stderrHandle
-                    liveRuntime.sessionSubagentRuntime
-                    request.tokenProvider
-                    request.transition
-                    request.transportModel
-                    request.unavailableProviders
+                runAgentProviders AgentProviderRequest
+                    { modelSwitchScope =
+                          if request.startup.startupBackground
+                              then SessionLocalSwitch
+                              else TopLevelSwitch
+                    , loaded = request.loaded
+                    , connectedGateway = request.connectedGateway
+                    , sessionRequest =
+                          buildProviderSessionRequest
+                              request
+                              promptRuntime
+                              liveRuntime
+                    , activeAccountIdRef = request.activeAccountIdRef
+                    , activeAccountRef = request.activeAccountRef
+                    , activeSelectionRef = request.activeSelectionRef
+                    , catalog = request.catalog
+                    , claudeBypassEnabled = request.claudeBypassEnabled
+                    , contextTokensRef = liveRuntime.sessionContextTokensRef
+                    , contextWindowForParams = sessionContextWindowForParams request
+                    , conversationRef = liveRuntime.sessionConversationRef
+                    , currentModelContextWindow =
+                          sessionCurrentModelContextWindow
+                              request
+                              promptRuntime
+                    , customGenericOptions = request.customGenericOptions
+                    , cwd = request.cwd
+                    , dialect = request.dialect
+                    , fullscreen = request.fullscreen
+                    , automaticCompactionHookRef =
+                        promptRuntime.sessionAutomaticCompactionHookRef
+                    , taskPlan = request.coding.codingTaskPlan
+                    , home = request.home
+                    , initialPrevious = promptRuntime.sessionInitialPrevious
+                    , model = request.model
+                    , multiCtx = request.multiCtx
+                    , openRouterOptions = request.openRouterOptions
+                    , options = request.options
+                    , paramsRef = promptRuntime.sessionParamsRef
+                    , pendingNotices = request.pendingNotices
+                    , persist = request.persist
+                    , preferredOpenAiAccountRef = request.preferredOpenAiAccountRef
+                    , projectRoot = request.projectRoot
+                    , provider = request.provider
+                    , recordCompactionUsage = liveRuntime.sessionRecordCompactionUsage
+                    , resolveActiveAccountLabel = request.resolveActiveAccountLabel
+                    , selectHttpAccount = request.selectHttpAccount
+                    , selectableTokenProvider = request.selectableTokenProvider
+                    , shouldProbeAtStartup
+                    , startup = request.startup
+                    , startupUnavailable
+                    , stderrHandle = request.stderrHandle
+                    , subagentRuntime = liveRuntime.sessionSubagentRuntime
+                    , tokenProvider = request.tokenProvider
+                    , transition = request.transition
+                    , transportModel = request.transportModel
+                    , unavailableProviders = request.unavailableProviders
+                    }
 
 -- | Print a copy-pasteable --resume line whenever the CLI session quits.
 -- Ctrl-C is normalized to the same graceful 'RunQuit' result as :q/Ctrl-D so
