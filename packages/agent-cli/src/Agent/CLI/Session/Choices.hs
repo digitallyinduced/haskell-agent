@@ -11,6 +11,7 @@ module Agent.CLI.Session.Choices
 import Agent.CLI.Error (formatApiErrorInlineAt)
 import Agent.CLI.GatewayClient
     ( GatewayModelAccess
+    , fetchGatewayUsage
     , refreshGatewayModels
     )
 import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
@@ -23,7 +24,7 @@ import Agent.CLI.ModelPicker
     ( ModelPickerSelection(..)
     , initialModelEffort
     , modelEffortOptions
-    , pickModelStateWithEffort
+    , pickModelStateWithEffortAndUsage
     , renderEffortIndicator
     )
 import Agent.CLI.Models
@@ -53,6 +54,7 @@ import Agent.CLI.TUI.App
 import Agent.CLI.Options (defaultEffortFor)
 import Agent.CLI.Usage
     ( AccountUsageLine(..)
+    , formatModelUsageSummary
     , formatUsageReport
     )
 import Agent.Claude
@@ -74,7 +76,8 @@ import Agent.Provider
     , getNextToken
     )
 import Data.List (elemIndex)
-import Data.Maybe (fromMaybe)
+import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -130,8 +133,8 @@ modelChoiceWithEffort
         currentEffort = do
     scopedPicker >>= \case
         Left err -> pure (Left err)
-        Right (title, picker) ->
-            Right <$> presentPicker title picker
+        Right (title, picker, usage) ->
+            Right <$> presentPicker title picker usage
   where
     scopedPicker =
         case gatewayAccess of
@@ -155,9 +158,13 @@ modelChoiceWithEffort
                                 OpenAIProvider
                                 current
                                 currentDialect
+                        usage <- loadGatewayModelUsage access options
                         pure
                             (Right
-                                ("Models · organization gateway", picker))
+                                ( "Models · organization gateway"
+                                , picker
+                                , usage
+                                ))
             Nothing -> do
                 discovered <- discoverModelOptions connectionId provider
                 picker <-
@@ -168,12 +175,16 @@ modelChoiceWithEffort
                         provider
                         current
                         currentDialect
-                pure (Right ("Models", picker))
+                pure (Right ("Models", picker, Map.empty))
 
-    presentPicker title picker =
+    presentPicker title picker usage =
         case fullscreen of
             Nothing ->
-                pickModelStateWithEffort color currentEffort picker
+                pickModelStateWithEffortAndUsage
+                    color
+                    currentEffort
+                    usage
+                    picker
             Just runtime -> do
                 let options = picker.pickerAll
                     row option =
@@ -182,8 +193,14 @@ modelChoiceWithEffort
                                 initialModelEffort picker currentEffort option
                             initialIndex =
                                 fromMaybe 0 (elemIndex initial efforts)
-                        in ( modelRowLabel picker option
-                           , modelDetail picker option
+                            usageText =
+                                Map.lookup
+                                    option.modelTarget.targetModelId
+                                    usage
+                            withUsage separator text =
+                                text <> maybe "" (separator <>) usageText
+                        in ( withUsage "  " (modelRowLabel picker option)
+                           , withUsage "\nUsage: " (modelDetail picker option)
                            , map (renderEffortIndicator option) efforts
                            , initialIndex
                            )
@@ -202,6 +219,24 @@ modelChoiceWithEffort
                                         , modelPickerEffort = effort
                                         }
                         _ -> pure Nothing
+
+loadGatewayModelUsage
+    :: GatewayModelAccess
+    -> [ModelOption]
+    -> IO (Map.Map Text Text)
+loadGatewayModelUsage access options =
+    Map.fromList . concat
+        <$> mapConcurrentlyBounded 4 loadUsage options
+  where
+    loadUsage option = do
+        let modelId = option.modelTarget.targetModelId
+        fetchGatewayUsage access modelId >>= \case
+            Left _ -> pure []
+            Right snapshot ->
+                pure
+                    [ (modelId, summary)
+                    | summary <- maybeToList (formatModelUsageSummary snapshot)
+                    ]
 
 discoverModelOptions :: Text -> Provider -> IO [ModelOption]
 discoverModelOptions connectionId provider

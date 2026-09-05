@@ -80,6 +80,24 @@ spec = do
                 (Left (ConnectionError "offline"))
                 `shouldBe` "usage unavailable"
 
+    describe "formatModelUsageSummary" do
+        it "compacts gateway model windows without account metadata" do
+            formatModelUsageSummary sampleSnapshot
+                `shouldBe` Just "5h 69% left · 7d 28% left"
+
+        it "marks a reached gateway model limit" do
+            let snapshot = UsageSnapshot
+                    { planType = sampleSnapshot.planType
+                    , rateLimit =
+                        fmap
+                            (\limit -> limit { limitReached = True })
+                            sampleSnapshot.rateLimit
+                    , additionalRateLimits = sampleSnapshot.additionalRateLimits
+                    }
+            formatModelUsageSummary snapshot
+                `shouldBe`
+                    Just "limit reached · 5h 69% left · 7d 28% left"
+
     describe "composer limit status" do
         it "uses OpenAI's weekly window ahead of its 5-hour window" do
             formatOpenAiLimitStatus sampleSnapshot
