@@ -3,6 +3,9 @@ module Agent.CLI.Runtime.Orchestration.Tools
     , runAgentTools
     ) where
 
+import Agent.CLI.ActiveAccount
+    ( ActiveAccountRef
+    )
 import Agent.CLI.AgentSessions
     ( agentSessionTools,
       launchSessionThread,
@@ -333,9 +336,7 @@ data AgentToolsRequest windowTitleResult = AgentToolsRequest
     , connectedGateway :: Maybe GatewayCredential
     , learnAboutUserRequested :: Bool
     , customBearerToken :: Maybe Text
-    , activeAccountIdRef :: IORef Text
-    , activeAccountRef :: IORef Text
-    , activeSelectionRef :: IORef Text
+    , activeAccountRef :: ActiveAccountRef
     , baseToolEnv :: ToolEnv
     , catalog :: ModelCatalog
     , initialSkills :: SkillCatalog
@@ -1957,9 +1958,7 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
         , connectedGateway
         , learnAboutUserRequested
         , sessionTmp
-        , activeAccountIdRef
         , activeAccountRef
-        , activeSelectionRef
         , agentTypesRef
         , allTools
         , recordImageGenerationInputs =
