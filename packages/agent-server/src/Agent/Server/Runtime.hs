@@ -1592,11 +1592,8 @@ selectModel boundary catalog options requested =
         case boundary.accessGatewayBoundary.gatewayBoundaryIdentity of
         Just _ -> listToMaybe options
         Nothing ->
-            (defaultModelOptionFor catalog OpenAIProvider
-                >>= \preferred ->
-                    find
-                        ((== preferred.modelTarget) . (.modelTarget))
-                        options)
+            let preferred = defaultModelOptionFor catalog OpenAIProvider
+            in find ((== preferred.modelTarget) . (.modelTarget)) options
                 <|> listToMaybe options
 
 resolveEffort

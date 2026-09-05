@@ -710,9 +710,7 @@ resolveToolModel AgentToolsRequest
   where
     toolProvider = loaded.loadedProvider
     fallbackModel =
-        fromMaybe
-            (error "validated default model is missing")
-            (defaultModelFor catalog toolProvider)
+        defaultModelFor catalog toolProvider
     unrestrictedModel =
         fromMaybe
             (maybe fallbackModel (.targetModelId) targetHint)
