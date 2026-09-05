@@ -70,6 +70,7 @@ library
                     , Agent.CLI.SessionLock
                     , Agent.CLI.Transcription
     build-depends:    agent-claude >= 0.1 && < 0.2
+                    , agent-server-client
                     , agent-core >= 0.1 && < 0.2
                     , agent-gemini >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2

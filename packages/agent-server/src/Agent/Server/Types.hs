@@ -13,11 +13,17 @@ module Agent.Server.Types
     , AccessBoundary(..)
     , accessBoundary
     , TurnId(..)
+    , ClientRequestId(..)
     , RequestId(..)
     , TurnStatus(..)
     , turnStatusText
     , TurnSpec(..)
     , TurnRecord(..)
+    , TurnReservation(..)
+    , TurnCompletionResult(..)
+    , TurnExecutionOutput(..)
+    , TurnTerminalOutcome(..)
+    , TurnResult(..)
     , HumanRequestKind(..)
     , humanRequestKindText
     , HumanRequestSpec(..)
@@ -116,6 +122,9 @@ accessBoundary principal gateway = AccessBoundary
 newtype TurnId = TurnId { unTurnId :: Text }
     deriving (Eq, Ord, Show)
 
+newtype ClientRequestId = ClientRequestId { unClientRequestId :: Text }
+    deriving (Eq, Ord, Show)
+
 newtype RequestId = RequestId { unRequestId :: Text }
     deriving (Eq, Ord, Show)
 
@@ -139,14 +148,26 @@ turnStatusText = \case
 
 data TurnSpec = TurnSpec
     { turnSpecSessionId :: !Text
+    , turnSpecClientRequestId :: !ClientRequestId
     , turnSpecPrompt :: !Text
     , turnSpecBoundary :: !AccessBoundary
     }
     deriving (Eq, Show)
 
+instance ToJSON TurnExecutionOutput where
+    toJSON output =
+        object
+            [ "responseId" .= output.turnExecutionResponseId
+            , "assistantText" .= output.turnExecutionAssistantText
+            , "assistantTextTruncated"
+                .= output.turnExecutionAssistantTextTruncated
+            , "completion" .= output.turnExecutionCompletion
+            ]
+
 data TurnRecord = TurnRecord
     { turnRecordId :: !TurnId
     , turnRecordSessionId :: !Text
+    , turnRecordClientRequestId :: !ClientRequestId
     , turnRecordBoundary :: !AccessBoundary
     , turnRecordStatus :: !TurnStatus
     , turnRecordCreatedAt :: !UTCTime
@@ -157,15 +178,67 @@ data TurnRecord = TurnRecord
     deriving (Eq, Show)
 
 instance ToJSON TurnRecord where
-    toJSON turn = object
-        [ "id" .= turn.turnRecordId.unTurnId
-        , "sessionId" .= turn.turnRecordSessionId
-        , "status" .= turnStatusText turn.turnRecordStatus
-        , "createdAt" .= turn.turnRecordCreatedAt
-        , "startedAt" .= turn.turnRecordStartedAt
-        , "finishedAt" .= turn.turnRecordFinishedAt
-        , "error" .= turn.turnRecordError
-        ]
+    toJSON turn =
+        object
+            [ "id" .= turn.turnRecordId.unTurnId
+            , "sessionId" .= turn.turnRecordSessionId
+            , "clientRequestId"
+                .= turn.turnRecordClientRequestId.unClientRequestId
+            , "status" .= turnStatusText turn.turnRecordStatus
+            , "createdAt" .= turn.turnRecordCreatedAt
+            , "startedAt" .= turn.turnRecordStartedAt
+            , "finishedAt" .= turn.turnRecordFinishedAt
+            , "error" .= turn.turnRecordError
+            ]
+
+data TurnReservation
+    = TurnReservationCreated !TurnRecord
+    | TurnReservationExistingOwned !TurnRecord
+    | TurnReservationExisting !TurnRecord
+    deriving (Eq, Show)
+
+data TurnCompletionResult
+    = TurnCompletionComplete
+    | TurnCompletionIncomplete !Text !(Maybe Int)
+    deriving (Eq, Show)
+
+instance ToJSON TurnCompletionResult where
+    toJSON = \case
+        TurnCompletionComplete ->
+            object ["status" .= ("completed" :: Text)]
+        TurnCompletionIncomplete reason reasoningTokens ->
+            object
+                [ "status" .= ("incomplete" :: Text)
+                , "reason" .= reason
+                , "reasoningTokens" .= reasoningTokens
+                ]
+
+data TurnExecutionOutput = TurnExecutionOutput
+    { turnExecutionResponseId :: !Text
+    , turnExecutionAssistantText :: !(Maybe Text)
+    , turnExecutionAssistantTextTruncated :: !Bool
+    , turnExecutionCompletion :: !TurnCompletionResult
+    }
+    deriving (Eq, Show)
+
+data TurnTerminalOutcome
+    = TurnSucceeded !TurnExecutionOutput
+    | TurnErrored !Text
+    | TurnWasCancelled
+    deriving (Eq, Show)
+
+data TurnResult = TurnResult
+    { turnResultTurn :: !TurnRecord
+    , turnResultOutput :: !(Maybe TurnExecutionOutput)
+    }
+    deriving (Eq, Show)
+
+instance ToJSON TurnResult where
+    toJSON result =
+        object
+            [ "turn" .= result.turnResultTurn
+            , "output" .= result.turnResultOutput
+            ]
 
 data HumanRequestKind
     = ToolApprovalRequest
@@ -310,15 +383,29 @@ instance FromJSON ForkSessionRequest where
             <*> value .:? "title"
             <*> value .:? "cwd"
 
-newtype CreateTurnRequest = CreateTurnRequest
-    { createTurnInput :: Text
+data CreateTurnRequest = CreateTurnRequest
+    { createTurnClientRequestId :: !(Maybe ClientRequestId)
+    , createTurnInput :: !Text
     }
     deriving (Eq, Show)
 
 instance FromJSON CreateTurnRequest where
     parseJSON = withObject "CreateTurnRequest" \value -> do
-        rejectUnknownFields "CreateTurnRequest" ["input"] value
-        CreateTurnRequest <$> value .: "input"
+        rejectUnknownFields
+            "CreateTurnRequest"
+            ["clientRequestId", "input"]
+            value
+        rawRequestId <- value .:? "clientRequestId"
+        requestId <- case rawRequestId of
+            Nothing -> pure Nothing
+            Just candidate
+                | isUUIDText candidate ->
+                    pure
+                        (Just
+                            (ClientRequestId
+                                (Text.toLower candidate)))
+                | otherwise -> fail "clientRequestId must be a UUID"
+        CreateTurnRequest requestId <$> value .: "input"
 
 data ResolveRequest = ResolveRequest
     { resolveRequestDecision :: !Text

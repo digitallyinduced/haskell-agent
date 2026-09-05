@@ -100,6 +100,16 @@
                     ];
                 };
 
+                agentServerClientSource = nix-filter.lib {
+                    root = ./packages/agent-server-client;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-server-client.cabal"
+                        "LICENSE"
+                    ];
+                };
+
                 agentGeminiSource = nix-filter.lib {
                     root = ./packages/agent-gemini;
                     include = [
@@ -687,6 +697,14 @@
                                     src = agentStoreSource;
                                 })
                             [ pkgs.postgresql_18 ]);
+                        agent-server-client = localPackage
+                            (pkgs.haskell.lib.overrideSrc
+                                (final.callPackage
+                                    ./packages/agent-server-client/package.nix
+                                    { })
+                                {
+                                    src = agentServerClientSource;
+                                });
                         agent-cli-runtime = localPackage
                             (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc
@@ -859,6 +877,8 @@
                     productionHaskellPackages.agent-native-bridge;
                 agentTelegramPackage = productionHaskellPackages.agent-telegram;
                 agentServerPackage = productionHaskellPackages.agent-server;
+                agentServerClientPackage =
+                    productionHaskellPackages.agent-server-client;
                 # Exercise these packages' own test suites against the
                 # production dependency graph. Referencing the all-check
                 # package set here would also rerun every transitive local
@@ -1280,6 +1300,7 @@
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;
                 packages.agent-server = agentServerExecutable;
+                packages.agent-server-client = agentServerClientPackage;
                 packages.${if pkgs.stdenv.hostPlatform.isLinux
                     then "agent-sandbox-runner" else null} = agentSandboxRunner;
                 packages.${if pkgs.stdenv.hostPlatform.isDarwin
@@ -1434,6 +1455,8 @@
                         '';
                     agent-telegram = agentTelegramCheckPackage;
                     agent-server = agentServerCheckPackage;
+                    agent-server-client =
+                        haskellPackages.agent-server-client;
                     agent-core = haskellPackages.agent-core;
                     agent-mcp = haskellPackages.agent-mcp;
                     agent-json = haskellPackages.agent-json;

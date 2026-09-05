@@ -1,11 +1,11 @@
 { mkDerivation, aeson, agent-claude, agent-core, agent-gemini
 , agent-json, agent-openai, agent-openrouter, agent-process
-, agent-responses-types, agent-store, agent-xai, async, base
-, base64-bytestring, bytestring, containers, crypton, directory
-, entropy, filelock, filepath, hspec, http-client, http-client-tls
-, http-types, lib, memory, network, network-uri, process
-, QuickCheck, safe-exceptions, scientific, stm, text, time
-, transformers, unix, vector, wai, warp
+, agent-responses-types, agent-server-client, agent-store
+, agent-xai, async, base, base64-bytestring, bytestring, containers
+, crypton, directory, entropy, filelock, filepath, hspec
+, http-client, http-client-tls, http-types, lib, memory, network
+, network-uri, process, QuickCheck, safe-exceptions, scientific
+, stm, text, time, transformers, unix, vector, wai, warp
 }:
 mkDerivation {
   pname = "agent-cli-runtime";
@@ -14,12 +14,12 @@ mkDerivation {
   enableSeparateDataOutput = true;
   libraryHaskellDepends = [
     aeson agent-claude agent-core agent-gemini agent-json agent-openai
-    agent-openrouter agent-process agent-responses-types agent-store
-    agent-xai async base base64-bytestring bytestring containers
-    crypton directory entropy filelock filepath http-client
-    http-client-tls http-types memory network network-uri process
-    safe-exceptions scientific stm text time transformers unix vector
-    wai warp
+    agent-openrouter agent-process agent-responses-types
+    agent-server-client agent-store agent-xai async base
+    base64-bytestring bytestring containers crypton directory entropy
+    filelock filepath http-client http-client-tls http-types memory
+    network network-uri process safe-exceptions scientific stm text
+    time transformers unix vector wai warp
   ];
   testHaskellDepends = [
     aeson agent-core agent-json agent-responses-types agent-store async
