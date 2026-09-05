@@ -39,10 +39,13 @@ import Agent.CLI.ComputerUse.Linux.Logind
     )
 import Agent.CLI.ComputerUse.Input (MouseButton(..))
 import Agent.CLI.ComputerUse.Linux.Portal
-    ( PortalState(..)
+    ( CapturedPortalFrame(..)
+    , PortalFrameState(..)
+    , PortalPngFrame(..)
+    , PortalState(..)
     , PortalStream(..)
     , ensurePortalStateReadyWith
-    , invalidatePortalStateWith
+    , invalidatePortalStateWhenWith
     , parsePortalStartResults
     , portalDisplayForFrame
     , portalDisplayForStream
@@ -50,12 +53,13 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , portalMethodCall
     , portalMouseButtonCode
     , portalRequestPathForSender
+    , readPortalPngFrame
     , requestResponseRule
     , sessionClosedRule
     , validatePortalOwnerUser
+    , waitForPortalFrameAfter
     , withPortalCaptureReadiness
     , withPortalInputReadiness
-    , withPortalTemporaryPathWith
     )
 import Agent.CLI.ComputerUse.Linux.X11
     ( XdotoolInvocation(..)
@@ -75,6 +79,11 @@ import Agent.Json (rawJsonFromEncoding)
 import Agent.Loop (ImageAttachment(..))
 import Agent.Responses.Types
 import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..))
+import Codec.Picture
+    ( PixelRGB8(..)
+    , encodePng
+    , generateImage
+    )
 import Control.Concurrent
     ( newEmptyMVar
     , newMVar
@@ -83,12 +92,13 @@ import Control.Concurrent
     , threadDelay
     )
 import Control.Concurrent.Async (cancel, waitCatch, withAsync)
+import Control.Concurrent.STM (atomically, newTVarIO, writeTVar)
 import Control.Exception
     ( MaskingState(..)
     , getMaskingState
     )
 import Control.Exception.Safe (finally, throwString, tryAny)
-import Control.Monad (forM_)
+import Control.Monad (forM_, void)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
@@ -115,6 +125,8 @@ import DBus
     , toVariant
     )
 import DBus.Client (MatchRule(..))
+import System.IO (hClose, hSetBinaryMode)
+import System.Posix.IO (createPipe, fdToHandle)
 import Test.Hspec
 
 spec :: Spec
@@ -1027,7 +1039,7 @@ spec = do
                 `shouldReturn` Right ()
             readIORef attempts `shouldReturn` 2
 
-        it "retries after closing a failed portal session" do
+        it "retries after cleaning up a matching remote portal close" do
             state <- newMVar (PortalReady ("stale session" :: Text.Text))
             closeStarted <- newEmptyMVar
             allowClose <- newEmptyMVar
@@ -1040,16 +1052,26 @@ spec = do
                 initialize = do
                     modifyIORef' attempts (+ 1)
                     pure ("fresh session" :: Text.Text)
+            invalidatePortalStateWhenWith
+                state
+                (== "different session")
+                "stale close signal"
+                closeSession
+            ensurePortalStateReadyWith state initialize
+                `shouldReturn` Right ()
+            readIORef closed `shouldReturn` []
+            readIORef attempts `shouldReturn` 0
             withAsync
-                (invalidatePortalStateWith
+                (invalidatePortalStateWhenWith
                     state
-                    "portal temporarily unavailable"
+                    (== "stale session")
+                    "portal session closed remotely"
                     closeSession)
                 \invalidating -> do
                     takeMVar closeStarted
                     ensurePortalStateReadyWith state initialize
                         `shouldReturn`
-                            Left "portal temporarily unavailable"
+                            Left "portal session closed remotely"
                     putMVar allowClose ()
                     waitCatch invalidating
                         >>= (`shouldSatisfy`
@@ -1061,27 +1083,68 @@ spec = do
             readIORef closed `shouldReturn` ["stale session"]
             readIORef attempts `shouldReturn` 1
 
-        it "surfaces a portal temp-path removal failure" do
-            events <- newIORef ([] :: [Text.Text])
-            let record event =
-                    modifyIORef' events (<> [event])
-                capture =
-                    withPortalTemporaryPathWith
-                        (record "acquire" >> pure ("capture.png", ()))
-                        (\() -> record "close")
-                        (\_ -> record "remove" >> throwString "remove failed")
-                        (\_ ->
-                            record "action"
-                                >> pure ("captured" :: Text.Text))
-            result <- tryAny capture
-            result `shouldSatisfy` \case
-                Left exception ->
-                    "remove failed"
-                        `Text.isInfixOf` Text.pack (show exception)
-                Right _ -> False
-            readIORef events
+        it "reads consecutive frames from one persistent PNG stream" do
+            let firstFrame =
+                    generateImage
+                        (\_ _ -> PixelRGB8 12 34 56)
+                        3
+                        2
+                secondFrame =
+                    generateImage
+                        (\_ _ -> PixelRGB8 65 43 21)
+                        5
+                        4
+                firstBytes = LBS.toStrict (encodePng firstFrame)
+                secondBytes = LBS.toStrict (encodePng secondFrame)
+                payload = firstBytes <> secondBytes
+            (readFd, writeFd) <- createPipe
+            input <- fdToHandle readFd
+            output <- fdToHandle writeFd
+            hSetBinaryMode input True
+            hSetBinaryMode output True
+            flip finally
+                ( do
+                    void (tryAny (hClose input))
+                    void (tryAny (hClose output))
+                ) $
+                withAsync
+                    (BS.hPut output payload `finally` hClose output)
+                    \writer -> do
+                        parsedFirst <- readPortalPngFrame input
+                        parsedSecond <- readPortalPngFrame input
+                        ( parsedFirst.portalPngFrameWidth
+                            , parsedFirst.portalPngFrameHeight
+                            ) `shouldBe` (3, 2)
+                        parsedFirst.portalPngFrameBytes
+                            `shouldBe` firstBytes
+                        ( parsedSecond.portalPngFrameWidth
+                            , parsedSecond.portalPngFrameHeight
+                            ) `shouldBe` (5, 4)
+                        parsedSecond.portalPngFrameBytes
+                            `shouldBe` secondBytes
+                        waitCatch writer
+                            >>= (`shouldSatisfy`
+                                either (const False) (const True))
+
+        it "requires a strictly newer frame and fails on timeout" do
+            let staleFrame = PortalPngFrame "stale" 3 2
+                freshFrame = PortalPngFrame "fresh" 5 4
+                timeoutError =
+                    "GStreamer portal capture did not produce a fresh frame."
+            frameState <-
+                newTVarIO (PortalFrameAvailable 41 staleFrame)
+            waitForPortalFrameAfter 1000 41 frameState
+                `shouldReturn` Left timeoutError
+            atomically $
+                writeTVar
+                    frameState
+                    (PortalFrameAvailable 42 freshFrame)
+            waitForPortalFrameAfter 100000 41 frameState
                 `shouldReturn`
-                    ["acquire", "close", "action", "close", "remove"]
+                    Right CapturedPortalFrame
+                        { portalFrameSequence = 42
+                        , portalFramePng = freshFrame
+                        }
 
         it "requires one monitor stream and both input grants" do
             parsePortalStartResults portalStartResults

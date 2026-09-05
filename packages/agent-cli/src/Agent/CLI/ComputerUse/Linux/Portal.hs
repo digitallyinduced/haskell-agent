@@ -1,8 +1,11 @@
 module Agent.CLI.ComputerUse.Linux.Portal
-    ( PortalState(..)
+    ( CapturedPortalFrame(..)
+    , PortalFrameState(..)
+    , PortalPngFrame(..)
+    , PortalState(..)
     , PortalStream(..)
     , ensurePortalStateReadyWith
-    , invalidatePortalStateWith
+    , invalidatePortalStateWhenWith
     , newPortalBackend
     , parsePortalStartResults
     , portalDisplayForFrame
@@ -11,12 +14,13 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , portalMethodCall
     , portalMouseButtonCode
     , portalRequestPathForSender
+    , readPortalPngFrame
     , requestResponseRule
     , sessionClosedRule
     , validatePortalOwnerUser
+    , waitForPortalFrameAfter
     , withPortalCaptureReadiness
     , withPortalInputReadiness
-    , withPortalTemporaryPathWith
     ) where
 
 import Agent.CLI.ComputerUse.Backend
@@ -69,6 +73,22 @@ import Control.Concurrent
     , threadDelay
     , tryPutMVar
     )
+import Control.Concurrent.Async
+    ( Async
+    , async
+    , cancel
+    , waitCatch
+    )
+import Control.Concurrent.STM
+    ( STM
+    , TVar
+    , atomically
+    , modifyTVar'
+    , newTVarIO
+    , readTVar
+    , readTVarIO
+    , retry
+    )
 import Control.Exception.Safe
     ( SomeException
     , bracket
@@ -81,7 +101,8 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad
-    ( forM
+    ( forever
+    , forM
     , forM_
     , unless
     , void
@@ -135,19 +156,11 @@ import DBus.Client
 import qualified DBus.Socket as Socket
 import DBus.Transport (SocketTransport)
 import Numeric (showHex)
-import System.Directory
-    ( getTemporaryDirectory
-    , removeFile
-    )
 import System.Entropy (getEntropy)
-import System.Exit (ExitCode(..))
 import System.IO
     ( Handle
-    , IOMode(..)
     , hClose
     , hSetBinaryMode
-    , openBinaryFile
-    , openBinaryTempFile
     )
 import System.Posix.IO (closeFd, fdToHandle)
 import System.Posix.Signals (sigKILL, signalProcessGroup)
@@ -156,12 +169,12 @@ import System.Process
     ( CreateProcess(..)
     , ProcessHandle
     , StdStream(..)
+    , createProcess
     , getPid
     , interruptProcessGroupOf
     , proc
     , terminateProcess
     , waitForProcess
-    , withCreateProcess
     )
 import System.Timeout (timeout)
 
@@ -183,7 +196,29 @@ data PortalSession = PortalSession
     { portalSessionPath :: !ObjectPath
     , portalSessionStream :: !PortalStream
     , portalSessionClosedHandler :: !SignalHandler
+    , portalSessionCapture :: !PortalCapture
     }
+
+data PortalCapture = PortalCapture
+    { portalCaptureProcess :: !ProcessHandle
+    , portalCaptureOutput :: !Handle
+    , portalCaptureErrors :: !Handle
+    , portalCaptureFrameReader :: !(Async ())
+    , portalCaptureErrorReader :: !(Async ())
+    , portalCaptureFrameState :: !(TVar PortalFrameState)
+    }
+
+data PortalPngFrame = PortalPngFrame
+    { portalPngFrameBytes :: !BS.ByteString
+    , portalPngFrameWidth :: !Int
+    , portalPngFrameHeight :: !Int
+    } deriving (Eq, Show)
+
+data PortalFrameState
+    = PortalFramePending
+    | PortalFrameAvailable !Word64 !PortalPngFrame
+    | PortalFrameFailed !Text
+    deriving (Eq, Show)
 
 data PortalState session
     = PortalUninitialized
@@ -200,8 +235,9 @@ data PortalRuntime = PortalRuntime
     }
 
 data CapturedPortalFrame = CapturedPortalFrame
-    { portalFrameImage :: !(Image PixelRGB8)
-    }
+    { portalFrameSequence :: !Word64
+    , portalFramePng :: !PortalPngFrame
+    } deriving (Eq, Show)
 
 newPortalBackend
     :: WaylandPortalTarget
@@ -446,10 +482,12 @@ initializePortalSession runtime = do
                     ]
         stream <- either (fail . Text.unpack) pure
             (parsePortalStartResults startResults)
+        capture <- startPortalCapture runtime sessionPath stream
         pure PortalSession
             { portalSessionPath = sessionPath
             , portalSessionStream = stream
             , portalSessionClosedHandler = closedHandler
+            , portalSessionCapture = capture
             }
 
 validatePortalCapabilities :: PortalRuntime -> IO ()
@@ -638,13 +676,11 @@ sessionClosedRule owner path =
 
 markPortalSessionClosed :: PortalRuntime -> ObjectPath -> IO ()
 markPortalSessionClosed runtime closedPath =
-    modifyMVar_ runtime.portalState \case
-        PortalReady session
-            | session.portalSessionPath == closedPath ->
-                pure
-                    (PortalFailed
-                        "The desktop portal closed the computer-use session.")
-        state -> pure state
+    invalidatePortalStateWhenWith
+        runtime.portalState
+        (\session -> session.portalSessionPath == closedPath)
+        "The desktop portal closed the computer-use session."
+        (disposePortalSession runtime)
 
 closePortalRequest :: PortalRuntime -> ObjectPath -> IO ()
 closePortalRequest runtime requestPath =
@@ -672,12 +708,18 @@ closePortalSessionPath runtime sessionPath =
                     []))
         `catchAny` const (pure Nothing)
 
-closePortalSession :: PortalRuntime -> PortalSession -> IO ()
-closePortalSession runtime session =
+disposePortalSession :: PortalRuntime -> PortalSession -> IO ()
+disposePortalSession runtime session =
     (removeMatch
         runtime.portalClient
         session.portalSessionClosedHandler
         `catchAny` const (pure ()))
+        `finally`
+            closePortalCapture session.portalSessionCapture
+
+closePortalSession :: PortalRuntime -> PortalSession -> IO ()
+closePortalSession runtime session =
+    disposePortalSession runtime session
         `finally`
             closePortalSessionPath runtime session.portalSessionPath
 
@@ -690,23 +732,19 @@ closePortalRuntime runtime = do
     mapM_ (closePortalSession runtime) session
     disconnect runtime.portalClient `catchAny` const (pure ())
 
-invalidatePortalRuntime :: PortalRuntime -> Text -> IO ()
-invalidatePortalRuntime runtime err =
-    invalidatePortalStateWith
-        runtime.portalState
-        err
-        (closePortalSession runtime)
-
-invalidatePortalStateWith
+invalidatePortalStateWhenWith
     :: MVar (PortalState session)
+    -> (session -> Bool)
     -> Text
     -> (session -> IO ())
     -> IO ()
-invalidatePortalStateWith stateVar err closeSession =
+invalidatePortalStateWhenWith stateVar matches err closeSession =
     mask \restore -> do
         session <-
             modifyMVar stateVar \case
-                PortalReady value -> pure (PortalFailed err, Just value)
+                PortalReady value
+                    | matches value ->
+                        pure (PortalFailed err, Just value)
                 state -> pure (state, Nothing)
         forM_ session \value ->
             restore (closeSession value)
@@ -723,11 +761,12 @@ inspectPortalDisplay runtime =
             withPortalCaptureReadiness runtime.portalReadiness $
                 withPortalSessionOperation runtime "display inspection"
                     \session -> do
-                        frame <- capturePortalFrame runtime session
+                        frame <-
+                            capturePortalFrame session.portalSessionCapture
                         pure
-                            (portalDisplayForImage
+                            (portalDisplayForPngFrame
                                 session
-                                frame.portalFrameImage)
+                                frame.portalFramePng)
 
 capturePortalDisplay
     :: PortalRuntime
@@ -739,16 +778,19 @@ capturePortalDisplay runtime encoding =
         Right () ->
             withPortalCaptureReadiness runtime.portalReadiness $
                 withPortalSessionOperation runtime "screen capture" \session -> do
-                    frame <- capturePortalFrame runtime session
-                    let image = frame.portalFrameImage
+                    frame <-
+                        capturePortalFrame session.portalSessionCapture
+                    image <-
+                        encodePortalFrame
+                            encoding
+                            session.portalSessionStream
+                            frame.portalFramePng
                     pure CapturedDisplay
                         { capturedComputerDisplay =
-                            portalDisplayForImage session image
-                        , capturedComputerImage =
-                            encodePortalFrame
-                                encoding
-                                session.portalSessionStream
-                                image
+                            portalDisplayForPngFrame
+                                session
+                                frame.portalFramePng
+                        , capturedComputerImage = image
                         }
 
 withPortalCaptureReadiness
@@ -812,7 +854,13 @@ withPortalSessionOperation runtime operation action = do
                                 <> operation
                                 <> " failed: "
                                 <> exceptionText exception
-                    invalidatePortalRuntime runtime err
+                    invalidatePortalStateWhenWith
+                        runtime.portalState
+                        (\current ->
+                            current.portalSessionPath
+                                == session.portalSessionPath)
+                        err
+                        (closePortalSession runtime)
                     pure (Left err)
                 Right value -> pure (Right value)
         PortalFailed err -> pure (Left err)
@@ -1040,45 +1088,87 @@ notifyPortal runtime member body =
                 member
                 body)
 
-capturePortalFrame
+capturePortalFrame :: PortalCapture -> IO CapturedPortalFrame
+capturePortalFrame capture = do
+    baseline <-
+        readTVarIO capture.portalCaptureFrameState >>= \case
+            PortalFramePending -> pure 0
+            PortalFrameAvailable sequenceNumber _ ->
+                pure sequenceNumber
+            PortalFrameFailed err -> fail (Text.unpack err)
+    waitForPortalFrameAfter
+        captureRefreshTimeout
+        baseline
+        capture.portalCaptureFrameState
+        >>= either (fail . Text.unpack) pure
+
+waitForPortalFrameAfter
+    :: Int
+    -> Word64
+    -> TVar PortalFrameState
+    -> IO (Either Text CapturedPortalFrame)
+waitForPortalFrameAfter microseconds baseline stateVar = do
+    waited <-
+        timeout microseconds $
+            atomically (portalFrameAfter baseline stateVar)
+    pure case waited of
+        Nothing ->
+            Left "GStreamer portal capture did not produce a fresh frame."
+        Just result -> result
+
+latestPortalFrame :: PortalCapture -> IO CapturedPortalFrame
+latestPortalFrame capture = do
+    waited <-
+        timeout captureTimeout $
+            atomically
+                (currentPortalFrame capture.portalCaptureFrameState)
+    case waited of
+        Nothing -> fail "GStreamer portal capture timed out."
+        Just (Left err) -> fail (Text.unpack err)
+        Just (Right frame) -> pure frame
+
+currentPortalFrame
+    :: TVar PortalFrameState
+    -> STM (Either Text CapturedPortalFrame)
+currentPortalFrame stateVar =
+    readTVar stateVar >>= \case
+        PortalFramePending -> retry
+        PortalFrameAvailable sequenceNumber pngFrame ->
+            pure
+                (Right CapturedPortalFrame
+                    { portalFrameSequence = sequenceNumber
+                    , portalFramePng = pngFrame
+                    })
+        PortalFrameFailed err -> pure (Left err)
+
+portalFrameAfter
+    :: Word64
+    -> TVar PortalFrameState
+    -> STM (Either Text CapturedPortalFrame)
+portalFrameAfter baseline stateVar =
+    currentPortalFrame stateVar >>= \case
+        Right frame
+            | frame.portalFrameSequence <= baseline -> retry
+        result -> pure result
+
+startPortalCapture
     :: PortalRuntime
-    -> PortalSession
-    -> IO CapturedPortalFrame
-capturePortalFrame runtime session = do
-    pipeWireFd <- openPipeWireRemote runtime session
+    -> ObjectPath
+    -> PortalStream
+    -> IO PortalCapture
+startPortalCapture runtime sessionPath stream = do
+    pipeWireFd <- openPipeWireRemote runtime sessionPath
     input <-
         fdToHandle pipeWireFd
             `onException` closeFd pipeWireFd
     bracket (pure input) hClose \pipeWireHandle -> do
         hSetBinaryMode pipeWireHandle True
-        withTemporaryPath "agent-computer-use-wayland.png" \imagePath -> do
-            withTemporaryPath "agent-computer-use-gstreamer.log" \logPath -> do
-                runGstreamerCapture
-                    pipeWireHandle
-                    session.portalSessionStream.portalStreamNodeId
-                    imagePath
-                    logPath
-                bytes <- BS.readFile imagePath
-                when (BS.null bytes) $
-                    fail "GStreamer returned an empty portal screenshot."
-                dynamicImage <-
-                    either
-                        (\err ->
-                            fail
-                                ("Unable to decode the portal screenshot: "
-                                    <> err))
-                        pure
-                        (decodeImage bytes)
-                let image = convertRGB8 dynamicImage
-                    width = imageWidth image
-                    height = imageHeight image
-                unless (validFrameSize width height) $
-                    fail "The portal returned an invalid screenshot size."
-                pure CapturedPortalFrame
-                    { portalFrameImage = image }
+        startGstreamerPortalCapture
+            pipeWireHandle
+            stream.portalStreamNodeId
 
-openPipeWireRemote :: PortalRuntime -> PortalSession -> IO Fd
-openPipeWireRemote runtime session = do
+openPipeWireRemote :: PortalRuntime -> ObjectPath -> IO Fd
+openPipeWireRemote runtime sessionPath = do
     reply <-
         portalCallBounded
             directCallTimeout
@@ -1087,7 +1177,7 @@ openPipeWireRemote runtime session = do
                 runtime.portalOwnerName
                 screenCastInterface
                 "OpenPipeWireRemote"
-                [ toVariant session.portalSessionPath
+                [ toVariant sessionPath
                 , toVariant emptyPortalOptions
                 ])
     case methodReturnBody reply of
@@ -1097,68 +1187,252 @@ openPipeWireRemote runtime session = do
         _ ->
             fail "The desktop portal returned an invalid PipeWire descriptor."
 
-runGstreamerCapture
+startGstreamerPortalCapture
     :: Handle
     -> Word32
-    -> FilePath
-    -> FilePath
+    -> IO PortalCapture
+startGstreamerPortalCapture pipeWireHandle nodeId = do
+    frameState <- newTVarIO PortalFramePending
+    errorBuffer <- newTVarIO BS.empty
+    mask \restore -> do
+        (_, maybeOutput, maybeErrors, processHandle) <-
+            createProcess
+                ( (proc "gst-launch-1.0"
+                    [ "-q"
+                    , "pipewiresrc"
+                    , "fd=0"
+                    , "path=" <> show nodeId
+                    , "!"
+                    , "videorate"
+                    , "drop-only=true"
+                    , "max-rate=4"
+                    , "!"
+                    , "videoconvert"
+                    , "!"
+                    , "pngenc"
+                    , "snapshot=false"
+                    , "!"
+                    , "fdsink"
+                    , "fd=1"
+                    , "sync=false"
+                    ])
+                    { std_in = UseHandle pipeWireHandle
+                    , std_out = CreatePipe
+                    , std_err = CreatePipe
+                    , close_fds = True
+                    , create_group = True
+                    }
+                )
+        case (maybeOutput, maybeErrors) of
+            (Just outputHandle, Just errorHandle) -> do
+                flip onException
+                    (closeBarePortalCapture
+                        processHandle
+                        outputHandle
+                        errorHandle) do
+                            hSetBinaryMode outputHandle True
+                            hSetBinaryMode errorHandle True
+                            errorReader <-
+                                async
+                                    (drainPortalCaptureErrors
+                                        errorHandle
+                                        errorBuffer)
+                            frameReader <-
+                                async
+                                    (runPortalFrameReader
+                                        outputHandle
+                                        errorBuffer
+                                        frameState)
+                                    `onException` do
+                                        cancel errorReader
+                                        void (waitCatch errorReader)
+                            let capture = PortalCapture
+                                    { portalCaptureProcess = processHandle
+                                    , portalCaptureOutput = outputHandle
+                                    , portalCaptureErrors = errorHandle
+                                    , portalCaptureFrameReader = frameReader
+                                    , portalCaptureErrorReader = errorReader
+                                    , portalCaptureFrameState = frameState
+                                    }
+                            void (restore (latestPortalFrame capture))
+                                `onException` closePortalCapture capture
+                            pure capture
+            _ -> do
+                void (tryAny (stopPortalCaptureProcess processHandle))
+                forM_ maybeOutput \handle ->
+                    void (tryAny (hClose handle))
+                forM_ maybeErrors \handle ->
+                    void (tryAny (hClose handle))
+                fail "GStreamer did not expose the portal capture pipes."
+
+runPortalFrameReader
+    :: Handle
+    -> TVar BS.ByteString
+    -> TVar PortalFrameState
     -> IO ()
-runGstreamerCapture pipeWireHandle nodeId imagePath logPath = do
-    exitResult <-
-        bracket
-            (openBinaryFile logPath WriteMode)
-            hClose
-            \logHandle ->
-                withCreateProcess
-                    ( (proc "gst-launch-1.0"
-                        [ "-q"
-                        , "pipewiresrc"
-                        , "fd=0"
-                        , "path=" <> show nodeId
-                        , "num-buffers=1"
-                        , "!"
-                        , "videoconvert"
-                        , "!"
-                        , "pngenc"
-                        , "snapshot=true"
-                        , "!"
-                        , "filesink"
-                        , "location=" <> imagePath
-                        ])
-                        { std_in = UseHandle pipeWireHandle
-                        , std_out = NoStream
-                        , std_err = UseHandle logHandle
-                        , close_fds = True
-                        , create_group = True
-                        }
-                    )
-                    \_ _ _ processHandle -> do
-                        waited <-
-                            timeout captureTimeout
-                                (waitForProcess processHandle)
-                        case waited of
-                            Just exitCode -> pure (Just exitCode)
-                            Nothing -> do
-                                stopPortalCaptureProcess processHandle
-                                pure Nothing
-    details <-
-        Text.strip
-            . TextEncoding.decodeUtf8With (\_ _ -> Just '\xfffd')
-            . BS.take 8192
-            <$> BS.readFile logPath
-    case exitResult of
-        Nothing -> fail "GStreamer portal capture timed out."
-        Just ExitSuccess -> pure ()
-        Just (ExitFailure code)
-            | Text.null details ->
+runPortalFrameReader outputHandle errorBuffer frameState =
+    (forever do
+        pngFrame <- readPortalPngFrame outputHandle
+        atomically $
+            modifyTVar' frameState \case
+                PortalFramePending ->
+                    PortalFrameAvailable 1 pngFrame
+                PortalFrameAvailable sequenceNumber _ ->
+                    PortalFrameAvailable (sequenceNumber + 1) pngFrame
+                failed@(PortalFrameFailed _) -> failed)
+        `catchAny` \exception -> do
+            details <- portalCaptureErrorDetails errorBuffer
+            let err
+                    | Text.null details =
+                        "GStreamer portal capture stopped: "
+                            <> exceptionText exception
+                    | otherwise =
+                        "GStreamer portal capture failed: " <> details
+            atomically $
+                modifyTVar' frameState \case
+                    failed@(PortalFrameFailed _) -> failed
+                    _ -> PortalFrameFailed err
+
+drainPortalCaptureErrors
+    :: Handle
+    -> TVar BS.ByteString
+    -> IO ()
+drainPortalCaptureErrors errorHandle errorBuffer =
+    loop `catchAny` const (pure ())
+  where
+    loop = do
+        chunk <- BS.hGetSome errorHandle 4096
+        unless (BS.null chunk) do
+            atomically $
+                modifyTVar' errorBuffer
+                    (BS.take maximumPortalErrorBytes . (<> chunk))
+            loop
+
+portalCaptureErrorDetails :: TVar BS.ByteString -> IO Text
+portalCaptureErrorDetails errorBuffer =
+    Text.strip
+        . TextEncoding.decodeUtf8With (\_ _ -> Just '\xfffd')
+        <$> readTVarIO errorBuffer
+
+readPortalPngFrame :: Handle -> IO PortalPngFrame
+readPortalPngFrame input = do
+    signature <- readPortalBytes input (BS.length pngSignature)
+    unless (signature == pngSignature) $
+        fail "GStreamer returned an invalid PNG stream."
+    chunks <- readChunks [] (toInteger (BS.length signature))
+    let bytes = BS.concat (signature : reverse chunks)
+    (width, height) <- validatePortalPngHeader bytes
+    pure PortalPngFrame
+        { portalPngFrameBytes = bytes
+        , portalPngFrameWidth = width
+        , portalPngFrameHeight = height
+        }
+  where
+    readChunks chunks consumed = do
+        header <- readPortalBytes input 8
+        let payloadLength =
+                portalBigEndianWord (BS.take 4 header)
+            chunkType = BS.drop 4 header
+            chunkBytes = payloadLength + 12
+        when
+            (payloadLength > toInteger (maxBound :: Int)
+                || consumed + chunkBytes > maximumPortalPngBytes) $
+            fail "The portal PNG frame is too large."
+        body <-
+            readPortalBytes
+                input
+                (fromInteger payloadLength + 4)
+        let chunk = header <> body
+        if chunkType == "IEND"
+            then do
+                unless (payloadLength == 0) $
+                    fail "The portal PNG frame has an invalid terminator."
+                pure (chunk : chunks)
+            else
+                readChunks
+                    (chunk : chunks)
+                    (consumed + chunkBytes)
+
+decodePortalPngFrame :: PortalPngFrame -> IO (Image PixelRGB8)
+decodePortalPngFrame frame = do
+    dynamicImage <-
+        either
+            (\err ->
                 fail
-                    ("GStreamer portal capture failed with exit code "
-                        <> show code
-                        <> ".")
-            | otherwise ->
-                fail
-                    ("GStreamer portal capture failed: "
-                        <> Text.unpack details)
+                    ("Unable to decode the portal screenshot: "
+                        <> err))
+            pure
+            (decodeImage frame.portalPngFrameBytes)
+    let image = convertRGB8 dynamicImage
+    unless
+        ( imageWidth image == frame.portalPngFrameWidth
+            && imageHeight image == frame.portalPngFrameHeight
+        ) $
+        fail "The decoded portal screenshot dimensions changed."
+    pure image
+
+readPortalBytes :: Handle -> Int -> IO BS.ByteString
+readPortalBytes handle byteCount =
+    go [] byteCount
+  where
+    go chunks remaining
+        | remaining == 0 = pure (BS.concat (reverse chunks))
+        | otherwise = do
+            chunk <- BS.hGetSome handle remaining
+            when (BS.null chunk) $
+                fail "GStreamer ended the portal PNG stream."
+            go (chunk : chunks) (remaining - BS.length chunk)
+
+validatePortalPngHeader :: BS.ByteString -> IO (Int, Int)
+validatePortalPngHeader bytes = do
+    let headerLength =
+            portalBigEndianWord (BS.take 4 (BS.drop 8 bytes))
+        headerType = BS.take 4 (BS.drop 12 bytes)
+        width = portalBigEndianWord (BS.take 4 (BS.drop 16 bytes))
+        height = portalBigEndianWord (BS.take 4 (BS.drop 20 bytes))
+    unless
+        ( BS.length bytes >= 33
+            && headerLength == 13
+            && headerType == "IHDR"
+            && width <= toInteger maximumFrameDimension
+            && height <= toInteger maximumFrameDimension
+            && validFrameSize (fromInteger width) (fromInteger height)
+        ) $
+        fail "The portal returned an invalid PNG frame header."
+    pure (fromInteger width, fromInteger height)
+
+portalBigEndianWord :: BS.ByteString -> Integer
+portalBigEndianWord =
+    BS.foldl' (\value byte -> value * 256 + fromIntegral byte) 0
+
+closeBarePortalCapture
+    :: ProcessHandle
+    -> Handle
+    -> Handle
+    -> IO ()
+closeBarePortalCapture processHandle outputHandle errorHandle = do
+    void (tryAny (stopPortalCaptureProcess processHandle))
+    void (tryAny (hClose outputHandle))
+    void (tryAny (hClose errorHandle))
+
+closePortalCapture :: PortalCapture -> IO ()
+closePortalCapture capture =
+    mask \_ -> do
+        atomically $
+            modifyTVar' capture.portalCaptureFrameState \case
+                failed@(PortalFrameFailed _) -> failed
+                _ -> PortalFrameFailed
+                    "The GStreamer portal capture has been closed."
+        void (tryAny (stopPortalCaptureProcess capture.portalCaptureProcess))
+        forM_
+            [ capture.portalCaptureFrameReader
+            , capture.portalCaptureErrorReader
+            ]
+            \worker -> do
+                cancel worker
+                void (waitCatch worker)
+        void (tryAny (hClose capture.portalCaptureOutput))
+        void (tryAny (hClose capture.portalCaptureErrors))
 
 stopPortalCaptureProcess :: ProcessHandle -> IO ()
 stopPortalCaptureProcess processHandle = do
@@ -1176,43 +1450,19 @@ stopPortalCaptureProcess processHandle = do
                 timeout closeCallTimeout
                     (waitForProcess processHandle)
 
-withTemporaryPath :: String -> (FilePath -> IO value) -> IO value
-withTemporaryPath template action = do
-    temporaryDirectory <- getTemporaryDirectory
-    withPortalTemporaryPathWith
-        (openBinaryTempFile temporaryDirectory template)
-        hClose
-        removeFile
-        action
-
-withPortalTemporaryPathWith
-    :: IO (FilePath, resource)
-    -> (resource -> IO ())
-    -> (FilePath -> IO ())
-    -> (FilePath -> IO value)
-    -> IO value
-withPortalTemporaryPathWith acquire closeResource removePath action =
-    bracket acquire cleanup \(path, resource) -> do
-        closeResource resource
-        action path
-  where
-    cleanup (path, handle) =
-        (closeResource handle `catchAny` const (pure ()))
-            `finally`
-                removePath path
-
 encodePortalFrame
     :: ScreenshotEncoding
     -> PortalStream
-    -> Image PixelRGB8
-    -> ImageAttachment
-encodePortalFrame encoding stream image =
+    -> PortalPngFrame
+    -> IO ImageAttachment
+encodePortalFrame encoding stream frame = do
+    image <- decodePortalPngFrame frame
     let normalized =
             resizeImage
                 stream.portalStreamWidth
                 stream.portalStreamHeight
                 image
-    in case encoding of
+    pure case encoding of
         ScreenshotPng ->
             ImageAttachment
                 "image/png"
@@ -1240,15 +1490,15 @@ resizeImage targetWidth targetHeight source
             targetWidth
             targetHeight
 
-portalDisplayForImage
+portalDisplayForPngFrame
     :: PortalSession
-    -> Image PixelRGB8
+    -> PortalPngFrame
     -> ComputerDisplay
-portalDisplayForImage session image =
+portalDisplayForPngFrame session frame =
     portalDisplayForFrame
         session.portalSessionPath
         session.portalSessionStream
-        (imageWidth image, imageHeight image)
+        (frame.portalPngFrameWidth, frame.portalPngFrameHeight)
 
 portalDisplayForStream :: ObjectPath -> PortalStream -> ComputerDisplay
 portalDisplayForStream sessionPath stream =
@@ -1567,9 +1817,11 @@ buttonPressed = 1
 leftButtonCode :: Int32
 leftButtonCode = 0x110
 
-requestTimeout, captureTimeout, directCallTimeout, closeCallTimeout :: Int
+requestTimeout, captureTimeout, captureRefreshTimeout :: Int
+directCallTimeout, closeCallTimeout :: Int
 requestTimeout = 120000000
 captureTimeout = 20000000
+captureRefreshTimeout = 1000000
 directCallTimeout = 10000000
 closeCallTimeout = 2000000
 
@@ -1578,3 +1830,12 @@ maximumFrameDimension = 32768
 
 maximumFramePixels :: Integer
 maximumFramePixels = 100000000
+
+maximumPortalPngBytes :: Integer
+maximumPortalPngBytes = 512 * 1024 * 1024
+
+maximumPortalErrorBytes :: Int
+maximumPortalErrorBytes = 8192
+
+pngSignature :: BS.ByteString
+pngSignature = "\137PNG\r\n\SUB\n"
