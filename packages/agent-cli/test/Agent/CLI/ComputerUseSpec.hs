@@ -77,6 +77,10 @@ import Control.Concurrent
     , threadDelay
     )
 import Control.Concurrent.Async (cancel, waitCatch, withAsync)
+import Control.Exception
+    ( MaskingState(..)
+    , getMaskingState
+    )
 import Control.Exception.Safe (finally, throwString, tryAny)
 import Control.Monad (forM_)
 import qualified Data.Aeson as Aeson
@@ -144,6 +148,33 @@ spec = do
                     runtime ScreenshotPng call
                 third `shouldSatisfy` either (const False) (const True)
                 readIORef attempts `shouldReturn` 2)
+                `finally` closeComputerUseRuntime runtime
+
+        it "keeps successful acquisition masked through runtime ownership" do
+            handoffMasking <- newIORef Unmasked
+            let backend = ComputerUseBackend
+                    { computerRunTransaction =
+                        \_ _ validateDisplay ->
+                            pure do
+                                validateDisplay (100, 100)
+                                pure (ComputerObservation
+                                    (ImageAttachment
+                                        "image/png"
+                                        "observation")
+                                    Nothing)
+                    }
+                initialize = do
+                    getMaskingState >>= writeIORef handoffMasking
+                    pure (Right backend)
+                call =
+                    exampleCall { computerActions = [ScreenshotAction] }
+            runtime <- newComputerUseRuntimeWithBackend initialize
+            (do
+                result <- executeComputerCallWithRuntime
+                    runtime ScreenshotPng call
+                result `shouldSatisfy` either (const False) (const True)
+                readIORef handoffMasking
+                    `shouldReturn` MaskedInterruptible)
                 `finally` closeComputerUseRuntime runtime
 
         it "remains retryable when initialization is cancelled" do

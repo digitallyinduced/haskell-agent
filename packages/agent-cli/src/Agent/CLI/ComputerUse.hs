@@ -375,7 +375,7 @@ executeComputerCallWithRuntime runtime encoding call
 
 ensureComputerBackend :: ComputerUseRuntime -> IO (Either Text ())
 ensureComputerBackend runtime =
-    mask \restore -> do
+    mask \_ -> do
         state <- takeMVar runtime.computerRuntimeState
         case state of
             ComputerRuntimeClosed -> do
@@ -385,8 +385,12 @@ ensureComputerBackend runtime =
                 putMVar runtime.computerRuntimeState state
                 pure (Right ())
             ComputerRuntimeOpen Nothing -> do
+                -- Keep every resource-acquisition and assembly handoff masked
+                -- until the completed backend is owned by the runtime. The
+                -- constructors remain cancellable at interruptible operations,
+                -- whose exception handlers close any resources acquired so far.
                 initialized <-
-                    restore runtime.computerRuntimeInitialize
+                    runtime.computerRuntimeInitialize
                         `onException` putMVar
                             runtime.computerRuntimeState
                             (ComputerRuntimeOpen Nothing)
