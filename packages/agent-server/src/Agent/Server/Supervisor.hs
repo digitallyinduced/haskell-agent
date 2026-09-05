@@ -1961,14 +1961,14 @@ turnImageBytes spec =
 queuedImageBytes :: Map TurnId TurnSlot -> Int
 queuedImageBytes =
     sum
-        . map (turnImageBytes . turnSlotSpec)
-        . filter ((== TurnQueued) . turnRecordStatus . turnSlotRecord)
+        . map (\slot -> turnImageBytes slot.turnSlotSpec)
+        . filter (\slot -> slot.turnSlotRecord.turnRecordStatus == TurnQueued)
         . Map.elems
 
 queuedImageBytesForTenant :: TenantId -> Map TurnId TurnSlot -> Int
 queuedImageBytesForTenant tenantId =
     sum
-        . map (turnImageBytes . turnSlotSpec)
+        . map (\slot -> turnImageBytes slot.turnSlotSpec)
         . filter
             ( \slot ->
                 slot.turnSlotRecord.turnRecordStatus == TurnQueued
