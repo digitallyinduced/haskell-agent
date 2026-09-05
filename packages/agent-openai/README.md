@@ -24,6 +24,8 @@ import Agent.Responses.Types
 main :: IO ()
 main = do
     -- Load tokens from wherever (env, file, DB, ...) and build a pool.
+    -- initialStates :: NonEmpty OpenAI.AuthState; validate an input list
+    -- with Data.List.NonEmpty.nonEmpty before constructing the pool.
     pool <- OpenAI.newPool initialStates
         (OpenAI.refreshAccessTokenHTTP oauthClientId)
     provider <- poolTokenProvider pool

@@ -1,5 +1,6 @@
 module Agent.OpenAI.CredentialSpec (spec) where
 
+import Data.List.NonEmpty (NonEmpty(..))
 import Agent.OpenAI.Auth (AuthState(..), newPool)
 import qualified Agent.OpenAI.Auth as Auth
 import Agent.OpenAI.Credential
@@ -175,7 +176,7 @@ spec = do
 
     describe "poolTokenProvider" do
         it "acquires a credential without exposing local pool details" do
-            provider <- localProvider ["acc-a"] (pure . Right)
+            provider <- localProvider ("acc-a" :| []) (pure . Right)
 
             tokenProviderBillingMode provider `shouldBe` SubscriptionBilled
             result <- getNextToken provider Nothing
@@ -183,7 +184,7 @@ spec = do
             fmap (.accountId) result `shouldBe` Right "acc-a"
 
         it "marks a limited account and immediately returns another" do
-            provider <- localProvider ["acc-a", "acc-b"] (pure . Right)
+            provider <- localProvider ("acc-a" :| ["acc-b"]) (pure . Right)
             first <- expectCredential =<< getNextToken provider Nothing
 
             second <- expectCredential =<< getNextToken provider
@@ -200,7 +201,7 @@ spec = do
             second.accountId `shouldNotBe` first.accountId
 
         it "returns CredentialsExhausted after every local account failed" do
-            provider <- localProvider ["acc-a", "acc-b"] (pure . Right)
+            provider <- localProvider ("acc-a" :| ["acc-b"]) (pure . Right)
             first <- expectCredential =<< getNextToken provider Nothing
             second <- expectCredential =<< getNextToken provider
                 (failed first (AccountRateLimited (Just 60)))
@@ -218,7 +219,7 @@ spec = do
                 refresh state = do
                     modifyIORef' refreshCalls (+ 1)
                     pure $ Right state { Auth.accessToken = freshToken "rotated" }
-            provider <- localProvider ["acc-a"] refresh
+            provider <- localProvider ("acc-a" :| []) refresh
             initial <- expectCredential =<< getNextToken provider Nothing
 
             rotated <- expectCredential =<< getNextToken provider
@@ -234,7 +235,7 @@ spec = do
                     { exhaustionErrorType = Nothing
                     , exhaustionStatusCode = Just 401
                     }
-            provider <- localProvider ["acc-a", "acc-b"] refresh
+            provider <- localProvider ("acc-a" :| ["acc-b"]) refresh
             first <- expectCredential =<< getNextToken provider Nothing
             second <- expectCredential =<< getNextToken provider
                 (failedWithReason
@@ -269,7 +270,7 @@ spec = do
                     takeMVar releaseRefresh
                     pure $ Right current
                         { Auth.accessToken = rotatedToken }
-            pool <- newPool [state] refresh
+            pool <- newPool (state :| []) refresh
             firstProvider <- poolTokenProvider pool
             secondProvider <- poolTokenProvider pool
             initial <- expectCredential
@@ -301,7 +302,7 @@ spec = do
                     call <- atomicModifyIORef' refreshCalls (\n -> (n + 1, n + 1))
                     pure $ Right state
                         { Auth.accessToken = freshToken ("rotated-" <> showText call) }
-            provider <- localProvider ["acc-a"] refresh
+            provider <- localProvider ("acc-a" :| []) refresh
             initial <- expectCredential =<< getNextToken provider Nothing
             let rejectionReason = ExhaustedByAuthentication
                     { exhaustionErrorType = Nothing
@@ -368,11 +369,10 @@ staticPoolAuthenticationTest :: IO ()
 staticPoolAuthenticationTest = do
     state <- freshAuth "acc-static"
     pool <- newPool
-        [ state
+        (state
             { accessToken = "static-token"
             , refreshToken = ""
-            }
-        ]
+            } :| [])
         unexpectedRefresh
     provider <- poolTokenProvider pool
     initial <- expectCredential =<< getNextToken provider Nothing
@@ -392,9 +392,7 @@ staticPoolCooldownTest = do
     staticState <- freshAuth "acc-static"
     oauthState <- freshAuth "acc-oauth"
     pool <- newPool
-        [ staticState { accessToken = "static-token", refreshToken = "" }
-        , oauthState
-        ]
+        (staticState { accessToken = "static-token", refreshToken = "" } :| [oauthState])
         (pure . Right)
     Auth.reportRateLimit pool "acc-oauth" (Just 90)
     provider <- poolTokenProvider pool
@@ -408,7 +406,7 @@ staticPoolCooldownTest = do
             ("expected CredentialsExhausted, got " <> show other)
 
 localProvider
-    :: [Text]
+    :: NonEmpty Text
     -> (AuthState -> IO (Either ApiError AuthState))
     -> IO TokenProvider
 localProvider accountIds refresh = do
