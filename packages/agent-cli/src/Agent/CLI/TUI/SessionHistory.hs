@@ -44,8 +44,8 @@ import Agent.Responses.Types
     , ResponseRole(..)
     )
 import Agent.ToolDispatch
-    ( withToolCallOutcome
-    , ToolCallKind(..)
+    ( ToolCallKind(..)
+    , ToolCallMode(..)
     , ToolCallResult(..)
     , customToolCall
     , functionToolCall
@@ -213,7 +213,8 @@ projectItem state = \case
                     (ToolCallResult
                         output.computerOutputCallId
                         "Screenshot captured"
-                        ComputerCallKind)))
+                        ComputerCallKind
+                        BlockingToolCall [] Nothing)))
             state
     ComputerCallItem call ->
         maybe state
@@ -232,19 +233,21 @@ projectItem state = \case
         reduceUi
             (UiLoop
                 (ToolFinished
-                    (withToolCallOutcome output.localOutcome (ToolCallResult
+                    (ToolCallResult
                         output.callId
                         (renderToolOutputValue output.output)
-                        FunctionCallKind))))
+                        FunctionCallKind
+                        BlockingToolCall [] output.localOutcome)))
             state
     CustomToolCallOutputItem output ->
         reduceUi
             (UiLoop
                 (ToolFinished
-                    (withToolCallOutcome output.localOutcome (ToolCallResult
+                    (ToolCallResult
                         output.callId
                         (renderToolOutputValue output.output)
-                        CustomCallKind))))
+                        CustomCallKind
+                        BlockingToolCall [] output.localOutcome)))
             state
     _ -> state
 
