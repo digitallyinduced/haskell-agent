@@ -14,6 +14,7 @@ import Agent.Loop
     , BackendSnapshot(..)
     , TurnInput(..)
     , advanceBackendSnapshot
+    , backendWithCallbacks
     )
 import Agent.OpenAI.Compaction
     ( estimateItemsTokens
@@ -41,10 +42,11 @@ boundCompletedToolContinuations
     -> IO ResponseCreateParams
     -> IORef (Maybe OccupancySnapshot)
     -> BackendMiddleware
-boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Backend submit) =
-    Backend \snapshot previous inputs onEvent ->
+boundCompletedToolContinuations contextWindowFor getParams contextTokensRef backend =
+    backendWithCallbacks \snapshot previous inputs callbacks ->
         if not (any isCompletedTool inputs)
-            then submit snapshot previous inputs onEvent
+            then backend.submitTurnWithCallbacks
+                snapshot previous inputs callbacks
             else do
                 params <- getParams
                 occupancy <- readIORef contextTokensRef
@@ -88,22 +90,24 @@ boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Bac
                                 requestTokens
                                 inputs
                 if requestTokens inputs <= contextWindow
-                    then submit snapshot previous inputs onEvent
+                    then backend.submitTurnWithCallbacks
+                        snapshot previous inputs callbacks
                     else if requestTokens truncated <= contextWindow
-                        then submit snapshot previous truncated onEvent
+                        then backend.submitTurnWithCallbacks
+                            snapshot previous truncated callbacks
                         else submitTrimmedHistory
                             params
                             contextWindow
                             snapshot
                             history
                             truncated
-                            onEvent
+                            callbacks
   where
     isCompletedTool = \case
         CompletedTool{} -> True
         _ -> False
 
-    submitTrimmedHistory params contextWindow snapshot history inputs onEvent = do
+    submitTrimmedHistory params contextWindow snapshot history inputs callbacks = do
         let callIds = pendingToolCallIds inputs
             (danglingCalls, prefix) =
                 partition (isPendingToolCall callIds) history
@@ -120,9 +124,9 @@ boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Bac
                     params
                     (fittedHistory <> turnInputsToItems inputs)
         if fittedTokens <= contextWindow
-            then submit
+            then backend.submitTurnWithCallbacks
                 (advanceBackendSnapshot snapshot fittedHistory Nothing)
-                Nothing inputs onEvent
+                Nothing inputs callbacks
             else pure (Left toolContinuationTooLargeError)
 
 pendingToolCallIds :: [TurnInput] -> [Text]

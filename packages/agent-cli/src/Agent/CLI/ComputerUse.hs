@@ -58,6 +58,7 @@ import Agent.ToolDispatch
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolAsyncCapability(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     )
@@ -174,6 +175,7 @@ computerUseToolWithExecutor executeCall = AppTool
     , appToolApproval = AlwaysPrompt
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
   where
     handler =

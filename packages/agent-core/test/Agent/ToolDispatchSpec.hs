@@ -6,12 +6,16 @@ import Agent.ToolDispatch
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolAsyncCapability(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     , dispatchRegisteredToolCall
     , dispatchRegisteredToolCallDetailed
+    , jsonAppTool
     , mkToolRegistry
     , toolAcceptsCall
+    , appToolSupportsAsync
+    , withAsyncToolCalls
     )
 import qualified Control.Exception as Exception
 import Data.IORef (modifyIORef', newIORef, readIORef)
@@ -29,6 +33,39 @@ echoArgsDecoder = objectArgs $ \object -> EchoArgs
 
 spec :: Spec
 spec = describe "dispatchToolCall" do
+    it "defaults constructed calls to blocking and compares call mode" do
+        let blocking = functionToolCall "call-1" "echo" "{}"
+            asynchronous = withToolCallMode AsyncToolCall blocking
+        toolCallMode blocking `shouldBe` BlockingToolCall
+        blocking `shouldNotBe` asynchronous
+
+    it "retags tool results without changing their payload or outcome" do
+        let blocking =
+                ToolCallResultWithOutcome
+                    "call-1"
+                    "done"
+                    FunctionCallKind
+                    [ToolResultImage "data:image/png;base64,eA==" Nothing]
+                    ToolFailed
+            asynchronous =
+                withToolCallResultMode AsyncToolCall blocking
+        toolCallResultMode asynchronous `shouldBe` AsyncToolCall
+        toolCallResultOutcome asynchronous `shouldBe` Just ToolFailed
+        toolCallResultImages asynchronous `shouldBe` toolCallResultImages blocking
+        withToolCallResultMode BlockingToolCall asynchronous
+            `shouldBe` blocking
+
+    it "requires tools to opt in to asynchronous calls" do
+        let tool =
+                jsonAppTool
+                    "echo"
+                    "echo"
+                    []
+                    AlwaysReadOnly
+                    (noArgsTool "echo" (pure (Right "ok")))
+        appToolSupportsAsync tool `shouldBe` False
+        appToolSupportsAsync (withAsyncToolCalls tool) `shouldBe` True
+
     it "retains success even when successful output looks like an error or denial" do
         mapM_ (\message -> do
             result <- dispatchToolCall testConfig
@@ -44,6 +81,14 @@ spec = describe "dispatchToolCall" do
             (functionToolCall "call" "fail" "{}")
         result.output `shouldBe` "plain explanation"
         toolCallResultOutcome result `shouldBe` Just ToolFailed
+
+    it "retains the async mode together with the typed outcome" do
+        result <- dispatchToolCall testConfig
+            [noArgsTool "echo" (pure (Right "ok"))]
+            (withToolCallMode AsyncToolCall $
+                functionToolCall "call" "echo" "{}")
+        toolCallResultMode result `shouldBe` AsyncToolCall
+        toolCallResultOutcome result `shouldBe` Just ToolSucceeded
 
     it "keeps plaintext tool arguments useful in Show output" do
         let rendered =
@@ -359,4 +404,5 @@ computerTool action = AppTool
     , appToolApproval = AlwaysPrompt
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }

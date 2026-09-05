@@ -520,6 +520,7 @@ sanitizeOversizedToolCall = \case
                 , arguments = oversizedFunctionArguments
                 , encryptedFunctionArgs = call.encryptedFunctionArgs
                 , status = call.status
+                , async = call.async
                 }
     CustomToolCallItem call
         | Text.length call.input > remoteCompactionMaxStringLength ->
@@ -530,6 +531,7 @@ sanitizeOversizedToolCall = \case
                 , namespace = call.namespace
                 , input = oversizedToolArgumentsMessage
                 , status = call.status
+                , async = call.async
                 }
     item -> item
 
@@ -555,6 +557,7 @@ rewriteOversizedToolOutput = \case
             , provider = output.provider
             , output = truncatedOutputJson
             , status = output.status
+            , async = output.async
             }
     ComputerCallOutputItem output ->
         Just $ ComputerCallOutputItem ComputerCallOutput
@@ -573,6 +576,7 @@ rewriteOversizedToolOutput = \case
             , name = output.name
             , output = truncatedOutputJson
             , status = output.status
+            , async = output.async
             }
     ToolSearchOutputItem output ->
         Just $ ToolSearchOutputItem ToolSearchOutput

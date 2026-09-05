@@ -20,6 +20,7 @@ module Agent.CLI.ModelConfig
     , catalogModelById
     , catalogModelForConnection
     , catalogModelsForConnection
+    , catalogSupportsAsyncToolCallsForTransport
     , connectionSupportsDialect
     , connectionBuiltinProvider
     , decodeModelConfig
@@ -88,6 +89,7 @@ data CatalogModel = CatalogModel
     , catalogModelLabel :: !(Maybe Text)
     , catalogModelReasoningEfforts :: !(Maybe [Text])
     , catalogModelDefaultReasoningEffort :: !(Maybe Text)
+    , catalogModelSupportsAsyncToolCalls :: !Bool
     , catalogModelDefault :: !Bool
     , catalogModelFallbackPriority :: !(Maybe Int)
     }
@@ -144,6 +146,7 @@ data ModelFile = ModelFile
     , modelFileLabel :: !(Maybe Text)
     , modelFileReasoningEfforts :: !(Maybe [Text])
     , modelFileDefaultReasoningEffort :: !(Maybe Text)
+    , modelFileSupportsAsyncToolCalls :: !Bool
     , modelFileDefault :: !Bool
     , modelFileFallbackPriority :: !(Maybe Int)
     }
@@ -182,6 +185,7 @@ modelFileDecoder =
             <*> optionalKey "reasoning_efforts"
                 (Hermes.list Hermes.text)
             <*> optionalKey "default_reasoning_effort" Hermes.text
+            <*> defaultKey False "supports_async_tool_calls" Hermes.bool
             <*> defaultKey False "default" Hermes.bool
             <*> optionalKey "fallback_priority" Hermes.int
 
@@ -263,6 +267,27 @@ catalogModelForConnection catalog connectionId modelId
 catalogModelsForConnection :: Text -> ModelCatalog -> [CatalogModel]
 catalogModelsForConnection wanted =
     filter ((== wanted) . (.catalogModelConnectionId)) . catalogModels
+
+-- | Resolve async-tool support against the exact routing connection and
+-- transport model. Ambiguous custom aliases fail closed unless every matching
+-- catalog entry explicitly opts in. Gateway aliases never inherit capability
+-- merely by resembling a direct model name.
+catalogSupportsAsyncToolCallsForTransport
+    :: ModelCatalog
+    -> Text
+    -> Text
+    -> Bool
+catalogSupportsAsyncToolCallsForTransport catalog connectionId transportModel
+    | connectionId == organizationGatewayConnectionId = False
+    | otherwise =
+        case
+            [ model
+            | model <- catalogModelsForConnection connectionId catalog
+            , model.catalogModelId == transportModel
+                || model.catalogModelWireId == transportModel
+            ] of
+            [] -> False
+            matches -> all (.catalogModelSupportsAsyncToolCalls) matches
 
 connectionBuiltinProvider :: ModelConnection -> Maybe Provider
 connectionBuiltinProvider connection = case connection.connectionKind of
@@ -721,6 +746,9 @@ validateCatalogModel connections raw =
                 , catalogModelReasoningEfforts = reasoningEfforts
                 , catalogModelDefaultReasoningEffort =
                     defaultReasoningEffort
+                , catalogModelSupportsAsyncToolCalls =
+                    raw.modelFileSupportsAsyncToolCalls
+                        && connectionId /= organizationGatewayConnectionId
                 , catalogModelDefault = raw.modelFileDefault
                 , catalogModelFallbackPriority =
                     raw.modelFileFallbackPriority

@@ -3,9 +3,13 @@ module Agent.CLI.Tools
     ( requireToolRegistry
     , lookupAppTool
     , schemasFromAppTools
+    , schemasFromAppToolsWithAsyncCapability
     , schemasFromAppToolsWithHostedSearch
+    , schemasFromAppToolsWithHostedSearchAndAsyncCapability
     , schemasFromAppToolsCodeMode
+    , schemasFromAppToolsCodeModeWithAsyncCapability
     , schemasFromAppToolsCodeModeWithHostedSearch
+    , schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
     , hostedSearchToolNames
     , hostedSearchToolNamesWhen
     , hostedSearchToolCollisions
@@ -50,6 +54,7 @@ import Agent.Tools.Types
     , ToolSchema(..)
     , ToolRegistry
     , mkToolRegistry
+    , appToolSupportsAsync
     )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
@@ -130,6 +135,14 @@ hostedSearchToolCollisions =
 schemasFromAppTools :: Dialect -> [AppTool] -> [ResponseTool]
 schemasFromAppTools = schemasFromAppToolsWithHostedSearch True
 
+schemasFromAppToolsWithAsyncCapability
+    :: Bool
+    -> Dialect
+    -> [AppTool]
+    -> [ResponseTool]
+schemasFromAppToolsWithAsyncCapability =
+    schemasFromAppToolsWithHostedSearchAndAsyncCapability True
+
 -- | Project application tools while explicitly controlling provider-hosted
 -- search. Hosted search bypasses application-tool dispatch, so embeddings
 -- without that capability must pass 'False'.
@@ -138,26 +151,44 @@ schemasFromAppToolsWithHostedSearch
     -> Dialect
     -> [AppTool]
     -> [ResponseTool]
-schemasFromAppToolsWithHostedSearch includeHostedSearch dialect tools =
+schemasFromAppToolsWithHostedSearch includeHostedSearch =
+    schemasFromAppToolsWithHostedSearchAndAsyncCapability
+        includeHostedSearch
+        False
+
+schemasFromAppToolsWithHostedSearchAndAsyncCapability
+    :: Bool
+    -> Bool
+    -> Dialect
+    -> [AppTool]
+    -> [ResponseTool]
+schemasFromAppToolsWithHostedSearchAndAsyncCapability
+        includeHostedSearch modelSupportsAsync dialect tools =
     case dialectToolLayout dialect of
         CollaborationNamespaceLayout ->
             let (multi, nonMulti) = partition isMultiAgentTool tools
                 (imageGeneration, rest) =
                     partition isImageGenerationTool nonMulti
                 base = hostedSearchToolsWhen includeHostedSearch dialect
-                    ++ mapMaybe (schemaFromAppTool dialect) rest
+                    ++ mapMaybe
+                        (schemaFromAppTool modelSupportsAsync dialect)
+                        rest
                 imageNamespaces =
-                    [ imageGenerationNamespaceTool imageGeneration
+                    [ imageGenerationNamespaceTool
+                        modelSupportsAsync
+                        imageGeneration
                     | not (null imageGeneration)
                     ]
                 collaborationNamespaces =
-                    [ multiAgentNamespaceTool multi
+                    [ multiAgentNamespaceTool modelSupportsAsync multi
                     | not (null multi)
                     ]
             in base ++ imageNamespaces ++ collaborationNamespaces
         FlatToolLayout ->
             hostedSearchToolsWhen includeHostedSearch dialect
-                ++ mapMaybe (schemaFromAppTool dialect) tools
+                ++ mapMaybe
+                    (schemaFromAppTool modelSupportsAsync dialect)
+                    tools
         NoHostToolLayout ->
             []
 
@@ -168,57 +199,65 @@ isImageGenerationTool :: AppTool -> Bool
 isImageGenerationTool tool =
     tool.appToolName == imageGenerationToolName
 
-schemaFromAppTool :: Dialect -> AppTool -> Maybe ResponseTool
-schemaFromAppTool _ tool
+schemaFromAppTool :: Bool -> Dialect -> AppTool -> Maybe ResponseTool
+schemaFromAppTool _ _ tool
     | canonicalToolName tool.appToolName == computerFunctionName
     , tool.appToolSchema /= HostedComputerSchema =
         Nothing
-schemaFromAppTool dialect tool =
-    case tool.appToolSchema of
-        HostedComputerSchema ->
-            if os `elem` ["darwin", "linux"]
-                    && dialectId dialect == CodexDialect
-                then Just (FunctionToolValue FunctionTool
-                    { name = computerFunctionName
+schemaFromAppTool modelSupportsAsync dialect tool =
+    fmap (setAsyncCapability supportsAsync) $
+        case tool.appToolSchema of
+            HostedComputerSchema ->
+                if os `elem` ["darwin", "linux"]
+                        && dialectId dialect == CodexDialect
+                    then Just (FunctionToolValue FunctionTool
+                        { name = computerFunctionName
+                        , description = Just tool.appToolDescription
+                        , parameters = Just
+                            (rawJsonFromEncoding
+                                (Aeson.toEncoding computerFunctionParameters))
+                        , strict = Just True
+                        , async = Nothing
+                        })
+                    else Nothing
+            JsonFunctionSchema parameters ->
+                case dialectFunctionSchemaStyle dialect of
+                    NoFunctionSchemas ->
+                        Nothing
+                    StrictFunctionSchemas ->
+                        Just (buildSchema buildTool parameters)
+                    LooseFunctionSchemas ->
+                        Just (buildSchema buildGrokTool parameters)
+            RawJsonFunctionSchema parameters ->
+                Just (FunctionToolValue FunctionTool
+                    { name = tool.appToolName
                     , description = Just tool.appToolDescription
-                    , parameters = Just
-                        (rawJsonFromEncoding
-                            (Aeson.toEncoding computerFunctionParameters))
-                    , strict = Just True
+                    , parameters =
+                        Just (rawJsonFromEncoding (Aeson.toEncoding parameters))
+                    , strict = case dialectFunctionSchemaStyle dialect of
+                        StrictFunctionSchemas -> Just False
+                        LooseFunctionSchemas -> Nothing
+                        NoFunctionSchemas -> Nothing
+                    , async = Nothing
                     })
-                else Nothing
-        JsonFunctionSchema parameters ->
-            case dialectFunctionSchemaStyle dialect of
-                NoFunctionSchemas ->
-                    Nothing
-                StrictFunctionSchemas ->
-                    Just (buildSchema buildTool parameters)
-                LooseFunctionSchemas ->
-                    Just (buildSchema buildGrokTool parameters)
-        RawJsonFunctionSchema parameters ->
-            Just (FunctionToolValue FunctionTool
-                { name = tool.appToolName
-                , description = Just tool.appToolDescription
-                , parameters =
-                    Just (rawJsonFromEncoding (Aeson.toEncoding parameters))
-                , strict = case dialectFunctionSchemaStyle dialect of
-                    StrictFunctionSchemas -> Just False
-                    LooseFunctionSchemas -> Nothing
+            FreeformApplyPatchSchema ->
+                case dialectFunctionSchemaStyle dialect of
                     NoFunctionSchemas -> Nothing
-                })
-        FreeformApplyPatchSchema ->
-            case dialectFunctionSchemaStyle dialect of
-                NoFunctionSchemas -> Nothing
-                _ -> Just (applyPatchCustomTool tool.appToolName tool.appToolDescription)
-        FreeformGrammarSchema syntax definition ->
-            case dialectFunctionSchemaStyle dialect of
-                NoFunctionSchemas -> Nothing
-                _ -> Just (grammarCustomTool
-                    tool.appToolName
-                    tool.appToolDescription
-                    syntax
-                    definition)
+                    _ -> Just
+                        (applyPatchCustomTool
+                            tool.appToolName
+                            tool.appToolDescription)
+            FreeformGrammarSchema syntax definition ->
+                case dialectFunctionSchemaStyle dialect of
+                    NoFunctionSchemas -> Nothing
+                    _ -> Just (grammarCustomTool
+                        tool.appToolName
+                        tool.appToolDescription
+                        syntax
+                        definition)
   where
+    supportsAsync = modelSupportsAsync && appToolSupportsAsync tool
+
     buildSchema build parameters =
         let (name, description, projectedParameters) =
                 projectFunctionTool dialect tool parameters
@@ -249,6 +288,16 @@ projectProperty toolName property =
         , description = grokPublicText <$> property.description
         }
 
+setAsyncCapability :: Bool -> ResponseTool -> ResponseTool
+setAsyncCapability enabled = \case
+    FunctionToolValue tool ->
+        FunctionToolValue tool
+            { async = if enabled then Just True else Nothing }
+    CustomToolValue tool ->
+        CustomToolValue tool
+            { async = if enabled then Just True else Nothing }
+    tool -> tool
+
 grokPublicText :: Text -> Text
 grokPublicText =
     replace "run_in_background" "background"
@@ -264,21 +313,23 @@ grokPublicText =
     replaceTaskName = Text.replace "`task`" "`spawn_subagent`"
 
 -- | Codex collaboration namespace: nested non-strict function tools.
-multiAgentNamespaceTool :: [AppTool] -> ResponseTool
-multiAgentNamespaceTool tools =
+multiAgentNamespaceTool :: Bool -> [AppTool] -> ResponseTool
+multiAgentNamespaceTool modelSupportsAsync tools =
     namespaceTool
+        modelSupportsAsync
         multiAgentNamespace
         "Tools for spawning and managing sub-agents."
         tools
 
-imageGenerationNamespaceTool :: [AppTool] -> ResponseTool
-imageGenerationNamespaceTool =
+imageGenerationNamespaceTool :: Bool -> [AppTool] -> ResponseTool
+imageGenerationNamespaceTool modelSupportsAsync =
     namespaceTool
+        modelSupportsAsync
         imageGenerationNamespace
         imageGenerationNamespaceDescription
 
-namespaceTool :: Text -> Text -> [AppTool] -> ResponseTool
-namespaceTool namespaceName namespaceDescription tools =
+namespaceTool :: Bool -> Text -> Text -> [AppTool] -> ResponseTool
+namespaceTool modelSupportsAsync namespaceName namespaceDescription tools =
     NamespaceToolValue NamespaceTool
         { name = namespaceName
         , description = Just namespaceDescription
@@ -286,10 +337,13 @@ namespaceTool namespaceName namespaceDescription tools =
         }
   where
     nestedFunction tool =
+        setAsyncCapability
+            (modelSupportsAsync && appToolSupportsAsync tool) $
         FunctionToolValue FunctionTool
             { name = tool.appToolName
             , description = Just tool.appToolDescription
             , strict = Just False
+            , async = Nothing
             , parameters = Just . rawJsonFromEncoding . Aeson.toEncoding $
                 namespaceParameters tool
             }
@@ -319,6 +373,7 @@ grammarCustomTool name description syntax definition =
     CustomToolValue CustomTool
         { name
         , description = Just description
+        , async = Nothing
         , format = Just . rawJsonFromEncoding . Aeson.toEncoding $
             Aeson.object
                 [ "type" .= ("grammar" :: Text)
@@ -333,12 +388,32 @@ schemasFromAppToolsCodeMode :: Dialect -> [AppTool] -> [ResponseTool]
 schemasFromAppToolsCodeMode =
     schemasFromAppToolsCodeModeWithHostedSearch True
 
+schemasFromAppToolsCodeModeWithAsyncCapability
+    :: Bool
+    -> Dialect
+    -> [AppTool]
+    -> [ResponseTool]
+schemasFromAppToolsCodeModeWithAsyncCapability =
+    schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability True
+
 schemasFromAppToolsCodeModeWithHostedSearch
     :: Bool
     -> Dialect
     -> [AppTool]
     -> [ResponseTool]
 schemasFromAppToolsCodeModeWithHostedSearch
-        includeHostedSearch dialect tools =
-    mapMaybe (schemaFromAppTool dialect) tools
+        includeHostedSearch =
+    schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
+        includeHostedSearch
+        False
+
+schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
+    :: Bool
+    -> Bool
+    -> Dialect
+    -> [AppTool]
+    -> [ResponseTool]
+schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
+        includeHostedSearch modelSupportsAsync dialect tools =
+    mapMaybe (schemaFromAppTool modelSupportsAsync dialect) tools
         ++ hostedSearchToolsWhen includeHostedSearch dialect

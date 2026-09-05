@@ -44,6 +44,7 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , ToolSchema(..)
+    , withAsyncToolCalls
     , defaultToolEnv
     , freeformApplyPatchAppTool
     , jsonAppTool
@@ -61,6 +62,22 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
+    it "emits async only when both the model and tool opt in" do
+        let capable = withAsyncToolCalls jsonTool
+            project modelCapability tool =
+                case
+                    schemasFromAppToolsWithAsyncCapability
+                        modelCapability
+                        codexDialect
+                        [tool] of
+                    [_, FunctionToolValue function] -> function.async
+                    other ->
+                        error
+                            ("expected one function tool, got " <> show other)
+        project True capable `shouldBe` Just True
+        project False capable `shouldBe` Nothing
+        project True jsonTool `shouldBe` Nothing
+
     it "advertises computer use as an ordinary strict function" do
         if os `elem` ["darwin", "linux"]
             then case schemasFromAppTools codexDialect [computerUseTool] of

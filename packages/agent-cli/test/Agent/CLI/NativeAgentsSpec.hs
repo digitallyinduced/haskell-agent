@@ -107,6 +107,7 @@ spec = describe "provider-native agent tracking" do
                     "{\"description\":\"Review API\",\"model\":\"sonnet\"}"
                 , encryptedFunctionArgs = Nothing
                 , status = Just ItemCompleted
+                , async = Nothing
                 }
             output = FunctionCallOutputItem FunctionCallOutput
                 { localOutcome = Nothing
@@ -118,6 +119,7 @@ spec = describe "provider-native agent tracking" do
                 , output =
                     rawJsonFromEncoding (Aeson.toEncoding ("review complete" :: String))
                 , status = Just ItemCompleted
+                , async = Nothing
                 }
             restored =
                 restoreNativeAgents
@@ -140,6 +142,7 @@ spec = describe "provider-native agent tracking" do
                 , arguments = "{}"
                 , encryptedFunctionArgs = Nothing
                 , status = Just ItemCompleted
+                , async = Nothing
                 }
             wrongOutput = FunctionCallOutputItem FunctionCallOutput
                 { localOutcome = Nothing
@@ -151,6 +154,7 @@ spec = describe "provider-native agent tracking" do
                 , output = rawJsonFromEncoding
                     (Aeson.toEncoding ("not Claude metadata" :: String))
                 , status = Just ItemCompleted
+                , async = Nothing
                 }
             restored =
                 restoreNativeAgents
@@ -173,6 +177,7 @@ spec = describe "provider-native agent tracking" do
                 , arguments = "{}"
                 , encryptedFunctionArgs = Nothing
                 , status = Just ItemCompleted
+                , async = Nothing
                 }
             output identifier = FunctionCallOutputItem FunctionCallOutput
                 { localOutcome = Nothing
@@ -185,6 +190,7 @@ spec = describe "provider-native agent tracking" do
                     rawJsonFromEncoding
                         (Aeson.toEncoding ("done" :: String))
                 , status = Just ItemCompleted
+                , async = Nothing
                 }
             newerUnpaired =
                 [ output

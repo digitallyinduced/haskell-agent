@@ -833,6 +833,7 @@ spec = do
                         "{\"actions\":[{\"type\":\"screenshot\"}]}"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
             transcript <- newIORef [FunctionCallItem legacyCall]
             let backend = openAiBackendWith
@@ -1018,6 +1019,54 @@ spec = do
                 , ActivityUpdated "Reconnecting to Codex (attempt 1)…"
                 , TextDelta "complete"
                 ]
+
+        it "does not replay after admitting a completed async tool call" do
+            attempts <- newIORef (0 :: Int)
+            admitted <- newIORef []
+            let connectionFailure = ConnectionError "socket closed"
+                asyncCall =
+                    FunctionCallItem FunctionCall
+                        { itemId = Nothing
+                        , callId = "fc-async"
+                        , name = "shell"
+                        , namespace = Nothing
+                        , provider = Nothing
+                        , arguments = "{}"
+                        , encryptedFunctionArgs = Nothing
+                        , status = Just ItemCompleted
+                        , async = Just True
+                        }
+                send _request _previous onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    onEvent ResponseOutputItemDoneEvent
+                        { item = asyncCall
+                        , outputIndex = Just 0
+                        , sequenceNumber = Nothing
+                        }
+                    pure (Left connectionFailure)
+                backend = openAiBackendWithRetryPolicies
+                    (constantDelay 0 <> limitRetries 3)
+                    (constantDelay 0 <> limitRetries 5)
+                    send
+                    (pure baseParams)
+            result <- backend.submitTurnWithCallbacks
+                emptyBackendSnapshot
+                Nothing
+                [UserMessage "one"]
+                BackendCallbacks
+                    { onLoopEvent = const (pure ())
+                    , onAsyncToolCall =
+                        \call -> modifyIORef' admitted (call.callId :)
+                    }
+            result `shouldBe` Left (ProviderError
+                (UnknownErrorType "replay_unsafe_websocket_transport")
+                ( "provider failed after asynchronous tool call; "
+                    <> "refusing to replay: "
+                    <> Text.pack (show connectionFailure)
+                )
+                Nothing)
+            readIORef attempts `shouldReturn` 1
+            readIORef admitted `shouldReturn` ["fc-async"]
 
         it "discards a tool-only partial attempt before reconnecting" do
             attempts <- newIORef (0 :: Int)
@@ -2024,6 +2073,7 @@ functionCallItemWithExtras callId name arguments metadataFields =
             Just (Aeson.Array _) -> Just []
             _ -> Nothing
     , status = Just ItemCompleted
+    , async = Nothing
     }
 
 customCallItem :: Text -> Text -> Text -> ResponseItem
@@ -2034,6 +2084,7 @@ customCallItem callId name input = CustomToolCallItem CustomToolCall
     , namespace = Nothing
     , input
     , status = Just ItemCompleted
+    , async = Nothing
     }
 
 assistantItem :: Text -> ResponseItem

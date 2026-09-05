@@ -106,6 +106,7 @@ spec = describe "Agent.CLI.ModelConfig" do
                 ( model.catalogModelReasoningEfforts
                 , model.catalogModelDefaultReasoningEffort
                 , model.catalogModelDefault
+                , model.catalogModelSupportsAsyncToolCalls
                 ))
             (catalogModelById catalog "gpt-6-astra")
             `shouldBe`
@@ -113,7 +114,24 @@ spec = describe "Agent.CLI.ModelConfig" do
                     ( Just ["low", "medium", "high", "xhigh", "max"]
                     , Just "low"
                     , False
+                    , True
                     )
+        map
+            (\model ->
+                (model.catalogModelId, model.catalogModelSupportsAsyncToolCalls))
+            (catalogModelsForConnection "openai" catalog)
+            `shouldBe`
+                [ ("gpt-5.6-sol", False)
+                , ("gpt-6-astra", True)
+                , ("gpt-5.6-terra", False)
+                , ("gpt-5.6-luna", False)
+                ]
+        catalogSupportsAsyncToolCallsForTransport
+            catalog "openai" "gpt-6-astra"
+            `shouldBe` True
+        catalogSupportsAsyncToolCallsForTransport
+            catalog organizationGatewayConnectionId "gpt-6-astra"
+            `shouldBe` False
 
     it "loads protocol metadata for organization gateway aliases" do
         defaults <- readPackagedDefaults
@@ -125,6 +143,7 @@ spec = describe "Agent.CLI.ModelConfig" do
                 , "    \"connection\": \"organization-gateway\","
                 , "    \"dialect\": \"generic-responses\","
                 , "    \"context_window\": 131072,"
+                , "    \"supports_async_tool_calls\": true,"
                 , "    \"label\": \"company\""
                 , "  }]"
                 , "}"
@@ -146,6 +165,7 @@ spec = describe "Agent.CLI.ModelConfig" do
                     , catalogModelReasoningEfforts =
                         Just ["low", "medium", "high", "xhigh"]
                     , catalogModelDefaultReasoningEffort = Just "high"
+                    , catalogModelSupportsAsyncToolCalls = False
                     , catalogModelDefault = False
                     , catalogModelFallbackPriority = Nothing
                     }
@@ -159,6 +179,7 @@ spec = describe "Agent.CLI.ModelConfig" do
                     , catalogModelLabel = Just "company"
                     , catalogModelReasoningEfforts = Nothing
                     , catalogModelDefaultReasoningEffort = Nothing
+                    , catalogModelSupportsAsyncToolCalls = False
                     , catalogModelDefault = False
                     , catalogModelFallbackPriority = Nothing
                     }
@@ -236,6 +257,23 @@ spec = describe "Agent.CLI.ModelConfig" do
             `shouldBe` [GenericResponsesDialect]
         fmap (.catalogModelContextWindow) custom
             `shouldBe` [Just 32_768]
+        fmap (.catalogModelSupportsAsyncToolCalls) custom
+            `shouldBe` [False]
+
+    it "requires custom Responses models to opt in explicitly" do
+        defaults <- readPackagedDefaults
+        let overlay =
+                "{\"version\":1,\"connections\":{\"custom\":{\"api\":\"responses\",\"base_url\":\"https://custom.example/v1\",\"api_key_optional\":true}},\"models\":[{\"id\":\"gpt-6-astra\",\"connection\":\"custom\",\"dialect\":\"codex\",\"supports_async_tool_calls\":true}]}"
+        catalog <- expectRight
+            (mergeModelConfigs
+                ("models.default.json", defaults)
+                (Just ("models.json", overlay)))
+        fmap (.catalogModelSupportsAsyncToolCalls)
+            (catalogModelForConnection catalog "custom" "gpt-6-astra")
+            `shouldBe` Just True
+        catalogSupportsAsyncToolCallsForTransport
+            catalog "custom" "gpt-6-astra"
+            `shouldBe` True
 
     it "uses the effective configured wire model after a transport remap" do
         defaults <- readPackagedDefaults

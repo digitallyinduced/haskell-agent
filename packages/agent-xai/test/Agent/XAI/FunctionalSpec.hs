@@ -113,6 +113,7 @@ toolOutputRequest model history call = defaultResponseCreateParams
             , output = rawJsonFromEncoding $ Aeson.toEncoding $
                 Aeson.String "grok functional tool ok"
             , status = Nothing
+            , async = Nothing
             }
         , userMessage "The tool ran. Reply with exactly: done"
         ]))
@@ -133,6 +134,7 @@ echoTool = FunctionToolValue FunctionTool
         , "additionalProperties" Aeson..= False
         ]
     , strict = Just True
+    , async = Nothing
     }
 
 userMessage :: Text -> ResponseItem

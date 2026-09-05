@@ -224,6 +224,7 @@ library
                     , Agent.CLI.ProviderFallback
                     , Agent.CLI.ProviderAvailability
                     , Agent.CLI.ProviderTransition
+                    , Agent.CLI.ProviderRuntime
                     , Agent.CLI.Render
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Runtime.MetaConsole

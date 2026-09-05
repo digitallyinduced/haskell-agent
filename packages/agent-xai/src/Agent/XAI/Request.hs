@@ -226,16 +226,17 @@ stripItemStatus :: ResponseItem -> ResponseItem
 stripItemStatus = \case
     MessageItem (ResponseMessage itemId content role _ phase passthrough) ->
         MessageItem (ResponseMessage itemId content role Nothing phase passthrough)
-    FunctionCallItem (FunctionCall itemId callId name namespace provider arguments encryptedArgs _) ->
+    FunctionCallItem (FunctionCall itemId callId name namespace provider arguments encryptedArgs _ async) ->
         FunctionCallItem
-            (FunctionCall itemId callId name namespace provider arguments encryptedArgs Nothing)
-    FunctionCallOutputItem (FunctionCallOutput itemId callId name namespace provider output _ outcome) ->
+            (FunctionCall itemId callId name namespace provider arguments encryptedArgs Nothing async)
+    FunctionCallOutputItem (FunctionCallOutput itemId callId name namespace provider output _ async outcome) ->
         FunctionCallOutputItem
-            (FunctionCallOutput itemId callId name namespace provider output Nothing outcome)
-    CustomToolCallItem (CustomToolCall itemId callId name namespace input _) ->
-        CustomToolCallItem (CustomToolCall itemId callId name namespace input Nothing)
-    CustomToolCallOutputItem (CustomToolCallOutput itemId callId name output _ outcome) ->
-        CustomToolCallOutputItem (CustomToolCallOutput itemId callId name output Nothing outcome)
+            (FunctionCallOutput itemId callId name namespace provider output Nothing async outcome)
+    CustomToolCallItem (CustomToolCall itemId callId name namespace input _ async) ->
+        CustomToolCallItem (CustomToolCall itemId callId name namespace input Nothing async)
+    CustomToolCallOutputItem (CustomToolCallOutput itemId callId name output _ async outcome) ->
+        CustomToolCallOutputItem
+            (CustomToolCallOutput itemId callId name output Nothing async outcome)
     ReasoningItemValue (ReasoningItem itemId summary content encryptedContent _) ->
         ReasoningItemValue
             (ReasoningItem itemId summary content encryptedContent Nothing)

@@ -267,13 +267,12 @@ spec = do
 
         it "uses the redacted computer-action summary for privileged calls" do
             summarizeToolCall
-                ( (functionToolCall
+                (ToolCall
                     "computer-1"
                     "computer"
-                    "{\"actions\":[{\"type\":\"type\",\"text\":\"secret\"}]}")
-                    { callKind = ComputerCallKind
-                    }
-                )
+                    "{\"actions\":[{\"type\":\"type\",\"text\":\"secret\"}]}"
+                    ComputerCallKind
+                    False)
                 `shouldBe` "Computer: type 6 characters"
 
     describe "truncateToolOutput" do
