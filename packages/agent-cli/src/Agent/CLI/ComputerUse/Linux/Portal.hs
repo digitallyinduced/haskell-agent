@@ -356,7 +356,10 @@ runPortalBackendOperationWith
         operation =
     Exception.mask \restore -> do
         let initializeAndRun allowRefresh = do
-                initialized <- tryAllExceptions (restore initialize)
+                -- Keep the acquisition-to-state handoff masked. Constructors
+                -- remain cancellable at interruptible operations and must
+                -- clean up any partially acquired resources before throwing.
+                initialized <- tryAllExceptions initialize
                 case initialized of
                     Left exception ->
                         pure

@@ -1042,6 +1042,79 @@ spec = do
                     expectationFailure
                         "the replacement portal runtime was not retained"
 
+        it "keeps refreshed runtime acquisition masked through ownership" do
+            backendState <-
+                newMVar
+                    (PortalBackendOpen Nothing
+                        :: PortalBackendState Text.Text)
+            handoffMasking <- newIORef Unmasked
+            let initialize = do
+                    getMaskingState >>= writeIORef handoffMasking
+                    pure (Right "runtime")
+            runPortalBackendOperationWith
+                backendState
+                initialize
+                (const (pure ()))
+                (const False)
+                True
+                (const (pure (Right ())))
+                `shouldReturn` Right ()
+            readIORef handoffMasking
+                `shouldReturn` MaskedInterruptible
+            readMVar backendState >>= \case
+                PortalBackendOpen (Just runtime) ->
+                    runtime `shouldBe` "runtime"
+                _ ->
+                    expectationFailure
+                        "the refreshed portal runtime was not retained"
+
+        it "keeps cancelled refreshed acquisition retryable" do
+            backendState <-
+                newMVar
+                    (PortalBackendOpen Nothing
+                        :: PortalBackendState Text.Text)
+            attempts <- newIORef (0 :: Int)
+            entered <- newEmptyMVar
+            blocker <- newEmptyMVar
+            let initialize = do
+                    attempt <-
+                        atomicModifyIORef' attempts \current ->
+                            let next = current + 1
+                            in (next, next)
+                    if attempt == 1
+                        then do
+                            putMVar entered ()
+                            takeMVar blocker
+                            pure (Right "unreachable")
+                        else pure (Right "runtime")
+                run =
+                    runPortalBackendOperationWith
+                        backendState
+                        initialize
+                        (const (pure ()))
+                        (const False)
+                        True
+                        (const (pure (Right ())))
+            withAsync run \initializing -> do
+                takeMVar entered
+                cancel initializing
+                waitCatch initializing
+                    >>= (`shouldSatisfy`
+                        either (const True) (const False))
+            readMVar backendState >>= \case
+                PortalBackendOpen Nothing -> pure ()
+                _ ->
+                    expectationFailure
+                        "the cancelled portal refresh was not retryable"
+            run `shouldReturn` Right ()
+            readIORef attempts `shouldReturn` 2
+            readMVar backendState >>= \case
+                PortalBackendOpen (Just runtime) ->
+                    runtime `shouldBe` "runtime"
+                _ ->
+                    expectationFailure
+                        "the retried portal runtime was not retained"
+
         it "evicts but does not repeat a side-effecting portal operation" do
             let oldOwner = "owner-a" :: Text.Text
                 newOwner = "owner-b" :: Text.Text
