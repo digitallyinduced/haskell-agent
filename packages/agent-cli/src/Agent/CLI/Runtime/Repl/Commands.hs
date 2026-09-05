@@ -5,15 +5,10 @@ module Agent.CLI.Runtime.Repl.Commands
     , preparePromptSkillInputsWithPaste
     ) where
 
-import Agent.CLI.AccountPicker ()
-import Agent.CLI.AccountSelection ()
-import Agent.CLI.Afk ()
-import Agent.CLI.AgentSessions ()
 import Agent.CLI.AgentViewport
     ( AgentViewportEnv(viewportSelect, viewportEntries,
                        viewportSelected) )
 import Agent.CLI.Approval ( setApprovalPolicy, toggleAlwaysApprove )
-import Agent.CLI.Auth ()
 import Agent.CLI.Changelog (loadReleaseNotes)
 import Agent.CLI.Clipboard ( loadImagesFromPastedText )
 import Agent.CLI.Command
@@ -50,19 +45,13 @@ import Agent.CLI.Compaction
     ( CompactOutcome(compactSummary, compactBeforeTokens,
                      compactAfterTokens, compactHistory) )
 import Agent.CLI.Context ( formatContextReport )
-import Agent.Connectivity ()
-import Agent.CLI.Database ()
-import Agent.CLI.Database.Store ()
 import Agent.CLI.Desktop ( openDesktopConversation )
-import Agent.CLI.Dialects ()
-import Agent.CLI.Error ()
 import Agent.CLI.ExternalProgram
     ( normalizeEditedText
     , resolveExternalProgram
     , runExternalProgramOnFile
     , withTemporaryTextFile
     )
-import Agent.CLI.GatewayBridge ()
 import Agent.CLI.GitDiff
     ( GitDiffResult(..)
     , colorizeGitDiff
@@ -78,36 +67,19 @@ import Agent.CLI.Input
                ReplClipboardPaste, ReplClipboardPasteOrText, ReplChooseModel,
                ReplChooseEffort, ReplChooseAccount, ReplRemovePendingImage,
                ReplPasted) )
-import Agent.CLI.Interrupt ()
 import Agent.CLI.GatewayClient ( loadGatewayCredential )
-import Agent.CLI.LearnedSkills ()
-import Agent.CLI.LearnedSkills.Store ()
 import Agent.CLI.Login
     ( runFullscreenLoginManager
     , runLoginManager
     )
-import Agent.CLI.Lsp ()
-import Agent.CLI.ManagedTurn ()
 import Agent.CLI.McpManager ( runMcpManager )
-import Agent.CLI.McpStatus ()
-import Agent.CLI.ModelConfig ()
-import Agent.CLI.Models ()
 import Agent.CLI.Options
     ( ApprovalPolicy(..), gatewayRoutingChanged )
-import Agent.CLI.PendingInputs ()
 import Agent.CLI.Permission ( approvalPolicyOptions )
-import Agent.CLI.Plan ()
-import Agent.CLI.Progress ()
-import Agent.CLI.Project ()
-import Agent.CLI.Prompt ()
-import Agent.CLI.PromptHooks ()
-import Agent.CLI.Provider.OpenAI ()
 import Agent.CLI.Provider.Switch
     ( reloadAuth,
       reportProviderUnavailable,
       requestAutomaticProviderFallback )
-import Agent.CLI.ProviderAvailability ()
-import Agent.CLI.ProviderFallback ()
 import Agent.CLI.ProviderTransition
     ( PendingTurn
     , ProviderTransition
@@ -123,7 +95,6 @@ import Agent.CLI.Render
       renderPrintedText,
       resetRenderPrintedText )
 import Agent.CLI.ReplMode ( replModeLabel )
-import Agent.CLI.Request ()
 import Agent.CLI.Review
     ( ReviewBranch(reviewBranchName)
     , ReviewCommit(reviewCommitHash, reviewCommitShortHash,
@@ -133,8 +104,6 @@ import Agent.CLI.Review
     , listReviewCommits
     , reviewPrompt
     )
-import Agent.CLI.Runtime.HistorySource ()
-import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ( runSessionRecap )
 import Agent.CLI.Runtime.Repl.Attachments
     ( handleAttachmentAction, handleClipboardInput )
@@ -173,26 +142,16 @@ import Agent.CLI.Session.Choices
 import Agent.CLI.Session.History
     ( modifyLiveAttachments, readLiveAttachments, readLiveTranscript )
 import Agent.CLI.Session.Interaction ( runBtwQuestion )
-import Agent.CLI.Session.Lifecycle ()
-import Agent.CLI.Session.Runtime.Types ()
 import Agent.CLI.Session.Selection
     ( currentSessionId, pickAgentChoice )
-import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
-import Agent.CLI.SessionLock ()
-import Agent.CLI.SessionState ()
-import Agent.CLI.SessionTitle ()
 import Agent.CLI.Skills
     ( formatSkillsListing
     , resolvePromptSkillMentions
     )
-import Agent.CLI.Startup.Auth ()
-import Agent.CLI.Startup.Format ()
-import Agent.CLI.StartupContext ()
 import Agent.CLI.Status ( applyReplMode, cycleReplInteraction )
 import Agent.CLI.Style
     ( glyphOk, glyphSession, roleError, roleMuted, roleSuccess )
-import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
     ( beginFullscreenLiveHistory,
       commitFullscreenImagePreviews,
@@ -211,15 +170,7 @@ import Agent.CLI.Terminal
     ( formatTerminalCapabilities
     , resolveColor
     )
-import Agent.CLI.Tools ()
 import Agent.CLI.Turn ( runOneTurn )
-import Agent.CLI.Usage ()
-import Agent.CLI.WebFetch ()
-import Agent.CLI.Worktree ()
-import Agent.Cancel ()
-import Agent.Claude ()
-import Agent.Dialect ()
-import Agent.Error ()
 import Agent.Loop
     ( LoopEvent(ActivityUpdated)
     , TurnAttachment(ImageAttachmentItem)
@@ -227,45 +178,25 @@ import Agent.Loop
     , userMessageWithAttachments
     )
 import Agent.OpenAI.Compaction ( compactSessionUserText )
-import Agent.OpenAI.Usage ()
-import Agent.OpenAI.WebSocketClient ()
-import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ( toText, unsafeToFilePath )
 import Agent.Provider ( Provider(ClaudeCodeProvider) )
-import Agent.Responses.GenericBackend ()
-import Agent.Responses.GenericClient ()
 import Agent.Responses.Types ( ResponseCreateParams(model) )
 import Agent.Skills
     ( SkillInvocation(invocationSkill),
       formatSkillActivation,
       resolveSkillInvocation,
       Skill(skillName) )
-import Agent.Store.Postgres ()
-import Agent.Store.Types ()
-import Agent.Subagents ()
-import Agent.Subagents.TaskPath ()
 import Agent.TUI.Model
     ( infoNotice,
       progressNotice,
       UiEvent(UiUserSubmitted, UiRecapStarted, UiSetNotice, UiErrorMessage,
               UiSystemMessage) )
-import Agent.TUI.Motion ()
-import Agent.ToolDispatch ()
-import Agent.Tools.MultiAgents ()
 import Agent.Tools.PlanMode
     ( PlanModeEnv(planStateRef, planSessionDir),
       activatePlanMode,
       planFilePath,
       readPlanMarkdown,
       PlanModeState(PlanPending) )
-import Agent.Tools.Secret ()
-import Agent.Tools.Types ()
-import Agent.XAI.LoopBackend ()
-import Control.Applicative ()
-import Control.Concurrent.Async ()
-import Control.Concurrent.Chan ()
-import Control.Concurrent.MVar ()
-import Control.Concurrent.STM ()
 import Control.Exception ( AsyncException(UserInterrupt) )
 import Control.Exception.Safe
     ( displayException, finally, throwIO, tryAny, tryIO )
@@ -276,29 +207,14 @@ import Data.List ( findIndex )
 import Data.Maybe ( fromMaybe, isNothing )
 import Data.Text ( Text )
 import Data.Time.Clock ( getCurrentTime )
-import System.Console.ANSI ()
-import System.Console.ANSI.Codes ()
-import System.Environment ()
-import System.Exit ()
 import System.IO ( stdout, hFlush, stderr )
 import System.IO.Error ( isDoesNotExistError )
 import System.OsPath ( OsPath, unsafeEncodeUtf, (</>) )
 import System.Posix.Files ( getSymbolicLinkStatus )
-import qualified Agent.Responses.GenericClient as GenericResponses
-    ()
 import qualified Agent.MCP as MCP
-import qualified Agent.OpenAI.Auth as OpenAI ()
-import qualified Agent.OpenRouter as OpenRouter ()
-import qualified Agent.OpenRouter.Usage as OpenRouterUsage ()
-import qualified Agent.Provider as Provider ()
-import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
-import qualified Agent.CLI.Session.Runner as SessionRunner ()
-import qualified Data.Set as Set ()
 import qualified Data.Text as Text
     ( intercalate, null, pack, replace, strip, toCaseFold )
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn, readFile )
-import qualified Agent.XAI.Options as XAI ()
-import qualified Agent.XAI.Usage as XAIUsage ()
 
 handleReplLine
     :: SessionEnv

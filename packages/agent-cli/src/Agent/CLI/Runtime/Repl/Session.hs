@@ -3,16 +3,8 @@ module Agent.CLI.Runtime.Repl.Session
     ( handleSessionAction
     ) where
 
-import Agent.CLI.AccountPicker ()
-import Agent.CLI.AccountSelection ()
 import Agent.CLI.Afk
     ( AfkTarget(..), handoffLocal, handoffRemote, parseAfkTarget )
-import Agent.CLI.AgentSessions ()
-import Agent.CLI.AgentViewport ()
-import Agent.CLI.Approval ()
-import Agent.CLI.Artifact ()
-import Agent.CLI.Auth ()
-import Agent.CLI.Clipboard ()
 import Agent.CLI.Command
     ( currentEffort,
       currentModel,
@@ -22,51 +14,16 @@ import Agent.CLI.Command
                  ReplWorktree, ReplRename, ReplFork),
       ShellMode(ShellNone, ShellGhci, ShellBash, ShellBoth),
       SlashCatalog(slashCatalogToolNames) )
-import Agent.CLI.Compaction ()
-import Agent.CLI.Config ()
-import Agent.Connectivity ()
-import Agent.CLI.Database ()
-import Agent.CLI.Database.Store ()
-import Agent.CLI.Dialects ()
-import Agent.CLI.Error ()
-import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input ( readChoiceSelection, readChoiceSelectionAt )
-import Agent.CLI.Interrupt ()
-import Agent.CLI.LearnedSkills ()
-import Agent.CLI.LearnedSkills.Store ()
-import Agent.CLI.Login ()
-import Agent.CLI.Lsp ()
-import Agent.CLI.ManagedTurn ()
-import Agent.CLI.McpManager ()
-import Agent.CLI.McpStatus ()
-import Agent.CLI.ModelConfig ()
 import Agent.CLI.Models
     ( ModelTarget(targetModelId, ModelTarget, targetProvider,
                   targetConnectionId, targetWireModelId, targetDialect) )
-import Agent.CLI.Options ()
-import Agent.CLI.PendingInputs ()
-import Agent.CLI.Plan ()
-import Agent.CLI.Progress ()
-import Agent.CLI.Project ()
-import Agent.CLI.Prompt ()
-import Agent.CLI.PromptHooks ()
-import Agent.CLI.Provider.OpenAI ()
-import Agent.CLI.Provider.Switch ()
-import Agent.CLI.ProviderAvailability ()
-import Agent.CLI.ProviderFallback ()
-import Agent.CLI.ProviderTransition ()
-import Agent.CLI.Recap ()
 import Agent.CLI.Render ( clearThinking, putTextLn, renderEvent )
-import Agent.CLI.ReplMode ()
-import Agent.CLI.Request ()
 import Agent.CLI.Runtime.HistorySource
     ( reloadFullscreenHistoryForHandle )
-import Agent.CLI.Runtime.Persistence ()
-import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Types
     ( RunResult(RunDeleteSession, RunForkSession, RunSwitchWorktree, RunRestart,
                 RunQuit) )
-import Agent.CLI.Secret ()
 import Agent.CLI.Session
     ( TranscriptEffect(TranscriptReset),
       appendTurnKeepTitleIndexed,
@@ -98,28 +55,14 @@ import Agent.CLI.Session
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
                   turnAssistantText, turnError, turnResponseId, turnEffect,
                   turnItems, turnDisplayItems, turnProviderTelemetry) )
-import Agent.CLI.Session.Attachments ()
-import Agent.CLI.Session.Choices ()
-import Agent.CLI.Session.History ()
-import Agent.CLI.Session.Interaction ()
-import Agent.CLI.Session.Lifecycle ()
-import Agent.CLI.Session.Runtime.Types ()
 import Agent.CLI.Session.Selection
     ( handleConversationSearch, handleResume )
-import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
-import Agent.CLI.SessionLock ()
-import Agent.CLI.SessionState ()
 import Agent.CLI.SessionTitle
     ( invalidateSessionTitles, requestSessionTitle )
-import Agent.CLI.Skills ()
-import Agent.CLI.Startup.Auth ()
-import Agent.CLI.Startup.Format ()
-import Agent.CLI.StartupContext ()
 import Agent.CLI.Status ( formatTokenUsageOrZero )
 import Agent.CLI.Style
     ( cliWindowTitle, glyphOk, glyphSession, roleError, roleMuted, rolePrompt )
-import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
     ( commitFullscreenHistoryTurn
     , emitUiEvent
@@ -128,93 +71,40 @@ import Agent.CLI.TUI.App
 import Agent.CLI.TUI.SessionHistory ( sessionHistoryTurn )
 import Agent.CLI.TUI.Types ( HistoryCommit(..) )
 import Agent.CLI.Terminal ( resolveColor )
-import Agent.CLI.Tools ()
-import Agent.CLI.Turn ()
-import Agent.CLI.Usage ()
-import Agent.CLI.WebFetch ()
 import Agent.CLI.Worktree
     ( createManagedWorktreeWithProgress
     , removeWorktree
     , worktreeProgressMessage
     )
-import Agent.Cancel ()
-import Agent.Claude ()
 import Agent.Dialect ( dialectId, dialectSlug )
-import Agent.Error ()
-import Agent.GrokBuild.Dialect.Goal ()
-import Agent.GrokBuild.Dialect.Runtime ()
-import Agent.GrokBuild.Dialect.Workflow ()
 import Agent.Loop ( LoopEvent(ActivityUpdated) )
 import Agent.OpenAI.Compaction
     ( clearSessionUserText, newSessionUserText )
-import Agent.OpenAI.Usage ()
-import Agent.OpenAI.WebSocketClient ()
-import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ( toText )
 import Agent.Provider ( providerSlug )
 import Agent.ReasoningEffort (reasoningEffortText)
-import Agent.Responses.GenericBackend ()
-import Agent.Responses.GenericClient ()
-import Agent.Responses.Types ()
-import Agent.Skills ()
-import Agent.Store.Postgres ()
-import Agent.Store.Types ()
-import Agent.Subagents ()
-import Agent.Subagents.TaskPath ()
 import Agent.TUI.Model
     ( progressNotice,
       UiEvent(UiConversationCleared, UiSystemMessage, UiErrorMessage,
               UiSetNotice) )
-import Agent.TUI.Motion ()
-import Agent.ToolDispatch ()
-import Agent.Tools.MultiAgents ()
 import Agent.Tools.PlanMode ( PlanModeEnv(planSessionDir) )
-import Agent.Tools.Secret ()
 import Agent.Tools.TaskPlan
     ( CurrentTaskPlan(currentTaskPlanValue)
     , resetTaskPlanState
     )
-import Agent.Tools.Types ()
-import Agent.XAI.LoopBackend ()
-import Control.Applicative ()
-import Control.Concurrent.Async ()
-import Control.Concurrent.Chan ()
-import Control.Concurrent.MVar ()
-import Control.Concurrent.STM ()
-import Control.Exception ()
 import Control.Exception.Safe
     ( displayException, finally, mask, onException, tryAny )
 import Control.Monad ( forM_, void )
 import Data.IORef ( readIORef, writeIORef )
-import Data.List ()
 import Data.Maybe ( fromMaybe )
 import Data.Text ( Text )
 import Data.Time.Clock ( getCurrentTime )
-import System.Console.ANSI ()
-import System.Console.ANSI.Codes ()
-import System.Directory.OsPath ()
-import System.Environment ()
-import System.Exit ()
 import System.IO ( stdout, stderr )
 import System.OsPath ( OsPath, takeDirectory )
-import System.Posix.Files ()
-import qualified Data.ByteString as BS ()
-import qualified Agent.Responses.GenericClient as GenericResponses
-    ()
-import qualified Agent.MCP as MCP ()
-import qualified Data.Map.Strict as Map ()
-import qualified Agent.OpenAI.Auth as OpenAI ()
-import qualified Agent.OpenRouter as OpenRouter ()
-import qualified Agent.OpenRouter.Usage as OpenRouterUsage ()
-import qualified Agent.Provider as Provider ()
-import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
-import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ( toAscList )
 import qualified Data.Text as Text
     ( intercalate, length, pack, strip, take, unlines, unwords, words )
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn )
-import qualified Agent.XAI.Options as XAI ()
-import qualified Agent.XAI.Usage as XAIUsage ()
 
 handleSessionAction
     :: SessionEnv

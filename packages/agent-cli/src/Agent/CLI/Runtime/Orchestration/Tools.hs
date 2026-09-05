@@ -3,9 +3,6 @@ module Agent.CLI.Runtime.Orchestration.Tools
     , runAgentTools
     ) where
 
-import Agent.CLI.AccountPicker ()
-import Agent.CLI.AccountSelection ()
-import Agent.CLI.Afk ()
 import Agent.CLI.AgentSessions
     ( agentSessionTools,
       launchSessionThread,
@@ -16,24 +13,16 @@ import Agent.CLI.AgentSessions
                            toolsResolveModelOption,
                            toolsGatewayIdentity, toolsCwd, toolsEffort,
                            toolsCurrentSessionId, toolsLaunchTurn) )
-import Agent.CLI.AgentViewport ()
-import Agent.CLI.Approval ()
-import Agent.CLI.Artifact ()
 import Agent.CLI.Auth
     ( LoadedAuth(loadedProvider, loadedTokenProvider),
       hasOpenAiAuth,
       isGatewayLoadedAuth,
       loadAuth )
-import Agent.CLI.Clipboard ()
-import Agent.CLI.CodeModeRuntime ()
-import Agent.CLI.Command ()
 import qualified Agent.CLI.ComputerUse as ComputerUse
-import Agent.CLI.Compaction ()
 import Agent.CLI.Config
     ( HarnessConfig(..),
       McpServerConfig(..),
       useProgressiveMcp )
-import Agent.Connectivity ()
 import Agent.CLI.Database ( databaseTools )
 import Agent.CLI.Database.Store
     (DatabaseScopes, databaseToolsEnvForStore)
@@ -55,7 +44,6 @@ import Agent.CLI.GatewayClient
     )
 import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
 import Agent.CLI.GatewayBridge ( managedGatewayTools )
-import Agent.CLI.Input ()
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.LearnedSkills ( learnedSkillTools )
 import Agent.CLI.LearnedSkills.Store
@@ -63,11 +51,9 @@ import Agent.CLI.LearnedSkills.Store
     , loadApplicableLearnedSkillsForStore
     , successfulLearnedSkillsPreload
     )
-import Agent.CLI.Login ()
 import Agent.CLI.Lsp
     ( LspStartup(..), closeLspRuntime, lspRuntimeTool, newLspRuntime )
 import Agent.CLI.ManagedTurn ( ManagedTurnRequest(..) )
-import Agent.CLI.McpManager ()
 import Agent.CLI.McpOAuthStore (mcpOAuthStorePath)
 import Agent.CLI.McpElicitation (cliMcpElicitation)
 import Agent.CLI.McpStatus
@@ -116,16 +102,7 @@ import Agent.CLI.Prompt
     )
 import Agent.CLI.PromptHooks
     ( fullscreenAwareImageHooks, fullscreenAwarePlanHooks, fullscreenAwareSecretHooks )
-import Agent.CLI.Provider.OpenAI ()
-import Agent.CLI.Provider.Switch ()
-import Agent.CLI.ProviderAvailability ()
-import Agent.CLI.ProviderFallback ()
 import Agent.CLI.ProviderTransition (PendingTurn, ProviderTransition)
-import Agent.CLI.Recap ()
-import Agent.CLI.Render ()
-import Agent.CLI.ReplMode ()
-import Agent.CLI.Request ()
-import Agent.CLI.Resume ()
 import Agent.CLI.Runtime.HistorySource
     ( emptyFullscreenHistoryPage, loadFullscreenHistoryPage )
 import Agent.CLI.Runtime.Orchestration.Background
@@ -141,7 +118,6 @@ import Agent.CLI.Runtime.Orchestration.Types
     , nativeLoadsHostWorkspaceContext
     , nativePreparedDiscovery
     )
-import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Resume
     ( SessionInitialContext
         ( initialContextMayRestoreSnapshot
@@ -155,8 +131,6 @@ import Agent.CLI.Runtime.Orchestration.Session ( AgentSessionRequest(..)
 import Agent.CLI.Runtime.Orchestration.Startup
     ( reportStartupWarning )
 import Agent.CLI.Runtime.Persistence ( preparePersistence )
-import Agent.CLI.Runtime.Recap ()
-import Agent.CLI.Runtime.Repl ()
 import Agent.CLI.Runtime.Types (DevResult, RunResult)
 import Agent.CLI.Secret ( promptSecretLine )
 import Agent.CLI.Session
@@ -180,9 +154,7 @@ import Agent.CLI.Session
                   metaConnection, metaModel, metaDialect, metaEffort, metaCwd),
       SessionTurn(turnAssistantText) )
 import Agent.CLI.Session.Attachments ( putImagePreview )
-import Agent.CLI.Session.Choices ()
 import Agent.CLI.Session.History (foldSessionItems)
-import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( InitialContextPreload(..)
     , StartupRuntime(startupFullscreen, startupBackground,
@@ -192,8 +164,6 @@ import Agent.CLI.Session.Runtime.Types
                      startupStdinTty) )
 import Agent.CLI.Session.Selection
     ( currentSessionId, loadPrompt, reservedSessionId )
-import Agent.CLI.SessionAdmin ()
-import Agent.CLI.SessionEnv ()
 import Agent.CLI.SessionLock
     ( SessionLock,
       acquireSessionLock,
@@ -201,11 +171,9 @@ import Agent.CLI.SessionLock
       sessionLockFilePath,
       sessionLockPath )
 import Agent.CLI.SessionState ( SessionState(sessionPreviewId) )
-import Agent.CLI.SessionTitle ()
 import Agent.CLI.Startup.Auth
     ( markStartupStage, setStartupNotice, startupDie )
 import Agent.CLI.StartupContext ( preloadAgentsContext )
-import Agent.CLI.Style ()
 import Agent.CLI.Subagents.Runtime
     ( flushAllSubagentSnapshots,
       persistAndEvictSubagentSessionWithStatus,
@@ -222,11 +190,7 @@ import Agent.CLI.TUI.App
       setFullscreenHistorySource )
 import Agent.CLI.TUI.History
     ( HistoryGeneration(HistoryGeneration) )
-import Agent.CLI.TUI.SessionHistory ()
 import Agent.CLI.Terminal ( resolveColor )
-import Agent.CLI.Tools ()
-import Agent.CLI.Turn ()
-import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch
     ( WebFetchRuntime
     , closeWebFetchRuntime
@@ -242,25 +206,19 @@ import Agent.CLI.Worktree
       removeWorktree,
       worktreeRoot,
       WorktreeCleanupReport(..) )
-import Agent.Cancel ()
-import Agent.Claude ()
 import Agent.Dialect
     ( Dialect
     , dialectForId
     , DialectId(CodexDialect, GrokBuildDialect)
     )
 import Agent.Error (ApiError)
-import Agent.GrokBuild.Dialect.Goal ()
-import Agent.GrokBuild.Dialect.Runtime ()
 import Agent.GrokBuild.Dialect.Task
     ( GrokSubagentSpecs
     , grokRootChildModels
     )
-import Agent.GrokBuild.Dialect.Workflow ()
 import Agent.Loop
     ( TurnInput(UserMessage, AgentMessage),
       LoopError(LoopNoResponseId) )
-import Agent.OpenAI.Compaction ()
 import Agent.OpenAI.ImageGeneration
     ( ImageGenerationHistory
     , clearImageGenerationHistory
@@ -269,9 +227,6 @@ import Agent.OpenAI.ImageGeneration
     , recordImageGenerationImages
     , recordImageGenerationResponseItems
     )
-import Agent.OpenAI.Usage ()
-import Agent.OpenAI.WebSocketClient ()
-import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ( unsafeToFilePath )
 import Agent.Provider
     ( Credential, TokenProvider,
@@ -280,7 +235,6 @@ import Agent.Provider
     )
 import Agent.ReasoningEffort
     ( parseReasoningEffort, reasoningEffortText )
-import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient ( GenericClientOptions(..) )
 import Agent.Responses.Types ( ResponseItem )
 import Agent.ResourceScope
@@ -294,7 +248,6 @@ import Agent.Skills
     , SkillInvocation
     )
 import Agent.Store.Postgres ( trustedPool )
-import Agent.Store.Types ()
 import Agent.Subagents
     ( RootTurnId,
       formatCompletionNotice,
@@ -310,7 +263,6 @@ import Agent.Subagents
       SubagentRegistry )
 import Agent.Subagents.TaskPath ( taskPathRoot )
 import Agent.TUI.Model ( UiEvent(UiSetNotice) )
-import Agent.TUI.Motion ()
 import Agent.Tools.MultiAgents
     ( CollaborationModelTarget(..)
     , MultiAgentContext(..)
@@ -336,36 +288,20 @@ import Agent.Tools.Types
     , setToolSessionTmp
     , withToolHumanInputWait
     )
-import Agent.XAI.LoopBackend ()
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async ( concurrently, concurrently_ )
-import Control.Concurrent.Chan ()
-import Control.Concurrent.MVar ()
-import Control.Concurrent.STM ()
-import Control.Exception ()
 import Control.Exception.Safe
     ( SomeException, bracketOnError, finally, onException, throwIO, try )
 import Control.Monad ( forM_, join, unless, when )
-import Data.Functor ()
 import Data.IORef
     (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
-import Data.List ()
 import Data.Map.Strict (Map)
 import Data.Maybe ( isNothing, fromMaybe, isJust )
 import Data.Set (Set)
 import Data.Text (Text)
-import Data.Time.Clock ()
-import System.Console.ANSI ()
-import System.Console.ANSI.Codes ()
-import System.Directory.OsPath ()
-import System.Environment ()
-import System.Exit ()
 import System.IO (Handle)
 import System.Info (os)
 import System.OsPath (OsPath)
-import qualified Data.ByteString as BS ()
-import qualified Agent.Responses.GenericClient as GenericResponses
-    ()
 import qualified Agent.MCP as MCP
     ( McpSupervisor,
       acquireMcpFleetProgressive,
@@ -384,23 +320,12 @@ import qualified Agent.MCP as MCP
                       mcpServerEnv, mcpServerStartupTimeoutSeconds, mcpServerProtocol) )
 import qualified Data.Map.Strict as Map
     ( toAscList, empty, lookup, notMember )
-import qualified Agent.OpenAI.Auth as OpenAI ()
 import qualified Agent.OpenRouter as OpenRouter
     ( ClientOptions
     , clientOptionsFromEnv
     , mapModel
     )
-import qualified Agent.OpenRouter.Usage as OpenRouterUsage ()
-import qualified Agent.Provider as Provider ()
-import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
-import qualified Agent.CLI.Session.Runner as SessionRunner ()
-import qualified Data.Set as Set ()
 import qualified Data.Text as Text ( intercalate, pack, strip, unpack )
-import qualified Data.Text.IO as Text ()
-import qualified Agent.XAI.Options as XAI ()
-import qualified Agent.XAI.Client as XAIClient ()
-import qualified Agent.XAI.Request as XAIRequest ()
-import qualified Agent.XAI.Usage as XAIUsage ()
 
 data AgentToolsRequest windowTitleResult = AgentToolsRequest
     { runAgentChild :: AgentRunMode -> CliOptions -> IO DevResult

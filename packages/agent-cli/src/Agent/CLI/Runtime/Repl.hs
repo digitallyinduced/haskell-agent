@@ -8,27 +8,12 @@ module Agent.CLI.Runtime.Repl
     , preparePromptSkillInputsWithPaste
     ) where
 
-import Agent.CLI.AccountPicker ()
-import Agent.CLI.AccountSelection ()
-import Agent.CLI.Afk ()
-import Agent.CLI.AgentSessions ()
 import Agent.CLI.AgentViewport
     ( renderAgentViewportPanelFor,
       AgentViewportEnv(viewportSelected, viewportEntries) )
-import Agent.CLI.Approval ()
-import Agent.CLI.Artifact ()
-import Agent.CLI.Auth ()
-import Agent.CLI.Clipboard ()
 import Agent.CLI.Command
     ( currentEffort, currentModel, mkSlashCatalog, SlashCatalog )
 import Agent.ReasoningEffort (reasoningEffortText)
-import Agent.CLI.Compaction ()
-import Agent.CLI.Config ()
-import Agent.Connectivity ()
-import Agent.CLI.Database ()
-import Agent.CLI.Database.Store ()
-import Agent.CLI.Dialects ()
-import Agent.CLI.Error ()
 import Agent.CLI.Dictation
     ( dictationTargetForSession )
 import Agent.CLI.GatewayClient
@@ -37,50 +22,26 @@ import Agent.CLI.GatewayClient
     , fetchGatewayUsage
     , gatewayModelIds
     )
-import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input
     ( ReplLine
     , readReplLineWithCatalogForProvider
     , readReplLineWithCatalogForTarget
     )
-import Agent.CLI.Interrupt ()
-import Agent.CLI.LearnedSkills ()
-import Agent.CLI.LearnedSkills.Store ()
-import Agent.CLI.Login ()
-import Agent.CLI.Lsp ()
-import Agent.CLI.ManagedTurn ()
-import Agent.CLI.McpManager ()
-import Agent.CLI.McpStatus ()
-import Agent.CLI.ModelConfig ()
 import Agent.OpenAI.Models.Types (ModelInfo(..), modelServiceTierForRequest)
 import Agent.CLI.Models ( catalogModelIds )
-import Agent.CLI.Options ()
-import Agent.CLI.PendingInputs ()
 import Agent.CLI.SteeringInputs
     ( awaitBackgroundCompletion
     , hasBackgroundCompletions
     )
-import Agent.CLI.Plan ()
-import Agent.CLI.Progress ()
-import Agent.CLI.Project ()
-import Agent.CLI.Prompt ()
-import Agent.CLI.PromptHooks ()
-import Agent.CLI.Provider.OpenAI ()
 import Agent.CLI.Provider.Switch
     ( reportProviderUnavailable, requestStartupProviderFallback )
-import Agent.CLI.ProviderAvailability ()
-import Agent.CLI.ProviderFallback ()
 import Agent.CLI.ProviderTransition ( PendingTurn, TurnResult )
-import Agent.CLI.Recap ()
 import Agent.CLI.Render
     ( RenderConfig(..)
     , stateLastTokensPerSecond
     )
 import Agent.CLI.ReplMode
     ( replModeFromState, ReplMode(ReplModeAlwaysApprove) )
-import Agent.CLI.Request ()
-import Agent.CLI.Runtime.Persistence ()
-import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Repl.Commands
     ( handleReplLine
     , preparePromptSkillInputs
@@ -90,27 +51,14 @@ import Agent.CLI.Runtime.Types
     ( PendingTurnPresentation
     , RunResult(RunSwitchProvider)
     )
-import Agent.CLI.Secret ()
-import Agent.CLI.Session ()
-import Agent.CLI.Session.Attachments ()
-import Agent.CLI.Session.Choices ()
 import Agent.CLI.Session.History ( readLiveAttachments )
 import Agent.CLI.Session.Interaction
     ( buildPromptState
     , syncFullscreenContext
     )
 import Agent.CLI.Session.Lifecycle ( SessionContinuation(..) )
-import Agent.CLI.Session.Runtime.Types ()
-import Agent.CLI.Session.Selection ()
-import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
-import Agent.CLI.SessionLock ()
-import Agent.CLI.SessionState ()
-import Agent.CLI.SessionTitle ()
 import Agent.CLI.Skills ( skillInvocationCommand )
-import Agent.CLI.Startup.Auth ()
-import Agent.CLI.Startup.Format ()
-import Agent.CLI.StartupContext ()
 import Agent.CLI.Status ( formatReplStatusLine )
 import Agent.CLI.Style
     ( beginBackground,
@@ -120,7 +68,6 @@ import Agent.CLI.Style
       roleSuccess,
       roleWarn,
       userBackground )
-import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
     ( FullscreenRuntime
     , emitUiEvent,
@@ -133,92 +80,45 @@ import Agent.CLI.Terminal
       resolveColor,
       withSynchronizedOutput,
       TerminalCapabilities(terminalSemanticPrompts) )
-import Agent.CLI.Tools ()
 import Agent.CLI.Turn (runOneTurn)
 import Agent.CLI.Usage
     ( formatGrokLimitStatus,
       formatOpenAiLimitStatus,
       formatOpenRouterLimitStatus )
-import Agent.CLI.WebFetch ()
-import Agent.CLI.Worktree ()
-import Agent.Cancel ()
-import Agent.Claude ()
 import Agent.Dialect ( dialectId )
 import Agent.Error (ApiError)
-import Agent.GrokBuild.Dialect.Goal ()
-import Agent.GrokBuild.Dialect.Runtime ()
-import Agent.GrokBuild.Dialect.Workflow ()
 import Agent.Loop ( emptyTokenUsage )
-import Agent.OpenAI.Compaction ()
 import Agent.OpenAI.Usage ( fetchUsage )
-import Agent.OpenAI.WebSocketClient ()
-import Agent.OpenRouter.LoopBackend ()
-import Agent.OsPath ()
 import Agent.Provider
     ( Provider(OpenRouterProvider, XAIProvider, OpenAIProvider),
       Credential(accessToken, accountId),
       getNextToken,
       tokenProviderBillingMode,
       BillingMode(SubscriptionBilled) )
-import Agent.Responses.GenericBackend ()
-import Agent.Responses.GenericClient ()
-import Agent.Responses.Types ()
 import Agent.Skills
     ( SkillInvocation(invocationSkill), Skill(skillUserInvocable) )
-import Agent.Store.Postgres ()
-import Agent.Store.Types ()
-import Agent.Subagents ()
-import Agent.Subagents.TaskPath ()
 import Agent.TUI.Model
     ( PromptState
     , UiEvent(UiSetPromptLimitStatus, UiSystemMessage) )
-import Agent.TUI.Motion ()
-import Agent.ToolDispatch ()
-import Agent.Tools.MultiAgents ()
 import Agent.Tools.PlanMode
     ( PlanModeEnv(planStateRef),
       PlanModeState(PlanPending, PlanActive) )
-import Agent.Tools.Secret ()
-import Agent.Tools.Types ()
-import Agent.XAI.LoopBackend ()
-import Control.Applicative ()
 import Control.Concurrent.Async ( withAsync )
-import Control.Concurrent.Chan ()
 import Control.Concurrent.MVar ( withMVar )
 import Control.Concurrent.STM (orElse, retry)
-import Control.Exception ()
-import Control.Exception.Safe ()
 import Control.Monad ( when, forM_ )
 import Data.IORef ( readIORef, writeIORef )
-import Data.List ()
 import Data.Maybe ( fromMaybe, isJust )
 import Data.Text ( Text )
-import Data.Time.Clock ()
 import System.Console.ANSI ( getTerminalSize )
 import System.Console.ANSI.Codes ( clearFromCursorToLineEndCode )
-import System.Directory.OsPath ()
-import System.Environment ()
-import System.Exit ()
 import System.IO ( stdout, hFlush )
-import System.OsPath ()
-import System.Posix.Files ()
-import qualified Data.ByteString as BS ()
-import qualified Agent.Responses.GenericClient as GenericResponses
-    ()
-import qualified Agent.MCP as MCP ()
-import qualified Data.Map.Strict as Map ()
-import qualified Agent.OpenAI.Auth as OpenAI ()
-import qualified Agent.OpenRouter as OpenRouter ()
 import qualified Agent.OpenRouter.Usage as OpenRouterUsage
     ( fetchOpenRouterUsage )
-import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle
     ( finishTurn, retryFailedTurn, runPendingTurn )
-import qualified Agent.CLI.Session.Runner as SessionRunner ()
-import qualified Data.Set as Set ()
 import qualified Data.Text as Text ( null, strip, pack )
 import qualified Data.Text.IO as Text ( putStr, putStrLn )
-import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Usage as XAIUsage ( fetchGrokUsage )
 
 sessionContinuation :: SessionContinuation
