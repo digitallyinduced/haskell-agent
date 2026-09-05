@@ -9,6 +9,7 @@ import Control.Exception.Safe (finally)
 import Data.ByteString (ByteString)
 import Data.Either (isLeft, isRight)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Clock (addUTCTime, getCurrentTime)
 import qualified Hasql.Decoders as Decoders
 import qualified Hasql.Encoders as Encoders
@@ -25,6 +26,7 @@ import Agent.Store.Postgres.Connection
     , openStorePool
     , withSession
     )
+import Agent.Store.Postgres.Config (postgresSocketPath)
 import Agent.Store.Postgres.Managed
     ( ensureManagedPostgres
     , stopManagedPostgres
@@ -92,6 +94,115 @@ spec =
                                 ("could not open managed store: " <> show err)
                         Right () -> pure ())
                     `finally` cleanup
+
+        it "reuses a warm socket without lifecycle executables and falls back when stopped" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = defaultManagedPostgresConfig stateDirectory ""
+                    dataDirectoryAlias =
+                        config.postgresPaths.postgresDataDirectory <> "/."
+                    unavailableBinConfig =
+                        config
+                            { postgresBinDirectory =
+                                stateDirectory <> "/missing-postgres-bin"
+                            , postgresPaths =
+                                config.postgresPaths
+                                    { postgresDataDirectory =
+                                        dataDirectoryAlias
+                                    }
+                            }
+                    cleanup = do
+                        _ <- stopManagedPostgres config
+                        pure ()
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+
+                    -- The running server remains reachable through its socket.
+                    -- An attempted pg_ctl/psql command would fail because this
+                    -- configuration points at a deliberately absent bin dir.
+                    -- Reaching it through a non-normalized data-directory alias
+                    -- also proves the identity check compares canonical paths.
+                    -- The cluster has not been migrated yet, so this also
+                    -- proves that the fast path runs migrations before it
+                    -- validates and returns the runtime-role pool.
+                    (withStore unavailableBinConfig \store -> do
+                        withSession
+                            (trustedPool store)
+                            (Session.statement () serverStatement)
+                            `shouldReturn`
+                                Right
+                                    ( "haskell_agent"
+                                    , "ha_runtime"
+                                    , True
+                                    , True
+                                    , True
+                                    )
+                        withSession
+                            (trustedPool store)
+                            (Session.script
+                                "CREATE SCHEMA warm_runtime_must_not_create")
+                            >>= (`shouldSatisfy` isLeft)
+                        ) >>= (`shouldSatisfy` isRight)
+
+                    stopManagedPostgres config `shouldReturn` Right ()
+                    -- A stale path exercises failed-probe fallback, rather
+                    -- than only the simpler missing-socket branch.
+                    writeFile (postgresSocketPath config) ""
+                    withStore unavailableBinConfig (const (pure ()))
+                        >>= \case
+                            Left (StoreProcessError message) ->
+                                message `shouldSatisfy`
+                                    Text.isInfixOf "Could not run pg_ctl"
+                            Left err ->
+                                expectationFailure $
+                                    "expected lifecycle fallback failure, got: "
+                                        <> show err
+                            Right () ->
+                                expectationFailure
+                                    "stopped cluster unexpectedly opened"
+                    ) `finally` cleanup
+
+        it "rejects a warm socket backed by a different data directory" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = defaultManagedPostgresConfig stateDirectory ""
+                    otherDataDirectory = stateDirectory <> "/other-data"
+                    mismatchedConfig =
+                        config
+                            { postgresBinDirectory =
+                                stateDirectory <> "/missing-postgres-bin"
+                            , postgresPaths =
+                                config.postgresPaths
+                                    { postgresDataDirectory =
+                                        otherDataDirectory
+                                    }
+                            }
+                    cleanup = do
+                        _ <- stopManagedPostgres config
+                        pure ()
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+
+                    -- The socket, database, and owner role all resolve, but
+                    -- the connected server belongs to the original data
+                    -- directory. A correct warm probe must reject it and enter
+                    -- lifecycle fallback, whose deliberately missing binary
+                    -- makes the distinction observable.
+                    withStore mismatchedConfig (const (pure ()))
+                        >>= \case
+                            Left (StoreProcessError message) ->
+                                message `shouldSatisfy`
+                                    Text.isInfixOf "Could not run initdb"
+                            Left err ->
+                                expectationFailure $
+                                    "expected lifecycle fallback failure, got: "
+                                        <> show err
+                            Right () ->
+                                expectationFailure
+                                    "mismatched cluster unexpectedly opened"
+                    ) `finally` cleanup
 
         it "ignores an unrelated migration 11 from another worktree" $
             withSystemTempDirectory "ha" \stateDirectory -> do

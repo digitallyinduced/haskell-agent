@@ -36,8 +36,19 @@ import Agent.MCP
     , newMcpSupervisor
     , releaseMcpFleetLease
     )
+import Agent.OsPath (unsafeToFilePath)
+import Agent.ProjectInstructions
+    ( DiscoverOptions(..)
+    , InstructionFile(..)
+    , LoadedAgentsMd
+    , defaultDiscoverOptions
+    , discoverProjectInstructions
+    , loadedInstructionFiles
+    , loadedInstructionWarnings
+    )
 import Agent.ResourceScope
     ( allocateResource
+    , allocateFourResourcesConcurrently
     , allocateResourcesConcurrently
     , withResourceScope
     )
@@ -107,6 +118,34 @@ data ToolStartupStrategy
     | StartupParentFullOverlap
     | StartupPreloadSkills
 
+data StartupDagStrategy
+    = StartupDagBaseline
+    | StartupDagCurrent
+
+data StartupDagContext = StartupDagContext
+    { dagAgentsContext :: !LoadedAgentsMd
+    , dagSkillsCatalog :: !SkillCatalog
+    }
+
+data StartupDagAuxResource = StartupDagAuxResource
+    { dagAuxLabel :: !Text.Text
+    , dagAuxChecksum :: !Int
+    }
+
+data StartupDagResources = StartupDagResources
+    { dagMcpLease :: !McpFleetLease
+    , dagCodingTools :: !CodingTools
+    , dagWebResource :: !StartupDagAuxResource
+    , dagLspResource :: !StartupDagAuxResource
+    }
+
+data StartupDagReleaseCounters = StartupDagReleaseCounters
+    { dagMcpReleases :: !(IORef Int)
+    , dagLocalReleases :: !(IORef Int)
+    , dagWebReleases :: !(IORef Int)
+    , dagLspReleases :: !(IORef Int)
+    }
+
 main :: IO ()
 main = do
     args <- getArgs
@@ -159,6 +198,19 @@ main = do
                 (read mcpDelayMillis)
                 (read skills)
                 (read samples)
+        [ "startup-dag-paired"
+            , servers
+            , mcpDelayMillis
+            , skills
+            , auxDelayMillis
+            , samples
+            ] ->
+                benchmarkStartupDagPaired
+                    (read servers)
+                    (read mcpDelayMillis)
+                    (read skills)
+                    (read auxDelayMillis)
+                    (read samples)
         _ -> benchmarkConcurrency args
 
 benchmarkConcurrency :: [String] -> IO ()
@@ -390,6 +442,428 @@ benchmarkStartupToolsPaired
                     <> " cpu-ms=" <> show cpuDelta
                     <> " allocated-bytes=" <> show allocationDelta
                 )
+
+-- | Retained comparison for the startup frontier changed in this branch.
+-- The baseline stages MCP/local, web/LSP, and context in three waves. The
+-- current graph overlaps all four resources with concurrent context preload.
+benchmarkStartupDagPaired :: Int -> Int -> Int -> Int -> Int -> IO ()
+benchmarkStartupDagPaired
+        serverCount mcpDelayMillis skillCount auxDelayMillis sampleCount = do
+    statsEnabled <- getRTSStatsEnabled
+    when (not statsEnabled) $
+        fail "run with +RTS -T"
+    executable <- getExecutablePath
+    let normalizedServers = max 0 serverCount
+        normalizedMcpDelay = max 0 mcpDelayMillis
+        normalizedSkills = max 0 skillCount
+        normalizedAuxDelay = max 0 auxDelayMillis
+        normalizedSamples = max 1 sampleCount
+    withStartupDagFixture
+        executable
+        normalizedServers
+        normalizedMcpDelay
+        normalizedSkills
+        \fixture -> do
+            validateMcpFixture fixture
+            baselineChecksum <-
+                runStartupDag
+                    StartupDagBaseline
+                    fixture
+                    normalizedAuxDelay
+            currentChecksum <-
+                runStartupDag
+                    StartupDagCurrent
+                    fixture
+                    normalizedAuxDelay
+            when (baselineChecksum /= currentChecksum) $
+                fail "startup DAG implementations disagree on checksum"
+            pairedSamples <-
+                forM [1 .. normalizedSamples] \index ->
+                    if odd index
+                        then do
+                            baselineSample <-
+                                measureStartupDag
+                                    StartupDagBaseline
+                                    fixture
+                                    normalizedAuxDelay
+                            currentSample <-
+                                measureStartupDag
+                                    StartupDagCurrent
+                                    fixture
+                                    normalizedAuxDelay
+                            pure (baselineSample, currentSample)
+                        else do
+                            currentSample <-
+                                measureStartupDag
+                                    StartupDagCurrent
+                                    fixture
+                                    normalizedAuxDelay
+                            baselineSample <-
+                                measureStartupDag
+                                    StartupDagBaseline
+                                    fixture
+                                    normalizedAuxDelay
+                            pure (baselineSample, currentSample)
+            let baselineSample = medianSample (map fst pairedSamples)
+                currentSample = medianSample (map snd pairedSamples)
+                elapsedDelta =
+                    median
+                        [ current.sampleElapsedMillis
+                            - baseline.sampleElapsedMillis
+                        | (baseline, current) <- pairedSamples
+                        ]
+                cpuDelta =
+                    median
+                        [ current.sampleCpuMillis - baseline.sampleCpuMillis
+                        | (baseline, current) <- pairedSamples
+                        ]
+                allocationDelta =
+                    median
+                        [ toInteger current.sampleAllocatedBytes
+                            - toInteger baseline.sampleAllocatedBytes
+                        | (baseline, current) <- pairedSamples
+                        ]
+                dimensions =
+                    " mcp-mode=progressive"
+                        <> " pairing=alternating"
+                        <> " baseline-topology=resources2+2-then-context1+1"
+                        <> " current-topology=resources4||context2"
+                        <> " shared-workspace-loaders=4"
+                        <> " resource-branches=4"
+                        <> " context-branches=2"
+                        <> " context-kind=agents+filesystem-skills"
+                        <> " mcp-servers=" <> show normalizedServers
+                        <> " mcp-delay-ms=" <> show normalizedMcpDelay
+                        <> " filesystem-skills=" <> show normalizedSkills
+                        <> " agents-files=1"
+                        <> " simulated-aux-resources=2"
+                        <> " simulated-aux-kind=web-fetch+lsp"
+                        <> " aux-delay-ms=" <> show normalizedAuxDelay
+                        <> " samples=" <> show normalizedSamples
+                printSample label sample =
+                    putStrLn
+                        ( label
+                            <> dimensions
+                            <> " elapsed-ms="
+                            <> show sample.sampleElapsedMillis
+                            <> " cpu-ms=" <> show sample.sampleCpuMillis
+                            <> " allocated-bytes="
+                            <> show sample.sampleAllocatedBytes
+                        )
+            printSample "startup-dag-paired-baseline" baselineSample
+            printSample "startup-dag-paired-current" currentSample
+            putStrLn
+                ( "startup-dag-paired-delta"
+                    <> dimensions
+                    <> " elapsed-ms=" <> show elapsedDelta
+                    <> " cpu-ms=" <> show cpuDelta
+                    <> " allocated-bytes=" <> show allocationDelta
+                )
+
+runStartupDag
+    :: StartupDagStrategy
+    -> ToolStartupFixture
+    -> Int
+    -> IO Int
+runStartupDag strategy fixture auxDelayMillis = do
+    toolEnv <- defaultToolEnv fixture.fixtureProject
+    releaseCounters <- newStartupDagReleaseCounters
+    bracket newMcpSupervisor closeMcpSupervisor \supervisor ->
+        runStartupDagWithSupervisor
+            strategy
+            fixture
+            auxDelayMillis
+            supervisor
+            toolEnv
+            releaseCounters
+            (startupDagChecksum fixture)
+
+measureStartupDag
+    :: StartupDagStrategy
+    -> ToolStartupFixture
+    -> Int
+    -> IO Sample
+measureStartupDag strategy fixture auxDelayMillis = do
+    toolEnv <- defaultToolEnv fixture.fixtureProject
+    releaseCounters <- newStartupDagReleaseCounters
+    performMajorGC
+    beforeStats <- getRTSStats
+    beforeCpu <- getCPUTime
+    beforeElapsed <- getMonotonicTimeNSec
+    bracket newMcpSupervisor closeMcpSupervisor \supervisor ->
+        runStartupDagWithSupervisor
+            strategy
+            fixture
+            auxDelayMillis
+            supervisor
+            toolEnv
+            releaseCounters
+            \resources context -> do
+                checksum <- startupDagChecksum fixture resources context
+                checksum `seq` pure ()
+                afterElapsed <- getMonotonicTimeNSec
+                afterCpu <- getCPUTime
+                -- Capture prompt-ready latency and CPU before the accounting
+                -- GC and before the resource scope performs cleanup.
+                performMajorGC
+                afterStats <- getRTSStats
+                pure Sample
+                    { sampleElapsedMillis =
+                        fromIntegral (afterElapsed - beforeElapsed)
+                            / 1_000_000
+                    , sampleCpuMillis =
+                        fromIntegral (afterCpu - beforeCpu)
+                            / 1_000_000_000
+                    , sampleAllocatedBytes =
+                        fromIntegral
+                            (allocated_bytes afterStats
+                                - allocated_bytes beforeStats)
+                    }
+
+runStartupDagWithSupervisor
+    :: StartupDagStrategy
+    -> ToolStartupFixture
+    -> Int
+    -> McpSupervisor
+    -> ToolEnv
+    -> StartupDagReleaseCounters
+    -> (StartupDagResources -> StartupDagContext -> IO a)
+    -> IO a
+runStartupDagWithSupervisor
+        strategy
+        fixture
+        auxDelayMillis
+        supervisor
+        toolEnv
+        releaseCounters
+        continuation = do
+    let acquireMcp =
+            acquireMcpFleetProgressive
+                supervisor
+                (const (pure ()))
+                fixture.fixtureMcpConfigs
+        releaseMcp lease =
+            releaseMcpFleetLease lease
+                `finally` noteRelease releaseCounters.dagMcpReleases
+        acquireLocal =
+            codingToolsFor
+                (dialectForId CodexDialect)
+                toolEnv
+                Nothing
+                Nothing
+                Nothing
+                Nothing
+        releaseLocal coding =
+            coding.codingClose
+                `finally` noteRelease releaseCounters.dagLocalReleases
+        acquireAux label checksum = do
+            threadDelay (auxDelayMillis * 1000)
+            pure StartupDagAuxResource
+                { dagAuxLabel = label
+                , dagAuxChecksum = checksum
+                }
+        acquireWeb = acquireAux "web-fetch" 17
+        acquireLsp = acquireAux "lsp" 29
+        releaseWeb _ = noteRelease releaseCounters.dagWebReleases
+        releaseLsp _ = noteRelease releaseCounters.dagLspReleases
+        loadWorkspace = do
+            ((projectSettings, userSettings), (catalogResult, branch)) <-
+                concurrently
+                    (concurrently
+                        (loadProjectSettings fixture.fixtureProject)
+                        (loadUserSettings fixture.fixtureHome))
+                    (concurrently
+                        (loadModelCatalogAt
+                            fixture.fixtureHome
+                            fixture.fixtureProject)
+                        (detectGitBranch fixture.fixtureProject))
+            catalog <- either (fail . Text.unpack) pure catalogResult
+            projectSettings `seq`
+                userSettings `seq`
+                catalog `seq`
+                branch `seq`
+                pure ()
+        loadAgents =
+            discoverProjectInstructions
+                (defaultDiscoverOptions
+                    { discoverGlobalDir =
+                        Just
+                            (unsafeEncodeUtf
+                                (unsafeToFilePath fixture.fixtureProject
+                                    </> ".codex"))
+                    , discoverRootMarkers =
+                        [unsafeEncodeUtf ".startup-benchmark-root"]
+                    })
+                fixture.fixtureProject
+        loadSkills =
+            loadSkillsCatalogQuiet
+                defaultCliOptions
+                fixture.fixtureHome
+                fixture.fixtureProject
+                fixture.fixtureProject
+        loadContextSequentially = do
+            dagAgentsContext <- loadAgents
+            dagSkillsCatalog <- loadSkills
+            pure StartupDagContext{..}
+        loadContextConcurrently = do
+            (dagAgentsContext, dagSkillsCatalog) <-
+                concurrently loadAgents loadSkills
+            pure StartupDagContext{..}
+        continueWith
+                mcpLease
+                codingTools
+                webResource
+                lspResource
+                context =
+            continuation
+                StartupDagResources
+                    { dagMcpLease = mcpLease
+                    , dagCodingTools = codingTools
+                    , dagWebResource = webResource
+                    , dagLspResource = lspResource
+                    }
+                context
+        runBaseline resourceScope = do
+            ((_, mcpLease), (_, codingTools)) <-
+                allocateResourcesConcurrently
+                    resourceScope
+                    acquireMcp
+                    releaseMcp
+                    acquireLocal
+                    releaseLocal
+            ((_, webResource), (_, lspResource)) <-
+                allocateResourcesConcurrently
+                    resourceScope
+                    acquireWeb
+                    releaseWeb
+                    acquireLsp
+                    releaseLsp
+            context <- loadContextSequentially
+            continueWith
+                mcpLease
+                codingTools
+                webResource
+                lspResource
+                context
+        runCurrent resourceScope = do
+            (acquiredResources, context) <-
+                concurrently
+                    (allocateFourResourcesConcurrently
+                        resourceScope
+                        acquireMcp
+                        releaseMcp
+                        acquireLocal
+                        releaseLocal
+                        acquireWeb
+                        releaseWeb
+                        acquireLsp
+                        releaseLsp)
+                    loadContextConcurrently
+            let ( (_, mcpLease)
+                    , (_, codingTools)
+                    , (_, webResource)
+                    , (_, lspResource)
+                    ) = acquiredResources
+            continueWith
+                mcpLease
+                codingTools
+                webResource
+                lspResource
+                context
+    result <-
+        withResourceScope \resourceScope -> do
+            loadWorkspace
+            case strategy of
+                StartupDagBaseline -> runBaseline resourceScope
+                StartupDagCurrent -> runCurrent resourceScope
+    assertStartupDagReleaseCounts releaseCounters
+    pure result
+
+newStartupDagReleaseCounters :: IO StartupDagReleaseCounters
+newStartupDagReleaseCounters = do
+    dagMcpReleases <- newIORef 0
+    dagLocalReleases <- newIORef 0
+    dagWebReleases <- newIORef 0
+    dagLspReleases <- newIORef 0
+    pure StartupDagReleaseCounters{..}
+
+assertStartupDagReleaseCounts :: StartupDagReleaseCounters -> IO ()
+assertStartupDagReleaseCounts counters = do
+    counts <-
+        mapM readIORef
+            [ counters.dagMcpReleases
+            , counters.dagLocalReleases
+            , counters.dagWebReleases
+            , counters.dagLspReleases
+            ]
+    unless (counts == [1, 1, 1, 1]) $
+        fail
+            ("expected one MCP, local, web, and LSP cleanup, got "
+                <> show counts)
+
+startupDagChecksum
+    :: ToolStartupFixture
+    -> StartupDagResources
+    -> StartupDagContext
+    -> IO Int
+startupDagChecksum fixture resources context = do
+    statuses <- mcpFleetStatuses resources.dagMcpLease.mcpLeaseFleet
+    let mcpServerCount = length statuses
+        expectedMcpServers = length fixture.fixtureMcpConfigs
+        mcpWarnings =
+            resources.dagMcpLease.mcpLeaseFleet.mcpFleetWarnings
+        codingToolCount =
+            length resources.dagCodingTools.codingAppTools
+        benchmarkSkillCount =
+            length
+                (filter
+                    (Text.isPrefixOf "startup-bench-" . (.skillName))
+                    context.dagSkillsCatalog.catalogSkills)
+        instructionFiles =
+            loadedInstructionFiles context.dagAgentsContext
+        instructionWarnings =
+            loadedInstructionWarnings context.dagAgentsContext
+        instructionCharacters =
+            sum (map (Text.length . (.instructionContent)) instructionFiles)
+        webResource = resources.dagWebResource
+        lspResource = resources.dagLspResource
+    unless (null mcpWarnings) $
+        fail ("MCP startup warnings: " <> show mcpWarnings)
+    when (mcpServerCount /= expectedMcpServers) $
+        fail
+            ("expected " <> show expectedMcpServers
+                <> " MCP servers, got " <> show mcpServerCount)
+    when (codingToolCount <= 0) $
+        fail "expected coding tool construction to produce tools"
+    when (benchmarkSkillCount /= fixture.fixtureSkillCount) $
+        fail
+            ("expected " <> show fixture.fixtureSkillCount
+                <> " benchmark skills, got " <> show benchmarkSkillCount)
+    unless (null instructionWarnings) $
+        fail ("AGENTS.md discovery warnings: " <> show instructionWarnings)
+    when (length instructionFiles /= 1 || instructionCharacters <= 0) $
+        fail
+            ("expected one non-empty AGENTS.md file, got "
+                <> show (length instructionFiles)
+                <> " files and "
+                <> show instructionCharacters
+                <> " characters")
+    when
+        ( webResource.dagAuxLabel /= "web-fetch"
+            || webResource.dagAuxChecksum /= 17
+            || lspResource.dagAuxLabel /= "lsp"
+            || lspResource.dagAuxChecksum /= 29
+        )
+        (fail "simulated web/LSP resources disagree")
+    pure
+        ( mcpServerCount * 1_000_000
+            + codingToolCount * 10_000
+            + benchmarkSkillCount * 100
+            + length instructionFiles * 10
+            + instructionCharacters
+            + webResource.dagAuxChecksum
+            + lspResource.dagAuxChecksum
+        )
 
 runToolStartup :: ToolStartupStrategy -> ToolStartupFixture -> IO Int
 runToolStartup strategy fixture = do
@@ -772,6 +1246,35 @@ boundedRead paths =
 
 sumLengths :: [BS.ByteString] -> Int
 sumLengths = foldr ((+) . BS.length) 0
+
+withStartupDagFixture
+    :: FilePath
+    -> Int
+    -> Int
+    -> Int
+    -> (ToolStartupFixture -> IO a)
+    -> IO a
+withStartupDagFixture
+        executable serverCount mcpDelayMillis skillCount action =
+    withToolStartupFixture
+        executable
+        serverCount
+        mcpDelayMillis
+        skillCount
+        \fixture -> do
+            let project = unsafeToFilePath fixture.fixtureProject
+            writeFile
+                (project </> ".startup-benchmark-root")
+                ""
+            writeFile
+                (project </> "AGENTS.md")
+                (unlines
+                    [ "# Startup benchmark instructions"
+                    , ""
+                    , "Exercise the production project-instruction discovery path."
+                    , "Keep benchmark resources scoped and startup work concurrent."
+                    ])
+            action fixture
 
 withToolStartupFixture
     :: FilePath

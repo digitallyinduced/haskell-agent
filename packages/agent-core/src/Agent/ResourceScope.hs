@@ -10,6 +10,7 @@ module Agent.ResourceScope
     , closeResourceScope
     , allocateResource
     , allocateResourcesConcurrently
+    , allocateFourResourcesConcurrently
     , registerResource
     , releaseResource
     ) where
@@ -62,9 +63,8 @@ allocateResource
     -> (a -> IO ())
     -> IO (ResourceKey, a)
 allocateResource scope acquire cleanup =
-    withOpenScope scope \state -> do
-        (key, value) <- runInScope state (allocate acquire cleanup)
-        pure (ResourceKey key, value)
+    withOpenScope scope \state ->
+        allocateInScope state acquire cleanup
 
 -- | Acquire two independently-owned resources concurrently.
 --
@@ -82,10 +82,53 @@ allocateResourcesConcurrently
 allocateResourcesConcurrently scope acquireLeft releaseLeft acquireRight releaseRight =
     withOpenScope scope \state ->
         concurrently
-            (wrap <$> runInScope state (allocate acquireLeft releaseLeft))
-            (wrap <$> runInScope state (allocate acquireRight releaseRight))
-  where
-    wrap (key, value) = (ResourceKey key, value)
+            (allocateInScope state acquireLeft releaseLeft)
+            (allocateInScope state acquireRight releaseRight)
+
+-- | Acquire four independently-owned, potentially heterogeneous resources
+-- concurrently.
+--
+-- All four resources are registered in the same scope before this function
+-- returns.  If any acquisition fails, or the caller is interrupted, the
+-- lexical scope remains responsible for every acquisition which completed.
+allocateFourResourcesConcurrently
+    :: ResourceScope
+    -> IO a
+    -> (a -> IO ())
+    -> IO b
+    -> (b -> IO ())
+    -> IO c
+    -> (c -> IO ())
+    -> IO d
+    -> (d -> IO ())
+    -> IO
+        ( (ResourceKey, a)
+        , (ResourceKey, b)
+        , (ResourceKey, c)
+        , (ResourceKey, d)
+        )
+allocateFourResourcesConcurrently
+    scope
+    acquireFirst
+    releaseFirst
+    acquireSecond
+    releaseSecond
+    acquireThird
+    releaseThird
+    acquireFourth
+    releaseFourth =
+        withOpenScope scope \state -> do
+            ((first, second), (third, fourth)) <-
+                concurrently
+                    ( concurrently
+                        (allocateInScope state acquireFirst releaseFirst)
+                        (allocateInScope state acquireSecond releaseSecond)
+                    )
+                    ( concurrently
+                        (allocateInScope state acquireThird releaseThird)
+                        (allocateInScope state acquireFourth releaseFourth)
+                    )
+            pure (first, second, third, fourth)
 
 registerResource :: ResourceScope -> IO () -> IO ResourceKey
 registerResource scope cleanup =
@@ -97,6 +140,15 @@ releaseResource (ResourceKey key) = release key
 
 runInScope :: InternalState -> ResourceT IO a -> IO a
 runInScope = flip runInternalState
+
+allocateInScope
+    :: InternalState
+    -> IO a
+    -> (a -> IO ())
+    -> IO (ResourceKey, a)
+allocateInScope state acquireResource cleanupResource = do
+    (key, value) <- runInScope state (allocate acquireResource cleanupResource)
+    pure (ResourceKey key, value)
 
 withOpenScope :: ResourceScope -> (InternalState -> IO a) -> IO a
 withOpenScope (ResourceScope stateVar) action =

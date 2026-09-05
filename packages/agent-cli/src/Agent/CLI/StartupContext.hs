@@ -1,7 +1,9 @@
 -- | Discover repository instructions for fresh or regenerated context.
 module Agent.CLI.StartupContext
     ( AgentsContextNotice(..)
+    , preloadAgentsContext
     , loadAgentsContext
+    , loadAgentsContextWithPreload
     ) where
 
 import Agent.CLI.Dialects
@@ -26,6 +28,7 @@ import Agent.OsPath (toText)
 import Agent.ProjectInstructions
     ( DiscoverOptions(..)
     , InstructionWarning(..)
+    , LoadedAgentsMd
     , defaultDiscoverOptions
     , discoverProjectInstructions
     , loadedInstructionFiles
@@ -70,16 +73,64 @@ loadAgentsContext
     -> IO (IORef (Maybe Text))
 loadAgentsContext
         stderrHandle fullscreen notice options dialect home cwd
-        initialItems initialPrevious extraContext
+        initialItems initialPrevious extraContext =
+    loadAgentsContextWithPreload
+        stderrHandle
+        fullscreen
+        notice
+        options
+        dialect
+        home
+        cwd
+        initialItems
+        initialPrevious
+        extraContext
+        Nothing
+
+-- | Read project instructions without reporting or formatting them. Startup
+-- can overlap this filesystem work with independent tool acquisition while
+-- leaving all user-visible effects at the original context-install boundary.
+preloadAgentsContext
+    :: CliOptions
+    -> Dialect
+    -> OsPath
+    -> OsPath
+    -> IO (Maybe LoadedAgentsMd)
+preloadAgentsContext options dialect home cwd
+    | not options.optAgentsMd = pure Nothing
+    | otherwise =
+        Just <$> discoverProjectInstructions
+            (agentsDiscoverOptions dialect home)
+            cwd
+
+-- | Finalize generated context from an optional startup preload. A preload
+-- that becomes unnecessary because persisted history is reusable is discarded
+-- before warnings or success notices are emitted.
+loadAgentsContextWithPreload
+    :: Handle
+    -> Maybe FullscreenRuntime
+    -> AgentsContextNotice
+    -> CliOptions
+    -> Dialect
+    -> OsPath
+    -> OsPath
+    -> [ResponseItem]
+    -> Maybe Text
+    -> Maybe Text
+    -> Maybe LoadedAgentsMd
+    -> IO (IORef (Maybe Text))
+loadAgentsContextWithPreload
+        stderrHandle fullscreen notice options dialect home cwd
+        initialItems initialPrevious extraContext preloaded
     | not (null initialItems) || isJust initialPrevious = newIORef Nothing
     | not options.optAgentsMd = newIORef extraContext
     | otherwise = do
-        let discoverOptions = DiscoverOptions
-                { discoverMaxBytes = defaultDiscoverOptions.discoverMaxBytes
-                , discoverGlobalDir = Just (globalAgentsHomeDir dialect home)
-                , discoverRootMarkers = defaultDiscoverOptions.discoverRootMarkers
-                }
-        loaded <- discoverProjectInstructions discoverOptions cwd
+        loaded <- case preloaded of
+            Just value -> pure value
+            Nothing ->
+                discoverProjectInstructions
+                    (agentsDiscoverOptions dialect home)
+                    cwd
         mapM_ (reportInstructionWarning stderrHandle fullscreen)
             (loadedInstructionWarnings loaded)
         let files = loadedInstructionFiles loaded
@@ -102,6 +153,14 @@ loadAgentsContext
                                 emitUiEvent runtime (UiSystemMessage message)
                 newIORef
                     (Just (text <> maybe "" ("\n\n" <>) extraContext))
+
+agentsDiscoverOptions :: Dialect -> OsPath -> DiscoverOptions
+agentsDiscoverOptions dialect home =
+    DiscoverOptions
+        { discoverMaxBytes = defaultDiscoverOptions.discoverMaxBytes
+        , discoverGlobalDir = Just (globalAgentsHomeDir dialect home)
+        , discoverRootMarkers = defaultDiscoverOptions.discoverRootMarkers
+        }
 
 reportInstructionWarning
     :: Handle
