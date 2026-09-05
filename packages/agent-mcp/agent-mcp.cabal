@@ -45,7 +45,10 @@ library
                     , Agent.MCP.OAuth
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_mcp
-    other-modules:    Paths_agent_mcp
+    other-modules:    Agent.MCP.Client.Internal.Core
+                    , Agent.MCP.Client.Internal.Operations
+                    , Agent.MCP.Client.Internal.Runtime
+                    , Paths_agent_mcp
     build-depends:    base >= 4.14 && < 5
                     , agent-core >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
