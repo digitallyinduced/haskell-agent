@@ -1,5 +1,7 @@
 module Agent.CLI.ComputerUse.Linux.Portal
-    ( PortalStream(..)
+    ( PortalState(..)
+    , PortalStream(..)
+    , ensurePortalStateReadyWith
     , newPortalBackend
     , parsePortalStartResults
     , portalDisplayForFrame
@@ -56,6 +58,7 @@ import Codec.Picture.Types (convertImage)
 import Control.Concurrent
     ( MVar
     , modifyMVar
+    , modifyMVarMasked
     , modifyMVar_
     , newEmptyMVar
     , newMVar
@@ -180,9 +183,9 @@ data PortalSession = PortalSession
     , portalSessionClosedHandler :: !SignalHandler
     }
 
-data PortalState
+data PortalState session
     = PortalUninitialized
-    | PortalReady !PortalSession
+    | PortalReady !session
     | PortalFailed !Text
     | PortalClosed
 
@@ -190,7 +193,7 @@ data PortalRuntime = PortalRuntime
     { portalClient :: !Client
     , portalUniqueName :: !BusName
     , portalOwnerName :: !BusName
-    , portalState :: !(MVar PortalState)
+    , portalState :: !(MVar (PortalState PortalSession))
     , portalReadiness :: !(IO (Either Text ()))
     }
 
@@ -335,25 +338,33 @@ ensurePortalReady runtime =
     runtime.portalReadiness >>= \case
         Left err -> pure (Left err)
         Right () ->
-            modifyMVar runtime.portalState \case
-                PortalUninitialized -> do
-                    attempted <-
-                        tryAny (initializePortalSessionChecked runtime)
-                    pure case attempted of
-                        Left exception ->
-                            let err =
-                                    "Wayland portal initialization failed: "
-                                        <> exceptionText exception
-                            in (PortalFailed err, Left err)
-                        Right session ->
-                            (PortalReady session, Right ())
-                state@(PortalReady _) -> pure (state, Right ())
-                state@(PortalFailed err) -> pure (state, Left err)
-                PortalClosed ->
-                    pure
-                        ( PortalClosed
-                        , Left "The Wayland computer-use session has been closed."
-                        )
+            ensurePortalStateReadyWith
+                runtime.portalState
+                (initializePortalSessionChecked runtime)
+
+ensurePortalStateReadyWith
+    :: MVar (PortalState session)
+    -> IO session
+    -> IO (Either Text ())
+ensurePortalStateReadyWith stateVar initialize =
+    modifyMVarMasked stateVar \case
+        PortalUninitialized -> do
+            attempted <- tryAny initialize
+            pure case attempted of
+                Left exception ->
+                    let err =
+                            "Wayland portal initialization failed: "
+                                <> exceptionText exception
+                    in (PortalUninitialized, Left err)
+                Right session ->
+                    (PortalReady session, Right ())
+        state@(PortalReady _) -> pure (state, Right ())
+        state@(PortalFailed err) -> pure (state, Left err)
+        PortalClosed ->
+            pure
+                ( PortalClosed
+                , Left "The Wayland computer-use session has been closed."
+                )
 
 initializePortalSessionChecked :: PortalRuntime -> IO PortalSession
 initializePortalSessionChecked runtime = do

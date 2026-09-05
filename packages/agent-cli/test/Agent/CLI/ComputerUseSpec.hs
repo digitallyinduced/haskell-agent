@@ -39,7 +39,9 @@ import Agent.CLI.ComputerUse.Linux.Logind
     )
 import Agent.CLI.ComputerUse.Input (MouseButton(..))
 import Agent.CLI.ComputerUse.Linux.Portal
-    ( PortalStream(..)
+    ( PortalState(..)
+    , PortalStream(..)
+    , ensurePortalStateReadyWith
     , parsePortalStartResults
     , portalDisplayForFrame
     , portalDisplayForStream
@@ -60,6 +62,7 @@ import Agent.CLI.ComputerUse.Linux.X11
     , runX11TypeInvocationsWith
     , withX11InputCleanup
     , withX11Readiness
+    , withX11TemporaryPathWith
     , x11KeyInvocation
     , x11PointerPosition
     , x11ScrollInvocations
@@ -72,6 +75,7 @@ import Agent.Responses.Types
 import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..))
 import Control.Concurrent
     ( newEmptyMVar
+    , newMVar
     , putMVar
     , takeMVar
     , threadDelay
@@ -593,6 +597,63 @@ spec = do
             refreshedObservation `shouldSatisfy` succeeds
 
     describe "Linux X11 computer use" do
+        it "keeps ownership when initial X11 temp-handle close is cancelled" do
+            closeStarted <- newEmptyMVar
+            never <- newEmptyMVar
+            closeAttempts <- newIORef (0 :: Int)
+            events <- newIORef ([] :: [Text.Text])
+            let record event =
+                    modifyIORef' events (<> [event])
+                closeResource () = do
+                    attempt <-
+                        atomicModifyIORef' closeAttempts \current ->
+                            let next = current + 1
+                            in (next, next)
+                    record ("close-" <> Text.pack (show attempt))
+                    if attempt == 1
+                        then putMVar closeStarted () >> takeMVar never
+                        else pure ()
+                capture =
+                    withX11TemporaryPathWith
+                        (record "acquire" >> pure ("capture.png", ()))
+                        closeResource
+                        (\_ -> record "remove")
+                        (\_ -> record "action")
+            withAsync capture \worker -> do
+                takeMVar closeStarted
+                cancel worker
+                result <- waitCatch worker
+                result `shouldSatisfy` either (const True) (const False)
+            readIORef events
+                `shouldReturn`
+                    ["acquire", "close-1", "close-2", "remove"]
+
+        it "removes the X11 temp path when its initial close fails" do
+            closeAttempts <- newIORef (0 :: Int)
+            events <- newIORef ([] :: [Text.Text])
+            let record event =
+                    modifyIORef' events (<> [event])
+                closeResource () = do
+                    attempt <-
+                        atomicModifyIORef' closeAttempts \current ->
+                            let next = current + 1
+                            in (next, next)
+                    record ("close-" <> Text.pack (show attempt))
+                    if attempt == 1
+                        then throwString "close failed"
+                        else pure ()
+                capture =
+                    withX11TemporaryPathWith
+                        (record "acquire" >> pure ("capture.png", ()))
+                        closeResource
+                        (\_ -> record "remove")
+                        (\_ -> record "action")
+            result <- tryAny capture
+            result `shouldSatisfy` either (const True) (const False)
+            readIORef events
+                `shouldReturn`
+                    ["acquire", "close-1", "close-2", "remove"]
+
         it "prefers native Wayland over the XWayland DISPLAY" do
             detectLinuxSessionType
                 (Just "wayland")
@@ -916,6 +977,31 @@ spec = do
                 `shouldBe` Just owner
             matchSender (sessionClosedRule owner sessionPath)
                 `shouldBe` Just owner
+
+        it "retries transient portal session initialization" do
+            state <- newMVar PortalUninitialized
+            attempts <- newIORef (0 :: Int)
+            let initialize = do
+                    attempt <-
+                        atomicModifyIORef' attempts \current ->
+                            let next = current + 1
+                            in (next, next)
+                    if attempt == 1
+                        then throwString "portal temporarily unavailable"
+                        else pure ("session" :: Text.Text)
+            first <- ensurePortalStateReadyWith state initialize
+            first `shouldSatisfy` \case
+                Left err ->
+                    "Wayland portal initialization failed:"
+                        `Text.isPrefixOf` err
+                        && "portal temporarily unavailable"
+                            `Text.isInfixOf` err
+                Right () -> False
+            ensurePortalStateReadyWith state initialize
+                `shouldReturn` Right ()
+            ensurePortalStateReadyWith state initialize
+                `shouldReturn` Right ()
+            readIORef attempts `shouldReturn` 2
 
         it "requires one monitor stream and both input grants" do
             parsePortalStartResults portalStartResults

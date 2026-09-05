@@ -6,6 +6,7 @@ module Agent.CLI.ComputerUse.Linux.X11
     , runX11TypeInvocationsWith
     , withX11InputCleanup
     , withX11Readiness
+    , withX11TemporaryPathWith
     , x11KeyInvocation
     , x11PointerPosition
     , x11ScrollInvocations
@@ -44,7 +45,13 @@ import Codec.Picture
     , imageWidth
     )
 import Control.Concurrent (threadDelay)
-import Control.Exception.Safe (finally, generalBracket, tryAny)
+import Control.Exception.Safe
+    ( bracket
+    , catchAny
+    , finally
+    , generalBracket
+    , tryAny
+    )
 import Control.Monad (foldM)
 import Codec.Picture.Types (convertImage)
 import qualified Data.ByteString as BS
@@ -532,27 +539,33 @@ captureX11Display processEnvironment readiness encoding =
   where
     capture display = do
         temporaryDirectory <- getTemporaryDirectory
-        attempted <- tryAny do
-            (path, handle) <- openBinaryTempFile temporaryDirectory
-                "agent-computer-use-x11.png"
-            hClose handle
-            flip finally (removeFile path) do
-                let geometry = x11CaptureGeometry display
-                readCreateProcessWithExitCode
-                    (processWithEnvironment
-                        processEnvironment
-                        "maim"
-                        ["--geometry", geometry, path])
-                    ""
-                    >>= \case
-                        (ExitFailure _, _, stderr) ->
-                            pure (Left (processError "maim" stderr))
-                        (ExitSuccess, _, _) -> do
-                            bytes <- BS.readFile path
-                            case encodeCaptured display encoding bytes of
-                                Left err -> pure (Left err)
-                                Right captured ->
-                                    verifyCapturedDisplay display captured
+        attempted <-
+            tryAny $
+                withX11TemporaryPathWith
+                    (openBinaryTempFile
+                        temporaryDirectory
+                        "agent-computer-use-x11.png")
+                    hClose
+                    removeFile
+                    \path -> do
+                        let geometry = x11CaptureGeometry display
+                        readCreateProcessWithExitCode
+                            (processWithEnvironment
+                                processEnvironment
+                                "maim"
+                                ["--geometry", geometry, path])
+                            ""
+                            >>= \case
+                                (ExitFailure _, _, stderr) ->
+                                    pure (Left (processError "maim" stderr))
+                                (ExitSuccess, _, _) -> do
+                                    bytes <- BS.readFile path
+                                    case encodeCaptured display encoding bytes of
+                                        Left err -> pure (Left err)
+                                        Right captured ->
+                                            verifyCapturedDisplay
+                                                display
+                                                captured
         pure (either (Left . Text.pack . show) id attempted)
 
     verifyCapturedDisplay display captured =
@@ -566,6 +579,22 @@ captureX11Display processEnvironment readiness encoding =
                     readiness >>= \case
                         Left err -> pure (Left err)
                         Right () -> pure (Right captured)
+
+withX11TemporaryPathWith
+    :: IO (FilePath, resource)
+    -> (resource -> IO ())
+    -> (FilePath -> IO ())
+    -> (FilePath -> IO value)
+    -> IO value
+withX11TemporaryPathWith acquire closeResource removePath action =
+    bracket acquire cleanup \(path, resource) -> do
+        closeResource resource
+        action path
+  where
+    cleanup (path, resource) =
+        (closeResource resource `catchAny` const (pure ()))
+            `finally`
+                (removePath path `catchAny` const (pure ()))
 
 encodeCaptured
     :: ComputerDisplay
