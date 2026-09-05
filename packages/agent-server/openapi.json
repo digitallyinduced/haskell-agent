@@ -334,7 +334,7 @@
       "post": {
         "tags": ["turns"],
         "operationId": "createTurn",
-        "description": "Durably reserves and queues one agent turn with text, images, or both. Reusing clientRequestId with identical text and image content returns the original turn; reusing it with different content is rejected. Once reserved, an admission rejection is represented by the same durable failed turn. A session may have only one queued/running/waiting turn.",
+        "description": "Durably reserves and queues one agent turn with text and optional attachments. Reusing clientRequestId with identical text and attachment content returns the original turn; reusing it with different content is rejected. Once reserved, an admission rejection is represented by the same durable failed turn. A session may have only one queued/running/waiting turn.",
         "requestBody": {
           "required": true,
           "content": {
@@ -743,6 +743,21 @@
                 "data": { "type": "string", "contentEncoding": "base64" }
               },
               "required": ["mimeType", "data"],
+              "additionalProperties": false
+            }
+          },
+          "files": {
+            "type": "array",
+            "maxItems": 5,
+            "description": "Opaque files materialized temporarily below the session working directory. Images and files together are limited to five attachments and 20 MiB decoded.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+                "mimeType": { "type": "string", "minLength": 1, "maxLength": 255 },
+                "data": { "type": "string", "contentEncoding": "base64" }
+              },
+              "required": ["name", "mimeType", "data"],
               "additionalProperties": false
             }
           }

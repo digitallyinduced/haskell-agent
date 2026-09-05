@@ -4,6 +4,7 @@ module Agent.Server.Client.Protocol
     , AgentServerSession (..)
     , AgentServerCreateTurnRequest (..)
     , AgentServerTurnImage (..)
+    , AgentServerTurnFile (..)
     , AgentServerTurnStatus (..)
     , AgentServerTurn (..)
     , AgentServerTurnList (..)
@@ -60,6 +61,23 @@ instance ToJSON AgentServerCreateSessionRequest where
             , "title" .= request.createSessionTitle
             ]
 
+data AgentServerTurnFile = AgentServerTurnFile
+    { turnFileName :: !Text
+    , turnFileMimeType :: !Text
+    , turnFileBytes :: !ByteString.ByteString
+    }
+    deriving (Eq, Show)
+
+instance ToJSON AgentServerTurnFile where
+    toJSON file =
+        object
+            [ "name" .= file.turnFileName
+            , "mimeType" .= file.turnFileMimeType
+            , "data"
+                .= TextEncoding.decodeUtf8
+                    (Base64.encode file.turnFileBytes)
+            ]
+
 newtype AgentServerSession = AgentServerSession
     { agentServerSessionId :: Text
     }
@@ -74,6 +92,7 @@ data AgentServerCreateTurnRequest = AgentServerCreateTurnRequest
     { createTurnClientRequestId :: !Text
     , createTurnInput :: !Text
     , createTurnImages :: ![AgentServerTurnImage]
+    , createTurnFiles :: ![AgentServerTurnFile]
     }
     deriving (Eq, Show)
 
@@ -85,6 +104,9 @@ instance ToJSON AgentServerCreateTurnRequest where
             ]
                 <> [ "images" .= request.createTurnImages
                    | not (null request.createTurnImages)
+                   ]
+                <> [ "files" .= request.createTurnFiles
+                   | not (null request.createTurnFiles)
                    ]
 
 data AgentServerTurnImage = AgentServerTurnImage

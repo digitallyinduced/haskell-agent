@@ -36,6 +36,7 @@ module Agent.Server.Types
     , PatchSessionRequest(..)
     , ForkSessionRequest(..)
     , CreateTurnRequest(..)
+    , FileAttachment(..)
     , ResolveRequest(..)
     , SessionArchiveFilter(..)
     , archiveFilterText
@@ -63,6 +64,7 @@ import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Aeson.Types (Parser)
 import Data.ByteString qualified as ByteString
 import Data.ByteString.Base64 qualified as Base64
+import Data.Char (isAlphaNum, isAscii, isControl)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
@@ -157,6 +159,7 @@ data TurnSpec = TurnSpec
     , turnSpecClientRequestId :: !ClientRequestId
     , turnSpecPrompt :: !Text
     , turnSpecImages :: ![ImageAttachment]
+    , turnSpecFiles :: ![FileAttachment]
     , turnSpecBoundary :: !AccessBoundary
     }
     deriving (Eq, Show)
@@ -394,6 +397,7 @@ data CreateTurnRequest = CreateTurnRequest
     { createTurnClientRequestId :: !(Maybe ClientRequestId)
     , createTurnInput :: !Text
     , createTurnImages :: ![ImageAttachment]
+    , createTurnFiles :: ![FileAttachment]
     }
     deriving (Eq, Show)
 
@@ -401,7 +405,7 @@ instance FromJSON CreateTurnRequest where
     parseJSON = withObject "CreateTurnRequest" \value -> do
         rejectUnknownFields
             "CreateTurnRequest"
-            ["clientRequestId", "input", "images"]
+            ["clientRequestId", "input", "images", "files"]
             value
         rawRequestId <- value .:? "clientRequestId"
         requestId <- case rawRequestId of
@@ -418,7 +422,77 @@ instance FromJSON CreateTurnRequest where
         when (length imageValues > maxTurnImageCount) $
             fail "images must contain at most one item"
         images <- traverse parseTurnImage imageValues
-        pure (CreateTurnRequest requestId input images)
+        fileValues <- value .:? "files" .!= []
+        when (length imageValues + length fileValues > maxTurnAttachmentCount) $
+            fail "images and files must contain at most five items in total"
+        files <- traverse parseTurnFile fileValues
+        when
+            ( sum (map (ByteString.length . imageBytes) images)
+                + sum (map (ByteString.length . fileBytes) files)
+                > maxTurnAttachmentBytesTotal
+            )
+            (fail "images and files are limited to 20 MiB decoded in total")
+        pure (CreateTurnRequest requestId input images files)
+
+data FileAttachment = FileAttachment
+    { fileName :: !Text
+    , fileMime :: !Text
+    , fileBytes :: !ByteString.ByteString
+    }
+    deriving (Eq, Show)
+
+maxTurnAttachmentCount, maxTurnFileBytesEach, maxTurnAttachmentBytesTotal :: Int
+maxTurnAttachmentCount = 5
+maxTurnFileBytesEach = 20 * 1024 * 1024
+maxTurnAttachmentBytesTotal = 20 * 1024 * 1024
+
+parseTurnFile :: Value -> Parser FileAttachment
+parseTurnFile = withObject "TurnFile" \value -> do
+    rejectUnknownFields "TurnFile" ["name", "mimeType", "data"] value
+    name <- value .: "name"
+    when
+        ( Text.null name
+            || Text.length name > 255
+            || Text.any (`elem` ['/', '\\', '\NUL']) name
+            || Text.any isControl name
+            || name == "."
+            || name == ".."
+        )
+        (fail "file name must be a non-empty basename of at most 255 characters")
+    mime <- value .: "mimeType"
+    when
+        (not (validFileMime mime))
+        (fail "file mimeType must be a valid media type of at most 255 characters")
+    encoded <- value .: "data"
+    bytes <-
+        either
+            (const (fail "file data must be valid base64"))
+            pure
+            (Base64.decode (TextEncoding.encodeUtf8 encoded))
+    when (ByteString.null bytes) $
+        fail "file data must not be empty"
+    when (ByteString.length bytes > maxTurnFileBytesEach) $
+        fail "each file is limited to 20 MiB decoded"
+    pure FileAttachment
+        { fileName = name
+        , fileMime = mime
+        , fileBytes = bytes
+        }
+
+validFileMime :: Text -> Bool
+validFileMime mime =
+    not (Text.null mime)
+        && Text.length mime <= 255
+        && Text.count "/" mime == 1
+        && Text.all
+            ( \character ->
+                isAscii character
+                    && ( isAlphaNum character
+                            || character
+                                `elem` ("!#$%&'*+-.^_`|~/" :: String)
+                       )
+            )
+            mime
 
 maxTurnImageCount, maxTurnImageBytesEach :: Int
 maxTurnImageCount = 1

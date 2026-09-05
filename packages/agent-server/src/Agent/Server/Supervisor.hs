@@ -618,20 +618,20 @@ enqueueTurnRecord supervisor reservationHeld spec record
                                 else
                                     if Seq.length state.stateQueue
                                         >= supervisor.supervisorConfig.supervisorMaxQueuedTurns
-                                        || queuedImageBytes state.stateTurns
-                                            + turnImageBytes spec
-                                            > maximumQueuedImageBytes
+                                        || queuedAttachmentBytes state.stateTurns
+                                            + turnAttachmentBytes spec
+                                            > maximumQueuedAttachmentBytes
                                         then pure (Left SubmitQueueFull)
                                         else
                                             if queuedForTenant
                                                 spec.turnSpecBoundary.accessTenantId
                                                 state.stateTurns
                                                 >= supervisor.supervisorConfig.supervisorMaxQueuedTurnsPerTenant
-                                                || queuedImageBytesForTenant
+                                                || queuedAttachmentBytesForTenant
                                                     spec.turnSpecBoundary.accessTenantId
                                                     state.stateTurns
-                                                    + turnImageBytes spec
-                                                    > maximumQueuedImageBytesPerTenant
+                                                    + turnAttachmentBytes spec
+                                                    > maximumQueuedAttachmentBytesPerTenant
                                                 then pure (Left SubmitTenantQueueFull)
                                                 else do
                                                     let turnId = record.turnRecordId
@@ -1316,6 +1316,7 @@ reserveRunnable supervisor = do
                                                             { turnSpecPrompt =
                                                                 ""
                                                             , turnSpecImages = []
+                                                            , turnSpecFiles = []
                                                             }
                                                     }
                                                 state.stateTurns
@@ -1948,27 +1949,28 @@ queuedForTenant tenantId turns =
         , slot.turnSlotRecord.turnRecordBoundary.accessTenantId == tenantId
         ]
 
--- Keep decoded image payloads bounded while they wait in the in-memory queue.
+-- Keep decoded attachment payloads bounded while they wait in the in-memory queue.
 -- Running turns clear their queued copy before execution.
-maximumQueuedImageBytes, maximumQueuedImageBytesPerTenant :: Int
-maximumQueuedImageBytes = 80 * 1024 * 1024
-maximumQueuedImageBytesPerTenant = 40 * 1024 * 1024
+maximumQueuedAttachmentBytes, maximumQueuedAttachmentBytesPerTenant :: Int
+maximumQueuedAttachmentBytes = 80 * 1024 * 1024
+maximumQueuedAttachmentBytesPerTenant = 40 * 1024 * 1024
 
-turnImageBytes :: TurnSpec -> Int
-turnImageBytes spec =
+turnAttachmentBytes :: TurnSpec -> Int
+turnAttachmentBytes spec =
     sum (map (ByteString.length . imageBytes) spec.turnSpecImages)
+        + sum (map (ByteString.length . fileBytes) spec.turnSpecFiles)
 
-queuedImageBytes :: Map TurnId TurnSlot -> Int
-queuedImageBytes =
+queuedAttachmentBytes :: Map TurnId TurnSlot -> Int
+queuedAttachmentBytes =
     sum
-        . map (\slot -> turnImageBytes slot.turnSlotSpec)
+        . map (\slot -> turnAttachmentBytes slot.turnSlotSpec)
         . filter (\slot -> slot.turnSlotRecord.turnRecordStatus == TurnQueued)
         . Map.elems
 
-queuedImageBytesForTenant :: TenantId -> Map TurnId TurnSlot -> Int
-queuedImageBytesForTenant tenantId =
+queuedAttachmentBytesForTenant :: TenantId -> Map TurnId TurnSlot -> Int
+queuedAttachmentBytesForTenant tenantId =
     sum
-        . map (\slot -> turnImageBytes slot.turnSlotSpec)
+        . map (\slot -> turnAttachmentBytes slot.turnSlotSpec)
         . filter
             ( \slot ->
                 slot.turnSlotRecord.turnRecordStatus == TurnQueued
