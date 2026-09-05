@@ -42,11 +42,13 @@ import Agent.Store.Postgres.Connection (
     StorePool,
     closeStoreConnection,
     openStoreConnection,
+    storePoolServerTurnActionLockDirectory,
     withConnectionSession,
     withSession,
     withStoreConnectionFailureMonitor,
  )
 import Agent.Store.Postgres.Hasql (mkStatement)
+import qualified Agent.Store.Postgres.ServerTurn.OwnerFence as OwnerFence
 import Agent.Store.Types (StoreError (..))
 import Control.Concurrent.MVar (
     MVar,
@@ -55,7 +57,7 @@ import Control.Concurrent.MVar (
     newMVar,
     withMVar,
  )
-import Control.Exception.Safe (mask, onException)
+import Control.Exception.Safe (finally, mask, onException)
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int64)
 import Data.Text (Text)
@@ -152,6 +154,7 @@ data ServerSessionMutationReservation
 
 data ServerTurnOwnerLease = ServerTurnOwnerLease
     { serverTurnOwnerLeaseInstanceId :: !Text
+    , serverTurnOwnerLeaseActionLockDirectory :: !FilePath
     , serverTurnOwnerLeaseState :: !(MVar ServerTurnOwnerLeaseState)
     }
 
@@ -163,7 +166,9 @@ newtype ServerTurnOwnerActionFence
     = ServerTurnOwnerActionFence (MVar ServerTurnOwnerActionFenceState)
 
 data ServerTurnOwnerActionFenceState
-    = ServerTurnOwnerActionFenceOpen !StoreConnection
+    = ServerTurnOwnerActionFenceOpen
+        !StoreConnection
+        !OwnerFence.OwnerActionFileLock
     | ServerTurnOwnerActionFenceClosed
 
 {- | Register one server process behind a connection-lifetime PostgreSQL lock.
@@ -177,41 +182,48 @@ openServerTurnOwnerLease ::
     StorePool ->
     Text ->
     IO (Either StoreError ServerTurnOwnerLease)
-openServerTurnOwnerLease pool instanceId = mask \restore ->
-    openStoreConnection pool >>= \case
+openServerTurnOwnerLease pool rawInstanceId =
+    case OwnerFence.canonicalOwnerInstanceId rawInstanceId of
         Left err -> pure (Left err)
-        Right connection -> do
-            locked <-
-                restore
-                    ( withConnectionSession connection $
-                        Session.statement
-                            instanceId
-                            acquireServerTurnOwnerLockStatement
-                    )
-                    `onException` closeStoreConnection connection
-            case locked of
-                Left err -> do
-                    closeStoreConnection connection
-                    pure (Left err)
-                Right False -> do
-                    closeStoreConnection connection
-                    pure . Left . StoreDataError $
-                        "server turn owner identity is already active"
-                Right True -> do
-                    state <- newMVar (ServerTurnOwnerLeaseOpen connection)
-                    let lease =
-                            ServerTurnOwnerLease
-                                { serverTurnOwnerLeaseInstanceId = instanceId
-                                , serverTurnOwnerLeaseState = state
-                                }
-                    registered <-
-                        restore (heartbeatServerTurnOwner lease)
-                            `onException` abandonServerTurnOwnerLease lease
-                    case registered of
+        Right instanceId -> mask \restore ->
+            openStoreConnection pool >>= \case
+                Left err -> pure (Left err)
+                Right connection -> do
+                    locked <-
+                        restore
+                            ( withConnectionSession connection $
+                                Session.statement
+                                    instanceId
+                                    acquireServerTurnOwnerLockStatement
+                            )
+                            `onException` closeStoreConnection connection
+                    case locked of
                         Left err -> do
-                            abandonServerTurnOwnerLease lease
+                            closeStoreConnection connection
                             pure (Left err)
-                        Right () -> pure (Right lease)
+                        Right False -> do
+                            closeStoreConnection connection
+                            pure . Left . StoreDataError $
+                                "server turn owner identity is already active"
+                        Right True -> do
+                            state <- newMVar (ServerTurnOwnerLeaseOpen connection)
+                            let lease =
+                                    ServerTurnOwnerLease
+                                        { serverTurnOwnerLeaseInstanceId =
+                                            instanceId
+                                        , serverTurnOwnerLeaseActionLockDirectory =
+                                            storePoolServerTurnActionLockDirectory
+                                                pool
+                                        , serverTurnOwnerLeaseState = state
+                                        }
+                            registered <-
+                                restore (heartbeatServerTurnOwner lease)
+                                    `onException` abandonServerTurnOwnerLease lease
+                            case registered of
+                                Left err -> do
+                                    abandonServerTurnOwnerLease lease
+                                    pure (Left err)
+                                Right () -> pure (Right lease)
 
 {- | Drop the liveness connection without acknowledging local worker teardown.
 
@@ -238,51 +250,78 @@ openServerTurnOwnerActionFence ::
     StorePool ->
     Text ->
     IO (Either StoreError (Maybe ServerTurnOwnerActionFence))
-openServerTurnOwnerActionFence pool instanceId = mask \restore ->
-    openStoreConnection pool >>= \case
+openServerTurnOwnerActionFence pool rawInstanceId =
+    case OwnerFence.canonicalOwnerInstanceId rawInstanceId of
         Left err -> pure (Left err)
-        Right connection -> do
-            locked <-
-                restore
-                    ( withConnectionSession connection $
-                        Session.statement
-                            instanceId
-                            acquireServerTurnOwnerActionFenceStatement
-                    )
-                    `onException` closeStoreConnection connection
-            case locked of
-                Left err -> do
-                    closeStoreConnection connection
-                    pure (Left err)
-                Right False -> do
-                    closeStoreConnection connection
-                    pure (Right Nothing)
-                Right True -> do
-                    valid <-
-                        restore
-                            ( withConnectionSession connection $
-                                Transactions.transaction
-                                    Transactions.ReadCommitted
-                                    Transactions.Read
-                                    ( Transaction.statement
-                                        instanceId
-                                        validateServerTurnOwnerActionFenceStatement
-                                    )
-                            )
-                            `onException` closeStoreConnection connection
-                    case valid of
-                        Left err -> do
-                            closeStoreConnection connection
-                            pure (Left err)
-                        Right False -> do
-                            closeStoreConnection connection
-                            pure (Right Nothing)
-                        Right True -> do
-                            state <-
-                                newMVar
-                                    (ServerTurnOwnerActionFenceOpen connection)
-                            pure . Right . Just $
-                                ServerTurnOwnerActionFence state
+        Right instanceId -> mask \restore ->
+            restore
+                ( OwnerFence.acquireSharedActionLock
+                    (storePoolServerTurnActionLockDirectory pool)
+                    instanceId
+                )
+                >>= \case
+                    Left err -> pure (Left err)
+                    Right actionLock -> do
+                        let releaseActionLock =
+                                OwnerFence.releaseActionLock actionLock
+                            closeFenceConnection connection =
+                                closeStoreConnection connection
+                                    `finally` releaseActionLock
+                        connectionResult <-
+                            restore (openStoreConnection pool)
+                                `onException` releaseActionLock
+                        case connectionResult of
+                            Left err -> do
+                                releaseActionLock
+                                pure (Left err)
+                            Right connection -> do
+                                locked <-
+                                    restore
+                                        ( withConnectionSession connection $
+                                            Session.statement
+                                                instanceId
+                                                acquireServerTurnOwnerActionFenceStatement
+                                        )
+                                        `onException` closeFenceConnection
+                                            connection
+                                case locked of
+                                    Left err -> do
+                                        closeFenceConnection connection
+                                        pure (Left err)
+                                    Right False -> do
+                                        closeFenceConnection connection
+                                        pure (Right Nothing)
+                                    Right True -> do
+                                        valid <-
+                                            restore
+                                                ( withConnectionSession connection $
+                                                    Transactions.transaction
+                                                        Transactions.ReadCommitted
+                                                        Transactions.Read
+                                                        ( Transaction.statement
+                                                            instanceId
+                                                            validateServerTurnOwnerActionFenceStatement
+                                                        )
+                                                )
+                                                `onException` closeFenceConnection
+                                                    connection
+                                        case valid of
+                                            Left err -> do
+                                                closeFenceConnection connection
+                                                pure (Left err)
+                                            Right False -> do
+                                                closeFenceConnection connection
+                                                pure (Right Nothing)
+                                            Right True -> do
+                                                state <-
+                                                    newMVar
+                                                        ( ServerTurnOwnerActionFenceOpen
+                                                            connection
+                                                            actionLock
+                                                        )
+                                                pure . Right . Just $
+                                                    ServerTurnOwnerActionFence
+                                                        state
 
 checkServerTurnOwnerActionFence ::
     ServerTurnOwnerActionFence ->
@@ -293,7 +332,7 @@ checkServerTurnOwnerActionFence
             ServerTurnOwnerActionFenceClosed ->
                 pure . Left . StoreDataError $
                     "server turn owner action fence is closed"
-            ServerTurnOwnerActionFenceOpen connection ->
+            ServerTurnOwnerActionFenceOpen connection _ ->
                 withConnectionSession connection $
                     Session.statement () checkServerTurnOwnerActionFenceStatement
 
@@ -301,7 +340,9 @@ checkServerTurnOwnerActionFence
 
 The event manager watches the exact idle socket which holds the advisory lock,
 so a server restart or socket failure wakes the caller without a timer-based
-polling window. The callback receives an interruptible wait for that failure.
+polling window. The independent shared host lock remains held until the caller
+has cancelled and joined the guarded action and closes this fence. The callback
+receives an interruptible wait for the socket failure.
 -}
 withServerTurnOwnerActionFenceMonitor ::
     ServerTurnOwnerActionFence ->
@@ -314,7 +355,7 @@ withServerTurnOwnerActionFenceMonitor
             ServerTurnOwnerActionFenceClosed ->
                 pure . Left . StoreDataError $
                     "server turn owner action fence is closed"
-            ServerTurnOwnerActionFenceOpen connection ->
+            ServerTurnOwnerActionFenceOpen connection _ ->
                 withStoreConnectionFailureMonitor connection action
 
 -- | Wait for the dedicated action-fence connection to fail.
@@ -324,15 +365,29 @@ waitForServerTurnOwnerActionFenceFailure ::
 waitForServerTurnOwnerActionFenceFailure fence =
     withServerTurnOwnerActionFenceMonitor fence id
 
+{- | Drop the database monitor and host lock after the action is quiescent.
+
+The caller must not close this fence until the guarded action has completed or
+has been cancelled and joined.
+-}
 closeServerTurnOwnerActionFence :: ServerTurnOwnerActionFence -> IO ()
 closeServerTurnOwnerActionFence
     (ServerTurnOwnerActionFence state) =
-        modifyMVar_ state \case
-            ServerTurnOwnerActionFenceClosed ->
-                pure ServerTurnOwnerActionFenceClosed
-            ServerTurnOwnerActionFenceOpen connection -> do
-                closeStoreConnection connection
-                pure ServerTurnOwnerActionFenceClosed
+        mask \restore -> do
+            resources <-
+                modifyMVar state \case
+                    ServerTurnOwnerActionFenceClosed ->
+                        pure (ServerTurnOwnerActionFenceClosed, Nothing)
+                    ServerTurnOwnerActionFenceOpen connection actionLock ->
+                        pure
+                            ( ServerTurnOwnerActionFenceClosed
+                            , Just (connection, actionLock)
+                            )
+            case resources of
+                Nothing -> pure ()
+                Just (connection, actionLock) ->
+                    restore (closeStoreConnection connection)
+                        `finally` OwnerFence.releaseActionLock actionLock
 
 reserveServerTurn ::
     StorePool ->
@@ -488,9 +543,11 @@ shouldCancelServerTurn pool boundary instanceId turnId =
 {- | Refresh one process registration and recover owners whose liveness
 connection has disappeared.
 
-A disconnected owner is terminalized only after this transaction acquires
-its advisory lock. A merely paused owner still holds that lock, so neither
-its turns nor its session mutations expire with wall-clock time.
+A disconnected owner is terminalized only while the reaper holds its exclusive
+host action lock and this transaction's defensive advisory lock. A merely
+paused owner or action still holds the shared host lock, including across a
+PostgreSQL restart, so neither its turns nor its session mutations expire with
+wall-clock time.
 -}
 heartbeatServerTurnOwner ::
     ServerTurnOwnerLease ->
@@ -501,23 +558,36 @@ heartbeatServerTurnOwner lease =
             pure . Left . StoreDataError $
                 "server turn owner liveness connection is closed"
         ServerTurnOwnerLeaseOpen connection -> do
-            accepted <-
+            recoveryCandidates <-
                 withConnectionSession connection $
-                    Transactions.transaction
-                        Transactions.ReadCommitted
-                        Transactions.Write
-                        do
-                            live <-
-                                Transaction.statement
-                                    lease.serverTurnOwnerLeaseInstanceId
-                                    heartbeatServerTurnOwnerStatement
-                            if live
-                                then do
-                                    Transaction.statement
-                                        lease.serverTurnOwnerLeaseInstanceId
-                                        interruptDisconnectedServerTurnsStatement
-                                    pure True
-                                else pure False
+                    Session.statement
+                        lease.serverTurnOwnerLeaseInstanceId
+                        listServerTurnOwnerRecoveryCandidatesStatement
+            accepted <- case recoveryCandidates of
+                Left err -> pure (Left err)
+                Right candidates ->
+                    OwnerFence.withAvailableExclusiveActionLocks
+                        lease.serverTurnOwnerLeaseActionLockDirectory
+                        candidates
+                        \recoverableOwners ->
+                            withConnectionSession connection $
+                                Transactions.transaction
+                                    Transactions.ReadCommitted
+                                    Transactions.Write
+                                    do
+                                        live <-
+                                            Transaction.statement
+                                                lease.serverTurnOwnerLeaseInstanceId
+                                                heartbeatServerTurnOwnerStatement
+                                        if live
+                                            then do
+                                                Transaction.statement
+                                                    ( lease.serverTurnOwnerLeaseInstanceId
+                                                    , recoverableOwners
+                                                    )
+                                                    interruptDisconnectedServerTurnsStatement
+                                                pure True
+                                            else pure False
             pure (accepted >>= ensureAccepted)
   where
     ensureAccepted True = Right ()
@@ -536,41 +606,62 @@ releaseServerTurnOwner ::
     ServerTurnOwnerLease ->
     IO (Either StoreError ())
 releaseServerTurnOwner lease =
-    modifyMVar lease.serverTurnOwnerLeaseState \case
-        ServerTurnOwnerLeaseClosed ->
-            pure (ServerTurnOwnerLeaseClosed, Right ())
-        ServerTurnOwnerLeaseOpen connection -> do
-            released <-
-                withConnectionSession connection $
-                    Transactions.transaction
-                        Transactions.ReadCommitted
-                        Transactions.Write
-                        do
-                            actionFenceAvailable <-
-                                Transaction.statement
-                                    lease.serverTurnOwnerLeaseInstanceId
-                                    acquireServerTurnOwnerReleaseFenceStatement
-                            if actionFenceAvailable
-                                then do
-                                    Transaction.statement
-                                        lease.serverTurnOwnerLeaseInstanceId
-                                        interruptReleasedServerTurnsStatement
-                                    Transaction.statement
-                                        lease.serverTurnOwnerLeaseInstanceId
-                                        deleteServerTurnOwnerStatement
-                                    pure True
-                                else pure False
-            closeStoreConnection connection
-            pure
-                ( ServerTurnOwnerLeaseClosed
-                , released >>= \case
-                    True -> Right ()
-                    False ->
-                        Left
-                            ( StoreDataError
-                                "server turn owner still has active actions"
+    mask \restore -> do
+        connection <-
+            modifyMVar lease.serverTurnOwnerLeaseState \case
+                ServerTurnOwnerLeaseClosed ->
+                    pure (ServerTurnOwnerLeaseClosed, Nothing)
+                ServerTurnOwnerLeaseOpen openConnection ->
+                    pure (ServerTurnOwnerLeaseClosed, Just openConnection)
+        case connection of
+            Nothing -> pure (Right ())
+            Just openConnection -> do
+                releaseFence <-
+                    OwnerFence.tryAcquireExclusiveActionLock
+                        lease.serverTurnOwnerLeaseActionLockDirectory
+                        lease.serverTurnOwnerLeaseInstanceId
+                released <- case releaseFence of
+                    Left err -> do
+                        closeStoreConnection openConnection
+                        pure (Left err)
+                    Right Nothing -> do
+                        closeStoreConnection openConnection
+                        pure (Right False)
+                    Right (Just actionLock) ->
+                        restore
+                            ( withConnectionSession
+                                openConnection
+                                ( Transactions.transaction
+                                    Transactions.ReadCommitted
+                                    Transactions.Write
+                                    do
+                                        actionFenceAvailable <-
+                                            Transaction.statement
+                                                lease.serverTurnOwnerLeaseInstanceId
+                                                acquireServerTurnOwnerReleaseFenceStatement
+                                        if actionFenceAvailable
+                                            then do
+                                                Transaction.statement
+                                                    lease.serverTurnOwnerLeaseInstanceId
+                                                    interruptReleasedServerTurnsStatement
+                                                Transaction.statement
+                                                    lease.serverTurnOwnerLeaseInstanceId
+                                                    deleteServerTurnOwnerStatement
+                                                pure True
+                                            else pure False
+                                )
                             )
-                )
+                            `finally` ( closeStoreConnection openConnection
+                                            `finally` OwnerFence.releaseActionLock actionLock
+                                      )
+                pure $
+                    released >>= \case
+                        True -> Right ()
+                        False ->
+                            Left
+                                ( StoreDataError
+                                    "server turn owner still has active actions"
+                                )
 
 markServerTurnRunning ::
     StorePool ->
@@ -1279,8 +1370,20 @@ acquireServerTurnOwnerLockStatement =
         (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.bool)))
         True
 
+listServerTurnOwnerRecoveryCandidatesStatement :: Statement Text [Text]
+listServerTurnOwnerRecoveryCandidatesStatement =
+    mkStatement
+        "SELECT instance_id::text\
+        \ FROM harness.server_turn_owners\
+        \ WHERE instance_id <> $1::uuid\
+        \ AND revoked_at IS NULL\
+        \ ORDER BY instance_id"
+        (Encoders.param (Encoders.nonNullable Encoders.text))
+        (Decoders.rowList (Decoders.column (Decoders.nonNullable Decoders.text)))
+        True
+
 interruptDisconnectedServerTurnsStatement ::
-    Statement Text ()
+    Statement (Text, [Text]) ()
 interruptDisconnectedServerTurnsStatement =
     mkStatement
         "WITH action_unfenced_owner AS MATERIALIZED (\
@@ -1288,6 +1391,7 @@ interruptDisconnectedServerTurnsStatement =
         \ FROM harness.server_turn_owners AS owner\
         \ WHERE owner.instance_id <> $1::uuid\
         \ AND owner.revoked_at IS NULL\
+        \ AND owner.instance_id::text = ANY($2::text[])\
         \ AND pg_try_advisory_xact_lock(\
         \   hashtextextended(\
         \     'haskell-agent:server-turn-owner-action:'\
@@ -1325,7 +1429,15 @@ interruptDisconnectedServerTurnsStatement =
         \ DELETE FROM harness.server_human_requests AS request\
         \ USING interrupted_turn AS turn\
         \ WHERE request.turn_id = turn.turn_id"
-        (Encoders.param (Encoders.nonNullable Encoders.text))
+        ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+            <> ( snd
+                    >$< Encoders.param
+                        ( Encoders.nonNullable $
+                            Encoders.foldableArray
+                                (Encoders.nonNullable Encoders.text)
+                        )
+               )
+        )
         Decoders.noResult
         True
 

@@ -63,6 +63,7 @@ library
                     , Agent.Store.Postgres.Session.Write
                     , Agent.Store.Postgres.Hasql
                     , Agent.Store.Postgres.Sql
+                    , Agent.Store.Postgres.ServerTurn.OwnerFence
                     , Agent.Store.Postgres.SessionItem
                     , Agent.Store.Postgres.SessionItem.Mapping.Statements.BaseRows
                     , Agent.Store.Postgres.SessionItem.Mapping.Statements.ContentParts
@@ -177,6 +178,7 @@ test-suite agent-store-test
                     , Agent.Store.Postgres.ManagedSpec
                     , Agent.Store.PoolCacheSpec
                     , Agent.Store.Postgres.ScopeSpec
+                    , Agent.Store.Postgres.ServerTurnRecoverySpec
                     , Agent.Store.Postgres.ServerTurnSpec
                     , Agent.Store.Postgres.SessionSpec
                     , Agent.Store.Postgres.SkillSpec

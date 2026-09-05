@@ -7,6 +7,7 @@
 module Agent.Store.Postgres.Connection
     ( StorePool
     , storePool
+    , storePoolServerTurnActionLockDirectory
     , StoreConnection
     , PoolConfig(..)
     , defaultPoolConfig
@@ -60,10 +61,15 @@ import Agent.Store.Types
 data StorePool = StorePool
     { storePoolInternal :: !Pool.Pool
     , storePoolConnectionSettings :: !ConnectionSettings.Settings
+    , storePoolServerTurnActionLockDirectoryInternal :: !FilePath
     }
 
 storePool :: StorePool -> Pool.Pool
 storePool = (.storePoolInternal)
+
+storePoolServerTurnActionLockDirectory :: StorePool -> FilePath
+storePoolServerTurnActionLockDirectory =
+    (.storePoolServerTurnActionLockDirectoryInternal)
 
 data StoreConnection = StoreConnection
     { storeConnectionHasql :: !Connection.Connection
@@ -132,6 +138,8 @@ openRoleStorePool config role options = mask \restore -> do
         Right () -> pure $ Right StorePool
             { storePoolInternal = pool
             , storePoolConnectionSettings = settings
+            , storePoolServerTurnActionLockDirectoryInternal =
+                config.postgresPaths.postgresServerTurnActionLockDirectory
             }
 
 closeStorePool :: StorePool -> IO ()

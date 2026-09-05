@@ -17,6 +17,8 @@ spec = do
                 `shouldBe` "/tmp/agent/postgres/data"
             config.postgresPaths.postgresSocketDirectory
                 `shouldBe` "/tmp/agent/postgres/run"
+            config.postgresPaths.postgresServerTurnActionLockDirectory
+                `shouldBe` "/tmp/agent/postgres/server-turn-actions"
             postgresExecutable config "initdb"
                 `shouldBe` "/pg/bin/initdb"
 

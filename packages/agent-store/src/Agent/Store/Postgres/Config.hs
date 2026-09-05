@@ -29,6 +29,7 @@ data ManagedPostgresPaths = ManagedPostgresPaths
     , postgresSocketDirectory :: !FilePath
     , postgresLogFile :: !FilePath
     , postgresLifecycleLockFile :: !FilePath
+    , postgresServerTurnActionLockDirectory :: !FilePath
     }
     deriving (Eq, Show)
 
@@ -58,6 +59,8 @@ defaultManagedPostgresConfig stateDirectory binDirectory =
             , postgresSocketDirectory = root </> "run"
             , postgresLogFile = root </> "postgres.log"
             , postgresLifecycleLockFile = root </> "lifecycle.lock"
+            , postgresServerTurnActionLockDirectory =
+                root </> "server-turn-actions"
             }
         , postgresBinDirectory = binDirectory
         , postgresPort = 55432
