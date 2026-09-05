@@ -71,6 +71,7 @@ library
                     , Agent.CLI.Session.StoreCodec
                     , Agent.CLI.Session.TitlePolicy
                     , Agent.CLI.Session.Types
+                    , Agent.CLI.Session.Activity
                     , Agent.CLI.Session.Request
                     , Agent.CLI.SessionLock
                     , Agent.CLI.Transcription
@@ -129,6 +130,7 @@ test-suite agent-cli-runtime-test
                     , Agent.CLI.ManagedTurnSpec
                     , Agent.CLI.ModelConfigSpec
                     , Agent.CLI.ModelsSpec
+                    , Agent.CLI.SessionActivitySpec
                     , Agent.CLI.SessionRequestSpec
                     , Agent.CLI.SessionSpec
     build-depends:    agent-cli-runtime

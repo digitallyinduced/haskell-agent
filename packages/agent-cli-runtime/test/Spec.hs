@@ -1,5 +1,6 @@
 module Main (main) where
 
+import qualified Agent.CLI.SessionActivitySpec as SessionActivitySpec
 import qualified Agent.CLI.SessionRequestSpec as SessionRequestSpec
 import Agent.CLI.Session.TitlePolicy (titleRefreshIndex)
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
@@ -16,6 +17,7 @@ import Test.Hspec
 
 main :: IO ()
 main = hspec do
+    SessionActivitySpec.spec
     SessionRequestSpec.spec
     describe "titleRefreshIndex" do
         it "advances only at the persisted title milestones" do

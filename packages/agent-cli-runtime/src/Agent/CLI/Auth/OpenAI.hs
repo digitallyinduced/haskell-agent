@@ -60,6 +60,7 @@ import Data.IORef
     )
 import Data.Containers.ListUtils (nubOrdOn)
 import Data.List (find)
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -326,8 +327,9 @@ loadOpenAi = do
             filter ((== billing) . (.openAiBilling)) accounts
     refreshLock <- lift (newMVar ())
     accountSources <- lift (newIORef activeAccounts)
-    let initial = map (.openAiState) activeAccounts
-        refresh =
+    initial <- maybe (throwE noAuthHint) pure $
+        NonEmpty.nonEmpty (map (.openAiState) activeAccounts)
+    let refresh =
             refreshOpenAiAccount refreshLock clientId accountSources
         discover =
             discoverOpenAiAccounts billing accountSources

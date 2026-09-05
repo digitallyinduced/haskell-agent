@@ -1278,7 +1278,7 @@ handleOpenAiStartupResult request nativeCapabilities shouldProbeAtStartup = \cas
                 now <- getCurrentTime
                 startupDie request.startup (formatApiErrorAt now err)
         in case request.transition of
-            Just active | active.transitionCause == AutomaticFallback ->
+            Just active | AutomaticFallback _ <- active.transitionCause ->
                 pure (RunProviderStartFailed err)
             _ | shouldProbeAtStartup
               , not (isGatewayLoadedAuth request.loaded)

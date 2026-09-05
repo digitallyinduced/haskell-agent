@@ -368,7 +368,6 @@ requestAccountProviderSwitch
                             , transitionPendingTurn = Nothing
                             , transitionUnavailableProviders = Set.empty
                             , transitionCause = ManualTransition
-                            , transitionAutomaticBilling = Nothing
                             }
                         modelMessage
                             | currentProvider == selectedProvider =
@@ -534,10 +533,10 @@ continueAutomaticFallback
 continueAutomaticFallback
         fallbackEnabled homeHint cwdHint stderrHandle fullscreen failed apiError
     | not fallbackEnabled = pure Nothing
-    | otherwise = case ( failed.transitionAutomaticBilling
+    | otherwise = case ( failed.transitionCause
                        , failed.transitionPendingTurn
                        ) of
-        (Just billing, Just pending) -> do
+        (AutomaticFallback billing, Just pending) -> do
             home <- maybe getHomeDirectory pure homeHint
             cwd <- maybe getCurrentDirectory pure cwdHint
             loadModelCatalogAt home cwd >>= \case
@@ -646,8 +645,7 @@ chooseAutomaticProviderTransition
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Just pending
                         , transitionUnavailableProviders = unavailable'
-                        , transitionCause = AutomaticFallback
-                        , transitionAutomaticBilling = Just sourceBilling
+                        , transitionCause = AutomaticFallback sourceBilling
                         }
 
 chooseStartupProviderTransition
@@ -727,8 +725,7 @@ chooseStartupProviderTransition
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Nothing
                         , transitionUnavailableProviders = unavailable'
-                        , transitionCause = AutomaticFallback
-                        , transitionAutomaticBilling = Just sourceBilling
+                        , transitionCause = AutomaticFallback sourceBilling
                         }
 
 prepareProviderTransition
@@ -753,7 +750,6 @@ prepareProviderTransition cause unavailable pending rawChoice persist = do
                 , transitionPendingTurn = pending
                 , transitionUnavailableProviders = unavailable
                 , transitionCause = cause
-                , transitionAutomaticBilling = Nothing
                 }
 
 validateProviderTarget :: ModelOption -> IO (Either Text ())

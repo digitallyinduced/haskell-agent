@@ -4,6 +4,7 @@ module Agent.CLI.Session.Runner.Execution
     , SessionRunnerContinuation(..)
     , runSession
     ) where
+import qualified Agent.CLI.Session.Activity as Activity
 import Agent.CLI.Session.Request
     ( readSessionRequestParams
     , readSessionRequestModel
@@ -1266,39 +1267,28 @@ newSessionPersistenceRuntime
     -> IO SessionPersistenceRuntime
 newSessionPersistenceRuntime
         host skillsRuntime SessionRequest{..} = do
-    turnActivityRef <- newIORef Nothing
-    turnIsActiveRef <- newIORef False
+    turnActivity <- Activity.newTurnActivity
     nativeSessionIdRef <- newIORef Nothing
-    let acquireTurnActivity handle = mask_ do
-            current <- readIORef turnActivityRef
-            if isNothing current
-                then
+    let acquireTurnActivity handle =
+            Activity.acquireTurnActivity turnActivity $
+                -- The marker is best effort; the lifetime session lock
+                -- remains authoritative.
+                either (const Nothing) Just <$>
                     acquireSessionActivityLock
-                        handle.sessionDir
-                        handle.sessionMeta.metaId >>= \case
-                            -- The activity lock is an external status marker;
-                            -- the lifetime session lock remains authoritative.
-                            Left _ -> pure False
-                            Right lock -> do
-                                writeIORef turnActivityRef (Just lock)
-                                pure True
-                else pure False
-        beginTurnActivity = mask_ do
-            -- Mark first so a concurrently completed first persistence sees
-            -- the active turn and attempts the activity marker itself.
-            writeIORef turnIsActiveRef True
-            case persist of
-                PersistenceDisabled -> pure ()
-                PersistenceEnabled slotRef ->
-                    readIORef slotRef >>= \case
-                        PersistencePending{} -> pure ()
-                        PersistenceActive handle ->
-                            void (acquireTurnActivity handle)
-        endTurnActivity = do
-            writeIORef turnIsActiveRef False
-            atomicModifyIORef' turnActivityRef
-                (\current -> (Nothing, current))
-                >>= mapM_ releaseSessionLock
+                        handle.sessionDir handle.sessionMeta.metaId
+        endTurnActivity =
+            Activity.endTurnActivity turnActivity releaseSessionLock
+        beginTurnActivity = mask_ $
+            (do
+                Activity.beginTurnActivity turnActivity
+                case persist of
+                    PersistenceDisabled -> pure ()
+                    PersistenceEnabled slotRef ->
+                        readIORef slotRef >>= \case
+                            PersistencePending{} -> pure ()
+                            PersistenceActive handle ->
+                                void (acquireTurnActivity handle))
+                `onException` endTurnActivity
         notifyNativeSessionId sessionId = do
             shouldNotify <-
                 atomicModifyIORef' nativeSessionIdRef \current ->
@@ -1318,11 +1308,7 @@ newSessionPersistenceRuntime
             -- Preserve the established lock order: own the session before
             -- attempting its best-effort activity marker.
             onPersisted handle
-            active <- readIORef turnIsActiveRef
-            acquired <-
-                if active
-                    then acquireTurnActivity handle
-                    else pure False
+            acquired <- acquireTurnActivity handle
             notifyNativeSessionId handle.sessionMeta.metaId
                 `onException`
                     when acquired endTurnActivity
