@@ -1,16 +1,17 @@
-{ mkDerivation, aeson, async, base, bytestring, containers, contravariant
-, directory, filelock, filepath, hasql, hasql-pool
-, hasql-transaction, hspec, lib, pqi, pqi-ffi, process, safe-exceptions
-, stm, temporary, text, time, unix, uuid-types, vector
+{ mkDerivation, aeson, async, base, bytestring, containers
+, contravariant, directory, filelock, filepath, hasql, hasql-pool
+, hasql-transaction, hspec, lib, pqi, pqi-ffi, process
+, safe-exceptions, stm, temporary, text, time, unix, uuid-types
+, vector
 }:
 mkDerivation {
   pname = "agent-store";
   version = "0.1.0.0";
   src = ./.;
   libraryHaskellDepends = [
-    aeson async base bytestring containers contravariant directory filelock
-    filepath hasql hasql-pool hasql-transaction pqi pqi-ffi process
-    safe-exceptions stm text time unix uuid-types vector
+    aeson async base bytestring containers contravariant directory
+    filelock filepath hasql hasql-pool hasql-transaction pqi pqi-ffi
+    process safe-exceptions stm text time unix uuid-types vector
   ];
   testHaskellDepends = [
     async base bytestring hasql hspec safe-exceptions temporary text

@@ -90,7 +90,9 @@ import Agent.CLI.Request
     , setRequestInstructionsAndTools
     , setRequestPromptCacheKey
     )
-import Agent.CLI.Resume ( resumeNeedsGeneratedContext )
+import Agent.CLI.Resume
+    ( SessionInitialContext(..)
+    )
 import Agent.CLI.Runtime.HistorySource ()
 import Agent.CLI.Runtime.Orchestration.Background ()
 import Agent.CLI.Runtime.Orchestration.Providers
@@ -123,7 +125,7 @@ import Agent.CLI.Session
       PersistenceState(PersistenceActive, PersistencePending),
       LegacySubagentTarget,
       SessionHandle(sessionDir),
-      SessionMeta(metaId, metaLastResponseId, metaPromptSnapshot, metaTitle),
+      SessionMeta(metaId, metaPromptSnapshot, metaTitle),
       SessionTurn,
       SessionPromptSnapshot(..) )
 import Agent.CLI.Session.Attachments ()
@@ -133,12 +135,12 @@ import Agent.CLI.Session.History
     , currentLiveTranscriptGeneration,
       durableTranscriptCheckpoint,
       evictLiveTranscript,
-      foldSessionItems,
       readLiveTranscript,
       replaceLiveConversation )
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
-    ( SessionRequest(codexCatalogSession, SessionRequest, catalog,
+    ( InitialContextPreload(..)
+    , SessionRequest(codexCatalogSession, SessionRequest, catalog,
                      gatewayModelsRef, modelInfo,
                      connectionId, gatewayIdentity,
                      options, provider, dialect, commitAttributionModel,
@@ -153,7 +155,7 @@ import Agent.CLI.Session.Runtime.Types
                      learnAboutUserRequested, databaseScopes, promptRequest,
                      pendingTurn, unavailableProviders, startupUnavailable, paramsRef,
                      conversationRef, needsInitialContext, queueInitialContext,
-                     initialGrokContext, persist,
+                     initialContextPreload, initialGrokContext, persist,
                      contextOccupancyRef, currentContextWindow,
                      startupWindowTitle, automaticCompactionRef,
                      projectRoot, home, cwd, tokenProvider, openAiPool, startupContext,
@@ -174,7 +176,7 @@ import Agent.CLI.SessionTitle ()
 import Agent.CLI.Skills ()
 import Agent.CLI.Startup.Auth ( markStartupStage, startupDie )
 import Agent.CLI.StartupContext
-    ( AgentsContextNotice(..), loadAgentsContext )
+    ( AgentsContextNotice(..), loadAgentsContextWithPreload )
 import Agent.CLI.Style ( cliWindowTitle, roleMuted )
 import Agent.CLI.Subagents.Runtime
     ( SubagentRuntime(subagentOpenAiChild, SubagentRuntime,
@@ -293,7 +295,6 @@ import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ()
-import qualified Data.Text as Text ( unpack )
 import qualified Data.Text.IO as Text ( hPutStr )
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Client as XAIClient ()
@@ -327,6 +328,8 @@ data AgentSessionRequest closeResult windowTitleResult = AgentSessionRequest
     , cwd :: OsPath
     , databaseAppTools :: [AppTool]
     , databaseScopes :: DatabaseScopes
+    , initialContext :: SessionInitialContext
+    , initialContextPreload :: InitialContextPreload
     , dialect :: Dialect
     , effortText :: Text
     , escPaused :: IORef Bool
@@ -615,8 +618,7 @@ prepareSessionPromptRuntime AgentSessionRequest
     , dialect
     , cwd
     , resumed
-    , transition
-    , resumeTargetChanged
+    , initialContext
     , policy
     , allTools
     } sessionCodeRuntime = do
@@ -642,19 +644,13 @@ prepareSessionPromptRuntime AgentSessionRequest
                     (`setRequestPromptCacheKey`
                         sessionCodeRuntime.sessionBaseParams)
                     sessionCodeRuntime.sessionReservedId
-        sessionInitialItems = maybe [] (foldSessionItems . snd) resumed
+        sessionInitialItems = initialContext.initialContextItems
         initialTurns = maybe [] snd resumed
         sessionResumeNeedsFreshContext =
-            resumeNeedsGeneratedContext initialTurns
-        sessionInitialPrevious = case transition of
-            Just _ -> Nothing
-            Nothing
-                | resumeTargetChanged -> Nothing
-                | otherwise ->
-                    resumed >>= \(meta, _) -> meta.metaLastResponseId
+            initialContext.initialContextResumeNeedsFresh
+        sessionInitialPrevious = initialContext.initialContextPrevious
         sessionNeedsInitialContext =
-            sessionResumeNeedsFreshContext
-                || (null initialTurns && isNothing sessionInitialPrevious)
+            initialContext.initialContextNeeded
         sessionRestoredPromptSnapshot
             | null initialTurns && isNothing sessionInitialPrevious =
                 compatiblePromptSnapshot
@@ -861,6 +857,7 @@ loadSessionStartupContext AgentSessionRequest
     , dialect
     , home
     , cwd
+    , initialContextPreload
     , refreshDialectContext
     } promptRuntime =
     case promptRuntime.sessionRestoredPromptSnapshot of
@@ -872,7 +869,7 @@ loadSessionStartupContext AgentSessionRequest
                 newIORef
                     promptRuntime.sessionCodeRuntime.sessionEnvironmentContext
             | otherwise ->
-                loadAgentsContext
+                loadAgentsContextWithPreload
                     stderrHandle
                     fullscreen
                     agentsContextNotice
@@ -883,6 +880,7 @@ loadSessionStartupContext AgentSessionRequest
                     initialItems
                     initialPrevious
                     promptRuntime.sessionCodeRuntime.sessionEnvironmentContext
+                    initialContextPreload.preloadedAgentsContext
   where
     agentsContextNotice
         | isNothing resumed && isNothing transition =
@@ -1044,6 +1042,7 @@ buildProviderSessionRequest
                 promptRuntime.sessionNeedsInitialContext
             , queueInitialContext =
                 promptRuntime.sessionQueueInitialContext
+            , initialContextPreload = request.initialContextPreload
             , initialGrokContext =
                 promptRuntime.sessionRestoredPromptSnapshot
                     >>= (.promptSnapshotGrokContext)
