@@ -1,39 +1,31 @@
-{-# LANGUAGE PatternSynonyms #-}
-
-module Agent.Loop.Internal where
+-- | Loop execution and scoped tool-worker ownership. Pure input/output,
+-- checkpoint, accounting and display-journal concerns live in sibling modules.
+module Agent.Loop.Internal
+    ( LoopConfig(..)
+    , LoopError(..)
+    , LoopExecution(..)
+    , LoopProgress(..)
+    , LoopResult(..)
+    , runLoop
+    , runLoopInputs
+    , runLoopInputsDetailed
+    ) where
 
 import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
-import qualified Agent.Json.Decode as Json
 import Agent.Error (ApiError)
-import Agent.Image.Normalize
-    ( NormalizedImage(..)
-    , normalizeImageDataUrl
-    , normalizeImageForPrompt
-    )
-import Agent.InterAgentMessage (InterAgentMessage)
-import Agent.Json (RawJson, rawJsonBytes, rawJsonFromEncoding)
+import Agent.Loop.Backend
+import Agent.Loop.DisplayJournal
 import Agent.Loop.EventPump
-    ( EventPump
-    , EventPumpFailure(..)
-    , emitAppendedText
-    , emitEvent
-    , emitLatestText
+    ( EventPumpFailure(..)
     , flushEventPump
     , newEventPump
     , runEventPump
     , waitEventPumpFailure
     )
-import Agent.Responses.Types
-    ( ComputerCallOutput(..)
-    , CustomToolCallOutput(..)
-    , FunctionCallOutput(..)
-    , MessageContent(..)
-    , ResponseContentPart(..)
-    , ResponseAgentMessage(..)
-    , ResponseItem(..)
-    , ResponseMessage(..)
-    , ReasoningItem(..)
-    )
+import Agent.Loop.Input
+import Agent.Loop.Output
+import Agent.Loop.TokenUsage
+import Agent.Responses.Types (ResponseItem)
 import Agent.Telemetry (TurnTelemetry)
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -42,8 +34,6 @@ import Agent.ToolDispatch
     , withToolCallOutcome
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
-    , ToolResultImage(..)
-    , setToolCallArguments
     , toolCallMode
     , withToolCallResultMode
     )
@@ -97,153 +87,19 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (when)
-import Data.Aeson (ToJSON(..), object, (.=))
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
-import Data.ByteString (ByteString)
-import qualified Data.ByteString as ByteString
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntSet as IntSet
-import Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NonEmpty
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Word (Word64)
 import System.Timeout (timeout)
 
 maxEmptyContinuations :: Int
 maxEmptyContinuations = 2
-
--- | Image bytes attached to a user turn (PNG/JPEG/…).
-data ImageAttachment = ImageAttachment
-    { imageMime :: !Text
-    , imageBytes :: !ByteString
-    } deriving (Eq)
-
-instance Show ImageAttachment where
-    show image =
-        "ImageAttachment { imageMime = " <> show image.imageMime
-            <> ", imageBytes = <redacted>"
-            <> ", imageByteLength = " <> show (ByteString.length image.imageBytes)
-            <> " }"
-
--- | File bytes attached to a user turn. Providers that cannot ingest files
--- natively should fall back to a local path or text summary.
-data FileAttachment = FileAttachment
-    { fileName :: !(Maybe Text)
-    , fileMime :: !Text
-    , fileBytes :: !ByteString
-    } deriving (Eq)
-
-instance Show FileAttachment where
-    show file =
-        "FileAttachment { fileName = " <> show file.fileName
-            <> ", fileMime = " <> show file.fileMime
-            <> ", fileBytes = <redacted>"
-            <> ", fileByteLength = " <> show (ByteString.length file.fileBytes)
-            <> " }"
-
--- | A provider-neutral user attachment, retained in source order.
-data TurnAttachment
-    = ImageAttachmentItem !ImageAttachment
-    | FileAttachmentItem !FileAttachment
-    deriving (Eq, Show)
-
--- | One input supplied to the provider-neutral agent loop.
-data TurnInput
-    = UserMessage Text
-    | AgentMessage InterAgentMessage
-    | UserMessageWithAttachments !Text !(NonEmpty TurnAttachment)
-    | CompletedTool ToolCallResult
-    deriving (Eq, Show)
-
--- | Build a user message, using the text-only representation when the
--- attachment list is empty.
-userMessageWithAttachments :: Text -> [TurnAttachment] -> TurnInput
-userMessageWithAttachments text =
-    maybe (UserMessage text) (UserMessageWithAttachments text)
-        . NonEmpty.nonEmpty
-
--- | Images attached to a user input, in source order.
-turnInputImages :: TurnInput -> [ImageAttachment]
-turnInputImages = \case
-    UserMessageWithAttachments _ attachments ->
-        [ image
-        | ImageAttachmentItem image <- NonEmpty.toList attachments
-        ]
-    _ -> []
-
--- | Files attached to a user input, in source order.
-turnInputFiles :: TurnInput -> [FileAttachment]
-turnInputFiles = \case
-    UserMessageWithAttachments _ attachments ->
-        [ file
-        | FileAttachmentItem file <- NonEmpty.toList attachments
-        ]
-    _ -> []
-
--- | Transform user-authored text without changing attachments or other input
--- variants.
-mapTurnInputUserText :: (Text -> Text) -> TurnInput -> TurnInput
-mapTurnInputUserText transform = \case
-    UserMessage text ->
-        UserMessage (transform text)
-    UserMessageWithAttachments text attachments ->
-        UserMessageWithAttachments (transform text) attachments
-    other -> other
-
-normalizeTurnInputImages :: TurnInput -> TurnInput
-normalizeTurnInputImages = \case
-    UserMessageWithAttachments text attachments ->
-        UserMessageWithAttachments text
-            (fmap normalizeAttachment attachments)
-    CompletedTool result ->
-        CompletedTool (normalizeToolResultImages result)
-    other -> other
-  where
-    normalizeAttachment = \case
-        ImageAttachmentItem ImageAttachment{imageMime, imageBytes} ->
-            case normalizeImageForPrompt imageMime imageBytes of
-                NormalizedImage{normalizedImageMime, normalizedImageBytes} ->
-                    ImageAttachmentItem ImageAttachment
-                        { imageMime = normalizedImageMime
-                        , imageBytes = normalizedImageBytes
-                        }
-        file@FileAttachmentItem{} -> file
-
-    normalizeToolResultImages result@ToolCallResult{} = result
-    normalizeToolResultImages result@ToolCallResultWithImages{
-        toolResultImages
-    } =
-        result
-            { toolResultImages =
-                fmap normalizeToolResultImage toolResultImages
-            }
-    normalizeToolResultImages result@AsyncToolCallResult{} = result
-    normalizeToolResultImages result@AsyncToolCallResultWithImages{
-        toolResultImages
-    } =
-        result
-            { toolResultImages =
-                fmap normalizeToolResultImage toolResultImages
-            }
-
-    normalizeToolResultImages result@ToolCallResultWithOutcome{toolResultImages} =
-        result { toolResultImages = fmap normalizeToolResultImage toolResultImages }
-    normalizeToolResultImages result@AsyncToolCallResultWithOutcome{toolResultImages} =
-        result { toolResultImages = fmap normalizeToolResultImage toolResultImages }
-
-    normalizeToolResultImage :: ToolResultImage -> ToolResultImage
-    normalizeToolResultImage image@ToolResultImage{imageUrl} =
-        image { imageUrl = normalizeImageDataUrl imageUrl }
-
-normalizeTurnInputs :: [TurnInput] -> [TurnInput]
-normalizeTurnInputs = map normalizeTurnInputImages
 
 normalizeBackendSnapshotImages :: BackendSnapshot -> BackendSnapshot
 normalizeBackendSnapshotImages snapshot =
@@ -251,182 +107,6 @@ normalizeBackendSnapshotImages snapshot =
         { backendItems =
             map normalizeResponseItemImages snapshot.backendItems
         }
-
-normalizeResponseItemImages :: ResponseItem -> ResponseItem
-normalizeResponseItemImages = \case
-    MessageItem message ->
-        MessageItem
-            message
-                { content =
-                    normalizeMessageContentImages message.content
-                }
-    AgentMessageItem message ->
-        AgentMessageItem
-            message
-                { content =
-                    map normalizeResponseContentPartImage message.content
-                }
-    ReasoningItemValue reasoning ->
-        ReasoningItemValue
-            reasoning
-                { content =
-                    fmap
-                        (map normalizeResponseContentPartImage)
-                        reasoning.content
-                }
-    FunctionCallOutputItem callOutput ->
-        FunctionCallOutputItem
-            callOutput
-                { output = normalizeRawJsonImages callOutput.output
-                }
-    CustomToolCallOutputItem callOutput ->
-        CustomToolCallOutputItem
-            callOutput
-                { output = normalizeRawJsonImages callOutput.output
-                }
-    ComputerCallOutputItem callOutput ->
-        ComputerCallOutputItem
-            callOutput
-                { screenshotDataUrl =
-                    normalizeImageDataUrl callOutput.screenshotDataUrl
-                }
-    item -> item
-
-normalizeMessageContentImages :: MessageContent -> MessageContent
-normalizeMessageContentImages = \case
-    MessageContentText text -> MessageContentText text
-    MessageContentParts parts ->
-        MessageContentParts (map normalizeResponseContentPartImage parts)
-
-normalizeResponseContentPartImage
-    :: ResponseContentPart
-    -> ResponseContentPart
-normalizeResponseContentPartImage part@InputImagePart{imageUrl} =
-    part
-        { imageUrl = fmap normalizeImageDataUrl imageUrl
-        }
-normalizeResponseContentPartImage part = part
-
-normalizeRawJsonImages :: RawJson -> RawJson
-normalizeRawJsonImages raw =
-    case Aeson.decodeStrict' (rawJsonBytes raw) of
-        Nothing -> raw
-        Just value ->
-            let normalized = normalizeJsonImageValues value
-            in if normalized == value
-                then raw
-                else rawJsonFromEncoding (Aeson.toEncoding normalized)
-
-normalizeJsonImageValues :: Aeson.Value -> Aeson.Value
-normalizeJsonImageValues = \case
-    Aeson.Object object ->
-        Aeson.Object (normalizeObjectImageUrl recursivelyNormalized)
-      where
-        recursivelyNormalized = KeyMap.map normalizeJsonImageValues object
-    Aeson.Array values ->
-        Aeson.Array (fmap normalizeJsonImageValues values)
-    value -> value
-  where
-    normalizeObjectImageUrl object =
-        case
-            ( KeyMap.lookup "type" object
-            , KeyMap.lookup "image_url" object
-            )
-        of
-            (Just (Aeson.String kind), Just (Aeson.String imageUrl))
-                | kind == "input_image"
-                    || kind == "computer_screenshot" ->
-                        KeyMap.insert
-                            "image_url"
-                            (Aeson.String (normalizeImageDataUrl imageUrl))
-                            object
-            _ -> object
-
--- | Provider-reported token counts for one model response. @inputTokens@
--- typically includes any cached prefix; @cachedTokens@ is that subset when
--- the provider reports it.
-data TokenUsage = TokenUsage
-    { inputTokens :: !Int
-    , outputTokens :: !Int
-    , cachedTokens :: !Int
-    } deriving (Eq, Show)
-
-instance Semigroup TokenUsage where
-    left <> right = addTokenUsage left right
-
-instance Monoid TokenUsage where
-    mempty = emptyTokenUsage
-
-emptyTokenUsage :: TokenUsage
-emptyTokenUsage = TokenUsage
-    { inputTokens = 0
-    , outputTokens = 0
-    , cachedTokens = 0
-    }
-
-instance ToJSON TokenUsage where
-    toJSON usage = object
-        [ "input" .= usage.inputTokens
-        , "output" .= usage.outputTokens
-        , "cached" .= usage.cachedTokens
-        ]
-
-tokenUsageDecoder :: Json.Decoder TokenUsage
-tokenUsageDecoder = Json.object $
-    TokenUsage
-        <$> Json.atKey "input" Json.int
-        <*> Json.atKey "output" Json.int
-        <*> (maybe 0 id <$> Json.atKeyOptional "cached" Json.int)
-
-addTokenUsage :: TokenUsage -> TokenUsage -> TokenUsage
-addTokenUsage a b = TokenUsage
-    { inputTokens = a.inputTokens + b.inputTokens
-    , outputTokens = a.outputTokens + b.outputTokens
-    , cachedTokens = a.cachedTokens + b.cachedTokens
-    }
-
--- | Rough streamed-text estimate: about four Unicode scalars per token.
-estimateTokensFromChars :: Int -> Int
-estimateTokensFromChars chars = (max 0 chars + 3) `div` 4
-
--- | Output tokens per second from a token count and elapsed milliseconds.
-tokensPerSecond :: Int -> Int -> Maybe Double
-tokensPerSecond tokens millis
-    | tokens <= 0 = Nothing
-    | millis <= 0 = Nothing
-    | otherwise =
-        Just (fromIntegral tokens * 1000 / fromIntegral millis)
-
--- | Completed generation speed from provider-reported output-token metadata.
--- Character-derived estimates are reserved for the live streaming display.
-generationTokensPerSecond :: Int -> Int -> Maybe Double
-generationTokensPerSecond = tokensPerSecond
-
--- | Live tok/s is noisy on the first few hundred milliseconds of a stream.
-liveTokenRateMinMillis :: Int
-liveTokenRateMinMillis = 400
-
-liveTokensPerSecond :: Int -> Int -> Maybe Double
-liveTokensPerSecond chars millis
-    | millis < liveTokenRateMinMillis = Nothing
-    | otherwise = tokensPerSecond (estimateTokensFromChars chars) millis
-
-data TurnOutput = TurnOutput
-    { responseId :: !Text
-    , toolCalls :: ![ToolCall]
-    , assistantText :: !(Maybe Text)
-    , tokenUsage :: !TokenUsage
-    , providerTelemetry :: !(Maybe TurnTelemetry)
-    , completion :: !TurnCompletion
-    } deriving (Eq, Show)
-
-data TurnCompletion
-    = TurnCompleted
-    | TurnIncomplete
-        { incompleteReason :: !Text
-        , incompleteReasoningTokens :: !(Maybe Int)
-        }
-    deriving (Eq, Show)
 
 data LoopProgress
     = NoResponseCommitted
@@ -461,194 +141,6 @@ data LoopExecution = LoopExecution
     , executionProviderTelemetry :: ![TurnTelemetry]
     , executionResult :: !(Either LoopError LoopResult)
     } deriving (Eq, Show)
-
-emptyTurnOutput :: Text -> [ToolCall] -> Maybe Text -> TurnOutput
-emptyTurnOutput responseId toolCalls assistantText = TurnOutput
-    { responseId
-    , toolCalls
-    , assistantText
-    , tokenUsage = emptyTokenUsage
-    , providerTelemetry = Nothing
-    , completion = TurnCompleted
-    }
-
-data BackendResult = BackendResult
-    { backendOutput :: !TurnOutput
-    -- | The provider candidate checkpoint. The state store assigns the
-    -- authoritative revision when this response is committed.
-    , backendState :: !BackendSnapshot
-    } deriving (Eq, Show)
-
-newtype BackendRevision = BackendRevision Word64
-    deriving (Eq, Ord, Show)
-
--- | An opaque provider continuation. Namespacing prevents a session token
--- minted by one backend from accidentally being sent to another backend.
-data BackendContinuation = BackendContinuation
-    { continuationProvider :: !Text
-    , continuationToken :: !Text
-    } deriving (Eq, Show)
-
--- | An immutable, atomically publishable backend checkpoint.
-data BackendSnapshot = BackendSnapshot
-    { backendItems :: ![ResponseItem]
-    , backendRevision :: !BackendRevision
-    , backendContinuation :: !(Maybe BackendContinuation)
-    } deriving (Eq, Show)
-
-emptyBackendSnapshot :: BackendSnapshot
-emptyBackendSnapshot = initialBackendSnapshot []
-
-initialBackendSnapshot :: [ResponseItem] -> BackendSnapshot
-initialBackendSnapshot items = BackendSnapshot
-    { backendItems = items
-    , backendRevision = BackendRevision 0
-    , backendContinuation = Nothing
-    }
-
--- | Build a provider result from the checkpoint it consumed. State stores
--- still normalize the revision at commit time, so concurrent writers cannot
--- publish duplicate or stale revisions.
-advanceBackendSnapshot
-    :: BackendSnapshot
-    -> [ResponseItem]
-    -> Maybe BackendContinuation
-    -> BackendSnapshot
-advanceBackendSnapshot snapshot items continuation = BackendSnapshot
-    { backendItems = items
-    , backendRevision = nextBackendRevision snapshot.backendRevision
-    , backendContinuation = continuation
-    }
-
-clearBackendContinuation :: BackendSnapshot -> BackendSnapshot
-clearBackendContinuation snapshot =
-    snapshot { backendContinuation = Nothing }
-
-backendContinuationToken :: Text -> BackendSnapshot -> Maybe Text
-backendContinuationToken provider snapshot =
-    case snapshot.backendContinuation of
-        Just BackendContinuation
-            { continuationProvider
-            , continuationToken
-            }
-            | continuationProvider == provider -> Just continuationToken
-        _ -> Nothing
-
-nextBackendRevision :: BackendRevision -> BackendRevision
-nextBackendRevision (BackendRevision revision) =
-    BackendRevision (revision + 1)
-
-type LegacySubmitTurn =
-    BackendSnapshot
-    -- | Legacy unnamespaced continuation for persisted sessions. New
-    -- backends should prefer the namespaced token in 'BackendSnapshot'.
-    -> Maybe Text
-    -> [TurnInput]
-    -> (LoopEvent -> IO ())
-    -> IO (Either ApiError BackendResult)
-
-type CallbackSubmitTurn =
-    BackendSnapshot
-    -> Maybe Text
-    -> [TurnInput]
-    -> BackendCallbacks
-    -> IO (Either ApiError BackendResult)
-
-data BackendCallbacks = BackendCallbacks
-    { onLoopEvent :: !(LoopEvent -> IO ())
-    , onAsyncToolCall :: !(ToolCall -> IO ())
-    }
-
-data Backend = BackendInternal
-    { submitTurn :: LegacySubmitTurn
-    , submitTurnWithCallbacks :: CallbackSubmitTurn
-    }
-
--- | Compatibility constructor for event-only backends.
-pattern Backend :: LegacySubmitTurn -> Backend
-pattern Backend legacySubmit <- BackendInternal legacySubmit _
-  where
-    Backend legacySubmit =
-        BackendInternal
-            legacySubmit
-            (\snapshot previous inputs callbacks ->
-                legacySubmit snapshot previous inputs callbacks.onLoopEvent)
-
-{-# COMPLETE Backend #-}
-
--- | Construct a backend that can announce async tool calls while streaming.
-backendWithCallbacks :: CallbackSubmitTurn -> Backend
-backendWithCallbacks callbackSubmit =
-    BackendInternal legacySubmit callbackSubmit
-  where
-    legacySubmit snapshot previous inputs onEvent =
-        callbackSubmit snapshot previous inputs BackendCallbacks
-            { onLoopEvent = onEvent
-            , onAsyncToolCall = const (pure ())
-            }
-
-data BackendStateStore = BackendStateStore
-    { readBackendState :: !(IO BackendSnapshot)
-      -- | Publish a completed provider response for live observers and later
-      -- tool continuations. Higher-level turn policy may still deliberately
-      -- roll this state back after cancellation or terminal failure.
-      --
-      -- The returned snapshot is the authoritative committed value, including
-      -- the store-assigned monotonic revision.
-    , commitBackendState :: !(BackendSnapshot -> IO BackendSnapshot)
-    }
-
-data LoopEvent
-    = TextDelta Text
-    | ReasoningDelta Text
-    -- | Ephemeral transport/tool activity for the live CLI status line.
-    | ActivityUpdated Text
-    -- | Latest provider-reported limit status for retained prompt chrome.
-    | ProviderLimitUpdated
-        { providerLimitText :: !Text
-        , providerLimitWarning :: !Bool
-        }
-    -- | A persistent user-visible warning that must not replace live activity.
-    | WarningRaised Text
-    -- | A streamed response was interrupted and its provider submission is
-    -- being retried. Renderers must close the partial stream before displaying
-    -- output from the new attempt.
-    | ResponseRestarted Text
-    | TurnStarted
-    | TurnFinished TurnOutput
-    | ToolStarted ToolCall
-    -- | Replace the metadata for an already-visible in-flight tool call.
-    -- Providers may learn canonical arguments after an early live start.
-    | ToolUpdated ToolCall
-    -- | Replace the live UI preview for an in-flight tool call while its
-    -- arguments are still streaming. Append-only renderers may ignore this;
-    -- retained renderers can repaint the existing tool block.
-    | ToolArgumentsUpdated ToolCall
-    -- | Latest accumulated output snapshot for an in-flight tool call.
-    | ToolOutputUpdated Text Text
-    | ToolFinished ToolCallResult
-    -- | Remove a provider-retracted tool call from the current attempt.
-    | ToolRetracted Text
-    -- | Discard all UI activity emitted by the current response attempt.
-    -- This is distinct from ending the whole turn: a retry may follow.
-    | ResponseAttemptDiscarded
-    -- | The composed backend (including recovery/fallback wrappers) has
-    -- definitively failed after emitting visible output. Renderers must keep
-    -- that output and close any streaming/running blocks as failed.
-    | ResponseAttemptFailed
-    -- | Lifecycle/activity from a provider-managed child agent. These agents
-    -- are display-only unless the provider exposes targeted controls.
-    | NativeAgentStarted Text (Maybe Text) Text (Maybe Text)
-    | NativeAgentOutput Text Text
-    | NativeAgentFinished Text NativeAgentStatus
-    deriving (Eq, Show)
-
-data NativeAgentStatus
-    = NativeAgentRunning
-    | NativeAgentCompleted
-    | NativeAgentFailed
-    | NativeAgentCancelled
-    deriving (Eq, Show)
 
 data LoopConfig = LoopConfig
     { loopBackend :: !Backend
@@ -1293,196 +785,6 @@ runLoopWithEventPump runtime initialState previousResponseId firstInputs =
                             progress
                             failure
             Right () -> pure execution
-
--- | Events that can be normalized into stable, display-only response items.
--- Reasoning is intentionally omitted: durable session history has always
--- treated provider scratchpad as live-only.
-replayableDisplayEvent :: LoopEvent -> Bool
-replayableDisplayEvent = \case
-    TextDelta _ -> True
-    ToolStarted _ -> True
-    ToolUpdated _ -> True
-    ToolArgumentsUpdated _ -> True
-    ToolOutputUpdated _ _ -> True
-    ToolFinished _ -> True
-    ToolRetracted _ -> True
-    _ -> False
-
--- The journal and each text chunk list are stored newest-first. Keeping
--- adjacent deltas as chunks avoids repeatedly copying the accumulated prefix.
--- A restart is the boundary between the current provider attempt and older
--- attempts that remain visible.
-data DisplayJournalEntry
-    = DisplayTextChunks ![Text]
-    | DisplayEvent !LoopEvent
-
-recordDisplayEvent
-    :: LoopEvent
-    -> [DisplayJournalEntry]
-    -> [DisplayJournalEntry]
-recordDisplayEvent event events = case event of
-    TextDelta delta ->
-        case events of
-            DisplayTextChunks chunks : rest ->
-                DisplayTextChunks (delta : chunks) : rest
-            _ -> DisplayTextChunks [delta] : events
-    ToolUpdated call ->
-        DisplayEvent event : removeCurrentToolUpdates call.callId events
-    ToolArgumentsUpdated call ->
-        DisplayEvent event : removeCurrentToolUpdates call.callId events
-    ToolOutputUpdated callId output ->
-        DisplayEvent (ToolOutputUpdated callId (boundLoopToolOutput output))
-            : removeCurrentToolOutput callId events
-    ToolFinished result ->
-        DisplayEvent
-            (ToolFinished
-                result
-                    { output = boundLoopToolOutput result.output
-                    })
-            : removeCurrentToolOutput result.callId events
-    ToolRetracted callId ->
-        removeCurrentToolEvents callId events
-    _ -> DisplayEvent event : events
-
-displayEventsFromJournal :: [DisplayJournalEntry] -> [LoopEvent]
-displayEventsFromJournal =
-    map entryToEvent . reverse
-  where
-    entryToEvent = \case
-        DisplayTextChunks chunks ->
-            TextDelta (Text.concat (reverse chunks))
-        DisplayEvent event -> event
-
-discardCurrentDisplayAttempt
-    :: [DisplayJournalEntry]
-    -> [DisplayJournalEntry]
-discardCurrentDisplayAttempt =
-    dropWhile \case
-        DisplayEvent (ResponseRestarted _) -> False
-        _ -> True
-
-removeCurrentToolUpdates
-    :: Text
-    -> [DisplayJournalEntry]
-    -> [DisplayJournalEntry]
-removeCurrentToolUpdates callId =
-    filterCurrentAttempt \case
-        DisplayEvent (ToolUpdated call) -> call.callId /= callId
-        DisplayEvent (ToolArgumentsUpdated call) -> call.callId /= callId
-        _ -> True
-
-removeCurrentToolOutput
-    :: Text
-    -> [DisplayJournalEntry]
-    -> [DisplayJournalEntry]
-removeCurrentToolOutput callId =
-    filterCurrentAttempt \case
-        DisplayEvent (ToolOutputUpdated identifier _) ->
-            identifier /= callId
-        _ -> True
-
-removeCurrentToolEvents
-    :: Text
-    -> [DisplayJournalEntry]
-    -> [DisplayJournalEntry]
-removeCurrentToolEvents callId =
-    filterCurrentAttempt \case
-        DisplayEvent (ToolStarted call) -> call.callId /= callId
-        DisplayEvent (ToolUpdated call) -> call.callId /= callId
-        DisplayEvent (ToolArgumentsUpdated call) -> call.callId /= callId
-        DisplayEvent (ToolOutputUpdated identifier _) ->
-            identifier /= callId
-        DisplayEvent (ToolFinished result) -> result.callId /= callId
-        _ -> True
-
-filterCurrentAttempt
-    :: (DisplayJournalEntry -> Bool)
-    -> [DisplayJournalEntry]
-    -> [DisplayJournalEntry]
-filterCurrentAttempt keep = go
-  where
-    go [] = []
-    go allEvents@(DisplayEvent (ResponseRestarted _) : _) = allEvents
-    go (event : rest)
-        | keep event = event : go rest
-        | otherwise = go rest
-
-visibleResponseActivity :: LoopEvent -> Bool
-visibleResponseActivity = \case
-    TextDelta _ -> True
-    ReasoningDelta _ -> True
-    ToolStarted _ -> True
-    ToolUpdated _ -> True
-    ToolArgumentsUpdated _ -> True
-    ToolOutputUpdated _ _ -> True
-    ToolFinished _ -> True
-    NativeAgentStarted{} -> True
-    NativeAgentOutput{} -> True
-    NativeAgentFinished{} -> True
-    _ -> False
-
-data LoopEventCoalescingKey
-    = AssistantTextDelta
-    | AssistantReasoningDelta
-    | ToolArgumentsSnapshot !Text
-    | ToolOutputSnapshot !Text
-    | NativeAgentOutputDelta !Text
-    deriving (Eq)
-
-type LoopEventPump = EventPump LoopEventCoalescingKey LoopEvent
-
-emitLoopEvent :: LoopEventPump -> LoopEvent -> IO ()
-emitLoopEvent pump = \case
-    TextDelta text ->
-        emitAppendedText pump AssistantTextDelta TextDelta text
-    ReasoningDelta text ->
-        emitAppendedText pump AssistantReasoningDelta ReasoningDelta text
-    ToolArgumentsUpdated call ->
-        emitLatestText
-            pump
-            (ToolArgumentsSnapshot call.callId)
-            (\arguments ->
-                ToolArgumentsUpdated (setToolCallArguments arguments call))
-            call.arguments
-    ToolOutputUpdated callId output ->
-        emitLatestText
-            pump
-            (ToolOutputSnapshot callId)
-            (ToolOutputUpdated callId)
-            (boundLoopToolOutput output)
-    NativeAgentOutput identifier output ->
-        emitAppendedText
-            pump
-            (NativeAgentOutputDelta identifier)
-            (NativeAgentOutput identifier)
-            output
-    event ->
-        emitEvent pump event
-
--- Tool output callbacks carry cumulative snapshots. Keep the coalesced value
--- bounded even when a provider sends one giant snapshot; the complete result
--- remains available through the normal tool-result or artifact path.
-boundLoopToolOutput :: Text -> Text
-boundLoopToolOutput output
-    | Text.length output <= loopEventTailPayloadBudgetCodeUnits =
-        Text.copy output
-    | otherwise =
-        toolOutputOmissionMarker
-            <> Text.copy (Text.takeEnd loopEventTailPayloadCodeUnits output)
-
-loopEventTailPayloadCodeUnits :: Int
-loopEventTailPayloadCodeUnits =
-    max 0
-        ( loopEventTailPayloadBudgetCodeUnits
-            - Text.length toolOutputOmissionMarker
-        )
-
-toolOutputOmissionMarker :: Text
-toolOutputOmissionMarker = "[earlier tool output truncated]\n"
-
-loopEventTailPayloadBudgetCodeUnits :: Int
-loopEventTailPayloadBudgetCodeUnits =
-    (8 * 1024 * 1024 - 64) `div` 4
 
 handleLoopEventFailure
     :: (BackendSnapshot -> LoopProgress -> SomeException -> IO LoopExecution)
