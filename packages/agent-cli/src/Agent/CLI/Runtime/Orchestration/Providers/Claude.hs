@@ -2,6 +2,9 @@ module Agent.CLI.Runtime.Orchestration.Providers.Claude
     ( withClaudeProvider
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    )
 import Agent.CLI.Compaction
     ( autoCompactBackendWith
     , claudeAutoCompactTokenLimit
@@ -36,7 +39,7 @@ import Agent.Loop
     , BackendSnapshot(..)
     )
 import Agent.OsPath (unsafeToFilePath)
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (newIORef, writeIORef)
 import Data.Maybe (fromMaybe)
 
 withClaudeProvider
@@ -58,7 +61,7 @@ withClaudeProvider ClaudeConfig{..}
                     , transport = claudeAuth.transport
                     }
             claudeContextWindow = do
-                currentParams <- readIORef paramsRef
+                currentParams <- readSessionRequestParams paramsRef
                 pure $
                     contextWindowForParams
                         transportModel
@@ -113,7 +116,7 @@ withClaudeProvider ClaudeConfig{..}
                             paramsRef
                             historyRef
                             requestedFocus
-                            >>= decorateManualCompact (readIORef paramsRef) taskPlan
+                            >>= decorateManualCompact (readSessionRequestParams paramsRef) taskPlan
                                 (const contextWindow))
                     focus
         onConnected claudeAuth.accountLabel
@@ -123,13 +126,13 @@ withClaudeProvider ClaudeConfig{..}
             claudeOptions
             hostHandlers
             initialPrevious
-            (readIORef paramsRef)
+            (readSessionRequestParams paramsRef)
             claudeTranscriptRef
             \handle -> do
                 let compactHistory history _inputs = do
                         contextWindow <- claudeContextWindow
                         inputLimit <- claudeSummaryInputLimit
-                        currentParams <- readIORef paramsRef
+                        currentParams <- readSessionRequestParams paramsRef
                         runBackendCompactHistoryWithLimits
                             contextWindow
                             inputLimit
@@ -138,14 +141,14 @@ withClaudeProvider ClaudeConfig{..}
                             currentParams
                             history
                             Nothing
-                            >>= decorateAutomaticCompact (readIORef paramsRef) taskPlan
+                            >>= decorateAutomaticCompact (readSessionRequestParams paramsRef) taskPlan
                                 (const contextWindow)
                     compactingBackend =
                         autoCompactBackendWith
                             claudeCompactThreshold
                             compactHistory
                             installAutomaticCompact
-                            (readIORef paramsRef)
+                            (readSessionRequestParams paramsRef)
                             contextTokensRef
                             handle.loopBackend
                 use ProviderRuntime

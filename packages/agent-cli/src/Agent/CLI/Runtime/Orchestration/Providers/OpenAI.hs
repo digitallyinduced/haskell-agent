@@ -2,6 +2,9 @@ module Agent.CLI.Runtime.Orchestration.Providers.OpenAI
     ( withOpenAiProvider
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    )
 import Agent.CLI.Compaction
     ( decorateCompactOutcomeWithTaskPlan
     , installLiveCompactOutcome
@@ -346,7 +349,7 @@ withConnectedOpenAiProvider OpenAiConfig{..}
                 httpFallbackActive
                 tokenProvider
                 activeConnectionRef
-                (readIORef paramsRef)
+                (readSessionRequestParams paramsRef)
                 contextTokensRef
                 recordCompactionUsage
                 (decorateCompactOutcomeWithTaskPlan
@@ -382,7 +385,7 @@ withConnectedOpenAiProvider OpenAiConfig{..}
                                     paramsRef
                                     historyRef
                                     requestedFocus
-                                    >>= decorateManualCompact (readIORef paramsRef) taskPlan
+                                    >>= decorateManualCompact (readSessionRequestParams paramsRef) taskPlan
                                         (codexEffectiveContextWindowFor
                                             . (.model)))
                             focus
