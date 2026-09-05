@@ -1672,7 +1672,10 @@ runSessionInteraction
                 pending
         Nothing -> case promptRequest of
             Just request -> do
-                inputs <- managedTurnInputs cwd request
+                inputs <-
+                    case startup.startupNativeHooks >>= (.nativeInitialTurnInputs) of
+                        Just nativeInputs -> pure nativeInputs
+                        Nothing -> managedTurnInputs cwd request
                 skillInputs <-
                     callbacks.runnerPreparePromptSkillInputs
                         env

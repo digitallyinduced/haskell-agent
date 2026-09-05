@@ -1030,6 +1030,8 @@ turnSpecFor boundary sessionId =
         , turnSpecClientRequestId =
             ClientRequestId "01999999-1111-7111-8111-111111111111"
         , turnSpecPrompt = "hello"
+        , turnSpecImages = []
+        , turnSpecFiles = []
         , turnSpecBoundary = boundary
         }
 

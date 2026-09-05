@@ -3,6 +3,8 @@ module Agent.Server.Client.Protocol
     ( AgentServerCreateSessionRequest (..)
     , AgentServerSession (..)
     , AgentServerCreateTurnRequest (..)
+    , AgentServerTurnImage (..)
+    , AgentServerTurnFile (..)
     , AgentServerTurnStatus (..)
     , AgentServerTurn (..)
     , AgentServerTurnList (..)
@@ -31,6 +33,7 @@ import Data.Aeson
 import Data.Aeson.Types (Parser)
 import Data.Bifunctor qualified as Bifunctor
 import Data.ByteString qualified as ByteString
+import Data.ByteString.Base64 qualified as Base64
 import Data.Foldable (forM_)
 import Data.Int (Int64)
 import Data.Maybe (fromMaybe)
@@ -58,6 +61,23 @@ instance ToJSON AgentServerCreateSessionRequest where
             , "title" .= request.createSessionTitle
             ]
 
+data AgentServerTurnFile = AgentServerTurnFile
+    { turnFileName :: !Text
+    , turnFileMimeType :: !Text
+    , turnFileBytes :: !ByteString.ByteString
+    }
+    deriving (Eq, Show)
+
+instance ToJSON AgentServerTurnFile where
+    toJSON file =
+        object
+            [ "name" .= file.turnFileName
+            , "mimeType" .= file.turnFileMimeType
+            , "data"
+                .= TextEncoding.decodeUtf8
+                    (Base64.encode file.turnFileBytes)
+            ]
+
 newtype AgentServerSession = AgentServerSession
     { agentServerSessionId :: Text
     }
@@ -71,14 +91,37 @@ instance FromJSON AgentServerSession where
 data AgentServerCreateTurnRequest = AgentServerCreateTurnRequest
     { createTurnClientRequestId :: !Text
     , createTurnInput :: !Text
+    , createTurnImages :: ![AgentServerTurnImage]
+    , createTurnFiles :: ![AgentServerTurnFile]
     }
     deriving (Eq, Show)
 
 instance ToJSON AgentServerCreateTurnRequest where
     toJSON request =
-        object
+        object $
             [ "clientRequestId" .= request.createTurnClientRequestId
             , "input" .= request.createTurnInput
+            ]
+                <> [ "images" .= request.createTurnImages
+                   | not (null request.createTurnImages)
+                   ]
+                <> [ "files" .= request.createTurnFiles
+                   | not (null request.createTurnFiles)
+                   ]
+
+data AgentServerTurnImage = AgentServerTurnImage
+    { turnImageMimeType :: !Text
+    , turnImageBytes :: !ByteString.ByteString
+    }
+    deriving (Eq, Show)
+
+instance ToJSON AgentServerTurnImage where
+    toJSON image =
+        object
+            [ "mimeType" .= image.turnImageMimeType
+            , "data"
+                .= TextEncoding.decodeUtf8
+                    (Base64.encode image.turnImageBytes)
             ]
 
 data AgentServerTurnStatus

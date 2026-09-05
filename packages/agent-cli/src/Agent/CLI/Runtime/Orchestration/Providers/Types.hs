@@ -1,100 +1,119 @@
 module Agent.CLI.Runtime.Orchestration.Providers.Types
-    ( AgentProviderRequest(..)
+    ( ProviderConfig(..)
+    , OpenAiConfig(..)
+    , OpenAiAccounts(..)
+    , OpenRouterConfig(..)
+    , ClaudeConfig(..)
+    , ProviderHost(..)
+    , ProviderCompaction(..)
+    , ProviderRuntime(..)
+    , ProviderAccountSelection(..)
+    , ProviderSubagents(..)
     ) where
 
-import Agent.CLI.ActiveAccount
-    ( ActiveAccountRef
-    )
-import Agent.CLI.Auth.Types (LoadedAuth)
-import Agent.CLI.Compaction
-    ( CompactOutcome
-    , CompactionInstall
-    , OccupancySnapshot
-    )
-import Agent.CLI.GatewayClient (GatewayCredential)
-import Agent.CLI.ModelConfig (ModelCatalog)
-import Agent.CLI.Options (CliOptions)
-import Agent.CLI.PendingInputs (PendingInputs)
-import Agent.CLI.Project (ModelSwitchScope)
-import Agent.CLI.ProviderTransition (ProviderTransition)
+import Agent.CLI.Compaction (CompactOutcome, CompactionInstall, OccupancySnapshot)
 import Agent.CLI.Session.History (LiveConversation)
-import Agent.CLI.Session.Runtime.Types (SessionRequest, StartupRuntime)
-import Agent.CLI.Session.Types (Persistence)
-import Agent.CLI.Subagents.Runtime.Types (SubagentRuntime)
-import Agent.CLI.TUI.App (FullscreenRuntime)
-import Agent.Dialect (Dialect)
+import Agent.CLI.Session.Runtime.Types (SessionBackend)
+import Agent.Claude (ClaudeCodeAuth)
+import Agent.Claude.Control (ClaudeCodeHostHandlers)
+import Agent.Connectivity.NetworkPath (NetworkRecovery)
 import Agent.Error (ApiError)
-import Agent.Loop (TokenUsage, TurnInput)
+import Agent.Loop (Backend, TokenUsage, TurnInput)
 import Agent.OpenAI.Auth (Pool)
 import Agent.OpenRouter.Options (ClientOptions)
-import Agent.Provider (Credential, Provider, TokenProvider)
+import Agent.Provider (Credential, TokenProvider)
 import Agent.Responses.Types (ResponseCreateParams)
-import Agent.Tools.MultiAgents (MultiAgentContext)
 import Agent.Tools.TaskPlan (TaskPlanEnv)
-import Control.Concurrent.STM (STM)
 import Data.IORef (IORef)
-import Data.Set (Set)
 import Data.Text (Text)
-import System.IO (Handle)
 import System.OsPath (OsPath)
 import qualified Agent.Responses.GenericClient as GenericResponses
 
-data AgentProviderRequest = AgentProviderRequest
-    { modelSwitchScope :: ModelSwitchScope
-    , loaded :: LoadedAuth
-    , connectedGateway :: Maybe GatewayCredential
-    , sessionRequest
-        :: Maybe (STM ApiError)
-        -> Maybe TokenProvider
-        -> Maybe Pool
-        -> Maybe (Text -> IO (Either ApiError Text))
-        -> IO (Maybe Int)
-        -> (Maybe Text -> IO (Either Text CompactOutcome))
-        -> SessionRequest
-    , activeAccountRef :: ActiveAccountRef
-    , catalog :: ModelCatalog
-    , claudeBypassEnabled :: Bool
-    , contextTokensRef :: IORef (Maybe OccupancySnapshot)
-    , contextWindowForParams
-        :: (Text -> Text)
-        -> Int
-        -> ResponseCreateParams
-        -> Int
-    , conversationRef :: IORef LiveConversation
-    , currentModelContextWindow
-        :: (Text -> Text)
-        -> IO (Maybe Int)
-    , customGenericOptions :: Maybe GenericResponses.GenericClientOptions
-    , cwd :: OsPath
-    , dialect :: Dialect
-    , fullscreen :: Maybe FullscreenRuntime
-    , automaticCompactionHookRef
-        :: IORef
-            (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
-    , taskPlan :: Maybe TaskPlanEnv
-    , home :: OsPath
-    , initialPrevious :: Maybe Text
-    , model :: Text
-    , multiCtx :: Maybe MultiAgentContext
-    , openRouterOptions :: ClientOptions
-    , options :: CliOptions
-    , paramsRef :: IORef ResponseCreateParams
-    , pendingNotices :: PendingInputs
-    , persist :: Persistence
-    , preferredOpenAiAccountRef :: IORef (Maybe Text)
-    , projectRoot :: OsPath
-    , provider :: Provider
-    , recordCompactionUsage :: TokenUsage -> IO ()
-    , resolveActiveAccountLabel :: Credential -> IO Text
-    , selectHttpAccount :: Text -> IO (Either ApiError Text)
-    , selectableTokenProvider :: TokenProvider
-    , shouldProbeAtStartup :: Bool
-    , startup :: StartupRuntime
-    , startupUnavailable :: Maybe (STM ApiError)
-    , stderrHandle :: Handle
-    , subagentRuntime :: SubagentRuntime
-    , tokenProvider :: TokenProvider
-    , transition :: Maybe ProviderTransition
+-- | Only the selected provider's configuration crosses the provider boundary.
+data ProviderConfig
+    = OpenAiProviderConfig OpenAiConfig
+    | XaiProviderConfig TokenProvider Bool
+    | GeminiProviderConfig TokenProvider
+    | OpenRouterProviderConfig OpenRouterConfig
+    | ClaudeProviderConfig ClaudeConfig
+
+data OpenAiConfig = OpenAiConfig
+    { tokenProvider :: TokenProvider
+    , showRawReasoning :: Bool
     , transportModel :: Text -> Text
-    , unavailableProviders :: Set Provider
+    , accounts :: OpenAiAccounts
     }
+
+-- | Account switching owns connections; the host owns account presentation
+-- and preferences. Keep those mutations behind operations.
+data OpenAiAccounts = OpenAiAccounts
+    { selectablePool :: Maybe Pool
+    , readActiveAccountId :: IO Text
+    , resolveAccountLabel :: Credential -> IO Text
+    , installAccount :: Credential -> Text -> IO ()
+    , preferAccount :: Text -> IO ()
+    }
+
+data OpenRouterConfig = OpenRouterConfig
+    { tokenProvider :: TokenProvider
+    , clientOptions :: ClientOptions
+    , genericOptions :: Maybe GenericResponses.GenericClientOptions
+    , model :: Text
+    , transportModel :: Text -> Text
+    }
+
+data ClaudeConfig = ClaudeConfig
+    { withAuth :: forall a. (ClaudeCodeAuth -> IO a) -> IO a
+    , cwd :: OsPath
+    , initialPrevious :: Maybe Text
+    , transportModel :: Text -> Text
+    , hostHandlers :: ClaudeCodeHostHandlers
+    , onConnected :: Text -> IO ()
+    }
+
+-- | Shared services used to construct a provider backend. Session startup,
+-- persistence, UI, and subagent registration belong to the caller.
+data ProviderHost = ProviderHost
+    { compaction :: ProviderCompaction
+    , networkRecovery :: Maybe NetworkRecovery
+    }
+
+-- | The live compaction state is shared with the session. Providers supply
+-- transport-specific summarization and context limits; installation stays
+-- behind the shared compaction helpers and the session's automatic hook.
+data ProviderCompaction = ProviderCompaction
+    { paramsRef :: IORef ResponseCreateParams
+    , contextTokensRef :: IORef (Maybe OccupancySnapshot)
+    , contextWindowForParams :: (Text -> Text) -> Int -> ResponseCreateParams -> Int
+    , currentModelContextWindow :: (Text -> Text) -> IO (Maybe Int)
+    , conversationRef :: IORef LiveConversation
+    , installAutomaticCompact :: CompactOutcome -> [TurnInput] -> IO CompactionInstall
+    , taskPlan :: Maybe TaskPlanEnv
+    , recordCompactionUsage :: TokenUsage -> IO ()
+    , compactThreshold :: Maybe Int
+    }
+
+-- | Valid only inside the continuation passed to 'withProviderRuntime'.
+-- Its backend and account operations must not be used after that scope closes.
+data ProviderRuntime = ProviderRuntime
+    { sessionBackend :: SessionBackend
+    , currentContextWindow :: IO (Maybe Int)
+    , compactRunner :: Maybe Text -> IO (Either Text CompactOutcome)
+    , accountSelection :: ProviderAccountSelection
+    , subagents :: ProviderSubagents
+    }
+
+data ProviderAccountSelection
+    = HttpAccountSelection
+    | OpenAiAccountSelection (Maybe Pool) (Maybe (Text -> IO (Either ApiError Text)))
+    | NoAccountSelection
+
+-- | Describe child transport support without accessing the session registry.
+data ProviderSubagents
+    = HttpSubagents (ResponseCreateParams -> Backend)
+    | XaiSubagents
+        (ResponseCreateParams -> Int)
+        (ResponseCreateParams -> Int)
+        (ResponseCreateParams -> Backend)
+    | CodexSubagents Bool
+    | NoProviderSubagents

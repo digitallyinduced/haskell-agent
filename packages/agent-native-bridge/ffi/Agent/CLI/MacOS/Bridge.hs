@@ -5247,6 +5247,7 @@ runNativeTurn
                     Nothing ->
                         forM_ (nativeLoopEvent control.turnControlId event)
                             (sendEvent callback context)
+            , nativeInitialTurnInputs = Nothing
             , nativeOnSessionId = \sessionId -> do
                 writeIORef sessionIdRef (Just sessionId)
                 atomically do

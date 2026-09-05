@@ -510,6 +510,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ProviderFallbackSpec
                     , Agent.CLI.ProviderAvailabilitySpec
                     , Agent.CLI.ProviderTransitionSpec
+                    , Agent.CLI.ProviderRuntimeSpec
                     , Agent.CLI.RequestSpec
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec

@@ -3,14 +3,22 @@ module Agent.CLI.Runtime.Orchestration.Session
     , runAgentSession
     ) where
 
-import Agent.CLI.ActiveAccount (ActiveAccountRef)
+import Agent.CLI.ActiveAccount
+    ( ActiveAccount(..)
+    , ActiveAccountRef
+    , modifyActiveAccount
+    , readActiveAccount
+    , writeActiveAccount
+    )
 import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.Auth
-    ( LoadedAuth(loadedTokenProvider)
+    ( LoadedAuth(loadedTokenProvider, loadedOpenAiPool)
     , isGatewayLoadedAuth
     )
 import Agent.CLI.Claude
-    ( ClaudeSessionRuntimeSlot
+    ( approveClaudeRegisteredTool
+    , handleClaudePermissionRequest
+    , ClaudeSessionRuntimeSlot
     , newClaudeSessionRuntimeSlot
     )
 import Agent.CLI.CodeModeRuntime
@@ -28,6 +36,7 @@ import Agent.CLI.Compaction
     )
 import Agent.CLI.Database.Store (DatabaseScopes)
 import Agent.CLI.Dialects (CodingTools(..))
+import Agent.CLI.Error (formatApiErrorAt)
 import Agent.CLI.GatewayClient
     ( GatewayCredential
     , GatewayModelAccess
@@ -46,9 +55,9 @@ import Agent.CLI.Models (ModelTarget(targetConnectionId))
 import Agent.CLI.Options
     ( ApprovalPolicy
     , isOneShot
-    , CliOptions(optCodeMode)
+    , CliOptions(optCodeMode, optCompactThreshold, optShowRawReasoning)
     )
-import Agent.CLI.PendingInputs (PendingInputs)
+import Agent.CLI.PendingInputs (PendingInputs, withPendingInputs)
 import Agent.CLI.Project ( ModelSwitchScope(..) )
 import Agent.CLI.Prompt
     ( codexEnvironmentContext,
@@ -56,9 +65,11 @@ import Agent.CLI.Prompt
       appendMcpInstructions,
       systemPromptForCatalogModelWithHostedSearch,
       systemPromptForToolsWithHostedSearch )
+import Agent.CLI.Provider.Switch (chooseStartupProviderTransition, prepareTransitionBackend)
 import Agent.CLI.ProviderAvailability ( probeLoadedAvailability )
 import Agent.CLI.ProviderFallback ( isProviderUnavailable )
-import Agent.CLI.ProviderTransition (PendingTurn, ProviderTransition)
+import Agent.CLI.ProviderTransition
+    ( PendingTurn, ProviderTransition(transitionCause), TransitionCause(AutomaticFallback) )
 import Agent.CLI.Render ( putTextLn )
 import Agent.CLI.Request
     ( requestParams
@@ -69,18 +80,26 @@ import Agent.CLI.Resume
     ( SessionInitialContext(..)
     )
 import Agent.CLI.Runtime.Orchestration.Providers
-    ( AgentProviderRequest(..)
-    , runAgentProviders
+    ( withProviderRuntime )
+import Agent.CLI.Runtime.Orchestration.Providers.Types
+    ( ProviderConfig(..), OpenAiConfig(..), OpenAiAccounts(..)
+    , OpenRouterConfig(..), ClaudeConfig(..), ProviderHost(..)
+    , ProviderCompaction(..), ProviderRuntime(..)
+    , ProviderAccountSelection(..), ProviderSubagents(..)
     )
 import Agent.CLI.Runtime.Orchestration.Startup
-    ( clearNativeProgress, mcpToolCollision, reportStartupWarning )
+    ( clearNativeProgress, mcpToolCollision, reportStartupWarning, finishStartup )
 import Agent.CLI.Runtime.Orchestration.Types
     ( NativeRunCapabilities(..)
     , NativeRunHooks(nativeCapabilities, nativeWorkspaceDiscovery)
     , fullNativeRunCapabilities
     , nativeLoadsHostWorkspaceContext
     )
-import Agent.CLI.Runtime.Types ( RunResult(RunQuit) )
+import Agent.CLI.Runtime.Recap (runSessionRecap, runSessionTurnSummary)
+import Agent.CLI.Runtime.Repl
+    ( finishTurn, preparePromptSkillInputsWithPaste, repl, replWithDraft, runPendingTurn )
+import qualified Agent.CLI.Session.Runner as SessionRunner
+import Agent.CLI.Runtime.Types ( RunResult(RunQuit, RunProviderStartFailed, RunSwitchProvider) )
 import Agent.CLI.Session
     ( addSessionUsage,
       ensureSession,
@@ -104,7 +123,8 @@ import Agent.CLI.Session.History
       readLiveTranscript,
       replaceLiveConversation )
 import Agent.CLI.Session.Runtime.Types
-    ( InitialContextPreload(..)
+    ( SessionBackend(..)
+    , InitialContextPreload(..)
     , SessionRequest(codexCatalogSession, SessionRequest, catalog,
                      gatewayModelsRef, modelInfo,
                      connectionId, gatewayIdentity,
@@ -137,9 +157,10 @@ import Agent.CLI.SessionState ( SessionState(sessionConversation) )
 import Agent.CLI.Startup.Auth ( markStartupStage, startupDie )
 import Agent.CLI.StartupContext
     ( AgentsContextNotice(..), loadAgentsContextWithPreload )
-import Agent.CLI.Style ( cliWindowTitle, roleMuted )
+import Agent.CLI.Style ( cliWindowTitle, roleMuted, glyphWarn, roleWarn )
 import Agent.CLI.Subagents.Runtime
-    ( SubagentRuntime(subagentOpenAiChild, SubagentRuntime,
+    ( runCodexSubagent, runHttpSubagent, runXaiParentSubagent
+    , SubagentRuntime(subagentOpenAiChild, SubagentRuntime,
                       subagentOptions, subagentNetworkRecovery,
                       subagentGhciEnabled, subagentBashEnabled,
                       subagentPolicy, subagentPlanHooks, subagentSkillRoots,
@@ -153,12 +174,20 @@ import Agent.CLI.Subagents.Runtime
 import Agent.CLI.Subagents.Runtime.Types
     (SubagentSession, SubagentStoreRoot)
 import Agent.CLI.TUI.App
-    ( FullscreenRuntime, withFullscreenSuspended )
+    ( FullscreenRuntime, withFullscreenSuspended, emitUiEvent )
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Tools
     ( schemasFromAppToolsCodeModeWithHostedSearch
     , schemasFromAppToolsWithHostedSearch
     )
+import Agent.Tools.OutputArtifact (finalizeToolOutput)
+import qualified Control.Exception.Safe as Safe
+import qualified Data.Aeson as Aeson
+import Agent.Claude
+    ( ClaudeCodeAuth, loadClaudeCodeAuth, loadClaudeCodeGatewayAuth )
+import Agent.Claude.Control
+    ( ClaudeCodeHostHandlers(..), ClaudeCodeMcpRequest(..), defaultClaudeCodeHostHandlers )
+import Agent.CLI.ClaudeGatewayProxy (withClaudeGatewayProxy)
 import Agent.Dialect (Dialect, dialectId)
 import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
@@ -168,23 +197,26 @@ import Agent.Loop
     , TurnInput
     , addTokenUsage
     , emptyTokenUsage
+    , defaultLoopDispatch
     )
+import Agent.OpenAI.WebSocketClient (CodexAuthFailed(..))
 import Agent.OpenAI.Models.Types ( ModelInfo, resolvedContextWindow )
 import Agent.OpenRouter.Options (ClientOptions)
 import Agent.Provider
-    (Credential, Provider(OpenAIProvider), TokenProvider,
+    (Credential(..), Provider(..), TokenProvider,
      tokenProviderBillingMode)
 import Agent.Responses.GenericClient (GenericClientOptions)
 import Agent.Responses.Types
     (ResponseItem, ResponseCreateParams(model))
 import Agent.Skills (SkillCatalog, SkillInvocation)
 import Agent.Store.Postgres ( trustedPool )
-import Agent.Subagents (SubagentRegistry)
+import Agent.Subagents (SubagentRegistry, setSubagentRunner)
 import Agent.Subagents.Types (RootTurnId, SubagentId)
+import Agent.TUI.Model (UiEvent(UiSystemMessage))
 import Agent.Tools.MultiAgents
-    (CollaborationModelTarget, MultiAgentContext, SubagentWorktree)
+    (CollaborationModelTarget, MultiAgentContext(..), SubagentWorktree)
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks)
-import Agent.ToolDispatch (canonicalToolName)
+import Agent.ToolDispatch (canonicalToolName, ToolDispatchConfig(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolSchema(..)
@@ -212,7 +244,6 @@ import System.IO (Handle, stderr)
 import System.Mem ( performMajorGC )
 import System.OsPath (OsPath)
 import qualified Agent.MCP as MCP
-import qualified Agent.OpenAI.Auth as OpenAI (Pool)
 import qualified Data.Text.IO as Text ( hPutStr )
 
 data AgentSessionRequest closeResult windowTitleResult = AgentSessionRequest
@@ -873,22 +904,29 @@ buildProviderSessionRequest
     -> SessionPromptRuntime
     -> SessionLiveRuntime
     -> Maybe (STM ApiError)
-    -> Maybe TokenProvider
-    -> Maybe OpenAI.Pool
-    -> Maybe (Text -> IO (Either ApiError Text))
-    -> IO (Maybe Int)
-    -> (Maybe Text -> IO (Either Text CompactOutcome))
+    -> ProviderRuntime
     -> SessionRequest
 buildProviderSessionRequest
     request
     promptRuntime
     liveRuntime
     startupUnavailable
-    sessionTokenProvider
-    sessionOpenAiPool
-    sessionSelectAccount
-    sessionContextWindow
-    sessionCompactRunner =
+    runtime =
+        let (sessionTokenProvider, sessionOpenAiPool, sessionSelectAccount) =
+                case runtime.accountSelection of
+                    NoAccountSelection -> (Nothing, Nothing, Nothing)
+                    OpenAiAccountSelection pool select ->
+                        (Just request.tokenProvider, pool, select)
+                    HttpAccountSelection ->
+                        ( Just request.tokenProvider
+                        , request.loaded.loadedOpenAiPool
+                        , if isGatewayLoadedAuth request.loaded
+                                || (request.provider == XAIProvider
+                                    && isJust request.customGenericOptions)
+                            then Nothing
+                            else Just request.selectHttpAccount
+                        )
+        in
         SessionRequest
             { catalog = request.catalog
             , gatewayModelsRef = request.gatewayModelsRef
@@ -943,7 +981,7 @@ buildProviderSessionRequest
             , contextOccupancyRef =
                 liveRuntime.sessionContextTokensRef
             , currentContextWindow = do
-                configured <- sessionContextWindow
+                configured <- runtime.currentContextWindow
                 pure $
                     configured
                         <|> (resolvedContextWindow
@@ -985,7 +1023,7 @@ buildProviderSessionRequest
             , accountLabel = request.resolveActiveAccountLabel
             , selectAccount = sessionSelectAccount
             , onPersisted = request.claimCurrentSession
-            , compactRunner = sessionCompactRunner
+            , compactRunner = runtime.compactRunner
             , codeModeRuntime =
                 promptRuntime.sessionCodeRuntime.sessionCodeModeRuntime
             , codexCatalogSession =
@@ -1046,61 +1084,222 @@ launchPreparedSession request promptRuntime liveRuntime = do
     runSessionWithInterruptHandling request progName $
         withSessionStartupAvailability request shouldProbeAtStartup
             \startupUnavailable ->
-                runAgentProviders AgentProviderRequest
-                    { modelSwitchScope =
-                          if request.startup.startupBackground
-                              then SessionLocalSwitch
-                              else TopLevelSwitch
-                    , loaded = request.loaded
-                    , connectedGateway = request.connectedGateway
-                    , sessionRequest =
-                          buildProviderSessionRequest
-                              request
-                              promptRuntime
-                              liveRuntime
-                    , activeAccountRef = request.activeAccountRef
-                    , catalog = request.catalog
-                    , claudeBypassEnabled = request.claudeBypassEnabled
-                    , contextTokensRef = liveRuntime.sessionContextTokensRef
-                    , contextWindowForParams = sessionContextWindowForParams request
-                    , conversationRef = liveRuntime.sessionConversationRef
-                    , currentModelContextWindow =
-                          sessionCurrentModelContextWindow
-                              request
-                              promptRuntime
-                    , customGenericOptions = request.customGenericOptions
-                    , cwd = request.cwd
-                    , dialect = request.dialect
-                    , fullscreen = request.fullscreen
-                    , automaticCompactionHookRef =
-                        promptRuntime.sessionAutomaticCompactionHookRef
-                    , taskPlan = request.coding.codingTaskPlan
-                    , home = request.home
-                    , initialPrevious = promptRuntime.sessionInitialPrevious
-                    , model = request.model
-                    , multiCtx = request.multiCtx
-                    , openRouterOptions = request.openRouterOptions
-                    , options = request.options
-                    , paramsRef = promptRuntime.sessionParamsRef
-                    , pendingNotices = request.pendingNotices
-                    , persist = request.persist
-                    , preferredOpenAiAccountRef = request.preferredOpenAiAccountRef
-                    , projectRoot = request.projectRoot
-                    , provider = request.provider
-                    , recordCompactionUsage = liveRuntime.sessionRecordCompactionUsage
-                    , resolveActiveAccountLabel = request.resolveActiveAccountLabel
-                    , selectHttpAccount = request.selectHttpAccount
-                    , selectableTokenProvider = request.selectableTokenProvider
-                    , shouldProbeAtStartup
-                    , startup = request.startup
-                    , startupUnavailable
-                    , stderrHandle = request.stderrHandle
-                    , subagentRuntime = liveRuntime.sessionSubagentRuntime
-                    , tokenProvider = request.tokenProvider
-                    , transition = request.transition
-                    , transportModel = request.transportModel
-                    , unavailableProviders = request.unavailableProviders
+                launchProvider request promptRuntime liveRuntime
+                    shouldProbeAtStartup startupUnavailable
+
+sessionRunnerContinuation :: SessionRunner.SessionRunnerContinuation
+sessionRunnerContinuation =
+    SessionRunner.SessionRunnerContinuation
+        { runnerRepl = repl
+        , runnerReplWithDraft = replWithDraft
+        , runnerRunPendingTurn = runPendingTurn
+        , runnerFinishTurn = finishTurn
+        , runnerFinishStartup = finishStartup
+        , runnerPreparePromptSkillInputs = preparePromptSkillInputsWithPaste
+        , runnerRunSessionRecap = runSessionRecap
+        , runnerRunSessionTurnSummary = runSessionTurnSummary
+        }
+
+runSession
+    :: SessionRequest
+    -> SessionBackend
+    -> IO RunResult
+runSession = SessionRunner.runSession sessionRunnerContinuation
+
+-- | The session owns composition and presentation. Provider runtimes only
+-- supply transport capabilities, scoped around this continuation.
+launchProvider
+    :: AgentSessionRequest closeResult windowTitleResult
+    -> SessionPromptRuntime
+    -> SessionLiveRuntime
+    -> Bool
+    -> Maybe (STM ApiError)
+    -> IO RunResult
+launchProvider request promptRuntime liveRuntime shouldProbeAtStartup startupUnavailable = do
+    let nativeCapabilities = maybe fullNativeRunCapabilities (.nativeCapabilities)
+            request.startup.startupNativeHooks
+        host = ProviderHost
+            { networkRecovery = request.startup.startupNetworkRecovery
+            , compaction = ProviderCompaction
+                { paramsRef = promptRuntime.sessionParamsRef
+                , contextTokensRef = liveRuntime.sessionContextTokensRef
+                , contextWindowForParams = sessionContextWindowForParams request
+                , currentModelContextWindow = sessionCurrentModelContextWindow request promptRuntime
+                , conversationRef = liveRuntime.sessionConversationRef
+                , installAutomaticCompact = \outcome inputs ->
+                    readIORef promptRuntime.sessionAutomaticCompactionHookRef
+                        >>= \hook -> hook outcome inputs
+                , taskPlan = request.coding.codingTaskPlan
+                , recordCompactionUsage = liveRuntime.sessionRecordCompactionUsage
+                , compactThreshold = request.options.optCompactThreshold
+                }
+            }
+        use runtime = do
+            installProviderSubagents request liveRuntime runtime.subagents
+            let sessionBackend = runtime.sessionBackend
+                noticingBackend = case request.provider of
+                    ClaudeCodeProvider -> sessionBackend.backend
+                    _ -> withPendingInputs request.pendingNotices sessionBackend.backend
+            activeBackend <- prepareTransitionBackend
+                (if request.startup.startupBackground
+                    then SessionLocalSwitch else TopLevelSwitch)
+                request.home request.projectRoot request.transition request.persist
+                noticingBackend
+            runSession
+                (buildProviderSessionRequest request promptRuntime liveRuntime
+                    startupUnavailable runtime)
+                sessionBackend{backend = activeBackend}
+    config <- prepareProviderConfig request promptRuntime nativeCapabilities
+    case request.provider of
+        OpenAIProvider ->
+            Safe.try @_ @CodexAuthFailed (withProviderRuntime config host use)
+                >>= handleOpenAiStartupResult request nativeCapabilities shouldProbeAtStartup
+        _ -> withProviderRuntime config host use
+
+prepareProviderConfig
+    :: AgentSessionRequest closeResult windowTitleResult
+    -> SessionPromptRuntime
+    -> NativeRunCapabilities
+    -> IO ProviderConfig
+prepareProviderConfig request promptRuntime nativeCapabilities = case request.provider of
+    OpenAIProvider -> pure $ OpenAiProviderConfig OpenAiConfig
+        { tokenProvider = request.tokenProvider
+        , showRawReasoning = request.options.optShowRawReasoning
+        , transportModel = request.transportModel
+        , accounts = OpenAiAccounts
+            { selectablePool = if isGatewayLoadedAuth request.loaded
+                then Nothing else request.loaded.loadedOpenAiPool
+            , readActiveAccountId =
+                (.activeAccountId) <$> readActiveAccount request.activeAccountRef
+            , resolveAccountLabel = request.resolveActiveAccountLabel
+            , installAccount = \credential label ->
+                writeActiveAccount request.activeAccountRef ActiveAccount
+                    { activeAccountId = credential.accountId
+                    , activeSelectionId = credential.accountId
+                    , activeAccountLabel = label
                     }
+            , preferAccount = writeIORef request.preferredOpenAiAccountRef . Just
+            }
+        }
+    XAIProvider -> pure $ XaiProviderConfig request.tokenProvider
+        nativeCapabilities.nativeProviderHostedTools
+    GeminiProvider -> pure $ GeminiProviderConfig request.tokenProvider
+    OpenRouterProvider -> pure $ OpenRouterProviderConfig OpenRouterConfig
+        { tokenProvider = request.tokenProvider
+        , clientOptions = request.openRouterOptions
+        , genericOptions = request.customGenericOptions
+        , model = request.model
+        , transportModel = request.transportModel
+        }
+    ClaudeCodeProvider -> do
+        when (not nativeCapabilities.nativeProviderNativeTools) $
+            startupDie request.startup "Claude Code is unavailable in this runtime"
+        mcpServer <- case MCP.createInProcessMcpServer "haskell-agent" "0.1.0"
+                (defaultLoopDispatch
+                    { toolDispatchFinalizeOutput = \call output ->
+                        finalizeToolOutput request.toolEnv call output
+                    })
+                (approveClaudeRegisteredTool promptRuntime.sessionClaudeRuntimeSlot)
+                promptRuntime.sessionClaudeBridgeTools of
+            Left err -> startupDie request.startup err
+            Right server -> pure server
+        pure $ ClaudeProviderConfig ClaudeConfig
+            { withAuth = withSelectedClaudeAuth request.connectedGateway request.loaded
+                (startupDie request.startup)
+            , cwd = request.cwd
+            , initialPrevious = promptRuntime.sessionInitialPrevious
+            , transportModel = request.transportModel
+            , hostHandlers = defaultClaudeCodeHostHandlers
+                { canUseTool = Just $ handleClaudePermissionRequest
+                    promptRuntime.sessionClaudeRuntimeSlot
+                , handleMcpMessage = Just \mcpRequest ->
+                    if mcpRequest.serverName /= "haskell-agent"
+                        then pure Aeson.Null
+                        else MCP.handleInProcessMcpMessage mcpServer mcpRequest.message
+                            >>= pure . fromMaybe (Aeson.object [])
+                , mcpToolNames = MCP.inProcessMcpToolNames mcpServer
+                , nativeToolsEnabled = nativeCapabilities.nativeProviderNativeTools
+                }
+            , onConnected = \label -> do
+                when request.claudeBypassEnabled $ do
+                    let notice = "Claude Code --yolo is active; host catastrophic-command and Plan Mode denies remain enforced."
+                    case request.fullscreen of
+                        Just runtime -> emitUiEvent runtime (UiSystemMessage notice)
+                        Nothing -> do
+                            color <- resolveColor request.stderrHandle
+                            putTextLn request.stderrHandle $
+                                roleWarn color $ glyphWarn <> notice
+                modifyActiveAccount request.activeAccountRef \current ->
+                    current { activeAccountLabel = label }
+            }
+
+installProviderSubagents
+    :: AgentSessionRequest closeResult windowTitleResult
+    -> SessionLiveRuntime
+    -> ProviderSubagents
+    -> IO ()
+installProviderSubagents request liveRuntime capabilities =
+    case request.multiCtx of
+        Nothing -> pure ()
+        Just ctx -> do
+            let runtime = liveRuntime.sessionSubagentRuntime
+                install = setSubagentRunner ctx.multiRegistry
+            case capabilities of
+                NoProviderSubagents -> pure ()
+                CodexSubagents gatewayOnly -> install $
+                    runCodexSubagent gatewayOnly runtime request.selectableTokenProvider
+                        ctx.multiSendToRoot
+                HttpSubagents makeBackend -> install $
+                    runHttpSubagent runtime request.dialect request.provider
+                        ctx.multiSendToRoot makeBackend
+                XaiSubagents contextWindow threshold makeBackend -> install $
+                    runXaiParentSubagent runtime request.dialect ctx.multiSendToRoot
+                        contextWindow threshold makeBackend
+
+handleOpenAiStartupResult
+    :: AgentSessionRequest closeResult windowTitleResult
+    -> NativeRunCapabilities
+    -> Bool
+    -> Either CodexAuthFailed RunResult
+    -> IO RunResult
+handleOpenAiStartupResult request nativeCapabilities shouldProbeAtStartup = \case
+    Right result -> pure result
+    Left (CodexAuthFailed err) ->
+        let startupFailure = do
+                now <- getCurrentTime
+                startupDie request.startup (formatApiErrorAt now err)
+        in case request.transition of
+            Just active | active.transitionCause == AutomaticFallback ->
+                pure (RunProviderStartFailed err)
+            _ | shouldProbeAtStartup
+              , not (isGatewayLoadedAuth request.loaded)
+              , isProviderUnavailable err ->
+                chooseStartupProviderTransition
+                    nativeCapabilities.nativeProviderFallback
+                    request.catalog request.projectRoot request.fullscreen
+                    (tokenProviderBillingMode request.tokenProvider)
+                    request.provider request.model request.unavailableProviders
+                    Nothing err >>= \case
+                        Just next -> pure (RunSwitchProvider next)
+                        Nothing -> startupFailure
+            _ -> startupFailure
+
+withSelectedClaudeAuth
+    :: Maybe GatewayCredential
+    -> LoadedAuth
+    -> (Text -> IO value)
+    -> (ClaudeCodeAuth -> IO value)
+    -> IO value
+withSelectedClaudeAuth connectedGateway loaded onError action
+    -- Preserve the credential snapshot that selected the session's catalog.
+    | not (isGatewayLoadedAuth loaded) =
+        loadClaudeCodeAuth >>= either onError action
+    | otherwise = case connectedGateway of
+        Nothing -> onError "No organization gateway credential is connected."
+        Just credential -> do
+            result <- withClaudeGatewayProxy credential \transport ->
+                loadClaudeCodeGatewayAuth transport >>= either onError action
+            either onError pure result
 
 -- | Print a copy-pasteable --resume line whenever the CLI session quits.
 -- Ctrl-C is normalized to the same graceful 'RunQuit' result as :q/Ctrl-D so
