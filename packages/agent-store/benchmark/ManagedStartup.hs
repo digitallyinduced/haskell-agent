@@ -5,17 +5,22 @@ module Main (main) where
 import Agent.Store.Postgres
     ( ManagedPostgresConfig
     , defaultManagedPostgresConfig
-    , trustedPool
-    , withStore
+    , openStartupOwnerPool
     )
-import Agent.Store.Postgres.Connection (withSession)
+import Agent.Store.Postgres.Connection
+    ( StorePool
+    , closeStorePool
+    , defaultPoolConfig
+    , openStorePool
+    , withSession
+    )
 import Agent.Store.Postgres.Managed
     ( ensureManagedPostgres
     , stopManagedPostgres
     )
 import Agent.Store.Types (StoreError, renderStoreError)
 import Control.Exception (evaluate)
-import Control.Exception.Safe (finally)
+import Control.Exception.Safe (bracket, finally)
 import Control.Monad (forM, unless, void)
 import Data.List (sort)
 import qualified Data.Text as Text
@@ -58,18 +63,18 @@ main = do
     withSystemTempDirectory "ham" \stateDirectory -> do
         let config = defaultManagedPostgresConfig stateDirectory ""
         (do
-            -- Provision and migrate outside the measured warm-start region.
-            _ <- requireStore =<< openAndQuery config
-            _ <- measure (openAndQuery config)
+            -- Provision outside the measured warm-start region.
+            _ <- requireStore =<< warmOpenAndQuery config
+            _ <- measure (warmOpenAndQuery config)
             _ <- measure (legacyOpenAndQuery config)
             pairs <- forM [0 .. sampleCount - 1] \index ->
                 if even index
                     then do
                         legacy <- measure (legacyOpenAndQuery config)
-                        warm <- measure (openAndQuery config)
+                        warm <- measure (warmOpenAndQuery config)
                         pure (legacy, warm)
                     else do
-                        warm <- measure (openAndQuery config)
+                        warm <- measure (warmOpenAndQuery config)
                         legacy <- measure (legacyOpenAndQuery config)
                         pure (legacy, warm)
             let (legacySamples, warmSamples) = unzip pairs
@@ -94,15 +99,30 @@ legacyOpenAndQuery :: ManagedPostgresConfig -> IO (Either StoreError Int)
 legacyOpenAndQuery config =
     ensureManagedPostgres config >>= \case
         Left err -> pure (Left err)
-        Right _ -> openAndQuery config
+        Right _ ->
+            openAndQueryWith
+                (openStorePool config defaultPoolConfig)
 
-openAndQuery :: ManagedPostgresConfig -> IO (Either StoreError Int)
-openAndQuery config =
-    withStore config \store ->
+warmOpenAndQuery :: ManagedPostgresConfig -> IO (Either StoreError Int)
+warmOpenAndQuery config =
+    openAndQueryWith (openStartupOwnerPool config)
+
+openAndQueryWith
+    :: IO (Either StoreError StorePool)
+    -> IO (Either StoreError Int)
+openAndQueryWith acquirePool =
+    acquirePool >>= \case
+        Left err -> pure (Left err)
+        Right pool ->
+            bracket
+                (pure pool)
+                closeStorePool
+                query
+  where
+    query pool =
         withSession
-            (trustedPool store)
+            pool
             (Session.statement () oneStatement)
-            >>= requireStore
 
 oneStatement :: Statement () Int
 oneStatement = Statement.preparable

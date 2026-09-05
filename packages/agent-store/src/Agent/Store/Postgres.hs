@@ -8,6 +8,7 @@ module Agent.Store.Postgres
     , managedPostgresConfigFromEnv
     , openStore
     , openStoreWithRuntimeRole
+    , openStartupOwnerPool
     , closeStore
     , withStore
     , storeConfig
