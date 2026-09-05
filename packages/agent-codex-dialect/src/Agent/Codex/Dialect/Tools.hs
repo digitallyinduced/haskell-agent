@@ -19,7 +19,11 @@ import Agent.ToolDSL
     )
 import Agent.Tools.ViewImage (viewImageTool)
 import Agent.ToolDispatch
-    ( ToolCall(..)
+    ( ToolOutcome(..)
+    , ToolHandlerResult(..)
+    , typedStreamingRichTool
+    , typedRichToolWithCall
+    , ToolCall(..)
     , ToolCallKind(..)
     , decodeToolArguments
     , textTool
@@ -170,7 +174,7 @@ shellCommandTool env session =
             ])
         AlwaysPrompt
         TurnSequential
-        (typedStreamingTool
+        (typedStreamingRichTool
             "shell_command"
             shellCommandArgsDecoder
             (runShell env session))
@@ -214,7 +218,7 @@ runShell
     -> CodexShellSession
     -> (Text -> IO ())
     -> ShellCommandArgs
-    -> IO (Either Text Text)
+    -> IO (Either Text ToolHandlerResult)
 runShell env session emitOutput args
     | args.timeoutMs /= Nothing && args.yieldTimeMs /= Nothing =
         pure (Left "timeout_ms and yield_time_ms are mutually exclusive")
@@ -244,7 +248,7 @@ runShell env session emitOutput args
             args.command
             yieldMs
             (\out err -> emitOutput (commandBody out err))
-            >>= pure . fmap renderShellResult
+            >>= pure . fmap shellHandlerResult
 
     runWithTimeout dir requestedTimeout = do
         let timeoutMs = clampMs requestedTimeout
@@ -254,14 +258,12 @@ runShell env session emitOutput args
             args.command
             timeoutMs
             (\out err -> emitOutput (commandBody out err))
-        if result.commandCancelled
-            then pure $ Left "Error: Command cancelled"
-            else if result.commandTimedOut
-            then pure $ Left $
-                "Error: Command timed out after "
-                    <> Text.pack (show timeoutMs)
-                    <> "ms"
-            else pure $ Right $ renderFinished result
+        let finished = finishedHandlerResult result
+        pure $ Right $
+            if result.commandTimedOut
+                then finished { resultText = "Error: Command timed out after "
+                    <> Text.pack (show timeoutMs) <> "ms" }
+                else finished
 
 data WriteStdinArgs = WriteStdinArgs
     { sessionId :: Int
@@ -289,7 +291,7 @@ writeStdinTool session =
         ]
         (ClassifyReadOnly writeStdinIsReadOnly)
         TurnSequential
-        (typedTool "write_stdin" writeStdinArgsDecoder (runWriteStdin session))
+        (typedRichToolWithCall "write_stdin" writeStdinArgsDecoder (\_ -> runWriteStdin session))
 
 writeStdinResourceClaims
     :: ToolCall
@@ -316,7 +318,7 @@ writeStdinIsReadOnly call =
 runWriteStdin
     :: CodexShellSession
     -> WriteStdinArgs
-    -> IO (Either Text Text)
+    -> IO (Either Text ToolHandlerResult)
 runWriteStdin session args = do
     let
         requestedYield = fromMaybe 5000 args.yieldTimeMs
@@ -327,7 +329,7 @@ runWriteStdin session args = do
             | maybe True Text.null args.chars =
                 min 300000 (max 5000 requestedYield)
             | otherwise = clampMs requestedYield
-    fmap renderShellResult <$> continueCodexShellCommand
+    fmap shellHandlerResult <$> continueCodexShellCommand
         session
         args.sessionId
         (fromMaybe "" args.chars)
@@ -335,6 +337,21 @@ runWriteStdin session args = do
 
 clampMs :: Int -> Int
 clampMs = min 300000 . max 1
+
+shellHandlerResult :: CodexShellResult -> ToolHandlerResult
+shellHandlerResult result = case result of
+    CodexShellFinished finished -> finishedHandlerResult finished
+    CodexShellRunning sessionId _ _ ->
+        ToolHandlerResultWithOutcome (renderShellResult result) [] (ShellRunning sessionId)
+
+finishedHandlerResult :: CommandResult -> ToolHandlerResult
+finishedHandlerResult result =
+    ToolHandlerResultWithOutcome (renderFinished result) [] outcome
+  where
+    outcome
+        | result.commandCancelled = ShellCancelled
+        | result.commandTimedOut = ShellTimedOut
+        | otherwise = ShellExited (fromMaybe 1 result.commandExitCode)
 
 renderShellResult :: CodexShellResult -> Text
 renderShellResult = \case

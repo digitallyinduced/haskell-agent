@@ -919,7 +919,8 @@ spec = describe "Agent.CLI.Session" do
                         , status = Just ItemCompleted
                         }
                     , FunctionCallOutputItem FunctionCallOutput
-                        { itemId = Just "output-item"
+                        { localOutcome = Nothing
+                        , itemId = Just "output-item"
                         , callId = "call-1"
                         , name = Nothing
                         , namespace = Nothing
@@ -937,7 +938,8 @@ spec = describe "Agent.CLI.Session" do
                         , status = Nothing
                         }
                     , CustomToolCallOutputItem CustomToolCallOutput
-                        { itemId = Nothing
+                        { localOutcome = Nothing
+                        , itemId = Nothing
                         , callId = "custom-1"
                         , name = Just "apply_patch"
                         , output = rawJsonValue ("Done" :: Text.Text)

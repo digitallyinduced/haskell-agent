@@ -44,7 +44,8 @@ import Agent.Responses.Types
     , ResponseRole(..)
     )
 import Agent.ToolDispatch
-    ( ToolCallKind(..)
+    ( withToolCallOutcome
+    , ToolCallKind(..)
     , ToolCallResult(..)
     , customToolCall
     , functionToolCall
@@ -231,19 +232,19 @@ projectItem state = \case
         reduceUi
             (UiLoop
                 (ToolFinished
-                    (ToolCallResult
+                    (withToolCallOutcome output.localOutcome (ToolCallResult
                         output.callId
                         (renderToolOutputValue output.output)
-                        FunctionCallKind)))
+                        FunctionCallKind))))
             state
     CustomToolCallOutputItem output ->
         reduceUi
             (UiLoop
                 (ToolFinished
-                    (ToolCallResult
+                    (withToolCallOutcome output.localOutcome (ToolCallResult
                         output.callId
                         (renderToolOutputValue output.output)
-                        CustomCallKind)))
+                        CustomCallKind))))
             state
     _ -> state
 

@@ -527,7 +527,8 @@ functionCallItem callId name arguments status =
 functionOutputItem :: Text -> Maybe ItemStatus -> ResponseItem
 functionOutputItem callId status =
     FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = Nothing
+        , itemId = Nothing
         , callId
         , name = Nothing
         , namespace = Nothing
@@ -539,7 +540,8 @@ functionOutputItem callId status =
 functionOutputText :: Text -> Text -> ResponseItem
 functionOutputText callId output =
     FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = Nothing
+        , itemId = Nothing
         , callId
         , name = Nothing
         , namespace = Nothing

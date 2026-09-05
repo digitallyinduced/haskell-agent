@@ -195,7 +195,8 @@ buildTurn sampleIndex turnIndex payloadBytes =
         , status = Nothing
         }
     , FunctionCallOutputItem FunctionCallOutput
-        { itemId = Just (itemId "output")
+        { localOutcome = Nothing
+        , itemId = Just (itemId "output")
         , callId = callId
         , name = Just "shell_command"
         , namespace = Nothing

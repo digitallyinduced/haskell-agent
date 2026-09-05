@@ -34,7 +34,9 @@ import Agent.Responses.Types
     )
 import Agent.Telemetry (TurnTelemetry)
 import Agent.ToolDispatch
-    ( ToolCall(..)
+    ( ToolOutcome(..)
+    , withToolCallOutcome
+    , ToolCall(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , ToolResultImage(..)
@@ -186,6 +188,9 @@ normalizeTurnInputImages = \case
             { toolResultImages =
                 fmap normalizeToolResultImage toolResultImages
             }
+
+    normalizeToolResultImages result@ToolCallResultWithOutcome{toolResultImages} =
+        result { toolResultImages = fmap normalizeToolResultImage toolResultImages }
 
     normalizeToolResultImage :: ToolResultImage -> ToolResultImage
     normalizeToolResultImage image@ToolResultImage{imageUrl} =
@@ -1504,17 +1509,11 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
             config.loopOnEvent (ToolStarted call)
             result <- case approval of
                 ToolApprovalDenied denial ->
-                    pure ToolCallResult
-                        { callId = call.callId
-                        , output = denial
-                        , callKind = call.callKind
-                        }
+                    pure (withToolCallOutcome (Just ToolDenied)
+                        (ToolCallResult call.callId denial call.callKind))
                 ToolApprovalRejected ->
-                    pure ToolCallResult
-                        { callId = call.callId
-                        , output = "Tool call rejected by user."
-                        , callKind = call.callKind
-                        }
+                    pure (withToolCallOutcome (Just ToolDenied)
+                        (ToolCallResult call.callId "Tool call rejected by user." call.callKind))
                 ToolApprovalGranted ->
                     dispatchRegisteredToolCall
                         config.loopDispatch

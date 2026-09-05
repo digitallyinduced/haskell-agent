@@ -265,7 +265,8 @@ projectCustomToolOutput
     -> Projection
 projectCustomToolOutput projection callOutput =
     projectFunctionOutput projection FunctionCallOutput
-        { itemId = callOutput.itemId
+        { localOutcome = Nothing
+        , itemId = callOutput.itemId
         , callId = callOutput.callId
         , name = callOutput.name
         , namespace = Nothing

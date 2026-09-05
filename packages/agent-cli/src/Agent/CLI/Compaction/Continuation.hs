@@ -24,7 +24,6 @@ import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
 import Agent.ToolDispatch
     ( ToolCallResult(..)
-    , toolCallResultImages
     )
 import Control.Applicative ((<|>))
 import Data.IORef (IORef, readIORef)
@@ -172,21 +171,9 @@ capCompletedToolOutputs maximumCharacters =
         CompletedTool result -> CompletedTool (capToolResult result)
         input -> input
   where
+    capToolResult :: ToolCallResult -> ToolCallResult
     capToolResult result =
-        let cappedOutput =
-                capToolOutput maximumCharacters result.output
-        in case toolCallResultImages result of
-            [] -> ToolCallResult
-                { callId = result.callId
-                , output = cappedOutput
-                , callKind = result.callKind
-                }
-            images -> ToolCallResultWithImages
-                { callId = result.callId
-                , output = cappedOutput
-                , callKind = result.callKind
-                , toolResultImages = images
-                }
+        result { output = capToolOutput maximumCharacters result.output }
 
 capToolOutput :: Int -> Text -> Text
 capToolOutput maximumCharacters text
