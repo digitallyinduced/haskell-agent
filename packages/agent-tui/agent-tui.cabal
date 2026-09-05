@@ -45,9 +45,14 @@ library
                     , Agent.TUI.Presentation
                     , Agent.TUI.TextWidth
                     , Agent.TUI.Theme
-    other-modules:    Agent.TUI.Model.Edit
+    other-modules:    Agent.TUI.Model.Block
+                    , Agent.TUI.Model.Edit
+                    , Agent.TUI.Model.Inspection
+                    , Agent.TUI.Model.Selection
+                    , Agent.TUI.Model.Shell
                     , Agent.TUI.Model.State
                     , Agent.TUI.Model.Timing
+                    , Agent.TUI.Model.ToolResult
                     , Agent.TUI.Model.Types
     build-depends:    agent-core >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
