@@ -6,6 +6,10 @@ import Agent.Server.Event
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
+    , ToolCallMode(..)
+    , ToolCallResult(..)
+    , functionToolCall
+    , withToolCallMode
     )
 import Data.Aeson
     ( encode
@@ -32,6 +36,24 @@ spec = describe "public loop-event projection" do
             `shouldNotContain` "highly-secret-argument"
         LBS8.unpack bytes
             `shouldContain` "\"argumentsEncrypted\":true"
+
+    it "projects asynchronous tool-call mode" do
+        let (_, value) = projectLoopEvent
+                (ToolStarted
+                    (withToolCallMode AsyncToolCall
+                        (functionToolCall "call-async" "exec" "{}")))
+        LBS8.unpack (encode value)
+            `shouldContain` "\"async\":true"
+
+    it "projects asynchronous tool-result mode" do
+        let (_, value) = projectLoopEvent
+                (ToolFinished
+                    (AsyncToolCallResult
+                        "call-async"
+                        "completed"
+                        FunctionCallKind))
+        LBS8.unpack (encode value)
+            `shouldContain` "\"async\":true"
 
     it "bounds streamed public text" do
         let input = Text.replicate (20 * 1024) "x"

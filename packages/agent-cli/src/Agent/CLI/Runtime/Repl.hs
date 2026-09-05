@@ -8,6 +8,13 @@ module Agent.CLI.Runtime.Repl
     , preparePromptSkillInputsWithPaste
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    )
+import Agent.CLI.ActiveAccount
+    ( ActiveAccount(..)
+    , readActiveAccount
+    )
 import Agent.CLI.AgentViewport
     ( renderAgentViewportPanelFor,
       AgentViewportEnv(viewportSelected, viewportEntries) )
@@ -180,7 +187,7 @@ replWithDraft env@SessionEnv
             map skillInvocationCommand
                 (filter (.invocationSkill.skillUserInvocable) skillInvocations)
     activeToolNames <- readActiveToolNames
-    params <- readIORef paramsRef
+    params <- readSessionRequestParams paramsRef
     gatewayAccess <- readIORef gatewayModelsRef
     modelIds <- case gatewayAccess of
         Nothing -> pure (catalogModelIds catalog)
@@ -203,7 +210,7 @@ replWithDraft env@SessionEnv
     pendingAttachments <- readLiveAttachments conversationRef
     let idleMode = replModeFromState planState policy
     usage <- readIORef usageRef
-    account <- readIORef accountRef
+    account <- (.activeAccountLabel) <$> readActiveAccount accountRef
     mlineResult <- case fullscreen of
         Just runtime -> do
             syncFullscreenContext env

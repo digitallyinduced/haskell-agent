@@ -193,9 +193,11 @@ buildTurn sampleIndex turnIndex payloadBytes =
         , arguments = "{\"command\":\"representative tool call\"}"
         , encryptedFunctionArgs = Nothing
         , status = Nothing
+        , async = Nothing
         }
     , FunctionCallOutputItem FunctionCallOutput
-        { itemId = Just (itemId "output")
+        { localOutcome = Nothing
+        , itemId = Just (itemId "output")
         , callId = callId
         , name = Just "shell_command"
         , namespace = Nothing
@@ -204,6 +206,7 @@ buildTurn sampleIndex turnIndex payloadBytes =
             Aeson.toEncoding (Aeson.String
                 (payload "tool-output" toolOutputBytes))
         , status = Nothing
+        , async = Nothing
         }
     ]
   where

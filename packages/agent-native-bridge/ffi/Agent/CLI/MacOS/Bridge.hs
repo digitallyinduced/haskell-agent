@@ -241,6 +241,8 @@ import Agent.Store.Postgres.Custom
 import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallMode(..)
+    , toolCallMode
     , ToolCallKind(..)
     , isComputerToolCallKind
     )
@@ -5247,6 +5249,7 @@ runNativeTurn
                     Nothing ->
                         forM_ (nativeLoopEvent control.turnControlId event)
                             (sendEvent callback context)
+            , nativeInitialTurnInputs = Nothing
             , nativeOnSessionId = \sessionId -> do
                 writeIORef sessionIdRef (Just sessionId)
                 atomically do
@@ -5698,6 +5701,7 @@ requestApprovalFromClient callback context control call = do
                 , "summary" Aeson..= summarizeToolCall call
                 , "arguments" Aeson..= arguments
                 , "argumentsEncrypted" Aeson..= call.argumentsEncrypted
+                , "async" Aeson..= (toolCallMode call == AsyncToolCall)
                 , "truncated" Aeson..= truncated
                 ]
             ]
@@ -6033,26 +6037,17 @@ loadNativeModelCatalog
                                 == target.targetConnectionId
                                 then Just option
                                 else Nothing
-                    selectedTarget <-
-                        traverse
-                            (fmap (.modelTarget)
-                                . resolveModelOptionDialect)
-                            ( configuredTarget
-                                <|> defaultModelOptionFor
-                                    catalog
-                                    OpenAIProvider
-                                <|> listToMaybe (modelCatalog catalog)
-                            )
-                    case selectedTarget of
-                        Nothing -> pure (Left "model catalog is empty")
-                        Just target -> do
-                            picker <- initialPickerStateResolved
-                                catalog
-                                target.targetConnectionId
-                                target.targetProvider
-                                target.targetModelId
-                                target.targetDialect
-                            pure (Right (modelPickerJSON catalog picker))
+                    selected <- resolveModelOptionDialect $
+                        fromMaybe (defaultModelOptionFor catalog OpenAIProvider)
+                            configuredTarget
+                    let target = selected.modelTarget
+                    picker <- initialPickerStateResolved
+                        catalog
+                        target.targetConnectionId
+                        target.targetProvider
+                        target.targetModelId
+                        target.targetDialect
+                    pure (Right (modelPickerJSON catalog picker))
 
 modelPickerJSON :: ModelCatalog -> PickerState -> Aeson.Value
 modelPickerJSON catalog picker =

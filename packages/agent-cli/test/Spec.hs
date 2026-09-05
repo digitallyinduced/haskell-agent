@@ -27,6 +27,7 @@ import Test.Hspec.Runner
     )
 import Text.Read (readMaybe)
 
+import qualified Agent.CLI.ActiveAccountSpec as ActiveAccountSpec
 import qualified Agent.CLI.AccountSelectionSpec as AccountSelectionSpec
 import qualified Agent.CLI.AgentSessionsSpec as AgentSessionsSpec
 import qualified Agent.CLI.AgentViewportSpec as AgentViewportSpec
@@ -78,6 +79,7 @@ import qualified Agent.CLI.RecapSpec as RecapSpec
 import qualified Agent.CLI.ProviderFallbackSpec as ProviderFallbackSpec
 import qualified Agent.CLI.ProviderAvailabilitySpec as ProviderAvailabilitySpec
 import qualified Agent.CLI.ProviderTransitionSpec as ProviderTransitionSpec
+import qualified Agent.CLI.ProviderRuntimeSpec as ProviderRuntimeSpec
 import qualified Agent.CLI.RequestSpec as RequestSpec
 import qualified Agent.CLI.RenderSpec as RenderSpec
 import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
@@ -152,6 +154,7 @@ main = do
 
 specs :: Spec
 specs = do
+    ActiveAccountSpec.spec
     AccountSelectionSpec.spec
     AgentViewportSpec.spec
     AgentViewportRuntimeSpec.spec
@@ -203,6 +206,7 @@ specs = do
     ProviderFallbackSpec.spec
     ProviderAvailabilitySpec.spec
     ProviderTransitionSpec.spec
+    ProviderRuntimeSpec.spec
     RequestSpec.spec
     RenderSpec.spec
     ReplStatusSpec.spec

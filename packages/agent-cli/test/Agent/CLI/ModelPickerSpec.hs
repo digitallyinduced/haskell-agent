@@ -56,7 +56,7 @@ spec = do
             frame `shouldSatisfy` Text.isInfixOf "openrouter"
             frame `shouldSatisfy` Text.isInfixOf "claude-code"
             defaultModelFor catalog XAIProvider
-                `shouldSatisfy` maybe False (\model -> Text.isInfixOf model frame)
+                `shouldSatisfy` (\model -> Text.isInfixOf model frame)
             frame `shouldSatisfy` Text.isInfixOf "grok-4.6"
             frame `shouldSatisfy` Text.isInfixOf "confirm"
             frame `shouldSatisfy` Text.isInfixOf "reasoning effort"

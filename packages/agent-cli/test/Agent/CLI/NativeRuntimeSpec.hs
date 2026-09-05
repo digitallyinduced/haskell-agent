@@ -28,6 +28,7 @@ spec = describe "nativeTurnOptions" do
         let cwd = unsafeEncodeUtf "/tmp/project"
             request = NativeTurnRequest
                 { nativeTurnPrompt = "fix the tests"
+                , nativeTurnImages = []
                 , nativeTurnSession = NativeNewSession
                 , nativeTurnProvider = Just OpenAIProvider
                 , nativeTurnModel = Just "gpt-5"
@@ -113,6 +114,7 @@ spec = describe "nativeTurnOptions" do
 baseRequest :: NativeTurnRequest
 baseRequest = NativeTurnRequest
     { nativeTurnPrompt = "hello"
+    , nativeTurnImages = []
     , nativeTurnSession = NativeNewSession
     , nativeTurnProvider = Nothing
     , nativeTurnModel = Nothing

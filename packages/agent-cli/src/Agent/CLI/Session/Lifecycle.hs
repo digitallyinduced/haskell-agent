@@ -6,6 +6,10 @@ module Agent.CLI.Session.Lifecycle
     , runPendingTurn
     ) where
 
+import Agent.CLI.ActiveAccount
+    ( ActiveAccount(..)
+    , readActiveAccount
+    )
 import Agent.CLI.Notification
     ( AttentionRequest(InputRequested)
     , notifyAttention
@@ -151,8 +155,9 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
     TurnSucceeded -> do
         env.sessionQueueRecap RecapTurnSummary
         writeIORef env.sessionUnavailableProviders Set.empty
-        selectionId <- readIORef env.sessionAccountSelectionId
-        accountId <- readIORef env.sessionAccountId
+        account <- readActiveAccount env.sessionAccount
+        let selectionId = account.activeSelectionId
+            accountId = account.activeAccountId
         when
             (not (Text.null (Text.strip selectionId))
                 && not (Text.null (Text.strip accountId))) $

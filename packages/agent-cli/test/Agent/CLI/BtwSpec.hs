@@ -203,6 +203,7 @@ functionCallItem callId = FunctionCallItem FunctionCall
     , arguments = "{}"
     , encryptedFunctionArgs = Nothing
     , status = Nothing
+    , async = Nothing
     }
 
 computerCallItem :: Text.Text -> ResponseItem
@@ -228,13 +229,15 @@ computerOutputItem computerOutputCallId =
 
 functionOutputItem :: Text.Text -> ResponseItem
 functionOutputItem callId = FunctionCallOutputItem FunctionCallOutput
-    { itemId = Nothing
+    { localOutcome = Nothing
+    , itemId = Nothing
     , callId
     , name = Nothing
     , namespace = Nothing
     , provider = Nothing
     , output = rawJsonFromEncoding (Aeson.toEncoding ("ok" :: Text.Text))
     , status = Nothing
+    , async = Nothing
     }
 
 reasoningItem :: ResponseItem

@@ -4,10 +4,10 @@ module Agent.CLI.Runtime.Repl.MetaConsole
     ) where
 
 import Agent.CLI.Command
-    ( ReplAction(ReplSetEffort, ReplToggleFast, ReplSetModel,
-                 ReplSetShell, ReplToggleComputerUse, ReplSetComputerUse,
+    ( ReplAction(ReplSelection, ReplSetShell, ReplToggleComputerUse, ReplSetComputerUse,
                  ReplToggleAlwaysApprove, ReplSetAgentLimit,
                  ReplEnableCodeMode, ReplSkills)
+    , SelectionAction(ReplSetEffort, ReplToggleFast, ReplSetModel)
     , SlashCatalog
     , parseReplLineWithCatalog
     )
@@ -358,7 +358,7 @@ promptMetaSecret runtime title body =
             requestFullscreenSecret fullscreen title body
         Nothing ->
             promptSecretLine
-                (metaEnv runtime).sessionEscPaused
+                (metaEnv runtime).sessionStdinControl
                 body
                 (Just
                     "Meta Console configuration; the value is written only to the local config file")
@@ -453,9 +453,9 @@ runMetaSessionCommand runtime command =
 
 safeMetaSessionAction :: ReplAction -> Bool
 safeMetaSessionAction = \case
-    ReplSetEffort{} -> True
-    ReplToggleFast -> True
-    ReplSetModel{} -> True
+    ReplSelection ReplSetEffort{} -> True
+    ReplSelection ReplToggleFast -> True
+    ReplSelection ReplSetModel{} -> True
     ReplSetShell{} -> True
     ReplToggleComputerUse -> True
     ReplSetComputerUse{} -> True

@@ -94,7 +94,7 @@ waitAndRetryPendingTurn resumeDraft retryPending env delay pending = do
             Nothing
                 | env.sessionBackground -> waitForCancel
                 | otherwise ->
-                    withEscCancel cancel env.sessionEscPaused waitForCancel
+                    withEscCancel cancel env.sessionStdinControl waitForCancel
     setPersistenceActivity
         env.sessionPersist
         "provider_cooldown"

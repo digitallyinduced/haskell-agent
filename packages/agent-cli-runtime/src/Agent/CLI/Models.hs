@@ -33,7 +33,8 @@ module Agent.CLI.Models
 import Agent.CLI.ModelConfig
     ( CatalogModel(..)
     , ConnectionKind(..)
-    , ModelCatalog(..)
+    , ModelCatalog
+    , catalogModels
     , ModelConnection(..)
     , builtinConnectionId
     , organizationGatewayConnectionId
@@ -111,7 +112,10 @@ modelOptionFromCatalog catalog model = do
             -- Gateway-only entries provide protocol and presentation metadata
             -- for live aliases. They must never enter the direct model catalog.
             OrganizationGatewayConnection -> Nothing
-    pure ModelOption
+    pure (modelOptionForProvider provider model)
+
+modelOptionForProvider :: Provider -> CatalogModel -> ModelOption
+modelOptionForProvider provider model = ModelOption
         { modelTarget = ModelTarget
             { targetProvider = provider
             , targetConnectionId = model.catalogModelConnectionId
@@ -126,7 +130,7 @@ modelOptionFromCatalog catalog model = do
 
 modelCatalog :: ModelCatalog -> [ModelOption]
 modelCatalog catalog =
-    mapMaybe (modelOptionFromCatalog catalog) catalog.catalogModels
+    mapMaybe (modelOptionFromCatalog catalog) (catalogModels catalog)
 
 modelsForProvider :: ModelCatalog -> Provider -> [ModelOption]
 modelsForProvider catalog provider =
@@ -191,14 +195,13 @@ catalogModelIds :: ModelCatalog -> [Text]
 catalogModelIds =
     map (.modelTarget.targetModelId) . modelCatalog
 
-defaultModelOptionFor :: ModelCatalog -> Provider -> Maybe ModelOption
+defaultModelOptionFor :: ModelCatalog -> Provider -> ModelOption
 defaultModelOptionFor catalog provider =
-    catalogDefaultForProvider catalog provider
-        >>= modelOptionFromCatalog catalog
+    modelOptionForProvider provider (catalogDefaultForProvider catalog provider)
 
-defaultModelFor :: ModelCatalog -> Provider -> Maybe Text
+defaultModelFor :: ModelCatalog -> Provider -> Text
 defaultModelFor catalog provider =
-    (.modelTarget.targetModelId) <$> defaultModelOptionFor catalog provider
+    (defaultModelOptionFor catalog provider).modelTarget.targetModelId
 
 resolveConfiguredModel :: ModelCatalog -> Text -> Maybe ModelOption
 resolveConfiguredModel catalog modelId =

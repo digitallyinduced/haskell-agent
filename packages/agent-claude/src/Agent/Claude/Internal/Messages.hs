@@ -608,6 +608,7 @@ functionCallItem callId name input =
         , arguments = rawJsonText input
         , encryptedFunctionArgs = Nothing
         , status = Just ItemCompleted
+        , async = Nothing
         }
 
 -- | Persist the text projection rather than the wire JSON: structured
@@ -621,7 +622,8 @@ functionOutputItem
     -> ResponseItem
 functionOutputItem callId content isError =
     FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = Nothing
+        , itemId = Nothing
         , callId
         , name = Nothing
         , namespace = Nothing
@@ -636,6 +638,7 @@ functionOutputItem callId content isError =
                 if isError == Just True
                     then ItemIncomplete
                     else ItemCompleted
+        , async = Nothing
         }
 
 streamEventToolEvents :: StreamEvent -> [ClaudeLiveEvent]

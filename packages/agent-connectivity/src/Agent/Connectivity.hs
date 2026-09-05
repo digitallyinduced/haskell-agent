@@ -22,9 +22,24 @@ import Agent.Error
     , apiErrorRetryAfter
     , isInlineRetryableProviderError
     )
-import Agent.Loop (Backend(..), BackendMiddleware, LoopEvent(..))
+import Agent.Loop
+    ( Backend(..)
+    , BackendCallbacks(..)
+    , BackendMiddleware
+    , LoopEvent(..)
+    , backendWithCallbacks
+    )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race)
+import Control.Concurrent.STM
+    ( TVar
+    , atomically
+    , newTVarIO
+    , readTVar
+    , readTVarIO
+    , retry
+    , writeTVar
+    )
 import Control.Monad (when)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
@@ -101,48 +116,73 @@ withConnectionRecoveryUsingMaybeWatcher
     -> Maybe RecoveryWatcher
     -> BackendMiddleware
 withConnectionRecoveryUsingMaybeWatcher
-    waitMicros watcher (Backend submit) =
-    Backend \state previous inputs onEvent ->
+    waitMicros watcher backend =
+    backendWithCallbacks \state previous inputs callbacks ->
         let go reconnectAttempt transientAttempt = do
                 streamed <- newIORef False
+                replayGate <- newTVarIO ReplayAllowed
                 armedRecovery <- traverse (.armRecoveryWatcher) watcher
                 outcome <-
-                    raceWithRecovery armedRecovery $
-                        submit state previous inputs \event -> do
-                            when (isStreamOutput event)
-                                (writeIORef streamed True)
-                            -- A lower layer already closed the interrupted
-                            -- attempt with its own boundary; only output
-                            -- streamed afterwards needs another one before
-                            -- the next replay.
-                            when (isRestartBoundary event)
-                                (writeIORef streamed False)
-                            onEvent event
+                    raceWithRecovery replayGate armedRecovery $
+                        backend.submitTurnWithCallbacks
+                            state
+                            previous
+                            inputs
+                            callbacks
+                                { onLoopEvent = \event -> do
+                                    when (isStreamOutput event)
+                                        (writeIORef streamed True)
+                                    -- A lower layer already closed the
+                                    -- interrupted attempt with its own
+                                    -- boundary; only output streamed
+                                    -- afterwards needs another one before the
+                                    -- next replay.
+                                    when (isRestartBoundary event)
+                                        (writeIORef streamed False)
+                                    callbacks.onLoopEvent event
+                                , onAsyncToolCall = \call -> do
+                                    shouldAdmit <- atomically do
+                                        readTVar replayGate >>= \case
+                                            RecoveryCommitted -> pure False
+                                            _ -> do
+                                                writeTVar replayGate
+                                                    AsyncAdmitted
+                                                pure True
+                                    -- If recovery won first, this provider
+                                    -- attempt is already being discarded.
+                                    -- Never expose its async call.
+                                    when shouldAdmit
+                                        (callbacks.onAsyncToolCall call)
+                                }
                 didStream <- readIORef streamed
+                didAdmitAsync <-
+                    (== AsyncAdmitted) <$> readTVarIO replayGate
                 case outcome of
                     RecoveryObserved -> do
-                        onEvent
+                        callbacks.onLoopEvent
                             (ActivityUpdated connectionRestoredMessage)
                         when didStream $
-                            onEvent
+                            callbacks.onLoopEvent
                                 (ResponseRestarted
                                     connectionRestartMessage)
                         go reconnectAttempt transientAttempt
+                    OperationFinished result
+                        | didAdmitAsync -> pure result
                     OperationFinished (Left ConnectionError{}) -> do
                         let delay = reconnectDelayMicros reconnectAttempt
-                        onEvent
+                        callbacks.onLoopEvent
                             (ActivityUpdated
                                 (connectionWaitingMessage delay))
                         recovered <-
                             waitForDelayOrRecovery
                                 waitMicros armedRecovery delay
-                        onEvent
+                        callbacks.onLoopEvent
                             (ActivityUpdated
                                 (if recovered
                                     then connectionRestoredMessage
                                     else "Checking internet connection…"))
                         when didStream $
-                            onEvent
+                            callbacks.onLoopEvent
                                 (ResponseRestarted
                                     connectionRestartMessage)
                         go (reconnectAttempt + 1) transientAttempt
@@ -152,17 +192,17 @@ withConnectionRecoveryUsingMaybeWatcher
                             let delay =
                                     transientRetryDelayMicros
                                         apiError transientAttempt
-                            onEvent
+                            callbacks.onLoopEvent
                                 (ActivityUpdated
                                     (transientWaitingMessage
                                         transientAttempt delay))
                             waitMicros delay
-                            onEvent
+                            callbacks.onLoopEvent
                                 (ActivityUpdated
                                     (transientRetryingMessage
                                         transientAttempt))
                             when didStream $
-                                onEvent
+                                callbacks.onLoopEvent
                                     (ResponseRestarted
                                         transientRestartMessage)
                             go reconnectAttempt (transientAttempt + 1)
@@ -173,24 +213,43 @@ data RecoveryOutcome result
     = RecoveryObserved
     | OperationFinished !result
 
+data ReplayGate
+    = ReplayAllowed
+    | AsyncAdmitted
+    | RecoveryCommitted
+    deriving (Eq)
+
 networkRecoveryWatcher :: NetworkRecovery -> RecoveryWatcher
 networkRecoveryWatcher recovery =
     RecoveryWatcher (armNetworkRecovery recovery)
 
 raceWithRecovery
-    :: Maybe (IO ())
+    :: TVar ReplayGate
+    -> Maybe (IO ())
     -> IO result
     -> IO (RecoveryOutcome result)
-raceWithRecovery armedRecovery operation =
+raceWithRecovery replayGate armedRecovery operation =
     case armedRecovery of
         Nothing -> OperationFinished <$> operation
         Just waitForRecovery ->
             race
                 operation
-                waitForRecovery
+                recovery
                 >>= \case
                     Left result -> pure (OperationFinished result)
                     Right () -> pure RecoveryObserved
+          where
+            recovery = do
+                waitForRecovery
+                atomically do
+                    readTVar replayGate >>= \case
+                        AsyncAdmitted ->
+                            -- Block until the operation branch wins and
+                            -- cancels this watcher.
+                            retry
+                        RecoveryCommitted -> pure ()
+                        ReplayAllowed ->
+                            writeTVar replayGate RecoveryCommitted
 
 waitForDelayOrRecovery
     :: (Int -> IO ())

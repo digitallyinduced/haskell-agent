@@ -445,9 +445,11 @@ spec = do
                     , encryptedFunctionArgs = Nothing
                     , provider = Nothing
                     , status = Nothing
+                    , async = Just True
                     }
                 output = FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = "call-function"
                     , name = Nothing
                     , namespace = Nothing
@@ -461,6 +463,7 @@ spec = do
                         ]
                     , provider = Nothing
                     , status = Nothing
+                    , async = Just True
                     }
                 encoded =
                     TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $
@@ -473,6 +476,8 @@ spec = do
                 ("type 10 characters" `Text.isInfixOf`)
             encoded `shouldSatisfy`
                 ("\"output\":\"Screenshot captured\"" `Text.isInfixOf`)
+            encoded `shouldSatisfy`
+                ("\"async\":true" `Text.isInfixOf`)
             encoded `shouldSatisfy`
                 (not . ("top secret" `Text.isInfixOf`))
             encoded `shouldSatisfy`

@@ -70,7 +70,9 @@ import Agent.Loop
     )
 import Agent.Telemetry (telemetrySummary)
 import Agent.ToolDispatch
-    ( ToolCall(..)
+    ( ToolOutcome(..)
+    , toolCallResultOutcome
+    , ToolCall(..)
     , ToolCallResult(..)
     , canonicalToolName
     )
@@ -978,7 +980,7 @@ timestampNewMessageBlocks firstNewIndex timestamp state
 
 completeTool :: Int -> ToolCall -> ToolCallResult -> UiState -> UiState
 completeTool blockIndex call result state =
-    let resultState = toolResultState result.output
+    let resultState = resultBlockState result
         diff =
             formatToolDiffRelativeWithOutput
                 state.uiWorkspaceRoot
@@ -1088,7 +1090,7 @@ finishVisibleTool result state =
             | blockIndex < Seq.length state.uiBlocks
             , isShellProcessTool call.name
             , Just (sessionId, output) <-
-                runningShellResult result.output
+                runningShellOutcome result
             , Map.notMember sessionId next.uiShellProcesses ->
                 retainRunningShell blockIndex sessionId output next
             | blockIndex < Seq.length state.uiBlocks ->
@@ -1115,7 +1117,7 @@ reconcileVisibleShellContinuation call result state =
             case Map.lookup sessionId state.uiShellProcesses of
                 Nothing -> state
                 Just ownerId ->
-                    case runningShellResult result.output of
+                    case runningShellOutcome result of
                         Just (returnedSessionId, _) ->
                             state
                                 { uiShellProcesses =
@@ -1127,7 +1129,7 @@ reconcileVisibleShellContinuation call result state =
                                             state.uiShellProcesses)
                                 }
                         Nothing ->
-                            case terminalShellResult result.output of
+                            case terminalShellOutcome result of
                                 Nothing -> state
                                 Just (blockState, _) ->
                                     let
@@ -1193,7 +1195,7 @@ finishShellPoll sessionId result state =
                 Nothing ->
                     next { uiShellProcesses = withoutSession }
                 Just (blockIndex, _) ->
-                    case runningShellResult result.output of
+                    case runningShellOutcome result of
                         Just (returnedSessionId, output) ->
                             appendShellOutput blockIndex output BlockRunning
                                 next
@@ -1204,7 +1206,7 @@ finishShellPoll sessionId result state =
                                             withoutSession
                                     }
                         Nothing ->
-                            case terminalShellResult result.output of
+                            case terminalShellOutcome result of
                                 Nothing -> next
                                 Just (blockState, output) ->
                                     appendShellOutput
@@ -1795,6 +1797,42 @@ emptyWriteStdinSession call = do
     (sessionId, chars) <- writeStdinInput call
     guard (maybe True Text.null chars)
     pure sessionId
+
+-- Older/imported results have no execution facts and use the legacy adapter.
+resultBlockState :: ToolCallResult -> BlockState
+resultBlockState result = maybe (toolResultState result.output) outcomeBlockState
+    (toolCallResultOutcome result)
+
+outcomeBlockState :: ToolOutcome -> BlockState
+outcomeBlockState = \case
+    ToolSucceeded -> BlockComplete
+    ToolFailed -> BlockFailed
+    ToolDenied -> BlockDenied
+    ToolCancelled -> BlockCancelled
+    ShellRunning _ -> BlockRunning
+    ShellExited 0 -> BlockComplete
+    ShellExited _ -> BlockFailed
+    ShellCancelled -> BlockCancelled
+    ShellTimedOut -> BlockFailed
+
+runningShellOutcome :: ToolCallResult -> Maybe (Int, Text)
+runningShellOutcome result = case toolCallResultOutcome result of
+    Just (ShellRunning sessionId) -> Just (sessionId, dropOutputLine (dropOutputLine result.output))
+    Just _ -> Nothing
+    Nothing -> runningShellResult result.output
+
+terminalShellOutcome :: ToolCallResult -> Maybe (BlockState, Text)
+terminalShellOutcome result = case toolCallResultOutcome result of
+    Just outcome@(ShellExited _) -> Just (outcomeBlockState outcome, dropOutputLine result.output)
+    Just ShellCancelled -> Just (BlockCancelled, result.output)
+    Just ShellTimedOut -> Just (BlockFailed, result.output)
+    Just _ -> Nothing
+    Nothing -> terminalShellResult result.output
+
+-- Only remove the transport prologue for presentation. It is never parsed for
+-- execution status, exit codes or session identifiers.
+dropOutputLine :: Text -> Text
+dropOutputLine = Text.drop 1 . Text.dropWhile (/= '\n')
 
 runningShellResult :: Text -> Maybe (Int, Text)
 runningShellResult output = do

@@ -1,59 +1,24 @@
 module Agent.CLI.Runtime.Orchestration.Providers
-    ( AgentProviderRequest(..)
-    , runAgentProviders
+    ( withProviderRuntime
     ) where
 
-import Agent.CLI.Runtime.Orchestration.Providers.Claude
-    ( runClaudeProvider
-    )
-import Agent.CLI.Runtime.Orchestration.Providers.Gemini
-    ( runGeminiProvider
-    )
-import Agent.CLI.Runtime.Orchestration.Providers.OpenAI
-    ( runOpenAiProvider
-    )
-import Agent.CLI.Runtime.Orchestration.Providers.OpenRouter
-    ( runOpenRouterProvider
-    )
+import Agent.CLI.Runtime.Orchestration.Providers.Claude (withClaudeProvider)
+import Agent.CLI.Runtime.Orchestration.Providers.Gemini (withGeminiProvider)
+import Agent.CLI.Runtime.Orchestration.Providers.OpenAI (withOpenAiProvider)
+import Agent.CLI.Runtime.Orchestration.Providers.OpenRouter (withOpenRouterProvider)
 import Agent.CLI.Runtime.Orchestration.Providers.Types
-    ( AgentProviderRequest(..)
-    )
-import Agent.CLI.Runtime.Orchestration.Providers.XAI
-    ( runXaiProvider
-    )
-import Agent.CLI.Runtime.Orchestration.Types
-    ( NativeRunCapabilities(..)
-    , NativeRunHooks(..)
-    , fullNativeRunCapabilities
-    )
-import Agent.CLI.Runtime.Types (RunResult)
-import Agent.CLI.Session.Runtime.Types
-    ( StartupRuntime(..) )
-import Agent.CLI.Startup.Auth (startupDie)
-import Agent.Provider
-    ( Provider(..) )
+import Agent.CLI.Runtime.Orchestration.Providers.XAI (withXaiProvider)
 
-runAgentProviders
-    :: AgentProviderRequest
-    -> IO RunResult
-runAgentProviders request@AgentProviderRequest{provider, startup} =
-    let nativeCapabilities =
-            maybe
-                fullNativeRunCapabilities
-                (.nativeCapabilities)
-                startup.startupNativeHooks
-    in case provider of
-        OpenAIProvider ->
-            runOpenAiProvider request nativeCapabilities
-        XAIProvider ->
-            runXaiProvider request nativeCapabilities
-        GeminiProvider ->
-            runGeminiProvider request
-        ClaudeCodeProvider
-            | not nativeCapabilities.nativeProviderNativeTools ->
-                startupDie startup
-                    "Claude Code is unavailable in this runtime"
-            | otherwise ->
-                runClaudeProvider request nativeCapabilities
-        OpenRouterProvider ->
-            runOpenRouterProvider request
+-- | Scope provider resources around a consumer. The consumer decides how to
+-- compose the backend with session persistence, notices, and child agents.
+withProviderRuntime
+    :: ProviderConfig
+    -> ProviderHost
+    -> (ProviderRuntime -> IO a)
+    -> IO a
+withProviderRuntime config host use = case config of
+    OpenAiProviderConfig openAi -> withOpenAiProvider openAi host use
+    XaiProviderConfig tokens hostedTools -> withXaiProvider tokens hostedTools host use
+    GeminiProviderConfig tokens -> withGeminiProvider tokens host use
+    OpenRouterProviderConfig openRouter -> withOpenRouterProvider openRouter host use
+    ClaudeProviderConfig claude -> withClaudeProvider claude host use

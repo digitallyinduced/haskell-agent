@@ -1,5 +1,6 @@
 module Agent.Tools.Types
     ( AppTool(..)
+    , ToolAsyncCapability(..)
     , AppToolGroup(..)
     , appToolsFromGroups
     , executionToolsFromGroups
@@ -27,6 +28,8 @@ module Agent.Tools.Types
     , freeformGrammarAppToolWithExecution
     , withToolHumanInputWait
     , withToolResourceClaims
+    , withAsyncToolCalls
+    , appToolSupportsAsync
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
@@ -38,6 +41,7 @@ module Agent.Tools.Types
     , jsonToolParameters
     , appToolHandlers
     , toolAllowsWithoutPrompt
+    , toolSupportsAsync
     ) where
 
 import Agent.Cancel (CancelFlag, newCancelFlag)
@@ -95,6 +99,12 @@ data ToolSchema
     | HostedComputerSchema
     deriving (Eq, Show)
 
+-- | Whether a tool may be selected for provider-requested asynchronous calls.
+data ToolAsyncCapability
+    = BlockingOnly
+    | AsyncCapable
+    deriving (Eq, Show)
+
 -- | Whether a call may run without generic user approval.
 data ApprovalRule
     = AlwaysReadOnly
@@ -125,6 +135,7 @@ data AppTool = AppTool
     , appToolApproval :: !ApprovalRule
     , appToolExecution :: !ToolExecutionPolicy
     , appToolResourceClaims :: !(Maybe ToolResourceResolver)
+    , appToolAsyncCapability :: !ToolAsyncCapability
     }
 
 -- | A construction-time partition between ambient execution handlers and
@@ -309,6 +320,7 @@ jsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
 
 -- | Construct a JSON tool from an already-built JSON Schema value. Dynamic
@@ -341,6 +353,7 @@ rawJsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
 
 withToolResourceClaims
@@ -349,6 +362,15 @@ withToolResourceClaims
     -> AppTool
 withToolResourceClaims resolver tool =
     tool { appToolResourceClaims = Just resolver }
+
+-- | Explicitly opt a tool into provider-requested asynchronous execution.
+withAsyncToolCalls :: AppTool -> AppTool
+withAsyncToolCalls tool =
+    tool { appToolAsyncCapability = AsyncCapable }
+
+appToolSupportsAsync :: AppTool -> Bool
+appToolSupportsAsync tool =
+    tool.appToolAsyncCapability == AsyncCapable
 
 -- | Construct a freeform tool with the conservative turn-sequential default.
 freeformApplyPatchAppTool
@@ -377,6 +399,7 @@ freeformApplyPatchAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
 
 -- | Construct a freeform tool that advertises an explicit grammar.
@@ -398,6 +421,7 @@ freeformGrammarAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
 
 mkToolRegistry :: [AppTool] -> Either Text ToolRegistry
@@ -430,6 +454,13 @@ toolRegistryTools = (.registryTools)
 lookupRegisteredTool :: Text -> ToolRegistry -> Maybe AppTool
 lookupRegisteredTool name registry =
     Map.lookup (canonicalToolName name) registry.registryByName
+
+-- | Whether a registered tool accepts an asynchronous call request.
+-- Unknown tools remain conservative and report no async support.
+toolSupportsAsync :: ToolRegistry -> ToolCall -> Bool
+toolSupportsAsync registry call =
+    maybe False appToolSupportsAsync
+        (lookupRegisteredTool call.name registry)
 
 -- | Unknown tools are conservative barriers. Their dispatch will still
 -- produce the normal unknown-tool result, but never overlap known work.

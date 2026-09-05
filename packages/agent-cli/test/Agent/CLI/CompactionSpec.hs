@@ -1,5 +1,7 @@
 module Agent.CLI.CompactionSpec (spec) where
 
+import Agent.CLI.Session.Request (SessionRequestState, newSessionRequestState)
+import Agent.CLI.Session (Persistence(..))
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
     , CompactionInstall(..)
@@ -87,7 +89,7 @@ spec :: Spec
 spec = do
     describe "runProviderCompact" do
         it "reports a provider-specific error when credentials are unavailable" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef []
             runProviderCompact OpenAIProvider Nothing params transcript Nothing
                 `shouldReturn` Left "openai compact requires a token provider"
@@ -99,7 +101,7 @@ spec = do
                 `shouldReturn` Left "gemini compact requires a token provider"
 
         it "short-circuits an empty transcript before using credentials" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef []
             let provider = tokenProvider SubscriptionBilled \_ ->
                     error "empty compaction unexpectedly requested credentials"
@@ -107,7 +109,7 @@ spec = do
                 `shouldReturn` Left "nothing to compact"
 
         it "uses an injected OpenAI sender and records its response usage" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             let history = [userTextItem "old context"]
             transcript <- newIORef history
             requests <- newIORef []
@@ -132,7 +134,7 @@ spec = do
             readIORef recordedUsage `shouldReturn` [compactionUsage]
 
         it "records completed-response usage with asynchronous exceptions masked" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [userTextItem "old context"]
             senderMasking <- newIORef MaskedUninterruptible
             recorderMasking <- newIORef Unmasked
@@ -152,7 +154,7 @@ spec = do
             readIORef recorderMasking `shouldReturn` MaskedInterruptible
 
         it "records local-summary response usage when summary text is missing" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [userTextItem "old context"]
             recordedUsage <- newIORef []
             result <-
@@ -172,7 +174,7 @@ spec = do
             readIORef recordedUsage `shouldReturn` [compactionUsage]
 
         it "rejects incomplete local summaries" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [userTextItem "old context"]
             result <-
                 runProviderCompactWith
@@ -195,13 +197,15 @@ spec = do
         it "clears tool and continuation controls for local summaries" do
             let paramsValue =
                     (defaultResponseCreateParams :: ResponseCreateParams)
-                        { tools =
+                        { model = Just "gpt-5.6-sol"
+                        , tools =
                             Just
                                 [ FunctionToolValue FunctionTool
                                     { name = "must_call"
                                     , description = Nothing
                                     , parameters = Nothing
                                     , strict = Just True
+                                    , async = Nothing
                                     }
                                 ]
                         , toolChoice =
@@ -210,7 +214,7 @@ spec = do
                         , previousResponseId = Just "resp-old"
                         , conversation = Just (ConversationId "conv-old")
                         }
-            params <- newIORef paramsValue
+            params <- testRequestState paramsValue
             transcript <- newIORef [userTextItem "old context"]
             requests <- newIORef []
             result <-
@@ -264,7 +268,7 @@ spec = do
                     , knownContextCheckpoint
                     , remoteTrigger
                     ]
-            params <- newIORef paramsValue
+            params <- testRequestState paramsValue
             transcript <- newIORef history
             requests <- newIORef []
             result <-
@@ -324,7 +328,7 @@ spec = do
                     , trigger
                     ]
                 prompt = userTextItem (summarizationPrompt (Just "focus"))
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef history
             requests <- newIORef []
             result <-
@@ -354,7 +358,7 @@ spec = do
                         }
                 retained = userTextItem "portable context"
                 prompt = userTextItem (summarizationPrompt Nothing)
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [foreignCheckpoint, retained]
             requests <- newIORef []
             result <-
@@ -375,7 +379,7 @@ spec = do
             let remoteCheckpoint =
                     KnownResponseItem ItemCompaction (TaggedObject "compaction")
                 history = [userTextItem "old context", remoteCheckpoint]
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef history
             requests <- newIORef []
             result <-
@@ -399,7 +403,7 @@ spec = do
         it "rejects portable summaries with only opaque checkpoints" do
             let remoteCheckpoint =
                     KnownResponseItem ItemCompaction (TaggedObject "compaction")
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [remoteCheckpoint]
             requests <- newIORef (0 :: Int)
             result <-
@@ -423,7 +427,7 @@ spec = do
                     (defaultResponseCreateParams :: ResponseCreateParams)
                         { model = Just "custom-small-model"
                         }
-            params <- newIORef paramsValue
+            params <- testRequestState paramsValue
             transcript <- newIORef [userTextItem "old context"]
             requests <- newIORef (0 :: Int)
             result <-
@@ -449,7 +453,7 @@ spec = do
                     (defaultResponseCreateParams :: ResponseCreateParams)
                         { model = Just "large-portable-model"
                         }
-            params <- newIORef paramsValue
+            params <- testRequestState paramsValue
             transcript <- newIORef [userTextItem huge]
             requests <- newIORef []
             result <-
@@ -502,7 +506,7 @@ spec = do
                     (defaultResponseCreateParams :: ResponseCreateParams)
                         { model = Just "small-portable-model"
                         }
-            params <- newIORef paramsValue
+            params <- testRequestState paramsValue
             transcript <- newIORef
                 [ userTextItem (Text.replicate 100_000 "old ")
                 , userTextItem "recent request"
@@ -535,7 +539,7 @@ spec = do
                             <> show (length seen))
 
         it "bounds oversized local-summary requests before sending them" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             let huge = Text.replicate 1_100_000 "x"
             transcript <- newIORef
                 [ userTextItem huge
@@ -592,7 +596,7 @@ spec = do
                             ("message-" <> Text.pack (show index)))
                     | index <- [1 :: Int .. 6]
                     ]
-            params <- newIORef paramsValue
+            params <- testRequestState paramsValue
             transcript <- newIORef history
             result <-
                 runProviderCompactWith
@@ -612,7 +616,7 @@ spec = do
                         `shouldSatisfy` (<= contextWindow)
 
         it "rejects blank local summaries" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [userTextItem "old context"]
             result <-
                 runProviderCompactWith
@@ -630,7 +634,7 @@ spec = do
                 Right _ -> False
 
         it "does not record usage for a transport failure" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [userTextItem "old context"]
             recordedUsage <- newIORef []
             result <-
@@ -648,7 +652,7 @@ spec = do
             readIORef recordedUsage `shouldReturn` []
 
         it "records completed-response usage even when the checkpoint is invalid" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [userTextItem "old context"]
             recordedUsage <- newIORef []
             result <-
@@ -682,11 +686,12 @@ spec = do
                                     , description = Nothing
                                     , parameters = Nothing
                                     , strict = Just True
+                                    , async = Nothing
                                     }
                                 ]
                         , previousResponseId = Just "resp-old"
                         }
-            params <- newIORef paramsValue
+            params <- testRequestState paramsValue
             transcript <- newIORef history
             requests <- newIORef []
             recordedUsage <- newIORef []
@@ -772,7 +777,7 @@ spec = do
                     , userTextItem "recent"
                     ]
                 inputLimit = 2_000
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef history
             requests <- newIORef []
             let makeBackend summaryParams =
@@ -923,6 +928,7 @@ spec = do
                                 Just (Text.replicate 4_000 "schema")
                             , parameters = Nothing
                             , strict = Just True
+                            , async = Nothing
                             }
                         ]
                     }
@@ -980,6 +986,7 @@ spec = do
                                 Just (Text.replicate 4_000 "schema")
                             , parameters = Nothing
                             , strict = Just True
+                            , async = Nothing
                             }
                         ]
                     }
@@ -1383,7 +1390,7 @@ spec = do
                     , userTextItem stale
                     , userTextItem "retained"
                     ]
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef history
             requests <- newIORef []
             result <-
@@ -1417,7 +1424,7 @@ spec = do
                     , userTextItem "retained"
                     ]
                 focus = Just "focus on the remaining work"
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef history
             requests <- newIORef []
             result <-
@@ -1964,6 +1971,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory = [userTextItem "run it", danglingCall]
                 toolOutputText = Text.replicate 400 "x"
@@ -2043,6 +2051,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory = [userTextItem "run it", danglingCall]
                 originalOutput =
@@ -2193,6 +2202,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory =
                     [ userTextItem
@@ -2249,6 +2259,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory = [userTextItem "run it", danglingCall]
                 originalOutput = Text.replicate 80_000 "x"
@@ -2348,6 +2359,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory =
                     [ userTextItem
@@ -2410,6 +2422,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory =
                     [ userTextItem
@@ -2679,3 +2692,12 @@ summaryResponseWithStatus responseStatus summary =
                 ]
             ]
         ]
+
+-- Compaction now receives the same validated request state as live sessions.
+testRequestState :: ResponseCreateParams -> IO SessionRequestState
+testRequestState params =
+    newSessionRequestState PersistenceDisabled
+        (case params.model of
+            Nothing -> params { model = Just "gpt-5.6-sol" }
+            Just _ -> params)
+        >>= either (fail . Text.unpack) pure

@@ -644,6 +644,7 @@ functionCallItem callId name arguments status =
         , arguments
         , encryptedFunctionArgs = Nothing
         , status
+        , async = Nothing
         }
 
 assistantMessage :: Text -> ResponseItem

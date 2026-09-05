@@ -57,7 +57,12 @@ import Agent.Responses.Types
     , ResponseRole(..)
     , TaggedObject(..)
     )
-import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..))
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , ToolCallMode(..)
+    , ToolCallResult(..)
+    , toolCallMode
+    )
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Encoding as AesonEncoding
 import Data.List (isPrefixOf)
@@ -289,18 +294,24 @@ displayToolCall call =
                 else call.arguments
         , encryptedFunctionArgs = Nothing
         , status = Just ItemInProgress
+        , async =
+            case toolCallMode call of
+                AsyncToolCall -> Just True
+                BlockingToolCall -> Nothing
         }
 
 displayToolOutput :: Text -> Text -> ItemStatus -> ResponseItem
 displayToolOutput callId output status =
     FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = Nothing
+        , itemId = Nothing
         , callId
         , name = Nothing
         , namespace = Nothing
         , provider = Nothing
         , output = rawJsonFromEncoding (AesonEncoding.text output)
         , status = Just status
+        , async = Nothing
         }
 
 belongsToDisplayCall :: Text -> ResponseItem -> Bool

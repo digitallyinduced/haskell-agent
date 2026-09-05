@@ -70,24 +70,24 @@ spec = do
                     "  /Users/marc/Downloads/template.png use this template  "
 
         it "shows the current effort with a bare /effort" do
-            parseReplLine "/effort" `shouldBe` ReplShowEffort
-            parseReplLine "  /Effort  " `shouldBe` ReplShowEffort
+            parseReplLine "/effort" `shouldBe` ReplSelection ReplShowEffort
+            parseReplLine "  /Effort  " `shouldBe` ReplSelection ReplShowEffort
 
         it "toggles Fast mode with /fast" do
             let catalog = mkSlashCatalog True CodexDialect [] [] []
             parseReplLineWithCatalog catalog "/fast"
-                `shouldBe` ReplToggleFast
+                `shouldBe` ReplSelection ReplToggleFast
             parseReplLineWithCatalog catalog "/FAST"
-                `shouldBe` ReplToggleFast
+                `shouldBe` ReplSelection ReplToggleFast
             parseReplLineWithCatalog catalog "/fast on"
                 `shouldBe` ReplCommandError "usage: /fast"
 
         it "sets a valid effort level" do
-            parseReplLine "/effort none" `shouldBe` ReplSetEffort EffortNone
-            parseReplLine "/effort high" `shouldBe` ReplSetEffort EffortHigh
-            parseReplLine "/effort XHIGH" `shouldBe` ReplSetEffort EffortXHigh
-            parseReplLine "/effort MAX" `shouldBe` ReplSetEffort EffortMax
-            parseReplLine "/effort medium" `shouldBe` ReplSetEffort EffortMedium
+            parseReplLine "/effort none" `shouldBe` ReplSelection (ReplSetEffort EffortNone)
+            parseReplLine "/effort high" `shouldBe` ReplSelection (ReplSetEffort EffortHigh)
+            parseReplLine "/effort XHIGH" `shouldBe` ReplSelection (ReplSetEffort EffortXHigh)
+            parseReplLine "/effort MAX" `shouldBe` ReplSelection (ReplSetEffort EffortMax)
+            parseReplLine "/effort medium" `shouldBe` ReplSelection (ReplSetEffort EffortMedium)
 
         it "parses the Codex workflow commands" do
             parseReplLine "/init" `shouldBe` ReplInit
@@ -100,23 +100,23 @@ spec = do
             parseReplLine "/diff now"
                 `shouldBe` ReplCommandError "usage: /diff"
             parseReplLine "/fork"
-                `shouldBe` ReplFork (ForkRequest Nothing Nothing)
+                `shouldBe` ReplSession (ReplFork (ForkRequest Nothing Nothing))
             parseReplLine "/fork   experiment branch  "
                 `shouldBe`
-                    ReplFork
-                        (ForkRequest Nothing (Just "experiment branch"))
+                    ReplSession (ReplFork
+                        (ForkRequest Nothing (Just "experiment branch")))
             parseReplLine "/fork --worktree fix the tests"
                 `shouldBe`
-                    ReplFork
-                        (ForkRequest (Just True) (Just "fix the tests"))
+                    ReplSession (ReplFork
+                        (ForkRequest (Just True) (Just "fix the tests")))
             parseReplLine "/fork --no-worktree"
-                `shouldBe` ReplFork (ForkRequest (Just False) Nothing)
+                `shouldBe` ReplSession (ReplFork (ForkRequest (Just False) Nothing))
             parseReplLine "/fork --unknown stays a directive"
                 `shouldBe`
-                    ReplFork
+                    ReplSession (ReplFork
                         (ForkRequest
                             Nothing
-                            (Just "--unknown stays a directive"))
+                            (Just "--unknown stays a directive")))
             parseReplLine "/fork --worktree --no-worktree"
                 `shouldBe`
                     ReplCommandError
@@ -188,14 +188,14 @@ spec = do
                 `shouldBe` ReplCommandError "usage: /always-approve"
 
         it "prints the current session id" do
-            parseReplLine "/session" `shouldBe` ReplShowSession
+            parseReplLine "/session" `shouldBe` ReplSession ReplShowSession
             parseReplLine "/session now"
                 `shouldBe` ReplCommandError "usage: /session"
 
         it "shows expanded session information through compatibility aliases" do
-            parseReplLine "/session-info" `shouldBe` ReplShowSessionInfo
-            parseReplLine "/status" `shouldBe` ReplShowSessionInfo
-            parseReplLine "/info" `shouldBe` ReplShowSessionInfo
+            parseReplLine "/session-info" `shouldBe` ReplSession ReplShowSessionInfo
+            parseReplLine "/status" `shouldBe` ReplSession ReplShowSessionInfo
+            parseReplLine "/info" `shouldBe` ReplSession ReplShowSessionInfo
             parseReplLine "/status now"
                 `shouldBe` ReplCommandError "usage: /session-info"
 
@@ -206,24 +206,24 @@ spec = do
                 `shouldBe` ReplCommandError "usage: /desktop"
 
         it "hands the session to local or remote tmux" do
-            parseReplLine "/afk" `shouldBe` ReplAfk Nothing
+            parseReplLine "/afk" `shouldBe` ReplSession (ReplAfk Nothing)
             parseReplLine "/afk office-builder:~/haskell-agent"
-                `shouldBe` ReplAfk (Just "office-builder:~/haskell-agent")
+                `shouldBe` ReplSession (ReplAfk (Just "office-builder:~/haskell-agent"))
             parseReplLine "/afk one two"
                 `shouldBe` ReplCommandError "usage: /afk [HOST:PATH]"
 
         it "starts a fresh session in a new worktree" do
-            parseReplLine "/worktree" `shouldBe` ReplWorktree
-            parseReplLine "  /Worktree  " `shouldBe` ReplWorktree
+            parseReplLine "/worktree" `shouldBe` ReplSession ReplWorktree
+            parseReplLine "  /Worktree  " `shouldBe` ReplSession ReplWorktree
             parseReplLine "/worktree now"
                 `shouldBe` ReplCommandError "usage: /worktree"
 
         it "renames sessions or restores automatic titles" do
             parseReplLine "/rename Fix auth races"
-                `shouldBe` ReplRename "Fix auth races"
+                `shouldBe` ReplSession (ReplRename "Fix auth races")
             parseReplLine "/title   keep  spaces"
-                `shouldBe` ReplRename "keep  spaces"
-            parseReplLine "/rename --auto" `shouldBe` ReplRenameAuto
+                `shouldBe` ReplSession (ReplRename "keep  spaces")
+            parseReplLine "/rename --auto" `shouldBe` ReplSession ReplRenameAuto
             parseReplLine "/rename"
                 `shouldBe` ReplCommandError "usage: /rename <TITLE>|--auto"
 
@@ -240,9 +240,9 @@ spec = do
                 `shouldBe` ReplCommandError "usage: /login"
 
         it "clears, starts, or deletes a session" do
-            parseReplLine "/clear" `shouldBe` ReplClear
-            parseReplLine "/new" `shouldBe` ReplNew
-            parseReplLine "/delete" `shouldBe` ReplDelete
+            parseReplLine "/clear" `shouldBe` ReplSession ReplClear
+            parseReplLine "/new" `shouldBe` ReplSession ReplNew
+            parseReplLine "/delete" `shouldBe` ReplSession ReplDelete
             parseReplLine "/clear now"
                 `shouldBe` ReplCommandError "usage: /clear"
             parseReplLine "/new now"
@@ -251,10 +251,10 @@ spec = do
                 `shouldBe` ReplCommandError "usage: /delete"
 
         it "returns home or rewinds through Grok-compatible aliases" do
-            parseReplLine "/home" `shouldBe` ReplHome
-            parseReplLine "/welcome" `shouldBe` ReplHome
-            parseReplLine "/rewind" `shouldBe` ReplRewind
-            parseReplLine "/undo" `shouldBe` ReplRewind
+            parseReplLine "/home" `shouldBe` ReplSession ReplHome
+            parseReplLine "/welcome" `shouldBe` ReplSession ReplHome
+            parseReplLine "/rewind" `shouldBe` ReplSession ReplRewind
+            parseReplLine "/undo" `shouldBe` ReplSession ReplRewind
             parseReplLine "/home now"
                 `shouldBe` ReplCommandError "usage: /home"
             parseReplLine "/undo now"
@@ -277,19 +277,19 @@ spec = do
 
         it "pastes clipboard images with an optional caption" do
             parseReplLine "/paste"
-                `shouldBe` ReplPaste False ""
+                `shouldBe` ReplAttachment (ReplPaste False "")
             parseReplLine "  /Paste  "
-                `shouldBe` ReplPaste False ""
+                `shouldBe` ReplAttachment (ReplPaste False "")
             parseReplLine "/paste what is this?"
-                `shouldBe` ReplPaste False "what is this?"
+                `shouldBe` ReplAttachment (ReplPaste False "what is this?")
             parseReplLine "/paste   keep  spaces"
-                `shouldBe` ReplPaste False "keep  spaces"
+                `shouldBe` ReplAttachment (ReplPaste False "keep  spaces")
             parseReplLine "/paste --send"
-                `shouldBe` ReplPaste True ""
+                `shouldBe` ReplAttachment (ReplPaste True "")
             parseReplLine "/paste --send look"
-                `shouldBe` ReplPaste True "look"
-            parseReplLine "/attachments" `shouldBe` ReplShowAttachments
-            parseReplLine "/clear-attachments" `shouldBe` ReplClearAttachments
+                `shouldBe` ReplAttachment (ReplPaste True "look")
+            parseReplLine "/attachments" `shouldBe` ReplAttachment ReplShowAttachments
+            parseReplLine "/clear-attachments" `shouldBe` ReplAttachment ReplClearAttachments
 
         it "parses terminal clipboard commands" do
             parseReplLine "/copy"
@@ -319,40 +319,40 @@ spec = do
                 `shouldBe` ReplCommandError "usage: /copy-code [N]"
 
         it "opens the model picker with a bare /model" do
-            parseReplLine "/model" `shouldBe` ReplShowModel
-            parseReplLine "  /Model  " `shouldBe` ReplShowModel
-            parseReplLine "/m" `shouldBe` ReplShowModel
+            parseReplLine "/model" `shouldBe` ReplSelection ReplShowModel
+            parseReplLine "  /Model  " `shouldBe` ReplSelection ReplShowModel
+            parseReplLine "/m" `shouldBe` ReplSelection ReplShowModel
 
         it "sets a model name" do
-            parseReplLine "/model grok-4.6" `shouldBe` ReplSetModel "grok-4.6"
+            parseReplLine "/model grok-4.6" `shouldBe` ReplSelection (ReplSetModel "grok-4.6")
             parseReplLine "/m openai/gpt-5.1"
-                `shouldBe` ReplSetModel "openai/gpt-5.1"
+                `shouldBe` ReplSelection (ReplSetModel "openai/gpt-5.1")
             parseReplLine "/model openai/gpt-5.1"
-                `shouldBe` ReplSetModel "openai/gpt-5.1"
+                `shouldBe` ReplSelection (ReplSetModel "openai/gpt-5.1")
 
         it "opens and selects a theme" do
-            parseReplLine "/theme" `shouldBe` ReplShowTheme
-            parseReplLine "/t" `shouldBe` ReplShowTheme
+            parseReplLine "/theme" `shouldBe` ReplSelection ReplShowTheme
+            parseReplLine "/t" `shouldBe` ReplSelection ReplShowTheme
             parseReplLine "/theme TokyoNight"
-                `shouldBe` ReplSetTheme "TokyoNight"
+                `shouldBe` ReplSelection (ReplSetTheme "TokyoNight")
             parseReplLine "/t daylight"
-                `shouldBe` ReplSetTheme "daylight"
+                `shouldBe` ReplSelection (ReplSetTheme "daylight")
 
         it "rejects extra theme arguments" do
             parseReplLine "/theme tokyo night"
                 `shouldBe` ReplCommandError "usage: /theme [NAME]"
 
         it "opens the resume picker" do
-            parseReplLine "/resume" `shouldBe` ReplResume Nothing
-            parseReplLine "/resume abc-123" `shouldBe` ReplResume (Just "abc-123")
+            parseReplLine "/resume" `shouldBe` ReplSession (ReplResume Nothing)
+            parseReplLine "/resume abc-123" `shouldBe` ReplSession (ReplResume (Just "abc-123"))
             parseReplLine "/resume a b"
                 `shouldBe` ReplCommandError "usage: /resume [ID]"
 
         it "searches past conversations with the full query suffix" do
             parseReplLine "/search postgres migration"
-                `shouldBe` ReplSearch "postgres migration"
+                `shouldBe` ReplSession (ReplSearch "postgres migration")
             parseReplLine "/SEARCH   keep  spaces"
-                `shouldBe` ReplSearch "keep  spaces"
+                `shouldBe` ReplSession (ReplSearch "keep  spaces")
             parseReplLine "/search"
                 `shouldBe` ReplCommandError "usage: /search <QUERY>"
 
@@ -795,18 +795,18 @@ spec = do
 
         it "parses goal lifecycle and a strict trailing budget" do
             parseReplLineWithCatalog enabled "/goal"
-                `shouldBe` ReplGoalStatus
+                `shouldBe` ReplWorkflow ReplGoalStatus
             parseReplLineWithCatalog enabled "/goal status"
-                `shouldBe` ReplGoalStatus
+                `shouldBe` ReplWorkflow ReplGoalStatus
             parseReplLineWithCatalog enabled "/goal pause"
-                `shouldBe` ReplGoalPause
+                `shouldBe` ReplWorkflow ReplGoalPause
             parseReplLineWithCatalog enabled "/goal resume"
-                `shouldBe` ReplGoalResume
+                `shouldBe` ReplWorkflow ReplGoalResume
             parseReplLineWithCatalog enabled "/goal clear"
-                `shouldBe` ReplGoalClear
+                `shouldBe` ReplWorkflow ReplGoalClear
             case parseReplLineWithCatalog enabled
                     "/goal ship the widget --budget 1200" of
-                ReplGoalSet original objective budget expanded -> do
+                ReplWorkflow (ReplGoalSet original objective budget expanded) -> do
                     original
                         `shouldBe`
                             "/goal ship the widget --budget 1200"
@@ -835,13 +835,13 @@ spec = do
                 ""
                 `shouldBe` ["runs"]
             parseReplLineWithCatalog enabled "/workflow"
-                `shouldBe` ReplWorkflowRuns
+                `shouldBe` ReplWorkflow ReplWorkflowRuns
             parseReplLineWithCatalog enabled "/workflow runs"
-                `shouldBe` ReplWorkflowRuns
+                `shouldBe` ReplWorkflow ReplWorkflowRuns
             parseReplLineWithCatalog enabled "/workflow pause wf_12"
-                `shouldBe` ReplWorkflowManage "pause" (Just "wf_12")
+                `shouldBe` ReplWorkflow (ReplWorkflowManage "pause" (Just "wf_12"))
             parseReplLineWithCatalog enabled "/workflow wf_12 stop"
-                `shouldBe` ReplWorkflowManage "stop" (Just "wf_12")
+                `shouldBe` ReplWorkflow (ReplWorkflowManage "stop" (Just "wf_12"))
             case parseReplLineWithCatalog enabled
                     "/workflow deep-research rust pitfalls" of
                 ReplExpandedPrompt original expanded -> do

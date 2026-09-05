@@ -6,12 +6,16 @@ import Agent.ToolDispatch
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolAsyncCapability(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     , dispatchRegisteredToolCall
     , dispatchRegisteredToolCallDetailed
+    , jsonAppTool
     , mkToolRegistry
     , toolAcceptsCall
+    , appToolSupportsAsync
+    , withAsyncToolCalls
     )
 import qualified Control.Exception as Exception
 import Data.IORef (modifyIORef', newIORef, readIORef)
@@ -29,6 +33,63 @@ echoArgsDecoder = objectArgs $ \object -> EchoArgs
 
 spec :: Spec
 spec = describe "dispatchToolCall" do
+    it "defaults constructed calls to blocking and compares call mode" do
+        let blocking = functionToolCall "call-1" "echo" "{}"
+            asynchronous = withToolCallMode AsyncToolCall blocking
+        toolCallMode blocking `shouldBe` BlockingToolCall
+        blocking `shouldNotBe` asynchronous
+
+    it "retags tool results without changing their payload or outcome" do
+        let blocking =
+                ToolCallResultWithOutcome
+                    "call-1"
+                    "done"
+                    FunctionCallKind
+                    [ToolResultImage "data:image/png;base64,eA==" Nothing]
+                    ToolFailed
+            asynchronous =
+                withToolCallResultMode AsyncToolCall blocking
+        toolCallResultMode asynchronous `shouldBe` AsyncToolCall
+        toolCallResultOutcome asynchronous `shouldBe` Just ToolFailed
+        toolCallResultImages asynchronous `shouldBe` toolCallResultImages blocking
+        withToolCallResultMode BlockingToolCall asynchronous
+            `shouldBe` blocking
+
+    it "requires tools to opt in to asynchronous calls" do
+        let tool =
+                jsonAppTool
+                    "echo"
+                    "echo"
+                    []
+                    AlwaysReadOnly
+                    (noArgsTool "echo" (pure (Right "ok")))
+        appToolSupportsAsync tool `shouldBe` False
+        appToolSupportsAsync (withAsyncToolCalls tool) `shouldBe` True
+
+    it "retains success even when successful output looks like an error or denial" do
+        mapM_ (\message -> do
+            result <- dispatchToolCall testConfig
+                [noArgsTool "echo" (pure (Right message))]
+                (functionToolCall "call" "echo" "{}")
+            result.output `shouldBe` message
+            toolCallResultOutcome result `shouldBe` Just ToolSucceeded)
+            ["Error: quoted log entry", "tool call rejected by user", "Exit code: 42", "cancelled"]
+
+    it "retains failure independently of custom output formatting" do
+        let config = testConfig { toolDispatchFormatResult = either id id }
+        result <- dispatchToolCall config [noArgsTool "fail" (pure (Left "plain explanation"))]
+            (functionToolCall "call" "fail" "{}")
+        result.output `shouldBe` "plain explanation"
+        toolCallResultOutcome result `shouldBe` Just ToolFailed
+
+    it "retains the async mode together with the typed outcome" do
+        result <- dispatchToolCall testConfig
+            [noArgsTool "echo" (pure (Right "ok"))]
+            (withToolCallMode AsyncToolCall $
+                functionToolCall "call" "echo" "{}")
+        toolCallResultMode result `shouldBe` AsyncToolCall
+        toolCallResultOutcome result `shouldBe` Just ToolSucceeded
+
     it "keeps plaintext tool arguments useful in Show output" do
         let rendered =
                 show (functionToolCall "call-visible" "echo" "{\"message\":\"hello\"}")
@@ -161,7 +222,7 @@ spec = describe "dispatchToolCall" do
             ]
             (customToolCall "call-1" "patch" "*** Begin Patch")
         result `shouldBe`
-            ToolCallResult "call-1" "patch:*** Begin Patch" CustomCallKind
+            ToolCallResultWithOutcome "call-1" "patch:*** Begin Patch" CustomCallKind [] ToolSucceeded
 
     it "supports no-argument tools" do
         result <- dispatchToolCall testConfig
@@ -201,7 +262,47 @@ spec = describe "dispatchToolCall" do
 
     it "formats unknown tools consistently" do
         result <- dispatchToolCall testConfig [] (functionToolCall "call-1" "missing" "{}")
-        result `shouldBe` functionResult "call-1" "ERR unknown:missing"
+        result `shouldBe` withToolCallOutcome (Just ToolFailed) (functionResult "call-1" "ERR unknown:missing")
+
+    it "preserves snapshots and images through typed and freeform streaming adapters" do
+        let image = ToolResultImage "data:image/png;base64,aW1hZ2U=" Nothing
+            run emit message = do
+                emit ("partial:" <> message)
+                pure (Right (ToolHandlerResult message [image]))
+            handlers =
+                [ ( typedStreamingRichTool "echo" echoArgsDecoder
+                        (\emit (EchoArgs message) -> run emit message)
+                  , functionToolCall "typed" "echo" "{\"message\":\"hello\"}"
+                  )
+                , ( streamingRichTextTool "echo" run
+                  , customToolCall "freeform" "echo" "hello"
+                  )
+                ]
+        mapM_ (\(handler, call) -> do
+            snapshots <- newIORef []
+            let config = testConfig
+                    { toolDispatchOnOutput = \seenCall value ->
+                        modifyIORef' snapshots (<> [(seenCall, value)])
+                    }
+            outcome <- dispatchToolHandlerDetailed config (Just handler) call
+            outcome.toolDispatchSucceeded `shouldBe` True
+            outcome.toolDispatchResult.output `shouldBe` "hello"
+            toolCallResultImages outcome.toolDispatchResult `shouldBe` [image]
+            readIORef snapshots `shouldReturn` [(call, "partial:hello")]
+            ) handlers
+
+    it "forwards the original call to a passthrough broker without decoding it" do
+        calls <- newIORef []
+        let call = (customToolCall "broker-call" "collaboration.spawn_agent" "not JSON")
+                { argumentsEncrypted = True }
+            handler = passthroughTool "spawn_agent" \emit received -> do
+                modifyIORef' calls (<> [received])
+                emit "forwarded"
+                pure (Left "broker rejected request")
+        outcome <- dispatchToolCallDetailed testConfig [handler] call
+        readIORef calls `shouldReturn` [call]
+        outcome.toolDispatchSucceeded `shouldBe` False
+        outcome.toolDispatchResult.output `shouldBe` "ERR broker rejected request"
 
     it "formats exceptions and invokes the exception hook" do
         seen <- newIORef []
@@ -212,7 +313,7 @@ spec = describe "dispatchToolCall" do
         result <- dispatchToolCall config
             [noArgsTool "explode" (Exception.throwIO (userError "boom"))]
             (functionToolCall "call-1" "explode" "{}")
-        result `shouldBe` functionResult "call-1" "EX explode"
+        result `shouldBe` withToolCallOutcome (Just ToolFailed) (functionResult "call-1" "EX explode")
         readIORef seen `shouldReturn` ["explode"]
 
     it "does not let a synchronous exception hook replace the tool failure" do
@@ -223,7 +324,7 @@ spec = describe "dispatchToolCall" do
         result <- dispatchToolCall config
             [noArgsTool "explode" (Exception.throwIO (userError "boom"))]
             (functionToolCall "call-1" "explode" "{}")
-        result `shouldBe` functionResult "call-1" "EX explode"
+        result `shouldBe` withToolCallOutcome (Just ToolFailed) (functionResult "call-1" "EX explode")
 
     it "does not turn asynchronous cancellation into tool output" do
         dispatchToolCall testConfig
@@ -286,10 +387,12 @@ testConfig = ToolDispatchConfig
     }
 
 functionResult :: Text -> Text -> ToolCallResult
-functionResult callId output = ToolCallResult
+functionResult callId output = ToolCallResultWithOutcome
     { callId
     , output
     , callKind = FunctionCallKind
+    , toolResultImages = []
+    , toolResultOutcome = ToolSucceeded
     }
 
 computerTool :: IO (Either Text Text) -> AppTool
@@ -301,4 +404,5 @@ computerTool action = AppTool
     , appToolApproval = AlwaysPrompt
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }

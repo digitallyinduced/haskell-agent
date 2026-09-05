@@ -4,6 +4,14 @@ module Agent.CLI.Runtime.Orchestration.Initialized
     , withPreparedStartupAuth
     ) where
 
+import Agent.CLI.ActiveAccount
+    ( ActiveAccount(..)
+    , ActiveAccountRef
+    , newActiveAccount
+    , writeActiveAccount
+    , modifyActiveAccount
+    , trackCredentialAccount
+    )
 import Agent.CLI.AccountSelection
     ( PreparedProviderAccounts,
       SelectedAccount(..),
@@ -67,10 +75,11 @@ import Agent.CLI.Provider.Switch ( loadSelectedAccountAuth )
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback )
 import Agent.CLI.ProviderTransition
-    ( ProviderTransition(transitionAutomaticBilling,
+    ( ProviderTransition(transitionCause,
                          transitionUnavailableProviders, transitionPendingTurn,
                          transitionTarget, transitionAccountSelectionId,
-                         transitionAccountId) )
+                         transitionAccountId)
+    , TransitionCause(AutomaticFallback) )
 import Agent.CLI.Resume ( publishResumeHistoryAfterBoundary )
 import Agent.CLI.Runtime.HistorySource
     ( loadFullscreenHistoryPage, sessionUiPageSize )
@@ -97,7 +106,7 @@ import Agent.CLI.Session.History ( detectGitBranch )
 import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupToolEnv, startupStderr, startupStdout,
                      startupStdoutTty, startupStdinTty, startupFullscreen,
-                     startupUiRuntimeRef, startupEscPaused, startupInterrupt,
+                     startupUiRuntimeRef, startupStdinControl, startupInterrupt,
                      startupDatabaseStore, startupNativeHooks) )
 import Agent.CLI.SessionLock ( releaseSessionLock, SessionLock )
 import Agent.CLI.Skills ( loadSkillsCatalogQuiet )
@@ -118,7 +127,6 @@ import Agent.Provider
       getNextToken,
       providerSlug,
       tokenProviderBillingMode,
-      tokenProviderWithNextToken,
       BillingMode(ApiBilled),
       FailedCredential(credential) )
 import Agent.Skills ( SkillCatalog(..) )
@@ -137,7 +145,7 @@ import Control.Concurrent.MVar
     )
 import Control.Exception.Safe ( onException )
 import Control.Monad ( forM_, void, when )
-import Data.IORef ( IORef, newIORef, readIORef, writeIORef )
+import Data.IORef ( IORef, newIORef, writeIORef )
 import Data.Maybe ( isNothing, fromMaybe, isJust )
 import Data.Text ( Text )
 import System.Environment ( lookupEnv )
@@ -209,9 +217,7 @@ data InitializedAuth = InitializedAuth
 
 data InitializedAccountRefs = InitializedAccountRefs
     { initializedGatewayModelsRef :: IORef (Maybe GatewayModelAccess)
-    , initializedActiveAccountIdRef :: IORef Text
-    , initializedActiveAccountRef :: IORef Text
-    , initializedActiveSelectionRef :: IORef Text
+    , initializedActiveAccountRef :: ActiveAccountRef
     , initializedPreferredOpenAiAccountRef :: IORef (Maybe Text)
     , initializedSelectableTokenProvider :: TokenProvider
     }
@@ -796,9 +802,8 @@ validateInitializedAuth request targets loaded = do
                     <> " but auth resolved "
                     <> providerSlug loaded.loadedProvider
         _ -> pure ()
-    case request.initializedTransition
-        >>= (.transitionAutomaticBilling) of
-        Just sourceBilling
+    case (.transitionCause) <$> request.initializedTransition of
+        Just (AutomaticFallback sourceBilling)
             | not
                 (allowsAutomaticBillingFallback
                     sourceBilling
@@ -824,15 +829,12 @@ newInitializedAccountRefs request auth = do
                 (startupDie request.initializedStartup)
                 pure
     gatewayModelsRef <- newIORef initialGatewayModels
-    activeAccountRef <- newIORef ""
-    activeAccountIdRef <-
-        newIORef (maybe "" snd startupAccountIds)
-    activeSelectionRef <-
-        newIORef $
-            maybe
-                (fromMaybe "" loaded.loadedSelectionId)
-                fst
-                startupAccountIds
+    activeAccountRef <- newActiveAccount ActiveAccount
+        { activeAccountId = maybe "" snd startupAccountIds
+        , activeSelectionId =
+            maybe (fromMaybe "" loaded.loadedSelectionId) fst startupAccountIds
+        , activeAccountLabel = ""
+        }
     preferredOpenAiAccountRef <-
         newIORef $
             case (loaded.loadedProvider, startupAccountIds) of
@@ -856,9 +858,7 @@ newInitializedAccountRefs request auth = do
                 unguardedSelectableTokenProvider
     pure InitializedAccountRefs
         { initializedGatewayModelsRef = gatewayModelsRef
-        , initializedActiveAccountIdRef = activeAccountIdRef
         , initializedActiveAccountRef = activeAccountRef
-        , initializedActiveSelectionRef = activeSelectionRef
         , initializedPreferredOpenAiAccountRef =
             preferredOpenAiAccountRef
         , initializedSelectableTokenProvider =
@@ -873,7 +873,8 @@ initializeActiveHttpAuth
 initializeActiveHttpAuth targets auth refs = do
     initialHttp <- case targets.initializedCustomResponses of
         Just (connectionId, _) -> do
-            writeIORef activeAccountRef connectionId
+            modifyActiveAccount activeAccountRef \current ->
+                current { activeAccountLabel = connectionId }
             pure
                 ( selectableTokenProvider
                 , const (pure connectionId)
@@ -890,13 +891,12 @@ initializeActiveHttpAuth targets auth refs = do
                 probeLoadedAuthCredential loaded >>= \case
                     Right (credential, usable) -> do
                         label <- usable.loadedAccountLabel credential
-                        writeIORef activeAccountRef label
-                        writeIORef activeAccountIdRef credential.accountId
-                        let selectionId =
-                                fromMaybe
-                                    credential.accountId
-                                    usable.loadedSelectionId
-                        writeIORef activeSelectionRef selectionId
+                        writeActiveAccount activeAccountRef ActiveAccount
+                            { activeAccountId = credential.accountId
+                            , activeSelectionId =
+                                fromMaybe credential.accountId usable.loadedSelectionId
+                            , activeAccountLabel = label
+                            }
                         pure
                             ( usable.loadedTokenProvider
                             , usable.loadedAccountLabel
@@ -910,8 +910,11 @@ initializeActiveHttpAuth targets auth refs = do
                                 ClaudeCodeProvider -> "Claude Code"
                             selectionId =
                                 fromMaybe "" loaded.loadedSelectionId
-                        writeIORef activeAccountRef fallback
-                        writeIORef activeSelectionRef selectionId
+                        modifyActiveAccount activeAccountRef \current ->
+                            current
+                                { activeAccountLabel = fallback
+                                , activeSelectionId = selectionId
+                                }
                         pure
                             ( selectableTokenProvider
                             , loaded.loadedAccountLabel
@@ -931,8 +934,6 @@ initializeActiveHttpAuth targets auth refs = do
   where
     loaded = auth.initializedLoaded
     activeAccountRef = refs.initializedActiveAccountRef
-    activeAccountIdRef = refs.initializedActiveAccountIdRef
-    activeSelectionRef = refs.initializedActiveSelectionRef
     selectableTokenProvider =
         refs.initializedSelectableTokenProvider
 
@@ -963,12 +964,12 @@ makeSwitchableTokenProvider refs activeHttpAuth =
                             if current.activeHttpGeneration
                                 == snapshot.activeHttpGeneration
                                 then do
-                                    writeIORef
-                                        refs.initializedActiveAccountIdRef
-                                        credential.accountId
-                                    writeIORef
-                                        refs.initializedActiveAccountRef
-                                        label
+                                    modifyActiveAccount
+                                        refs.initializedActiveAccountRef \account ->
+                                            account
+                                                { activeAccountId = credential.accountId
+                                                , activeAccountLabel = label
+                                                }
                                     pure current
                                         { activeHttpAccountId =
                                             credential.accountId
@@ -1046,15 +1047,13 @@ selectInitializedHttpAccount
                                             writeIORef
                                                 refs.initializedGatewayModelsRef
                                                 selectedGatewayModels
-                                            writeIORef
-                                                refs.initializedActiveAccountIdRef
-                                                credential.accountId
-                                            writeIORef
-                                                refs.initializedActiveSelectionRef
-                                                selectionId
-                                            writeIORef
+                                            writeActiveAccount
                                                 refs.initializedActiveAccountRef
-                                                label
+                                                ActiveAccount
+                                                    { activeAccountId = credential.accountId
+                                                    , activeSelectionId = selectionId
+                                                    , activeAccountLabel = label
+                                                    }
                                             pure ActiveHttpAuth
                                                 { activeHttpGeneration =
                                                     current.activeHttpGeneration
@@ -1099,8 +1098,6 @@ newInitializedHttpRuntime auth refs activeHttpAuth =
             OpenAIProvider ->
                 trackCredentialAccount
                     refs.initializedActiveAccountRef
-                    refs.initializedActiveAccountIdRef
-                    refs.initializedActiveSelectionRef
                     resolveActiveAccountLabel
                     selectableTokenProvider
             _ -> switchableTokenProvider
@@ -1154,9 +1151,7 @@ launchInitializedTools request workspace targets auth refs httpRuntime =
         , connectedGateway = request.initializedConnectedGateway
         , learnAboutUserRequested = auth.initializedLearnAboutUserRequested
         , customBearerToken = auth.initializedCustomBearerToken
-        , activeAccountIdRef = refs.initializedActiveAccountIdRef
         , activeAccountRef = refs.initializedActiveAccountRef
-        , activeSelectionRef = refs.initializedActiveSelectionRef
         , baseToolEnv = startup.startupToolEnv
         , catalog = workspace.initializedCatalog
         , initialSkills = workspace.initializedSkills
@@ -1169,7 +1164,7 @@ launchInitializedTools request workspace targets auth refs httpRuntime =
         , customResponses = targets.initializedCustomResponses
         , cwd = request.initializedCwd
         , databaseScopes = workspace.initializedDatabaseScopes
-        , escPaused = startup.startupEscPaused
+        , stdinControl = startup.startupStdinControl
         , fullscreen
         , home = request.initializedHome
         , interrupt = startup.startupInterrupt
@@ -1261,25 +1256,6 @@ loadPreparedOrStartupAuth
   where
     loadFallback =
         (, Nothing) <$> loadStartupAuth startup transition requestedProvider
-
-trackCredentialAccount
-    :: IORef Text
-    -> IORef Text
-    -> IORef Text
-    -> (Credential -> IO Text)
-    -> TokenProvider
-    -> TokenProvider
-trackCredentialAccount accountRef accountIdRef selectionRef resolveLabel provider =
-    tokenProviderWithNextToken provider \failed ->
-        getNextToken provider failed >>= \case
-            Left err -> pure (Left err)
-            Right credential -> do
-                previousAccountId <- readIORef accountIdRef
-                writeIORef accountIdRef credential.accountId
-                when (previousAccountId /= credential.accountId) $
-                    writeIORef selectionRef credential.accountId
-                resolveLabel credential >>= writeIORef accountRef
-                pure (Right credential)
 
 loadGatewayModelAccess
     :: Maybe GatewayCredential

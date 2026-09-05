@@ -4,6 +4,9 @@
 
 module Agent.CLI.TUIHistorySpec (spec) where
 
+import Agent.CLI.Session.StoreCodec (fromStoredResponseItem, toStoredResponseItem)
+import Agent.Loop (LoopEvent(..))
+import Agent.ToolDispatch (ToolOutcome(..), functionToolCall)
 import Agent.CLI.Session
     ( SessionTurn(..)
     , TranscriptEffect(..)
@@ -31,6 +34,7 @@ import Agent.TUI.Model
     , initialUiState
     , reduceUi
     )
+import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Data.Int (Int64)
 import qualified Data.Text as Text
@@ -40,6 +44,62 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "bounded fullscreen history window" do
+    it "preserves execution facts through storage and history without sending them to providers" do
+        let cases =
+                [ (ToolSucceeded, "Error: quoted log entry", BlockComplete)
+                , (ToolSucceeded, "tool call rejected by user", BlockComplete)
+                , (ToolSucceeded, "Exit code: 7", BlockComplete)
+                , (ToolFailed, "plain explanation", BlockFailed)
+                , (ToolDenied, "custom approval policy", BlockDenied)
+                , (ToolCancelled, "stopped by owner", BlockCancelled)
+                , (ShellExited 7, "Exit code: 0\noutput", BlockFailed)
+                , (ShellCancelled, "output", BlockCancelled)
+                , (ShellTimedOut, "output", BlockFailed)
+                ]
+        mapM_ (\(kind, (outcome, body, expected)) -> do
+            let result = ToolCallResultWithOutcome "call" body kind [] outcome
+                item = toolResultToItem result
+                call = functionToolCall "call" "echo" "{}"
+                live = reduceUi (UiLoop (ToolFinished result))
+                    (reduceUi (UiLoop (ToolStarted call)) initialUiState)
+            map (.blockState) (toList live.uiBlocks) `shouldBe` [expected]
+            restored <- expectRight (fromStoredResponseItem (toStoredResponseItem item))
+            restored `shouldBe` item
+            let history = sessionHistoryTurn (0 :: Int)
+                    (sessionTurn TranscriptAppend "" [FunctionCallItem FunctionCall
+                        { itemId = Nothing, callId = "call", name = "echo", namespace = Nothing
+                        , provider = Nothing, arguments = "{}", encryptedFunctionArgs = Nothing
+                        , status = Nothing, async = Nothing }
+                        , restored])
+            map (.blockState) (toList history.historyTurnBlocks) `shouldBe` [expected]
+            Aeson.toJSON item `shouldBe`
+                Aeson.toJSON (toolResultToItem (ToolCallResult "call" body kind)))
+            [(kind, testCase) | kind <- [FunctionCallKind, CustomCallKind], testCase <- cases]
+
+    it "uses a typed shell session id even if output contains a different id" do
+        let call = functionToolCall "shell" "shell_command" "{\"command\":\"echo hi\"}"
+            result = ToolCallResultWithOutcome "shell"
+                "Process still running.\nsession_id: 999\nworking" FunctionCallKind [] (ShellRunning 42)
+            state = reduceUi (UiLoop (ToolFinished result))
+                (reduceUi (UiLoop (ToolStarted call)) initialUiState)
+        map (.blockState) (toList state.uiBlocks) `shouldBe` [BlockRunning]
+        Map.keys state.uiShellProcesses `shouldBe` [42]
+        let item = toolResultToItem result
+        fromStoredResponseItem (toStoredResponseItem item) `shouldBe` Right item
+
+    it "does not mistake a failed stdin interaction for a stopped process" do
+        let call = functionToolCall "shell" "shell_command" "{\"command\":\"cat\"}"
+            running = ToolCallResultWithOutcome "shell"
+                "Process still running.\nsession_id: 42\n" FunctionCallKind [] (ShellRunning 42)
+            state = reduceUi (UiLoop (ToolFinished running))
+                (reduceUi (UiLoop (ToolStarted call)) initialUiState)
+            poll = functionToolCall "poll" "write_stdin" "{\"session_id\":42}"
+            failed = ToolCallResultWithOutcome "poll" "input unavailable" FunctionCallKind [] ToolFailed
+            afterPoll = reduceUi (UiLoop (ToolFinished failed))
+                (reduceUi (UiLoop (ToolStarted poll)) state)
+        Map.keys afterPoll.uiShellProcesses `shouldBe` [42]
+        map (.blockState) (toList afterPoll.uiBlocks) `shouldBe` [BlockRunning]
+
     it "allows keyboard scrollback when only persisted history is loaded" do
         let generation = HistoryGeneration 1
             empty = emptyHistoryWindow generation 10 20 1_000_000
@@ -357,9 +417,11 @@ spec = describe "bounded fullscreen history window" do
                             , arguments = "{\"command\":\"pwd\"}"
                             , encryptedFunctionArgs = Nothing
                             , status = Nothing
+                            , async = Nothing
                             }
                         , FunctionCallOutputItem FunctionCallOutput
-                            { itemId = Nothing
+                            { localOutcome = Nothing
+                            , itemId = Nothing
                             , callId = "call-1"
                             , name = Nothing
                             , namespace = Nothing
@@ -367,6 +429,7 @@ spec = describe "bounded fullscreen history window" do
                             , output = rawJsonFromEncoding
                                 (Aeson.toEncoding ("/tmp/project" :: Text.Text))
                             , status = Nothing
+                            , async = Nothing
                             }
                         , assistantMessage "Done"
                         ])
@@ -491,10 +554,12 @@ spec = describe "bounded fullscreen history window" do
                     , arguments
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemInProgress
+                    , async = Nothing
                     }
             output callId body status =
                 FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId
                     , name = Nothing
                     , namespace = Nothing
@@ -503,6 +568,7 @@ spec = describe "bounded fullscreen history window" do
                         rawJsonFromEncoding
                             (Aeson.toEncoding (body :: Text.Text))
                     , status = Just status
+                    , async = Nothing
                     }
             turnValue =
                 (sessionTurn TranscriptAppend "fix it" [userMessage "fix it"])
@@ -550,10 +616,12 @@ spec = describe "bounded fullscreen history window" do
                     , arguments
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemInProgress
+                    , async = Nothing
                     }
             output body status =
                 FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = "same"
                     , name = Nothing
                     , namespace = Nothing
@@ -562,6 +630,7 @@ spec = describe "bounded fullscreen history window" do
                         rawJsonFromEncoding
                             (Aeson.toEncoding (body :: Text.Text))
                     , status = Just status
+                    , async = Nothing
                     }
             boundary =
                 UnknownResponseItem
@@ -618,9 +687,11 @@ spec = describe "bounded fullscreen history window" do
                         , arguments = "{\"command\":\"pwd\"}"
                         , encryptedFunctionArgs = Nothing
                         , status = Nothing
+                        , async = Nothing
                         }
                     , FunctionCallOutputItem FunctionCallOutput
-                        { itemId = Nothing
+                        { localOutcome = Nothing
+                        , itemId = Nothing
                         , callId = "call-1"
                         , name = Nothing
                         , namespace = Nothing
@@ -628,6 +699,7 @@ spec = describe "bounded fullscreen history window" do
                         , output = rawJsonFromEncoding
                             (Aeson.toEncoding ("/tmp/project" :: Text.Text))
                         , status = Nothing
+                        , async = Nothing
                         }
                     ])
                     { turnAssistantText = Just "already visible"
@@ -834,13 +906,15 @@ assistantMessage text =
 toolOutputItem :: [Aeson.Value] -> ResponseItem
 toolOutputItem parts =
     FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = Nothing
+        , itemId = Nothing
         , callId = "image-call"
         , name = Nothing
         , namespace = Nothing
         , provider = Nothing
         , output = rawJsonFromEncoding (Aeson.toEncoding parts)
         , status = Nothing
+        , async = Nothing
         }
 
 projectedToolResult :: ResponseItem -> Text.Text
@@ -864,6 +938,7 @@ projectedToolResult outputItem =
                     , arguments = "{\"path\":\"example.png\"}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 , outputItem
                 ])

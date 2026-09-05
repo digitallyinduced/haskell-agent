@@ -39,15 +39,15 @@ spec = do
     describe "modelsForProvider" do
         it "puts the provider default first" do
             firstId (modelsForProvider catalog XAIProvider)
-                `shouldBe` defaultModelFor catalog XAIProvider
+                `shouldBe` Just (defaultModelFor catalog XAIProvider)
             firstId (modelsForProvider catalog OpenAIProvider)
-                `shouldBe` defaultModelFor catalog OpenAIProvider
+                `shouldBe` Just (defaultModelFor catalog OpenAIProvider)
             firstId (modelsForProvider catalog OpenRouterProvider)
-                `shouldBe` defaultModelFor catalog OpenRouterProvider
+                `shouldBe` Just (defaultModelFor catalog OpenRouterProvider)
             firstId (modelsForProvider catalog GeminiProvider)
-                `shouldBe` defaultModelFor catalog GeminiProvider
+                `shouldBe` Just (defaultModelFor catalog GeminiProvider)
             firstId (modelsForProvider catalog ClaudeCodeProvider)
-                `shouldBe` defaultModelFor catalog ClaudeCodeProvider
+                `shouldBe` Just (defaultModelFor catalog ClaudeCodeProvider)
 
         it "ships the configured frontier models for each provider" do
             modelIdsFor OpenAIProvider
@@ -515,9 +515,7 @@ spec = do
 
         it "does not duplicate a known current model" do
             let base = modelsForProvider catalog XAIProvider
-                def = fromMaybe
-                    (error "shipped xAI default is missing")
-                    (defaultModelFor catalog XAIProvider)
+                def = defaultModelFor catalog XAIProvider
                 opts =
                     ensureCurrentInList
                         "xai"

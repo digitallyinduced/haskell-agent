@@ -340,7 +340,7 @@ data RenderConfig = RenderConfig
     , renderLock :: !(MVar ())
     , renderStdout :: !Handle
     , renderStderr :: !Handle
-    , renderModelRef :: !(IORef Text)
+    , renderModel :: !(IO Text)
     , renderNativeProgress :: !Bool -- ^ Ghostty / WT OSC 9;4; off in tests
     , renderMotionMode :: !MotionMode
     , renderWorkspace :: !Text

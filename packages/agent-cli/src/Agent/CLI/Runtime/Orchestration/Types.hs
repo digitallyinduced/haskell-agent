@@ -1,6 +1,5 @@
 module Agent.CLI.Runtime.Orchestration.Types
     ( ActiveHttpAuth(..)
-    , AccountSwitchRequest(..)
     , AgentProcessRuntime(..)
     , AgentRunMode(..)
     , NativeInteractionMode(..)
@@ -23,14 +22,12 @@ import Agent.CLI.Options ( CliOptions )
 import Agent.CLI.Project ( ProjectSettings )
 import Agent.Connectivity.NetworkPath ( NetworkRecovery )
 import Agent.CLI.Permission ( PermissionChoice )
-import Agent.Error ( ApiError )
-import Agent.Loop ( LoopEvent )
+import Agent.Loop ( LoopEvent, TurnInput )
 import Agent.Provider ( Credential, TokenProvider )
 import Agent.Store.Postgres ( Store )
 import Agent.ToolDispatch ( ToolCall )
 import Agent.Tools.PlanMode ( PlanModeHooks )
 import Agent.Tools.Types ( AppTool, AppToolGroup )
-import Control.Concurrent.MVar ( MVar )
 import Data.IORef ( IORef )
 import Data.Text ( Text )
 import System.IO ( Handle, stderr, stdout )
@@ -44,9 +41,6 @@ data ActiveHttpAuth = ActiveHttpAuth
     , activeHttpResolveLabel :: !(Credential -> IO Text)
     , activeHttpAccountId :: !Text
     }
-
-data AccountSwitchRequest
-    = AccountSwitchRequest !Credential !(MVar (Either ApiError Text))
 
 data AgentProcessRuntime = AgentProcessRuntime
     { processMcpSupervisor :: !MCP.McpSupervisor
@@ -132,6 +126,7 @@ fullNativeRunCapabilities = NativeRunCapabilities
 
 data NativeRunHooks = NativeRunHooks
     { nativeOnLoopEvent :: !(LoopEvent -> IO ())
+    , nativeInitialTurnInputs :: !(Maybe [TurnInput])
     , nativeOnSessionId :: !(Text -> IO ())
     , nativeRegisterCancel :: !(IO () -> IO ())
     , nativeRegisterAgentSnapshot :: !(IO [AgentEntry] -> IO ())

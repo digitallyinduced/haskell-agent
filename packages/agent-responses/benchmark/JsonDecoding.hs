@@ -330,6 +330,7 @@ toolArgumentEvents shell bodyChars deltaChars =
         , arguments = ""
         , encryptedFunctionArgs = Nothing
         , status = Nothing
+        , async = Nothing
         }
     added = ResponseOutputItemAddedEvent
         { item = FunctionCallItem call
@@ -387,12 +388,14 @@ requestParams iteration = defaultResponseCreateParams
             { name = "apply_patch"
             , description = Just "Apply a patch to files."
             , format = Just patchFormat
+            , async = Nothing
             }
         , FunctionToolValue FunctionTool
             { name = "shell_command"
             , description = Just "Run a shell command."
             , parameters = Just shellSchema
             , strict = Just True
+            , async = Nothing
             }
         , NamespaceToolValue NamespaceTool
             { name = "workspace"
@@ -403,6 +406,7 @@ requestParams iteration = defaultResponseCreateParams
                     , description = Just "Read a file."
                     , parameters = Just readSchema
                     , strict = Just True
+                    , async = Nothing
                     }
                 ]
             }

@@ -1,14 +1,28 @@
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module Agent.ToolDispatch
-    ( ToolCall(..)
+    ( ToolCall(ToolCall, callId, name, arguments, callKind, argumentsEncrypted)
+    , ToolCallMode(..)
+    , callMode
+    , toolCallMode
+    , withToolCallMode
+    , setToolCallArguments
     , ToolCallKind(..)
     , isComputerToolCallKind
     , ToolCallResult(..)
     , ToolDispatchOutcome(..)
     , ToolResultImage(..)
     , ToolHandlerResult(..)
+    , ToolOutcome(..)
+    , toolCallResultOutcome
+    , withToolCallOutcome
     , toolCallResultImages
+    , toolCallResultMode
+    , withToolCallResultMode
     , ToolDispatchConfig(..)
     , ToolHandler
     , typedTool
@@ -34,6 +48,7 @@ module Agent.ToolDispatch
     , decodeToolArguments
     ) where
 
+import Agent.ToolOutcome (ToolOutcome(..), toolOutcomeSucceeded)
 import Agent.Dialect
     ( claudeCodeCanonicalToolName
     , grokBuildCanonicalToolName
@@ -47,6 +62,7 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import GHC.Records (HasField(..))
 
 -- | How the originating model turn encoded this call. Adapters need this to
 -- emit @function_call_output@ versus @custom_tool_call_output@.
@@ -62,6 +78,13 @@ data ToolCallKind
     | ComputerFunctionCallKind
     deriving (Eq, Show)
 
+-- | Whether the provider permits the application to complete this call after
+-- the originating model turn has continued.
+data ToolCallMode
+    = BlockingToolCall
+    | AsyncToolCall
+    deriving (Eq, Show)
+
 isComputerToolCallKind :: ToolCallKind -> Bool
 isComputerToolCallKind = \case
     ComputerCallKind -> True
@@ -69,13 +92,99 @@ isComputerToolCallKind = \case
     _ -> False
 
 -- | Provider-neutral function or custom tool call emitted by a model transport.
-data ToolCall = ToolCall
-    { callId :: !Text
-    , name :: !Text
-    , arguments :: !Text
-    , callKind :: !ToolCallKind
-    , argumentsEncrypted :: !Bool
-    } deriving (Eq)
+data ToolCall =
+    ToolCallInternal
+        !Text
+        !Text
+        !Text
+        !ToolCallKind
+        !Bool
+        !ToolCallMode
+    deriving (Eq)
+
+-- | Source-compatible blocking-call constructor. The execution mode is kept
+-- outside the historical five-field surface so existing positional and record
+-- construction remains valid.
+pattern ToolCall
+    :: Text
+    -> Text
+    -> Text
+    -> ToolCallKind
+    -> Bool
+    -> ToolCall
+pattern ToolCall
+    { callId
+    , name
+    , arguments
+    , callKind
+    , argumentsEncrypted
+    } <- ToolCallInternal
+        callId
+        name
+        arguments
+        callKind
+        argumentsEncrypted
+        _
+  where
+    ToolCall callId name arguments callKind argumentsEncrypted =
+        ToolCallInternal
+            callId
+            name
+            arguments
+            callKind
+            argumentsEncrypted
+            BlockingToolCall
+
+{-# COMPLETE ToolCall #-}
+
+instance HasField "callId" ToolCall Text where
+    getField (ToolCallInternal value _ _ _ _ _) = value
+
+instance HasField "name" ToolCall Text where
+    getField (ToolCallInternal _ value _ _ _ _) = value
+
+instance HasField "arguments" ToolCall Text where
+    getField (ToolCallInternal _ _ value _ _ _) = value
+
+instance HasField "callKind" ToolCall ToolCallKind where
+    getField (ToolCallInternal _ _ _ value _ _) = value
+
+instance HasField "argumentsEncrypted" ToolCall Bool where
+    getField (ToolCallInternal _ _ _ _ value _) = value
+
+toolCallMode :: ToolCall -> ToolCallMode
+toolCallMode
+    (ToolCallInternal _ _ _ _ _ mode) =
+        mode
+
+-- | Execution-mode accessor named after the logical 'ToolCall' field.
+-- 'toolCallMode' remains available where a less ambiguous name is useful.
+callMode :: ToolCall -> ToolCallMode
+callMode = toolCallMode
+
+withToolCallMode :: ToolCallMode -> ToolCall -> ToolCall
+withToolCallMode mode
+    (ToolCallInternal callId name arguments callKind argumentsEncrypted _) =
+        ToolCallInternal
+            callId
+            name
+            arguments
+            callKind
+            argumentsEncrypted
+            mode
+
+-- | Replace streamed arguments without accidentally resetting an async call
+-- to the compatibility constructor's blocking default.
+setToolCallArguments :: Text -> ToolCall -> ToolCall
+setToolCallArguments newArguments
+    (ToolCallInternal callId name _ callKind argumentsEncrypted mode) =
+        ToolCallInternal
+            callId
+            name
+            newArguments
+            callKind
+            argumentsEncrypted
+            mode
 
 instance Show ToolCall where
     show call =
@@ -84,6 +193,7 @@ instance Show ToolCall where
             <> ", arguments = " <> shownArguments
             <> ", callKind = " <> show call.callKind
             <> ", argumentsEncrypted = " <> show call.argumentsEncrypted
+            <> ", callMode = " <> show (toolCallMode call)
             <> " }"
       where
         shownArguments
@@ -109,7 +219,13 @@ instance Show ToolResultImage where
 data ToolHandlerResult = ToolHandlerResult
     { resultText :: !Text
     , resultImages :: ![ToolResultImage]
-    } deriving (Eq, Show)
+    }
+    | ToolHandlerResultWithOutcome
+        { resultText :: !Text
+        , resultImages :: ![ToolResultImage]
+        , resultOutcome :: !ToolOutcome
+        }
+    deriving (Eq, Show)
 
 -- | A dispatched result together with its protocol-neutral success bit.
 --
@@ -123,9 +239,9 @@ data ToolDispatchOutcome = ToolDispatchOutcome
 
 -- | Provider-neutral result ready for a transport adapter to encode.
 --
--- The original constructor stays unchanged for ordinary text tools. The rich
--- constructor avoids a source-compatible API break for callers that build or
--- pattern-match three-field results.
+-- Native dispatch always supplies an outcome. The legacy constructors
+-- represent historical/imported results whose execution facts are unknown.
+-- Consumers use the total image, mode, and outcome accessors across all forms.
 data ToolCallResult
     = ToolCallResult
         { callId :: !Text
@@ -138,6 +254,31 @@ data ToolCallResult
         , callKind :: !ToolCallKind
         , toolResultImages :: ![ToolResultImage]
         }
+    | AsyncToolCallResult
+        { callId :: !Text
+        , output :: !Text
+        , callKind :: !ToolCallKind
+        }
+    | AsyncToolCallResultWithImages
+        { callId :: !Text
+        , output :: !Text
+        , callKind :: !ToolCallKind
+        , toolResultImages :: ![ToolResultImage]
+        }
+    | ToolCallResultWithOutcome
+        { callId :: !Text
+        , output :: !Text
+        , callKind :: !ToolCallKind
+        , toolResultImages :: ![ToolResultImage]
+        , toolResultOutcome :: !ToolOutcome
+        }
+    | AsyncToolCallResultWithOutcome
+        { callId :: !Text
+        , output :: !Text
+        , callKind :: !ToolCallKind
+        , toolResultImages :: ![ToolResultImage]
+        , toolResultOutcome :: !ToolOutcome
+        }
     deriving (Eq)
 
 instance Show ToolCallResult where
@@ -145,6 +286,8 @@ instance Show ToolCallResult where
         "ToolCallResult { callId = " <> show result.callId
             <> ", output = " <> show result.output
             <> ", callKind = " <> show result.callKind
+            <> ", callMode = " <> show (toolCallResultMode result)
+            <> ", outcome = " <> show (toolCallResultOutcome result)
             <> imageSummary
             <> " }"
       where
@@ -156,6 +299,67 @@ toolCallResultImages :: ToolCallResult -> [ToolResultImage]
 toolCallResultImages = \case
     ToolCallResult{} -> []
     ToolCallResultWithImages{toolResultImages} -> toolResultImages
+    AsyncToolCallResult{} -> []
+    AsyncToolCallResultWithImages{toolResultImages} -> toolResultImages
+    ToolCallResultWithOutcome{toolResultImages} -> toolResultImages
+    AsyncToolCallResultWithOutcome{toolResultImages} -> toolResultImages
+
+toolCallResultOutcome :: ToolCallResult -> Maybe ToolOutcome
+toolCallResultOutcome = \case
+    ToolCallResultWithOutcome{toolResultOutcome} -> Just toolResultOutcome
+    AsyncToolCallResultWithOutcome{toolResultOutcome} -> Just toolResultOutcome
+    _ -> Nothing
+
+toolCallResultMode :: ToolCallResult -> ToolCallMode
+toolCallResultMode = \case
+    ToolCallResult{} -> BlockingToolCall
+    ToolCallResultWithImages{} -> BlockingToolCall
+    AsyncToolCallResult{} -> AsyncToolCall
+    AsyncToolCallResultWithImages{} -> AsyncToolCall
+    ToolCallResultWithOutcome{} -> BlockingToolCall
+    AsyncToolCallResultWithOutcome{} -> AsyncToolCall
+
+-- | Retag a result while preserving its payload, images, and outcome.
+withToolCallResultMode :: ToolCallMode -> ToolCallResult -> ToolCallResult
+withToolCallResultMode mode result =
+    case toolCallResultOutcome result of
+        Just outcome ->
+            case mode of
+                BlockingToolCall ->
+                    ToolCallResultWithOutcome
+                        result.callId result.output result.callKind
+                        (toolCallResultImages result) outcome
+                AsyncToolCall ->
+                    AsyncToolCallResultWithOutcome
+                        result.callId result.output result.callKind
+                        (toolCallResultImages result) outcome
+        Nothing ->
+            case (mode, toolCallResultImages result) of
+                (BlockingToolCall, []) ->
+                    ToolCallResult result.callId result.output result.callKind
+                (BlockingToolCall, images) ->
+                    ToolCallResultWithImages
+                        result.callId result.output result.callKind images
+                (AsyncToolCall, []) ->
+                    AsyncToolCallResult
+                        result.callId result.output result.callKind
+                (AsyncToolCall, images) ->
+                    AsyncToolCallResultWithImages
+                        result.callId result.output result.callKind images
+
+-- | Attach execution facts at a native or durable-storage boundary. Legacy
+-- imports without facts retain their compatibility representation.
+withToolCallOutcome :: Maybe ToolOutcome -> ToolCallResult -> ToolCallResult
+withToolCallOutcome Nothing result = result
+withToolCallOutcome (Just outcome) result =
+    case toolCallResultMode result of
+        BlockingToolCall ->
+            ToolCallResultWithOutcome result.callId result.output result.callKind
+                (toolCallResultImages result) outcome
+        AsyncToolCall ->
+            AsyncToolCallResultWithOutcome
+                result.callId result.output result.callKind
+                (toolCallResultImages result) outcome
 
 functionToolCall :: Text -> Text -> Text -> ToolCall
 functionToolCall callId name arguments = ToolCall
@@ -184,32 +388,38 @@ data ToolDispatchConfig = ToolDispatchConfig
     , toolDispatchFinalizeOutput :: ToolCall -> Text -> IO Text
     }
 
-data ToolHandler
-    = forall args. TypedTool Text (Decoder args) (args -> IO (Either Text Text))
-    | forall args. TypedToolWithCall Text (Decoder args) (ToolCall -> args -> IO (Either Text Text))
-    | forall args. TypedRichToolWithCall Text (Decoder args) (ToolCall -> args -> IO (Either Text ToolHandlerResult))
-    | forall args. TypedStreamingTool Text (Decoder args) ((Text -> IO ()) -> args -> IO (Either Text Text))
-    | forall args. TypedStreamingRichTool Text (Decoder args) ((Text -> IO ()) -> args -> IO (Either Text ToolHandlerResult))
-    | TextTool Text (Text -> IO (Either Text Text))
-    | StreamingTextTool Text ((Text -> IO ()) -> Text -> IO (Either Text Text))
-    | StreamingRichTextTool Text ((Text -> IO ()) -> Text -> IO (Either Text ToolHandlerResult))
-    -- | Boundary adapter which receives the original call without decoding or
-    -- rewriting its arguments. Used by out-of-process tool brokers.
-    | PassthroughTool Text ((Text -> IO ()) -> ToolCall -> IO (Either Text ToolHandlerResult))
-    | NoArgsTool Text (IO (Either Text Text))
+-- | Every handler has the same execution interface. Smart constructors capture
+-- argument decoding and result adaptation, leaving dispatch independent of the
+-- input format, streaming support, and output richness.
+--
+-- The original call remains separate from the canonical argument text so
+-- passthrough brokers can forward it without rewriting its payload.
+data ToolHandler = ToolHandler
+    { toolHandlerName :: !Text
+    , toolHandlerRun
+        :: (Text -> IO ())
+        -> ToolCall
+        -> Text
+        -> IO (Either Text ToolHandlerResult)
+    }
 
 typedTool :: Text -> Decoder args -> (args -> IO (Either Text Text)) -> ToolHandler
-typedTool = TypedTool
+typedTool name decoder run =
+    typedToolWithCall name decoder (\_call -> run)
 
 typedToolWithCall :: Text -> Decoder args -> (ToolCall -> args -> IO (Either Text Text)) -> ToolHandler
-typedToolWithCall = TypedToolWithCall
+typedToolWithCall name decoder run =
+    typedRichToolWithCall name decoder \call args ->
+        plainResult <$> run call args
 
 typedRichToolWithCall
     :: Text
     -> Decoder args
     -> (ToolCall -> args -> IO (Either Text ToolHandlerResult))
     -> ToolHandler
-typedRichToolWithCall = TypedRichToolWithCall
+typedRichToolWithCall name decoder run =
+    ToolHandler name \_emit call value ->
+        decodeAndRun decoder value (run call)
 
 -- | A typed tool that can publish accumulated output snapshots while running.
 -- The final result remains authoritative.
@@ -218,21 +428,26 @@ typedStreamingTool
     -> Decoder args
     -> ((Text -> IO ()) -> args -> IO (Either Text Text))
     -> ToolHandler
-typedStreamingTool = TypedStreamingTool
+typedStreamingTool name decoder run =
+    typedStreamingRichTool name decoder \emit args ->
+        plainResult <$> run emit args
 
 typedStreamingRichTool
     :: Text
     -> Decoder args
     -> ((Text -> IO ()) -> args -> IO (Either Text ToolHandlerResult))
     -> ToolHandler
-typedStreamingRichTool = TypedStreamingRichTool
+typedStreamingRichTool name decoder run =
+    ToolHandler name \emit _call value ->
+        decodeAndRun decoder value (run emit)
 
 -- | A freeform tool whose input is plain text rather than JSON.
 textTool
     :: Text
     -> (Text -> IO (Either Text Text))
     -> ToolHandler
-textTool = TextTool
+textTool name run =
+    streamingTextTool name (\_emit -> run)
 
 -- | A streaming freeform tool. Its input is not JSON, so no JSON decoder is
 -- involved.
@@ -240,22 +455,29 @@ streamingTextTool
     :: Text
     -> ((Text -> IO ()) -> Text -> IO (Either Text Text))
     -> ToolHandler
-streamingTextTool = StreamingTextTool
+streamingTextTool name run =
+    streamingRichTextTool name \emit value ->
+        plainResult <$> run emit value
 
 streamingRichTextTool
     :: Text
     -> ((Text -> IO ()) -> Text -> IO (Either Text ToolHandlerResult))
     -> ToolHandler
-streamingRichTextTool = StreamingRichTextTool
+streamingRichTextTool name run =
+    ToolHandler name \emit _call value -> run emit value
 
 passthroughTool
     :: Text
     -> ((Text -> IO ()) -> ToolCall -> IO (Either Text ToolHandlerResult))
     -> ToolHandler
-passthroughTool = PassthroughTool
+passthroughTool name run =
+    ToolHandler name \emit call _value -> run emit call
 
 noArgsTool :: Text -> IO (Either Text Text) -> ToolHandler
-noArgsTool = NoArgsTool
+noArgsTool name run = textTool name (\_value -> run)
+
+plainResult :: Either Text Text -> Either Text ToolHandlerResult
+plainResult = fmap \text -> ToolHandlerResult text []
 
 dispatchToolCall :: ToolDispatchConfig -> [ToolHandler] -> ToolCall -> IO ToolCallResult
 dispatchToolCall config handlers call =
@@ -321,25 +543,18 @@ dispatchToolHandlerDetailed config maybeHandler call = do
             Left exception -> do
                 _ <- tryAny (config.toolDispatchOnException callName exception)
                 pure resultOutput
-    let dispatchedResult
-            | null resultImages =
-                ToolCallResult
-                    call.callId
-                    finalizedOutput
-                    call.callKind
-            | otherwise =
-                ToolCallResultWithImages
-                    call.callId
-                    finalizedOutput
-                    call.callKind
-                    resultImages
-        succeeded = case result of
-            Right (Right _) -> True
-            Right (Left _) -> False
-            Left _ -> False
+    let outcome = case result of
+            Right (Right ToolHandlerResult{}) -> ToolSucceeded
+            Right (Right ToolHandlerResultWithOutcome{resultOutcome}) -> resultOutcome
+            Right (Left _) -> ToolFailed
+            Left _ -> ToolFailed
+        dispatchedResult =
+            withToolCallResultMode (toolCallMode call) $
+                ToolCallResultWithOutcome
+                    call.callId finalizedOutput call.callKind resultImages outcome
     pure ToolDispatchOutcome
         { toolDispatchResult = dispatchedResult
-        , toolDispatchSucceeded = succeeded
+        , toolDispatchSucceeded = toolOutcomeSucceeded outcome
         }
 
 toolArgumentsValue :: Text -> Text
@@ -410,17 +625,7 @@ multiAgentBareNames =
     ]
 
 handlerName :: ToolHandler -> Text
-handlerName = \case
-    TypedTool name _ _ -> name
-    TypedToolWithCall name _ _ -> name
-    TypedRichToolWithCall name _ _ -> name
-    TypedStreamingTool name _ _ -> name
-    TypedStreamingRichTool name _ _ -> name
-    TextTool name _ -> name
-    StreamingTextTool name _ -> name
-    StreamingRichTextTool name _ -> name
-    PassthroughTool name _ -> name
-    NoArgsTool name _ -> name
+handlerName handler = handler.toolHandlerName
 
 runHandler
     :: (Text -> IO ())
@@ -428,25 +633,8 @@ runHandler
     -> Text
     -> ToolHandler
     -> IO (Either Text ToolHandlerResult)
-runHandler emitOutput call value = \case
-    TypedTool _ decoder run ->
-        plainResult <$> decodeAndRun decoder value run
-    TypedToolWithCall _ decoder run ->
-        plainResult <$> decodeAndRun decoder value (run call)
-    TypedRichToolWithCall _ decoder run ->
-        decodeAndRun decoder value (run call)
-    TypedStreamingTool _ decoder run ->
-        plainResult <$> decodeAndRun decoder value (run emitOutput)
-    TypedStreamingRichTool _ decoder run ->
-        decodeAndRun decoder value (run emitOutput)
-    TextTool _ run -> plainResult <$> run value
-    StreamingTextTool _ run -> plainResult <$> run emitOutput value
-    StreamingRichTextTool _ run -> run emitOutput value
-    PassthroughTool _ run -> run emitOutput call
-    NoArgsTool _ run ->
-        plainResult <$> run
-  where
-    plainResult = fmap \text -> ToolHandlerResult text []
+runHandler emitOutput call value handler =
+    handler.toolHandlerRun emitOutput call value
 
 decodeAndRun
     :: Decoder args

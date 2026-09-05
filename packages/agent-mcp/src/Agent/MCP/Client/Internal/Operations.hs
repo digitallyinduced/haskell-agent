@@ -51,6 +51,7 @@ import Agent.Tools.IO ()
 import Agent.Tools.Types
     ( AppTool(..),
       ApprovalRule(..),
+      ToolAsyncCapability(..),
       ToolExecutionPolicy(..),
       ToolSchema(..) )
 import Control.Concurrent ()
@@ -345,6 +346,7 @@ appToolFor client tool = AppTool
     , appToolExecution =
         if tool.discoveredReadOnly then ParallelSafe else TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
   where
     qualifiedName = qualifiedMcpToolName

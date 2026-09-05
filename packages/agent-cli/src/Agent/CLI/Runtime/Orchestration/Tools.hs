@@ -3,6 +3,8 @@ module Agent.CLI.Runtime.Orchestration.Tools
     , runAgentTools
     ) where
 
+import Agent.CLI.ActiveAccount (ActiveAccountRef)
+import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.AgentSessions
     ( agentSessionTools,
       launchSessionThread,
@@ -333,9 +335,7 @@ data AgentToolsRequest windowTitleResult = AgentToolsRequest
     , connectedGateway :: Maybe GatewayCredential
     , learnAboutUserRequested :: Bool
     , customBearerToken :: Maybe Text
-    , activeAccountIdRef :: IORef Text
-    , activeAccountRef :: IORef Text
-    , activeSelectionRef :: IORef Text
+    , activeAccountRef :: ActiveAccountRef
     , baseToolEnv :: ToolEnv
     , catalog :: ModelCatalog
     , initialSkills :: SkillCatalog
@@ -346,7 +346,7 @@ data AgentToolsRequest windowTitleResult = AgentToolsRequest
     , customResponses :: Maybe (Text, ResponsesConnection)
     , cwd :: OsPath
     , databaseScopes :: DatabaseScopes
-    , escPaused :: IORef Bool
+    , stdinControl :: StdinControl
     , fullscreen :: Maybe FullscreenRuntime
     , home :: OsPath
     , interrupt :: InterruptState
@@ -710,9 +710,7 @@ resolveToolModel AgentToolsRequest
   where
     toolProvider = loaded.loadedProvider
     fallbackModel =
-        fromMaybe
-            (error "validated default model is missing")
-            (defaultModelFor catalog toolProvider)
+        defaultModelFor catalog toolProvider
     unrestrictedModel =
         fromMaybe
             (maybe fallbackModel (.targetModelId) targetHint)
@@ -849,7 +847,7 @@ buildToolHostHooks
     -> ToolHostHooks
 buildToolHostHooks AgentToolsRequest
     { interrupt
-    , escPaused
+    , stdinControl
     , stderrHandle
     , uiRuntimeRef
     , options
@@ -873,11 +871,11 @@ buildToolHostHooks AgentToolsRequest
                 }
         | otherwise =
             cliPlanHooks
-                provider interrupt escPaused (resolveColor stderrHandle)
+                provider interrupt stdinControl (resolveColor stderrHandle)
     toolPlanHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
     baseSecretHooks = SecretPromptHooks \request ->
         Right <$> promptSecretLine
-            escPaused
+            stdinControl
             request.secretPromptMessage
             request.secretPromptPurpose
     toolSecretHooks
@@ -1330,7 +1328,7 @@ acquireMcpRuntime request@AgentToolsRequest
     , startup
     , options
     , isTty
-    , escPaused
+    , stdinControl
     , uiRuntimeRef
     , baseToolEnv
     , mcpSupervisor
@@ -1351,7 +1349,7 @@ acquireMcpRuntime request@AgentToolsRequest
             then Nothing
             else Just \elicitation ->
                 withToolHumanInputWait baseToolEnv $
-                    cliMcpElicitation escPaused uiRuntimeRef elicitation)
+                    cliMcpElicitation stdinControl uiRuntimeRef elicitation)
     let enqueueMcpSnapshot statuses =
             unless (null statuses) do
                 instructions <-
@@ -1959,9 +1957,7 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
         , connectedGateway
         , learnAboutUserRequested
         , sessionTmp
-        , activeAccountIdRef
         , activeAccountRef
-        , activeSelectionRef
         , agentTypesRef
         , allTools
         , recordImageGenerationInputs =
@@ -1986,7 +1982,7 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
         , initialContextPreload
         , dialect
         , effortText
-        , escPaused
+        , stdinControl
         , extraTools
         , fullscreen
         , gatewayTools

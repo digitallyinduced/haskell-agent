@@ -3,13 +3,16 @@ module Agent.CLI.Runtime.Repl.Session
     ( handleSessionAction
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    )
 import Agent.CLI.Afk
     ( AfkTarget(..), handoffLocal, handoffRemote, parseAfkTarget )
 import Agent.CLI.Command
     ( currentEffort,
       currentModel,
       ForkRequest(..),
-      ReplAction(ReplRenameAuto, ReplResume, ReplSearch, ReplHome, ReplRewind, ReplClear,
+      SessionAction(ReplRenameAuto, ReplResume, ReplSearch, ReplHome, ReplRewind, ReplClear,
                  ReplNew, ReplDelete, ReplShowSession, ReplShowSessionInfo, ReplAfk,
                  ReplWorktree, ReplRename, ReplFork),
       ShellMode(ShellNone, ShellGhci, ShellBash, ShellBoth),
@@ -110,7 +113,7 @@ handleSessionAction
     :: SessionEnv
     -> SlashCatalog
     -> IO RunResult
-    -> ReplAction
+    -> SessionAction
     -> IO RunResult
 handleSessionAction
         env
@@ -130,7 +133,7 @@ data SessionActionRuntime = SessionActionRuntime
 
 dispatchSessionAction
     :: SessionActionRuntime
-    -> ReplAction
+    -> SessionAction
     -> IO RunResult
 dispatchSessionAction runtime = \case
     ReplResume maybeId -> handleResumeAction runtime maybeId
@@ -147,7 +150,6 @@ dispatchSessionAction runtime = \case
     ReplWorktree -> handleWorktreeAction runtime
     ReplRename title -> handleRenameAction runtime title
     ReplRenameAuto -> handleRenameAutoAction runtime
-    _ -> error "handleSessionAction: unsupported action"
 
 runtimeFullscreenEvent :: SessionActionRuntime -> UiEvent -> IO ()
 runtimeFullscreenEvent runtime event =
@@ -714,7 +716,7 @@ handleShowSessionInfoAction :: SessionActionRuntime -> IO RunResult
 handleShowSessionInfoAction runtime = do
     let env = runtime.actionEnv
     color <- resolveColor stdout
-    params <- readIORef env.sessionParams
+    params <- readSessionRequestParams env.sessionParams
     usage <- readIORef env.sessionUsage
     shellMode <- env.sessionShellMode
     (persistenceState, sessionId, sessionTitle) <-
@@ -846,7 +848,7 @@ handleWorktreeAction runtime = do
             runtime.actionContinue
         Right path -> do
             color <- resolveColor stderr
-            params <- readIORef env.sessionParams
+            params <- readSessionRequestParams env.sessionParams
             let message = "worktree: " <> toText path
             runtimeDisplayInfo runtime message $
                 putTextLn stderr
@@ -976,7 +978,7 @@ handleNewAction runtime = do
                         (glyphOk <> "started a fresh conversation"))
             runtime.actionContinue
         PersistenceEnabled slotRef -> do
-            params <- readIORef env.sessionParams
+            params <- readSessionRequestParams env.sessionParams
             slot <- readIORef slotRef
             let model = currentModel params
                 effort = reasoningEffortText (currentEffort params)

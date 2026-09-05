@@ -5,14 +5,13 @@ module Agent.CLI.Secret
     , secretPromptMessage
     ) where
 
-import Agent.CLI.CancelWatch (withStdinPaused)
+import Agent.CLI.CancelWatch (StdinControl, withStdinPaused)
 import Agent.CLI.Notification
     ( AttentionRequest(SecretRequested)
     , notifyAttention
     )
 import Control.Exception.Safe (bracket_, finally, tryIO)
 import Data.Char (isControl)
-import Data.IORef (IORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -31,12 +30,12 @@ import System.IO
 -- ordinary REPL input path or its history. An unavailable terminal or empty
 -- value returns 'Nothing'.
 promptSecretLine
-    :: IORef Bool
+    :: StdinControl
     -> Text
     -> Maybe Text
     -> IO (Maybe Text)
-promptSecretLine escPaused prompt purpose =
-    withStdinPaused escPaused do
+promptSecretLine stdinControl prompt purpose =
+    withStdinPaused stdinControl do
         tty <- hIsTerminalDevice stdin
         if not tty
             then pure Nothing

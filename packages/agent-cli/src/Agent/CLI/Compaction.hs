@@ -38,6 +38,10 @@ module Agent.CLI.Compaction
     , reportedOccupancy
     ) where
 
+import Agent.CLI.Session.Request
+    ( SessionRequestState
+    , readSessionRequestParams
+    )
 import Agent.CLI.Error (formatApiError)
 import Agent.CLI.Compaction.Continuation
     ( boundCompletedToolContinuations
@@ -54,6 +58,7 @@ import qualified Agent.Gemini.Client as Gemini
 import qualified Agent.Gemini.Options as Gemini
 import Agent.Loop
     ( Backend(..)
+    , BackendCallbacks(..)
     , BackendMiddleware
     , BackendResult(..)
     , BackendSnapshot(..)
@@ -64,6 +69,7 @@ import Agent.Loop
     , TurnOutput(..)
     , emptyTokenUsage
     , advanceBackendSnapshot
+    , backendWithCallbacks
     , initialBackendSnapshot
     )
 import qualified Agent.OpenAI.Client as OpenAI
@@ -173,7 +179,7 @@ data CompactAttempt error = CompactAttempt
 runProviderCompact
     :: Provider
     -> Maybe TokenProvider
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -188,7 +194,7 @@ runProviderCompactWith
     -> (TokenUsage -> IO ())
     -> Provider
     -> Maybe TokenProvider
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -204,14 +210,14 @@ runProviderCompactWithContextWindow
     -> (TokenUsage -> IO ())
     -> Provider
     -> Maybe TokenProvider
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
 runProviderCompactWithContextWindow contextWindow openAiSender recordUsage
         provider tokenProvider
         paramsRef transcriptRef focus = do
-    params <- readIORef paramsRef
+    params <- readSessionRequestParams paramsRef
     history <- readIORef transcriptRef
     attempt <- runAttemptAndRecord recordUsage $ case provider of
         OpenAIProvider ->
@@ -315,7 +321,7 @@ runBackendCompactWithContextWindow
     :: Int
     -> (ResponseCreateParams -> Backend)
     -> (TokenUsage -> IO ())
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -329,13 +335,13 @@ runBackendCompactWithLimits
     -> Int
     -> (ResponseCreateParams -> Backend)
     -> (TokenUsage -> IO ())
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
 runBackendCompactWithLimits contextWindow inputLimit makeBackend recordUsage
         paramsRef transcriptRef focus = do
-    params <- readIORef paramsRef
+    params <- readSessionRequestParams paramsRef
     history <- readIORef transcriptRef
     either (Left . formatApiError) Right
         <$> runBackendCompactHistoryWithLimits
@@ -525,7 +531,7 @@ compactApiFailure message =
 runResponsesCompactWith
     :: (ResponseCreateParams -> IO (Either ApiError Response))
     -> (TokenUsage -> IO ())
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -536,7 +542,7 @@ runResponsesCompactWithContextWindow
     :: Maybe Int
     -> (ResponseCreateParams -> IO (Either ApiError Response))
     -> (TokenUsage -> IO ())
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -551,7 +557,7 @@ runXaiResponsesCompactWithContextWindow
     :: Maybe Int
     -> (ResponseCreateParams -> IO (Either ApiError Response))
     -> (TokenUsage -> IO ())
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -564,14 +570,14 @@ runResponsesCompactPreparedWithContextWindow
     -> Maybe Int
     -> (ResponseCreateParams -> IO (Either ApiError Response))
     -> (TokenUsage -> IO ())
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
 runResponsesCompactPreparedWithContextWindow
         prepareHistory contextWindow sender recordUsage
         paramsRef transcriptRef focus = do
-    params <- readIORef paramsRef
+    params <- readSessionRequestParams paramsRef
     history <- readIORef transcriptRef
     attempt <- runAttemptAndRecord recordUsage $
         if null history
@@ -1292,8 +1298,8 @@ autoCompactOpenAiBackendWithSenderHookAndDecorator
 rejectOversizedInitialRequest
     :: IO ResponseCreateParams
     -> BackendMiddleware
-rejectOversizedInitialRequest getParams (Backend submit) =
-    Backend \snapshot previous inputs onEvent ->
+rejectOversizedInitialRequest getParams backend =
+    backendWithCallbacks \snapshot previous inputs callbacks ->
         if null snapshot.backendItems
             then do
                 params <- getParams
@@ -1308,8 +1314,10 @@ rejectOversizedInitialRequest getParams (Backend submit) =
                         pure $
                             Left $
                                 requestTooLargeError "initial"
-                    else submit snapshot previous inputs onEvent
-            else submit snapshot previous inputs onEvent
+                    else backend.submitTurnWithCallbacks
+                        snapshot previous inputs callbacks
+            else backend.submitTurnWithCallbacks
+                snapshot previous inputs callbacks
 
 autoCompactOpenAiBackendWith
     :: IO (Either Text CompactOutcome)
@@ -1382,8 +1390,8 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
         recordUsage estimateProjected
         onCompacted
         contextTokensRef
-        (Backend submit) =
-    Backend \snapshot previous inputs onEvent -> do
+        backend =
+    backendWithCallbacks \snapshot previous inputs callbacks -> do
         contextState <- readIORef contextTokensRef
         tokenLimit <- getLimit
         let history = snapshot.backendItems
@@ -1394,9 +1402,9 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
         if shouldCompact
             && (absorbCompletedTools || not (any isCompletedTool inputs))
             then compactThenSubmit
-                tokenLimit contextState snapshot history inputs onEvent
+                tokenLimit contextState snapshot history inputs callbacks
             else submitAndTrack
-                contextState snapshot previous inputs onEvent
+                contextState snapshot previous inputs callbacks
   where
     runCompaction history inputs =
         fmap
@@ -1418,8 +1426,9 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
         CompletedTool{} -> True
         _ -> False
 
-    compactThenSubmit tokenLimit oldTokens oldSnapshot oldHistory inputs onEvent = do
-        onEvent (ActivityUpdated "Compacting context…")
+    compactThenSubmit tokenLimit oldTokens oldSnapshot oldHistory inputs
+            callbacks@(BackendCallbacks emitLoopEvent _) = do
+        emitLoopEvent (ActivityUpdated "Compacting context…")
         -- Tool results complete protocol units that are already represented by
         -- calls in oldHistory. Put those results behind their calls before
         -- requesting the checkpoint; replaying them after the checkpoint
@@ -1448,7 +1457,7 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
                             oldSnapshot
                             outcome
                             continuationInputs
-                            onEvent
+                            callbacks
 
     partitionCompletedTools =
         foldr
@@ -1458,7 +1467,7 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
                     else (completed, input : pending))
             ([], [])
 
-    installSubmitAndTrack restore rollback oldSnapshot outcome inputs onEvent = do
+    installSubmitAndTrack restore rollback oldSnapshot outcome inputs callbacks = do
         let compactedHistory = outcome.compactHistory
             pendingItems = turnInputsToItems inputs
             durableHistory = compactedHistory <> pendingItems
@@ -1483,10 +1492,10 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
                     CompactionNotInstalled -> (compactedHistory, inputs, rollback)
         result <-
             restore
-                (submit
+                (backend.submitTurnWithCallbacks
                     (advanceBackendSnapshot oldSnapshot
                         continuationHistory Nothing)
-                    Nothing continuationInputs onEvent)
+                    Nothing continuationInputs callbacks)
                 `onException` rollbackIfDeferred
         case result of
             Left _ -> rollbackIfDeferred
@@ -1495,9 +1504,9 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
                     occupancySnapshot backendResult <|> compactSnapshot
         pure result
 
-    submitAndTrack oldTokens snapshot previous inputs onEvent = do
+    submitAndTrack oldTokens snapshot previous inputs callbacks = do
         result <-
-            submit snapshot previous inputs onEvent
+            backend.submitTurnWithCallbacks snapshot previous inputs callbacks
                 `onException` writeIORef contextTokensRef oldTokens
         case result of
             Left _ -> writeIORef contextTokensRef oldTokens
