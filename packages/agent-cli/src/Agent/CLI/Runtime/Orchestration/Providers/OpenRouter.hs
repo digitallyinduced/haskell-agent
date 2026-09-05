@@ -1,13 +1,13 @@
 module Agent.CLI.Runtime.Orchestration.Providers.OpenRouter
-    ( runOpenRouterProvider
+    ( withOpenRouterProvider
     ) where
 
 import Agent.CLI.Runtime.Orchestration.Providers.Common
-    ( HttpProviderSession(..)
-    , runHttpProvider
+    ( HttpProviderTransport(..)
+    , withHttpProvider
     )
-import Agent.CLI.Runtime.Orchestration.Providers.Types (AgentProviderRequest(..))
-import Agent.CLI.Runtime.Types (RunResult)
+import Agent.CLI.Runtime.Orchestration.Providers.Types
+    ( ProviderHost(..), ProviderRuntime, OpenRouterConfig(..), ProviderCompaction(..) )
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import Agent.Provider (runWithTokenProvider)
 import Agent.Responses.GenericBackend (genericResponsesBackendWith)
@@ -16,14 +16,19 @@ import Data.Maybe (fromMaybe)
 import qualified Agent.OpenRouter as OpenRouter
 import qualified Agent.Responses.GenericClient as GenericResponses
 
-runOpenRouterProvider :: AgentProviderRequest -> IO RunResult
-runOpenRouterProvider request@AgentProviderRequest{..} =
-    runHttpProvider request HttpProviderSession
+withOpenRouterProvider
+    :: OpenRouterConfig
+    -> ProviderHost
+    -> (ProviderRuntime -> IO a)
+    -> IO a
+withOpenRouterProvider OpenRouterConfig{genericOptions = customGenericOptions, ..}
+        host use =
+    withHttpProvider host HttpProviderTransport
         { httpMakeBackend = makeBackend
         , httpSendCompact = sendCompact
         , httpTransportModel = transportModel
-        , httpOccupancy = contextTokensRef
-        }
+        , httpOccupancy = host.compaction.contextTokensRef
+        } use
   where
     optionsForRequest
         :: GenericResponses.GenericClientOptions
@@ -44,7 +49,7 @@ runOpenRouterProvider request@AgentProviderRequest{..} =
                             responseRequest
                             onEvent)
                     params
-            Nothing -> openRouterBackend openRouterOptions tokenProvider params
+            Nothing -> openRouterBackend clientOptions tokenProvider params
     sendCompact responseRequest =
         case customGenericOptions of
             Just genericOptions ->
@@ -54,4 +59,4 @@ runOpenRouterProvider request@AgentProviderRequest{..} =
             Nothing ->
                 runWithTokenProvider tokenProvider \credential ->
                     OpenRouter.createResponseWith
-                        openRouterOptions credential responseRequest
+                        clientOptions credential responseRequest
