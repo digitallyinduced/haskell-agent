@@ -135,6 +135,11 @@ test-suite agent-openai-test
                     , Agent.OpenAI.ImageGenerationSpec
                     , Agent.OpenAI.LoginSpec
                     , Agent.OpenAI.LoopBackendSpec
+                    , Agent.OpenAI.LoopBackendSpec.CodecSpec
+                    , Agent.OpenAI.LoopBackendSpec.Fixtures
+                    , Agent.OpenAI.LoopBackendSpec.RecoverySpec
+                    , Agent.OpenAI.LoopBackendSpec.StateSpec
+                    , Agent.OpenAI.LoopBackendSpec.TransportSpec
                     , Agent.OpenAI.ModelsClientSpec
                     , Agent.OpenAI.ModelsManagerSpec
                     , Agent.OpenAI.ModelsTypesSpec
