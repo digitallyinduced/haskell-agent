@@ -2,6 +2,10 @@ module Agent.CLI.Runtime.Orchestration.Providers.Claude
     ( runClaudeProvider
     ) where
 
+import Agent.CLI.ActiveAccount
+    ( ActiveAccount(..)
+    , modifyActiveAccount
+    )
 import Agent.CLI.Auth.Types
     ( LoadedAuth
     , isGatewayLoadedAuth
@@ -214,7 +218,8 @@ runClaudeProvider request@AgentProviderRequest{..} nativeCapabilities =
                             roleWarn color $
                                 glyphWarn
                                     <> "Claude Code --yolo is active; host catastrophic-command and Plan Mode denies remain enforced."
-            writeIORef activeAccountRef claudeAuth.accountLabel
+            modifyActiveAccount activeAccountRef \current ->
+                current { activeAccountLabel = claudeAuth.accountLabel }
             claudeTranscriptRef <-
                 newIORef =<< readLiveTranscript conversationRef
             withClaudeCodeBackendWithHost

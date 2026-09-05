@@ -3,6 +3,9 @@ module Agent.CLI.Runtime.Orchestration.Session
     , runAgentSession
     ) where
 
+import Agent.CLI.ActiveAccount
+    ( ActiveAccountRef
+    )
 import Agent.CLI.Auth
     ( LoadedAuth(loadedTokenProvider)
     , isGatewayLoadedAuth
@@ -125,7 +128,7 @@ import Agent.CLI.Session.Runtime.Types
                      automaticCompactionHookRef, skillsRef, skillInvocationsRef,
                      escPaused, interrupt, multiCtx, rootTurnRef, subagentSessions,
                      pendingNotices, storeRoot, agentTypes, legacyTarget, usageRef,
-                     accountRef, accountIdRef, selectionRef, accountLabel,
+                     accountRef, accountLabel,
                      selectAccount, onPersisted, compactRunner, codeModeRuntime),
       StartupRuntime(startupBackground, startupDatabaseStore,
                      startupNetworkRecovery, startupSessionState,
@@ -218,9 +221,7 @@ data AgentSessionRequest closeResult windowTitleResult = AgentSessionRequest
     , connectedGateway :: Maybe GatewayCredential
     , learnAboutUserRequested :: Bool
     , sessionTmp :: OsPath
-    , activeAccountIdRef :: IORef Text
-    , activeAccountRef :: IORef Text
-    , activeSelectionRef :: IORef Text
+    , activeAccountRef :: ActiveAccountRef
     , agentTypesRef :: GrokSubagentSpecs
     , allTools :: [AppTool]
     , recordImageGenerationInputs :: [ImageAttachment] -> IO ()
@@ -982,8 +983,6 @@ buildProviderSessionRequest
             , legacyTarget = request.legacySubagentTarget
             , usageRef = liveRuntime.sessionUsageRef
             , accountRef = request.activeAccountRef
-            , accountIdRef = request.activeAccountIdRef
-            , selectionRef = request.activeSelectionRef
             , accountLabel = request.resolveActiveAccountLabel
             , selectAccount = sessionSelectAccount
             , onPersisted = request.claimCurrentSession
@@ -1060,9 +1059,7 @@ launchPreparedSession request promptRuntime liveRuntime = do
                               request
                               promptRuntime
                               liveRuntime
-                    , activeAccountIdRef = request.activeAccountIdRef
                     , activeAccountRef = request.activeAccountRef
-                    , activeSelectionRef = request.activeSelectionRef
                     , catalog = request.catalog
                     , claudeBypassEnabled = request.claudeBypassEnabled
                     , contextTokensRef = liveRuntime.sessionContextTokensRef
