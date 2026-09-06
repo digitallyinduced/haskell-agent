@@ -10,6 +10,7 @@ module Agent.CLI.Skills
     , queueSkillCatalogContextWithOmissions
     , reservedSlashNames
     , resolvePromptSkillMentions
+    , resolvePromptSkillMentionsWithWarnings
     , skillInvocationCommand
     ) where
 
@@ -54,9 +55,17 @@ resolvePromptSkillMentions
     -> [SkillInvocation]
     -> Text
     -> Either Text [SkillInvocation]
-resolvePromptSkillMentions pasted invocations prompt
-    | pasted = Right []
-    | otherwise = resolveSkillMentions invocations prompt
+resolvePromptSkillMentions pasted invocations prompt =
+    Right (snd (resolvePromptSkillMentionsWithWarnings pasted invocations prompt))
+
+resolvePromptSkillMentionsWithWarnings
+    :: Bool
+    -> [SkillInvocation]
+    -> Text
+    -> ([Text], [SkillInvocation])
+resolvePromptSkillMentionsWithWarnings pasted invocations prompt
+    | pasted = ([], [])
+    | otherwise = resolveSkillMentionsWithWarnings invocations prompt
 
 loadSkillsCatalog
     :: CliOptions
