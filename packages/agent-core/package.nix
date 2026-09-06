@@ -24,8 +24,9 @@ mkDerivation {
     tls unix websockets yaml zlib
   ];
   benchmarkHaskellDepends = [
-    aeson agent-json async base bytestring directory filepath process
-    safe-exceptions text text-builder time unix
+    aeson agent-json agent-responses-types async base bytestring
+    containers directory filepath process safe-exceptions stm text
+    text-builder time unix
   ];
   description = "Provider-neutral infrastructure for the agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

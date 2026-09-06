@@ -302,7 +302,7 @@ data LoopRuntime = LoopRuntime
     , loopRuntimePendingRef :: IORef [TurnInput]
     , loopRuntimeUncommittedTextRef :: IORef ([[Text]], [Text])
     , loopRuntimeUncommittedDisplayEventsRef
-        :: IORef [DisplayJournalEntry]
+        :: IORef DisplayJournal
     , loopRuntimeProviderAttemptActiveRef :: IORef Bool
     , loopRuntimeProviderTelemetryRef :: IORef [TurnTelemetry]
     , loopRuntimeInitialSteering :: [TurnInput]
@@ -331,7 +331,7 @@ initializeLoopRuntime config0 initialState firstInputs = do
     eventAdmissionLock <- newMVar ()
     progressRef <- newIORef (initialState, NoResponseCommitted)
     uncommittedTextRef <- newIORef ([], [])
-    uncommittedDisplayEventsRef <- newIORef []
+    uncommittedDisplayEventsRef <- newIORef emptyDisplayJournal
     providerAttemptActiveRef <- newIORef False
     providerTelemetryRef <- newIORef []
     initialSteering <- config0.loopReadSteering
@@ -365,7 +365,7 @@ initializeLoopRuntime config0 initialState firstInputs = do
 
 recordVisibleLoopEvent
     :: IORef ([[Text]], [Text])
-    -> IORef [DisplayJournalEntry]
+    -> IORef DisplayJournal
     -> IORef Bool
     -> LoopEvent
     -> IO ()
@@ -386,10 +386,10 @@ recordVisibleLoopEvent
         case event of
             TurnStarted -> do
                 writeIORef providerAttemptActiveRef True
-                writeIORef uncommittedDisplayEventsRef []
+                writeIORef uncommittedDisplayEventsRef emptyDisplayJournal
             TurnFinished _ -> do
                 writeIORef providerAttemptActiveRef False
-                writeIORef uncommittedDisplayEventsRef []
+                writeIORef uncommittedDisplayEventsRef emptyDisplayJournal
             ResponseRestarted _ ->
                 modifyIORef'
                     uncommittedDisplayEventsRef
@@ -631,7 +631,7 @@ continueCommittedLoop runtime cursor turn = do
     -- assistant text now lives in the committed state.
     writeIORef runtime.loopRuntimePendingRef []
     writeIORef runtime.loopRuntimeUncommittedTextRef ([], [])
-    writeIORef runtime.loopRuntimeUncommittedDisplayEventsRef []
+    writeIORef runtime.loopRuntimeUncommittedDisplayEventsRef emptyDisplayJournal
     writeIORef runtime.loopRuntimeProviderAttemptActiveRef False
     -- Result metadata belongs to the response commit even when a cancellation
     -- lands before the completion event is painted.
