@@ -472,7 +472,7 @@ spec = describe "runLoop" do
         case seen of
             [ _
               , ( Just "resp-tool-image"
-                , [ CompletedTool ToolCallResultWithOutcome{
+                , [ CompletedTool ToolCallResult{
                         toolResultImages = [normalized]
                     }
                   ]
@@ -1856,7 +1856,7 @@ spec = describe "runLoop" do
         config <- testConfig backend
         execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
         execution.executionPendingInputs `shouldBe`
-            [CompletedTool (ToolCallResultWithOutcome "c1" "echo:hi" FunctionCallKind [] ToolSucceeded)]
+            [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind BlockingToolCall [] (Just ToolSucceeded))]
 
     it "interrupts the provider in-band before tearing down a cancelled submission" do
         started <- newEmptyMVar
@@ -1949,7 +1949,7 @@ spec = describe "runLoop" do
         execution.executionResult `shouldBe` Left (LoopCancelled [])
         execution.executionProgress `shouldBe` ResponseCommitted
         execution.executionPendingInputs `shouldBe`
-            [CompletedTool (ToolCallResultWithOutcome "c1" "echo:hi" FunctionCallKind [] ToolSucceeded)]
+            [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind BlockingToolCall [] (Just ToolSucceeded))]
 
     it "retains committed state when a later callback throws" do
         submissions <- newIORef []
@@ -2141,7 +2141,7 @@ spec = describe "runLoop" do
                         (ToolCallResult
                             "large"
                             oversized
-                            FunctionCallKind))
+                            FunctionCallKind BlockingToolCall [] Nothing))
                 pure (Left (ConnectionError "down"))
         config <- testConfig backend
         execution <-
@@ -2828,11 +2828,12 @@ echoArgsDecoder :: Json.Decoder EchoArgs
 echoArgsDecoder = objectArgs $ \object -> EchoArgs <$> reqText object "message"
 
 functionResult :: Text -> Text -> ToolCallResult
-functionResult callId output = ToolCallResultWithOutcome
+functionResult callId output = ToolCallResult
     { callId
     , output
+    , toolResultMode = BlockingToolCall
     , toolResultImages = []
-    , toolResultOutcome = ToolSucceeded
+    , toolResultOutcome = Just ToolSucceeded
     , callKind = FunctionCallKind
     }
 

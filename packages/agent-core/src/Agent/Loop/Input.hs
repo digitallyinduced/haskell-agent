@@ -136,26 +136,7 @@ normalizeTurnInputImages = \case
                         }
         file@FileAttachmentItem{} -> file
 
-    normalizeToolResultImages result@ToolCallResult{} = result
-    normalizeToolResultImages result@ToolCallResultWithImages{
-        toolResultImages
-    } =
-        result
-            { toolResultImages =
-                fmap normalizeToolResultImage toolResultImages
-            }
-    normalizeToolResultImages result@AsyncToolCallResult{} = result
-    normalizeToolResultImages result@AsyncToolCallResultWithImages{
-        toolResultImages
-    } =
-        result
-            { toolResultImages =
-                fmap normalizeToolResultImage toolResultImages
-            }
-
-    normalizeToolResultImages result@ToolCallResultWithOutcome{toolResultImages} =
-        result { toolResultImages = fmap normalizeToolResultImage toolResultImages }
-    normalizeToolResultImages result@AsyncToolCallResultWithOutcome{toolResultImages} =
+    normalizeToolResultImages result@ToolCallResult{toolResultImages} =
         result { toolResultImages = fmap normalizeToolResultImage toolResultImages }
 
     normalizeToolResultImage :: ToolResultImage -> ToolResultImage

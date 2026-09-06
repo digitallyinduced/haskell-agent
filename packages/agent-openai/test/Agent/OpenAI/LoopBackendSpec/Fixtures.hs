@@ -152,6 +152,9 @@ functionResult callId output = ToolCallResult
     { callId
     , output
     , callKind = FunctionCallKind
+    , toolResultMode = BlockingToolCall
+    , toolResultImages = []
+    , toolResultOutcome = Nothing
     }
 
 customResult :: Text -> Text -> ToolCallResult
@@ -159,6 +162,9 @@ customResult callId output = ToolCallResult
     { callId
     , output
     , callKind = CustomCallKind
+    , toolResultMode = BlockingToolCall
+    , toolResultImages = []
+    , toolResultOutcome = Nothing
     }
 
 functionCallItem :: Text -> Text -> Text -> ResponseItem
