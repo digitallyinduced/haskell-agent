@@ -84,14 +84,8 @@ import Agent.CLI.ManagedTurn
     , managedTurnRequestWithImages
     , renderManagedTurnPrompt
     )
-import Data.Bifunctor (first)
-import Agent.Store.Postgres.Scope (Scope(..), scopeKindText)
-import Agent.Store.Postgres.Skill
-    ( LearnedSkill(..)
-    , learnedSkillActivationText
-    , learnedSkillStatusText
-    , listAllLearnedSkillsLimited
-    )
+import Agent.CLI.MacOS.DatabaseBrowseBridge ()
+import Agent.CLI.MacOS.LearnedSkillsBridge ()
 import Agent.CLI.MacOS.NativeLoopEvent
     ( encodeNativeLoopEvent
     , encodeNativeUsageEvent
@@ -116,20 +110,10 @@ import Agent.CLI.GatewayClient
 import Agent.CLI.ModelConfig
     ( organizationGatewayConnectionId
     )
-import Agent.CLI.Database (DatabaseScope(..))
-import Agent.CLI.Database.Store
-    ( DatabaseBrowsePage(..)
-    , DatabaseScopes
-    , applicableDatabaseScopes
-    , deriveDatabaseScopes
-    , listDatabaseObjects
-    , loadDatabaseRows
-    )
 import Agent.CLI.Models
     ( validateResumedGatewayBoundary
     )
 import Agent.CLI.Permission (PermissionChoice(..))
-import Agent.CLI.Project (resolveProjectRoot)
 import Agent.CLI.Session
     ( SessionMeta(..)
     , SessionTurn(..)
@@ -168,11 +152,6 @@ import Agent.Store.Postgres
     , trustedPool
     )
 import Agent.Store.Postgres.Connection (StorePool)
-import Agent.Store.Postgres.Custom
-    ( CatalogColumn(..)
-    , CatalogDefinition(..)
-    , CatalogObject(..)
-    )
 import Agent.Store.Types (renderStoreError)
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -305,7 +284,6 @@ import System.IO
 import System.OsPath
     ( OsPath
     , decodeFS
-    , takeDirectory
     , unsafeEncodeUtf
     )
 
@@ -362,24 +340,6 @@ type SearchCallback =
     -> Ptr Word8 -> CSize -- error
     -> IO ()
 
-type LearnedSkillsListCallback =
-    Ptr () -> CInt
-    -> CString -> CSize -> CString -> CSize -> CLLong
-    -> CString -> CSize -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize -> CString -> CSize
-    -> CInt -> CString -> CSize -> CString -> CSize -> IO ()
-
-type DataCatalogCallback =
-    Ptr () -> CInt -> CInt -> CInt
-    -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize -> CInt
-    -> CString -> CSize -> CString -> CSize -> IO ()
-
-type DataRowsCallback =
-    Ptr () -> CInt -> Int64 -> Int64 -> CInt -> CInt
-    -> CString -> CSize -> Int64 -> CInt
-    -> CString -> CSize -> IO ()
-
 -- Status is 0 for an active task, 1 for completion, and -1 for failure.
 -- State is 0 for queued and 1 for running. Every pointer is callback-scoped.
 type TaskSnapshotCallback =
@@ -427,18 +387,6 @@ foreign import ccall "dynamic"
 
 foreign import ccall "dynamic"
     invokeSearchCallback :: FunPtr SearchCallback -> SearchCallback
-
-foreign import ccall "dynamic"
-    invokeLearnedSkillsListCallback
-        :: FunPtr LearnedSkillsListCallback -> LearnedSkillsListCallback
-
-foreign import ccall "dynamic"
-    invokeDataCatalogCallback
-        :: FunPtr DataCatalogCallback -> DataCatalogCallback
-
-foreign import ccall "dynamic"
-    invokeDataRowsCallback
-        :: FunPtr DataRowsCallback -> DataRowsCallback
 
 foreign import ccall "dynamic"
     invokeTaskSnapshotCallback
@@ -694,9 +642,6 @@ foreign export ccall ha_session_import
     :: Ptr Word8 -> CSize
     -> FunPtr SessionTransferResultCallback -> Ptr () -> IO CInt
 
-foreign export ccall ha_learned_skills_list
-    :: Ptr Word8 -> CSize -> FunPtr LearnedSkillsListCallback -> Ptr () -> IO CInt
-
 foreign export ccall ha_engine_mcp_server_restart
     :: Ptr () -> Word64 -> Ptr Word8 -> CSize
     -> FunPtr McpResultCallback -> Ptr () -> IO CInt
@@ -724,13 +669,6 @@ ha_engine_mcp_server_restart pointer expected nameBytes (CSize nameLength)
                     Left _ -> 3
                     Right False -> 3
                     Right True -> 0
-
-foreign export ccall ha_data_catalog_list
-    :: Ptr Word8 -> CSize -> FunPtr DataCatalogCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_data_rows_load
-    :: Ptr Word8 -> CSize -> CInt -> Ptr Word8 -> CSize
-    -> Int64 -> CInt -> FunPtr DataRowsCallback -> Ptr () -> IO CInt
 
 ha_session_load_around
     :: Ptr Word8 -> CSize -> Int64 -> CInt
@@ -1085,323 +1023,6 @@ sessionExportFailure callback context err =
     withText err \pointer length ->
         invokeSessionExportCallback callback context (-1)
             nullPtr 0 pointer length
-
-ha_learned_skills_list
-    :: Ptr Word8 -> CSize -> FunPtr LearnedSkillsListCallback -> Ptr () -> IO CInt
-ha_learned_skills_list cwdBytes (CSize cwdLength) callback context
-    | callback == nullFunPtr = pure 1
-    | cwdBytes == nullPtr && cwdLength > 0 = pure 2
-    | otherwise = do
-        cwd <- decodeInput cwdBytes cwdLength
-        _ <- forkIO do
-            tryAny (listLearnedSkillsFor (Text.unpack cwd)) >>= \case
-                Left exception ->
-                    withText (Text.pack (show exception)) $ \errorPtr errorLength ->
-                        learnedSkillsTerminal callback context (-1) errorPtr errorLength
-                Right (Left err) ->
-                    withText err $ \errorPtr errorLength ->
-                        learnedSkillsTerminal callback context (-1) errorPtr errorLength
-                Right (Right skills) -> do
-                    forM_ skills \skill ->
-                        withLearnedSkillStrings skill $
-                            invokeLearnedSkillsListCallback callback context 0
-                    learnedSkillsTerminal callback context 1 nullPtr 0
-        pure 0
-  where
-    listLearnedSkillsFor cwd = do
-        home <- getHomeDirectory
-        projectRoot <- resolveProjectRoot (unsafeEncodeUtf cwd)
-        stateDirectory <- decodeFS (takeDirectory (sessionsRoot home))
-        projectRootPath <- decodeFS projectRoot
-        scopes <- deriveDatabaseScopes stateDirectory projectRootPath
-        case scopes of
-            Left err -> pure (Left err)
-            Right databaseScopes -> do
-                store <- openStore =<< managedPostgresConfigForHome home
-                case store of
-                    Left err -> pure (Left (renderStoreError err))
-                    Right opened ->
-                        bracket (pure opened) closeStore \store ->
-                            first renderStoreError
-                                <$> listAllLearnedSkillsLimited
-                                    (trustedPool store)
-                                    (applicableDatabaseScopes databaseScopes)
-                                    Nothing
-                                    1000
-
-ha_data_catalog_list
-    :: Ptr Word8 -> CSize -> FunPtr DataCatalogCallback -> Ptr () -> IO CInt
-ha_data_catalog_list cwdBytes (CSize cwdLength) callback context
-    | callback == nullFunPtr = pure 1
-    | cwdBytes == nullPtr && cwdLength > 0 = pure 2
-    | otherwise = do
-        cwd <- decodeInput cwdBytes cwdLength
-        _ <- forkIO do
-            tryAny (loadDataCatalogFor (Text.unpack cwd)) >>= \case
-                Left exception ->
-                    withText (Text.pack (show exception)) \errorPtr errorLength ->
-                        dataCatalogTerminal
-                            callback context (-1) errorPtr errorLength
-                Right (Left err) ->
-                    withText err \errorPtr errorLength ->
-                        dataCatalogTerminal
-                            callback context (-1) errorPtr errorLength
-                Right (Right scopedObjects) -> do
-                    forM_ scopedObjects \(scope, objects) ->
-                        forM_ objects (emitDataCatalogObject callback context scope)
-                    dataCatalogTerminal callback context 2 nullPtr 0
-        pure 0
-
-ha_data_rows_load
-    :: Ptr Word8 -> CSize -> CInt -> Ptr Word8 -> CSize
-    -> Int64 -> CInt -> FunPtr DataRowsCallback -> Ptr () -> IO CInt
-ha_data_rows_load
-    cwdBytes
-    (CSize cwdLength)
-    rawScope
-    objectBytes
-    (CSize objectLength)
-    offset
-    rawLimit
-    callback
-    context
-    | callback == nullFunPtr = pure 1
-    | cwdBytes == nullPtr && cwdLength > 0 = pure 2
-    | objectBytes == nullPtr && objectLength > 0 = pure 2
-    | offset < 0 = pure 3
-    | rawLimit < 1 || rawLimit > 500 = pure 3
-    | Nothing <- dataScopeFromCode rawScope = pure 3
-    | otherwise = do
-        cwd <- decodeInput cwdBytes cwdLength
-        objectName <- decodeInput objectBytes objectLength
-        if Text.null objectName
-            then pure 3
-            else do
-                let Just scope = dataScopeFromCode rawScope
-                    limit = fromIntegral rawLimit
-                _ <- forkIO do
-                    tryAny
-                        (loadDataPageFor
-                            (Text.unpack cwd)
-                            scope
-                            objectName
-                            offset
-                            limit)
-                        >>= \case
-                            Left exception ->
-                                withText
-                                    (Text.pack (show exception))
-                                    \errorPtr errorLength ->
-                                        dataRowsTerminal
-                                            callback context (-1) offset 0 False
-                                            errorPtr errorLength
-                            Right (Left err) ->
-                                withText err \errorPtr errorLength ->
-                                    dataRowsTerminal
-                                        callback context (-1) offset 0 False
-                                        errorPtr errorLength
-                            Right (Right page) -> do
-                                forM_
-                                    (zip [0 :: Int64 ..] page.databaseBrowseRows)
-                                    \(rowIndex, row) ->
-                                        forM_
-                                            (zip [0 :: Int ..] row)
-                                            \(columnIndex, value) ->
-                                                withDataValue value
-                                                    \kind valuePtr valueLength ->
-                                                        invokeDataRowsCallback
-                                                            callback context 0
-                                                            offset rowIndex
-                                                            (fromIntegral columnIndex)
-                                                            kind
-                                                            valuePtr valueLength
-                                                            0 0 nullPtr 0
-                                dataRowsTerminal
-                                    callback
-                                    context
-                                    1
-                                    offset
-                                    (fromIntegral
-                                        (length page.databaseBrowseRows))
-                                    page.databaseBrowseHasMore
-                                    nullPtr
-                                    0
-                pure 0
-
-loadDataCatalogFor
-    :: FilePath
-    -> IO (Either Text [(CInt, [CatalogObject])])
-loadDataCatalogFor cwd =
-    withDatabaseStoreFor cwd \store scopes -> do
-        results <- mapM
-            (\(scopeCode, scope) ->
-                fmap (fmap ((,) scopeCode)) $
-                    listDatabaseObjects store scopes scope)
-            [ (0, DatabaseUserScope)
-            , (1, DatabaseRepositoryScope)
-            , (2, DatabaseCheckoutScope)
-            ]
-        pure (sequence results)
-
-loadDataPageFor
-    :: FilePath
-    -> DatabaseScope
-    -> Text
-    -> Int64
-    -> Int
-    -> IO (Either Text DatabaseBrowsePage)
-loadDataPageFor cwd selected objectName offset limit =
-    withDatabaseStoreFor cwd \store scopes ->
-        loadDatabaseRows store scopes selected objectName offset limit
-
-withDatabaseStoreFor
-    :: FilePath
-    -> (Store -> DatabaseScopes -> IO (Either Text value))
-    -> IO (Either Text value)
-withDatabaseStoreFor cwd action = do
-    home <- getHomeDirectory
-    projectRoot <- resolveProjectRoot (unsafeEncodeUtf cwd)
-    stateDirectory <- decodeFS (takeDirectory (sessionsRoot home))
-    projectRootPath <- decodeFS projectRoot
-    deriveDatabaseScopes stateDirectory projectRootPath >>= \case
-        Left err -> pure (Left err)
-        Right scopes -> do
-            config <- managedPostgresConfigForHome home
-            openStore config >>= \case
-                Left err -> pure (Left (renderStoreError err))
-                Right opened ->
-                    bracket (pure opened) closeStore \store ->
-                        action store scopes
-
-emitDataCatalogObject
-    :: FunPtr DataCatalogCallback
-    -> Ptr ()
-    -> CInt
-    -> CatalogObject
-    -> IO ()
-emitDataCatalogObject callback context scope object =
-    withText object.catalogObjectName \objectPtr objectLength ->
-    withOptionalText definition.definitionComment \commentPtr commentLength -> do
-        invokeDataCatalogCallback callback context
-            0 scope kind
-            objectPtr objectLength
-            commentPtr commentLength
-            nullPtr 0 nullPtr 0 0 nullPtr 0 nullPtr 0
-        forM_ definition.definitionColumns \column ->
-            withText column.columnName \columnPtr columnLength ->
-            withText column.columnType \typePtr typeLength ->
-            withOptionalText column.columnComment
-                \columnCommentPtr columnCommentLength ->
-                    invokeDataCatalogCallback callback context
-                        1 scope kind
-                        objectPtr objectLength
-                        nullPtr 0
-                        columnPtr columnLength
-                        typePtr typeLength
-                        (if column.columnNullable then 1 else 0)
-                        columnCommentPtr columnCommentLength
-                        nullPtr 0
-  where
-    definition = object.catalogObjectDefinition
-    kind = dataObjectKind object.catalogObjectKind
-
-dataObjectKind :: Text -> CInt
-dataObjectKind = \case
-    "view" -> 1
-    "materialized_view" -> 1
-    _ -> 0
-
-dataScopeFromCode :: CInt -> Maybe DatabaseScope
-dataScopeFromCode = \case
-    0 -> Just DatabaseUserScope
-    1 -> Just DatabaseRepositoryScope
-    2 -> Just DatabaseCheckoutScope
-    _ -> Nothing
-
-dataCatalogTerminal
-    :: FunPtr DataCatalogCallback
-    -> Ptr ()
-    -> CInt
-    -> CString
-    -> CSize
-    -> IO ()
-dataCatalogTerminal callback context status errorPtr errorLength =
-    invokeDataCatalogCallback callback context
-        status 0 0
-        nullPtr 0 nullPtr 0
-        nullPtr 0 nullPtr 0 0
-        nullPtr 0 errorPtr errorLength
-
-withDataValue
-    :: Aeson.Value
-    -> (CInt -> CString -> CSize -> IO value)
-    -> IO value
-withDataValue value action =
-    case value of
-        Aeson.Null -> action 0 nullPtr 0
-        Aeson.String text -> withText text (action 1)
-        Aeson.Number _ -> withEncoded 2
-        Aeson.Bool True -> withText "true" (action 3)
-        Aeson.Bool False -> withText "false" (action 3)
-        Aeson.Array _ -> withEncoded 4
-        Aeson.Object _ -> withEncoded 4
-  where
-    withEncoded kind =
-        withText
-            (TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode value)))
-            (action kind)
-
-dataRowsTerminal
-    :: FunPtr DataRowsCallback
-    -> Ptr ()
-    -> CInt
-    -> Int64
-    -> Int64
-    -> Bool
-    -> CString
-    -> CSize
-    -> IO ()
-dataRowsTerminal
-    callback context status offset rowCount hasMore errorPtr errorLength =
-        invokeDataRowsCallback callback context
-            status offset (-1) (-1) (-1)
-            nullPtr 0 rowCount (if hasMore then 1 else 0)
-            errorPtr errorLength
-
-type LearnedSkillItemCallback =
-    CString -> CSize -> CString -> CSize -> CLLong
-    -> CString -> CSize -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize -> CString -> CSize
-    -> CInt -> CString -> CSize -> CString -> CSize -> IO ()
-
-withLearnedSkillStrings :: LearnedSkill -> LearnedSkillItemCallback -> IO ()
-withLearnedSkillStrings skill action =
-    withText (scopeKindText skill.learnedSkillScope.scopeKind) $ \scope scopeLength ->
-    withText skill.learnedSkillSlug $ \slug slugLength ->
-    withText skill.learnedSkillTitle $ \title titleLength ->
-    withText skill.learnedSkillDescription $ \description descriptionLength ->
-    withText skill.learnedSkillAppliesWhen $ \applies appliesLength ->
-    withText skill.learnedSkillInstructions $ \instructions instructionsLength ->
-    withText (learnedSkillActivationText skill.learnedSkillActivation) $ \activation activationLength ->
-    withText (learnedSkillStatusText skill.learnedSkillStatus) $ \status statusLength ->
-    withText (Text.pack (show skill.learnedSkillUpdatedAt)) $ \updated updatedLength ->
-        action scope scopeLength slug slugLength
-            (fromIntegral skill.learnedSkillRevision)
-            title titleLength description descriptionLength
-            applies appliesLength instructions instructionsLength
-            activation activationLength status statusLength
-            (fromIntegral skill.learnedSkillPriority) updated updatedLength
-            nullPtr 0
-
-learnedSkillsTerminal
-    :: FunPtr LearnedSkillsListCallback
-    -> Ptr () -> CInt -> CString -> CSize -> IO ()
-learnedSkillsTerminal callback context status errorPtr errorLength =
-    invokeLearnedSkillsListCallback callback context status
-        nullPtr 0 nullPtr 0 0
-        nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-        nullPtr 0 nullPtr 0
-        0 nullPtr 0 errorPtr errorLength
 
 foreign export ccall ha_engine_search_conversations
     :: Ptr () -> Ptr Word8 -> CSize -> CSize
