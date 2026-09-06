@@ -9,6 +9,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , beginPortalCaptureRequestWith
     , cancelAndJoinPortalCaptureWorker
     , closeBarePortalCaptureWith
+    , closePortalBackendWith
     , closePortalStateWith
     , ensurePortalStateReadyWith
     , ensurePortalStateReadyWithOwnership
@@ -98,7 +99,9 @@ import Control.Concurrent.Async
     ( Async
     , async
     , cancel
+    , wait
     , waitCatch
+    , withAsyncWithUnmask
     )
 import Control.Concurrent.STM
     ( STM
@@ -113,13 +116,9 @@ import Control.Concurrent.STM
 import qualified Control.Exception as Exception
 import Control.Exception.Safe
     ( SomeException
-    , bracket
     , catchAny
-    , finally
-    , generalBracket
     , isAsyncException
     , mask
-    , onException
     , throwIO
     , tryAny
     )
@@ -340,7 +339,7 @@ newPortalRuntime target readiness = do
     attempted <- tryAny do
         either (fail . Text.unpack) pure =<< readiness
         (client, uniqueName) <- connectPortal target
-        flip onException
+        flip Exception.onException
             (disconnect client `catchAny` const (pure ())) do
                 ownerName <- resolvePortalOwner client
                 verifyPortalOwnerUser
@@ -491,6 +490,16 @@ runPortalBackendOperationWith
         outcome <- modifyMVarMasked stateVar step
         either Exception.throwIO pure outcome
 
+-- The CLI session owner can invoke backend finalizers while already under
+-- uninterruptible masking. Portal teardown contains its own deadlines, so run
+-- it in a structured child whose masking state can be reset independently.
+-- The parent still waits for the child (and joins it on cancellation).
+runPortalCleanupWorker :: IO value -> IO value
+runPortalCleanupWorker action =
+    withAsyncWithUnmask
+        (\unmask -> unmask action)
+        wait
+
 closePortalBackendWith
     :: MVar (PortalBackendState runtime)
     -> (runtime -> IO ())
@@ -499,7 +508,10 @@ closePortalBackendWith stateVar closeRuntime =
     Exception.mask \restore -> do
         let closeAndFinish runtime = do
                 closed <-
-                    tryAllExceptions (restore (closeRuntime runtime))
+                    tryAllExceptions
+                        (restore
+                            (runPortalCleanupWorker
+                                (closeRuntime runtime)))
                 pure case closed of
                     Left exception ->
                         (PortalBackendClosing runtime, Left exception)
@@ -807,12 +819,14 @@ initializePortalSession runtime = do
             runtime.portalClient
             (sessionClosedRule runtime.portalOwnerName sessionPath)
             (\_ -> markPortalSessionClosed runtime sessionPath)
-            `onException` closePortalSessionPath runtime sessionPath
+            `Exception.onException`
+                closePortalSessionPath runtime sessionPath
     let cleanup =
             (removeMatch runtime.portalClient closedHandler
                 `catchAny` const (pure ()))
-                `finally` closePortalSessionPath runtime sessionPath
-    flip onException cleanup do
+                `Exception.finally`
+                    closePortalSessionPath runtime sessionPath
+    flip Exception.onException cleanup do
         void $
             portalRequest runtime screenCastInterface "SelectSources"
                 \requestOptions ->
@@ -935,7 +949,7 @@ portalRequest runtime interface member bodyForOptions = do
     responseVar <- newEmptyMVar
     waited <-
         (timeout requestTimeout do
-            bracket
+            Exception.bracket
                 (addMatch
                     runtime.portalClient
                     (requestResponseRule runtime.portalOwnerName expectedPath)
@@ -957,7 +971,8 @@ portalRequest runtime interface member bodyForOptions = do
                         fail
                             "The desktop portal returned an unexpected request handle."
                     takeMVar responseVar)
-            `onException` closePortalRequest runtime expectedPath
+            `Exception.onException`
+                closePortalRequest runtime expectedPath
     case waited of
         Nothing -> do
             closePortalRequest runtime expectedPath
@@ -1079,13 +1094,13 @@ disposePortalSession runtime session =
         runtime.portalClient
         session.portalSessionClosedHandler
         `catchAny` const (pure ()))
-        `finally`
+        `Exception.finally`
             closePortalCapture session.portalSessionCapture
 
 closePortalSession :: PortalRuntime -> PortalSession -> IO ()
 closePortalSession runtime session =
     disposePortalSession runtime session
-        `finally`
+        `Exception.finally`
             closePortalSessionPath runtime session.portalSessionPath
 
 closePortalRuntime :: PortalRuntime -> IO ()
@@ -1155,7 +1170,7 @@ withPortalStateInvalidation
     -> IO value
 withPortalStateInvalidation stateVar matches err closeSession action =
     action
-        `onException`
+        `Exception.onException`
             invalidatePortalStateWhenWith
                 stateVar
                 matches
@@ -1372,9 +1387,9 @@ withPortalModifiers
 withPortalModifiers _ _ [] action = action
 withPortalModifiers runtime session modifiers action = do
     let keysyms = map modifierKeysym modifiers
-    fst <$> generalBracket
+    Exception.bracket
         (pure ())
-        (\() _ -> releaseKeysyms runtime session keysyms)
+        (const (releaseKeysyms runtime session keysyms))
         (\() -> do
             forM_ keysyms \keysym ->
                 notifyKeyboardKeysym runtime session keysym keyPressed
@@ -1399,14 +1414,14 @@ tapKeysym :: PortalRuntime -> PortalSession -> Int32 -> IO ()
 tapKeysym runtime session keysym =
     (notifyKeyboardKeysym runtime session keysym keyPressed
         >> threadDelay 1000)
-        `finally`
+        `Exception.finally`
             notifyKeyboardKeysym runtime session keysym keyReleased
 
 tapPointerButton :: PortalRuntime -> PortalSession -> Int32 -> IO ()
 tapPointerButton runtime session button =
     (notifyPointerButton runtime session button buttonPressed
         >> threadDelay 20000)
-        `finally`
+        `Exception.finally`
             notifyPointerButton runtime session button buttonReleased
 
 dragPortalPointer
@@ -1425,7 +1440,7 @@ dragPortalPointer runtime session stream
         (notifyPointerButton
             runtime session leftButtonCode buttonPressed
             >> forM_ rest movePoint)
-            `finally`
+            `Exception.finally`
                 notifyPointerButton
                     runtime session leftButtonCode buttonReleased
   where
@@ -1620,7 +1635,7 @@ withPortalCaptureRunningWith
 withPortalCaptureRunningWith resume suspend action =
     mask \restore -> do
         resume
-        restore action `finally` suspend
+        restore action `Exception.finally` suspend
 
 waitForPortalFrameAfter
     :: Int

@@ -48,6 +48,7 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , beginPortalCaptureRequestWith
     , cancelAndJoinPortalCaptureWorker
     , closeBarePortalCaptureWith
+    , closePortalBackendWith
     , closePortalStateWith
     , drainPortalPngFrameBuffer
     , ensurePortalStateReadyWith
@@ -1227,6 +1228,36 @@ spec = do
                 _ ->
                     expectationFailure
                         "the next readiness check did not reconnect"
+
+        it "keeps teardown deadlines live under an uninterruptible owner" do
+            backendState <-
+                newMVar
+                    (PortalBackendOpen (Just ("runtime" :: Text.Text)))
+            cleanupMasking <- newIORef MaskedUninterruptible
+            deadlineResult <- newIORef (Just ())
+            let closeRuntime _ = do
+                    getMaskingState >>= writeIORef cleanupMasking
+                    timeout 20000 (threadDelay 500000)
+                        >>= writeIORef deadlineResult
+            attempted <-
+                tryAny
+                    ((throwString "owner failed" :: IO ())
+                        `finally`
+                            closePortalBackendWith
+                                backendState
+                                closeRuntime)
+            attempted `shouldSatisfy` \case
+                Left exception ->
+                    "owner failed"
+                        `Text.isInfixOf` Text.pack (show exception)
+                Right () -> False
+            readIORef cleanupMasking `shouldReturn` Unmasked
+            readIORef deadlineResult `shouldReturn` Nothing
+            readMVar backendState >>= \case
+                PortalBackendClosed -> pure ()
+                _ ->
+                    expectationFailure
+                        "portal backend teardown did not finish"
 
         it "derives race-free request paths from the unique bus name" do
             portalRequestPathForSender ":1.42" "request_ab12"
