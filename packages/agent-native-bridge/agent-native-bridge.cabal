@@ -74,6 +74,10 @@ foreign-library haskell-agent-bridge
                     , Agent.CLI.MacOS.RepositoryWorkers
                     , Agent.CLI.MacOS.RepositoryChecks
                     , Agent.CLI.MacOS.RepositoryDeliveryBridge
+                    , Agent.CLI.MacOS.RepositoryReviewBridge
+                    , Agent.CLI.MacOS.NativeRequest
+                    , Agent.CLI.MacOS.NativeGatewayBoundary
+                    , Agent.CLI.MacOS.NativeModelCatalog
                     , Agent.CLI.MacOS.RepositoryInput
                     , Agent.CLI.MacOS.ResourceAdmin
     c-sources:        cbits/HaskellAgentBridgeRuntime.c
@@ -157,6 +161,10 @@ test-suite agent-native-bridge-test
                      , Agent.CLI.MacOS.RepositoryWorkers
                      , Agent.CLI.MacOS.RepositoryChecks
                      , Agent.CLI.MacOS.RepositoryDeliveryBridge
+                     , Agent.CLI.MacOS.RepositoryReviewBridge
+                     , Agent.CLI.MacOS.NativeRequest
+                     , Agent.CLI.MacOS.NativeGatewayBoundary
+                     , Agent.CLI.MacOS.NativeModelCatalog
                     , Agent.CLI.MacOS.ResourceAdmin
                      , Agent.CLI.MacOS.BrowserBridgeFFISpec
                      , Agent.CLI.MacOS.ComputerBridgeSpec

@@ -31,17 +31,15 @@ module Agent.CLI.MacOS.Bridge
 
 import Agent.CLI.MacOS.ResourceAdmin ()
 import Agent.CLI.MacOS.Marshalling
+import Agent.CLI.MacOS.NativeRequest
+import Agent.CLI.MacOS.NativeGatewayBoundary
+import Agent.CLI.MacOS.NativeModelCatalog
 import Agent.CLI.MacOS.BrowserBridge
 import Agent.CLI.MacOS.GatewayBridge (invokeGatewayCallbackOnce)
 import Agent.CLI.MacOS.AccountBridge ()
 import Agent.CLI.MacOS.RepositoryChecks
 import Agent.CLI.MacOS.RepositoryDeliveryBridge ()
-import Agent.CLI.MacOS.RepositoryInput
-import Agent.CLI.MacOS.RepositoryWorkers
-    ( cancelRepositoryWorkers
-    , startRepositoryWorker
-    , tryRepositorySynchronous
-    )
+import Agent.CLI.MacOS.RepositoryReviewBridge ()
 import Agent.CLI.MacOS.ComputerBridge
     ( ComputerCallback
     , ComputerHost(..)
@@ -112,18 +110,12 @@ import Agent.Runtime.Daemon.TaskScheduler
     )
 import qualified Agent.CLI.GatewayBoundary as GatewayBoundary
 import Agent.CLI.GatewayClient
-    ( GatewayCredential(..)
-    , withGatewayCredentialLease
+    ( withGatewayCredentialLease
     , withGatewayCredentialTurnLease
     )
 import Agent.CLI.ModelConfig
-    ( CatalogModel(..)
-    , ModelCatalog
-    , catalogModelForConnection
-    , organizationGatewayConnectionId
+    ( organizationGatewayConnectionId
     )
-import Agent.CLI.GatewayModels
-    ( loadGatewayModelOptionsWithCredentialAt )
 import Agent.CLI.Database (DatabaseScope(..))
 import Agent.CLI.Database.Store
     ( DatabaseBrowsePage(..)
@@ -134,27 +126,10 @@ import Agent.CLI.Database.Store
     , loadDatabaseRows
     )
 import Agent.CLI.Models
-    ( ModelOption(..)
-    , ModelTarget(..)
-    , PickerState(..)
-    , defaultModelOptionFor
-    , initialPickerStateForOptions
-    , initialPickerStateResolved
-    , resolveConfiguredModel
-    , resolveModelOptionById
-    , resolveModelOptionDialect
-    , selectedOption
-    , validateResumedGatewayBoundary
+    ( validateResumedGatewayBoundary
     )
 import Agent.CLI.Permission (PermissionChoice(..))
-import Agent.CLI.Project
-    ( ProjectModel(..)
-    , ProjectSettings(..)
-    , loadProjectSettings
-    , resolveProjectRoot
-    )
-import qualified Agent.CLI.RepositoryReview as RepositoryReview
-import Agent.CLI.Options (parseEffort)
+import Agent.CLI.Project (resolveProjectRoot)
 import Agent.CLI.Session
     ( SessionMeta(..)
     , SessionTurn(..)
@@ -168,7 +143,6 @@ import Agent.CLI.Session
     , listArchivedSessionIds
     , listSessions
     , loadSessionHistoryTurnsAround
-    , loadSessionMeta
     , renameSession
     , setSessionArchived
     , sessionsRoot
@@ -186,8 +160,6 @@ import Agent.Loop
     , TurnOutput(..)
     , emptyTokenUsage
     )
-import Agent.Dialect (dialectSlug)
-import Agent.Provider (Provider(..), providerSlug)
 import Agent.Store.Postgres
     ( ManagedPostgresConfig
     , Store
@@ -268,15 +240,12 @@ import Control.Monad
     , when
     )
 import qualified Data.Aeson as Aeson
-import Data.Aeson
-    ( (.:)
-    , (.:?)
-    )
 import qualified Data.Aeson.Types as Aeson
+import Data.Aeson
+    ( (.:?)
+    )
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (ord)
-import Data.Either (isRight)
 import Data.IORef
     ( modifyIORef'
     , newIORef
@@ -424,35 +393,6 @@ type McpServerFieldCallback =
 
 type McpResultCallback =
     Ptr () -> CInt -> Word64 -> CString -> CSize -> IO ()
-type RepositorySnapshotCallback =
-    Ptr ()
-    -> CString -> CSize -- snapshot id
-    -> CString -> CSize -- repository root
-    -> CString -> CSize -- HEAD, empty for unborn
-    -> CString -> CSize -- index fingerprint
-    -> CString -> CSize -- worktree fingerprint
-    -> IO ()
-
-type RepositoryFileCallback =
-    Ptr ()
-    -> CString -> CSize -- path
-    -> CString -> CSize -- original path, null when absent
-    -> CInt -- index status byte
-    -> CInt -- worktree status byte
-    -> IO ()
-
-type RepositoryDiffCallback =
-    Ptr () -> Ptr Word8 -> CSize -> CInt -> IO ()
-
-type RepositoryHunkCallback =
-    Ptr () -> CLLong -> CLLong -> CLLong -> CLLong
-    -> CString -> CSize -> IO ()
-
-type RepositoryResultCallback =
-    Ptr () -> CInt
-    -> CString -> CSize -- current snapshot id on success/stale
-    -> CString -> CSize -- error
-    -> IO ()
 
 -- Status is 0 for an active task, 1 for completion, and -1 for failure.
 -- State is 0 for queued and 1 for running. Every pointer is callback-scoped.
@@ -527,26 +467,6 @@ foreign import ccall "dynamic"
         :: FunPtr McpResultCallback -> McpResultCallback
 
 foreign import ccall "dynamic"
-    invokeRepositorySnapshotCallback
-        :: FunPtr RepositorySnapshotCallback -> RepositorySnapshotCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryFileCallback
-        :: FunPtr RepositoryFileCallback -> RepositoryFileCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryDiffCallback
-        :: FunPtr RepositoryDiffCallback -> RepositoryDiffCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryHunkCallback
-        :: FunPtr RepositoryHunkCallback -> RepositoryHunkCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryResultCallback
-        :: FunPtr RepositoryResultCallback -> RepositoryResultCallback
-
-foreign import ccall "dynamic"
     invokeTaskSnapshotCallback
         :: FunPtr TaskSnapshotCallback -> TaskSnapshotCallback
 
@@ -561,83 +481,6 @@ foreign import ccall "dynamic"
 foreign import ccall "dynamic"
     invokeSessionExportCallback
         :: FunPtr SessionExportCallback -> SessionExportCallback
-
-data BridgeRequest = BridgeRequest
-    { requestId :: !Text
-    , requestMethod :: !Text
-    , requestParams :: !Aeson.Value
-    }
-
-instance Aeson.FromJSON BridgeRequest where
-    parseJSON = Aeson.withObject "BridgeRequest" \object ->
-        BridgeRequest
-            <$> object .: "id"
-            <*> object .: "method"
-            <*> (object .:? "params" Aeson..!= Aeson.object [])
-
-data TurnStart = TurnStart
-    { turnStartId :: !Text
-    , turnStartPrompt :: !Text
-    , turnStartSessionId :: !(Maybe Text)
-    , turnStartCwd :: !FilePath
-    , turnStartProvider :: !(Maybe Text)
-    , turnStartModel :: !(Maybe Text)
-    , turnStartEffort :: !(Maybe Text)
-    , turnStartWorktree :: !Bool
-    , turnStartComputerUse :: !Bool
-    }
-
-instance Aeson.FromJSON TurnStart where
-    parseJSON = Aeson.withObject "TurnStart" \object -> do
-        turnStartId <- object .: "turnId"
-        turnStartPrompt <- object .: "prompt"
-        turnStartSessionId <- object .:? "sessionId"
-        turnStartCwd <- object .: "cwd"
-        turnStartProvider <- object .:? "provider"
-        turnStartModel <- object .:? "model"
-        turnStartEffort <- object .:? "effort"
-        _ <- traverse
-            (either fail pure . parseEffort)
-            turnStartEffort
-        turnStartWorktree <- object .:? "worktree" Aeson..!= False
-        turnStartComputerUse <-
-            object .:? "computerUse" Aeson..!= False
-        let start = TurnStart
-                { turnStartId
-                , turnStartPrompt
-                , turnStartSessionId
-                , turnStartCwd
-                , turnStartProvider
-                , turnStartModel
-                , turnStartEffort
-                , turnStartWorktree
-                , turnStartComputerUse
-                }
-        case
-            ( turnStartSessionId
-            , turnStartWorktree
-            , turnStartProvider
-            , turnStartModel
-            )
-          of
-            (Just _, True, _, _) ->
-                fail "a worktree can only be created for a new session"
-            (_, _, Nothing, Nothing) -> pure start
-            (_, _, Just _, Just _) -> pure start
-            _ -> fail "provider and model must be supplied together"
-
-turnStartCleanupId :: Text -> Aeson.Value -> Text
-turnStartCleanupId requestId params =
-    fromMaybe requestId $
-        Aeson.parseMaybe
-            (Aeson.withObject "TurnStartCleanup" (.:? "turnId"))
-            params
-            >>= id
-            >>= nonBlank
-  where
-    nonBlank value
-        | Text.null (Text.strip value) = Nothing
-        | otherwise = Just value
 
 discardStagedTurn
     :: Text
@@ -659,57 +502,6 @@ discardStagedTurnById
 discardStagedTurnById turnId stagedImages stagedOptions = do
     modifyTVar' stagedImages (Map.delete turnId)
     modifyTVar' stagedOptions (Map.delete turnId)
-
-data TurnReference = TurnReference
-    { turnReferenceId :: !Text
-    }
-
-instance Aeson.FromJSON TurnReference where
-    parseJSON = Aeson.withObject "TurnReference" \object ->
-        TurnReference <$> object .: "turnId"
-
-data ApprovalResolution = ApprovalResolution
-    { approvalResolutionId :: !Text
-    , approvalResolutionDecision :: !Text
-    }
-
-instance Aeson.FromJSON ApprovalResolution where
-    parseJSON = Aeson.withObject "ApprovalResolution" \object ->
-        ApprovalResolution
-            <$> object .: "approvalId"
-            <*> object .: "decision"
-
-data SessionPageRequest = SessionPageRequest
-    { sessionPageId :: !Text
-    , sessionPageBefore :: !(Maybe Int64)
-    , sessionPageLimit :: !(Maybe Int)
-    }
-
-instance Aeson.FromJSON SessionPageRequest where
-    parseJSON = Aeson.withObject "SessionPageRequest" \object ->
-        SessionPageRequest
-            <$> object .: "id"
-            <*> object .:? "before"
-            <*> object .:? "limit"
-
-data SessionReference = SessionReference
-    { sessionReferenceId :: !Text
-    }
-
-instance Aeson.FromJSON SessionReference where
-    parseJSON = Aeson.withObject "SessionReference" \object ->
-        SessionReference <$> object .: "id"
-
-data ModelsListRequest = ModelsListRequest
-    { modelsListCwd :: !FilePath
-    , modelsListSessionId :: !(Maybe Text)
-    }
-
-instance Aeson.FromJSON ModelsListRequest where
-    parseJSON = Aeson.withObject "ModelsListRequest" \object ->
-        ModelsListRequest
-            <$> object .: "cwd"
-            <*> object .:? "sessionId"
 
 data NativeTurnOptions = NativeTurnOptions
     { nativeTurnInteractionMode :: !NativeInteractionMode
@@ -1263,416 +1055,6 @@ mcpAdminTry action =
         Left exception ->
             pure (Left (McpAdminInvalid (Text.pack (show exception))))
         Right result -> pure result
-foreign export ccall ha_repository_snapshot
-    :: Ptr Word8 -> CSize
-    -> FunPtr RepositorySnapshotCallback
-    -> FunPtr RepositoryFileCallback
-    -> FunPtr RepositoryResultCallback
-    -> Ptr () -> IO CInt
-
-foreign export ccall ha_repository_diff
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryDiffCallback
-    -> FunPtr RepositoryHunkCallback
-    -> FunPtr RepositoryResultCallback
-    -> Ptr () -> IO CInt
-
-foreign export ccall ha_repository_apply_path
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt
-    -> Ptr Word8 -> CSize -> FunPtr RepositoryResultCallback
-    -> Ptr () -> IO CInt
-
-foreign export ccall ha_repository_apply_hunks
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt
-    -> Ptr Word8 -> CSize -> Ptr CSize -> CSize
-    -> FunPtr RepositoryResultCallback
-    -> Ptr () -> IO CInt
-
-foreign export ccall ha_repository_commit
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryResultCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_repository_cancel_all :: IO ()
-
-ha_repository_snapshot
-    :: Ptr Word8 -> CSize
-    -> FunPtr RepositorySnapshotCallback
-    -> FunPtr RepositoryFileCallback
-    -> FunPtr RepositoryResultCallback
-    -> Ptr () -> IO CInt
-ha_repository_snapshot pathBytes pathLength snapshotCallback fileCallback
-    resultCallback context
-    | snapshotCallback == nullFunPtr
-        || fileCallback == nullFunPtr
-        || resultCallback == nullFunPtr = pure 1
-    | otherwise =
-        copyRequiredText pathBytes pathLength >>= \case
-            Left _ -> pure 2
-            Right path -> do
-                started <- startRepositoryWorker
-                    (emitRepositoryCancelled resultCallback context) do
-                    tryRepositorySynchronous
-                        (RepositoryReview.repositorySnapshot (Text.unpack path))
-                        >>= \case
-                            Left exception ->
-                                pure
-                                    (emitRepositoryFailure
-                                        resultCallback
-                                        context
-                                        (Text.pack (show exception)))
-                            Right (Left err) ->
-                                pure
-                                    (emitRepositoryError
-                                        resultCallback context err)
-                            Right (Right snapshot) -> do
-                                streamed <- tryRepositorySynchronous do
-                                    withRepositorySnapshot snapshot $
-                                        invokeRepositorySnapshotCallback
-                                            snapshotCallback
-                                            context
-                                    forM_ snapshot.snapshotFiles \file ->
-                                        withText
-                                            (Text.pack file.repositoryFilePath)
-                                            \pathPtr pathSize ->
-                                        withNullableText
-                                            (Text.pack
-                                                <$> file.repositoryFileOriginalPath)
-                                            \originalPtr originalSize ->
-                                                invokeRepositoryFileCallback
-                                                    fileCallback
-                                                    context
-                                                    pathPtr pathSize
-                                                    originalPtr originalSize
-                                                    (fromIntegral
-                                                        (ord
-                                                            file.repositoryFileIndexStatus))
-                                                    (fromIntegral
-                                                        (ord
-                                                            file.repositoryFileWorktreeStatus))
-                                case streamed of
-                                    Left exception ->
-                                        pure
-                                            (emitRepositoryFailure
-                                                resultCallback
-                                                context
-                                                (Text.pack (show exception)))
-                                    Right () ->
-                                        pure
-                                            (emitRepositorySuccess
-                                                resultCallback
-                                                context
-                                                snapshot.snapshotId)
-                pure (if started then 0 else 3)
-
-ha_repository_diff
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryDiffCallback
-    -> FunPtr RepositoryHunkCallback
-    -> FunPtr RepositoryResultCallback
-    -> Ptr () -> IO CInt
-ha_repository_diff pathBytes pathLength snapshotBytes snapshotLength
-    diffKind fileBytes fileLength diffCallback hunkCallback resultCallback context
-    | diffCallback == nullFunPtr
-        || hunkCallback == nullFunPtr
-        || resultCallback == nullFunPtr = pure 1
-    | otherwise =
-        copyRequiredTexts
-            [ (pathBytes, pathLength)
-            , (snapshotBytes, snapshotLength)
-            , (fileBytes, fileLength)
-            ] >>= \case
-                Left _ -> pure 2
-                Right [path, expected, file] ->
-                    case repositoryDiffKind diffKind of
-                        Nothing -> pure 2
-                        Just kind -> do
-                            started <- startRepositoryWorker
-                                (emitRepositoryCancelled resultCallback context) do
-                                tryRepositorySynchronous
-                                    (RepositoryReview.repositoryDiff
-                                        (Text.unpack path)
-                                        expected
-                                        kind
-                                        (Text.unpack file))
-                                    >>= \case
-                                        Left exception ->
-                                            pure
-                                                (emitRepositoryFailure
-                                                    resultCallback
-                                                    context
-                                                    (Text.pack (show exception)))
-                                        Right (Left err) ->
-                                            pure
-                                                (emitRepositoryError
-                                                    resultCallback context err)
-                                        Right (Right diff) -> do
-                                            streamed <- tryRepositorySynchronous do
-                                                forM_
-                                                    (byteStringChunks
-                                                        (64 * 1024)
-                                                        diff.repositoryDiffPatch)
-                                                    \chunk ->
-                                                        BS.useAsCStringLen chunk
-                                                            \(pointer, length) ->
-                                                                invokeRepositoryDiffCallback
-                                                                    diffCallback
-                                                                    context
-                                                                    (castPtr pointer)
-                                                                    (fromIntegral length)
-                                                                    (if
-                                                                        diff.repositoryDiffBinary
-                                                                        then 1
-                                                                        else 0)
-                                                forM_
-                                                    diff.repositoryDiffHunks
-                                                    \hunk ->
-                                                        withText
-                                                            hunk.hunkHeader
-                                                            \headerPtr
-                                                                headerLength ->
-                                                                    invokeRepositoryHunkCallback
-                                                                        hunkCallback
-                                                                        context
-                                                                        (fromIntegral hunk.hunkOldStart)
-                                                                        (fromIntegral hunk.hunkOldCount)
-                                                                        (fromIntegral hunk.hunkNewStart)
-                                                                        (fromIntegral hunk.hunkNewCount)
-                                                                        headerPtr
-                                                                        headerLength
-                                            case streamed of
-                                                Left exception ->
-                                                    pure
-                                                        (emitRepositoryFailure
-                                                            resultCallback
-                                                            context
-                                                            (Text.pack
-                                                                (show exception)))
-                                                Right () ->
-                                                    pure
-                                                        (emitRepositorySuccess
-                                                            resultCallback
-                                                            context
-                                                            expected)
-                            pure (if started then 0 else 3)
-                Right _ -> pure 3
-
-ha_repository_apply_path
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt
-    -> Ptr Word8 -> CSize -> FunPtr RepositoryResultCallback
-    -> Ptr () -> IO CInt
-ha_repository_apply_path pathBytes pathLength snapshotBytes snapshotLength
-    operation fileBytes fileLength callback context
-    | callback == nullFunPtr = pure 1
-    | otherwise =
-        copyRequiredTexts
-            [ (pathBytes, pathLength)
-            , (snapshotBytes, snapshotLength)
-            , (fileBytes, fileLength)
-            ] >>= \case
-                Left _ -> pure 2
-                Right [path, expected, file] ->
-                    case repositoryPathMutation operation (Text.unpack file) of
-                        Nothing -> pure 2
-                        Just mutation -> do
-                            started <- startRepositoryMutation
-                                callback context (Text.unpack path) expected mutation
-                            pure (if started then 0 else 3)
-                Right _ -> pure 3
-
-ha_repository_apply_hunks
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt
-    -> Ptr Word8 -> CSize -> Ptr CSize -> CSize
-    -> FunPtr RepositoryResultCallback
-    -> Ptr () -> IO CInt
-ha_repository_apply_hunks pathBytes pathLength snapshotBytes snapshotLength
-    operation fileBytes fileLength hunkIndices hunkCount callback context
-    | callback == nullFunPtr = pure 1
-    | hunkIndices == nullPtr || hunkCount == 0 = pure 2
-    | hunkCount > 4096 = pure 2
-    | fromIntegral hunkCount
-        > (maxBound :: Int) `div` sizeOf (undefined :: CSize) = pure 2
-    | otherwise =
-        copyRequiredTexts
-            [ (pathBytes, pathLength)
-            , (snapshotBytes, snapshotLength)
-            , (fileBytes, fileLength)
-            ]
-            >>= \case
-                Left _ -> pure 2
-                Right [path, expected, file] -> do
-                    rawIndices <- mapM
-                        (\index ->
-                            (peekByteOff
-                                    hunkIndices
-                                    (index * sizeOf (undefined :: CSize))
-                                    :: IO CSize))
-                        [0 .. fromIntegral hunkCount - 1]
-                    if any
-                        ((> toInteger (maxBound :: Int)) . toInteger)
-                        rawIndices
-                        then pure 2
-                        else
-                            case repositoryHunkMutation
-                                operation
-                                (Text.unpack file)
-                                (map fromIntegral rawIndices) of
-                                    Nothing -> pure 2
-                                    Just mutation -> do
-                                        started <- startRepositoryMutation
-                                            callback
-                                            context
-                                            (Text.unpack path)
-                                            expected
-                                            mutation
-                                        pure (if started then 0 else 3)
-                Right _ -> pure 3
-
-ha_repository_commit
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryResultCallback -> Ptr () -> IO CInt
-ha_repository_commit pathBytes pathLength snapshotBytes snapshotLength
-    messageBytes messageLength callback context
-    | callback == nullFunPtr = pure 1
-    | otherwise =
-        copyRequiredTexts
-            [ (pathBytes, pathLength)
-            , (snapshotBytes, snapshotLength)
-            , (messageBytes, messageLength)
-            ] >>= \case
-                Left _ -> pure 2
-                Right [path, expected, message] -> do
-                    started <- startRepositoryWorker
-                        (emitRepositoryCancelled callback context) $
-                        prepareRepositoryResult callback context $
-                            (RepositoryReview.commitRepository
-                                (Text.unpack path)
-                                expected
-                                message)
-                    pure (if started then 0 else 3)
-                Right _ -> pure 3
-
-startRepositoryMutation
-    :: FunPtr RepositoryResultCallback
-    -> Ptr ()
-    -> FilePath
-    -> Text
-    -> RepositoryReview.RepositoryMutation
-    -> IO Bool
-startRepositoryMutation callback context path expected mutation =
-    startRepositoryWorker (emitRepositoryCancelled callback context) $
-        prepareRepositoryResult callback context $
-            (RepositoryReview.mutateRepository path expected mutation)
-
-prepareRepositoryResult
-    :: FunPtr RepositoryResultCallback
-    -> Ptr ()
-    -> IO
-        (Either
-            RepositoryReview.RepositoryError
-            RepositoryReview.RepositorySnapshot)
-    -> IO (IO ())
-prepareRepositoryResult callback context action =
-    tryRepositorySynchronous action >>= \case
-        Left exception ->
-            pure
-                (emitRepositoryFailure callback context
-                    (Text.pack (show exception)))
-        Right (Left err) ->
-            pure (emitRepositoryError callback context err)
-        Right (Right snapshot) ->
-            pure
-                (emitRepositorySuccess
-                    callback context snapshot.snapshotId)
-
-ha_repository_cancel_all :: IO ()
-ha_repository_cancel_all = cancelRepositoryWorkers
-
-repositoryPathMutation
-    :: CInt -> FilePath -> Maybe RepositoryReview.RepositoryMutation
-repositoryPathMutation operation path = case operation of
-    0 -> Just (RepositoryReview.StagePath path)
-    1 -> Just (RepositoryReview.UnstagePath path)
-    2 -> Just (RepositoryReview.RestorePath path)
-    _ -> Nothing
-
-repositoryDiffKind
-    :: CInt -> Maybe RepositoryReview.RepositoryDiffKind
-repositoryDiffKind kind = case kind of
-    0 -> Just RepositoryReview.RepositoryWorktreeDiff
-    1 -> Just RepositoryReview.RepositoryStagedDiff
-    _ -> Nothing
-
-repositoryHunkMutation
-    :: CInt
-    -> FilePath
-    -> [Int]
-    -> Maybe RepositoryReview.RepositoryMutation
-repositoryHunkMutation operation path hunks = case operation of
-    0 -> Just (RepositoryReview.StageHunks path hunks)
-    1 -> Just (RepositoryReview.UnstageHunks path hunks)
-    2 -> Just (RepositoryReview.RestoreHunks path hunks)
-    _ -> Nothing
-
-withRepositorySnapshot
-    :: RepositoryReview.RepositorySnapshot
-    -> (CString -> CSize -> CString -> CSize -> CString -> CSize
-        -> CString -> CSize -> CString -> CSize -> IO value)
-    -> IO value
-withRepositorySnapshot snapshot action =
-    withText snapshot.snapshotId \snapshotPtr snapshotLength ->
-    withText (Text.pack snapshot.snapshotRoot) \rootPtr rootLength ->
-    withOptionalText snapshot.snapshotHead \headPtr headLength ->
-    withText snapshot.snapshotIndexFingerprint \indexPtr indexLength ->
-    withText snapshot.snapshotWorktreeFingerprint
-        \worktreePtr worktreeLength ->
-            action snapshotPtr snapshotLength rootPtr rootLength
-                headPtr headLength indexPtr indexLength
-                worktreePtr worktreeLength
-
-emitRepositorySuccess
-    :: FunPtr RepositoryResultCallback -> Ptr () -> Text -> IO ()
-emitRepositorySuccess callback context snapshotId =
-    withText snapshotId \snapshotPtr snapshotLength ->
-        invokeRepositoryResultCallback callback context 0
-            snapshotPtr snapshotLength nullPtr 0
-
-emitRepositoryFailure
-    :: FunPtr RepositoryResultCallback -> Ptr () -> Text -> IO ()
-emitRepositoryFailure callback context message =
-    withText message \errorPtr errorLength ->
-        invokeRepositoryResultCallback callback context (-1)
-            nullPtr 0 errorPtr errorLength
-
-emitRepositoryCancelled
-    :: FunPtr RepositoryResultCallback -> Ptr () -> IO ()
-emitRepositoryCancelled callback context =
-    withText "cancelled" \errorPtr errorLength ->
-        invokeRepositoryResultCallback callback context (-3)
-            nullPtr 0 errorPtr errorLength
-
-emitRepositoryError
-    :: FunPtr RepositoryResultCallback
-    -> Ptr ()
-    -> RepositoryReview.RepositoryError
-    -> IO ()
-emitRepositoryError callback context err =
-    case err of
-        RepositoryReview.StaleRepositorySnapshot _ actual ->
-            withText actual \snapshotPtr snapshotLength ->
-            withText (RepositoryReview.repositoryErrorText err)
-                \errorPtr errorLength ->
-                    invokeRepositoryResultCallback callback context (-2)
-                        snapshotPtr snapshotLength errorPtr errorLength
-        _ ->
-            emitRepositoryFailure
-                callback context (RepositoryReview.repositoryErrorText err)
-
-byteStringChunks :: Int -> BS.ByteString -> [BS.ByteString]
-byteStringChunks size bytes
-    | BS.null bytes = []
-    | otherwise =
-        let (chunk, remaining) = BS.splitAt size bytes
-        in chunk : byteStringChunks size remaining
 foreign export ccall ha_data_catalog_list
     :: Ptr Word8 -> CSize -> FunPtr DataCatalogCallback -> Ptr () -> IO CInt
 
@@ -1878,147 +1260,6 @@ withNativeSessionStore action = do
         Right opened ->
             bracket (pure opened) closeStore \store ->
                 action (trustedPool store) (sessionsRoot home)
-
-loadNativeGatewayIdentity :: IO (Either Text (Maybe Text))
-loadNativeGatewayIdentity =
-    GatewayBoundary.loadGatewayBoundary >>= \case
-        Left err ->
-            pure (Left (GatewayBoundary.renderGatewayBoundaryError err))
-        Right boundary ->
-            pure (Right boundary.gatewayBoundaryIdentity)
-
-withNativeGatewayBoundary
-    :: (Maybe Text -> IO (Either Text a))
-    -> IO (Either Text a)
-withNativeGatewayBoundary action =
-    withNativeGatewayCredentialBoundary
-        (\_ gatewayIdentity -> action gatewayIdentity)
-
-withNativeGatewayCredentialBoundary
-    :: (Maybe GatewayCredential -> Maybe Text -> IO (Either Text a))
-    -> IO (Either Text a)
-withNativeGatewayCredentialBoundary action =
-    GatewayBoundary.withCurrentGatewayCredentialBoundary
-        (\snapshot ->
-            action
-                snapshot.gatewayBoundaryCredential
-                snapshot.gatewayBoundary.gatewayBoundaryIdentity)
-        >>= \case
-            Left err ->
-                pure
-                    (Left
-                        (GatewayBoundary.renderGatewayBoundaryError err))
-            Right result -> pure result
-
-ensureNativeGatewayIdentity :: Maybe Text -> IO (Either Text ())
-ensureNativeGatewayIdentity expected =
-    GatewayBoundary.loadGatewayBoundary >>= \case
-        Left err ->
-            pure (Left (GatewayBoundary.renderGatewayBoundaryError err))
-        Right current ->
-            pure $
-                case
-                    GatewayBoundary.validateGatewayBoundary
-                        (GatewayBoundary.GatewayBoundary expected)
-                        current
-                of
-                    Left err ->
-                        Left (GatewayBoundary.renderGatewayBoundaryError err)
-                    Right () -> Right ()
-
--- | A queued or running native turn belongs to the exact gateway credential
--- identity captured when the turn was accepted. Direct and gateway routes are
--- distinct, as are two successive credentials for the same gateway.
-nativeTurnRouteMatchesBoundary :: Maybe Text -> Maybe Text -> Bool
-nativeTurnRouteMatchesBoundary expected current =
-    GatewayBoundary.gatewayBoundariesMatch
-        (GatewayBoundary.GatewayBoundary expected)
-        (GatewayBoundary.GatewayBoundary current)
-
-emitForNativeGatewayBoundary
-    :: Maybe Text
-    -> IO ()
-    -> IO (Either Text ())
-emitForNativeGatewayBoundary gatewayIdentity emit =
-    GatewayBoundary.withExpectedGatewayBoundary
-        (GatewayBoundary.GatewayBoundary gatewayIdentity)
-        emit >>= \case
-            Left err ->
-                pure (Left (GatewayBoundary.renderGatewayBoundaryError err))
-            Right () -> pure (Right ())
-
--- | Revalidate immediately before every asynchronous item and terminal
--- callback. If the boundary changes, no later item is emitted.
-emitBoundaryChecked
-    :: (IO (Either Text ()) -> IO (Either Text ()))
-    -> IO (Either Text ())
-    -> (item -> IO ())
-    -> IO ()
-    -> [item]
-    -> IO (Either Text ())
-emitBoundaryChecked critical check emit terminal = go
-  where
-    go [] =
-        critical $
-            check >>= \case
-                Left err -> pure (Left err)
-                Right () -> terminal >> pure (Right ())
-    go (item : remaining) =
-        critical
-            (check >>= \case
-                Left err -> pure (Left err)
-                Right () -> emit item >> pure (Right ())) >>= \case
-                    Left err -> pure (Left err)
-                    Right () -> go remaining
-
-validateNativeSessionBoundary
-    :: StorePool
-    -> OsPath
-    -> Maybe Text
-    -> Text
-    -> IO (Either Text SessionMeta)
-validateNativeSessionBoundary pool root gatewayIdentity sessionId =
-    loadSessionMeta pool root sessionId >>= \loaded ->
-        pure do
-            meta <- loaded
-            first GatewayBoundary.renderGatewayBoundaryError $
-                GatewayBoundary.validateGatewaySessionBoundary
-                    (GatewayBoundary.GatewayBoundary gatewayIdentity)
-                    meta.metaConnection
-                    meta.metaGatewayIdentity
-            pure meta
-
-withNativeSessionBoundary
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> (Maybe Text -> SessionMeta -> IO (Either Text a))
-    -> IO (Either Text a)
-withNativeSessionBoundary pool root sessionId action =
-    withNativeGatewayBoundary \gatewayIdentity ->
-        validateNativeSessionBoundary
-            pool root gatewayIdentity sessionId >>= \case
-                Left err -> pure (Left err)
-                Right meta -> action gatewayIdentity meta
-
-nativeSessionMatchesBoundary :: Maybe Text -> SessionMeta -> Bool
-nativeSessionMatchesBoundary gatewayIdentity meta =
-    nativeSessionRouteMatchesBoundary
-        gatewayIdentity
-        meta.metaConnection
-        meta.metaGatewayIdentity
-
-nativeSessionRouteMatchesBoundary
-    :: Maybe Text
-    -> Text
-    -> Maybe Text
-    -> Bool
-nativeSessionRouteMatchesBoundary gatewayIdentity connection persistedIdentity =
-    isRight
-        (GatewayBoundary.validateGatewaySessionBoundary
-            (GatewayBoundary.GatewayBoundary gatewayIdentity)
-            connection
-            persistedIdentity)
 
 emitSessionTurn
     :: FunPtr SessionTurnCallback
@@ -4526,149 +3767,6 @@ handleRequest config store root request = do
             method ->
                 pure $ failureEvent current.requestId
                     ("unknown method: " <> method)
-
-loadNativeModelCatalog
-    :: Store
-    -> OsPath
-    -> Maybe GatewayCredential
-    -> Maybe Text
-    -> ModelsListRequest
-    -> IO (Either Text Aeson.Value)
-loadNativeModelCatalog
-        store root gatewayCredential gatewayIdentity request = do
-    let home = takeDirectory (takeDirectory root)
-        requestedCwd = unsafeEncodeUtf request.modelsListCwd
-    contextResult <- currentModelContext
-        store
-        root
-        requestedCwd
-        gatewayIdentity
-        request.modelsListSessionId
-    case contextResult of
-        Left err -> pure (Left err)
-        Right (cwd, maybeTarget) ->
-            loadGatewayModelOptionsWithCredentialAt
-                home cwd gatewayCredential >>= \case
-                Left err -> pure (Left err)
-                Right (catalog, Just gatewayOptions) ->
-                    case gatewayOptions of
-                        [] -> pure
-                            (Left
-                                "The organization gateway does not offer any models.")
-                        firstAvailable : _ -> do
-                            let selected =
-                                    fromMaybe firstAvailable $ do
-                                        target <- maybeTarget
-                                        resolveModelOptionById
-                                            gatewayOptions
-                                            target.targetModelId
-                                target = selected.modelTarget
-                            picker <- initialPickerStateForOptions
-                                "organization gateway"
-                                gatewayOptions
-                                target.targetConnectionId
-                                target.targetProvider
-                                target.targetModelId
-                                target.targetDialect
-                            pure (Right (modelPickerJSON catalog picker))
-                Right (catalog, Nothing) -> do
-                    let configuredTarget = do
-                            target <- maybeTarget
-                            option <-
-                                resolveConfiguredModel
-                                    catalog
-                                    target.targetModelId
-                            if option.modelTarget.targetConnectionId
-                                == target.targetConnectionId
-                                then Just option
-                                else Nothing
-                    selected <- resolveModelOptionDialect $
-                        fromMaybe (defaultModelOptionFor catalog OpenAIProvider)
-                            configuredTarget
-                    let target = selected.modelTarget
-                    picker <- initialPickerStateResolved
-                        catalog
-                        target.targetConnectionId
-                        target.targetProvider
-                        target.targetModelId
-                        target.targetDialect
-                    pure (Right (modelPickerJSON catalog picker))
-
-modelPickerJSON :: ModelCatalog -> PickerState -> Aeson.Value
-modelPickerJSON catalog picker =
-    Aeson.object
-        [ "options" Aeson..=
-            map (modelOptionJSON catalog) picker.pickerAll
-        , "current" Aeson..=
-            fmap (modelOptionJSON catalog) (selectedOption picker)
-        ]
-
-currentModelContext
-    :: Store
-    -> OsPath
-    -> OsPath
-    -> Maybe Text
-    -> Maybe Text
-    -> IO (Either Text (OsPath, Maybe ModelTarget))
-currentModelContext store root cwd gatewayIdentity = \case
-    Just sessionId ->
-        validateNativeSessionBoundary
-            (trustedPool store)
-            root
-            gatewayIdentity
-            sessionId >>= \case
-                Left err -> pure (Left err)
-                Right meta ->
-                    pure
-                        (Right
-                            ( meta.metaCwd
-                            , Just (sessionModelTarget meta)
-                            ))
-    Nothing -> do
-        projectRoot <- resolveProjectRoot cwd
-        settings <- loadProjectSettings projectRoot
-        pure $ Right
-            ( cwd
-            , (.projectModelTarget) <$> settings.settingsLastModel
-            )
-
-sessionModelTarget :: SessionMeta -> ModelTarget
-sessionModelTarget meta =
-    ModelTarget
-        { targetProvider = meta.metaProvider
-        , targetConnectionId = meta.metaConnection
-        , targetModelId = meta.metaModel
-        , targetWireModelId =
-            fromMaybe meta.metaModel meta.metaTransportModel
-        , targetDialect = meta.metaDialect
-        }
-
-modelOptionJSON :: ModelCatalog -> ModelOption -> Aeson.Value
-modelOptionJSON catalog option =
-    let target = option.modelTarget
-        configured =
-            catalogModelForConnection
-                catalog
-                target.targetConnectionId
-                target.targetModelId
-    in Aeson.object
-        [ "id" Aeson..= target.targetModelId
-        , "provider" Aeson..= providerSlug target.targetProvider
-        , "connection" Aeson..= target.targetConnectionId
-        , "wireModel" Aeson..= target.targetWireModelId
-        , "dialect" Aeson..= dialectSlug target.targetDialect
-        , "label" Aeson..= option.modelLabel
-        , "supportedReasoningEfforts" Aeson..=
-            (configured >>= (.catalogModelReasoningEfforts))
-        , "defaultReasoningEffort" Aeson..=
-            (configured >>= (.catalogModelDefaultReasoningEffort))
-        ]
-
-parseParams :: Aeson.FromJSON value => BridgeRequest -> Either Text value
-parseParams request =
-    case Aeson.parseEither Aeson.parseJSON request.requestParams of
-        Left err -> Left (Text.pack err)
-        Right value -> Right value
 
 acquireStore :: ManagedPostgresConfig -> MVar (Maybe Store) -> IO Store
 acquireStore config state =
