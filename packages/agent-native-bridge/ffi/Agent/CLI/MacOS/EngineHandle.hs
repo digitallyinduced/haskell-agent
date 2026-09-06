@@ -95,5 +95,6 @@ ha_engine_destroy pointer
                 (const (pure Nothing))
             _ <- atomically
                 (closeEngineMailbox engine.engineCommands EngineStop)
-            void (waitCatch engine.engineWorker))
+            void (waitCatch engine.engineWorker)
+            modifyMVar_ engine.engineBrowser.browserRegistration (const (pure Nothing)))
             `finally` freeStablePtr stable

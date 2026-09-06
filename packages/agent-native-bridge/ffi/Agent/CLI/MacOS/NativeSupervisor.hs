@@ -405,7 +405,7 @@ supervisorLoop
             pending.pendingTurnGatewayIdentity
             start.turnStartSessionId
             interactions
-        nativeBrowserTools <- browserToolsWhenEnabled browser
+        nativeBrowserTools <- browserToolsWhenEnabled browser start.turnStartId
         nativeComputerTool <- computerToolWhenEnabled computer
         worker <- launchTrackedWorker start.turnStartId do
             withGatewayCredentialTurnLease $

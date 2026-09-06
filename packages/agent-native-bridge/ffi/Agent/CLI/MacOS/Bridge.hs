@@ -1,7 +1,10 @@
 -- | Native bridge composition root and compatibility facade for boundary tests.
 -- FFI implementations live with the private owner of their state and lifetime.
 module Agent.CLI.MacOS.Bridge
-    ( BrowserCallback
+    ( BrowserCancelCallback
+    , BrowserCompletion
+    , nextAvailableBrowserPendingId
+    , BrowserCallback
     , BrowserHost(..)
     , BrowserRegistration(..)
     , browserCommandABI
