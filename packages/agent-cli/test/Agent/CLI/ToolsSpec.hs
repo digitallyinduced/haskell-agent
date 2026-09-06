@@ -79,7 +79,7 @@ spec = describe "schemasFromAppTools" do
         project True jsonTool `shouldBe` Nothing
 
     it "advertises computer use as an ordinary strict function" do
-        if os == "darwin"
+        if os `elem` ["darwin", "linux"]
             then case schemasFromAppTools codexDialect [computerUseTool] of
                 [_, FunctionToolValue function] -> do
                     function.name `shouldBe` computerFunctionName

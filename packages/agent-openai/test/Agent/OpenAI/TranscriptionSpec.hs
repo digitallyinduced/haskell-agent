@@ -13,7 +13,12 @@ import Agent.Provider
     , Provider(OpenAIProvider)
     , tokenProvider
     )
-import Control.Concurrent (threadDelay)
+import Control.Concurrent
+    ( newEmptyMVar
+    , putMVar
+    , takeMVar
+    , threadDelay
+    )
 import Control.Concurrent.Async (wait, withAsync)
 import Control.Exception.Safe (bracket, finally, throwString)
 import Data.Aeson ((.=))
@@ -432,6 +437,7 @@ spec = describe "OpenAI transcription" do
                     && "RIFF" `BS.isInfixOf` LBS.toStrict first
             _ -> False
     it "distinguishes local capture failures from unavailable gateway streams" do
+        sessionStarted <- newEmptyMVar
         let server pending = do
                 connection <- WS.acceptRequest pending
                 start <- WS.receiveData connection
@@ -456,7 +462,18 @@ spec = describe "OpenAI transcription" do
                     ]
                 sendEvent connection $
                     Aeson.object ["type" .= ("session.started" :: Text)]
-                threadDelay (2 * 1_000_000)
+                putMVar sessionStarted ()
+                let awaitClose :: IO ()
+                    awaitClose =
+                        (WS.receiveData connection :: IO Text) >> awaitClose
+                Timeout.timeout (5 * 1_000_000)
+                    ( awaitClose
+                        `shouldThrow` \case
+                            WS.CloseRequest _ _ -> True
+                            WS.ConnectionClosed -> True
+                            _ -> False
+                    )
+                    `shouldReturn` Just ()
         withWebSocketServer server \port -> do
             let websocketUrl =
                     "ws://127.0.0.1:"
@@ -466,7 +483,16 @@ spec = describe "OpenAI transcription" do
                 transcribePcmWithChatGPTStreamAt
                     websocketUrl
                     []
-                    (\_ -> throwString "microphone failed")
+                    ( \_ -> do
+                        Timeout.timeout
+                            (5 * 1_000_000)
+                            (takeMVar sessionStarted) >>= \case
+                                Nothing ->
+                                    throwString
+                                        "test gateway did not start"
+                                Just () ->
+                                    throwString "microphone failed"
+                    )
                     (const (pure ()))
             result `shouldSatisfy` \case
                 Left (ChatGPTDictationCaptureFailed message) ->
