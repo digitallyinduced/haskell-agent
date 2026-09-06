@@ -31,6 +31,38 @@ spec = do
             mapModel options "gpt-4o" `shouldBe` "openai/gpt-5.1"
 
     describe "buildRequest" do
+        it "keeps Claude tool-result images as ordered typed content" do
+            let parts =
+                    [ InputTextPart "before" Nothing
+                    , InputImagePart Nothing Nothing
+                        (Just "data:image/png;base64,cG5nLWJ5dGVz") Nothing
+                    , InputTextPart "after" Nothing
+                    ]
+                output = FunctionCallOutputItem FunctionCallOutput
+                    { localOutcome = Nothing
+                    , itemId = Nothing
+                    , callId = "claude-image-read"
+                    , name = Nothing
+                    , namespace = Nothing
+                    , provider = Just "claude-code"
+                    , output = rawJsonFromEncoding (Aeson.toEncoding parts)
+                    , status = Just ItemCompleted
+                    , async = Nothing
+                    }
+                params :: ResponseCreateParams
+                params = sampleRequest
+                    { input = Just (ResponseInputItems [output]) }
+            object <- expectObject (requestValue defaultClientOptions params)
+            items <- expectArray (KeyMap.lookup "input" object)
+            case items of
+                [item] -> do
+                    wireOutput <- expectObject item
+                    KeyMap.lookup "call_id" wireOutput
+                        `shouldBe` Just (Aeson.String "claude-image-read")
+                    KeyMap.lookup "output" wireOutput
+                        `shouldBe` Just (Aeson.toJSON parts)
+                other -> expectationFailure ("unexpected input: " <> show other)
+
         it "forces a stateless streaming Responses request" do
             let value = requestValue defaultClientOptions sampleRequest
             object <- expectObject value

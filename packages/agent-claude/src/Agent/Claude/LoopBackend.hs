@@ -85,6 +85,7 @@ import Agent.Responses.Types
     )
 import qualified Agent.ToolDispatch as ToolDispatch
 import Agent.Json (RawJson, rawJsonBytes)
+import Agent.Responses.Types.Content (responseContentPartDecoder)
 import qualified Agent.Json.Decode as Json
 import Claude.Agent.SDK.Client
     ( ClaudeSDKClient
@@ -694,13 +695,11 @@ renderResponseItem = \case
             "Assistant tool call"
             (call.name <> " " <> call.input)
     FunctionCallOutputItem output ->
-        labelled
-            ("Tool result " <> output.callId)
-            (renderRawJson output.output)
+        Just (UserTextBlock ("Tool result " <> output.callId <> ":\n")
+            : toolResultContentBlocks output.output)
     CustomToolCallOutputItem output ->
-        labelled
-            ("Tool result " <> output.callId)
-            (renderRawJson output.output)
+        Just (UserTextBlock ("Tool result " <> output.callId <> ":\n")
+            : toolResultContentBlocks output.output)
     ComputerCallItem item ->
         labelled "Assistant computer call" (renderJsonValue (Aeson.toJSON item))
     ComputerCallOutputItem item ->
@@ -747,6 +746,50 @@ roleLabel = \case
     RoleSystem -> "System"
     RoleDeveloper -> "Developer"
     RoleUnknown role -> role
+
+-- Decode canonical multimodal outputs before rendering history. Each array
+-- element owns its bytes before a second decoder reads it; malformed parts
+-- must not turn an entire image-bearing array into raw JSON prompt text.
+toolResultContentBlocks :: RawJson -> [UserContentBlock]
+toolResultContentBlocks raw =
+    case Json.decodeEither containsContentDecoder (rawJsonBytes raw) of
+        Right False -> [UserTextBlock (renderRawJson raw)]
+        _ -> either (const unavailable) id $
+            Json.decodeEither decoder (rawJsonBytes raw)
+  where
+    unavailable = [UserTextBlock "[Historical tool result content unavailable]"]
+    -- Classification is independent of validity: malformed image parts must
+    -- never select the legacy raw-JSON fallback. Inspect nested objects too.
+    containsContentDecoder = Json.withType \case
+        Json.VArray -> or <$> Json.list (containsImageDecoder True)
+        _ -> containsImageDecoder False
+    containsImageDecoder isContentPart = Json.withType \case
+        Json.VArray -> or <$> Json.list (containsImageDecoder False)
+        Json.VObject -> do
+            fields <- Json.objectAsKeyValues pure $
+                Json.withOwnedRawJson pure
+            pure $ any (\(key, bytes) ->
+                key `elem` ["image_url", "imageUrl"]
+                    || (key == "type" && case Json.decodeEither Json.text bytes of
+                        Right tag ->
+                            tag `elem` ["input_image", "image", "image_url"]
+                                || (isContentPart && tag `elem`
+                                    [ "input_text", "output_text", "text", "refusal"
+                                    , "summary_text", "input_file", "input_audio"
+                                    , "reasoning_text", "encrypted_content"
+                                    ])
+                        Left _ -> False)
+                    || either (const True) id
+                        (Json.decodeEither (containsImageDecoder False) bytes)) fields
+        _ -> pure False
+    decoder = Json.withType \case
+        Json.VArray -> concat . intersperse [UserTextBlock "\n"] <$>
+            Json.list (Json.withOwnedRawJson \bytes ->
+                pure $ case Json.decodeEither responseContentPartDecoder bytes of
+                    Right UnknownContentPart{} -> unavailable
+                    Right part -> contentPartBlocks part
+                    Left _ -> unavailable)
+        _ -> pure unavailable
 
 messageContentBlocks :: MessageContent -> [UserContentBlock]
 messageContentBlocks = \case

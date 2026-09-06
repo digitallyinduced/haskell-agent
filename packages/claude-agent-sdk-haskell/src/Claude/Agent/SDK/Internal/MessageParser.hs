@@ -15,6 +15,8 @@ import Claude.Agent.SDK.Types
 import Control.Monad (join)
 import qualified Data.Aeson.Encoding as Aeson
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Base64 as Base64
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe)
@@ -306,7 +308,46 @@ toolResultContentDecoder = do
     pure ToolResultContent
         { raw
         , renderedText = renderToolResultBytes (rawJsonBytes raw)
+        , blocks = either (const [ToolResultText "[unavailable tool result]"]) id
+            (Json.decodeEither toolResultPartsDecoder (rawJsonBytes raw))
         }
+
+-- Decode the owned value, not the already-consumed Hermes array tape.
+-- Each image is isolated so a malformed sibling cannot discard good images.
+toolResultPartsDecoder :: Json.Decoder [ToolResultPart]
+toolResultPartsDecoder = Json.withType \case
+    Json.VArray -> concat <$> Json.list toolResultPartsDecoder
+    Json.VObject -> Json.withOwnedRawJson \bytes -> pure
+        [case Json.decodeEither toolResultImageDecoder bytes of
+            Right (Just image) -> image
+            _ -> ToolResultText (renderToolResultBlock bytes)]
+    _ -> (\text -> [ToolResultText text]) <$> renderedToolResultDecoder
+
+toolResultImageDecoder :: Json.Decoder (Maybe ToolResultPart)
+toolResultImageDecoder = Json.object do
+    blockType <- optionalText "type"
+    source <- join <$> optionalTyped "source" imageSourceDecoder
+    pure $ if blockType == Just "image" then source else Nothing
+
+imageSourceDecoder :: Json.Decoder (Maybe ToolResultPart)
+imageSourceDecoder = Json.withType \case
+    Json.VObject -> Json.object do
+        sourceType <- optionalText "type"
+        mime <- optionalText "media_type"
+        encoded <- optionalText "data"
+        pure do
+            "base64" <- sourceType
+            mediaType <- mime
+            if mediaType `elem` ["image/png", "image/jpeg", "image/gif", "image/webp"]
+                then pure ()
+                else Nothing
+            dataText <- encoded
+            imageBytes <- either (const Nothing) Just
+                (Base64.decode (TextEncoding.encodeUtf8 dataText))
+            if ByteString.null imageBytes
+                then Nothing
+                else Just ToolResultImage{mediaType, imageBytes}
+    _ -> pure Nothing
 
 renderToolResultBytes :: ByteString -> Text
 renderToolResultBytes bytes =
@@ -345,11 +386,11 @@ toolResultBlockDecoder = Json.object do
     toolName <- optionalNonEmptyText "tool_name"
     mediaType <- join <$> optionalTyped "source" imageSourceMediaTypeDecoder
     pure case (blockType, textValue) of
+        (Just "image", _) ->
+            Just ("[image" <> maybe "" (" " <>) mediaType <> "]")
         (_, Just text) -> Just text
         (Just "tool_reference", Nothing) ->
             ("Tool reference: " <>) <$> toolName
-        (Just "image", Nothing) ->
-            Just ("[image" <> maybe "" (" " <>) mediaType <> "]")
         _ -> Nothing
 
 imageSourceMediaTypeDecoder :: Json.Decoder (Maybe Text)

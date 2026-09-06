@@ -7,7 +7,10 @@ module Agent.Gemini.Request
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Json (RawJson, rawJsonBytes)
+import qualified Agent.Json.Decode as Json
 import Agent.Responses.Types
+import Agent.Responses.Types.Content (responseContentPartDecoder)
 import Control.Applicative ((<|>))
 import Control.Monad (foldM)
 import Data.Aeson
@@ -279,12 +282,18 @@ projectCustomToolOutput projection callOutput =
 
 projectFunctionOutput :: Projection -> FunctionCallOutput -> Projection
 projectFunctionOutput projection callOutput =
-    appendContent "user" [part] projection
+    appendContent "user" (part : imageContent) projection
   where
     callName = fromMaybe "tool"
         (callOutput.name
             <|> Map.lookup callOutput.callId projection.callNames)
-    result = toJSON callOutput.output
+    -- A canonical image-bearing result is not ordinary JSON tool data:
+    -- send its ordered content as native user parts, never base64 in response
+    -- text. Keep the function response itself for call/result association.
+    (result, imageContent) = case toolImageContent callOutput.output of
+        Just parts ->
+            (String "Tool result content follows.", parts)
+        Nothing -> (toJSON callOutput.output, [])
     responseObject = case result of
         Object objectValue -> Object objectValue
         value -> object ["result" .= value]
@@ -295,6 +304,23 @@ projectFunctionOutput projection callOutput =
             , "response" .= responseObject
             ]
         ]
+
+toolImageContent :: RawJson -> Maybe [Value]
+toolImageContent raw =
+    case Json.decodeEither decoder (rawJsonBytes raw) of
+        Right parts | any fst parts -> Just (concatMap (project . snd) parts)
+        _ -> Nothing
+  where
+    decoder = Json.list (Json.withOwnedRawJson \bytes -> pure
+        ( Json.decodeEither (Json.object (Json.atKey "type" Json.text)) bytes
+            == Right "input_image"
+        , Json.decodeEither responseContentPartDecoder bytes
+        ))
+    -- Classify by the tag independently of decoding the payload so malformed
+    -- image-only results cannot fall back to raw JSON containing image bytes.
+    project (Right part@InputImagePart{}) = contentPart part
+    project (Right part@InputTextPart{}) = contentPart part
+    project _ = [textPart "[Unsupported tool result content omitted]"]
 
 appendContent :: Text -> [Value] -> Projection -> Projection
 appendContent _ [] projection = projection
