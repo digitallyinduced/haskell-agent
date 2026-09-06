@@ -13,12 +13,13 @@ import Agent.CLI.AgentSessions
     ( agentSessionTools,
       launchSessionThread,
       sessionThreadStatus,
+      prepareSessionThreadWait,
       AgentSessionToolsEnv(toolsSessionStatus, AgentSessionToolsEnv,
                            toolsPool, toolsRoot, toolsProvider, toolsConnection, toolsModel,
                            toolsTransportModel, toolsDialect, toolsAllowedModels,
                            toolsResolveModelOption,
                            toolsGatewayIdentity, toolsCwd, toolsEffort,
-                           toolsCurrentSessionId, toolsLaunchTurn) )
+                           toolsCurrentSessionId, toolsLaunchTurn, toolsPrepareSessionWait) )
 import Agent.CLI.Auth (isGatewayLoadedAuth)
 import qualified Agent.CLI.ComputerUse as ComputerUse
 import Agent.CLI.Config (HarnessConfig(..))
@@ -542,6 +543,8 @@ newSessionControlRuntime AgentToolsRequest
                             action
             , toolsSessionStatus =
                 sessionThreadStatus processRuntime.processSessionThreads
+            , toolsPrepareSessionWait =
+                prepareSessionThreadWait processRuntime.processSessionThreads
             }
         -- Persisted agent-session tools recursively start another native
         -- runtime, so they require an explicit collaboration capability from
