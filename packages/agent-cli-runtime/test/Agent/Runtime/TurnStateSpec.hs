@@ -13,7 +13,7 @@ import Agent.Responses.LoopBackend (toolResultToItem, turnInputsToItems)
 import Agent.Responses.Types (ResponseItem)
 import Agent.Runtime.Compaction (AutomaticCompactionBoundary(..))
 import Agent.Runtime.TurnState
-import Agent.ToolDispatch (ToolCallKind(..), ToolCallResult(..))
+import Agent.ToolDispatch (ToolCallKind(..), ToolCallMode(..), ToolCallResult(..))
 import Test.Hspec
 
 spec :: Spec
@@ -30,7 +30,14 @@ spec = describe "frontend-neutral turn policy" do
         execution.executionState `shouldBe` history
 
     it "retains committed tool results pending a failed continuation" do
-        let result = ToolCallResult "call-1" "already executed" FunctionCallKind
+        let result = ToolCallResult
+                { callId = "call-1"
+                , output = "already executed"
+                , callKind = FunctionCallKind
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                }
             committed = inputOnlyTurnItems prepared
             execution = failedExecution
                 { executionState = history <> committed

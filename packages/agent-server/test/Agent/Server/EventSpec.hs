@@ -48,10 +48,10 @@ spec = describe "public loop-event projection" do
     it "projects asynchronous tool-result mode" do
         let (_, value) = projectLoopEvent
                 (ToolFinished
-                    (AsyncToolCallResult
+                    (ToolCallResult
                         "call-async"
                         "completed"
-                        FunctionCallKind))
+                        FunctionCallKind AsyncToolCall [] Nothing))
         LBS8.unpack (encode value)
             `shouldContain` "\"async\":true"
 

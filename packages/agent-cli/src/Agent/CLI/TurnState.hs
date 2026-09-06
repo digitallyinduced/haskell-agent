@@ -1,5 +1,4 @@
--- | Compatibility facade. Conversation transition policy belongs to the
--- frontend-neutral runtime, not to terminal presentation.
+-- | Compatibility facade. Conversation policy lives in the shared runtime.
 module Agent.CLI.TurnState
     ( module Agent.Runtime.TurnState
     ) where
