@@ -84,6 +84,19 @@ waitTestTurn answer = SessionTurn
 
 spec :: Spec
 spec = describe "Agent.CLI.AgentSessions" do
+    it "describes background session launches as explicit work, not completed results" $
+        withTempEnv \env _ -> do
+            let launchTools = filter
+                    (\tool -> tool.appToolName `elem`
+                        ["create_agent_session", "send_agent_session_message"])
+                    (agentSessionTools env)
+            length launchTools `shouldBe` 2
+            mapM_ (\tool -> do
+                tool.appToolDescription `shouldSatisfy` Text.isInfixOf "explicitly"
+                tool.appToolDescription `shouldSatisfy` Text.isInfixOf "current task"
+                tool.appToolDescription `shouldSatisfy` Text.isInfixOf "not a completed result"
+                ) launchTools
+
     it "waits for idle sessions immediately and includes their last response" $
         withTempEnv \env _ -> do
             handle <- createSession (testCreate env.toolsPool env.toolsRoot)

@@ -414,7 +414,7 @@ createAgentSessionArgsDecoder = Hermes.object $
 createAgentSessionTool :: AgentSessionToolsEnv -> AppTool
 createAgentSessionTool env = jsonTool
     "create_agent_session"
-    "Create a persisted top-level agent session and start its first turn in the background. Returns the session id and status as readable text."
+    "Create a persisted top-level agent session and start its first turn in the background. Use only when the user explicitly requests independent/background work or a separate session; do not offload the entire current task here. For bounded subtasks, use subagents and retain responsibility for integration, verification, and the final answer. Returns the session id and status as readable text, not a completed result."
     [ PropertySchema "message" PropertyString True $ Just
         "Initial task or message for the new agent session."
     , PropertySchema "title" PropertyString False $ Just
@@ -619,7 +619,7 @@ sendAgentSessionMessageArgsDecoder = Hermes.object $
 sendAgentSessionMessageTool :: AgentSessionToolsEnv -> AppTool
 sendAgentSessionMessageTool env = jsonTool
     "send_agent_session_message"
-    "Send a message to a persisted agent session by starting a resumed background turn. Returns the session id and status as readable text; fails if that session is already running."
+    "Send a message to a persisted agent session by starting a resumed background turn. Use for explicitly requested independent/background work or continuation of that separate session, not to transfer responsibility for the current task. Returns the session id and status as readable text, not a completed result; fails if that session is already running."
     [ PropertySchema "session_id" PropertyString True $ Just
         "Persisted target session id."
     , PropertySchema "message" PropertyString True $ Just
