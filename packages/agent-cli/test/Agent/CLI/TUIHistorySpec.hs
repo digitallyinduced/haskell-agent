@@ -45,6 +45,112 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "bounded fullscreen history window" do
+    it "projects history in order, coalescing within turns but not across turn boundaries" do
+        let regular = Seq.fromList [block identifier | identifier <- [1 .. 31]]
+            readBlock = inspectionBlock 32 "Read a.hs"
+            listedBlock = inspectionBlock 33 "Listed src"
+            searchedBlock = inspectionBlock 34 "Searched needle"
+            fetchedBlock = inspectionBlock 35 "Fetched docs"
+            turns =
+                Seq.fromList
+                    [ HistoryTurn (HistoryCursor 1) (regular Seq.|> readBlock)
+                    , HistoryTurn (HistoryCursor 2) (Seq.singleton listedBlock)
+                    , HistoryTurn
+                        (HistoryCursor 3)
+                        (Seq.fromList [searchedBlock, fetchedBlock])
+                    ]
+            window =
+                setHistoryWindowTurns turns $
+                    emptyHistoryWindow (HistoryGeneration 1) 10 100 1_000_000
+            chunks = window.historyWindowTranscriptChunks
+            projected = concatMap toList chunks
+        map Seq.length chunks `shouldBe` [32, 2]
+        map (.blockId) projected
+            `shouldBe` map BlockId ([1 .. 33] <> [35])
+        -- The adjacent calls in the third turn merge under the newest ID,
+        -- while the calls straddling the first/second turn boundary do not.
+        map (.blockTitle) (drop 31 projected)
+            `shouldBe`
+                [ "Read a.hs"
+                , "Listed src"
+                , "Searched 1 query, Fetched 1 source"
+                ]
+
+    it "refreshes projected history after pages, append, eviction, generation reset, and tail reset" do
+        let generation = HistoryGeneration 11
+            initial = emptyHistoryWindow generation 2 100 1_000_000
+            page direction turns_ older newer =
+                HistoryPage
+                    { historyPageGeneration = generation
+                    , historyPageDirection = direction
+                    , historyPageTurns = Seq.fromList turns_
+                    , historyPageGenerationStart = HistoryCursor 0
+                    , historyPageTotalTurns = 4
+                    , historyPageHasOlder = older
+                    , historyPageHasNewer = newer
+                    }
+        loaded <-
+            expectRight $
+                applyHistoryPage
+                    (page HistoryNewer [turn 2 1] True False)
+                    initial
+        projectedBlockIds loaded `shouldBe` [BlockId 20]
+        paged <-
+            expectRight $
+                applyHistoryPage
+                    (page HistoryOlder [turn 1 1] False True)
+                    loaded
+        projectedBlockIds paged `shouldBe` map BlockId [10, 20]
+        let appended = appendHistoryTurn (turn 3 1) paged
+        -- Appending at a disconnected (non-tail) page resets to the new tail.
+        projectedBlockIds appended `shouldBe` [BlockId 30]
+        let atTail = appended { historyWindowHasNewer = False }
+            evicted =
+                appendHistoryTurn (turn 5 1) $
+                    appendHistoryTurn (turn 4 2) atTail
+        projectedBlockIds evicted `shouldBe` map BlockId [40, 41, 50]
+        projectedBlockIds
+            (historyWindowSetGeneration (HistoryGeneration 12) evicted)
+            `shouldBe` []
+
+    it "refreshes projected history when a persisted block is expanded" do
+        let historyTurn =
+                HistoryTurn
+                    (HistoryCursor 7)
+                    (Seq.fromList
+                        [ inspectionBlock 70 "Searched first"
+                        , inspectionBlock 71 "Searched second"
+                        ])
+            original =
+                setHistoryWindowTurns (Seq.singleton historyTurn) $
+                    emptyHistoryWindow
+                        (HistoryGeneration 13)
+                        10
+                        100
+                        1_000_000
+            updated =
+                setHistoryWindowTurns
+                    (fmap
+                        (\turn_ ->
+                            turn_
+                                { historyTurnBlocks =
+                                    fmap
+                                        (\value ->
+                                            if value.blockId == BlockId 71
+                                                then
+                                                    value
+                                                        { blockExpanded = True
+                                                        }
+                                                else value)
+                                        turn_.historyTurnBlocks
+                                })
+                        original.historyWindowTurns)
+                    original
+        map (.blockExpanded) (projectedBlocks original)
+            `shouldBe` [False]
+        map (.blockExpanded) (projectedBlocks updated)
+            `shouldBe` [True]
+
     it "preserves execution facts through storage and history without sending them to providers" do
         let cases =
                 [ (ToolSucceeded, "Error: quoted log entry", BlockComplete)
@@ -928,6 +1034,22 @@ block identifier =
         , blockCallId = Nothing
         , blockInspectionGroupable = False
         }
+
+inspectionBlock :: Int -> Text.Text -> UiBlock
+inspectionBlock identifier title =
+    (block identifier)
+        { blockKind = BlockInspect
+        , blockTitle = title
+        , blockInspectionGroupable = True
+        }
+
+projectedBlocks :: HistoryWindow -> [UiBlock]
+projectedBlocks =
+    concatMap toList . (.historyWindowTranscriptChunks)
+
+projectedBlockIds :: HistoryWindow -> [BlockId]
+projectedBlockIds =
+    map (.blockId) . projectedBlocks
 
 isRight :: Either a b -> Bool
 isRight value =

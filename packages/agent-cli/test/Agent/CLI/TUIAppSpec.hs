@@ -103,6 +103,8 @@ import Agent.CLI.TUI.History
     , HistoryWindow(..)
     , applyHistoryPage
     , emptyHistoryWindow
+    , historyWindowBlock
+    , setHistoryWindowTurns
     )
 import Agent.CLI.TUI.ImagePreview
     ( NativePreviewPlacement(..)
@@ -159,7 +161,12 @@ import Control.Concurrent.STM
 import Control.Monad (replicateM_)
 import qualified Data.ByteString as ByteString
 import Data.Foldable (find, toList)
-import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef
+    ( modifyIORef'
+    , newIORef
+    , readIORef
+    , writeIORef
+    )
 import Data.Maybe (isNothing)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
@@ -1873,6 +1880,15 @@ spec = do
             timeout 2_000_000 (replacementPreservesFollow False)
                 `shouldReturn` Just True
 
+    describe "history transcript chunk cache" do
+        it "redraws and clears a historical selection after warming the cache" do
+            timeout 2_000_000 cachedHistorySelectionRenders
+                `shouldReturn` Just True
+
+        it "renders expansion without losing it on deselection" do
+            timeout 2_000_000 cachedHistoryExpansionRenders
+                `shouldReturn` Just True
+
     describe "submitted image history retention" do
         it "remaps a live preview onto its committed durable block" do
             timeout 2_000_000 committedPreviewKeys
@@ -2491,6 +2507,24 @@ runFullscreenScriptWithState
     -> [FullscreenScriptEvent]
     -> IO (ByteString.ByteString, AppState)
 runFullscreenScriptWithState initialState script = do
+    (rendered, _, finalState) <-
+        runFullscreenScriptDetailed initialState script
+    pure (rendered, finalState)
+
+runFullscreenScriptFramesWithState
+    :: AppState
+    -> [FullscreenScriptEvent]
+    -> IO ([V.Picture], AppState)
+runFullscreenScriptFramesWithState initialState script = do
+    (_, frames, finalState) <-
+        runFullscreenScriptDetailed initialState script
+    pure (frames, finalState)
+
+runFullscreenScriptDetailed
+    :: AppState
+    -> [FullscreenScriptEvent]
+    -> IO (ByteString.ByteString, [V.Picture], AppState)
+runFullscreenScriptDetailed initialState script = do
     let scriptedApp = App
             { appDraw = fullscreenApp.appDraw
             , appChooseCursor = fullscreenApp.appChooseCursor
@@ -2520,6 +2554,7 @@ runFullscreenScriptWithState initialState script = do
     let bounds = (80, 24)
     (_, mockOutput) <- VMock.mockTerminal bounds
     outputBytes <- newIORef ByteString.empty
+    renderedFrames <- newIORef []
     let output = mockOutput
             { V.outputByteBuffer = \bytes ->
                 modifyIORef' outputBytes (<> bytes)
@@ -2527,7 +2562,9 @@ runFullscreenScriptWithState initialState script = do
     context <- V.mkDisplayContext output output bounds
     internalEvents <- newTChanIO
     let vty = V.Vty
-            { V.update = V.outputPicture context
+            { V.update = \picture -> do
+                modifyIORef' renderedFrames (picture :)
+                V.outputPicture context picture
             , V.nextEvent = atomically retry
             , V.nextEventNonblocking = pure Nothing
             , V.inputIface = V.Input
@@ -2544,7 +2581,8 @@ runFullscreenScriptWithState initialState script = do
     finalState <-
         customMain vty (pure vty) (Just events) scriptedApp initialState
     rendered <- readIORef outputBytes
-    pure (rendered, finalState)
+    frames <- reverse <$> readIORef renderedFrames
+    pure (rendered, frames, finalState)
 
 markerBlock :: BlockId -> Text -> UiBlock
 markerBlock blockId body = UiBlock
@@ -2559,6 +2597,118 @@ markerBlock blockId body = UiBlock
     , blockCallId = Nothing
     , blockInspectionGroupable = False
     }
+
+cachedHistorySelectionRenders :: IO Bool
+cachedHistorySelectionRenders = do
+    let selectedId = BlockId (-32)
+        selectedBlock =
+            (markerBlock selectedId "selected body")
+                { blockKind = BlockTool
+                , blockTitle = "cached selection"
+                }
+        blocks =
+            selectedBlock
+                : [ markerBlock
+                        (BlockId ident)
+                        ("cached history " <> Text.pack (show ident))
+                  | ident <- [-31 .. -1]
+                  ]
+    initialState <- cachedHistoryState blocks
+    (frames, finalState) <-
+        runFullscreenScriptFramesWithState
+            initialState
+            [ FullscreenScriptVty (V.EvKey V.KDown [])
+            , FullscreenScriptVty (V.EvKey V.KEsc [])
+            , FullscreenScriptHalt
+            ]
+    let rendered = map renderedPictureText frames
+        selectedMarker text =
+            markerBeforeTitle (Text.lines text)
+        markerBeforeTitle = \case
+            [] -> False
+            line : rest ->
+                ( Text.isInfixOf "❯ " line
+                    && any
+                        (Text.isInfixOf "cached selection")
+                        (take 2 rest)
+                )
+                    || markerBeforeTitle rest
+    pure $ case rendered of
+        initialFrame : laterFrames ->
+            not (selectedMarker initialFrame)
+                && any selectedMarker laterFrames
+                && maybe False (not . selectedMarker) (lastMaybe rendered)
+                && finalState.appHistorySelectedBlock == Nothing
+        [] -> False
+
+cachedHistoryExpansionRenders :: IO Bool
+cachedHistoryExpansionRenders = do
+    let expandingId = BlockId (-32)
+        expandingBlock =
+            (markerBlock
+                expandingId
+                (Text.unlines
+                    [ "visible one"
+                    , "visible two"
+                    , "visible three"
+                    , "expanded history marker"
+                    ]))
+                { blockKind = BlockTool
+                , blockTitle = "cached expansion"
+                }
+        blocks =
+            expandingBlock
+                : [ markerBlock
+                        (BlockId ident)
+                        ("cached history " <> Text.pack (show ident))
+                  | ident <- [-31 .. -1]
+                  ]
+    initialState <- cachedHistoryState blocks
+    (frames, finalState) <-
+        runFullscreenScriptFramesWithState
+            initialState
+            [ FullscreenScriptVty (V.EvKey V.KDown [])
+            , FullscreenScriptVty (V.EvKey V.KEnter [])
+            , FullscreenScriptVty (V.EvKey V.KEsc [])
+            , FullscreenScriptHalt
+            ]
+    let rendered = map renderedPictureText frames
+        expansionVisible =
+            Text.isInfixOf "expanded history marker"
+    pure $ case rendered of
+        initialFrame : laterFrames ->
+            not (expansionVisible initialFrame)
+                && any expansionVisible laterFrames
+                && finalState.appHistorySelectedBlock == Nothing
+                && maybe
+                    False
+                    (.blockExpanded)
+                    (historyWindowBlock
+                        expandingId
+                        finalState.appHistoryWindow)
+        [] -> False
+
+cachedHistoryState :: [UiBlock] -> IO AppState
+cachedHistoryState blocks = do
+    let ui = reduceUi (UiFocusChanged FocusScrollback) initialUiState
+        turn = HistoryTurn
+            { historyTurnCursor = HistoryCursor 0
+            , historyTurnBlocks = Seq.fromList blocks
+            }
+        window =
+            setHistoryWindowTurns
+                (Seq.singleton turn)
+                (emptyHistoryWindow
+                    (HistoryGeneration 0)
+                    64
+                    1_000
+                    1_000_000)
+    runtime <- newScriptRuntime ui
+    pure $
+        (initialFullscreenAppState runtime [] AgentRoot [] 0)
+            { appUi = ui
+            , appHistoryWindow = window
+            }
 
 visiblePromptRepairsStaleAnchor :: IO Bool
 visiblePromptRepairsStaleAnchor = do
@@ -2597,18 +2747,32 @@ visiblePromptRepairsStaleAnchor = do
 
 renderedAppText :: (Int, Int) -> AppState -> Text
 renderedAppText size state =
+    renderedPictureTextAt size (renderWidget Nothing (drawApp state) size)
+
+renderedPictureText :: V.Picture -> Text
+renderedPictureText picture =
+    let image = V.picImage picture
+    in renderedPictureTextAt
+        (V.imageWidth image, V.imageHeight image)
+        picture
+
+renderedPictureTextAt :: (Int, Int) -> V.Picture -> Text
+renderedPictureTextAt size picture =
     Text.unlines $
         map
             (Text.concat . map spanText . toList)
             (toList
-                (displayOpsForPic
-                    (renderWidget Nothing (drawApp state) size)
-                    size))
+                (displayOpsForPic picture size))
   where
     spanText = \case
         TextSpan _ _ _ text -> LazyText.toStrict text
         Skip width -> Text.replicate width " "
         RowEnd width -> Text.replicate width " "
+
+lastMaybe :: [a] -> Maybe a
+lastMaybe = \case
+    [] -> Nothing
+    values -> Just (last values)
 
 encoded :: Text -> ByteString.ByteString
 encoded = TextEncoding.encodeUtf8

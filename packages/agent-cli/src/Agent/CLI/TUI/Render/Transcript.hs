@@ -38,16 +38,17 @@ import Agent.CLI.Startup.Format
 import Agent.CLI.Style ()
 import Agent.CLI.TUI.History
     ( HistoryWindow(historyWindowTurns, historyWindowTotalTurns,
+                    historyWindowTranscriptChunks,
                     historyWindowGenerationStart, historyWindowHasNewer,
                     historyWindowHasOlder, historyWindowPending),
-      HistoryTurn(historyTurnCursor, historyTurnBlocks),
+      HistoryTurn(historyTurnCursor),
       HistoryDirection(..),
       HistoryCursor(HistoryCursor) )
 import Agent.CLI.TUI.ImagePreview ()
 import Agent.CLI.TUI.LambdaArt ( lambdaArtWidget )
 import Agent.TUI.Accent ()
 import Agent.CLI.TUI.Types
-    ( AppState(appConversationAnchor, appHoveredControl,
+    ( AppState(appConversationAnchor, appHoveredControl, appHistorySelectedBlock,
                appAgentEntries, appSlashCatalog, appHistoryWindow, appUi,
                appAgentSelected),
       Name(QuickStartModel, CodeCopy, ConversationChunkCache,
@@ -164,20 +165,13 @@ drawTranscript state =
         [ vBox $
             olderGap
                 <> map
-                    (drawBlock state AgentRoot state.appUi)
-                    historicalBlocks
+                    (drawTranscriptChunk state AgentRoot state.appUi)
+                    state.appHistoryWindow.historyWindowTranscriptChunks
                 <> newerGap
                 <> [drawConversationBlocks state AgentRoot state.appUi]
         ]
             <> conversationReserveWidgets anchor
   where
-    historicalBlocks =
-        concatMap
-            ( toList
-                . Transcript.coalesceInspectionBlocks
-                . (.historyTurnBlocks)
-            )
-            (toList state.appHistoryWindow.historyWindowTurns)
     olderGap =
         historyGapWidget
             HistoryOlder
@@ -229,6 +223,12 @@ drawTranscriptChunk state target ui blocks =
         , state.appAgentSelected == target
         , blockId <- maybeToList ui.uiSelectedBlock
         ]
+            <> [ blockId
+               | target == AgentRoot
+               , state.appUi.uiFocus == FocusScrollback
+               , state.appAgentSelected == target
+               , blockId <- maybeToList state.appHistorySelectedBlock
+               ]
             <> [ blockId
                | Just (CodeCopy hoveredTarget blockId _) <-
                     [state.appHoveredControl]

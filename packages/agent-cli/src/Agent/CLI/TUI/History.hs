@@ -41,6 +41,7 @@ module Agent.CLI.TUI.History
     , unarchivedLiveStart
     ) where
 
+import Agent.CLI.TUI.Transcript (coalesceInspectionBlocks, transcriptChunks)
 import Agent.TUI.Model (BlockId, UiBlock(..))
 import Data.Foldable (toList)
 import Data.Int (Int64)
@@ -95,6 +96,10 @@ data HistoryWindow = HistoryWindow
     , historyWindowTurns :: !(Seq HistoryTurn)
     , historyWindowTurnsByCursor :: !(Map HistoryCursor HistoryTurn)
     , historyWindowBlocksById :: !(Map BlockId UiBlock)
+    -- | Block-only display projection, shared by redraws until turns change.
+    -- Coalesce within each turn (never across turn boundaries), then chunk
+    -- across the window so short turns benefit from image caching too.
+    , historyWindowTranscriptChunks :: ![Seq UiBlock]
     , historyWindowHasOlder :: !Bool
     , historyWindowHasNewer :: !Bool
     , historyWindowMaxTurns :: !Int
@@ -125,6 +130,7 @@ emptyHistoryWindow generation maxTurns maxBlocks maxBytes =
         , historyWindowTurns = Seq.empty
         , historyWindowTurnsByCursor = Map.empty
         , historyWindowBlocksById = Map.empty
+        , historyWindowTranscriptChunks = []
         , historyWindowHasOlder = False
         , historyWindowHasNewer = False
         , historyWindowMaxTurns = max 1 maxTurns
@@ -141,6 +147,9 @@ setHistoryWindowTurns :: Seq HistoryTurn -> HistoryWindow -> HistoryWindow
 setHistoryWindowTurns turns window =
     window
         { historyWindowTurns = turns
+        , historyWindowTranscriptChunks =
+            transcriptChunks $
+                foldMap (coalesceInspectionBlocks . (.historyTurnBlocks)) turns
         , historyWindowTurnsByCursor =
             Map.fromList
                 [ (turn.historyTurnCursor, turn)
