@@ -11,8 +11,10 @@ import Agent.CLI.Compaction.Projection
 import Agent.CLI.Compaction.Types
 import Agent.Loop
     ( Backend(..)
+    , BackendCallbacks(..)
     , BackendMiddleware
     , BackendSnapshot(..)
+    , LoopEvent(..)
     , TurnInput(..)
     , advanceBackendSnapshot
     , backendWithCallbacks
@@ -96,8 +98,10 @@ boundCompletedToolContinuations contextWindowFor getParams contextTokensRef back
                     then backend.submitTurnWithCallbacks
                         snapshot previous inputs callbacks
                     else if requestTokens truncated <= contextWindow
-                        then backend.submitTurnWithCallbacks
-                            snapshot previous truncated callbacks
+                        then do
+                            callbacks.onLoopEvent ModelContextReset
+                            backend.submitTurnWithCallbacks
+                                snapshot previous truncated callbacks
                         else submitTrimmedHistory
                             params
                             contextWindow
@@ -127,9 +131,11 @@ boundCompletedToolContinuations contextWindowFor getParams contextTokensRef back
                     params
                     (fittedHistory <> turnInputsToItems inputs)
         if fittedTokens <= contextWindow
-            then backend.submitTurnWithCallbacks
-                (advanceBackendSnapshot snapshot fittedHistory Nothing)
-                Nothing inputs callbacks
+            then do
+                callbacks.onLoopEvent ModelContextReset
+                backend.submitTurnWithCallbacks
+                    (advanceBackendSnapshot snapshot fittedHistory Nothing)
+                    Nothing inputs callbacks
             else pure (Left toolContinuationTooLargeError)
 
 pendingToolCallIds :: [TurnInput] -> [Text]

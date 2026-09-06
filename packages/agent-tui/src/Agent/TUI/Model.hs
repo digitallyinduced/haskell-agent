@@ -402,6 +402,7 @@ reduceLoop event state = case event of
                 }
     ActivityUpdated activity ->
         state { uiActivity = activity }
+    ModelContextReset -> state
     ProviderLimitUpdated
         { providerLimitText = text
         , providerLimitWarning = warning

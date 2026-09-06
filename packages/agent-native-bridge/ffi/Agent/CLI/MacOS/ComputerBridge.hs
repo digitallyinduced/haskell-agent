@@ -14,11 +14,13 @@ module Agent.CLI.MacOS.ComputerBridge
     , computerOutputCapacity
     , computerStatusMessage
     , computerToolWhenEnabled
+    , computerToolSessionWhenEnabled
     , encodeComputerActions
     , invokeComputerTransaction
     , invokeComputerSessionTransaction
     , newComputerHost
     , newComputerSession
+    , resetComputerSessionAccessibility
     ) where
 
 import Agent.CLI.ComputerUse
@@ -43,7 +45,13 @@ import Agent.Responses.Types
 import Agent.Tools.Types (AppTool)
 import Control.Exception.Safe (bracket, tryAny)
 import Control.Monad (foldM)
-import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
+import Control.Concurrent.MVar
+    ( MVar
+    , modifyMVar
+    , modifyMVar_
+    , newMVar
+    , withMVar
+    )
 import qualified Data.ByteString as BS
 import Data.Bits ((.|.))
 import Data.Text (Text)
@@ -192,15 +200,29 @@ newComputerSession = ComputerSession <$> newMVar ComputerSessionState
 
 computerToolWhenEnabled :: ComputerHost -> IO (Maybe AppTool)
 computerToolWhenEnabled host =
+    fmap (fmap fst) (computerToolSessionWhenEnabled host)
+
+computerToolSessionWhenEnabled :: ComputerHost -> IO (Maybe (AppTool, IO ()))
+computerToolSessionWhenEnabled host =
     withMVar host.computerRegistration \case
         Nothing -> pure Nothing
         Just _ -> do
             session <- newComputerSession
-            pure . Just . computerUseToolWith $
-                ComputerUseBackend
-                    { computerRunTransaction =
-                        invokeComputerSessionTransaction host session
-                    }
+            pure . Just $
+                ( computerUseToolWith $
+                    ComputerUseBackend
+                        { computerRunTransaction =
+                            invokeComputerSessionTransaction host session
+                        }
+                , resetComputerSessionAccessibility session
+                )
+
+resetComputerSessionAccessibility :: ComputerSession -> IO ()
+resetComputerSessionAccessibility session =
+    modifyMVar_ session.computerSessionState \state ->
+        pure state
+            { computerSessionAccessibility = initialAccessibilityDeltaState
+            }
 
 encodeComputerActions :: [ComputerAction] -> Either Text ComputerBatch
 encodeComputerActions actions = do

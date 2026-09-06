@@ -581,6 +581,7 @@ uiEventLogicalBytes = \case
                 logicalTextBytes text
             WarningRaised text -> logicalTextBytes text
             ResponseRestarted text -> logicalTextBytes text
+            ModelContextReset -> 128
             TurnStarted -> 128
             TurnFinished output -> turnOutputLogicalBytes output
             ToolStarted call -> toolCallLogicalBytes call

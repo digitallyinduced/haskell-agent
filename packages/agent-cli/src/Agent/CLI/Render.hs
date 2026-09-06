@@ -632,6 +632,8 @@ renderEventUnlocked config = \case
         pure ()
     NativeAgentFinished{} ->
         pure ()
+    ModelContextReset ->
+        pure ()
 
 renderToolStartedUnlocked :: RenderConfig -> ToolCall -> IO ()
 renderToolStartedUnlocked config call = do

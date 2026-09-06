@@ -11,7 +11,7 @@ import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
-import Data.List (sortOn)
+import Data.List (sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import GHC.Clock (getMonotonicTimeNSec)
@@ -167,8 +167,17 @@ makeSnapshot workload nodes revision = AccessibilitySnapshot
                     <> "-node-" <> Text.pack (show index)
 
 median :: [Sample] -> Sample
-median samples =
-    sortOn (.sampleElapsedMillis) samples !! (length samples `div` 2)
+median samples = Sample
+    { sampleElapsedMillis = medianValue (map (.sampleElapsedMillis) samples)
+    , sampleCpuMillis = medianValue (map (.sampleCpuMillis) samples)
+    , sampleAllocatedBytes =
+        medianValue (map (.sampleAllocatedBytes) samples)
+    , sampleOutputBytes = medianValue (map (.sampleOutputBytes) samples)
+    }
+
+medianValue :: Ord value => [value] -> value
+medianValue values =
+    sort values !! (length values `div` 2)
 
 printSample :: Workload -> Policy -> Int -> Int -> Sample -> IO ()
 printSample workload policy nodes revisions sample =

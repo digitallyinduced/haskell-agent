@@ -73,6 +73,11 @@ spec = describe "public loop-event projection" do
         LBS8.unpack (encode failed)
             `shouldContain` "\"displayOnly\":true"
 
+    it "projects model-context resets as display-only" do
+        let (eventType, value) = projectLoopEvent ModelContextReset
+        eventType `shouldBe` "model.context.reset"
+        value `shouldBe` object ["displayOnly" .= True]
+
     it "redacts encrypted durable values and applies a total budget" do
         let public = projectPublicValue $
                 object
