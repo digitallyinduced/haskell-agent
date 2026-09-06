@@ -26,8 +26,7 @@ import Agent.CLI.AgentSessions
     , newSessionThreadManager
     )
 import Agent.Loop
-    ( ImageAttachment
-    , TurnAttachment(ImageAttachmentItem)
+    ( TurnAttachment(ImageAttachmentItem)
     , userMessageWithAttachments
     )
 import Agent.CLI.Options
@@ -58,8 +57,11 @@ import Agent.CLI.Runtime.Orchestration.Types
     , nativeRunMode
     )
 import Agent.CLI.Runtime.Types (DevResult(..), StartupFailure(..))
-import Agent.Provider (Provider)
-import Agent.ReasoningEffort (ReasoningEffort)
+import Agent.Runtime.Request
+    ( NativeSessionTarget(..)
+    , NativeTurnRequest(..)
+    , validateNativeTurnRequest
+    )
 import Agent.TUI.Motion (MotionMode(..))
 import qualified Agent.MCP as MCP
 import Control.Concurrent.Async
@@ -83,34 +85,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import System.IO (Handle)
 import System.OsPath (OsPath)
-
--- | Whether a native turn creates a durable session or resumes one.
---
--- Keeping this as a sum type prevents transport adapters from constructing
--- ambiguous combinations of @save@ and @resume@ flags.
-data NativeSessionTarget
-    = NativeNewSession
-    | NativeResumeSession !Text
-    deriving (Eq, Show)
-
--- | Typed, transport-neutral inputs for one native agent turn.
---
--- Native turns intentionally exclude CLI-only capabilities such as worktree
--- creation, computer use, prompt files, and implicit non-interactive
--- auto-approval. The supplied 'NativeRunHooks' remain responsible for all
--- interactive approval and plan-mode callbacks.
-data NativeTurnRequest = NativeTurnRequest
-    { nativeTurnPrompt :: !Text
-    , nativeTurnImages :: ![ImageAttachment]
-    , nativeTurnSession :: !NativeSessionTarget
-    , nativeTurnProvider :: !(Maybe Provider)
-    , nativeTurnModel :: !(Maybe Text)
-    , nativeTurnCwd :: !OsPath
-    , nativeTurnEffort :: !(Maybe ReasoningEffort)
-    , nativeTurnInteractionMode :: !NativeInteractionMode
-    , nativeTurnShellMode :: !NativeShellMode
-    }
-    deriving (Eq, Show)
 
 data NativeProcessRuntime = NativeProcessRuntime
     { nativeMcpSupervisor :: !MCP.McpSupervisor
@@ -219,17 +193,13 @@ runNativeTurn runtime output hooks request =
 
 -- | Lower a typed native request into the existing orchestration options.
 --
--- This function is public so transport adapters can validate requests before
--- queue admission. It never enables capabilities excluded from native turns.
+-- This compatibility adapter never enables capabilities excluded from native
+-- turns. Transport adapters can validate without CLI options using
+-- 'validateNativeTurnRequest'.
 nativeTurnOptions :: NativeTurnRequest -> Either Text CliOptions
-nativeTurnOptions request
-    | request.nativeTurnInteractionMode == NativeYolo =
-        Left "typed native turns do not support auto-approval"
-    | NativeResumeSession sessionId <- request.nativeTurnSession
-    , Text.null (Text.strip sessionId) =
-        Left "native resume session id must not be empty"
-    | otherwise =
-        Right defaultCliOptions
+nativeTurnOptions request = do
+    validateNativeTurnRequest request
+    pure defaultCliOptions
             { optProvider = request.nativeTurnProvider
             , optModel = request.nativeTurnModel
             , optCwd = Just request.nativeTurnCwd

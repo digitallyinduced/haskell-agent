@@ -13,6 +13,9 @@ import qualified Agent.CLI.ManagedTurnSpec as ManagedTurnSpec
 import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
 import qualified Agent.CLI.SessionSpec as SessionSpec
+import qualified Agent.Runtime.RequestSpec as RuntimeRequestSpec
+import qualified Agent.Runtime.TurnEngineSpec as TurnEngineSpec
+import qualified Agent.Runtime.TurnStateSpec as TurnStateSpec
 import Test.Hspec
 
 main :: IO ()
@@ -33,3 +36,6 @@ main = hspec do
     ModelConfigSpec.spec
     ModelsSpec.spec
     SessionSpec.spec
+    RuntimeRequestSpec.spec
+    TurnEngineSpec.spec
+    TurnStateSpec.spec
