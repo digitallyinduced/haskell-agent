@@ -1069,22 +1069,27 @@
                                     haskellPackages.ghc
                                     (old.disallowedRequisites or [ ]);
                             });
-                agentSandboxVm =
+                agentSandboxWorkerExecutable =
+                    (pkgs.haskell.lib.justStaticExecutables
+                        agentServerPackage).overrideAttrs
+                        (old: {
+                            postInstall = (old.postInstall or "") + ''
+                                rm -f "$out/bin/agent-server"
+                            '';
+                        });
+                agentSandboxRootfs =
                     if pkgs.stdenv.hostPlatform.isLinux then
-                        (nixpkgs.lib.nixosSystem {
-                            inherit system;
-                            specialArgs = {
-                                agentServer = agentServerExecutable;
-                            };
-                            modules = [ ./nix/sandbox-vm.nix ];
-                        }).config.system.build.vm
+                        import ./nix/sandbox-rootfs.nix {
+                            inherit pkgs;
+                            agentServer = agentSandboxWorkerExecutable;
+                        }
                     else
                         null;
                 agentSandboxRunner =
                     if pkgs.stdenv.hostPlatform.isLinux then
                         import ./nix/sandbox-runner.nix {
                             inherit pkgs;
-                            vm = agentSandboxVm;
+                            rootfs = agentSandboxRootfs;
                         }
                     else
                         null;
@@ -1244,6 +1249,8 @@
                 packages.agent-server-client = agentServerClientPackage;
                 packages.${if pkgs.stdenv.hostPlatform.isLinux
                     then "agent-sandbox-runner" else null} = agentSandboxRunner;
+                packages.${if pkgs.stdenv.hostPlatform.isLinux
+                    then "agent-sandbox-rootfs" else null} = agentSandboxRootfs;
                 packages.${if pkgs.stdenv.hostPlatform.isDarwin
                     then "agent-native-bridge" else null} = agentNativeBridgePackage;
                 packages.${if pkgs.stdenv.hostPlatform.isDarwin

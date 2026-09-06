@@ -40,7 +40,7 @@ use. A symlink cannot be used to select a directory outside an allowed root.
 Multi-tenant mode uses an opaque bearer credential to select a tenant. Each
 tenant gets a disjoint workspace, server-owned state directory, PostgreSQL
 database and restricted runtime role. Model-controlled filesystem, shell,
-process, and network tools execute in one NixOS QEMU microVM per tenant, shared
+process, and network tools execute in one gVisor sandbox per tenant, shared
 by that tenant's sessions and started lazily on the first sandboxed tool call.
 Provider API calls, authorization, and PostgreSQL access remain in the host
 server; database credentials and provider secrets are not copied into the
@@ -91,36 +91,50 @@ group/other-writable. The sandbox runner has the same trusted-ancestry
 requirement and must be outside every tenant workspace and state directory.
 `--max-active-tenants` must cover the complete registry.
 
-The VM receives only two writable 9p exports: the tenant workspace as
-`/workspace` and a dedicated guest-data directory as `/state`. VM images,
-locks, sockets, registry data, and credentials stay in host-only paths. The
-runner pins both exports by open directory descriptors before QEMU starts, so
-a later pathname replacement cannot redirect a mount. It also compares the
-workspace descriptor's device and inode with the identity recorded when the
-registry was loaded, rejecting a pre-launch substitution.
+The gVisor sandbox receives only two writable directory bind mounts: the
+tenant workspace as `/workspace` and a dedicated guest-data directory as
+`/state`. The bootstrap trace remains inside the bounded `/run` tmpfs. On
+startup failure the runner emits only a bounded tail to its private stderr;
+a successful bootstrap deletes the trace before starting the worker. Runtime
+bundles, locks, sockets, registry data, and credentials otherwise stay in
+host-only paths. The runner pins both directory mounts by open descriptors
+before starting `runsc`, so a later pathname replacement cannot redirect a
+mount. It also compares the workspace descriptor's device and inode with the
+identity recorded when the registry was loaded, rejecting a pre-launch
+substitution.
 
-Outbound guest networking is available for development tools. Its immutable
-nftables policy rejects loopback, private, link-local, metadata, reserved, and
-all host addresses captured at VM launch. The runner monitors host address
-changes and terminates stale VMs; the next sandboxed call starts a replacement
-with a fresh deny set. There is no inbound guest service or SSH.
-Failure to start, attest, or communicate with a VM fails the tool call closed;
-the server never falls back to host execution.
+Outbound sandbox networking is available for development tools through
+`slirp4netns`. Its immutable nftables policy rejects loopback, private,
+link-local, metadata, reserved, IPv6, and all host addresses captured at
+sandbox launch. The runner monitors host address changes and terminates stale
+sandboxes; the next sandboxed call starts a replacement with a fresh deny set.
+There is no inbound sandbox service or SSH. Failure to start, attest, or
+communicate with gVisor fails the tool call closed; the server never falls back
+to host execution. The protocol input must be a read-only pipe so closing the
+server's writer produces an unambiguous EOF.
 
 The managed host PostgreSQL cluster provisions a separate database and
 `NOSUPERUSER`, `NOCREATEDB`, `NOCREATEROLE`, `NOINHERIT`, `NOBYPASSRLS`
 runtime role for each tenant. Public database connectivity is revoked, runtime
 roles receive only the application grants in their own database, and custom
-scope role names include the tenant namespace. The microVM has no PostgreSQL
+scope role names include the tenant namespace. The sandbox has no PostgreSQL
 credentials or socket mount.
 
-Production operators should additionally enforce host cgroup and filesystem
-quotas, PostgreSQL database quotas/backups, TLS termination, and authentication
-rate limits. The server bounds global/per-tenant turns, queues, active tenant
-runtimes, SSE subscribers, replay buffers, request bodies, protocol frames,
-and guest tool output. A tenant VM uses two vCPUs, 2 GiB RAM, and an ephemeral
-tmpfs root over a read-only Nix store image; workspace and guest-state storage
-remain operator-owned host capacity.
+Production operators must delegate the `cpu`, `memory`, and `pids` cgroup v2
+controllers to the service's `supervisor` subgroup and should additionally
+enforce filesystem quotas, PostgreSQL database quotas/backups, TLS termination,
+and authentication rate limits. The server bounds global/per-tenant turns,
+queues, active tenant runtimes, SSE subscribers, replay buffers, request
+bodies, protocol frames, and sandbox tool output. Each sandbox process tree,
+including its network helper, runs in a dedicated cgroup limited to two CPUs,
+2 GiB RAM without swap, and 512 processes. gVisor uses the `systrap` platform,
+an immutable Nix root filesystem, a private 4 GiB overlay, and a fresh
+256 MiB tmpfs for mutable Nix database and build-log state. Workspace and guest-state
+storage remain operator-owned host capacity and must be quota-limited by the
+deployment. Cleanup uses global TERM and KILL deadlines. If descendant
+quiescence cannot be proved, the runner fail-stops while retaining the tenant
+lock until its supervisor kills the complete process group; a stale
+tenant-named cgroup also blocks replacement launches.
 
 ## Basic workflow
 

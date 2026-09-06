@@ -69,6 +69,10 @@ import Data.ByteString.Lazy qualified as LazyByteString
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
+import GHC.IO.Handle
+    ( hDuplicate
+    , hDuplicateTo
+    )
 import System.Directory
     ( createDirectory
     , doesFileExist
@@ -78,15 +82,21 @@ import System.FilePath ((</>))
 import System.IO
     ( BufferMode(NoBuffering)
     , Handle
+    , SeekMode(AbsoluteSeek)
     , hClose
     , hFlush
     , hIsEOF
+    , hSeek
     , hSetBinaryMode
     , hSetBuffering
+    , stderr
     , stdin
     , stdout
     )
-import System.IO.Temp (withSystemTempDirectory)
+import System.IO.Temp
+    ( withSystemTempDirectory
+    , withSystemTempFile
+    )
 import System.Posix.IO
     ( createPipe
     , fdToHandle
@@ -180,6 +190,28 @@ spec = describe "tenant sandbox protocol" do
                             outcome.toolDispatchResult.output
                                 `shouldSatisfy`
                                     Text.isInfixOf "wrong tenant")
+                        (closeTenantSandbox sandbox)
+
+    it "keeps bounded sanitized runner diagnostics private" do
+        withTenantFixture "stderr-failure" \tenant _ -> do
+            runner <- getExecutablePath
+            openTenantSandbox runner tenant >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right sandbox ->
+                    finally
+                        (do
+                            (outcome, captured) <-
+                                captureStandardError
+                                    (dispatchSandbox tenant sandbox)
+                            outcome.toolDispatchSucceeded `shouldBe` False
+                            outcome.toolDispatchResult.output
+                                `shouldNotSatisfy`
+                                    Text.isInfixOf "stderr-final-marker"
+                            captured
+                                `shouldSatisfy`
+                                    Text.isInfixOf
+                                        "stderr-final-marker injected control"
+                            Text.count "\n" captured `shouldBe` 1)
                         (closeTenantSandbox sandbox)
 
     it "keeps host services local while routing execution tools to the guest" do
@@ -391,7 +423,9 @@ fakeSandboxRunner :: [String] -> IO ()
 fakeSandboxRunner arguments = do
     hSetBinaryMode stdin True
     hSetBinaryMode stdout True
+    hSetBinaryMode stderr True
     hSetBuffering stdout NoBuffering
+    hSetBuffering stderr NoBuffering
     let tenantId = requiredOption "--tenant-id" arguments
         stateRoot = requiredOption "--state-root" arguments
         modePath = stateRoot </> "fake-mode"
@@ -400,20 +434,30 @@ fakeSandboxRunner arguments = do
         if modeExists
             then Text.strip . Text.pack <$> readFile modePath
             else pure "normal"
-    let readyTenant =
-            if mode == "bad-ready"
-                then "018f6a14-7d52-7a52-9c00-66d5e7d70000"
-                else Text.pack tenantId
-    writeJsonLine stdout $
-        object
-            [ "type" .= ("ready" :: Text)
-            , "version" .= (1 :: Int)
-            , "tenantId" .= readyTenant
-            , "generation" .= fakeGenerationId
-            , "workspace" .= ("/workspace" :: Text)
-            , "state" .= ("/state" :: Text)
-            ]
-    unless (mode == "bad-ready") (fakeLoop mode)
+    if mode == "stderr-failure"
+        then do
+            ByteString8.hPutStr
+                stderr
+                (ByteString8.replicate (1024 * 1024) 'x')
+            ByteString8.hPutStr
+                stderr
+                "\nstderr-final-marker\tinjected\rcontrol\n"
+            ByteString8.hPutStr stdout "{not-json}\n"
+        else do
+            let readyTenant =
+                    if mode == "bad-ready"
+                        then "018f6a14-7d52-7a52-9c00-66d5e7d70000"
+                        else Text.pack tenantId
+            writeJsonLine stdout $
+                object
+                    [ "type" .= ("ready" :: Text)
+                    , "version" .= (1 :: Int)
+                    , "tenantId" .= readyTenant
+                    , "generation" .= fakeGenerationId
+                    , "workspace" .= ("/workspace" :: Text)
+                    , "state" .= ("/state" :: Text)
+                    ]
+            unless (mode == "bad-ready") (fakeLoop mode)
 
 fakeLoop :: Text -> IO ()
 fakeLoop mode = do
@@ -495,6 +539,20 @@ parseField field value =
 
 closeHandles :: [Handle] -> IO ()
 closeHandles = mapM_ (\handle -> void (tryAny (hClose handle)))
+
+captureStandardError :: IO value -> IO (value, Text)
+captureStandardError action =
+    withSystemTempFile "agent-server-stderr" \_ capturedHandle ->
+        bracket (hDuplicate stderr) hClose \originalStderr -> do
+            hDuplicateTo capturedHandle stderr
+            value <-
+                action `finally` do
+                    hFlush stderr
+                    hDuplicateTo originalStderr stderr
+            hFlush capturedHandle
+            hSeek capturedHandle AbsoluteSeek 0
+            captured <- ByteString8.hGetContents capturedHandle
+            pure (value, TextEncoding.decodeLatin1 captured)
 
 within :: String -> IO value -> IO value
 within description action =
