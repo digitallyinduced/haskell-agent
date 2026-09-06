@@ -5,7 +5,8 @@ module Agent.CLI.MacOS.NativeSupervisor
 
 import Agent.CLI.MacOS.AgentSnapshot (activeAgentSnapshot)
 import Agent.CLI.MacOS.BrowserBridge (BrowserHost, browserToolsWhenEnabled)
-import Agent.CLI.MacOS.ComputerBridge (ComputerHost, computerToolWhenEnabled)
+import Agent.CLI.MacOS.ComputerBridge
+    ( ComputerHost, computerToolSessionWhenEnabled )
 import Agent.CLI.MacOS.EngineCallbacks (invokeTaskSnapshotCallback)
 import Agent.CLI.MacOS.EngineEvents
 import Agent.CLI.MacOS.EngineMailbox
@@ -406,7 +407,7 @@ supervisorLoop
             start.turnStartSessionId
             interactions
         nativeBrowserTools <- browserToolsWhenEnabled browser start.turnStartId
-        nativeComputerTool <- computerToolWhenEnabled computer
+        nativeComputerSession <- computerToolSessionWhenEnabled computer
         worker <- launchTrackedWorker start.turnStartId do
             withGatewayCredentialTurnLease $
                 ensureNativeGatewayIdentity
@@ -440,7 +441,7 @@ supervisorLoop
                                     processRuntime
                                     control
                                     nativeBrowserTools
-                                    nativeComputerTool
+                                    nativeComputerSession
                                     start
                                     pending.pendingTurnImages
                                     pending.pendingTurnOptions

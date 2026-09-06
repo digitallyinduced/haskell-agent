@@ -382,6 +382,9 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     }
             result = ToolCallResult
                 { callId = "call-native-full"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 , output = encoded
                 , callKind = ComputerFunctionCallKind
                 }
@@ -418,6 +421,9 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     }
             result = ToolCallResult
                 { callId = "call-native-delta"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 , output = encoded
                 , callKind = ComputerFunctionCallKind
                 }
@@ -451,6 +457,9 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     }
             result = ToolCallResult
                 { callId = "call-native-unavailable"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 , output = encoded
                 , callKind = ComputerFunctionCallKind
                 }

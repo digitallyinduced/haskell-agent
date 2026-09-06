@@ -134,6 +134,10 @@ projectLoopEvent = \case
             , "status" .= nativeAgentStatusText status
             ]
         )
+    ModelContextReset ->
+        ( "model.context.reset"
+        , object ["displayOnly" .= True]
+        )
 
 -- | Public agent snapshots intentionally omit transcripts and retained UI
 -- state. Those may contain arbitrarily large or sensitive model/tool output.

@@ -212,6 +212,10 @@ spec = describe "fullscreen TUI bridge" do
             ]
             `shouldBe` ["canonical"]
 
+    it "accounts model-context reset mailbox overhead" do
+        appEventLogicalBytes (AppUi (UiLoop ModelContextReset))
+            `shouldBe` 128
+
     it "backpressures a single streaming mailbox node by payload bytes" do
         runtime <- newBridgeTestRuntime
         let exactBudgetText =

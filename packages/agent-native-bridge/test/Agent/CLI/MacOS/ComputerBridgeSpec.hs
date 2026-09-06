@@ -23,6 +23,7 @@ import Agent.CLI.MacOS.ComputerBridge
     , invokeComputerSessionTransaction
     , invokeComputerTransaction
     , newComputerSession
+    , resetComputerSessionAccessibility
     )
 import Agent.Loop (ImageAttachment(..))
 import Agent.Responses.Types
@@ -222,6 +223,39 @@ spec = describe "native computer bridge" do
                   ) -> pure ()
                 values -> expectationFailure
                     ("unexpected accessibility observations: " <> show values)
+
+    it "resets accessibility to a full snapshot without discarding the display lease" do
+        observed <- newIORef []
+        withComputerHost (accessibilityComputerCallback observed) \host -> do
+            session <- newComputerSession
+            first <- invokeComputerSessionTransaction
+                host session ScreenshotPng [] (const (Right ()))
+            second <- invokeComputerSessionTransaction
+                host session ScreenshotPng [] (const (Right ()))
+            resetComputerSessionAccessibility session
+            third <- invokeComputerSessionTransaction
+                host session ScreenshotPng
+                [ClickAction 10 20 "left" []]
+                (const (Right ()))
+            case (first, second, third) of
+                ( Right ComputerObservation
+                    { computerObservationAccessibility =
+                        Just (AccessibilityFull 1 _)
+                    }
+                  , Right ComputerObservation
+                    { computerObservationAccessibility =
+                        Just (AccessibilityDelta 1 2 [])
+                    }
+                  , Right ComputerObservation
+                    { computerObservationAccessibility =
+                        Just (AccessibilityFull 1 _)
+                    }
+                  ) -> pure ()
+                values -> expectationFailure
+                    ("unexpected reset accessibility observations: " <> show values)
+            invocations <- readIORef observed
+            map observedOperationAndToken invocations `shouldBe`
+                [(1, 0), (2, 41), (1, 0), (2, 41), (2, 42)]
 
     it "keeps a valid screenshot when accessibility JSON is malformed" do
         observed <- newIORef []
