@@ -86,6 +86,7 @@ import Agent.CLI.Runtime.Types
     )
 import Agent.CLI.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Style
     ( glyphOk
     , glyphWarn
@@ -484,7 +485,7 @@ requestAutomaticProviderFallback env apiError pending = do
                     chooseAutomaticProviderTransition
                         env.sessionProviderFallback
                         env.sessionModelCatalog
-                        env.sessionProjectRoot
+                        env.sessionWorkspace.projectRoot
                         env.sessionRender.renderStderr
                         env.sessionFullscreen
                         (tokenProviderBillingMode tokenProvider)
@@ -512,7 +513,7 @@ requestStartupProviderFallback env apiError = do
                     chooseStartupProviderTransition
                         env.sessionProviderFallback
                         env.sessionModelCatalog
-                        env.sessionProjectRoot
+                        env.sessionWorkspace.projectRoot
                         env.sessionFullscreen
                         (tokenProviderBillingMode tokenProvider)
                         env.sessionProvider

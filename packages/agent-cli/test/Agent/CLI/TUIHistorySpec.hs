@@ -387,6 +387,49 @@ spec = describe "bounded fullscreen history window" do
         historyWindowLoadedBytes completed `shouldSatisfy` (> 180)
         historyWindowOlderAvailable completed `shouldBe` True
 
+    it "matches single-eviction semantics and indexes across budgets and anchors" do
+        let generation = HistoryGeneration 6
+            existing = Seq.fromList [turn 2 1, turn 3 3, turn 4 2]
+            cases =
+                [ (direction, visible, selected, maxTurns, maxBlocks, maxBytes)
+                | direction <- [HistoryOlder, HistoryNewer]
+                , visible <- [Nothing, Just (HistoryCursor 2), Just (HistoryCursor 4)]
+                , selected <- [Nothing, Just (HistoryCursor 3), Just (HistoryCursor 4)]
+                , maxTurns <- [1, 3, 10]
+                , maxBlocks <- [1, 4, 100]
+                , maxBytes <- [1, 400, 1_000_000]
+                ]
+        mapM_ (\(direction, visible, selected, maxTurns, maxBlocks, maxBytes) -> do
+            let initial = historyWindowSetAnchors visible selected $
+                    setHistoryWindowTurns existing $
+                        emptyHistoryWindow generation maxTurns maxBlocks maxBytes
+                page = HistoryPage
+                    { historyPageGeneration = generation
+                    , historyPageDirection = direction
+                    -- Unsorted, overlapping, duplicate, and empty turns.
+                    , historyPageTurns =
+                        Seq.fromList [turn 5 2, turn 2 4, turn 1 0, turn 5 1]
+                    , historyPageGenerationStart = HistoryCursor 1
+                    , historyPageTotalTurns = 5
+                    , historyPageHasOlder = False
+                    , historyPageHasNewer = False
+                    }
+                unlimited = initial
+                    { historyWindowMaxTurns = maxBound
+                    , historyWindowMaxBlocks = maxBound
+                    , historyWindowMaxBytes = maxBound
+                    }
+            merged <- expectRight (applyHistoryPage page unlimited)
+            actual <- expectRight (applyHistoryPage page initial)
+            let expected = referenceTrim direction merged
+                    { historyWindowMaxTurns = maxTurns
+                    , historyWindowMaxBlocks = maxBlocks
+                    , historyWindowMaxBytes = maxBytes
+                    }
+            -- Equality checks both indexes, flags, metadata, and anchors,
+            -- not just the surviving cursor range.
+            actual `shouldBe` expected) cases
+
     it "omits persisted reasoning while projecting tool and assistant history" do
         let projected =
                 sessionHistoryTurn
@@ -825,6 +868,40 @@ spec = describe "bounded fullscreen history window" do
             blocks = toList projected.historyTurnBlocks
         map (.blockKind) blocks `shouldBe` [BlockSystem]
         map (.blockBody) blocks `shouldBe` ["Earlier conversation summary"]
+
+-- Deliberately retain the old repeated-eviction algorithm as a simple oracle.
+referenceTrim :: HistoryDirection -> HistoryWindow -> HistoryWindow
+referenceTrim incoming window
+    | historyWindowLoadedTurns window <= window.historyWindowMaxTurns
+        && historyWindowLoadedBlocks window <= window.historyWindowMaxBlocks
+        && historyWindowLoadedBytes window <= window.historyWindowMaxBytes =
+        window
+    | historyWindowLoadedTurns window <= 1 = window
+    | otherwise =
+        case filter canEvict [preferred, incoming] of
+            [] -> window
+            direction : _ ->
+                referenceTrim incoming $
+                    case direction of
+                        HistoryOlder ->
+                            setHistoryWindowTurns (Seq.drop 1 turns)
+                                window { historyWindowHasOlder = True }
+                        HistoryNewer ->
+                            setHistoryWindowTurns (Seq.take (Seq.length turns - 1) turns)
+                                window { historyWindowHasNewer = True }
+  where
+    turns = window.historyWindowTurns
+    preferred = case incoming of
+        HistoryOlder -> HistoryNewer
+        HistoryNewer -> HistoryOlder
+    canEvict direction =
+        case turns Seq.!? (case direction of
+                HistoryOlder -> 0
+                HistoryNewer -> Seq.length turns - 1) of
+            Nothing -> False
+            Just edge ->
+                Just edge.historyTurnCursor /= window.historyWindowVisibleAnchor
+                    && Just edge.historyTurnCursor /= window.historyWindowSelectedAnchor
 
 turn :: Int64 -> Int -> HistoryTurn
 turn cursor blocks =

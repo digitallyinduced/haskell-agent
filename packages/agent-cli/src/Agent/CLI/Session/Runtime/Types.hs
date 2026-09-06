@@ -20,6 +20,7 @@ import Agent.CLI.AgentViewport
 import Agent.CLI.Claude (ClaudeSessionRuntimeSlot)
 import Agent.CLI.Config (HarnessConfig)
 import Agent.CLI.Session.History (LiveConversation)
+import Agent.CLI.Session.Workspace (WorkspaceContext)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.CodeModeRuntime
     ( CodeModeSessionRuntime
@@ -173,9 +174,7 @@ data SessionRequest = SessionRequest
     , initialGrokContext :: !(Maybe Text)
     , persist :: !Persistence
     , startupWindowTitle :: !Text
-    , projectRoot :: !OsPath
-    , home :: !OsPath
-    , cwd :: !OsPath
+    , workspace :: !WorkspaceContext
     , tokenProvider :: !(Maybe TokenProvider)
     , openAiPool :: !(Maybe OpenAI.Pool)
     , startupContext :: !(IORef (Maybe Text))
