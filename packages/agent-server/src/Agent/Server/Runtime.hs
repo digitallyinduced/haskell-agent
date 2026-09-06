@@ -30,19 +30,21 @@ import Agent.CLI.Models
     , modelCatalog
     )
 import Agent.CLI.NativeRuntime
-    ( NativeInteractionMode(..)
-    , NativeDiscoveryContext(..)
+    ( NativeDiscoveryContext(..)
     , NativeWorkspaceDiscovery(..)
     , NativeRunCapabilities(..)
     , NativeProcessRuntime
     , NativeRunHooks(..)
-    , NativeSessionTarget(..)
-    , NativeShellMode(..)
-    , NativeTurnRequest(..)
     , closeNativeProcessRuntime
     , fullNativeRunCapabilities
     , newNativeProcessRuntime
     , runNativeTurn
+    )
+import Agent.Runtime.Request
+    ( NativeInteractionMode(..)
+    , NativeSessionTarget(..)
+    , NativeShellMode(..)
+    , NativeTurnRequest(..)
     )
 import Agent.CLI.Options (CliOptions(..))
 import Agent.CLI.Project (defaultProjectSettings)

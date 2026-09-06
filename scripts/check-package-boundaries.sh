@@ -6,15 +6,29 @@ cli="$root/packages/agent-cli"
 external_session="$root/packages/agent-external-session"
 repository="$root/packages/agent-repository"
 bridge="$root/packages/agent-native-bridge"
+runtime="$root/packages/agent-cli-runtime"
 
 fail() {
   echo "package boundary check failed: $*" >&2
   exit 1
 }
 
-for package in "$cli" "$external_session" "$repository" "$bridge"; do
+for package in "$cli" "$external_session" "$repository" "$bridge" "$runtime"; do
   [[ -d "$package" ]] || fail "missing package directory: $package"
 done
+
+# The session lifecycle kernel is frontend-independent, even while the legacy
+# composition root is being incrementally migrated out of agent-cli.
+if sed -n '/^library$/,/^test-suite /p' "$runtime/agent-cli-runtime.cabal" \
+    | sed -n '/build-depends:/,$p' \
+    | rg --line-number '\bagent-(cli|tui)([[:space:],><=]|$)'; then
+  fail "headless runtime gained a CLI/TUI dependency"
+fi
+
+if rg --line-number '^import[[:space:]]+(qualified[[:space:]]+)?Agent\.(CLI|TUI)(\.|[[:space:]])' \
+  "$runtime/src/Agent/Runtime" "$runtime/test/Agent/Runtime"; then
+  fail "frontend types leaked into the session lifecycle kernel"
+fi
 
 moved_modules=(
   Agent.CLI.BrowserTools

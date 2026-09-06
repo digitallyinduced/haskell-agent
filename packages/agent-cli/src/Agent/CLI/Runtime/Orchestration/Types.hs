@@ -24,6 +24,7 @@ import Agent.Connectivity.NetworkPath ( NetworkRecovery )
 import Agent.CLI.Permission ( PermissionChoice )
 import Agent.Loop ( LoopEvent, TurnInput )
 import Agent.Provider ( Credential, TokenProvider )
+import Agent.Runtime.Request (NativeInteractionMode(..), NativeShellMode(..))
 import Agent.Store.Postgres ( Store )
 import Agent.ToolDispatch ( ToolCall )
 import Agent.Tools.PlanMode ( PlanModeHooks )
@@ -54,22 +55,6 @@ data AgentProcessRuntime = AgentProcessRuntime
     -- every MCP fleet the supervisor starts.
     , processNetworkRecovery :: !(Maybe NetworkRecovery)
     }
-
-data NativeInteractionMode
-    = NativeAsk
-    -- ^ Prompt before mutating tools.
-    | NativePlan
-    -- ^ Begin this turn with plan mode active.
-    | NativeYolo
-    -- ^ Auto-approve mutating tools.
-    deriving (Eq, Show)
-
-data NativeShellMode
-    = NativeShellNone
-    | NativeShellBash
-    | NativeShellGhci
-    | NativeShellBoth
-    deriving (Eq, Show)
 
 -- | Host-side discovery results supplied by an embedding that does not want
 -- generic orchestration to inspect the turn workspace.
