@@ -10,6 +10,8 @@ module Agent.CLI.AgentSessions
     , closeSessionThreadManager
     , closeSessionProcessManager
     , launchSessionThread
+    , launchSessionThreadNotifying
+    , formatSessionCompletionNotice
     , launchManagedTurn
     , launchManagedTurnBounded
     , launchSessionTurn
@@ -164,6 +166,21 @@ launchSessionThread
     -> IO (Either Text ())
     -> IO (Either Text Text)
 launchSessionThread manager sessionId action =
+    launchSessionThreadNotifying manager sessionId (const (pure ())) action
+
+-- | Enqueue one completion notification for this particular turn. The sink
+-- runs in the tracked worker while the manager lock is held, immediately
+-- before publishing the terminal state. It must be nonblocking and must not
+-- call back into the manager. This makes notification delivery and readiness
+-- for a follow-up atomic to callers, without an unowned notification thread.
+-- Rejected launches and manager shutdown do not emit completion notices.
+launchSessionThreadNotifying
+    :: SessionThreadManager
+    -> Text
+    -> (Text -> IO ())
+    -> IO (Either Text ())
+    -> IO (Either Text Text)
+launchSessionThreadNotifying manager sessionId notify action =
     mask \_ -> do
         launched <- modifyMVar manager.threadManagerState \state ->
             if state.threadManagerClosed
@@ -190,20 +207,24 @@ launchSessionThread manager sessionId action =
                                             ManagedSessionThreadFailed err
                                         Right (Right ()) ->
                                             ManagedSessionThreadCompleted
+                                let status = case terminal of
+                                        ManagedSessionThreadFailed err -> "failed (" <> err <> ")"
+                                        _ -> "completed"
                                 modifyMVar_ manager.threadManagerState \current ->
-                                    pure $
-                                        if current.threadManagerClosed
-                                            then current
-                                            else current
+                                    if current.threadManagerClosed
+                                        then pure current
+                                        else do
+                                            -- A notification failure must not
+                                            -- replace the child turn's outcome.
+                                            void (tryAny (notify status))
+                                            pure current
                                                 { managedThreads =
                                                     Map.insert
                                                         sessionId
                                                         terminal
                                                         current.managedThreads
                                                 }
-                                pure $ case terminal of
-                                    ManagedSessionThreadFailed err -> "failed (" <> err <> ")"
-                                    _ -> "completed"
+                                pure status
                         case started of
                             Left err ->
                                 pure
@@ -226,6 +247,16 @@ launchSessionThread manager sessionId action =
                                     , Right ("started session " <> sessionId)
                                     )
         pure launched
+
+formatSessionCompletionNotice :: Text -> Text -> Text
+formatSessionCompletionNotice sessionId status =
+    "<agent_session_notification>\n"
+        <> "The agent session turn you started has finished.\n"
+        <> "Session ID: " <> sessionId <> "\n"
+        <> "Status: " <> status <> "\n"
+        <> "Use read_agent_session with this session_id to inspect its response, "
+        <> "or send_agent_session_message to provide further input.\n"
+        <> "</agent_session_notification>"
 
 sessionThreadStatus :: SessionThreadManager -> Text -> IO Text
 sessionThreadStatus manager sessionId =
@@ -414,7 +445,7 @@ createAgentSessionArgsDecoder = Hermes.object $
 createAgentSessionTool :: AgentSessionToolsEnv -> AppTool
 createAgentSessionTool env = jsonTool
     "create_agent_session"
-    "Create a persisted top-level agent session and start its first turn in the background. Use only when the user explicitly requests independent/background work or a separate session; do not offload the entire current task here. For bounded subtasks, use subagents and retain responsibility for integration, verification, and the final answer. Returns the session id and status as readable text, not a completed result."
+    "Create a persisted top-level agent session and start its first turn in the background. Use only when the user explicitly requests independent/background work or a separate session; do not offload the entire current task here. For bounded subtasks, use subagents and retain responsibility for integration, verification, and the final answer. Returns the session id and status as readable text, not a completed result. The interactive parent session is notified when the background turn finishes; use read_agent_session to inspect its response or send_agent_session_message to continue it."
     [ PropertySchema "message" PropertyString True $ Just
         "Initial task or message for the new agent session."
     , PropertySchema "title" PropertyString False $ Just
@@ -619,7 +650,7 @@ sendAgentSessionMessageArgsDecoder = Hermes.object $
 sendAgentSessionMessageTool :: AgentSessionToolsEnv -> AppTool
 sendAgentSessionMessageTool env = jsonTool
     "send_agent_session_message"
-    "Send a message to a persisted agent session by starting a resumed background turn. Use for explicitly requested independent/background work or continuation of that separate session, not to transfer responsibility for the current task. Returns the session id and status as readable text, not a completed result; fails if that session is already running."
+    "Send a message to a persisted agent session by starting a resumed background turn. Use for explicitly requested independent/background work or continuation of that separate session, not to transfer responsibility for the current task. Returns the session id and status as readable text, not a completed result; fails if that session is already running. The interactive parent session is notified when this turn finishes."
     [ PropertySchema "session_id" PropertyString True $ Just
         "Persisted target session id."
     , PropertySchema "message" PropertyString True $ Just
