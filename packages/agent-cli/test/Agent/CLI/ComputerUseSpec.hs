@@ -51,6 +51,9 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , closePortalStateWith
     , drainPortalPngFrameBuffer
     , ensurePortalStateReadyWith
+    , ensurePortalStateReadyWithOwnership
+    , initializePortalSessionCheckedWith
+    , initializePortalSessionCheckedWithOwnership
     , invalidatePortalStateWhenWith
     , newPortalPngFrameBuffer
     , parsePortalStartResults
@@ -70,6 +73,7 @@ import Agent.CLI.ComputerUse.Linux.Portal
     , validatePortalOwnerUser
     , waitForPortalCaptureProcessStatusWith
     , waitForPortalFrameAfter
+    , withPortalCaptureResourceWith
     , withPortalCaptureRunningWith
     , withPortalCaptureReadiness
     , withPortalCaptureStartupCleanup
@@ -1141,7 +1145,7 @@ spec = do
                     if attempt == 1
                         then do
                             putMVar entered ()
-                            takeMVar blocker
+                            _ <- takeMVar blocker
                             pure (Right "unreachable")
                         else pure (Right "runtime")
                 run =
@@ -1271,6 +1275,169 @@ spec = do
                 `shouldReturn` Right ()
             readIORef attempts `shouldReturn` 2
 
+        it "keeps portal session acquisition masked through state ownership" do
+            state <- newMVar PortalUninitialized
+            acquisitionMasking <- newIORef Unmasked
+            ensurePortalStateReadyWith
+                state
+                (do
+                    getMaskingState >>= writeIORef acquisitionMasking
+                    pure ("session" :: Text.Text))
+                (const (pure ()))
+                `shouldReturn` Right ()
+            readIORef acquisitionMasking
+                `shouldReturn` MaskedInterruptible
+            readMVar state >>= \case
+                PortalReady session ->
+                    session `shouldBe` "session"
+                _ ->
+                    expectationFailure
+                        "the acquired portal session was not retained"
+
+        it "masks race-spawned session construction and closes rejected ownership" do
+            readinessCalls <- newIORef (0 :: Int)
+            acquisitionMasking <- newIORef Unmasked
+            cleanupMasking <- newIORef Unmasked
+            closed <- newIORef ([] :: [Text.Text])
+            let readiness = do
+                    call <-
+                        atomicModifyIORef' readinessCalls \current ->
+                            let next = current + 1
+                            in (next, next)
+                    pure $
+                        if call == 1
+                            then Right ()
+                            else Left "graphical session changed"
+                initialize = do
+                    getMaskingState >>= writeIORef acquisitionMasking
+                    pure ("session" :: Text.Text)
+                closeSession session = do
+                    getMaskingState >>= writeIORef cleanupMasking
+                    modifyIORef' closed (<> [session])
+            attempted <-
+                tryAny
+                    (initializePortalSessionCheckedWith
+                        readiness
+                        initialize
+                        closeSession)
+            attempted `shouldSatisfy` \case
+                Left exception ->
+                    "graphical session changed"
+                        `Text.isInfixOf` Text.pack (show exception)
+                Right _ -> False
+            readIORef acquisitionMasking
+                `shouldReturn` MaskedInterruptible
+            readIORef cleanupMasking
+                `shouldReturn` MaskedInterruptible
+            readIORef closed `shouldReturn` ["session"]
+            readIORef readinessCalls `shouldReturn` 2
+
+        it "closes a completed portal session when readiness handoff is cancelled" do
+            readinessCalls <- newIORef (0 :: Int)
+            finalCheckStarted <- newEmptyMVar
+            blocker <- newEmptyMVar
+            closed <- newIORef ([] :: [Text.Text])
+            let readiness = do
+                    call <-
+                        atomicModifyIORef' readinessCalls \current ->
+                            let next = current + 1
+                            in (next, next)
+                    if call == 1
+                        then pure (Right ())
+                        else do
+                            putMVar finalCheckStarted ()
+                            _ <- takeMVar blocker
+                            pure (Right ())
+                closeSession session =
+                    modifyIORef' closed (<> [session])
+            withAsync
+                (initializePortalSessionCheckedWith
+                    readiness
+                    (pure ("session" :: Text.Text))
+                    closeSession)
+                \initializing -> do
+                    timeout 1000000 (takeMVar finalCheckStarted)
+                        `shouldReturn` Just ()
+                    cancel initializing
+                    timeout 1000000 (waitCatch initializing)
+                        >>= (`shouldSatisfy`
+                            maybe
+                                False
+                                (either (const True) (const False)))
+            readIORef closed `shouldReturn` ["session"]
+            readIORef readinessCalls `shouldReturn` 2
+
+        it "retains completed ownership when readiness cleanup fails" do
+            state <- newMVar PortalUninitialized
+            readinessCalls <- newIORef (0 :: Int)
+            initializationCalls <- newIORef (0 :: Int)
+            cleanupCalls <- newIORef (0 :: Int)
+            cleanupMasking <- newIORef ([] :: [MaskingState])
+            let readiness = do
+                    call <-
+                        atomicModifyIORef' readinessCalls \current ->
+                            let next = current + 1
+                            in (next, next)
+                    pure case call of
+                        2 -> Left "graphical session changed"
+                        _ -> Right ()
+                initialize = do
+                    call <-
+                        atomicModifyIORef' initializationCalls \current ->
+                            let next = current + 1
+                            in (next, next)
+                    pure ("session-" <> Text.pack (show call))
+                closeSession _ = do
+                    masking <- getMaskingState
+                    modifyIORef' cleanupMasking (<> [masking])
+                    call <-
+                        atomicModifyIORef' cleanupCalls \current ->
+                            let next = current + 1
+                            in (next, next)
+                    if call == 1
+                        then throwString "cleanup failed"
+                        else pure ()
+                initializeOwned setOwnership =
+                    initializePortalSessionCheckedWithOwnership
+                        readiness
+                        initialize
+                        closeSession
+                        setOwnership
+            first <-
+                ensurePortalStateReadyWithOwnership
+                    state
+                    initializeOwned
+                    closeSession
+            first `shouldSatisfy` \case
+                Left err ->
+                    "cleanup failed" `Text.isInfixOf` err
+                Right () -> False
+            readMVar state >>= \case
+                PortalClosing session ->
+                    session `shouldBe` "session-1"
+                _ ->
+                    expectationFailure
+                        "failed readiness cleanup lost the completed session"
+            ensurePortalStateReadyWithOwnership
+                state
+                initializeOwned
+                closeSession
+                `shouldReturn` Right ()
+            readMVar state >>= \case
+                PortalReady session ->
+                    session `shouldBe` "session-2"
+                _ ->
+                    expectationFailure
+                        "retained readiness cleanup did not recover"
+            readIORef readinessCalls `shouldReturn` 4
+            readIORef initializationCalls `shouldReturn` 2
+            readIORef cleanupCalls `shouldReturn` 2
+            readIORef cleanupMasking
+                `shouldReturn`
+                    [ MaskedInterruptible
+                    , Unmasked
+                    ]
+
         it "retries retained cleanup from readiness before initializing" do
             state <-
                 newMVar (PortalClosing ("stale session" :: Text.Text))
@@ -1330,7 +1497,7 @@ spec = do
                     if attempt == 1
                         then do
                             putMVar initializeStarted ()
-                            takeMVar blocker
+                            _ <- takeMVar blocker
                             pure "unreachable session"
                         else pure "fresh session"
             withAsync
@@ -1569,6 +1736,67 @@ spec = do
                     , "close-output"
                     , "close-errors"
                     ]
+
+        it "releases a raw capture resource when adoption is cancelled" do
+            acquireMasking <- newIORef Unmasked
+            adoptMasking <- newIORef Unmasked
+            releaseMasking <- newIORef Unmasked
+            adoptionStarted <- newEmptyMVar
+            allowAdoption <- newEmptyMVar
+            releasedResources <- newIORef ([] :: [Text.Text])
+            releasedOwners <- newIORef ([] :: [Text.Text])
+            let operation =
+                    withPortalCaptureResourceWith
+                        (do
+                            getMaskingState
+                                >>= writeIORef acquireMasking
+                            pure ("raw" :: Text.Text))
+                        (\resource -> do
+                            getMaskingState
+                                >>= writeIORef adoptMasking
+                            putMVar adoptionStarted ()
+                            takeMVar allowAdoption
+                            pure ("owned-" <> resource))
+                        (\resource -> do
+                            getMaskingState
+                                >>= writeIORef releaseMasking
+                            modifyIORef'
+                                releasedResources
+                                (<> [resource]))
+                        (\owner ->
+                            modifyIORef' releasedOwners (<> [owner]))
+                        (const (pure ()))
+            withAsync operation \worker ->
+                flip finally
+                    (do
+                        void (tryPutMVar allowAdoption ())
+                        cancel worker
+                        void (waitCatch worker)) do
+                    timeout 1000000 (takeMVar adoptionStarted)
+                        `shouldReturn` Just ()
+                    timeout 1000000 (cancel worker)
+                        `shouldReturn` Just ()
+                    timeout 1000000 (waitCatch worker)
+                        >>= (`shouldSatisfy`
+                            maybe
+                                False
+                                (either (const True) (const False)))
+            readIORef acquireMasking
+                `shouldReturn` MaskedInterruptible
+            readIORef adoptMasking
+                `shouldReturn` MaskedInterruptible
+            readIORef releaseMasking
+                `shouldReturn` MaskedInterruptible
+            readIORef releasedResources `shouldReturn` ["raw"]
+            readIORef releasedOwners `shouldReturn` []
+            successfulUseMasking <-
+                withPortalCaptureResourceWith
+                    (pure ())
+                    pure
+                    (const (pure ()))
+                    (const (pure ()))
+                    (const getMaskingState)
+            successfulUseMasking `shouldBe` Unmasked
 
         it "joins cancelled capture workers before dropping ownership" do
             started <- newEmptyMVar

@@ -11,6 +11,9 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , closeBarePortalCaptureWith
     , closePortalStateWith
     , ensurePortalStateReadyWith
+    , ensurePortalStateReadyWithOwnership
+    , initializePortalSessionCheckedWith
+    , initializePortalSessionCheckedWithOwnership
     , invalidatePortalStateWhenWith
     , newPortalBackend
     , newPortalPngFrameBuffer
@@ -34,6 +37,7 @@ module Agent.CLI.ComputerUse.Linux.Portal
     , validatePortalOwnerUser
     , waitForPortalCaptureProcessStatusWith
     , waitForPortalFrameAfter
+    , withPortalCaptureResourceWith
     , withPortalStateInvalidation
     , withPortalCaptureRunningWith
     , withPortalCaptureReadiness
@@ -113,6 +117,7 @@ import Control.Exception.Safe
     , catchAny
     , finally
     , generalBracket
+    , isAsyncException
     , mask
     , onException
     , throwIO
@@ -258,6 +263,7 @@ data PortalState session
 data PortalReadinessStep
     = PortalReadinessDone !(Either Text ())
     | PortalReadinessRetry
+    | PortalReadinessThrow !SomeException
 
 data PortalRuntime = PortalRuntime
     { portalClient :: !Client
@@ -610,7 +616,7 @@ ensurePortalReady runtime =
     runtime.portalReadiness >>= \case
         Left err -> pure (Left err)
         Right () ->
-            ensurePortalStateReadyWith
+            ensurePortalStateReadyWithOwnership
                 runtime.portalState
                 (initializePortalSessionChecked runtime)
                 (closePortalSession runtime)
@@ -620,25 +626,52 @@ ensurePortalStateReadyWith
     -> IO session
     -> (session -> IO ())
     -> IO (Either Text ())
-ensurePortalStateReadyWith stateVar initialize closeSession = do
+ensurePortalStateReadyWith stateVar initialize =
+    ensurePortalStateReadyWithOwnership
+        stateVar
+        (const initialize)
+
+ensurePortalStateReadyWithOwnership
+    :: MVar (PortalState session)
+    -> ((Maybe session -> IO ()) -> IO session)
+    -> (session -> IO ())
+    -> IO (Either Text ())
+ensurePortalStateReadyWithOwnership stateVar initialize closeSession = do
     readinessStep <-
         Exception.mask \restore ->
             modifyMVarMasked stateVar \case
                 PortalUninitialized -> do
-                    attempted <- tryAny (restore initialize)
-                    pure case attempted of
-                        Left exception ->
-                            let err =
-                                    "Wayland portal initialization failed: "
-                                        <> exceptionText exception
-                            in
-                                ( PortalUninitialized
-                                , PortalReadinessDone (Left err)
-                                )
+                    -- Keep acquisition masked until PortalReady owns the
+                    -- session. Blocking setup operations remain
+                    -- interruptible, and their local brackets own partial
+                    -- resources.
+                    retained <- newIORef Nothing
+                    attempted <-
+                        tryAllExceptions
+                            (initialize (writeIORef retained))
+                    case attempted of
+                        Left exception -> do
+                            retainedSession <- readIORef retained
+                            let nextState =
+                                    maybe
+                                        PortalUninitialized
+                                        PortalClosing
+                                        retainedSession
+                                nextStep
+                                    | isAsyncException exception =
+                                        PortalReadinessThrow exception
+                                    | otherwise =
+                                        PortalReadinessDone
+                                            (Left
+                                                ( "Wayland portal initialization failed: "
+                                                    <> exceptionText exception
+                                                ))
+                            pure (nextState, nextStep)
                         Right session ->
-                            ( PortalReady session
-                            , PortalReadinessDone (Right ())
-                            )
+                            pure
+                                ( PortalReady session
+                                , PortalReadinessDone (Right ())
+                                )
                 state@(PortalReady _) ->
                     pure (state, PortalReadinessDone (Right ()))
                 state@(PortalFailed err) ->
@@ -666,22 +699,90 @@ ensurePortalStateReadyWith stateVar initialize closeSession = do
     case readinessStep of
         PortalReadinessDone outcome -> pure outcome
         PortalReadinessRetry ->
-            ensurePortalStateReadyWith stateVar initialize closeSession
+            ensurePortalStateReadyWithOwnership
+                stateVar
+                initialize
+                closeSession
+        PortalReadinessThrow exception ->
+            Exception.throwIO exception
 
-initializePortalSessionChecked :: PortalRuntime -> IO PortalSession
-initializePortalSessionChecked runtime = do
-    completed <- newIORef Nothing
-    checked <-
-        withLogindReadiness runtime.portalReadiness $
-            mask \restore -> do
-                session <- restore (initializePortalSession runtime)
-                writeIORef completed (Just session)
-                pure (Right session)
-    case checked of
-        Right session -> pure session
-        Left err -> do
-            readIORef completed >>= mapM_ (closePortalSession runtime)
-            fail (Text.unpack err)
+initializePortalSessionChecked
+    :: PortalRuntime
+    -> (Maybe PortalSession -> IO ())
+    -> IO PortalSession
+initializePortalSessionChecked runtime =
+    initializePortalSessionCheckedWithOwnership
+        runtime.portalReadiness
+        (initializePortalSession runtime)
+        (closePortalSession runtime)
+
+initializePortalSessionCheckedWith
+    :: IO (Either Text ())
+    -> IO session
+    -> (session -> IO ())
+    -> IO session
+initializePortalSessionCheckedWith readiness initialize closeSession =
+    initializePortalSessionCheckedWithOwnership
+        readiness
+        initialize
+        closeSession
+        (const (pure ()))
+
+initializePortalSessionCheckedWithOwnership
+    :: IO (Either Text ())
+    -> IO session
+    -> (session -> IO ())
+    -> (Maybe session -> IO ())
+    -> IO session
+initializePortalSessionCheckedWithOwnership
+        readiness
+        initialize
+        closeSession
+        setOwnership =
+    Exception.mask \restore -> do
+        completed <- newIORef Nothing
+        let cleanupCompleted =
+                readIORef completed >>= \case
+                    Nothing -> pure (Right ())
+                    Just session ->
+                        tryAllExceptions do
+                            closeSession session
+                            writeIORef completed Nothing
+                            setOwnership Nothing
+            throwAfterCleanup exception =
+                cleanupCompleted >>= \case
+                    Right () ->
+                        Exception.throwIO exception
+                    Left cleanupException
+                        | isAsyncException exception ->
+                            Exception.throwIO exception
+                        | otherwise ->
+                            Exception.throwIO cleanupException
+            initializeAndRemember =
+                -- Establish the resource-handoff mask inside the race branch
+                -- as well, independent of the caller's masking state.
+                Exception.mask_ do
+                    session <- initialize
+                    writeIORef completed (Just session)
+                    setOwnership (Just session)
+                    pure (Right session)
+        attempted <-
+            tryAllExceptions
+                (restore
+                    (withLogindReadiness
+                        readiness
+                        initializeAndRemember))
+        case attempted of
+            Left exception ->
+                throwAfterCleanup exception
+            Right (Right session) ->
+                pure session
+            Right (Left err) ->
+                cleanupCompleted >>= \case
+                    Left exception ->
+                        Exception.throwIO exception
+                    Right () ->
+                        fail (Text.unpack err)
 
 initializePortalSession :: PortalRuntime -> IO PortalSession
 initializePortalSession runtime = do
@@ -1575,16 +1676,40 @@ startPortalCapture
     -> ObjectPath
     -> PortalStream
     -> IO PortalCapture
-startPortalCapture runtime sessionPath stream = do
-    pipeWireFd <- openPipeWireRemote runtime sessionPath
-    input <-
-        fdToHandle pipeWireFd
-            `onException` closeFd pipeWireFd
-    bracket (pure input) hClose \pipeWireHandle -> do
-        hSetBinaryMode pipeWireHandle True
-        startGstreamerPortalCapture
-            pipeWireHandle
-            stream.portalStreamNodeId
+startPortalCapture runtime sessionPath stream =
+    withPortalCaptureResourceWith
+        (openPipeWireRemote runtime sessionPath)
+        fdToHandle
+        closeFd
+        hClose
+        \pipeWireHandle -> do
+            hSetBinaryMode pipeWireHandle True
+            startGstreamerPortalCapture
+                pipeWireHandle
+                stream.portalStreamNodeId
+
+withPortalCaptureResourceWith
+    :: IO resource
+    -> (resource -> IO owned)
+    -> (resource -> IO ())
+    -> (owned -> IO ())
+    -> (owned -> IO value)
+    -> IO value
+withPortalCaptureResourceWith
+        acquire
+        adopt
+        releaseResource
+        releaseOwned
+        use =
+    -- The raw descriptor is consumed by 'adopt', so two independent brackets
+    -- would leave an exception window between raw and owned cleanup. Mask only
+    -- that low-level ownership transfer; the scoped use remains cancellable.
+    Exception.mask \restore -> do
+        resource <- acquire
+        owned <-
+            adopt resource
+                `Exception.onException` releaseResource resource
+        Exception.bracket (pure owned) releaseOwned (restore . use)
 
 openPipeWireRemote :: PortalRuntime -> ObjectPath -> IO Fd
 openPipeWireRemote runtime sessionPath = do
