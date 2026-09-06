@@ -31,6 +31,9 @@ module Agent.CLI.MacOS.Bridge
 
 import Agent.CLI.MacOS.ResourceAdmin ()
 import Agent.CLI.MacOS.Marshalling
+import Agent.CLI.MacOS.NativeRequest
+import Agent.CLI.MacOS.NativeGatewayBoundary
+import Agent.CLI.MacOS.NativeModelCatalog
 import Agent.CLI.MacOS.BrowserBridge
 import Agent.CLI.MacOS.GatewayBridge (invokeGatewayCallbackOnce)
 import Agent.CLI.MacOS.AccountBridge ()
@@ -107,18 +110,12 @@ import Agent.Runtime.Daemon.TaskScheduler
     )
 import qualified Agent.CLI.GatewayBoundary as GatewayBoundary
 import Agent.CLI.GatewayClient
-    ( GatewayCredential(..)
-    , withGatewayCredentialLease
+    ( withGatewayCredentialLease
     , withGatewayCredentialTurnLease
     )
 import Agent.CLI.ModelConfig
-    ( CatalogModel(..)
-    , ModelCatalog
-    , catalogModelForConnection
-    , organizationGatewayConnectionId
+    ( organizationGatewayConnectionId
     )
-import Agent.CLI.GatewayModels
-    ( loadGatewayModelOptionsWithCredentialAt )
 import Agent.CLI.Database (DatabaseScope(..))
 import Agent.CLI.Database.Store
     ( DatabaseBrowsePage(..)
@@ -129,26 +126,10 @@ import Agent.CLI.Database.Store
     , loadDatabaseRows
     )
 import Agent.CLI.Models
-    ( ModelOption(..)
-    , ModelTarget(..)
-    , PickerState(..)
-    , defaultModelOptionFor
-    , initialPickerStateForOptions
-    , initialPickerStateResolved
-    , resolveConfiguredModel
-    , resolveModelOptionById
-    , resolveModelOptionDialect
-    , selectedOption
-    , validateResumedGatewayBoundary
+    ( validateResumedGatewayBoundary
     )
 import Agent.CLI.Permission (PermissionChoice(..))
-import Agent.CLI.Project
-    ( ProjectModel(..)
-    , ProjectSettings(..)
-    , loadProjectSettings
-    , resolveProjectRoot
-    )
-import Agent.CLI.Options (parseEffort)
+import Agent.CLI.Project (resolveProjectRoot)
 import Agent.CLI.Session
     ( SessionMeta(..)
     , SessionTurn(..)
@@ -162,7 +143,6 @@ import Agent.CLI.Session
     , listArchivedSessionIds
     , listSessions
     , loadSessionHistoryTurnsAround
-    , loadSessionMeta
     , renameSession
     , setSessionArchived
     , sessionsRoot
@@ -180,8 +160,6 @@ import Agent.Loop
     , TurnOutput(..)
     , emptyTokenUsage
     )
-import Agent.Dialect (dialectSlug)
-import Agent.Provider (Provider(..), providerSlug)
 import Agent.Store.Postgres
     ( ManagedPostgresConfig
     , Store
@@ -262,14 +240,12 @@ import Control.Monad
     , when
     )
 import qualified Data.Aeson as Aeson
-import Data.Aeson
-    ( (.:)
-    , (.:?)
-    )
 import qualified Data.Aeson.Types as Aeson
+import Data.Aeson
+    ( (.:?)
+    )
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import Data.Either (isRight)
 import Data.IORef
     ( modifyIORef'
     , newIORef
@@ -506,83 +482,6 @@ foreign import ccall "dynamic"
     invokeSessionExportCallback
         :: FunPtr SessionExportCallback -> SessionExportCallback
 
-data BridgeRequest = BridgeRequest
-    { requestId :: !Text
-    , requestMethod :: !Text
-    , requestParams :: !Aeson.Value
-    }
-
-instance Aeson.FromJSON BridgeRequest where
-    parseJSON = Aeson.withObject "BridgeRequest" \object ->
-        BridgeRequest
-            <$> object .: "id"
-            <*> object .: "method"
-            <*> (object .:? "params" Aeson..!= Aeson.object [])
-
-data TurnStart = TurnStart
-    { turnStartId :: !Text
-    , turnStartPrompt :: !Text
-    , turnStartSessionId :: !(Maybe Text)
-    , turnStartCwd :: !FilePath
-    , turnStartProvider :: !(Maybe Text)
-    , turnStartModel :: !(Maybe Text)
-    , turnStartEffort :: !(Maybe Text)
-    , turnStartWorktree :: !Bool
-    , turnStartComputerUse :: !Bool
-    }
-
-instance Aeson.FromJSON TurnStart where
-    parseJSON = Aeson.withObject "TurnStart" \object -> do
-        turnStartId <- object .: "turnId"
-        turnStartPrompt <- object .: "prompt"
-        turnStartSessionId <- object .:? "sessionId"
-        turnStartCwd <- object .: "cwd"
-        turnStartProvider <- object .:? "provider"
-        turnStartModel <- object .:? "model"
-        turnStartEffort <- object .:? "effort"
-        _ <- traverse
-            (either fail pure . parseEffort)
-            turnStartEffort
-        turnStartWorktree <- object .:? "worktree" Aeson..!= False
-        turnStartComputerUse <-
-            object .:? "computerUse" Aeson..!= False
-        let start = TurnStart
-                { turnStartId
-                , turnStartPrompt
-                , turnStartSessionId
-                , turnStartCwd
-                , turnStartProvider
-                , turnStartModel
-                , turnStartEffort
-                , turnStartWorktree
-                , turnStartComputerUse
-                }
-        case
-            ( turnStartSessionId
-            , turnStartWorktree
-            , turnStartProvider
-            , turnStartModel
-            )
-          of
-            (Just _, True, _, _) ->
-                fail "a worktree can only be created for a new session"
-            (_, _, Nothing, Nothing) -> pure start
-            (_, _, Just _, Just _) -> pure start
-            _ -> fail "provider and model must be supplied together"
-
-turnStartCleanupId :: Text -> Aeson.Value -> Text
-turnStartCleanupId requestId params =
-    fromMaybe requestId $
-        Aeson.parseMaybe
-            (Aeson.withObject "TurnStartCleanup" (.:? "turnId"))
-            params
-            >>= id
-            >>= nonBlank
-  where
-    nonBlank value
-        | Text.null (Text.strip value) = Nothing
-        | otherwise = Just value
-
 discardStagedTurn
     :: Text
     -> Aeson.Value
@@ -603,57 +502,6 @@ discardStagedTurnById
 discardStagedTurnById turnId stagedImages stagedOptions = do
     modifyTVar' stagedImages (Map.delete turnId)
     modifyTVar' stagedOptions (Map.delete turnId)
-
-data TurnReference = TurnReference
-    { turnReferenceId :: !Text
-    }
-
-instance Aeson.FromJSON TurnReference where
-    parseJSON = Aeson.withObject "TurnReference" \object ->
-        TurnReference <$> object .: "turnId"
-
-data ApprovalResolution = ApprovalResolution
-    { approvalResolutionId :: !Text
-    , approvalResolutionDecision :: !Text
-    }
-
-instance Aeson.FromJSON ApprovalResolution where
-    parseJSON = Aeson.withObject "ApprovalResolution" \object ->
-        ApprovalResolution
-            <$> object .: "approvalId"
-            <*> object .: "decision"
-
-data SessionPageRequest = SessionPageRequest
-    { sessionPageId :: !Text
-    , sessionPageBefore :: !(Maybe Int64)
-    , sessionPageLimit :: !(Maybe Int)
-    }
-
-instance Aeson.FromJSON SessionPageRequest where
-    parseJSON = Aeson.withObject "SessionPageRequest" \object ->
-        SessionPageRequest
-            <$> object .: "id"
-            <*> object .:? "before"
-            <*> object .:? "limit"
-
-data SessionReference = SessionReference
-    { sessionReferenceId :: !Text
-    }
-
-instance Aeson.FromJSON SessionReference where
-    parseJSON = Aeson.withObject "SessionReference" \object ->
-        SessionReference <$> object .: "id"
-
-data ModelsListRequest = ModelsListRequest
-    { modelsListCwd :: !FilePath
-    , modelsListSessionId :: !(Maybe Text)
-    }
-
-instance Aeson.FromJSON ModelsListRequest where
-    parseJSON = Aeson.withObject "ModelsListRequest" \object ->
-        ModelsListRequest
-            <$> object .: "cwd"
-            <*> object .:? "sessionId"
 
 data NativeTurnOptions = NativeTurnOptions
     { nativeTurnInteractionMode :: !NativeInteractionMode
@@ -1412,147 +1260,6 @@ withNativeSessionStore action = do
         Right opened ->
             bracket (pure opened) closeStore \store ->
                 action (trustedPool store) (sessionsRoot home)
-
-loadNativeGatewayIdentity :: IO (Either Text (Maybe Text))
-loadNativeGatewayIdentity =
-    GatewayBoundary.loadGatewayBoundary >>= \case
-        Left err ->
-            pure (Left (GatewayBoundary.renderGatewayBoundaryError err))
-        Right boundary ->
-            pure (Right boundary.gatewayBoundaryIdentity)
-
-withNativeGatewayBoundary
-    :: (Maybe Text -> IO (Either Text a))
-    -> IO (Either Text a)
-withNativeGatewayBoundary action =
-    withNativeGatewayCredentialBoundary
-        (\_ gatewayIdentity -> action gatewayIdentity)
-
-withNativeGatewayCredentialBoundary
-    :: (Maybe GatewayCredential -> Maybe Text -> IO (Either Text a))
-    -> IO (Either Text a)
-withNativeGatewayCredentialBoundary action =
-    GatewayBoundary.withCurrentGatewayCredentialBoundary
-        (\snapshot ->
-            action
-                snapshot.gatewayBoundaryCredential
-                snapshot.gatewayBoundary.gatewayBoundaryIdentity)
-        >>= \case
-            Left err ->
-                pure
-                    (Left
-                        (GatewayBoundary.renderGatewayBoundaryError err))
-            Right result -> pure result
-
-ensureNativeGatewayIdentity :: Maybe Text -> IO (Either Text ())
-ensureNativeGatewayIdentity expected =
-    GatewayBoundary.loadGatewayBoundary >>= \case
-        Left err ->
-            pure (Left (GatewayBoundary.renderGatewayBoundaryError err))
-        Right current ->
-            pure $
-                case
-                    GatewayBoundary.validateGatewayBoundary
-                        (GatewayBoundary.GatewayBoundary expected)
-                        current
-                of
-                    Left err ->
-                        Left (GatewayBoundary.renderGatewayBoundaryError err)
-                    Right () -> Right ()
-
--- | A queued or running native turn belongs to the exact gateway credential
--- identity captured when the turn was accepted. Direct and gateway routes are
--- distinct, as are two successive credentials for the same gateway.
-nativeTurnRouteMatchesBoundary :: Maybe Text -> Maybe Text -> Bool
-nativeTurnRouteMatchesBoundary expected current =
-    GatewayBoundary.gatewayBoundariesMatch
-        (GatewayBoundary.GatewayBoundary expected)
-        (GatewayBoundary.GatewayBoundary current)
-
-emitForNativeGatewayBoundary
-    :: Maybe Text
-    -> IO ()
-    -> IO (Either Text ())
-emitForNativeGatewayBoundary gatewayIdentity emit =
-    GatewayBoundary.withExpectedGatewayBoundary
-        (GatewayBoundary.GatewayBoundary gatewayIdentity)
-        emit >>= \case
-            Left err ->
-                pure (Left (GatewayBoundary.renderGatewayBoundaryError err))
-            Right () -> pure (Right ())
-
--- | Revalidate immediately before every asynchronous item and terminal
--- callback. If the boundary changes, no later item is emitted.
-emitBoundaryChecked
-    :: (IO (Either Text ()) -> IO (Either Text ()))
-    -> IO (Either Text ())
-    -> (item -> IO ())
-    -> IO ()
-    -> [item]
-    -> IO (Either Text ())
-emitBoundaryChecked critical check emit terminal = go
-  where
-    go [] =
-        critical $
-            check >>= \case
-                Left err -> pure (Left err)
-                Right () -> terminal >> pure (Right ())
-    go (item : remaining) =
-        critical
-            (check >>= \case
-                Left err -> pure (Left err)
-                Right () -> emit item >> pure (Right ())) >>= \case
-                    Left err -> pure (Left err)
-                    Right () -> go remaining
-
-validateNativeSessionBoundary
-    :: StorePool
-    -> OsPath
-    -> Maybe Text
-    -> Text
-    -> IO (Either Text SessionMeta)
-validateNativeSessionBoundary pool root gatewayIdentity sessionId =
-    loadSessionMeta pool root sessionId >>= \loaded ->
-        pure do
-            meta <- loaded
-            first GatewayBoundary.renderGatewayBoundaryError $
-                GatewayBoundary.validateGatewaySessionBoundary
-                    (GatewayBoundary.GatewayBoundary gatewayIdentity)
-                    meta.metaConnection
-                    meta.metaGatewayIdentity
-            pure meta
-
-withNativeSessionBoundary
-    :: StorePool
-    -> OsPath
-    -> Text
-    -> (Maybe Text -> SessionMeta -> IO (Either Text a))
-    -> IO (Either Text a)
-withNativeSessionBoundary pool root sessionId action =
-    withNativeGatewayBoundary \gatewayIdentity ->
-        validateNativeSessionBoundary
-            pool root gatewayIdentity sessionId >>= \case
-                Left err -> pure (Left err)
-                Right meta -> action gatewayIdentity meta
-
-nativeSessionMatchesBoundary :: Maybe Text -> SessionMeta -> Bool
-nativeSessionMatchesBoundary gatewayIdentity meta =
-    nativeSessionRouteMatchesBoundary
-        gatewayIdentity
-        meta.metaConnection
-        meta.metaGatewayIdentity
-
-nativeSessionRouteMatchesBoundary
-    :: Maybe Text
-    -> Text
-    -> Maybe Text
-    -> Bool
-nativeSessionRouteMatchesBoundary gatewayIdentity connection persistedIdentity =
-    isRight
-        (GatewayBoundary.validateGatewaySessionBoundary
-            (GatewayBoundary.GatewayBoundary gatewayIdentity)
-            connection
-            persistedIdentity)
 
 emitSessionTurn
     :: FunPtr SessionTurnCallback
@@ -4060,149 +3767,6 @@ handleRequest config store root request = do
             method ->
                 pure $ failureEvent current.requestId
                     ("unknown method: " <> method)
-
-loadNativeModelCatalog
-    :: Store
-    -> OsPath
-    -> Maybe GatewayCredential
-    -> Maybe Text
-    -> ModelsListRequest
-    -> IO (Either Text Aeson.Value)
-loadNativeModelCatalog
-        store root gatewayCredential gatewayIdentity request = do
-    let home = takeDirectory (takeDirectory root)
-        requestedCwd = unsafeEncodeUtf request.modelsListCwd
-    contextResult <- currentModelContext
-        store
-        root
-        requestedCwd
-        gatewayIdentity
-        request.modelsListSessionId
-    case contextResult of
-        Left err -> pure (Left err)
-        Right (cwd, maybeTarget) ->
-            loadGatewayModelOptionsWithCredentialAt
-                home cwd gatewayCredential >>= \case
-                Left err -> pure (Left err)
-                Right (catalog, Just gatewayOptions) ->
-                    case gatewayOptions of
-                        [] -> pure
-                            (Left
-                                "The organization gateway does not offer any models.")
-                        firstAvailable : _ -> do
-                            let selected =
-                                    fromMaybe firstAvailable $ do
-                                        target <- maybeTarget
-                                        resolveModelOptionById
-                                            gatewayOptions
-                                            target.targetModelId
-                                target = selected.modelTarget
-                            picker <- initialPickerStateForOptions
-                                "organization gateway"
-                                gatewayOptions
-                                target.targetConnectionId
-                                target.targetProvider
-                                target.targetModelId
-                                target.targetDialect
-                            pure (Right (modelPickerJSON catalog picker))
-                Right (catalog, Nothing) -> do
-                    let configuredTarget = do
-                            target <- maybeTarget
-                            option <-
-                                resolveConfiguredModel
-                                    catalog
-                                    target.targetModelId
-                            if option.modelTarget.targetConnectionId
-                                == target.targetConnectionId
-                                then Just option
-                                else Nothing
-                    selected <- resolveModelOptionDialect $
-                        fromMaybe (defaultModelOptionFor catalog OpenAIProvider)
-                            configuredTarget
-                    let target = selected.modelTarget
-                    picker <- initialPickerStateResolved
-                        catalog
-                        target.targetConnectionId
-                        target.targetProvider
-                        target.targetModelId
-                        target.targetDialect
-                    pure (Right (modelPickerJSON catalog picker))
-
-modelPickerJSON :: ModelCatalog -> PickerState -> Aeson.Value
-modelPickerJSON catalog picker =
-    Aeson.object
-        [ "options" Aeson..=
-            map (modelOptionJSON catalog) picker.pickerAll
-        , "current" Aeson..=
-            fmap (modelOptionJSON catalog) (selectedOption picker)
-        ]
-
-currentModelContext
-    :: Store
-    -> OsPath
-    -> OsPath
-    -> Maybe Text
-    -> Maybe Text
-    -> IO (Either Text (OsPath, Maybe ModelTarget))
-currentModelContext store root cwd gatewayIdentity = \case
-    Just sessionId ->
-        validateNativeSessionBoundary
-            (trustedPool store)
-            root
-            gatewayIdentity
-            sessionId >>= \case
-                Left err -> pure (Left err)
-                Right meta ->
-                    pure
-                        (Right
-                            ( meta.metaCwd
-                            , Just (sessionModelTarget meta)
-                            ))
-    Nothing -> do
-        projectRoot <- resolveProjectRoot cwd
-        settings <- loadProjectSettings projectRoot
-        pure $ Right
-            ( cwd
-            , (.projectModelTarget) <$> settings.settingsLastModel
-            )
-
-sessionModelTarget :: SessionMeta -> ModelTarget
-sessionModelTarget meta =
-    ModelTarget
-        { targetProvider = meta.metaProvider
-        , targetConnectionId = meta.metaConnection
-        , targetModelId = meta.metaModel
-        , targetWireModelId =
-            fromMaybe meta.metaModel meta.metaTransportModel
-        , targetDialect = meta.metaDialect
-        }
-
-modelOptionJSON :: ModelCatalog -> ModelOption -> Aeson.Value
-modelOptionJSON catalog option =
-    let target = option.modelTarget
-        configured =
-            catalogModelForConnection
-                catalog
-                target.targetConnectionId
-                target.targetModelId
-    in Aeson.object
-        [ "id" Aeson..= target.targetModelId
-        , "provider" Aeson..= providerSlug target.targetProvider
-        , "connection" Aeson..= target.targetConnectionId
-        , "wireModel" Aeson..= target.targetWireModelId
-        , "dialect" Aeson..= dialectSlug target.targetDialect
-        , "label" Aeson..= option.modelLabel
-        , "supportedReasoningEfforts" Aeson..=
-            (configured >>= (.catalogModelReasoningEfforts))
-        , "defaultReasoningEffort" Aeson..=
-            (configured >>= (.catalogModelDefaultReasoningEffort))
-        ]
-
-parseParams :: Aeson.FromJSON value => BridgeRequest -> Either Text value
-parseParams request =
-    case Aeson.parseEither Aeson.parseJSON request.requestParams of
-        Left err -> Left (Text.pack err)
-        Right value -> Right value
 
 acquireStore :: ManagedPostgresConfig -> MVar (Maybe Store) -> IO Store
 acquireStore config state =
