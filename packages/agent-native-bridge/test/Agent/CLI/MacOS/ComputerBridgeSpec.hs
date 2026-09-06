@@ -18,6 +18,12 @@ import Agent.CLI.MacOS.ComputerBridge
     , replaceComputerRegistration
     , resetComputerSessionAccessibility
     )
+import Agent.ComputerUse.Protocol
+    ( SemanticComputerAction(..)
+    , SemanticComputerRequest(..)
+    , SemanticComputerScalar(..)
+    , semanticComputerRequestWireValue
+    )
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
@@ -53,6 +59,7 @@ import Data.IORef
     , newIORef
     , readIORef
     )
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -195,32 +202,19 @@ spec = describe "native AX-first computer bridge" do
                     listScreenshot.toolDispatchSucceeded `shouldBe` False
                     close
             readIORef requests `shouldReturn`
-                [Aeson.object
-                    [ "operation" Aeson..= ("observe" :: Text)
-                    , "include_screenshot" Aeson..= False
+                map semanticComputerRequestWireValue
+                    [ ObserveComputerTarget False
+                    , ActOnComputerTarget
+                        ( PerformComputerAction "e1" "AXPress"
+                            NonEmpty.:|
+                                [ SetComputerValue
+                                    "e2"
+                                    (ComputerNumber 42)
+                                , ReplaceComputerSelectedText "e3" "hello"
+                                ]
+                        )
+                        False
                     ]
-                , Aeson.object
-                    [ "operation" Aeson..= ("act" :: Text)
-                    , "actions" Aeson..=
-                        [ Aeson.object
-                            [ "type" Aeson..= ("perform" :: Text)
-                            , "element_id" Aeson..= ("e1" :: Text)
-                            , "action" Aeson..= ("AXPress" :: Text)
-                            ]
-                        , Aeson.object
-                            [ "type" Aeson..= ("set_value" :: Text)
-                            , "element_id" Aeson..= ("e2" :: Text)
-                            , "value" Aeson..= (42 :: Int)
-                            ]
-                        , Aeson.object
-                            [ "type" Aeson..=
-                                ("replace_selected_text" :: Text)
-                            , "element_id" Aeson..= ("e3" :: Text)
-                            , "text" Aeson..= ("hello" :: Text)
-                            ]
-                        ]
-                    , "include_screenshot" Aeson..= False
-                    ]]
 
     it "returns an image only when explicitly requested" do
         requests <- newIORef []
@@ -228,9 +222,9 @@ spec = describe "native AX-first computer bridge" do
         withHost (recordingCallback "image" requests closes) \host -> do
             Right session <- newComputerSession host
             withoutImage <- invokeComputerSessionRequest session
-                "{\"operation\":\"observe\",\"include_screenshot\":false}"
+                (ObserveComputerTarget False)
             withImage <- invokeComputerSessionRequest session
-                "{\"operation\":\"observe\",\"include_screenshot\":true}"
+                (ObserveComputerTarget True)
             fmap (.nativeComputerImage) withoutImage `shouldBe` Right Nothing
             case fmap (.nativeComputerImage) withImage of
                 Right (Just image) ->
@@ -249,7 +243,7 @@ spec = describe "native AX-first computer bridge" do
             \host -> do
                 Right session <- newComputerSession host
                 result <- invokeComputerSessionRequest session
-                    "{\"operation\":\"observe\",\"include_screenshot\":true}"
+                    (ObserveComputerTarget True)
                 result `shouldBe`
                     Left "The native computer host returned malformed PNG data."
                 closeComputerSession session
@@ -261,7 +255,7 @@ spec = describe "native AX-first computer bridge" do
             \host -> do
                 Right session <- newComputerSession host
                 result <- invokeComputerSessionRequest session
-                    "{\"operation\":\"observe\",\"include_screenshot\":true}"
+                    (ObserveComputerTarget True)
                 result `shouldBe`
                     Left "The native computer host returned malformed PNG data."
                 closeComputerSession session
@@ -273,7 +267,7 @@ spec = describe "native AX-first computer bridge" do
             \host -> do
                 Right session <- newComputerSession host
                 result <- invokeComputerSessionRequest session
-                    "{\"operation\":\"observe\",\"include_screenshot\":true}"
+                    (ObserveComputerTarget True)
                 result `shouldBe`
                     Left "The native computer host returned malformed PNG data."
                 closeComputerSession session
@@ -285,7 +279,7 @@ spec = describe "native AX-first computer bridge" do
             \host -> do
                 Right session <- newComputerSession host
                 result <- invokeComputerSessionRequest session
-                    "{\"operation\":\"observe\",\"include_screenshot\":true}"
+                    (ObserveComputerTarget True)
                 result `shouldBe`
                     Left "The native computer host returned malformed JPEG data."
                 closeComputerSession session
@@ -297,7 +291,7 @@ spec = describe "native AX-first computer bridge" do
             \host -> do
                 Right session <- newComputerSession host
                 result <- invokeComputerSessionRequest session
-                    "{\"operation\":\"observe\",\"include_screenshot\":false}"
+                    (ObserveComputerTarget False)
                 result `shouldBe`
                     Left
                         "The native computer host embedded screenshot data in result JSON."
@@ -307,7 +301,7 @@ spec = describe "native AX-first computer bridge" do
         withHost (fixedCallback "{\"ok\":true}" Nothing True) \host -> do
             Right session <- newComputerSession host
             result <- invokeComputerSessionRequest session
-                "{\"operation\":\"observe\",\"include_screenshot\":false}"
+                (ObserveComputerTarget False)
             result `shouldBe`
                 Left
                     "The native computer host reported image output beyond its buffer."
@@ -328,9 +322,9 @@ spec = describe "native AX-first computer bridge" do
                 (Just (ComputerRegistration new nullPtr))
             Right newSession <- newComputerSession host
             oldResult <- invokeComputerSessionRequest oldSession
-                "{\"operation\":\"list_targets\",\"include_screenshot\":false}"
+                ListComputerTargets
             newResult <- invokeComputerSessionRequest newSession
-                "{\"operation\":\"list_targets\",\"include_screenshot\":false}"
+                ListComputerTargets
             resultHost oldResult `shouldBe` Just "old"
             resultHost newResult `shouldBe` Just "new"
             closeComputerSession oldSession
@@ -355,9 +349,9 @@ spec = describe "native AX-first computer bridge" do
             Right second <- newComputerSession host
             outcome <- concurrently
                 (invokeComputerSessionRequest first
-                    "{\"operation\":\"observe\",\"include_screenshot\":false}")
+                    (ObserveComputerTarget False))
                 (invokeComputerSessionRequest second
-                    "{\"operation\":\"observe\",\"include_screenshot\":false}")
+                    (ObserveComputerTarget False))
             fst outcome `shouldSatisfy` isRight
             snd outcome `shouldSatisfy` isRight
             readIORef maximumActive `shouldReturn` 2
@@ -378,9 +372,8 @@ spec = describe "native AX-first computer bridge" do
             accessibilityKind third `shouldBe` Just "full"
             closeComputerSession session
 
-observeRequest :: BS.ByteString
-observeRequest =
-    "{\"operation\":\"observe\",\"include_screenshot\":false}"
+observeRequest :: SemanticComputerRequest
+observeRequest = ObserveComputerTarget False
 
 runTool :: AppTool -> ToolCall -> IO ToolDispatchOutcome
 runTool tool =
@@ -673,7 +666,7 @@ expectedComputerParameters = strictObjectSchema
         , "enum" Aeson..=
             (["list_targets", "bind", "observe", "act"] :: [Text])
         ])
-    , ("target_id", nullableStringSchema)
+    , ("target_id", nullableStringSchema 1024)
     , ("actions", Aeson.object
         [ "type" Aeson..= (["array", "null"] :: [Text])
         , "minItems" Aeson..= (1 :: Int)
@@ -688,14 +681,14 @@ expectedComputerParameters = strictObjectSchema
                       ] :: [Text]
                     )
                 ])
-            , ("element_id", Aeson.object
-                ["type" Aeson..= ("string" :: Text)])
-            , ("action", nullableStringSchema)
+            , ("element_id", boundedStringSchema False 1024)
+            , ("action", nullableStringSchema 1024)
             , ("value", Aeson.object
                 [ "type" Aeson..=
                     (["string", "number", "boolean", "null"] :: [Text])
+                , "maxLength" Aeson..= (65536 :: Int)
                 ])
-            , ("text", nullableStringSchema)
+            , ("text", nullableStringSchema 65536)
             ]
             ["type", "element_id", "action", "value", "text"]
         ])
@@ -719,6 +712,15 @@ strictObjectSchema properties requiredFields = Aeson.object
     , "required" Aeson..= requiredFields
     ]
 
-nullableStringSchema :: Aeson.Value
-nullableStringSchema =
-    Aeson.object ["type" Aeson..= (["string", "null"] :: [Text])]
+nullableStringSchema :: Int -> Aeson.Value
+nullableStringSchema maximumLength = Aeson.object
+    [ "type" Aeson..= (["string", "null"] :: [Text])
+    , "maxLength" Aeson..= maximumLength
+    ]
+
+boundedStringSchema :: Bool -> Int -> Aeson.Value
+boundedStringSchema allowEmpty maximumLength = Aeson.object $
+    [ "type" Aeson..= ("string" :: Text)
+    , "maxLength" Aeson..= maximumLength
+    ]
+    <> [ "minLength" Aeson..= (1 :: Int) | not allowEmpty ]

@@ -334,33 +334,74 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             other -> expectationFailure
                 ("unexpected computer continuation: " <> show other)
 
-    it "returns native accessibility state beside the screenshot" do
+    it "returns native computer accessibility state beside the screenshot" do
         let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
-                ComputerCallOutput
-                    { computerOutputItemId = Nothing
-                    , computerOutputCallId = "ignored"
-                    , screenshotDataUrl = "data:image/jpeg;base64,AA=="
-                    , acknowledgedChecks = []
-                    , computerOutputStatus = Nothing
-                    , computerOutputExtra = KeyMap.singleton
-                        "accessibility_state"
-                        (Aeson.String
-                            "app=\"TextEdit\"\n[1] AXButton \"Save\"")
-                    }
+                (Aeson.object
+                    [ "operation" Aeson..= ("observe" :: Text.Text)
+                    , "mode" Aeson..= ("accessibility" :: Text.Text)
+                    , "accessibility_state" Aeson..=
+                        ("app=\"TextEdit\"\n[1] AXButton \"Save\"" :: Text.Text)
+                    ])
             result = ToolCallResult
                 { callId = "call-native"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages =
+                    [ ToolResultImage
+                        { imageUrl = "data:image/jpeg;base64,AA=="
+                        , imageDetail = Just "auto"
+                        }
+                    ]
+                , toolResultOutcome = Nothing
+                , output = encoded
+                , callKind = ComputerFunctionCallKind
+                }
+        case turnInputsToItems [CompletedTool result] of
+            [ FunctionCallOutputItem output
+                , MessageItem ResponseMessage
+                    { content =
+                        MessageContentParts
+                            [ InputTextPart{}
+                                , InputImagePart{imageUrl}
+                            ]
+                    }
+                ] -> do
+                Aeson.toJSON output.output `shouldBe` Aeson.toJSON
+                    [ InputImagePart
+                        { detail = Just "auto"
+                        , fileId = Nothing
+                        , imageUrl = Just "data:image/jpeg;base64,AA=="
+                        , promptCacheBreakpoint = Nothing
+                        }
+                    , InputTextPart
+                        { text =
+                            "Computer action completed.\n\nCurrent macOS accessibility state:\napp=\"TextEdit\"\n[1] AXButton \"Save\""
+                        , promptCacheBreakpoint = Nothing
+                        }
+                    ]
+                imageUrl `shouldBe` Just "data:image/jpeg;base64,AA=="
+            other -> expectationFailure
+                ("unexpected native computer continuation: " <> show other)
+
+    it "preserves native computer list-target results without accessibility state" do
+        let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                (Aeson.object
+                    [ "operation" Aeson..= ("list_targets" :: Text.Text)
+                    , "mode" Aeson..= ("accessibility" :: Text.Text)
+                    , "targets" Aeson..= ([] :: [Aeson.Value])
+                    ])
+            result = ToolCallResult
+                { callId = "call-native-targets"
                 , toolResultMode = BlockingToolCall
                 , toolResultImages = []
                 , toolResultOutcome = Nothing
                 , output = encoded
                 , callKind = ComputerFunctionCallKind
                 }
-        case turnInputsToItems [CompletedTool result] of
-            FunctionCallOutputItem output : _ ->
-                Aeson.toJSON output.output `shouldBe` Aeson.String
-                    "Computer action completed.\n\nCurrent macOS accessibility state:\napp=\"TextEdit\"\n[1] AXButton \"Save\""
+        case toolResultToItem result of
+            FunctionCallOutputItem output ->
+                Aeson.toJSON output.output `shouldBe` Aeson.String encoded
             other -> expectationFailure
-                ("unexpected native computer continuation: " <> show other)
+                ("unexpected native list-target output: " <> show other)
 
     it "keeps AX-only computer results text-only" do
         let result = ToolCallResult
@@ -379,7 +420,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 ("expected text-only computer output, got " <> show other)
 
     it "preserves explicitly requested computer screenshots as image content" do
-        let result = ToolCallResult
+        let result callKind = ToolCallResult
                 { callId = "call-ax-image"
                 , toolResultMode = BlockingToolCall
                 , toolResultImages =
@@ -390,24 +431,64 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     ]
                 , toolResultOutcome = Nothing
                 , output = "Current macOS accessibility state"
-                , callKind = ComputerFunctionCallKind
+                , callKind
                 }
-        case toolResultToItem result of
-            FunctionCallOutputItem output ->
-                Aeson.toJSON output.output `shouldBe` Aeson.toJSON
-                    [ InputImagePart
-                        { detail = Just "high"
-                        , fileId = Nothing
-                        , imageUrl = Just "data:image/png;base64,AA=="
-                        , promptCacheBreakpoint = Nothing
-                        }
-                    , InputTextPart
-                        { text = "Current macOS accessibility state"
-                        , promptCacheBreakpoint = Nothing
+            assertKind callKind =
+                case toolResultToItem (result callKind) of
+                    FunctionCallOutputItem output ->
+                        Aeson.toJSON output.output `shouldBe` Aeson.toJSON
+                            [ InputImagePart
+                                { detail = Just "high"
+                                , fileId = Nothing
+                                , imageUrl = Just "data:image/png;base64,AA=="
+                                , promptCacheBreakpoint = Nothing
+                                }
+                            , InputTextPart
+                                { text = "Current macOS accessibility state"
+                                , promptCacheBreakpoint = Nothing
+                                }
+                            ]
+                    other -> expectationFailure
+                        ("expected rich computer output, got " <> show other)
+        mapM_ assertKind [ComputerCallKind, ComputerFunctionCallKind]
+
+    it "prefers out-of-band computer screenshots for the fresh observation" do
+        let legacyOutput = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "call-ax-image"
+                    , screenshotDataUrl = "data:image/png;base64,LEGACY"
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Nothing
+                    , computerOutputExtra = KeyMap.empty
+                    }
+            result = ToolCallResult
+                { callId = "call-ax-image"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages =
+                    [ ToolResultImage
+                        { imageUrl = "data:image/png;base64,NATIVE"
+                        , imageDetail = Just "high"
                         }
                     ]
+                , toolResultOutcome = Nothing
+                , output = legacyOutput
+                , callKind = ComputerFunctionCallKind
+                }
+        case turnInputsToItems [CompletedTool result] of
+            [ FunctionCallOutputItem{}
+                , MessageItem ResponseMessage
+                    { content =
+                        MessageContentParts
+                            [ InputTextPart{}
+                                , InputImagePart{imageUrl}
+                            ]
+                    }
+                ] ->
+                    imageUrl `shouldBe`
+                        Just "data:image/png;base64,NATIVE"
             other -> expectationFailure
-                ("expected rich computer output, got " <> show other)
+                ("expected the native screenshot observation, got " <> show other)
 
     it "labels a structured full accessibility snapshot with its revision" do
         let accessibilityState = Aeson.object
@@ -417,16 +498,11 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     ["application" Aeson..= ("TextEdit" :: Text.Text)]
                 ]
             encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
-                ComputerCallOutput
-                    { computerOutputItemId = Nothing
-                    , computerOutputCallId = "ignored"
-                    , screenshotDataUrl = "data:image/jpeg;base64,AA=="
-                    , acknowledgedChecks = []
-                    , computerOutputStatus = Nothing
-                    , computerOutputExtra = KeyMap.singleton
-                        "accessibility_state"
-                        accessibilityState
-                    }
+                (Aeson.object
+                    [ "operation" Aeson..= ("observe" :: Text.Text)
+                    , "mode" Aeson..= ("accessibility" :: Text.Text)
+                    , "accessibility_state" Aeson..= accessibilityState
+                    ])
             result = ToolCallResult
                 { callId = "call-native-full"
                 , toolResultMode = BlockingToolCall

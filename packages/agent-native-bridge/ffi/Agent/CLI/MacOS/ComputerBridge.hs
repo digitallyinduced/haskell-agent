@@ -33,10 +33,19 @@ import Agent.CLI.ComputerUse.Accessibility
     , initialAccessibilityDeltaState
     , unavailableAccessibilityObservation
     )
+import Agent.ComputerUse.Protocol
+    ( SemanticComputerOperation(..)
+    , SemanticComputerRequest
+    , encodeSemanticComputerRequest
+    , semanticComputerRequestDecoder
+    , semanticComputerRequestOperation
+    , semanticComputerRequestSchema
+    , semanticComputerRequestWantsScreenshot
+    )
 import Agent.ToolDispatch
     ( ToolHandlerResult(..)
     , ToolResultImage(..)
-    , streamingRichTextTool
+    , typedStreamingRichTool
     )
 import Agent.Tools.Types
     ( AppTool(..)
@@ -58,13 +67,12 @@ import qualified Control.Concurrent.MVar as MVar
 import Control.Exception (evaluate)
 import qualified Control.Exception.Safe as Exception
 import Control.Exception.Safe (finally, mask_, onException, tryAny)
-import Control.Monad (guard, unless, when)
+import Control.Monad (guard, when)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.Aeson.Types as AesonTypes
 import Data.Bits ((.&.), complement, shiftR, xor)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, atomicModifyIORef', newIORef)
 import qualified Data.Map.Strict as Map
@@ -302,11 +310,13 @@ computerTool session = AppTool
         "Inspect and control macOS through the accessibility tree. "
             <> "Use stable target_id and element_id values; screenshots are "
             <> "optional and returned only when include_screenshot is true."
-    , appToolSchema = HostedComputerFunctionSchema computerToolParameters
-    , appToolHandler = streamingRichTextTool "computer" \_emit arguments ->
-        normalizeRequest arguments >>= \case
-            Left err -> pure (Left err)
-            Right request ->
+    , appToolSchema =
+        HostedComputerFunctionSchema semanticComputerRequestSchema
+    , appToolHandler =
+        typedStreamingRichTool
+            "computer"
+            semanticComputerRequestDecoder
+            \_emit request ->
                 invokeComputerSessionRequest session request >>= \case
                     Left err -> pure (Left err)
                     Right result ->
@@ -323,7 +333,7 @@ computerTool session = AppTool
 
 invokeComputerSessionRequest
     :: ComputerSession
-    -> BS.ByteString
+    -> SemanticComputerRequest
     -> IO (Either Text NativeComputerResult)
 invokeComputerSessionRequest session request =
     MVar.modifyMVar session.computerSessionState \case
@@ -331,43 +341,42 @@ invokeComputerSessionRequest session request =
             pure (ComputerSessionClosed, Left
                 "The native computer session is closed.")
         ComputerSessionOpen token accessibilityState -> do
-            case decodeOperation request of
-                Left err ->
+            let operation =
+                    computerOperationCode
+                        (semanticComputerRequestOperation request)
+                includeScreenshot =
+                    semanticComputerRequestWantsScreenshot request
+                requestBytes = encodeSemanticComputerRequest request
+            attempted <- tryAny
+                (invokeComputerRaw
+                    session.computerSessionRegistration
+                    operation
+                    token
+                    includeScreenshot
+                    requestBytes)
+            let failed err =
                     pure
                         ( ComputerSessionOpen token accessibilityState
                         , Left err
                         )
-                Right (operation, includeScreenshot) -> do
-                    attempted <- tryAny
-                        (invokeComputerRaw
-                            session.computerSessionRegistration
-                            operation
-                            token
-                            includeScreenshot
-                            request)
-                    let failed err =
+            case attempted of
+                Left exception -> failed (Text.pack (show exception))
+                Right (Left err) -> failed err
+                Right (Right response) -> do
+                    validated <- validateResponse
+                        operation
+                        includeScreenshot
+                        accessibilityState
+                        response
+                    case validated of
+                        Left err -> failed err
+                        Right (result, successorAccessibility) ->
                             pure
-                                ( ComputerSessionOpen token accessibilityState
-                                , Left err
+                                ( ComputerSessionOpen
+                                    token
+                                    successorAccessibility
+                                , Right result
                                 )
-                    case attempted of
-                        Left exception -> failed (Text.pack (show exception))
-                        Right (Left err) -> failed err
-                        Right (Right response) -> do
-                            validated <- validateResponse
-                                operation
-                                includeScreenshot
-                                accessibilityState
-                                response
-                            case validated of
-                                Left err -> failed err
-                                Right (result, successorAccessibility) ->
-                                    pure
-                                        ( ComputerSessionOpen
-                                            token
-                                            successorAccessibility
-                                        , Right result
-                                        )
 
 data RawComputerResponse = RawComputerResponse
     { rawResult :: !BS.ByteString
@@ -473,144 +482,9 @@ decodeImage includeScreenshot imageFormat bytes
                 ( "data:"
                     <> mime
                     <> ";base64,"
-                    <> encodeBase64 bytes
+                    <> TextEncoding.decodeUtf8 (Base64.encode bytes)
                 )
                 Nothing))
-
-normalizeRequest :: Text -> IO (Either Text BS.ByteString)
-normalizeRequest arguments =
-    pure case Aeson.eitherDecodeStrict'
-            (TextEncoding.encodeUtf8 arguments) of
-        Left err -> Left ("Invalid computer arguments: " <> Text.pack err)
-        Right value ->
-            case AesonTypes.parseEither parseRequest value of
-                Left err -> Left (Text.pack err)
-                Right normalized -> Right
-                    (LBS.toStrict (Aeson.encode normalized))
-
-parseRequest :: Aeson.Value -> AesonTypes.Parser Aeson.Value
-parseRequest = Aeson.withObject "computer arguments" \object -> do
-    requireOnly object
-        ["operation", "target_id", "actions", "include_screenshot"]
-    operation <- object Aeson..: "operation"
-    includeScreenshot <- object Aeson..: "include_screenshot"
-    case (operation :: Text) of
-        "list_targets" -> do
-            requireNull object "target_id"
-            requireNull object "actions"
-            when includeScreenshot $
-                fail "list_targets cannot include a screenshot"
-            pure (Aeson.object
-                [ "operation" Aeson..= operation
-                , "include_screenshot" Aeson..= False
-                ])
-        "bind" -> do
-            targetId <- object Aeson..: "target_id"
-            requireNull object "actions"
-            pure (Aeson.object
-                [ "operation" Aeson..= operation
-                , "target_id" Aeson..= (targetId :: Text)
-                , "include_screenshot" Aeson..= includeScreenshot
-                ])
-        "observe" -> do
-            requireNull object "target_id"
-            requireNull object "actions"
-            pure (Aeson.object
-                [ "operation" Aeson..= operation
-                , "include_screenshot" Aeson..= includeScreenshot
-                ])
-        "act" -> do
-            requireNull object "target_id"
-            rawActions <-
-                object Aeson..: "actions"
-                    :: AesonTypes.Parser [Aeson.Value]
-            actions <- traverse parseSemanticAction rawActions
-            when (null actions) $
-                fail "act requires at least one semantic action"
-            when (length actions > 64) $
-                fail "act accepts at most 64 semantic actions"
-            pure (Aeson.object
-                [ "operation" Aeson..= operation
-                , "actions" Aeson..= actions
-                , "include_screenshot" Aeson..= includeScreenshot
-                ])
-        _ -> fail "unsupported computer operation"
-
-parseSemanticAction :: Aeson.Value -> AesonTypes.Parser Aeson.Value
-parseSemanticAction = Aeson.withObject "semantic computer action" \object -> do
-    requireOnly object ["type", "element_id", "action", "value", "text"]
-    actionType <- object Aeson..: "type"
-    elementId <- object Aeson..: "element_id"
-    case (actionType :: Text) of
-        "perform" -> do
-            action <- object Aeson..: "action"
-            requireNull object "value"
-            requireNull object "text"
-            pure (Aeson.object
-                [ "type" Aeson..= actionType
-                , "element_id" Aeson..= (elementId :: Text)
-                , "action" Aeson..= (action :: Text)
-                ])
-        "set_value" -> do
-            requireNull object "action"
-            requireNull object "text"
-            value <- object Aeson..: "value"
-            case (value :: Aeson.Value) of
-                Aeson.String _ -> pure ()
-                Aeson.Number _ -> pure ()
-                Aeson.Bool _ -> pure ()
-                _ -> fail "set_value.value must be a string, number, or boolean"
-            pure (Aeson.object
-                [ "type" Aeson..= actionType
-                , "element_id" Aeson..= (elementId :: Text)
-                , "value" Aeson..= value
-                ])
-        "replace_selected_text" -> do
-            requireNull object "action"
-            requireNull object "value"
-            text <- object Aeson..: "text"
-            pure (Aeson.object
-                [ "type" Aeson..= actionType
-                , "element_id" Aeson..= (elementId :: Text)
-                , "text" Aeson..= (text :: Text)
-                ])
-        _ -> fail "unsupported semantic computer action"
-
-requireOnly :: Aeson.Object -> [Text] -> AesonTypes.Parser ()
-requireOnly object allowed =
-    unless (null unexpected) $
-        fail ("unexpected computer argument fields: "
-            <> Text.unpack (Text.intercalate ", " unexpected))
-  where
-    unexpected =
-        filter (`notElem` allowed) (map Key.toText (KeyMap.keys object))
-
-requireNull :: Aeson.Object -> Text -> AesonTypes.Parser ()
-requireNull object fieldName =
-    case KeyMap.lookup (Key.fromText fieldName) object of
-        Just Aeson.Null -> pure ()
-        Just _ -> fail (Text.unpack fieldName <> " must be null for this operation")
-        Nothing -> fail ("missing required field: " <> Text.unpack fieldName)
-
-decodeOperation :: BS.ByteString -> Either Text (CInt, Bool)
-decodeOperation bytes =
-    case Aeson.eitherDecodeStrict' bytes of
-        Left err -> Left ("Invalid normalized computer request: " <> Text.pack err)
-        Right value ->
-            case AesonTypes.parseEither parser value of
-                Left err -> Left (Text.pack err)
-                Right result -> Right result
-  where
-    parser = Aeson.withObject "computer request" \object -> do
-        operation <- object Aeson..: "operation"
-        includeScreenshot <- object Aeson..: "include_screenshot"
-        command <- case (operation :: Text) of
-            "list_targets" -> pure operationList
-            "bind" -> pure operationBind
-            "observe" -> pure operationObserveOrAct
-            "act" -> pure operationObserveOrAct
-            _ -> fail "unsupported computer operation"
-        pure (command, includeScreenshot)
 
 acquireCurrentGeneration
     :: ComputerHost
@@ -980,35 +854,6 @@ word32At bytes offset =
         + fromIntegral (BS.index bytes (offset + 2)) * 256
         + fromIntegral (BS.index bytes (offset + 3))
 
-encodeBase64 :: BS.ByteString -> Text
-encodeBase64 = Text.pack . go . BS.unpack
-  where
-    alphabet =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    at value = alphabet !! value
-    go = \case
-        [] -> []
-        [a] ->
-            [ at (fromIntegral a `div` 4)
-            , at ((fromIntegral a `mod` 4) * 16)
-            , '='
-            , '='
-            ]
-        [a, b] ->
-            [ at (fromIntegral a `div` 4)
-            , at (((fromIntegral a `mod` 4) * 16) + (fromIntegral b `div` 16))
-            , at ((fromIntegral b `mod` 16) * 4)
-            , '='
-            ]
-        a : b : c : rest ->
-            at (fromIntegral a `div` 4)
-                : at (((fromIntegral a `mod` 4) * 16)
-                    + (fromIntegral b `div` 16))
-                : at (((fromIntegral b `mod` 16) * 4)
-                    + (fromIntegral c `div` 64))
-                : at (fromIntegral c `mod` 64)
-                : go rest
-
 computerFailureMessage :: CInt -> BS.ByteString -> Text
 computerFailureMessage status bytes =
     case TextEncoding.decodeUtf8' bytes of
@@ -1037,70 +882,11 @@ encodeJson = TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode
 computerAbiVersion :: Word32
 computerAbiVersion = 3
 
-computerToolParameters :: Aeson.Value
-computerToolParameters = strictObject
-    [ ("operation", Aeson.object
-        [ "type" Aeson..= ("string" :: Text)
-        , "enum" Aeson..=
-            (["list_targets", "bind", "observe", "act"] :: [Text])
-        ])
-    , ("target_id", nullableStringParameter)
-    , ("actions", Aeson.object
-        [ "type" Aeson..= (["array", "null"] :: [Text])
-        , "minItems" Aeson..= (1 :: Int)
-        , "maxItems" Aeson..= (64 :: Int)
-        , "items" Aeson..= semanticActionParameters
-        ])
-    , ("include_screenshot", screenshotParameter)
-    ]
-    ["operation", "target_id", "actions", "include_screenshot"]
-
-semanticActionParameters :: Aeson.Value
-semanticActionParameters = strictObject
-    [ ("type", Aeson.object
-        [ "type" Aeson..= ("string" :: Text)
-        , "enum" Aeson..=
-            (["perform", "set_value", "replace_selected_text"] :: [Text])
-        ])
-    , ("element_id", stringParameter)
-    , ("action", nullableStringParameter)
-    , ("value", Aeson.object
-        [ "type" Aeson..=
-            (["string", "number", "boolean", "null"] :: [Text])
-        ])
-    , ("text", nullableStringParameter)
-    ]
-    ["type", "element_id", "action", "value", "text"]
-
-strictObject :: [(Text, Aeson.Value)] -> [Text] -> Aeson.Value
-strictObject properties requiredFields = Aeson.object
-    [ "type" Aeson..= ("object" :: Text)
-    , "additionalProperties" Aeson..= False
-    , "properties" Aeson..= Aeson.object
-        [ Key.fromText name Aeson..= schema | (name, schema) <- properties ]
-    , "required" Aeson..= requiredFields
-    ]
-
-stringParameter :: Aeson.Value
-stringParameter = scalarParameter "string"
-
-nullableStringParameter :: Aeson.Value
-nullableStringParameter = Aeson.object
-    [ "type" Aeson..= (["string", "null"] :: [Text]) ]
-
-scalarParameter :: Text -> Aeson.Value
-scalarParameter parameterType = Aeson.object
-    [ "type" Aeson..= parameterType ]
-
-screenshotParameter :: Aeson.Value
-screenshotParameter = Aeson.object
-    [ "type" Aeson..= ("boolean" :: Text)
-    , "description" Aeson..=
-        ( "Set false unless visual evidence is necessary; screenshots are "
-        <> "never returned implicitly."
-        :: Text
-        )
-    ]
+computerOperationCode :: SemanticComputerOperation -> CInt
+computerOperationCode = \case
+    ListComputerTargetsOperation -> operationList
+    BindComputerTargetOperation -> operationBind
+    ObserveOrActOnComputerTargetOperation -> operationObserveOrAct
 
 operationOpen, operationList, operationBind, operationObserveOrAct, operationClose
     :: CInt

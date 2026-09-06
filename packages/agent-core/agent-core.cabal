@@ -14,6 +14,7 @@ category:           Development
 build-type:         Simple
 extra-source-files: README.md
 data-files:         data/code-mode/worker.mjs
+                  , data/computer-use/protocol-v1.json
 
 common common-opts
     default-language: Haskell2010
@@ -41,6 +42,7 @@ library
     exposed-modules:  Agent.Auth.JWT
                     , Agent.Cancel
                     , Agent.Concurrent
+                    , Agent.ComputerUse.Protocol
                     , Agent.Dialect
                     , Agent.Error
                     , Agent.FileRetry
@@ -130,6 +132,7 @@ library
                     , retry >= 0.9.3.1 && < 0.10
                     , resourcet
                     , safe-exceptions
+                    , scientific
                     , stm
                     , template-haskell
                     , text
@@ -278,6 +281,7 @@ test-suite agent-core-test
     main-is:          Spec.hs
     other-modules:    Agent.Auth.JWTSpec
                     , Agent.CancelSpec
+                    , Agent.ComputerUse.ProtocolSpec
                     , Agent.Tools.CodeMode.HostSpec
                     , Agent.Tools.CodeMode.ProtocolSpec
                     , Agent.ConcurrentSpec
@@ -316,6 +320,8 @@ test-suite agent-core-test
                     , Agent.Tools.ViewImageSpec
                     , Agent.ToolDSLSpec
                     , Agent.Transport.WebSocketSpec
+                    , Paths_agent_core
+    autogen-modules:  Paths_agent_core
     build-depends:    base >= 4.14 && < 5
                     , agent-core
                     , agent-json

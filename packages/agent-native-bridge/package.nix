@@ -20,11 +20,11 @@ mkDerivation {
     filelock JuicyPixels safe-exceptions stm
   ];
   testHaskellDepends = [
-    agent-cli agent-core agent-mcp agent-runtime-daemon agent-store
+    aeson agent-cli agent-core agent-mcp agent-runtime-daemon agent-store
     async base base64-bytestring bytestring containers directory filepath hspec
     safe-exceptions stm text unix
   ] ++ lib.optionals stdenv.hostPlatform.isDarwin [
-    aeson agent-cli-runtime agent-openai agent-openrouter
+    agent-cli-runtime agent-openai agent-openrouter
     agent-repository agent-responses-types agent-xai filelock JuicyPixels time
   ];
   description = "Native host integration for the agent harness";
