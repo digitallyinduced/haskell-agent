@@ -443,11 +443,13 @@ benchmark history-eviction-bench
     hs-source-dirs:   benchmark, src
     main-is:          HistoryEviction.hs
     other-modules:    Agent.CLI.TUI.History
+                    , Agent.CLI.TUI.Transcript
                     , HistoryEvictionBaseline
     ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-tui
                     , base >= 4.17 && < 5
                     , containers
+                    , text
 
 benchmark accessibility-delta-bench
     import:           common-options
@@ -682,8 +684,10 @@ benchmark transcript-scrolling-bench
     main-is:          TranscriptScrolling.hs
     ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-cli
+                    , agent-tui
                     , base >= 4.17 && < 5
                     , brick >= 2.9 && < 3
+                    , containers
                     , deepseq
                     , text
                     , vty >= 6.4 && < 7
