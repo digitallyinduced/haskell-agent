@@ -1563,7 +1563,10 @@ spec = do
                     expectationFailure
                         ("expected one compacted continuation, got "
                             <> show (length seen))
-            readIORef events `shouldReturn` [ModelContextReset]
+            readIORef events `shouldReturn`
+                [ ActivityUpdated "Compacting context…"
+                , ModelContextReset
+                ]
 
         it "rejects an oversized first turn before provider submission" do
             let params = defaultResponseCreateParams
