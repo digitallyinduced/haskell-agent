@@ -11,7 +11,8 @@ import Agent.CLI.Runtime.Orchestration.Tools.Mcp
 import Agent.CLI.Runtime.Orchestration.Tools.HostHooks
 import Agent.CLI.AgentSessions
     ( agentSessionTools,
-      launchSessionThread,
+      launchSessionThreadNotifying,
+      formatSessionCompletionNotice,
       sessionThreadStatus,
       prepareSessionThreadWait,
       AgentSessionToolsEnv(toolsSessionStatus, AgentSessionToolsEnv,
@@ -117,16 +118,19 @@ import Agent.Tools.PlanMode
 import Agent.Tools.Types
     ( AppTool
     , AppToolGroup(..)
+    , BackgroundTaskHooks(..)
+    , BackgroundTaskNotice(..)
     , ToolEnv(..)
     , appToolsFromGroups
     )
 import Control.Concurrent.Async ( concurrently, concurrently_ )
 import Control.Exception.Safe
     ( SomeException, bracketOnError, finally, throwIO, try )
-import Control.Monad ( forM_, join, when )
+import Control.Monad ( forM_, join, when, void )
 import Data.IORef
     (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (isJust)
+import Data.Unique (newUnique, hashUnique)
 import System.Info (os)
 import System.OsPath (OsPath)
 import qualified Agent.MCP as MCP
@@ -134,7 +138,7 @@ import qualified Agent.MCP as MCP
       mcpFleetMetaTools,
       mcpFleetResourceTools,
       mcpFleetTools )
-import qualified Data.Text as Text (unpack)
+import qualified Data.Text as Text (unpack, pack)
 
 data LocalToolRuntime = LocalToolRuntime
     { localCoding :: CodingTools
@@ -459,6 +463,7 @@ newSessionControlRuntime
     -> IO SessionControlRuntime
 newSessionControlRuntime AgentToolsRequest
     { options
+    , baseToolEnv
     , startup
     , root
     , gatewayIdentity
@@ -536,10 +541,20 @@ newSessionControlRuntime AgentToolsRequest
                                     (Right
                                         ("completed session "
                                             <> handle.sessionMeta.metaId))
-                    else
-                        launchSessionThread
+                    else do
+                        -- Capture the launching conversation's sink, rather
+                        -- than looking up whichever session is open later.
+                        hooks <- readIORef baseToolEnv.toolBackgroundTaskHooks
+                        turnKey <- Text.pack . show . hashUnique <$> newUnique
+                        launchSessionThreadNotifying
                             processRuntime.processSessionThreads
                             handle.sessionMeta.metaId
+                            (\status -> void $ hooks.backgroundTaskCompleted
+                                BackgroundTaskNotice
+                                    { noticeKey = "agent-session:" <> turnKey
+                                    , noticeBody = formatSessionCompletionNotice
+                                        handle.sessionMeta.metaId status
+                                    })
                             action
             , toolsSessionStatus =
                 sessionThreadStatus processRuntime.processSessionThreads

@@ -7,8 +7,12 @@ import Agent.CLI.ManagedTurn (managedTurnRequestFromText)
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Session
 import Agent.CLI.SessionLock
+import Agent.CLI.SteeringInputs
+    ( awaitBackgroundCompletion, clearSteeringInputs, commitSteeringInputs
+    , hasBackgroundCompletionWake, newSteeringInputs
+    , prepareBackgroundCompletion, readSteeringInputs )
 import Agent.Dialect (DialectId(..))
-import Agent.Loop (defaultLoopDispatch)
+import Agent.Loop (TurnInput(..), defaultLoopDispatch)
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch
@@ -39,8 +43,10 @@ import Agent.Store.Types (renderStoreError)
 import Control.Concurrent (threadDelay)
 import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception.Safe (SomeException, bracket, finally, try)
+import Control.Concurrent.STM (atomically)
+import Control.Exception.Safe (SomeException, bracket, finally, try, throwIO)
 import Data.IORef
+import Control.Monad (void)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), secondsToDiffTime)
@@ -487,6 +493,119 @@ spec = describe "Agent.CLI.AgentSessions" do
             launched `shouldBe` Right "started session same-process"
             takeMVar observedPid `shouldReturn` parentPid
             waitForThreadStatus manager "same-process" "completed"
+
+    it "notifies the launching parent once per completed session turn and permits follow-up" $
+        withTempSessionThreadManager ["child"] \_ manager -> do
+            notices <- newIORef []
+            let notify status =
+                    atomicModifyIORef' notices \previous ->
+                        (previous <> [formatSessionCompletionNotice "child" status], ())
+            launchSessionThreadNotifying manager "child" notify (pure (Right ()))
+                `shouldReturn` Right "started session child"
+            waitForThreadStatus manager "child" "completed"
+            readIORef notices `shouldReturn` [formatSessionCompletionNotice "child" "completed"]
+            -- A resumed turn gets a new notification; status reads do not.
+            sessionThreadStatus manager "child" `shouldReturn` "completed"
+            launchSessionThreadNotifying manager "child" notify (pure (Left "follow-up failed"))
+                `shouldReturn` Right "started session child"
+            waitForThreadStatus manager "child" "failed (follow-up failed)"
+            readIORef notices `shouldReturn`
+                [ formatSessionCompletionNotice "child" "completed"
+                , formatSessionCompletionNotice "child" "failed (follow-up failed)"
+                ]
+
+    it "routes concurrent session turn completions only to their launching parents" $
+        withTempSessionThreadManager ["first", "second"] \_ manager -> do
+            firstNotices <- newIORef []
+            secondNotices <- newIORef []
+            let notify ref status =
+                    atomicModifyIORef' ref \previous -> (previous <> [status], ())
+            _ <- launchSessionThreadNotifying manager "first"
+                (notify firstNotices) (pure (Right ()))
+            _ <- launchSessionThreadNotifying manager "second"
+                (notify secondNotices) (pure (Left "second failed"))
+            waitForThreadStatus manager "first" "completed"
+            waitForThreadStatus manager "second" "failed (second failed)"
+            readIORef firstNotices `shouldReturn` ["completed"]
+            readIORef secondNotices `shouldReturn` ["failed (second failed)"]
+
+    it "notifies the parent when a session turn throws" $
+        withTempSessionThreadManager ["child"] \_ manager -> do
+            notice <- newEmptyMVar
+            _ <- launchSessionThreadNotifying manager "child" (putMVar notice)
+                (throwIO (userError "child exception"))
+            observed <- timeout 1000000 (takeMVar notice)
+            observed `shouldSatisfy` maybe False (Text.isInfixOf "child exception")
+            sessionThreadStatus manager "child" `shouldReturn`
+                maybe "missing notification" id observed
+
+    it "does not notify for rejected launches or shutdown cancellation" $
+        withTempSessionThreadManager ["child"] \_ manager -> do
+            notices <- newIORef []
+            gate <- newEmptyMVar
+            let notify status =
+                    atomicModifyIORef' notices \previous -> (previous <> [status], ())
+            _ <- launchSessionThreadNotifying manager "child" notify
+                (takeMVar gate >> pure (Right ()))
+            launchSessionThreadNotifying manager "child" notify (pure (Right ()))
+                `shouldReturn` Left "session child is already running"
+            closeSessionThreadManager manager
+            launchSessionThreadNotifying manager "child" notify (pure (Right ()))
+                `shouldReturn` Left "agent session manager is closed"
+            readIORef notices `shouldReturn` []
+
+    it "preserves session outcome when a completion sink fails" $
+        withTempSessionThreadManager ["child"] \_ manager -> do
+            _ <- launchSessionThreadNotifying manager "child"
+                (\_ -> throwIO (userError "notification failed"))
+                (pure (Right ()))
+            waitForThreadStatus manager "child" "completed"
+
+    it "includes the session id and inspection/follow-up tools in completion notices" $ do
+        let notice = formatSessionCompletionNotice "child-id" "completed"
+        notice `shouldSatisfy` Text.isInfixOf "Session ID: child-id"
+        notice `shouldSatisfy` Text.isInfixOf "Status: completed"
+        notice `shouldSatisfy` Text.isInfixOf "read_agent_session"
+        notice `shouldSatisfy` Text.isInfixOf "send_agent_session_message"
+
+    it "wakes an idle parent and retains child completion until the provider commits it" $
+        withTempSessionThreadManager ["child"] \_ manager -> do
+            steering <- newSteeringInputs
+            enqueue <- prepareBackgroundCompletion steering
+            let notice = UserMessage (formatSessionCompletionNotice "child" "completed")
+            _ <- launchSessionThreadNotifying manager "child"
+                (\status -> void $ enqueue "child:turn-1" $
+                    UserMessage (formatSessionCompletionNotice "child" status))
+                (pure (Right ()))
+            timeout 1000000 (atomically (awaitBackgroundCompletion steering))
+                `shouldReturn` Just ()
+            -- Consuming the idle-wake edge must not consume the model input.
+            readSteeringInputs steering `shouldReturn` [notice]
+            hasBackgroundCompletionWake steering `shouldReturn` False
+            readSteeringInputs steering `shouldReturn` [notice]
+            commitSteeringInputs steering 1
+            readSteeringInputs steering `shouldReturn` []
+
+    it "does not deliver a late child completion into a reset parent conversation" $
+        withTempSessionThreadManager ["child"] \_ manager -> do
+            steering <- newSteeringInputs
+            enqueue <- prepareBackgroundCompletion steering
+            gate <- newEmptyMVar
+            _ <- launchSessionThreadNotifying manager "child"
+                (\status -> void $ enqueue "child:turn-1" $
+                    UserMessage (formatSessionCompletionNotice "child" status))
+                (takeMVar gate >> pure (Right ()))
+            clearSteeringInputs steering
+            putMVar gate ()
+            waitForThreadStatus manager "child" "completed"
+            readSteeringInputs steering `shouldReturn` []
+            hasBackgroundCompletionWake steering `shouldReturn` False
+            -- New work belongs to the new conversation and can wake it.
+            current <- prepareBackgroundCompletion steering
+            current "child:turn-2" (UserMessage "new completion")
+                `shouldReturn` Right True
+            readSteeringInputs steering `shouldReturn` [UserMessage "new completion"]
+            hasBackgroundCompletionWake steering `shouldReturn` True
 
     it "serializes and reports in-process session turns" $
         withTempSessionThreadManager ["blocked", "failed"] \_ manager -> do

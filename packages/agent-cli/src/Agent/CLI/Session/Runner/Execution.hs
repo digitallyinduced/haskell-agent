@@ -358,6 +358,22 @@ data SessionControlRuntime = SessionControlRuntime
     , controlAgentViewport :: !AgentViewportEnv
     }
 
+installBackgroundTaskSteering :: ToolEnv -> SteeringInputs -> IO ()
+installBackgroundTaskSteering toolEnv steeringInputs = do
+    enqueueCompletion <- prepareBackgroundCompletion steeringInputs
+    setBackgroundTaskHooks toolEnv BackgroundTaskHooks
+        { backgroundTaskCompleted = \notice ->
+            enqueueCompletion
+                notice.noticeKey
+                (UserMessage notice.noticeBody) >>= \case
+                    -- Completion callbacks hold a delivery gate. Keep this
+                    -- non-blocking; UI reporting can backpressure.
+                    Left _ -> pure False
+                    Right inserted -> pure inserted
+        , backgroundTaskDismissed =
+            dismissBackgroundCompletion steeringInputs
+        }
+
 newSessionControlRuntime
     :: SessionHostRuntime
     -> SessionRequest
@@ -365,20 +381,7 @@ newSessionControlRuntime
 newSessionControlRuntime host SessionRequest{..} = do
     toolRegistry <- requireToolRegistry allTools
     steeringInputs <- newSteeringInputs
-    setBackgroundTaskHooks toolEnv BackgroundTaskHooks
-        { backgroundTaskCompleted = \notice ->
-            enqueueBackgroundCompletion
-                steeringInputs
-                notice.noticeKey
-                (UserMessage notice.noticeBody) >>= \case
-                    -- Completion callbacks run while their delivery gate is
-                    -- held. Keep this hook non-blocking; UI reporting can
-                    -- backpressure on a full mailbox.
-                    Left _ -> pure False
-                    Right inserted -> pure inserted
-        , backgroundTaskDismissed =
-            dismissBackgroundCompletion steeringInputs
-        }
+    installBackgroundTaskSteering toolEnv steeringInputs
     spinnerRef <- newIORef Nothing
     renderStateRef <- newIORef emptyRenderState
     allowedToolsRef <- newIORef Set.empty
@@ -605,6 +608,7 @@ buildSkillContextRuntime
             Nothing -> pure ()
         clearPendingInputs pendingNotices
         clearSteeringInputs steeringInputs
+        installBackgroundTaskSteering toolEnv steeringInputs
         readIORef toolEnv.toolSessionTmp >>= mapM_ resetToolSessionTemp
         reloadGeneratedContext
     refreshSkills queueContext = do
