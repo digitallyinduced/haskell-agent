@@ -76,6 +76,7 @@ import Agent.CLI.TUI.Types
     , ChoiceSelection(..)
     , CommandPaletteAction(..)
     , CommandPaletteEntry(..)
+    , DictationSession(..)
     , FullscreenInput(..)
     , commandPaletteActionAt
     , commandPaletteEntries
