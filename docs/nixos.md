@@ -1,7 +1,10 @@
 # NixOS
 
 The flake exports `nixosModules.default` and `nixosModules.telegram` for
-running one or more Telegram gateways as systemd services.
+running one or more Telegram gateways as systemd services. It also exports
+`nixosModules.agent-server`, the required hardened systemd launch path for the
+multi-tenant HTTP server and its gVisor sandboxes; see
+[Agent server](agent-server.md#multi-tenant-sandbox-deployment).
 
 ```nix
 {
