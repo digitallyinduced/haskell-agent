@@ -88,3 +88,17 @@ subscription-backed session. Each successful process turn is checkpointed
 against the authoritative host snapshot; rollback, cancellation, or host-side
 compaction invalidates the continuation and forces a fresh process so discarded
 Claude context cannot leak into the next turn.
+
+Fresh processes import the canonical host history as multimodal content,
+including stored inline images in their original order. Missing, unsupported,
+or remote-only image references receive an explicit unavailable marker; history
+import does not fetch URLs or read file references. Continuing processes do not
+receive duplicate historical images.
+
+When a turn is cancelled or fails, `Agent.Loop` retains a bounded, attributed
+recovery note from complete validated assistant/tool messages, without a Claude
+continuation token. This note survives normal session persistence and helps the
+next turn recognize work already performed. It is not a successful transcript:
+partial display deltas, thinking, raw tool arguments, and protocol metadata are
+excluded, and unconfirmed tool outcomes remain unknown. Successful turns do not
+append the recovery note. Existing historical sessions are not rewritten.

@@ -1128,22 +1128,27 @@
                                     haskellPackages.ghc
                                     (old.disallowedRequisites or [ ]);
                             });
-                agentSandboxVm =
+                agentSandboxWorkerExecutable =
+                    (pkgs.haskell.lib.justStaticExecutables
+                        agentServerPackage).overrideAttrs
+                        (old: {
+                            postInstall = (old.postInstall or "") + ''
+                                rm -f "$out/bin/agent-server"
+                            '';
+                        });
+                agentSandboxRootfs =
                     if pkgs.stdenv.hostPlatform.isLinux then
-                        (nixpkgs.lib.nixosSystem {
-                            inherit system;
-                            specialArgs = {
-                                agentServer = agentServerExecutable;
-                            };
-                            modules = [ ./nix/sandbox-vm.nix ];
-                        }).config.system.build.vm
+                        import ./nix/sandbox-rootfs.nix {
+                            inherit pkgs;
+                            agentServer = agentSandboxWorkerExecutable;
+                        }
                     else
                         null;
                 agentSandboxRunner =
                     if pkgs.stdenv.hostPlatform.isLinux then
                         import ./nix/sandbox-runner.nix {
                             inherit pkgs;
-                            vm = agentSandboxVm;
+                            rootfs = agentSandboxRootfs;
                         }
                     else
                         null;
@@ -1303,6 +1308,8 @@
                 packages.agent-server-client = agentServerClientPackage;
                 packages.${if pkgs.stdenv.hostPlatform.isLinux
                     then "agent-sandbox-runner" else null} = agentSandboxRunner;
+                packages.${if pkgs.stdenv.hostPlatform.isLinux
+                    then "agent-sandbox-rootfs" else null} = agentSandboxRootfs;
                 packages.${if pkgs.stdenv.hostPlatform.isDarwin
                     then "agent-native-bridge" else null} = agentNativeBridgePackage;
                 packages.${if pkgs.stdenv.hostPlatform.isDarwin
@@ -1481,8 +1488,15 @@
                 } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
                     agent-cli-static-runtime = agentCliStaticRuntimeCheck;
                     agent-sandbox-runner = agentSandboxRunner;
+                    agent-server-nixos-module = import ./nix/tests/agent-server-module.nix {
+                        inherit self nixpkgs pkgs system;
+                    };
                     nixos-module = import ./nix/tests/telegram-module.nix {
                         inherit self nixpkgs pkgs system;
+                    };
+                } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+                    agent-server-nixos-module-vm = import ./nix/tests/agent-server-module-vm.nix {
+                        inherit self pkgs;
                     };
                 } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
                     agent-cli-macos-bundle = agentCliMacosRelease.bundle;
@@ -1501,6 +1515,9 @@
             }
         )
         // {
+            nixosModules.agent-server = import ./nix/modules/agent-server.nix {
+                inherit self;
+            };
             nixosModules.telegram = import ./nix/modules/telegram.nix {
                 inherit self;
             };

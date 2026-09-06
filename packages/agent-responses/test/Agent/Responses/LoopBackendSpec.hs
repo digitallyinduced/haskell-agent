@@ -902,6 +902,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             [UserMessage "hello"]
             BackendCallbacks
                 { onLoopEvent = const (pure ())
+                , onRecoveryCheckpoint = const (pure ())
                 , onAsyncToolCall =
                     \call -> modifyIORef' announced (<> [call])
                 }

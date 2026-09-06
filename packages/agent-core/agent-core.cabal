@@ -49,6 +49,7 @@ library
                     , Agent.Provider.Options
                     , Agent.ReasoningEffort
                     , Agent.Loop
+                    , Agent.Loop.InputItems
                     , Agent.JsonText
                     , Agent.OsPath
                     , Agent.Http.Header

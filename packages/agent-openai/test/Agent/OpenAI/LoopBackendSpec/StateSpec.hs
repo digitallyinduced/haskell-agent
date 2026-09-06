@@ -582,6 +582,7 @@ spec = do
                 [UserMessage "one"]
                 BackendCallbacks
                     { onLoopEvent = const (pure ())
+                    , onRecoveryCheckpoint = const (pure ())
                     , onAsyncToolCall =
                         \call -> modifyIORef' admitted (call.callId :)
                     }

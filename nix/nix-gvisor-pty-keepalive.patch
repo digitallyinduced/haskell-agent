@@ -1,0 +1,16 @@
+diff --git a/src/libstore/unix/build/derivation-builder.cc b/src/libstore/unix/build/derivation-builder.cc
+--- a/src/libstore/unix/build/derivation-builder.cc
++++ b/src/libstore/unix/build/derivation-builder.cc
+@@ -1023,3 +1023,12 @@ void DerivationBuilderImpl::startChild()
++    /* Linux blocks reads from the master until a slave is opened, whereas
++       gVisor currently returns EIO. Keep a slave descriptor open across the
++       fork until the child opens its own slave, so that an early master read
++       has identical blocking semantics. */
++    std::string slaveName = getPtsName(builderOut.get());
++    AutoCloseFD builderOutSlave = open(slaveName.c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC);
++    if (!builderOutSlave)
++        throw SysError("opening pseudoterminal slave keepalive");
++
+     pid = startProcess([this, args = std::move(args)]() {
+         openSlave();
+         runChild(std::move(args));

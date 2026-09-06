@@ -654,7 +654,9 @@ assembleSessionToolsRuntime AgentToolsRequest
             ]
         surroundingToolGroupsFor selectedComputerTools =
             [ ExecutionToolGroup extraTools
-            , ExecutionToolGroup sessionMcpTools
+            -- MCP clients and their tenant credentials stay in the
+            -- orchestrator process; only execution tools cross a sandbox.
+            , HostToolGroup sessionMcpTools
             , HostToolGroup persistedSessionTools
             , HostToolGroup sessionGatewayTools
             , HostToolGroup sessionDatabaseTools
