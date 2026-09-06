@@ -10,6 +10,7 @@ module Agent.CLI.Options
     , SessionOutputFormat(..)
     , SessionPageRequest(..)
     , StorageCommand(..)
+    , WorktreeCommand(..)
     , defaultCliOptions
     , defaultEffortFor
     , freshSessionOptions
@@ -60,7 +61,16 @@ data Command
     | WaitSession Text
     | ImportSession (Maybe OsPath)
     | Storage StorageCommand
+    | Worktree WorktreeCommand
     | RunAgent CliOptions
+    deriving (Eq, Show)
+
+data WorktreeCommand
+    = WorktreeGC !Bool !(Maybe Int)
+    | WorktreeEnroll !OsPath
+    | WorktreeRestore !OsPath
+    | WorktreeProtect !OsPath
+    | WorktreeUnprotect !OsPath
     deriving (Eq, Show)
 
 data SessionPageRequest
@@ -262,7 +272,7 @@ parseArgs args
 isRunInvocation :: [String] -> Bool
 isRunInvocation = \case
     command : _ ->
-        command `notElem` ["gateway", "login", "mcp", "sessions", "storage"]
+        command `notElem` ["gateway", "login", "mcp", "sessions", "storage", "worktree"]
     [] -> True
 
 parserPreferences :: Options.ParserPrefs
@@ -323,8 +333,33 @@ commandParser =
             <> Options.command "storage"
                 (Options.info storageParser
                     (Options.progDesc "Administer managed PostgreSQL storage"))
+            <> Options.command "worktree"
+                (Options.info worktreeParser
+                    (Options.progDesc "Collect and recover inactive managed worktrees"))
         )
         Options.<|> (RunAgent <$> runOptionsParser)
+
+worktreeParser :: Options.Parser Command
+worktreeParser = Worktree <$> Options.hsubparser
+    ( Options.command "gc"
+        (Options.info
+            (WorktreeGC
+                <$> Options.switch
+                    (Options.long "dry-run" <> Options.help "Simulate adoption and report eligibility, reasons and estimated bytes without writing or collecting")
+                <*> Options.optional (Options.option (positiveIntReader "--inactivity-days")
+                    (Options.long "inactivity-days" <> Options.metavar "DAYS"
+                        <> Options.help "Override normal inactivity expiry (default 7 days; incorporated HEADs expire after 24h idle)")))
+            (Options.progDesc "Adopt verified agent worktrees, then snapshot and collect inactive checkouts; ignored files are NOT recovered"))
+    <> pathCommand "enroll" WorktreeEnroll "Explicitly enroll an existing checkout in automatic collection"
+    <> pathCommand "restore" WorktreeRestore "Restore a collected checkout without overwriting existing paths"
+    <> pathCommand "protect" WorktreeProtect "Protect an enrolled checkout from collection"
+    <> pathCommand "unprotect" WorktreeUnprotect "Allow inactivity-based collection again"
+    )
+  where
+    pathCommand name constructor description =
+        Options.command name (Options.info
+            (constructor <$> (unsafeEncodeUtf <$> Options.argument Options.str (Options.metavar "PATH")))
+            (Options.progDesc description))
 
 gatewayParser :: Options.Parser Command
 gatewayParser = Gateway <$> Options.hsubparser
@@ -680,6 +715,8 @@ usage = unlines
     , "       agent-cli mcp login <url> [--scope SCOPE]..."
     , "       agent-cli mcp logout <url>"
     , "       agent-cli storage <status|start|stop|migrate|doctor>"
+    , "       agent-cli worktree gc [--dry-run] [--inactivity-days DAYS]"
+    , "       agent-cli worktree <enroll|restore|protect|unprotect> PATH"
     , ""
     , "  -p, --prompt TEXT       Run one prompt and exit"
     , "      --prompt-file FILE  Read the one-shot prompt from a file"

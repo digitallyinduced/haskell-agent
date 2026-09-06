@@ -13,6 +13,30 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do
+    describe "worktree administration" do
+        it "parses dry-run and inactivity override" do
+            parseArgs ["worktree", "gc", "--dry-run"]
+                `shouldBe` Right (Worktree (WorktreeGC True Nothing))
+            parseArgs ["worktree", "gc", "--inactivity-days", "30"]
+                `shouldBe` Right (Worktree (WorktreeGC False (Just 30)))
+        it "requires a positive expiry" do
+            parseArgs ["worktree", "gc", "--inactivity-days", "0"]
+                `shouldSatisfy` either (const True) (const False)
+            parseArgs ["worktree", "gc", "--inactivity-days", "-1"]
+                `shouldSatisfy` either (const True) (const False)
+        it "parses explicit enrollment, recovery, and protection" do
+            let path = fromFilePath "/checkout"
+            parseArgs ["worktree", "enroll", "/checkout"]
+                `shouldBe` Right (Worktree (WorktreeEnroll path))
+            parseArgs ["worktree", "restore", "/checkout"]
+                `shouldBe` Right (Worktree (WorktreeRestore path))
+            parseArgs ["worktree", "protect", "/checkout"]
+                `shouldBe` Right (Worktree (WorktreeProtect path))
+            parseArgs ["worktree", "unprotect", "/checkout"]
+                `shouldBe` Right (Worktree (WorktreeUnprotect path))
+        it "does not reinterpret incomplete administration as a prompt" do
+            parseArgs ["worktree", "enroll"]
+                `shouldSatisfy` either (const True) (const False)
     describe "freshSessionOptions" do
         it "drops the old routing and resume state after a gateway change" do
             let cwd = fromFilePath "/tmp/company-work"

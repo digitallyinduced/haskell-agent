@@ -243,6 +243,7 @@ spec = describe "Agent.CLI.Config" do
             fmap (.configWorktree) result
                 `shouldBe` Right WorktreeConfig
                     { worktreeFetchLatestUpstream = True
+                    , worktreeInactiveDays = 7
                     }
 
     it "loads the managed worktree fetch opt-out" $
@@ -253,7 +254,23 @@ spec = describe "Agent.CLI.Config" do
             fmap (.configWorktree) result
                 `shouldBe` Right WorktreeConfig
                     { worktreeFetchLatestUpstream = False
+                    , worktreeInactiveDays = 7
                     }
+
+    it "loads configurable worktree inactivity expiry" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home "{\"worktree\":{\"inactivityDays\":30}}"
+            result <- loadHarnessConfig home
+            fmap (.configWorktree.worktreeInactiveDays) result `shouldBe` Right 30
+
+    it "rejects nonpositive worktree inactivity expiry" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home "{\"worktree\":{\"inactivityDays\":0}}"
+            result <- loadHarnessConfig home
+            result `shouldSatisfy` either (Text.isInfixOf "inactivityDays") (const False)
+            writeConfig home "{\"worktree\":{\"inactivityDays\":-1}}"
+            resultNegative <- loadHarnessConfig home
+            resultNegative `shouldSatisfy` either (Text.isInfixOf "inactivityDays") (const False)
 
     it "decodes LSP maps and retains opaque JSON options" $
         withTempDir "agent-config-" \home -> do
@@ -367,6 +384,7 @@ spec = describe "Agent.CLI.Config" do
                     { configMcpServers = Map.singleton "seo-mcp" server
                     , configWorktree = WorktreeConfig
                         { worktreeFetchLatestUpstream = True
+                        , worktreeInactiveDays = 30
                         }
                     , configMaxConcurrentAgents = Just 48
                     }
