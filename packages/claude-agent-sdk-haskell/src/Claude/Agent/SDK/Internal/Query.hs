@@ -7,6 +7,7 @@ module Claude.Agent.SDK.Internal.Query
     , canonicalMessages
     ) where
 
+import Agent.Json (rawJsonBytes)
 import Claude.Agent.SDK.Errors (ClaudeSDKError(..))
 import Claude.Agent.SDK.Types
     ( AssistantMessage(..)
@@ -16,18 +17,24 @@ import Claude.Agent.SDK.Types
     , QueryMessageScope(..)
     , QueryProgress(..)
     , ResultMessage(..)
+    , StreamEvent(..)
     , SystemMessage(..)
+    , Usage(..)
     , UserMessage(..)
     , messageHasParentToolUseId
     , messageParentToolUseId
     , messageUuid
     )
 import Control.Applicative ((<|>))
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Types as Aeson
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe, isJust)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 data MessageScope
     = TopLevelScope
@@ -45,7 +52,30 @@ data MessageBuffer = MessageBuffer
     , seenIds :: !(Set (MessageScope, Text))
     , retractedIds :: !(Set (MessageScope, Text))
     , globallyRetractedIds :: !(Set Text)
+    , usageStreams :: !(Map MessageScope UsageStream)
     } deriving (Eq, Show)
+
+-- A delta contains cumulative counters for one API request, not increments.
+-- Keep the raw input components separate until the stream has finished.
+data UsagePatch = UsagePatch
+    { directInput :: !(Maybe Int)
+    , cacheCreation :: !(Maybe Int)
+    , cacheRead :: !(Maybe Int)
+    , output :: !(Maybe Int)
+    } deriving (Eq, Show)
+
+data UsageStream = UsageStream
+    { apiMessageId :: !Text
+    , counters :: !UsagePatch
+    , finalStopReason :: !(Maybe Text)
+    , finalOutputSeen :: !Bool
+    } deriving (Eq, Show)
+
+data UsageEvent
+    = UsageStart !Text !UsagePatch
+    | UsageDelta !UsagePatch !(Maybe Text)
+    | UsageStop
+    | OtherUsageEvent
 
 data QueryAccumulator = QueryAccumulator
     { ownBuffer :: !MessageBuffer
@@ -95,6 +125,7 @@ emptyMessageBuffer = MessageBuffer
     , seenIds = Set.empty
     , retractedIds = Set.empty
     , globallyRetractedIds = Set.empty
+    , usageStreams = Map.empty
     }
 
 -- | Consume one parsed SDK message. A successful human result returns the
@@ -482,7 +513,17 @@ consumeBufferedMessage buffer message =
                 Just _ ->
                     Right (markMessageSeen retracted message)
                 Nothing ->
-                    bufferRetractableMessage retracted message
+                    -- A streamed content block is emitted before its final
+                    -- message_delta usage. Never expose that provisional
+                    -- count as the canonical response's measured usage.
+                    bufferRetractableMessage retracted $
+                        MessageAssistant assistant
+                            { usage =
+                                if assistant.stopReason == Nothing
+                                    || Map.member (messageScope message) retracted.usageStreams
+                                    then Nothing
+                                    else assistant.usage
+                            }
         MessageSystem system
             | system.subtype == "model_refusal_fallback" ->
                 Right $
@@ -491,16 +532,133 @@ consumeBufferedMessage buffer message =
                             buffer
                             system.retractedMessageUuids)
                         message
+        MessageSystem system
+            | system.subtype == "compact_boundary" ->
+                Right $ bufferMessage
+                    buffer
+                        { usageStreams =
+                            Map.delete (messageScope message) buffer.usageStreams
+                        }
+                    message
         MessageUser _ ->
             bufferRetractableMessage buffer message
-        MessageStreamEvent _ ->
+        MessageStreamEvent event ->
             -- Partial stream events are not canonical response records and
             -- cannot be safely associated with later UUID retractions. The
             -- low-level 'receiveMessage' API still exposes them to callers
             -- that explicitly implement live partial-message handling.
-            Right buffer
+            -- Usage alone can be reconciled by API message id and scope;
+            -- never retain partial text or resurrect retracted messages.
+            Right (consumeUsageEvent (messageScope message) event buffer)
         _ ->
             Right (bufferMessage buffer message)
+
+consumeUsageEvent :: MessageScope -> StreamEvent -> MessageBuffer -> MessageBuffer
+consumeUsageEvent scope event buffer =
+    case Aeson.decodeStrict' (rawJsonBytes event.event)
+            >>= Aeson.parseMaybe parseUsageEvent of
+        Nothing -> clearStream
+        Just (UsageStart identifier counters) ->
+            buffer { usageStreams = Map.insert scope
+                (UsageStream identifier counters Nothing False)
+                buffer.usageStreams }
+        Just (UsageDelta patch stopReason) ->
+            buffer { usageStreams = Map.adjust
+                (\stream -> stream
+                    { counters = mergeUsagePatch stream.counters patch
+                    , finalStopReason = stopReason <|> stream.finalStopReason
+                    , finalOutputSeen = stream.finalOutputSeen || isJust patch.output
+                    })
+                scope buffer.usageStreams }
+        Just UsageStop ->
+            case Map.lookup scope buffer.usageStreams of
+                Just stream
+                    | stream.finalOutputSeen
+                    , Just stopReason <- stream.finalStopReason
+                    , Just usage <- completedUsage stream.counters ->
+                        clearStream
+                            { messagesRev = map (complete stream.apiMessageId stopReason usage)
+                                buffer.messagesRev
+                            }
+                _ -> clearStream
+        Just OtherUsageEvent -> buffer
+  where
+    clearStream = buffer
+        { usageStreams = Map.delete scope buffer.usageStreams }
+    complete :: Text -> Text -> Usage -> BufferedMessage -> BufferedMessage
+    complete identifier stopReason usage buffered =
+        case buffered.message of
+            MessageAssistant assistant
+                | buffered.scope == scope
+                , assistant.messageId == Just identifier ->
+                    buffered { message = MessageAssistant assistant
+                        { usage = Just usage, stopReason = Just stopReason } }
+            _ -> buffered
+
+parseUsageEvent :: Aeson.Value -> Aeson.Parser UsageEvent
+parseUsageEvent = Aeson.withObject "stream usage event" \object -> do
+    eventType <- object Aeson..: "type" :: Aeson.Parser Text
+    case eventType of
+        "message_start" -> do
+            message <- object Aeson..: "message"
+            Aeson.withObject "stream message" (\fields -> do
+                identifier <- fields Aeson..: "id"
+                if Text.null (Text.strip identifier)
+                    then fail "empty API message id"
+                    else UsageStart identifier
+                        <$> (fields Aeson..: "usage" >>= parseUsagePatch)) message
+        "message_delta" -> do
+            patch <- object Aeson..: "usage" >>= parseUsagePatch
+            delta <- object Aeson..: "delta"
+            stopReason <- Aeson.withObject "message delta"
+                (Aeson..:? "stop_reason") delta
+            pure $ UsageDelta patch
+                (stopReason >>= \reason ->
+                    if Text.null (Text.strip reason) then Nothing else Just reason)
+        "message_stop" -> pure UsageStop
+        _ -> pure OtherUsageEvent
+
+parseUsagePatch :: Aeson.Value -> Aeson.Parser UsagePatch
+parseUsagePatch = Aeson.withObject "usage counters" \object ->
+    UsagePatch
+        <$> counter object "input_tokens"
+        <*> counter object "cache_creation_input_tokens"
+        <*> counter object "cache_read_input_tokens"
+        <*> counter object "output_tokens"
+  where
+    counter object key = do
+        value <- object Aeson..:? key
+        case value of
+            Just number | number < 0 -> fail "negative usage counter"
+            _ -> pure value
+
+mergeUsagePatch :: UsagePatch -> UsagePatch -> UsagePatch
+mergeUsagePatch previous current = UsagePatch
+    { directInput = positive current.directInput <|> previous.directInput
+    , cacheCreation = positive current.cacheCreation <|> previous.cacheCreation
+    , cacheRead = positive current.cacheRead <|> previous.cacheRead
+    , output = current.output <|> previous.output
+    }
+  where
+    -- Claude's message_delta may carry zero placeholders for unchanged
+    -- input/cache components. Output is cumulative and may validly be zero.
+    positive (Just number) | number > 0 = Just number
+    positive _ = Nothing
+
+completedUsage :: UsagePatch -> Maybe Usage
+completedUsage counters
+    | total > 0
+    , total <= toInteger (maxBound :: Int)
+    , Just outputTokens <- counters.output =
+        Just Usage
+            { inputTokens = fromInteger total
+            , cachedTokens = fromMaybe 0 counters.cacheRead
+            , outputTokens
+            }
+    | otherwise = Nothing
+  where
+    total = sum $ map (toInteger . fromMaybe 0)
+        [counters.directInput, counters.cacheCreation, counters.cacheRead]
 
 canonicalMessages :: QueryAccumulator -> [Message]
 canonicalMessages accumulator =

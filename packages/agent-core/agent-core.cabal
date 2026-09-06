@@ -49,6 +49,7 @@ library
                     , Agent.Provider.Options
                     , Agent.ReasoningEffort
                     , Agent.Loop
+                    , Agent.Loop.InputItems
                     , Agent.JsonText
                     , Agent.OsPath
                     , Agent.Http.Header
@@ -95,8 +96,14 @@ library
                     , Agent.Tools.Types
                     , Agent.Tools.ViewImage
                     , Agent.Transport.WebSocket
-    other-modules:    Agent.Loop.EventPump
+    other-modules:    Agent.Image.Normalize
+                    , Agent.Loop.Backend
+                    , Agent.Loop.DisplayJournal
+                    , Agent.Loop.EventPump
+                    , Agent.Loop.Input
                     , Agent.Loop.Internal
+                    , Agent.Loop.Output
+                    , Agent.Loop.TokenUsage
                     , Agent.Subagents.Registry.Internal.Core
                     , Agent.Subagents.Registry.Internal.Operations
                     , Agent.Subagents.Registry.Internal.Types
@@ -111,7 +118,7 @@ library
                     , agent-process >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
                     , aeson >= 2.0
-                    , async
+                    , async >= 2.2.6 && < 2.3
                     , base64-bytestring
                     , bytestring
                     , containers
@@ -133,6 +140,7 @@ library
                     , vector
                     , websockets
                     , yaml
+                    , zlib
 
 benchmark grep-streaming-bench
     import:           common-opts
@@ -212,6 +220,36 @@ benchmark loop-events-bench
                     , base >= 4.14 && < 5
                     , text
 
+benchmark display-journal-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    -- Both algorithms and their shared types are compiled with the same -O2.
+    hs-source-dirs:   benchmark, src
+    main-is:          DisplayJournal.hs
+    other-modules:    DisplayJournalBaseline
+                    , Agent.Dialect
+                    , Agent.Error
+                    , Agent.Loop.DisplayJournal
+                    , Agent.Loop.EventPump
+                    , Agent.Loop.Output
+                    , Agent.Loop.TokenUsage
+                    , Agent.Provider
+                    , Agent.Telemetry
+                    , Agent.TextBuffer
+                    , Agent.ToolDispatch
+    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-json
+                    , agent-responses-types
+                    , aeson
+                    , async
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , containers
+                    , safe-exceptions
+                    , stm
+                    , text
+                    , time
+
 benchmark concurrent-discovery-bench
     import:           common-opts
     type:             exitcode-stdio-1.0
@@ -247,6 +285,9 @@ test-suite agent-core-test
                     , Agent.ErrorSpec
                     , Agent.Http.HeaderSpec
                     , Agent.LoopSpec
+                    , Agent.Loop.EventDeliverySpec
+                    , Agent.Loop.FailedDisplaySpec
+                    , Agent.Loop.Fixtures
                     , Agent.OsPathSpec
                     , Agent.JsonTextSpec
                     , Agent.ProjectInstructionsSpec
@@ -286,6 +327,7 @@ test-suite agent-core-test
                     , filepath
                     , containers
                     , hspec
+                    , JuicyPixels
                     , process
                     , QuickCheck >= 2.14 && < 2.16
                     , retry >= 0.9.3.1 && < 0.10
@@ -299,3 +341,4 @@ test-suite agent-core-test
                     , unix
                     , websockets
                     , yaml
+                    , zlib

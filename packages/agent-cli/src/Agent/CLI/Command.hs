@@ -2,6 +2,10 @@
 module Agent.CLI.Command
     ( CopyRequest(..)
     , ForkRequest(..)
+    , AttachmentAction(..)
+    , SelectionAction(..)
+    , WorkflowAction(..)
+    , SessionAction(..)
     , ReplAction(..)
     , ShellMode(..)
     , SkillCommand(..)
@@ -259,7 +263,7 @@ simpleSlashCommands =
         , ("diff", ReplDiff)
         , ("history", ReplHistory)
         , ("permissions", ReplPermissions)
-        , ("fast", ReplToggleFast)
+        , ("fast", ReplSelection ReplToggleFast)
         , ("view-plan", ReplViewPlan)
         , ("queue", ReplQueue)
         , ("transcript", ReplTranscript)
@@ -267,20 +271,20 @@ simpleSlashCommands =
         , ("context", ReplContext)
         , ("recap", ReplRecap)
         , ("retry", ReplRetry)
-        , ("session", ReplShowSession)
-        , ("session-info", ReplShowSessionInfo)
+        , ("session", ReplSession ReplShowSession)
+        , ("session-info", ReplSession ReplShowSessionInfo)
         , ("desktop", ReplDesktop)
-        , ("worktree", ReplWorktree)
+        , ("worktree", ReplSession ReplWorktree)
         , ("login", ReplLogin)
-        , ("home", ReplHome)
-        , ("rewind", ReplRewind)
-        , ("clear", ReplClear)
-        , ("new", ReplNew)
-        , ("delete", ReplDelete)
+        , ("home", ReplSession ReplHome)
+        , ("rewind", ReplSession ReplRewind)
+        , ("clear", ReplSession ReplClear)
+        , ("new", ReplSession ReplNew)
+        , ("delete", ReplSession ReplDelete)
         , ("usage", ReplUsage)
         , ("reload-auth", ReplReloadAuth)
-        , ("attachments", ReplShowAttachments)
-        , ("clear-attachments", ReplClearAttachments)
+        , ("attachments", ReplAttachment ReplShowAttachments)
+        , ("clear-attachments", ReplAttachment ReplClearAttachments)
         , ("copy-diff", ReplCopyDiff)
         , ("copy-path", ReplCopyPath)
         , ("copy-session", ReplCopySession)
@@ -341,22 +345,22 @@ parseSpecializedSlashCommand catalog raw spec args commandTail =
                 spec
                 commandTail
         "afk" -> case args of
-            [] -> ReplAfk Nothing
-            [target] -> ReplAfk (Just target)
+            [] -> ReplSession (ReplAfk Nothing)
+            [target] -> ReplSession (ReplAfk (Just target))
             _ -> slashUsageError spec
         "rename" ->
             if commandTail == "--auto"
-                then ReplRenameAuto
+                then ReplSession ReplRenameAuto
                 else if Text.null commandTail
                     then slashUsageError spec
                     else if Text.length commandTail > 100
                         then ReplCommandError
                             "session titles must be at most 100 characters"
-                        else ReplRename commandTail
+                        else ReplSession (ReplRename commandTail)
         "resume" -> parseResumeCommand args
         "search" ->
             parseRequiredTextCommand
-                ReplSearch
+                (ReplSession . ReplSearch)
                 spec
                 commandTail
         "compact" -> parseOptionalTextCommand ReplCompact commandTail
@@ -427,16 +431,16 @@ parseLoopCommand original args
 parseGoalCommand :: Text -> Text -> ReplAction
 parseGoalCommand original args =
     case Text.toLower args of
-        "" -> ReplGoalStatus
-        "status" -> ReplGoalStatus
-        "pause" -> ReplGoalPause
-        "resume" -> ReplGoalResume
-        "clear" -> ReplGoalClear
+        "" -> ReplWorkflow ReplGoalStatus
+        "status" -> ReplWorkflow ReplGoalStatus
+        "pause" -> ReplWorkflow ReplGoalPause
+        "resume" -> ReplWorkflow ReplGoalResume
+        "clear" -> ReplWorkflow ReplGoalClear
         _ ->
             case parseTrailingGoalBudget args of
                 Left err -> ReplCommandError err
                 Right (objective, budget) ->
-                    ReplGoalSet
+                    ReplWorkflow (ReplGoalSet
                         original
                         objective
                         budget
@@ -447,7 +451,7 @@ parseGoalCommand original args =
                                     "\nThe host records an advisory scope budget of "
                                         <> Text.pack (show tokens)
                                         <> " tokens, but does not hard-enforce it. Keep the work proportionate and report if the objective cannot fit.")
-                                budget)
+                                budget))
 
 parseTrailingGoalBudget :: Text -> Either Text (Text, Maybe Int)
 parseTrailingGoalBudget input =
@@ -486,22 +490,22 @@ parseTrailingGoalBudget input =
 parseWorkflowCommand :: Text -> Text -> ReplAction
 parseWorkflowCommand original args =
     case Text.words args of
-        [] -> ReplWorkflowRuns
+        [] -> ReplWorkflow ReplWorkflowRuns
         [single]
             | Text.toLower single == "runs" ->
-                ReplWorkflowRuns
+                ReplWorkflow ReplWorkflowRuns
         first : rest
             | isWorkflowOperation first ->
-                ReplWorkflowManage
+                ReplWorkflow (ReplWorkflowManage
                     (Text.toLower first)
                     (nonEmptyText
                         (Text.strip
-                            (Text.drop (Text.length first) args)))
+                            (Text.drop (Text.length first) args))))
             | [operation] <- rest
             , isWorkflowOperation operation ->
-                ReplWorkflowManage
+                ReplWorkflow (ReplWorkflowManage
                     (Text.toLower operation)
-                    (Just first)
+                    (Just first))
             | otherwise ->
                 let input =
                         Text.strip
@@ -522,7 +526,7 @@ parseDeepResearchCommand original query
 
 parseForkCommand :: Text -> ReplAction
 parseForkCommand input =
-    either ReplCommandError ReplFork (go Nothing (Text.stripStart input))
+    either ReplCommandError (ReplSession . ReplFork) (go Nothing (Text.stripStart input))
   where
     go worktree rest
         | Text.null rest =
@@ -596,11 +600,11 @@ loopUsageMessage =
 
 parseResumeCommand :: [Text] -> ReplAction
 parseResumeCommand = \case
-    [] -> ReplResume Nothing
+    [] -> ReplSession (ReplResume Nothing)
     [sessionId]
         | Text.null (Text.strip sessionId) ->
             ReplCommandError "usage: /resume [ID]"
-        | otherwise -> ReplResume (Just sessionId)
+        | otherwise -> ReplSession (ReplResume (Just sessionId))
     _ -> ReplCommandError "usage: /resume [ID]"
 
 parseCopyCodeCommand :: [Text] -> ReplAction
@@ -623,7 +627,7 @@ parsePasteCommand rest =
             ("--send":xs) -> (True, Text.unwords xs)
             ("-s":xs) -> (True, Text.unwords xs)
             _ -> (False, rest)
-    in ReplPaste immediate (Text.strip caption)
+    in ReplAttachment (ReplPaste immediate (Text.strip caption))
 
 parseAgentsCommand :: [Text] -> ReplAction
 parseAgentsCommand = \case
@@ -636,9 +640,9 @@ parseAgentsCommand = \case
 
 parseEffortCommand :: [Text] -> ReplAction
 parseEffortCommand = \case
-    [] -> ReplShowEffort
+    [] -> ReplSelection ReplShowEffort
     [level] -> case parseEffort level of
-        Right effort -> ReplSetEffort effort
+        Right effort -> ReplSelection (ReplSetEffort effort)
         Left err -> ReplCommandError (Text.pack err)
     _ -> ReplCommandError "usage: /effort [none|low|medium|high|xhigh|max]"
 
@@ -666,18 +670,18 @@ parseComputerUseCommand = \case
 
 parseModelCommand :: [Text] -> ReplAction
 parseModelCommand = \case
-    [] -> ReplShowModel
+    [] -> ReplSelection ReplShowModel
     [name]
         | Text.null (Text.strip name) ->
             ReplCommandError "usage: /model [NAME]"
-        | otherwise -> ReplSetModel name
+        | otherwise -> ReplSelection (ReplSetModel name)
     _ -> ReplCommandError "usage: /model [NAME]"
 
 parseThemeCommand :: [Text] -> ReplAction
 parseThemeCommand = \case
-    [] -> ReplShowTheme
+    [] -> ReplSelection ReplShowTheme
     [name]
-        | not (Text.null (Text.strip name)) -> ReplSetTheme name
+        | not (Text.null (Text.strip name)) -> ReplSelection (ReplSetTheme name)
         | otherwise -> ReplCommandError "usage: /theme [NAME]"
     _ -> ReplCommandError "usage: /theme [NAME]"
 

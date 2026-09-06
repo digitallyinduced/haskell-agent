@@ -10,7 +10,13 @@ import Agent.Loop
     , TurnOutput(..)
     , emptyTurnOutput
     )
-import Agent.ToolDispatch (ToolCall(..), ToolCallKind(..), ToolCallResult(..))
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , ToolCallKind(..)
+    , ToolCallMode(..)
+    , ToolCallResult(..)
+    , withToolCallMode
+    )
 import qualified Data.ByteString as BS
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -58,9 +64,37 @@ spec = describe "native loop event binary encoding" do
                 BS.isInfixOf "read_file" encoded `shouldBe` True
                 BS.index encoded 7 `shouldBe` 1
 
+    it "marks asynchronous tool calls with the forward-compatible flag" do
+        let call = withToolCallMode AsyncToolCall ToolCall
+                { callId = "call-async"
+                , name = "exec"
+                , arguments = "return tools.echo({})"
+                , callKind = CustomCallKind
+                , argumentsEncrypted = False
+                }
+        case encodeNativeLoopEvent "turn" (ToolStarted call) of
+            Nothing -> expectationFailure "native tool event failed to encode"
+            Just encoded -> BS.take 8 encoded `shouldBe` header 4 4
+
+    it "marks asynchronous tool results with the forward-compatible flag" do
+        let result = ToolCallResult
+                { callId = "call-async"
+                , toolResultMode = AsyncToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , output = "done"
+                , callKind = CustomCallKind
+                }
+        case encodeNativeLoopEvent "turn" (ToolFinished result) of
+            Nothing -> expectationFailure "native tool event failed to encode"
+            Just encoded -> BS.take 8 encoded `shouldBe` header 5 4
+
     it "encodes truncated tool output with its flag" do
         let result = ToolCallResult
                 { callId = "call-1"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 , output = Text.replicate 8193 "x"
                 , callKind = FunctionCallKind
                 }
@@ -72,6 +106,9 @@ spec = describe "native loop event binary encoding" do
         let secret = "data:image/png;base64,private-screenshot" :: Text.Text
             result = ToolCallResult
                 { callId = "computer-1"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 , output = secret
                 , callKind = ComputerFunctionCallKind
                 }

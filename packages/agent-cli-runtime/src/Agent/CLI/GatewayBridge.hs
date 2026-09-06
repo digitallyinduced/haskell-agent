@@ -2,6 +2,7 @@
 module Agent.CLI.GatewayBridge
     ( ManagedBridgeRequest(..)
     , managedBridgeRequestDecoder
+    , managedBridgeRequestEncoding
     , ManagedBridgeResponse(..)
     , managedBridgeResponseDecoder
     , ManagedActivity(..)
@@ -58,6 +59,7 @@ import Data.Aeson
     , (.=)
     )
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Encoding as Encoding
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum)
 import Data.Maybe (fromMaybe)
@@ -86,21 +88,16 @@ data ManagedBridgeRequest = ManagedBridgeRequest
     , bridgeRequestPayload :: !RawJson
     } deriving (Eq, Show)
 
-instance ToJSON ManagedBridgeRequest where
-    toJSON _ =
-        error "ManagedBridgeRequest supports Aeson encoding only"
-    toEncoding request = Aeson.pairs
-        ( "version" .= request.bridgeRequestVersion
-        <> "id" .= request.bridgeRequestId
-        <> "kind" .= request.bridgeRequestKind
-        <> "payload" .= EncodedRawJson request.bridgeRequestPayload
-        )
-
-newtype EncodedRawJson = EncodedRawJson RawJson
-
-instance ToJSON EncodedRawJson where
-    toJSON _ = error "EncodedRawJson supports Aeson encoding only"
-    toEncoding (EncodedRawJson raw) = rawJsonEncoding raw
+-- | Encode the envelope while preserving the validated, opaque payload bytes.
+-- This API deliberately returns an Encoding: constructing an Aeson Value
+-- would require decoding the payload and could change its representation.
+managedBridgeRequestEncoding :: ManagedBridgeRequest -> Encoding.Encoding
+managedBridgeRequestEncoding request = Aeson.pairs
+    ( "version" .= request.bridgeRequestVersion
+    <> "id" .= request.bridgeRequestId
+    <> "kind" .= request.bridgeRequestKind
+    <> Encoding.pair "payload" (rawJsonEncoding request.bridgeRequestPayload)
+    )
 
 managedBridgeRequestDecoder :: Hermes.Decoder ManagedBridgeRequest
 managedBridgeRequestDecoder = Hermes.object $
@@ -582,7 +579,9 @@ performBridgeRequest request callId kind payload timeoutMicros =
                     , bridgeRequestPayload =
                         rawJsonFromEncoding (Aeson.toEncoding payload)
                     }
-            writeLazyFileAtomically requestPath 0o600 (encode bridgeRequest)
+            writeLazyFileAtomically requestPath 0o600 $
+                Encoding.encodingToLazyByteString
+                    (managedBridgeRequestEncoding bridgeRequest)
             waitForBridgeResponse responsePath timeoutMicros
                 `finally` do
                     removePrivateFile requestPath

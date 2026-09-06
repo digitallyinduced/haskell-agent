@@ -30,19 +30,21 @@ import Agent.CLI.Models
     , modelCatalog
     )
 import Agent.CLI.NativeRuntime
-    ( NativeInteractionMode(..)
-    , NativeDiscoveryContext(..)
+    ( NativeDiscoveryContext(..)
     , NativeWorkspaceDiscovery(..)
     , NativeRunCapabilities(..)
     , NativeProcessRuntime
     , NativeRunHooks(..)
-    , NativeSessionTarget(..)
-    , NativeShellMode(..)
-    , NativeTurnRequest(..)
     , closeNativeProcessRuntime
     , fullNativeRunCapabilities
     , newNativeProcessRuntime
     , runNativeTurn
+    )
+import Agent.Runtime.Request
+    ( NativeInteractionMode(..)
+    , NativeSessionTarget(..)
+    , NativeShellMode(..)
+    , NativeTurnRequest(..)
     )
 import Agent.CLI.Options (CliOptions(..))
 import Agent.CLI.Project (defaultProjectSettings)
@@ -52,7 +54,6 @@ import Agent.CLI.Session
     ( SessionCreate(..)
     , SessionHandle(..)
     , SessionMeta(..)
-    , SessionTurnPage(..)
     , createSession
     , deleteSession
     , forkSessionAt
@@ -66,11 +67,11 @@ import Agent.CLI.Session
     , setSessionArchived
     )
 import Agent.CLI.Session.Codec (fromStoredMetadata)
-import Agent.Dialect (DialectId, dialectSlug)
+import Agent.Dialect (DialectId)
+import Agent.Loop qualified as Loop
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider
     ( Provider(..)
-    , providerSlug
     )
 import Agent.ReasoningEffort
     ( ReasoningEffort
@@ -89,14 +90,20 @@ import Agent.Server.Event
     ( boundedPublicText
     , projectAgentEntries
     , projectLoopEvent
-    , projectPublicValue
     )
-import Agent.Server.Supervisor (TurnControl(..))
+import Agent.Server.Identifier (newUUIDv7Text)
+import Agent.Server.Runtime.SessionCodec
+import Agent.Server.Runtime.Attachments (withMaterializedTurnFiles)
+import Agent.Server.Runtime.TurnStore qualified as TurnStore
 import Agent.Server.Sandbox
     ( TenantSandbox
     , closeTenantSandbox
     , openTenantSandbox
     , composeSandboxTools
+    )
+import Agent.Server.Supervisor
+    ( TurnControl(..)
+    , TurnPersistence(..)
     )
 import Agent.Server.Tenant
     ( ResolvedTenant(..) )
@@ -118,7 +125,7 @@ import Agent.Store.Postgres.Tenant
     )
 import Agent.Store.Postgres.Session qualified as StoreSession
 import Agent.Store.Types
-    ( StoreError
+    ( StoreError(..)
     , renderStoreError
     )
 import Agent.ToolDispatch (ToolCall(..))
@@ -145,23 +152,16 @@ import Control.Monad (forM_, void)
 import Data.Aeson
     ( Value
     , object
-    , toJSON
     , (.=)
     )
 import Data.Bifunctor (first)
-import Data.Int (Int64)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (find)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Data.Time.Clock (UTCTime)
-import Data.Time.Format
-    ( defaultTimeLocale
-    , formatTime
-    , parseTimeM
-    )
 import System.IO
     ( IOMode(WriteMode)
     , withFile
@@ -180,6 +180,7 @@ openServerRuntime
     :: ResolvedServerConfig
     -> IO (Either Text ServerRuntime)
 openServerRuntime config = mask \restore -> do
+    instanceId <- newUUIDv7Text
     case config.resolvedServerMode of
         MultiTenantMode multi -> do
             postgresConfig <-
@@ -191,11 +192,15 @@ openServerRuntime config = mask \restore -> do
                     Left err -> pure (Left (renderStoreError err))
                     Right stores -> do
                         manager <-
-                            newTenantRuntimeManager config multi stores
+                            newTenantRuntimeManager
+                                config
+                                multi
+                                stores
+                                instanceId
                         pure $
                             Right ServerRuntime
                                 { runtimeBackend =
-                                    multiTenantBackend manager
+                                    multiTenantBackend instanceId manager
                                 , runtimeClose =
                                     closeTenantRuntimeManager manager
                                         `finally`
@@ -206,36 +211,59 @@ openServerRuntime config = mask \restore -> do
                 managedPostgresConfigFromEnv config.resolvedStateDirectory
             restore (openStore postgresConfig) >>= \case
                 Left err -> pure (Left (renderStoreError err))
-                Right store -> do
-                    let root = sessionsRoot (unsafeEncodeUtf config.resolvedHome)
-                    nativeResult <-
-                        tryAny (restore (newNativeProcessRuntime root))
-                            `onException` closeStore store
-                    case nativeResult of
-                        Left _ -> do
-                            closeStore store
-                            pure
-                                (Left
-                                    "could not initialize the native agent runtime")
-                        Right native -> do
-                            let environment = RuntimeEnvironment
-                                    { environmentConfig = config
-                                    , environmentStore = store
-                                    , environmentNative = native
-                                    , environmentRoot = root
-                                    , environmentTenantId = localTenantId
-                                    , environmentHome =
-                                        config.resolvedHome
-                                    , environmentSandbox = Nothing
-                                    }
-                                backend = productionBackend environment
-                            pure $
-                                Right ServerRuntime
-                                    { runtimeBackend = backend
-                                    , runtimeClose =
-                                        closeNativeProcessRuntime native
+                Right store ->
+                    restore
+                        (TurnStore.openTurnStoreOwner store instanceId)
+                        >>= \case
+                            Left err -> do
+                                closeStore store
+                                pure (Left err)
+                            Right turnStoreOwner -> do
+                                let root =
+                                        sessionsRoot
+                                            (unsafeEncodeUtf config.resolvedHome)
+                                    closeOwnedStore =
+                                        TurnStore.closeTurnStoreOwner
+                                            turnStoreOwner
                                             `finally` closeStore store
-                                    }
+                                nativeResult <-
+                                    tryAny
+                                        (restore
+                                            (newNativeProcessRuntime root))
+                                        `onException` closeOwnedStore
+                                case nativeResult of
+                                    Left _ -> do
+                                        closeOwnedStore
+                                        pure
+                                            (Left
+                                                "could not initialize the native agent runtime")
+                                    Right native -> do
+                                        let environment = RuntimeEnvironment
+                                                { environmentConfig = config
+                                                , environmentStore = store
+                                                , environmentTurnStoreOwner =
+                                                    turnStoreOwner
+                                                , environmentNative = native
+                                                , environmentRoot = root
+                                                , environmentTenantId =
+                                                    localTenantId
+                                                , environmentHome =
+                                                    config.resolvedHome
+                                                , environmentSandbox = Nothing
+                                                }
+                                            backend =
+                                                productionBackend
+                                                    instanceId
+                                                    environment
+                                        pure $
+                                            Right ServerRuntime
+                                                { runtimeBackend = backend
+                                                , runtimeClose =
+                                                    closeRuntimeEnvironment
+                                                        environment
+                                                        `finally`
+                                                            closeStore store
+                                                }
 
 closeServerRuntime :: ServerRuntime -> IO ()
 closeServerRuntime = (.runtimeClose)
@@ -243,6 +271,7 @@ closeServerRuntime = (.runtimeClose)
 data RuntimeEnvironment = RuntimeEnvironment
     { environmentConfig :: !ResolvedServerConfig
     , environmentStore :: !Store
+    , environmentTurnStoreOwner :: !TurnStore.TurnStoreOwner
     , environmentNative :: !NativeProcessRuntime
     , environmentRoot :: !OsPath
     , environmentTenantId :: !TenantId
@@ -265,6 +294,7 @@ data TenantRuntimeManager = TenantRuntimeManager
     , tenantRuntimeMultiConfig :: !MultiTenantConfig
     , tenantRuntimeStores :: !TenantStoreManager
     , tenantRuntimeMaximum :: !Int
+    , tenantRuntimeInstanceId :: !Text
     , tenantRuntimeState :: !(MVar TenantRuntimeState)
     }
 
@@ -281,8 +311,9 @@ newTenantRuntimeManager
     :: ResolvedServerConfig
     -> MultiTenantConfig
     -> TenantStoreManager
+    -> Text
     -> IO TenantRuntimeManager
-newTenantRuntimeManager config multi stores = do
+newTenantRuntimeManager config multi stores instanceId = do
     state <- newMVar TenantRuntimeState
         { tenantRuntimeClosed = False
         , tenantRuntimeSlots = Map.empty
@@ -292,6 +323,7 @@ newTenantRuntimeManager config multi stores = do
         , tenantRuntimeMultiConfig = multi
         , tenantRuntimeStores = stores
         , tenantRuntimeMaximum = config.resolvedMaxActiveTenants
+        , tenantRuntimeInstanceId = instanceId
         , tenantRuntimeState = state
         }
 
@@ -459,20 +491,39 @@ createTenantRuntime manager tenant = mask \restore ->
                                             closeComponents
                                             pure (Left (storeApiError err))
                                         Right store ->
-                                            pure $
-                                                Right RuntimeEnvironment
-                                                    { environmentConfig =
-                                                        manager.tenantRuntimeConfig
-                                                    , environmentStore = store
-                                                    , environmentNative = native
-                                                    , environmentRoot = root
-                                                    , environmentTenantId =
-                                                        tenant.resolvedTenantId
-                                                    , environmentHome =
-                                                        tenant.resolvedTenantHome
-                                                    , environmentSandbox =
-                                                        Just sandbox
-                                                    }
+                                            restore
+                                                (TurnStore.openTurnStoreOwner
+                                                    store
+                                                    manager.tenantRuntimeInstanceId)
+                                                `onException` closeComponents
+                                                >>= \case
+                                                    Left err -> do
+                                                        closeComponents
+                                                        pure
+                                                            (Left
+                                                                (tenantRuntimeUnavailable
+                                                                    err))
+                                                    Right turnStoreOwner ->
+                                                        pure $
+                                                            Right
+                                                                RuntimeEnvironment
+                                                                    { environmentConfig =
+                                                                        manager.tenantRuntimeConfig
+                                                                    , environmentStore =
+                                                                        store
+                                                                    , environmentTurnStoreOwner =
+                                                                        turnStoreOwner
+                                                                    , environmentNative =
+                                                                        native
+                                                                    , environmentRoot =
+                                                                        root
+                                                                    , environmentTenantId =
+                                                                        tenant.resolvedTenantId
+                                                                    , environmentHome =
+                                                                        tenant.resolvedTenantHome
+                                                                    , environmentSandbox =
+                                                                        Just sandbox
+                                                                    }
 
 closeTenantRuntimeManager :: TenantRuntimeManager -> IO ()
 closeTenantRuntimeManager manager = mask \restore -> do
@@ -510,10 +561,14 @@ closeRuntimeEnvironment :: RuntimeEnvironment -> IO ()
 closeRuntimeEnvironment environment =
     closeNativeProcessRuntime environment.environmentNative
         `finally`
-            mapM_ closeTenantSandbox environment.environmentSandbox
+            ( mapM_ closeTenantSandbox environment.environmentSandbox
+                `finally`
+                    TurnStore.closeTurnStoreOwner
+                        environment.environmentTurnStoreOwner
+            )
 
-multiTenantBackend :: TenantRuntimeManager -> Backend
-multiTenantBackend manager = Backend
+multiTenantBackend :: Text -> TenantRuntimeManager -> Backend
+multiTenantBackend instanceId manager = Backend
     { backendAdmitBoundary = \principal action ->
         withTenantEnvironment manager principal.principalTenantId \environment ->
             first gatewayApiError
@@ -530,39 +585,73 @@ multiTenantBackend manager = Backend
     , backendTurnBoundaryGuard = \boundary action ->
         acquireTenantRuntime manager boundary.accessTenantId >>= \case
             Left err -> pure (Left err.apiErrorMessage)
-            Right environment ->
-                first gatewayTurnError
-                    <$> withGatewayTurnBoundaryAt
-                        (unsafeEncodeUtf environment.environmentHome)
-                        boundary.accessGatewayBoundary
-                        action
+            Right environment -> do
+                fenced <-
+                    TurnStore.withTurnStoreOwnerFence
+                        environment.environmentTurnStoreOwner
+                        $ first gatewayTurnError
+                            <$> withGatewayTurnBoundaryAt
+                                (unsafeEncodeUtf environment.environmentHome)
+                                boundary.accessGatewayBoundary
+                                action
+                pure (fenced >>= id)
     , backendCheckReady =
         first storeApiError
             <$> checkTenantStoreManager manager.tenantRuntimeStores
     , backendListModels = \boundary ->
-        withBoundaryBackend manager boundary \backend ->
+        withBoundaryBackend instanceId manager boundary \backend ->
             backend.backendListModels boundary
     , backendListSessions = \boundary archive cursor limit ->
-        withBoundaryBackend manager boundary \backend ->
+        withBoundaryBackend instanceId manager boundary \backend ->
             backend.backendListSessions boundary archive cursor limit
     , backendCreateSession = \boundary request ->
-        withBoundaryBackend manager boundary \backend ->
+        withBoundaryBackend instanceId manager boundary \backend ->
             backend.backendCreateSession boundary request
     , backendGetSession = \boundary sessionId ->
-        withBoundaryBackend manager boundary \backend ->
+        withBoundaryBackend instanceId manager boundary \backend ->
             backend.backendGetSession boundary sessionId
     , backendPatchSession = \boundary sessionId request ->
-        withBoundaryBackend manager boundary \backend ->
+        withBoundaryBackend instanceId manager boundary \backend ->
             backend.backendPatchSession boundary sessionId request
     , backendDeleteSession = \boundary sessionId ->
-        withBoundaryBackend manager boundary \backend ->
+        withBoundaryBackend instanceId manager boundary \backend ->
             backend.backendDeleteSession boundary sessionId
     , backendSessionHistory = \boundary sessionId before limit ->
-        withBoundaryBackend manager boundary \backend ->
+        withBoundaryBackend instanceId manager boundary \backend ->
             backend.backendSessionHistory boundary sessionId before limit
     , backendForkSession = \boundary sessionId request ->
-        withBoundaryBackend manager boundary \backend ->
+        withBoundaryBackend instanceId manager boundary \backend ->
             backend.backendForkSession boundary sessionId request
+    , backendReserveTurn =
+        \boundary sessionId clientRequestId prompt turnId now ->
+            withBoundaryBackend instanceId manager boundary \backend ->
+                backend.backendReserveTurn
+                    boundary
+                    sessionId
+                    clientRequestId
+                    prompt
+                    turnId
+                    now
+    , backendReserveSessionMutation = \boundary sessionId now ->
+        withBoundaryBackend instanceId manager boundary \backend ->
+            backend.backendReserveSessionMutation boundary sessionId now
+    , backendLookupTurn = \boundary turnId ->
+        withBoundaryBackend instanceId manager boundary \backend ->
+            backend.backendLookupTurn boundary turnId
+    , backendListTurns = \boundary sessionId ->
+        withBoundaryBackend instanceId manager boundary \backend ->
+            backend.backendListTurns boundary sessionId
+    , backendLookupTurnResult = \boundary turnId ->
+        withBoundaryBackend instanceId manager boundary \backend ->
+            backend.backendLookupTurnResult boundary turnId
+    , backendRequestTurnCancellation = \boundary turnId requestedAt ->
+        withBoundaryBackend instanceId manager boundary \backend ->
+            backend.backendRequestTurnCancellation
+                boundary
+                turnId
+                requestedAt
+    , backendTurnPersistence =
+        multiTenantTurnPersistence instanceId manager
     , backendRunTurn = \control spec ->
         acquireTenantRuntime
             manager
@@ -582,13 +671,26 @@ withTenantEnvironment manager tenantId action =
         Right environment -> action environment
 
 withBoundaryBackend
-    :: TenantRuntimeManager
+    :: Text
+    -> TenantRuntimeManager
     -> AccessBoundary
     -> (Backend -> IO (Either ApiError value))
     -> IO (Either ApiError value)
-withBoundaryBackend manager boundary action =
+withBoundaryBackend instanceId manager boundary action =
     withTenantEnvironment manager boundary.accessTenantId
-        (action . productionBackend)
+        (action . productionBackend instanceId)
+
+withBoundaryBackendText
+    :: Text
+    -> TenantRuntimeManager
+    -> AccessBoundary
+    -> (Backend -> IO (Either Text value))
+    -> IO (Either Text value)
+withBoundaryBackendText instanceId manager boundary action =
+    acquireTenantRuntime manager boundary.accessTenantId >>= \case
+        Left err -> pure (Left err.apiErrorMessage)
+        Right environment ->
+            action (productionBackend instanceId environment)
 
 tenantRuntimeUnavailable :: Text -> ApiError
 tenantRuntimeUnavailable message = ApiError
@@ -598,8 +700,8 @@ tenantRuntimeUnavailable message = ApiError
     , apiErrorDetails = Nothing
     }
 
-productionBackend :: RuntimeEnvironment -> Backend
-productionBackend environment = Backend
+productionBackend :: Text -> RuntimeEnvironment -> Backend
+productionBackend _instanceId environment = Backend
     { backendAdmitBoundary = \principal action ->
         first gatewayApiError
             <$> withCurrentGatewayBoundaryAt
@@ -611,10 +713,16 @@ productionBackend environment = Backend
                 home
                 boundary.accessGatewayBoundary
                 action
-    , backendTurnBoundaryGuard = \boundary action ->
-        first gatewayTurnError
-            <$> withGatewayTurnBoundaryAt
-                home boundary.accessGatewayBoundary action
+    , backendTurnBoundaryGuard = \boundary action -> do
+        fenced <-
+            TurnStore.withTurnStoreOwnerFence
+                environment.environmentTurnStoreOwner
+                $ first gatewayTurnError
+                    <$> withGatewayTurnBoundaryAt
+                        home
+                        boundary.accessGatewayBoundary
+                        action
+        pure (fenced >>= id)
     , backendCheckReady =
         fmap (first storeApiError . fmap (const ())) $
             StoreSession.loadSessionMetadata
@@ -628,10 +736,107 @@ productionBackend environment = Backend
     , backendDeleteSession = deleteSessionForBoundary environment
     , backendSessionHistory = sessionHistoryForBoundary environment
     , backendForkSession = forkSessionForBoundary environment
+    , backendReserveSessionMutation =
+        turnStore.turnStoreReserveSessionMutation
+    , backendReserveTurn = turnStore.turnStoreReserve
+    , backendLookupTurn = turnStore.turnStoreLookup
+    , backendListTurns = turnStore.turnStoreList
+    , backendLookupTurnResult = turnStore.turnStoreLookupResult
+    , backendRequestTurnCancellation =
+        turnStore.turnStoreRequestCancellation
+    , backendTurnPersistence = turnStore.turnStorePersistence
     , backendRunTurn = runTurn environment
     }
   where
     home = unsafeEncodeUtf environment.environmentHome
+    turnStore =
+        TurnStore.newTurnStoreBackend
+            environment.environmentStore
+            environment.environmentTenantId
+            environment.environmentTurnStoreOwner
+
+multiTenantTurnPersistence
+    :: Text
+    -> TenantRuntimeManager
+    -> TurnPersistence
+multiTenantTurnPersistence instanceId manager =
+    TurnPersistence
+        { turnPersistenceStarted = \record startedAt ->
+            withBoundaryBackendText
+                instanceId
+                manager
+                record.turnRecordBoundary
+                \backend ->
+                    backend.backendTurnPersistence.turnPersistenceStarted
+                        record
+                        startedAt
+        , turnPersistenceTerminal = \record finishedAt outcome ->
+            withBoundaryBackendText
+                instanceId
+                manager
+                record.turnRecordBoundary
+                \backend ->
+                    backend.backendTurnPersistence.turnPersistenceTerminal
+                        record
+                        finishedAt
+                        outcome
+        , turnPersistenceShouldCancel = \record ->
+            withBoundaryBackendText
+                instanceId
+                manager
+                record.turnRecordBoundary
+                \backend ->
+                    backend.backendTurnPersistence.turnPersistenceShouldCancel
+                        record
+        , turnPersistenceCreateHumanRequest = \record request ->
+            withBoundaryBackendText
+                instanceId
+                manager
+                record.turnRecordBoundary
+                \backend ->
+                    backend.backendTurnPersistence.turnPersistenceCreateHumanRequest
+                        record
+                        request
+        , turnPersistenceListHumanRequests = \boundary turnId ->
+            withBoundaryBackendText
+                instanceId
+                manager
+                boundary
+                \backend ->
+                    backend.backendTurnPersistence.turnPersistenceListHumanRequests
+                        boundary
+                        turnId
+        , turnPersistenceResolveHumanRequest =
+            \boundary requestId response ->
+                withBoundaryBackendText
+                    instanceId
+                    manager
+                    boundary
+                    \backend ->
+                        backend.backendTurnPersistence.turnPersistenceResolveHumanRequest
+                            boundary
+                            requestId
+                            response
+        , turnPersistenceLoadHumanResponse = \record requestId ->
+            withBoundaryBackendText
+                instanceId
+                manager
+                record.turnRecordBoundary
+                \backend ->
+                    backend.backendTurnPersistence.turnPersistenceLoadHumanResponse
+                        record
+                        requestId
+        , turnPersistenceDeleteHumanRequest = \record requestId disposition ->
+            withBoundaryBackendText
+                instanceId
+                manager
+                record.turnRecordBoundary
+                \backend ->
+                    backend.backendTurnPersistence.turnPersistenceDeleteHumanRequest
+                        record
+                        requestId
+                        disposition
+        }
 
 gatewayApiError :: GatewayBoundaryError -> ApiError
 gatewayApiError err =
@@ -964,7 +1169,7 @@ runTurn
     :: RuntimeEnvironment
     -> TurnControl
     -> TurnSpec
-    -> IO (Either Text ())
+    -> IO (Either Text TurnExecutionOutput)
 runTurn environment control spec =
     loadAuthorizedMeta
         environment
@@ -981,33 +1186,79 @@ runTurn environment control spec =
                             case parseReasoningEffort meta.metaEffort of
                                 Left err -> pure (Left err)
                                 Right effort ->
-                                    withFile "/dev/null" WriteMode \output ->
-                                        runNativeTurn
-                                            environment.environmentNative
-                                            output
-                                            (nativeHooks
-                                                environment
-                                                control
-                                                spec.turnSpecSessionId
-                                                cwd
-                                                meta.metaDialect)
-                                            NativeTurnRequest
-                                                { nativeTurnPrompt =
-                                                    spec.turnSpecPrompt
-                                                , nativeTurnSession =
-                                                    NativeResumeSession
+                                    withMaterializedTurnFiles cwd spec \turnPrompt ->
+                                        withFile "/dev/null" WriteMode \output -> do
+                                            finalOutput <- newIORef Nothing
+                                            let baseHooks =
+                                                    nativeHooks
+                                                        environment
+                                                        control
                                                         spec.turnSpecSessionId
-                                                , nativeTurnProvider = Nothing
-                                                , nativeTurnModel = Nothing
-                                                , nativeTurnCwd =
-                                                    unsafeEncodeUtf cwd
-                                                , nativeTurnEffort =
-                                                    Just effort
-                                                , nativeTurnInteractionMode =
-                                                    NativeAsk
-                                                , nativeTurnShellMode =
-                                                    tenantShellMode environment
-                                                }
+                                                        cwd
+                                                        meta.metaDialect
+                                                hooks =
+                                                    baseHooks
+                                                        { nativeOnLoopEvent = \event -> do
+                                                            case event of
+                                                                Loop.TurnFinished value ->
+                                                                    writeIORef
+                                                                        finalOutput
+                                                                        (Just value)
+                                                                _ -> pure ()
+                                                            baseHooks.nativeOnLoopEvent event
+                                                        }
+                                            runNativeTurn
+                                                environment.environmentNative
+                                                output
+                                                hooks
+                                                NativeTurnRequest
+                                                    { nativeTurnPrompt =
+                                                        turnPrompt
+                                                    , nativeTurnImages =
+                                                        spec.turnSpecImages
+                                                    , nativeTurnSession =
+                                                        NativeResumeSession
+                                                            spec.turnSpecSessionId
+                                                    , nativeTurnProvider = Nothing
+                                                    , nativeTurnModel = Nothing
+                                                    , nativeTurnCwd =
+                                                        unsafeEncodeUtf cwd
+                                                    , nativeTurnEffort =
+                                                        Just effort
+                                                    , nativeTurnInteractionMode =
+                                                        NativeAsk
+                                                    , nativeTurnShellMode =
+                                                        tenantShellMode environment
+                                                    }
+                                                >>= \case
+                                                    Left err -> pure (Left err)
+                                                    Right () ->
+                                                        readIORef finalOutput
+                                                            >>= pure
+                                                                . maybe
+                                                                    ( Left
+                                                                        "agent turn completed without a terminal output"
+                                                                    )
+                                                                    ( Right
+                                                                        . turnExecutionOutput
+                                                                    )
+
+turnExecutionOutput :: Loop.TurnOutput -> TurnExecutionOutput
+turnExecutionOutput output =
+    let assistantText = boundedPublicText <$> output.assistantText
+     in TurnExecutionOutput
+            { turnExecutionResponseId = output.responseId
+            , turnExecutionAssistantText = fst <$> assistantText
+            , turnExecutionAssistantTextTruncated =
+                maybe False snd assistantText
+            , turnExecutionCompletion =
+                case output.completion of
+                    Loop.TurnCompleted -> TurnCompletionComplete
+                    Loop.TurnIncomplete reason reasoningTokens ->
+                        TurnCompletionIncomplete
+                            (fst (boundedPublicText reason))
+                            reasoningTokens
+            }
 
 nativeHooks
     :: RuntimeEnvironment
@@ -1020,6 +1271,7 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
     { nativeOnLoopEvent = \event ->
         let (eventType, value) = projectLoopEvent event
         in control.turnControlEmit eventType value
+    , nativeInitialTurnInputs = Nothing
     , nativeOnSessionId = \_ -> pure ()
     , nativeRegisterCancel = control.turnControlRegisterCancel
     , nativeRegisterAgentSnapshot = \snapshot ->
@@ -1075,6 +1327,7 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
                 { nativeProviderFallback = False
                 , nativeProviderHostedTools = False
                 , nativeHostExtensions = False
+                , nativeMcpTools = True
                 , nativeCollaboration = False
                 , nativeProviderNativeTools = False
                 }
@@ -1337,11 +1590,8 @@ selectModel boundary catalog options requested =
         case boundary.accessGatewayBoundary.gatewayBoundaryIdentity of
         Just _ -> listToMaybe options
         Nothing ->
-            (defaultModelOptionFor catalog OpenAIProvider
-                >>= \preferred ->
-                    find
-                        ((== preferred.modelTarget) . (.modelTarget))
-                        options)
+            let preferred = defaultModelOptionFor catalog OpenAIProvider
+            in find ((== preferred.modelTarget) . (.modelTarget)) options
                 <|> listToMaybe options
 
 resolveEffort
@@ -1361,122 +1611,6 @@ resolveEffort provider requested =
                         , apiErrorDetails = Nothing
                         })
                 (parseReasoningEffort effort)
-
-sessionValue :: Bool -> SessionMeta -> Value
-sessionValue archived meta = object
-    [ "id" .= meta.metaId
-    , "createdAt" .= meta.metaCreatedAt
-    , "updatedAt" .= meta.metaUpdatedAt
-    , "provider" .= providerSlug meta.metaProvider
-    , "connection" .= meta.metaConnection
-    , "model" .= meta.metaModel
-    , "transportModel" .= meta.metaTransportModel
-    , "dialect" .= dialectSlug meta.metaDialect
-    , "cwd" .= unsafeToFilePath meta.metaCwd
-    , "effort" .= meta.metaEffort
-    , "title" .= meta.metaTitle
-    , "titleIsManual" .= meta.metaTitleIsManual
-    , "archived" .= archived
-    , "usage" .= object
-        [ "input" .= meta.metaInputTokens
-        , "output" .= meta.metaOutputTokens
-        , "cached" .= meta.metaCachedTokens
-        ]
-    ]
-
-modelOptionValue :: ModelOption -> Value
-modelOptionValue option = object
-    [ "id" .= option.modelTarget.targetModelId
-    , "provider" .= providerSlug option.modelTarget.targetProvider
-    , "connection" .= option.modelTarget.targetConnectionId
-    , "transportModel" .= option.modelTarget.targetWireModelId
-    , "dialect" .= dialectSlug option.modelTarget.targetDialect
-    , "label" .= option.modelLabel
-    , "contextWindow" .= option.modelContextWindow
-    ]
-
-historyValue :: SessionMeta -> Bool -> SessionTurnPage -> Value
-historyValue meta archived page = object
-    [ "session" .= sessionValue archived meta
-    , "data" .=
-        [ object
-            [ "index" .= index
-            , "turn" .= projectPublicValue (toJSON turn)
-            ]
-        | (index, turn) <- page.pageTurns
-        ]
-    , "generationStart" .= page.pageGenerationStart
-    , "total" .= page.pageTotalTurns
-    , "hasOlder" .= page.pageHasOlder
-    , "hasNewer" .= page.pageHasNewer
-    , "nextCursor" .=
-        if page.pageHasOlder
-            then fst <$> listToMaybe page.pageTurns
-            else Nothing
-    ]
-
-storeArchiveFilter
-    :: SessionArchiveFilter
-    -> StoreSession.SessionArchiveFilter
-storeArchiveFilter = \case
-    ActiveSessions -> StoreSession.SessionActive
-    ArchivedSessions -> StoreSession.SessionArchived
-    AllSessions -> StoreSession.SessionAll
-
-encodeCursor :: StoreSession.SessionListCursor -> Text
-encodeCursor cursor =
-    Text.pack
-        (formatTime
-            defaultTimeLocale
-            cursorTimestampFormat
-            cursor.sessionListCursorUpdatedAt)
-        <> "|"
-        <> cursor.sessionListCursorKey
-
-decodeCursor
-    :: Text
-    -> Either ApiError StoreSession.SessionListCursor
-decodeCursor raw =
-    let (timestamp, separatorAndKey) = Text.breakOn "|" raw
-        key = Text.drop 1 separatorAndKey
-        parsed =
-            parseTimeM
-                True
-                defaultTimeLocale
-                cursorTimestampFormat
-                (Text.unpack timestamp)
-                :: Maybe UTCTime
-    in case parsed of
-        Just updatedAt
-            | not (Text.null separatorAndKey)
-            , not (Text.null key) ->
-                Right StoreSession.SessionListCursor
-                    { sessionListCursorUpdatedAt = updatedAt
-                    , sessionListCursorKey = key
-                    }
-        _ ->
-            Left ApiError
-                { apiErrorStatus = 400
-                , apiErrorCode = "invalid_cursor"
-                , apiErrorMessage = "the session cursor is invalid"
-                , apiErrorDetails = Nothing
-                }
-
-cursorTimestampFormat :: String
-cursorTimestampFormat = "%Y-%m-%dT%H:%M:%S%QZ"
-
-integerToInt64 :: Integer -> Either ApiError Int64
-integerToInt64 value
-    | value < 0
-        || value > toInteger (maxBound :: Int64) =
-        Left ApiError
-            { apiErrorStatus = 400
-            , apiErrorCode = "invalid_turn_cursor"
-            , apiErrorMessage =
-                "the turn cursor must be a non-negative 64-bit integer"
-            , apiErrorDetails = Nothing
-            }
-    | otherwise = Right (fromInteger value)
 
 storeApiError :: StoreError -> ApiError
 storeApiError err =

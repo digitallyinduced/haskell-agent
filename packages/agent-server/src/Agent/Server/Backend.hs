@@ -6,15 +6,24 @@
 -- 'backendContinueBoundary' before every write.
 module Agent.Server.Backend
     ( Backend(..)
+    , SessionMutationLease(..)
     ) where
 
 import Agent.Server.Supervisor
     ( TurnBoundaryGuard
     , TurnControl
+    , TurnPersistence
     )
 import Agent.Server.Types
 import Data.Aeson (Value)
 import Data.Text (Text)
+import Data.Time.Clock (UTCTime)
+
+data SessionMutationLease = SessionMutationLease
+    { runSessionMutationLease ::
+        forall value. IO value -> IO (Either ApiError value)
+    , releaseSessionMutationLease :: IO ()
+    }
 
 data Backend = Backend
     { backendAdmitBoundary
@@ -66,6 +75,46 @@ data Backend = Backend
             -> ForkSessionRequest
             -> IO (Either ApiError Value)
             )
+    , backendReserveSessionMutation
+        :: !( AccessBoundary
+            -> Text
+            -> UTCTime
+            -> IO (Either ApiError (Maybe SessionMutationLease))
+            )
+    , backendReserveTurn
+        :: !( AccessBoundary
+            -> Text
+            -> ClientRequestId
+            -> Text
+            -> TurnId
+            -> UTCTime
+            -> IO (Either ApiError TurnReservation)
+            )
+    , backendLookupTurn
+        :: !( AccessBoundary
+            -> TurnId
+            -> IO (Either ApiError (Maybe TurnRecord))
+            )
+    , backendListTurns
+        :: !( AccessBoundary
+            -> Maybe Text
+            -> IO (Either ApiError [TurnRecord])
+            )
+    , backendLookupTurnResult
+        :: !( AccessBoundary
+            -> TurnId
+            -> IO (Either ApiError (Maybe TurnResult))
+            )
+    , backendRequestTurnCancellation
+        :: !( AccessBoundary
+            -> TurnId
+            -> UTCTime
+            -> IO (Either ApiError (Maybe (Bool, TurnRecord)))
+            )
+    , backendTurnPersistence :: !TurnPersistence
     , backendRunTurn
-        :: !(TurnControl -> TurnSpec -> IO (Either Text ()))
+        :: !( TurnControl
+            -> TurnSpec
+            -> IO (Either Text TurnExecutionOutput)
+            )
     }

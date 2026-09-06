@@ -2,12 +2,24 @@ module Agent.CLI.RepositoryDeliverySpec (spec) where
 
 import qualified Data.Aeson as Aeson
 import Agent.CLI.RepositoryDelivery
+import Agent.CLI.RepositoryDelivery.ConfirmationStore
+    ( ConfirmationStore
+    , closeConfirmationStore
+    , confirmationCount
+    , insertConfirmation
+    , newConfirmationStoreWithExpiryWait
+    )
 import Agent.CLI.RepositoryReview
     ( RepositorySnapshot(..)
     , repositorySnapshot
     )
 import System.Timeout (timeout)
-import Control.Concurrent (threadDelay)
+import Control.Concurrent
+    ( newEmptyMVar
+    , putMVar
+    , takeMVar
+    , threadDelay
+    )
 import Control.Exception.Safe (bracket)
 import qualified Data.Text as Text
 import qualified Data.ByteString.Char8 as BS8
@@ -84,6 +96,25 @@ spec = describe "repository delivery service" do
         it "ignores same-named branches from another fork and deleted head repositories" do
             parseRepositoryPullRequest "owner/repo" "[{\"headRepository\":{\"name\":\"repo\"},\"headRepositoryOwner\":{\"login\":\"someone-else\"}}]" `shouldBe` Right Nothing
             parseRepositoryPullRequest "owner/repo" "[{\"headRepository\":null,\"headRepositoryOwner\":null}]" `shouldBe` Right Nothing
+    it "reclaims expired confirmation payloads while idle" do
+        expiry <- newEmptyMVar
+        bracket
+            (newConfirmationStoreWithExpiryWait
+                (\_ -> takeMVar expiry))
+            closeConfirmationStore
+            \store -> do
+                insertConfirmation
+                    store
+                    1
+                    "idle-expiry"
+                    maxBound
+                    (Text.replicate (1024 * 1024) "x")
+                    `shouldReturn` True
+                confirmationCount store `shouldReturn` 1
+
+                putMVar expiry ()
+                timeout 1_000_000 (awaitEmpty store)
+                    `shouldReturn` Just ()
 
     it "validates branch and remote names without option/ref injection" do
         validateBranchName "feature/safe-name" `shouldBe` True
@@ -750,6 +781,12 @@ withTempDirectory template action = do
             pure path)
         removePathForcibly
         action
+
+awaitEmpty :: ConfirmationStore value -> IO ()
+awaitEmpty store =
+    confirmationCount store >>= \case
+        0 -> pure ()
+        _ -> threadDelay 1_000 >> awaitEmpty store
 
 withFakeGh
     :: FilePath

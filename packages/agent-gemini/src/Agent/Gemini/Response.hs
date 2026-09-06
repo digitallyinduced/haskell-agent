@@ -156,6 +156,7 @@ canonicalFunctionCall state native = FunctionCall
     , arguments
     , encryptedFunctionArgs = Nothing
     , status = Just ItemCompleted
+    , async = Nothing
     }
   where
     callId = fromMaybe syntheticId

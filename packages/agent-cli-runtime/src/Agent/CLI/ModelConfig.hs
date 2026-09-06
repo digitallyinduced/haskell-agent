@@ -6,7 +6,8 @@
 module Agent.CLI.ModelConfig
     ( CatalogModel(..)
     , ConnectionKind(..)
-    , ModelCatalog(..)
+    , ModelCatalog
+    , catalogModels
     , ModelConnection(..)
     , ResponsesConnection(..)
     , builtinConnectionId
@@ -19,6 +20,7 @@ module Agent.CLI.ModelConfig
     , catalogModelById
     , catalogModelForConnection
     , catalogModelsForConnection
+    , catalogSupportsAsyncToolCallsForTransport
     , connectionSupportsDialect
     , connectionBuiltinProvider
     , decodeModelConfig
@@ -45,7 +47,6 @@ import Control.Exception.Safe (tryIO)
 import Control.Monad (unless)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlpha, isAlphaNum, isSpace)
-import Data.Foldable (traverse_)
 import Data.List (nub)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
@@ -88,6 +89,7 @@ data CatalogModel = CatalogModel
     , catalogModelLabel :: !(Maybe Text)
     , catalogModelReasoningEfforts :: !(Maybe [Text])
     , catalogModelDefaultReasoningEffort :: !(Maybe Text)
+    , catalogModelSupportsAsyncToolCalls :: !Bool
     , catalogModelDefault :: !Bool
     , catalogModelFallbackPriority :: !(Maybe Int)
     }
@@ -95,11 +97,28 @@ data CatalogModel = CatalogModel
 
 data ModelCatalog = ModelCatalog
     { catalogConnections :: !(Map Text ModelConnection)
-    , catalogModels :: ![CatalogModel]
+    , modelEntries :: ![CatalogModel]
+    , catalogDefaults :: !ProviderDefaults
     , catalogModelsById :: !(Map Text CatalogModel)
     , catalogGatewayModelsById :: !(Map Text CatalogModel)
     }
     deriving (Eq, Show)
+
+-- Every supported provider has a default after configuration validation.
+-- Keeping a product here makes lookup exhaustive without a partial Map lookup.
+data ProviderDefaults = ProviderDefaults
+    { openAiDefault :: !CatalogModel
+    , xaiDefault :: !CatalogModel
+    , openRouterDefault :: !CatalogModel
+    , geminiDefault :: !CatalogModel
+    , claudeDefault :: !CatalogModel
+    }
+    deriving (Eq, Show)
+
+-- | Models in their configured presentation order. Catalog internals cannot
+-- be updated independently of the indexes and validated defaults.
+catalogModels :: ModelCatalog -> [CatalogModel]
+catalogModels catalog = catalog.modelEntries
 
 data ConfigFile = ConfigFile
     { configVersion :: !Int
@@ -127,6 +146,7 @@ data ModelFile = ModelFile
     , modelFileLabel :: !(Maybe Text)
     , modelFileReasoningEfforts :: !(Maybe [Text])
     , modelFileDefaultReasoningEffort :: !(Maybe Text)
+    , modelFileSupportsAsyncToolCalls :: !Bool
     , modelFileDefault :: !Bool
     , modelFileFallbackPriority :: !(Maybe Int)
     }
@@ -165,6 +185,7 @@ modelFileDecoder =
             <*> optionalKey "reasoning_efforts"
                 (Hermes.list Hermes.text)
             <*> optionalKey "default_reasoning_effort" Hermes.text
+            <*> defaultKey False "supports_async_tool_calls" Hermes.bool
             <*> defaultKey False "default" Hermes.bool
             <*> optionalKey "fallback_priority" Hermes.int
 
@@ -245,7 +266,28 @@ catalogModelForConnection catalog connectionId modelId
 
 catalogModelsForConnection :: Text -> ModelCatalog -> [CatalogModel]
 catalogModelsForConnection wanted =
-    filter ((== wanted) . (.catalogModelConnectionId)) . (.catalogModels)
+    filter ((== wanted) . (.catalogModelConnectionId)) . catalogModels
+
+-- | Resolve async-tool support against the exact routing connection and
+-- transport model. Ambiguous custom aliases fail closed unless every matching
+-- catalog entry explicitly opts in. Gateway aliases never inherit capability
+-- merely by resembling a direct model name.
+catalogSupportsAsyncToolCallsForTransport
+    :: ModelCatalog
+    -> Text
+    -> Text
+    -> Bool
+catalogSupportsAsyncToolCallsForTransport catalog connectionId transportModel
+    | connectionId == organizationGatewayConnectionId = False
+    | otherwise =
+        case
+            [ model
+            | model <- catalogModelsForConnection connectionId catalog
+            , model.catalogModelId == transportModel
+                || model.catalogModelWireId == transportModel
+            ] of
+            [] -> False
+            matches -> all (.catalogModelSupportsAsyncToolCalls) matches
 
 connectionBuiltinProvider :: ModelConnection -> Maybe Provider
 connectionBuiltinProvider connection = case connection.connectionKind of
@@ -264,15 +306,13 @@ connectionSupportsDialect connection provider dialect
                 && dialect == ClaudeCodeDialect)
     | otherwise = providerSupportsDialect provider dialect
 
-catalogDefaultForProvider :: ModelCatalog -> Provider -> Maybe CatalogModel
-catalogDefaultForProvider catalog provider =
-    case
-        [ model
-        | model <- catalogModelsForConnection (builtinConnectionId provider) catalog
-        , model.catalogModelDefault
-        ] of
-        model : _ -> Just model
-        [] -> Nothing
+catalogDefaultForProvider :: ModelCatalog -> Provider -> CatalogModel
+catalogDefaultForProvider catalog = \case
+    OpenAIProvider -> catalog.catalogDefaults.openAiDefault
+    XAIProvider -> catalog.catalogDefaults.xaiDefault
+    OpenRouterProvider -> catalog.catalogDefaults.openRouterDefault
+    GeminiProvider -> catalog.catalogDefaults.geminiDefault
+    ClaudeCodeProvider -> catalog.catalogDefaults.claudeDefault
 
 -- | Decode and validate one standalone file. This is mainly useful for tests;
 -- normal startup should use 'mergeModelConfigs' so defaults can be overlaid.
@@ -460,13 +500,19 @@ validateConfig :: Text -> ConfigFile -> Either Text ModelCatalog
 validateConfig source config = do
     ensureUniqueModelRoutes source config.configModels
     connections <- validationToEither $
-        Map.traverseWithKey validateConnection config.configConnections
+        Map.traverseWithKey validateModelConnection config.configConnections
     models <- validationToEither $
-        traverse (validateModel connections) config.configModels
-    traverse_ (validateBuiltinDefault models) allBuiltinProviders
+        traverse (validateCatalogModel connections) config.configModels
+    defaults <- ProviderDefaults
+        <$> validateBuiltinDefault connections models OpenAIProvider
+        <*> validateBuiltinDefault connections models XAIProvider
+        <*> validateBuiltinDefault connections models OpenRouterProvider
+        <*> validateBuiltinDefault connections models GeminiProvider
+        <*> validateBuiltinDefault connections models ClaudeCodeProvider
     pure ModelCatalog
         { catalogConnections = connections
-        , catalogModels = models
+        , modelEntries = models
+        , catalogDefaults = defaults
         , catalogModelsById =
             Map.fromList
                 [ (model.catalogModelId, model)
@@ -482,14 +528,19 @@ validateConfig source config = do
                     == organizationGatewayConnectionId
                 ]
         }
-  where
-    validateConnection connectionId raw =
+
+validateModelConnection
+    :: Text
+    -> ConnectionFile
+    -> Validation [Text] ModelConnection
+validateModelConnection connectionId raw =
         case validateConnectionId connectionId of
             Left err -> validationFailure err
             Right () ->
                 ModelConnection connectionId
                     <$> validateConnectionKind connectionId raw
 
+  where
     validateConnectionKind connectionId raw =
         case Text.toLower (Text.strip raw.connectionApi) of
             "builtin" ->
@@ -555,7 +606,11 @@ validateConfig source config = do
                 validationFailure ("connection " <> connectionId
                     <> " has unsupported api " <> other)
 
-    validateModel connections raw =
+validateCatalogModel
+    :: Map Text ModelConnection
+    -> ModelFile
+    -> Validation [Text] CatalogModel
+validateCatalogModel connections raw =
         let modelId = Text.strip raw.modelFileId
             connectionId = Text.strip raw.modelFileConnection
             wireId = Text.strip (fromMaybe modelId raw.modelFileWireId)
@@ -591,7 +646,7 @@ validateConfig source config = do
                                 wireId
                                 reasoningEfforts
                                 defaultReasoningEffort
-      where
+  where
         validateResolvedModel
             connection
             dialect
@@ -691,6 +746,9 @@ validateConfig source config = do
                 , catalogModelReasoningEfforts = reasoningEfforts
                 , catalogModelDefaultReasoningEffort =
                     defaultReasoningEffort
+                , catalogModelSupportsAsyncToolCalls =
+                    raw.modelFileSupportsAsyncToolCalls
+                        && connectionId /= organizationGatewayConnectionId
                 , catalogModelDefault = raw.modelFileDefault
                 , catalogModelFallbackPriority =
                     raw.modelFileFallbackPriority
@@ -701,14 +759,23 @@ supportedReasoningEfforts :: [Text]
 supportedReasoningEfforts =
     ["none", "low", "medium", "high", "xhigh", "max"]
 
-validateBuiltinDefault :: [CatalogModel] -> Provider -> Either Text ()
-validateBuiltinDefault models provider =
+validateBuiltinDefault
+    :: Map Text ModelConnection
+    -> [CatalogModel]
+    -> Provider
+    -> Either Text CatalogModel
+validateBuiltinDefault connections models provider = do
+    case Map.lookup (builtinConnectionId provider) connections of
+        Just ModelConnection{connectionKind = BuiltinConnection configured}
+            | configured == provider -> pure ()
+        _ -> Left ("connection " <> builtinConnectionId provider
+            <> " must be a builtin connection for its provider")
     case filter
         (\model ->
             model.catalogModelConnectionId == builtinConnectionId provider
                 && model.catalogModelDefault)
         models of
-        [_] -> Right ()
+        [model] -> Right model
         [] ->
             Left ("connection " <> builtinConnectionId provider
                 <> " must have exactly one default model")
@@ -778,7 +845,7 @@ modelMergeKey model =
 
 allBuiltinProviders :: [Provider]
 allBuiltinProviders =
-    [OpenAIProvider, XAIProvider, OpenRouterProvider, GeminiProvider]
+    [OpenAIProvider, XAIProvider, OpenRouterProvider, GeminiProvider, ClaudeCodeProvider]
 
 gatewaySupportsDialect :: DialectId -> Bool
 gatewaySupportsDialect = \case

@@ -67,11 +67,14 @@ library
                     , http-types
                     , memory
                     , network
+                    , network-uri
                     , retry >= 0.9.3.1 && < 0.10
                     , safe-exceptions
                     , scientific
                     , text
                     , time
+                    , wai
+                    , warp
 
 test-suite agent-gemini-test
     import:           common-opts

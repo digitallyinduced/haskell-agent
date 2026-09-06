@@ -4,6 +4,12 @@ module Agent.CLI.Session.Runner.Execution
     , SessionRunnerContinuation(..)
     , runSession
     ) where
+import qualified Agent.CLI.Session.Activity as Activity
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    , readSessionRequestModel
+    , modifySessionRequestOptions
+    )
 import Agent.CLI.CodeModeRuntime
 import Agent.CLI.Claude
     ( ClaudeSessionRuntime(..)
@@ -13,9 +19,8 @@ import Agent.CLI.Compaction
     ( AutomaticCompactionBoundary(..)
     , CompactOutcome(..)
     , CompactionInstall(CompactionInstalled)
-    , reportedOccupancy
     )
-import Agent.CLI.Compaction.Projection (reportedContextTokens)
+import Agent.CLI.Compaction.Projection (occupancyOnTurnFinished)
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
 import Agent.CLI.Context (contextUsageTokens, formatContextReport)
 import Agent.Responses.LoopBackend (turnInputsToItems)
@@ -64,6 +69,7 @@ import Agent.CLI.SessionState
 import Agent.CLI.Render
 import Agent.CLI.Session
 import Agent.CLI.Session.History
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.SessionEnv
 import Agent.CLI.SessionLock
     ( acquireSessionActivityLock
@@ -79,6 +85,9 @@ import Agent.CLI.Style
 import Agent.CLI.Terminal
 import Agent.CLI.Request
 import Agent.CLI.Tools
+import Agent.CLI.ModelConfig
+    ( catalogSupportsAsyncToolCallsForTransport
+    )
 import Agent.CLI.Error
 import Agent.CLI.Dialects
 import Agent.CLI.Dictation (dictationTargetForSession)
@@ -102,8 +111,7 @@ import Agent.Tools.MultiAgents
 import Agent.Tools.PlanMode
 import Agent.Tools.Types
 import Agent.OsPath
-import Control.Concurrent (ThreadId)
-import Control.Concurrent.Async (withAsync)
+import Control.Concurrent.Async (Async, withAsync)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Concurrent.STM (STM)
@@ -239,7 +247,7 @@ newSessionHostRuntime SessionRequest{..} = do
                                                 , ("Deny", "")
                                                 ]
                                     Nothing ->
-                                        withStdinPaused escPaused
+                                        withStdinPaused stdinControl
                                             (promptRootAccess useColor root)
         reportSessionError message =
             case fullscreen of
@@ -328,7 +336,7 @@ withSessionTitleRuntime
 withSessionTitleRuntime host SessionRequest{..} SessionBackend{..} =
     withSessionTitleManager
         btwBackend
-        (readIORef paramsRef)
+        (readSessionRequestParams paramsRef)
         host.hostTitleEvent
 
 -- | Mutable controls shared by rendering, tools, persistence, and the agent
@@ -336,12 +344,11 @@ withSessionTitleRuntime host SessionRequest{..} SessionBackend{..} =
 data SessionControlRuntime = SessionControlRuntime
     { controlToolRegistry :: !ToolRegistry
     , controlSteeringInputs :: !SteeringInputs
-    , controlSpinnerRef :: !(IORef (Maybe ThreadId))
+    , controlSpinnerRef :: !(IORef (Maybe (Async ())))
     , controlRenderStateRef :: !(IORef RenderState)
     , controlAllowedToolsRef :: !(IORef (Set.Set Text.Text))
     , controlComputerUseEnabledRef :: !(IORef Bool)
     , controlLastAssistantRef :: !(IORef (Maybe Text.Text))
-    , controlModelRef :: !(IORef Text.Text)
     , controlUnavailableProvidersRef :: !(IORef (Set.Set Provider))
     , controlStartupUnavailableRef :: !(IORef (Maybe (STM ApiError)))
     , controlRestartEffortRef :: !(IORef (Maybe Text.Text))
@@ -382,14 +389,13 @@ newSessionControlRuntime host SessionRequest{..} = do
                     computerToolName
                     (sessionDirectTools refreshTools codeModeRuntime))
     lastAssistantRef <- newIORef Nothing
-    modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
     unavailableProvidersRef <- newIORef unavailableProviders
     startupUnavailableRef <- newIORef startupUnavailable
     restartEffortRef <- newIORef Nothing
     lastFailedTurnRef <- newIORef Nothing
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     let loadSelectedAgent agentId = do
-            effectiveModel <- readIORef modelRef
+            effectiveModel <- readSessionRequestModel paramsRef
             lookupOrCreateSubagentSession
                 subagentSessions
                 storeRoot
@@ -446,7 +452,7 @@ newSessionControlRuntime host SessionRequest{..} = do
         newAgentViewportRuntime AgentViewportRuntimeConfig
             { viewportConfigShowRawReasoning =
                 options.optShowRawReasoning
-            , viewportConfigWorkspace = toText cwd
+            , viewportConfigWorkspace = toText workspace.cwd
             , viewportConfigReadRootTranscript =
                 readLiveTranscript conversationRef
             , viewportConfigListChildren = listChildAgents
@@ -471,7 +477,6 @@ newSessionControlRuntime host SessionRequest{..} = do
         , controlAllowedToolsRef = allowedToolsRef
         , controlComputerUseEnabledRef = computerUseEnabledRef
         , controlLastAssistantRef = lastAssistantRef
-        , controlModelRef = modelRef
         , controlUnavailableProvidersRef = unavailableProvidersRef
         , controlStartupUnavailableRef = startupUnavailableRef
         , controlRestartEffortRef = restartEffortRef
@@ -522,28 +527,32 @@ buildSkillContextRuntime
             ( omitted
             , max 0 (contextLength after - contextLength before)
             )
-    installLearnedSkills context maximum queueContext =
+    loadLearnedSkills =
         loadApplicableLearnedSkillsForStore
             startup.startupDatabaseStore
-            databaseScopes >>= \case
-                Left err -> do
-                    reportLearnedSkillWarning
-                        ("learned skills unavailable: " <> err)
-                    pure []
-                Right learnedSkills -> do
-                    omitted <-
-                        if queueContext
-                            then queueLearnedSkillContextWithOmissions
-                                maximum
-                                context
-                                learnedSkills
-                            else pure 0
-                    when (omitted > 0) $
-                        reportLearnedSkillWarning
-                            ("learned skills: "
-                                <> Text.pack (show omitted)
-                                <> " omitted from model context due to the context budget")
-                    pure learnedSkills
+            databaseScopes
+    installLearnedSkills context maximum queueContext =
+        loadLearnedSkills
+            >>= installLearnedSkillResult context maximum queueContext
+    installLearnedSkillResult context maximum queueContext = \case
+        Left err -> do
+            reportLearnedSkillWarning
+                ("learned skills unavailable: " <> err)
+            pure []
+        Right learnedSkills -> do
+            omitted <-
+                if queueContext
+                    then queueLearnedSkillContextWithOmissions
+                        maximum
+                        context
+                        learnedSkills
+                    else pure 0
+            when (omitted > 0) $
+                reportLearnedSkillWarning
+                    ("learned skills: "
+                        <> Text.pack (show omitted)
+                        <> " omitted from model context due to the context budget")
+            pure learnedSkills
     reloadGeneratedContext = do
         freshAgents <-
             if loadsHostWorkspaceContext
@@ -554,8 +563,8 @@ buildSkillContextRuntime
                         SuppressAgentsContextLoaded
                         options
                         dialect
-                        home
-                        cwd
+                        workspace.home
+                        workspace.cwd
                         []
                         Nothing
                         ((.catalogEnvironmentContext)
@@ -566,7 +575,8 @@ buildSkillContextRuntime
                             <$> codexCatalogSession)
         freshSkills <-
             if loadsHostWorkspaceContext
-                then loadSkillsCatalogQuiet options home projectRoot cwd
+                then loadSkillsCatalogQuiet
+                    options workspace.home workspace.projectRoot workspace.cwd
                 else pure (SkillCatalog [] [])
         (omitted, _) <-
             installSkills freshAgents True freshSkills
@@ -600,7 +610,8 @@ buildSkillContextRuntime
     refreshSkills queueContext = do
         refreshed <-
             if loadsHostWorkspaceContext
-                then loadSkillsCatalogQuiet options home projectRoot cwd
+                then loadSkillsCatalogQuiet
+                    options workspace.home workspace.projectRoot workspace.cwd
                 else pure (SkillCatalog [] [])
         (omitted, _) <-
             installSkills startupContext queueContext refreshed
@@ -675,10 +686,16 @@ buildSkillContextRuntime
         reportSkillCatalog (isNothing fullscreen) skills omitted
         learnedSkills <-
             if needsInitialContext
-                then installLearnedSkills
-                    startupContext
-                    defaultLearnedSkillContextMaxChars
-                    queueInitialContext
+                then do
+                    loaded <-
+                        loadLearnedSkillsWithPreload
+                            initialContextPreload.preloadedLearnedSkills
+                            loadLearnedSkills
+                    installLearnedSkillResult
+                        startupContext
+                        defaultLearnedSkillContextMaxChars
+                        queueInitialContext
+                        loaded
                 else pure []
         callbacks.runnerFinishStartup startup
         pure learnedSkills
@@ -713,13 +730,13 @@ buildSessionLoopEventRuntime
         , renderLock = host.hostIoLock
         , renderStdout = host.hostStdoutHandle
         , renderStderr = host.hostStderrHandle
-        , renderModelRef = controls.controlModelRef
+        , renderModel = readSessionRequestModel paramsRef
         , renderNativeProgress =
             host.hostStderrTty
                 && terminal.terminalNativeProgress
                 && nativeProgressAnimationEnabled options.optMotionMode
         , renderMotionMode = options.optMotionMode
-        , renderWorkspace = toText cwd
+        , renderWorkspace = toText workspace.cwd
         }
     emitLoop event = do
         recordAgentViewportEvent agentViewportRuntime event
@@ -727,11 +744,12 @@ buildSessionLoopEventRuntime
             hooks.nativeOnLoopEvent event
         managedLoopPublisher event
         case event of
-            TurnFinished turn -> do
-                history <- readLiveTranscript conversationRef
-                forM_ (reportedContextTokens turn.tokenUsage) \tokens ->
-                    writeIORef contextOccupancyRef $
-                        Just (reportedOccupancy tokens (length history))
+            TurnFinished turn ->
+                -- Keep the provider checkpoint recorded by middleware:
+                -- a host-renumbered commit may restart the live process.
+                withLiveBackendState conversationRef \snapshot ->
+                    modifyIORef' contextOccupancyRef $
+                        occupancyOnTurnFinished snapshot turn
             _ -> pure ()
         case fullscreen of
             Nothing -> renderEvent render event
@@ -756,7 +774,7 @@ buildSessionLoopEventRuntime
                 case event of
                     TurnFinished _ -> do
                         occupancy <- readIORef contextOccupancyRef
-                        params <- readIORef paramsRef
+                        params <- readSessionRequestParams paramsRef
                         history <- readLiveTranscript conversationRef
                         contextWindow <- currentContextWindow
                         emitUiEvent runtime $
@@ -809,20 +827,20 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                         Nothing ->
                             approve
                                 (\requested ->
-                                    withStdinPaused escPaused do
+                                    withStdinPaused stdinControl do
                                         color <-
                                             resolveColor host.hostStderrHandle
                                         promptPermission
                                             color
-                                            (toText cwd)
+                                            (toText workspace.cwd)
                                             requested)
                                 reportLineApproval
-                                (saveProjectAutoApprove projectRoot True)
+                                (saveProjectAutoApprove workspace.projectRoot True)
                         Just runtime ->
                             approve
                                 (requestFullscreenPermission
                                     runtime
-                                    (toText cwd))
+                                    (toText workspace.cwd))
                                 (\case
                                     ApprovalWarning _ -> pure ()
                                     ApprovalSuccess message ->
@@ -831,7 +849,7 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                                                 (Just
                                                     (successNotice
                                                         message))))
-                                (saveProjectAutoApprove projectRoot True)
+                                (saveProjectAutoApprove workspace.projectRoot True)
         classify = const (pure classifiedReadOnly)
         approve request report persist =
             approveToolDecisionWithReporterAndPersistenceClassified
@@ -867,6 +885,7 @@ data SessionShellRuntime = SessionShellRuntime
     , shellComputerUseEnabled :: !(IO Bool)
     , shellSetComputerUseEnabled :: !(Bool -> IO Text.Text)
     , shellSetTempDir :: !(OsPath -> IO ())
+    , shellRefreshRequestParams :: !(IO ())
     }
 
 buildSessionShellRuntime
@@ -883,6 +902,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         , shellComputerUseEnabled = readIORef computerUseEnabledRef
         , shellSetComputerUseEnabled = setComputerUse
         , shellSetTempDir = setSessionTempDir
+        , shellRefreshRequestParams = refreshCurrentSessionParams
         }
   where
     nativeCapabilities = host.hostNativeCapabilities
@@ -978,6 +998,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         ShellNone -> "none"
     refreshSessionParams ghciEnabled bashEnabled computerUseEnabled = do
         sessionTmp <- readIORef toolEnv.toolSessionTmp
+        effectiveModel <- readSessionRequestModel paramsRef
         today <- utctDay <$> getCurrentTime
         let enabledTools =
                 activeSessionTools
@@ -997,26 +1018,42 @@ buildSessionShellRuntime host controls SessionRequest{..} =
                             commitAttributionModel
                             commitAttributionEffort
                             enabledNames
-                            cwd
+                            workspace.cwd
                             sessionTmp
                             today
                             (isOneShot options)
             toolSchemas =
+                let modelSupportsAsync =
+                        catalogSupportsAsyncToolCallsForTransport
+                            catalog
+                            connectionId
+                            effectiveModel
+                in
                 case codeModeRuntime of
                     Just _ ->
-                        schemasFromAppToolsCodeModeWithHostedSearch
+                        schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
                             nativeCapabilities.nativeProviderHostedTools
+                            modelSupportsAsync
                             dialect
                             (providerVisibleTools enabledTools)
                     Nothing ->
-                        schemasFromAppToolsWithHostedSearch
+                        schemasFromAppToolsWithHostedSearchAndAsyncCapability
                             nativeCapabilities.nativeProviderHostedTools
+                            modelSupportsAsync
                             dialect
                             enabledTools
-        modifyIORef' paramsRef
+        modifySessionRequestOptions paramsRef
             (setRequestInstructionsAndTools
                 instructionText
                 (Just toolSchemas))
+    refreshCurrentSessionParams = do
+        ghciEnabled <- readIORef ghciEnabledRef
+        bashEnabled <- readIORef bashEnabledRef
+        computerUseEnabled <- readIORef computerUseEnabledRef
+        refreshSessionParams
+            ghciEnabled
+            bashEnabled
+            computerUseEnabled
     setShellMode mode = do
         let (ghciEnabled, bashEnabled) = shellModeFlags mode
         writeIORef ghciEnabledRef ghciEnabled
@@ -1051,13 +1088,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
         -- file remains attached to the previous session.
         resetToolSessionTemp tempDir
         setToolSessionTmp toolEnv (Just tempDir)
-        ghciEnabled <- readIORef ghciEnabledRef
-        bashEnabled <- readIORef bashEnabledRef
-        computerUseEnabled <- readIORef computerUseEnabledRef
-        refreshSessionParams
-            ghciEnabled
-            bashEnabled
-            computerUseEnabled
+        refreshCurrentSessionParams
 
 data SessionSubagentRuntime = SessionSubagentRuntime
     { subagentBeginTurn :: !(IO (Maybe RootTurnId))
@@ -1104,7 +1135,7 @@ buildSessionSubagentRuntime SessionRequest{..} =
         case multiCtx of
             Just ctx -> setMaxConcurrent ctx.multiRegistry next
             Nothing -> pure ()
-        saveProjectMaxConcurrentAgents projectRoot next
+        saveProjectMaxConcurrentAgents workspace.projectRoot next
         pure ("concurrent agent limit: " <> Text.pack (show next))
 
 buildSessionLoopConfig
@@ -1255,39 +1286,28 @@ newSessionPersistenceRuntime
     -> IO SessionPersistenceRuntime
 newSessionPersistenceRuntime
         host skillsRuntime SessionRequest{..} = do
-    turnActivityRef <- newIORef Nothing
-    turnIsActiveRef <- newIORef False
+    turnActivity <- Activity.newTurnActivity
     nativeSessionIdRef <- newIORef Nothing
-    let acquireTurnActivity handle = mask_ do
-            current <- readIORef turnActivityRef
-            if isNothing current
-                then
+    let acquireTurnActivity handle =
+            Activity.acquireTurnActivity turnActivity $
+                -- The marker is best effort; the lifetime session lock
+                -- remains authoritative.
+                either (const Nothing) Just <$>
                     acquireSessionActivityLock
-                        handle.sessionDir
-                        handle.sessionMeta.metaId >>= \case
-                            -- The activity lock is an external status marker;
-                            -- the lifetime session lock remains authoritative.
-                            Left _ -> pure False
-                            Right lock -> do
-                                writeIORef turnActivityRef (Just lock)
-                                pure True
-                else pure False
-        beginTurnActivity = mask_ do
-            -- Mark first so a concurrently completed first persistence sees
-            -- the active turn and attempts the activity marker itself.
-            writeIORef turnIsActiveRef True
-            case persist of
-                PersistenceDisabled -> pure ()
-                PersistenceEnabled slotRef ->
-                    readIORef slotRef >>= \case
-                        PersistencePending{} -> pure ()
-                        PersistenceActive handle ->
-                            void (acquireTurnActivity handle)
-        endTurnActivity = do
-            writeIORef turnIsActiveRef False
-            atomicModifyIORef' turnActivityRef
-                (\current -> (Nothing, current))
-                >>= mapM_ releaseSessionLock
+                        handle.sessionDir handle.sessionMeta.metaId
+        endTurnActivity =
+            Activity.endTurnActivity turnActivity releaseSessionLock
+        beginTurnActivity = mask_ $
+            (do
+                Activity.beginTurnActivity turnActivity
+                case persist of
+                    PersistenceDisabled -> pure ()
+                    PersistenceEnabled slotRef ->
+                        readIORef slotRef >>= \case
+                            PersistencePending{} -> pure ()
+                            PersistenceActive handle ->
+                                void (acquireTurnActivity handle))
+                `onException` endTurnActivity
         notifyNativeSessionId sessionId = do
             shouldNotify <-
                 atomicModifyIORef' nativeSessionIdRef \current ->
@@ -1307,11 +1327,7 @@ newSessionPersistenceRuntime
             -- Preserve the established lock order: own the session before
             -- attempting its best-effort activity marker.
             onPersisted handle
-            active <- readIORef turnIsActiveRef
-            acquired <-
-                if active
-                    then acquireTurnActivity handle
-                    else pure False
+            acquired <- acquireTurnActivity handle
             notifyNativeSessionId handle.sessionMeta.metaId
                 `onException`
                     when acquired endTurnActivity
@@ -1438,13 +1454,11 @@ buildSessionEnv
         , sessionTitleTurnCount = controls.controlTitleTurnCount
         , sessionPlanMode = planMode
         , sessionTaskPlan = taskPlan
-        , sessionProjectRoot = projectRoot
-        , sessionCwd = cwd
+        , sessionWorkspace = workspace
         , sessionProviderFallback =
             host.hostNativeCapabilities.nativeProviderFallback
         , sessionPreparedWorkspaceEnvironment =
             host.hostPreparedWorkspaceEnvironment
-        , sessionHome = home
         , sessionMcpRegistrations = mcpRegistrations
         , sessionMcpWarnings = mcpWarnings
         , sessionMcpFleet = mcpFleet
@@ -1469,8 +1483,10 @@ buildSessionEnv
             loopRuntime.loopRuntimeShell.shellComputerUseEnabled
         , sessionSetComputerUseEnabled =
             loopRuntime.loopRuntimeShell.shellSetComputerUseEnabled
+        , sessionRefreshRequestParams =
+            loopRuntime.loopRuntimeShell.shellRefreshRequestParams
         , sessionBackground = startup.startupBackground
-        , sessionEscPaused = escPaused
+        , sessionStdinControl = stdinControl
         , sessionDraft = startup.startupSessionState.sessionDraft
         , sessionPreviewId =
             startup.startupSessionState.sessionPreviewId
@@ -1480,8 +1496,6 @@ buildSessionEnv
         , sessionStoreRoot = storeRoot
         , sessionUsage = usageRef
         , sessionAccount = accountRef
-        , sessionAccountId = accountIdRef
-        , sessionAccountSelectionId = selectionRef
         , sessionAccountLabel = accountLabel
         , sessionSelectAccount = selectAccount
         , sessionLastAssistant = controls.controlLastAssistantRef
@@ -1611,7 +1625,7 @@ installSessionActions
                         copyImmediate
                             "worktree path"
                             "worktree path is unavailable"
-                            (Just (toText cwd))
+                            (Just (toText workspace.cwd))
                     ReplCopySession ->
                         currentSessionId persist >>= copyImmediate
                             "session id"
@@ -1623,7 +1637,7 @@ installSessionActions
                                     runtime.runtimeInput
                         showImmediate (formatQueuedPrompts prompts)
                     ReplContext -> do
-                        currentParams <- readIORef env.sessionParams
+                        currentParams <- readSessionRequestParams env.sessionParams
                         history <- readLiveTranscript conversationRef
                         occupancy <- readIORef contextOccupancyRef
                         contextWindow <- currentContextWindow
@@ -1665,7 +1679,10 @@ runSessionInteraction
                 pending
         Nothing -> case promptRequest of
             Just request -> do
-                inputs <- managedTurnInputs cwd request
+                inputs <-
+                    case startup.startupNativeHooks >>= (.nativeInitialTurnInputs) of
+                        Just nativeInputs -> pure nativeInputs
+                        Nothing -> managedTurnInputs workspace.cwd request
                 skillInputs <-
                     callbacks.runnerPreparePromptSkillInputs
                         env

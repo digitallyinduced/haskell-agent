@@ -1,5 +1,7 @@
 module Agent.CLI.MetaConsoleSpec (spec) where
 
+import Agent.CLI.Session.Request (newSessionRequestState, readSessionRequestParams)
+import Agent.CLI.Session (Persistence(..))
 import Agent.CLI.MetaConsole
 import Agent.Loop
     ( Backend(..)
@@ -397,14 +399,16 @@ spec = do
         it "uses empty private state, strips tools, disables storage, and repairs JSON once" do
             let originalParams = case defaultResponseCreateParams of
                     ResponseCreateParams{..} -> ResponseCreateParams
-                        { input = Just (ResponseInputText "stale")
+                        { model = Just "gpt-5.6-sol"
+                        , input = Just (ResponseInputText "stale")
                         , instructions = Just "coding instructions"
                         , previousResponseId = Just "previous"
                         , store = Just True
                         , tools = Just []
                         , ..
                         }
-            paramsRef <- newIORef originalParams
+            paramsRef <- newSessionRequestState PersistenceDisabled originalParams
+                >>= either (fail . Text.unpack) pure
             submissions <- newIORef ([] :: [[TurnInput]])
             states <- newIORef ([] :: [[ResponseItem]])
             previousValues <- newIORef ([] :: [Maybe Text.Text])
@@ -464,10 +468,12 @@ spec = do
             fmap (.instructions) captured
                 `shouldSatisfy` maybe False
                     (maybe False (Text.isInfixOf "configuration planner"))
-            readIORef paramsRef `shouldReturn` originalParams
+            readSessionRequestParams paramsRef `shouldReturn` originalParams
 
         it "rejects tool calls without running a repair request" do
-            paramsRef <- newIORef defaultResponseCreateParams
+            paramsRef <- newSessionRequestState PersistenceDisabled
+                defaultResponseCreateParams { model = Just "gpt-5.6-sol" }
+                >>= either (fail . Text.unpack) pure
             submissions <- newIORef (0 :: Int)
             let factory _ =
                     Backend \state _ _ _ -> do

@@ -4,7 +4,7 @@ module Agent.CLI.Runtime.Repl.Workflow
     ) where
 
 import Agent.CLI.Command
-    ( ReplAction(ReplGoalStatus, ReplGoalPause, ReplGoalResume, ReplGoalClear,
+    ( WorkflowAction(ReplGoalStatus, ReplGoalPause, ReplGoalResume, ReplGoalClear,
                  ReplGoalSet, ReplWorkflowRuns, ReplWorkflowManage) )
 import Agent.CLI.Runtime.Types ( RunResult )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
@@ -26,7 +26,7 @@ handleWorkflowAction
     -> (IO RunResult -> Bool -> Text -> Text -> IO RunResult)
     -> Bool
     -> IO RunResult
-    -> ReplAction
+    -> WorkflowAction
     -> IO RunResult
 handleWorkflowAction
         SessionEnv
@@ -180,7 +180,6 @@ handleWorkflowAction
                 (roleError color err)
         continue
 
-    _ -> error "handleWorkflowAction: unsupported action"
   where
     displayInfo message minimalAction = case fullscreen of
         Nothing -> minimalAction

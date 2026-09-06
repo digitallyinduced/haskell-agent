@@ -1,11 +1,11 @@
 module Agent.CLI.RepositoryDelivery
-    ( DeliveryStatus(..)
-    , RepositoryPullRequest(..)
+    ( RepositoryPullRequest(..)
     , repositoryPullRequest
     , parseRepositoryPullRequest
     , pullRequestURLs
     , conversationPullRequestURLs
     , pullRequestByURL
+    , DeliveryStatus(..)
     , PushPreview(..)
     , PullRequestPreview(..)
     , DeliveryError(..)
@@ -19,26 +19,25 @@ module Agent.CLI.RepositoryDelivery
     , validateRemoteName
     ) where
 
-import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.Async (cancel, wait, withAsync)
-import Control.Applicative ((<|>))
-import Control.Concurrent.MVar
-    ( MVar
-    , modifyMVar
-    , modifyMVar_
-    , newMVar
+import Agent.CLI.RepositoryDelivery.ConfirmationStore
+    ( ConfirmationStore
+    , insertConfirmation
+    , newConfirmationStore
+    , takeConfirmation
     )
+import Agent.CLI.RepositoryDelivery.Process
+    ( ProcessResult(..)
+    , ProcessFailure(..)
+    , runCommand
+    , runCommandWithEnvironment
+    , trySynchronous
+    )
+import Agent.CLI.RepositoryDelivery.Validation
 import Control.Exception.Safe
-    ( SomeException
-    , bracket
-    , finally
-    , isAsyncException
-    , mask
+    ( bracket
     , onException
-    , throwIO
-    , tryAny
     )
-import Control.Monad (forever, unless, when)
+import Control.Monad (unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
@@ -46,24 +45,17 @@ import Control.Monad.Trans.Except
     , throwE
     )
 import Crypto.Hash (Digest, SHA1, SHA256, hash)
-import qualified Data.Aeson as Aeson
 import Data.Aeson ((.:), (.:?), (.!=))
 import qualified Data.Aeson.Types as AesonTypes
+import qualified Data.Aeson.KeyMap as KeyMap
+import Data.List (nub)
+import Data.Maybe (fromMaybe)
+import Text.Read (readMaybe)
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
-import Data.List (nub)
-import qualified Data.Aeson.KeyMap as KeyMap
-import Text.Read (readMaybe)
 import Data.Char (isAlphaNum, isHexDigit, isSpace)
-import Data.IORef
-    ( newIORef
-    , readIORef
-    , writeIORef
-    )
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -79,10 +71,8 @@ import System.Directory
     , removePathForcibly
     )
 import System.Exit (ExitCode(..))
-import System.Environment (getEnvironment)
 import System.IO
-    ( Handle
-    , IOMode(ReadMode)
+    ( IOMode(ReadMode)
     , hClose
     , openBinaryFile
     )
@@ -98,24 +88,7 @@ import System.Posix.Files
     , setFileMode
     , unionFileModes
     )
-import System.Posix.Signals
-    ( Signal
-    , sigKILL
-    , sigTERM
-    , signalProcessGroup
-    )
-import System.Posix.Types (ProcessID)
 import System.Posix.Temp (mkdtemp)
-import System.Process
-    ( CreateProcess(..)
-    , ProcessHandle
-    , StdStream(CreatePipe)
-    , createProcess
-    , getPid
-    , proc
-    , terminateProcess
-    , waitForProcess
-    )
 import System.Timeout (timeout)
 
 import Agent.CLI.RepositoryReview
@@ -125,7 +98,6 @@ import Agent.CLI.RepositoryReview
 import Agent.CLI.ProcessSecurity
     ( canonicalPathOutside
     , resolveExecutableOutside
-    , sanitizeSearchPathOutside
     )
 
 data DeliveryStatus = DeliveryStatus
@@ -209,22 +181,8 @@ instance Eq ValidatedRemote where
 
 data StoredConfirmation = StoredConfirmation
     { storedRoot :: !FilePath
-    , storedDeadlineNanos :: !Word64
     , storedConfirmation :: !Confirmation
     }
-
-data ProcessResult = ProcessResult
-    { processExitCode :: !ExitCode
-    , processStdout :: !BS.ByteString
-    , processStderr :: !BS.ByteString
-    , processOutputTruncated :: !Bool
-    }
-
-data ProcessFailure
-    = ProcessLaunchFailed
-    | ProcessTimedOut
-    | ProcessOutputExceeded
-    deriving (Eq, Show)
 
 repositoryDeliveryStatus
     :: FilePath
@@ -451,104 +409,74 @@ liftDelivery = ExceptT
 statusAtSnapshot
     :: RepositorySnapshot
     -> IO (Either DeliveryError DeliveryStatus)
-statusAtSnapshot snapshot =
-    case snapshot.snapshotHead of
-        Nothing ->
+statusAtSnapshot snapshot = runExceptT do
+    headOid <- maybe
+        (throwE (DeliveryInvalidRequest
+            "delivery requires a branch with at least one commit"))
+        pure
+        snapshot.snapshotHead
+    branchBytes <- liftIO
+        (runGit root ["symbolic-ref", "--quiet", "HEAD"] BS.empty
+            localTimeoutMicros)
+        >>= either
+            (const (throwE (DeliveryInvalidRequest
+                "delivery requires a named local branch")))
             pure
-                (Left
-                    (DeliveryInvalidRequest
-                        "delivery requires a branch with at least one commit"))
-        Just headOid ->
-            runGit root ["symbolic-ref", "--quiet", "HEAD"] BS.empty
-                localTimeoutMicros >>= \case
-                    Left _ ->
-                        pure
-                            (Left
-                                (DeliveryInvalidRequest
-                                    "delivery requires a named local branch"))
-                    Right branchBytes ->
-                        let fullBranch = decodeTrimmed branchBytes
-                        in case Text.stripPrefix "refs/heads/" fullBranch of
-                            Nothing ->
-                                pure
-                                    (Left
-                                        (DeliveryInvalidRequest
-                                            "Git returned an invalid local branch"))
-                            Just branch
-                                | not (validateBranchName branch) ->
-                                    pure
-                                        (Left
-                                            (DeliveryInvalidRequest
-                                                "local branch name is not safe for delivery"))
-                                | otherwise ->
-                                    readUpstream root fullBranch >>= \case
-                                        Left err -> pure (Left err)
-                                        Right (remote, upstreamRef) ->
-                                            readUpstreamStatus
-                                                root headOid branch remote upstreamRef
+    let fullBranch = decodeTrimmed branchBytes
+    branch <- maybe
+        (throwE (DeliveryInvalidRequest
+            "Git returned an invalid local branch"))
+        pure
+        (Text.stripPrefix "refs/heads/" fullBranch)
+    unless (validateBranchName branch) $
+        throwE (DeliveryInvalidRequest
+            "local branch name is not safe for delivery")
+    (remote, upstreamRef) <- liftDelivery (readUpstream root fullBranch)
+    readUpstreamStatus headOid branch remote upstreamRef
   where
     root = snapshot.snapshotRoot
-    readUpstreamStatus root headOid branch remote upstreamRef =
-        runGit root ["rev-parse", "--verify", "@{upstream}"] BS.empty
-            localTimeoutMicros >>= \case
-                Left _ ->
+    readUpstreamStatus headOid branch remote upstreamRef = do
+        upstream <- liftIO $
+            runGit root ["rev-parse", "--verify", "@{upstream}"] BS.empty
+                localTimeoutMicros
+        case upstream of
+            Left _ -> do
+                countBytes <- liftDelivery $
                     runGit root ["rev-list", "--count", "HEAD"] BS.empty
-                        localTimeoutMicros >>= \case
-                            Left err -> pure (Left err)
-                            Right countBytes ->
-                                case reads (BS8.unpack (stripLineEnding countBytes)) of
-                                    [(ahead, "")]
-                                        | ahead > 0 ->
-                                            finishStatus
-                                                (zeroObjectId headOid)
-                                                ahead
-                                                0
-                                    _ ->
-                                        pure
-                                            (Left
-                                                (DeliveryCommandFailed
-                                                    "Git returned an invalid commit count"))
-                Right upstreamBytes ->
-                    let upstreamOid = decodeTrimmed upstreamBytes
-                    in runGit
-                        root
-                        [ "rev-list"
-                        , "--left-right"
-                        , "--count"
-                        , "HEAD...@{upstream}"
-                        ]
-                        BS.empty
-                        localTimeoutMicros >>= \case
-                            Left err -> pure (Left err)
-                            Right counts ->
-                                case parseAheadBehind counts of
-                                    Nothing ->
-                                        pure
-                                            (Left
-                                                (DeliveryCommandFailed
-                                                    "Git returned invalid ahead/behind counts"))
-                                    Just (ahead, behind) ->
-                                        finishStatus upstreamOid ahead behind
-      where
-        finishStatus upstreamOid ahead behind =
-            readValidatedRemote root headOid remote >>= \case
-                Left err -> pure (Left err)
-                Right validatedRemote ->
+                        localTimeoutMicros
+                case reads (BS8.unpack (stripLineEnding countBytes)) of
+                    [(ahead, "")] | ahead > 0 ->
+                        finishStatus (zeroObjectId headOid) ahead 0
+                    _ -> throwE (DeliveryCommandFailed
+                        "Git returned an invalid commit count")
+            Right upstreamBytes -> do
+                counts <- liftDelivery $
+                    runGit root
+                        ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]
+                        BS.empty localTimeoutMicros
+                (ahead, behind) <- maybe
+                    (throwE (DeliveryCommandFailed
+                        "Git returned invalid ahead/behind counts"))
                     pure
-                        (Right
-                            DeliveryStatus
-                                { deliverySnapshotId = snapshot.snapshotId
-                                , deliveryRoot = root
-                                , deliveryHeadOid = headOid
-                                , deliveryBranch = branch
-                                , deliveryRemote = remote
-                                , deliveryRemoteFingerprint =
-                                    validatedRemote.validatedRemoteFingerprint
-                                , deliveryUpstreamRef = upstreamRef
-                                , deliveryUpstreamOid = upstreamOid
-                                , deliveryAhead = ahead
-                                , deliveryBehind = behind
-                                })
+                    (parseAheadBehind counts)
+                finishStatus (decodeTrimmed upstreamBytes) ahead behind
+      where
+        finishStatus upstreamOid ahead behind = do
+            validatedRemote <- liftDelivery $
+                readValidatedRemote root headOid remote
+            pure DeliveryStatus
+                { deliverySnapshotId = snapshot.snapshotId
+                , deliveryRoot = root
+                , deliveryHeadOid = headOid
+                , deliveryBranch = branch
+                , deliveryRemote = remote
+                , deliveryRemoteFingerprint =
+                    validatedRemote.validatedRemoteFingerprint
+                , deliveryUpstreamRef = upstreamRef
+                , deliveryUpstreamOid = upstreamOid
+                , deliveryAhead = ahead
+                , deliveryBehind = behind
+                }
 
 readUpstream
     :: FilePath
@@ -764,53 +692,33 @@ refreshPushedStatus pushed validatedRemote = do
 revalidateLocalMutation
     :: DeliveryStatus
     -> IO (Either DeliveryError ())
-revalidateLocalMutation expected =
-    repositoryDeliveryStatus
-        expected.deliveryRoot
-        expected.deliverySnapshotId >>= \case
-            Left err -> pure (Left err)
-            Right current
-                | current == expected -> pure (Right ())
-                | otherwise ->
-                    pure
-                        (Left
-                            (DeliveryStale
-                                "repository state changed immediately before delivery"))
+revalidateLocalMutation expected = runExceptT do
+    current <- liftDelivery $
+        repositoryDeliveryStatus
+            expected.deliveryRoot expected.deliverySnapshotId
+    unless (current == expected) $
+        throwE (DeliveryStale
+            "repository state changed immediately before delivery")
 
 revalidatePullRequestMutation
     :: DeliveryStatus
     -> ValidatedRemote
     -> IO (Either DeliveryError ())
-revalidatePullRequestMutation expected expectedRemote =
-    repositoryDeliveryStatus
-        expected.deliveryRoot
-        expected.deliverySnapshotId >>= \case
-            Left err -> pure (Left err)
-            Right current
-                | current /= expected ->
-                    pure
-                        (Left
-                            (DeliveryStale
-                                "branch or upstream state changed before pull-request creation"))
-                | otherwise ->
-                    validatedRemoteForStatus current >>= \case
-                        Left err -> pure (Left err)
-                        Right remote
-                            | remote /= expectedRemote ->
-                                pure
-                                    (Left
-                                        (DeliveryStale
-                                            "the remote destination changed before pull-request creation"))
-                            | otherwise ->
-                                queryRemoteHead current expectedRemote >>= \case
-                                    Left err -> pure (Left err)
-                                    Right oid
-                                        | oid /= Just current.deliveryHeadOid ->
-                                            pure
-                                                (Left
-                                                    (DeliveryStale
-                                                        "the pushed branch changed before pull-request creation"))
-                                        | otherwise -> pure (Right ())
+revalidatePullRequestMutation expected expectedRemote = runExceptT do
+    current <- liftDelivery $
+        repositoryDeliveryStatus
+            expected.deliveryRoot expected.deliverySnapshotId
+    unless (current == expected) $
+        throwE (DeliveryStale
+            "branch or upstream state changed before pull-request creation")
+    remote <- liftDelivery (validatedRemoteForStatus current)
+    unless (remote == expectedRemote) $
+        throwE (DeliveryStale
+            "the remote destination changed before pull-request creation")
+    oid <- liftDelivery (queryRemoteHead current expectedRemote)
+    unless (oid == Just current.deliveryHeadOid) $
+        throwE (DeliveryStale
+            "the pushed branch changed before pull-request creation")
 
 ensureBaseAndNoOpenPullRequest
     :: DeliveryStatus
@@ -1181,114 +1089,6 @@ pullRequestNumber repository url =
             | number > 0 -> Just number
         _ -> Nothing
 
-validRemoteUrl :: BS.ByteString -> Bool
-validRemoteUrl url =
-    not (BS.null url)
-        && BS.length url <= 4096
-        && BS.all (\byte -> byte >= 0x20 && byte /= 0x7f) url
-        && BS8.head url /= '-'
-        && (validHttps url
-            || validSsh url
-            || validScpLike url)
-  where
-    validHttps value =
-        "https://" `BS8.isPrefixOf` value
-            && validUrlAuthority "https://" value
-            && not (authorityContains '@' "https://" value)
-            && not (containsQueryOrFragment value)
-            && not (authorityContains '%' "https://" value)
-    validSsh value =
-        "ssh://" `BS8.isPrefixOf` value
-            && validSshAuthority value
-            && not (containsQueryOrFragment value)
-    authorityContains character prefix value =
-        BS8.elem character
-            (BS8.takeWhile (/= '/') (BS.drop (BS.length prefix) value))
-    validSshAuthority value =
-        let authority =
-                BS8.takeWhile (/= '/') (BS.drop (BS.length "ssh://") value)
-            (userinfo, separatorAndHost) = BS8.break (== '@') authority
-            host = BS.drop 1 separatorAndHost
-        in not (BS.null authority)
-            && not (BS8.elem '%' authority)
-            && if BS.null separatorAndHost
-                then validHostPort authority
-                else validUsername userinfo
-                    && validHostPort host
-                    && not (BS8.elem '@' host)
-    validUrlAuthority prefix value =
-        validHostPort
-            (BS8.takeWhile (/= '/') (BS.drop (BS.length prefix) value))
-    validHostPort authority =
-        case BS8.break (== ':') authority of
-            (host, port)
-                | BS.null port -> validHost host
-                | otherwise ->
-                    validHost host
-                        && BS.length port > 1
-                        && BS8.all
-                            (\character ->
-                                character >= '0' && character <= '9')
-                            (BS.drop 1 port)
-    validHost host =
-        not (BS.null host)
-            && BS8.all
-                (\character ->
-                    isAsciiAlphaNumeric character
-                        || character `elem` (".-" :: String))
-                host
-            && BS8.head host /= '.'
-            && BS8.last host /= '.'
-    validUsername username =
-        not (BS.null username)
-            && BS8.all
-                (\character ->
-                    isAsciiAlphaNumeric character
-                        || character `elem` ("._-" :: String))
-                username
-    isAsciiAlphaNumeric character =
-        (character >= 'a' && character <= 'z')
-            || (character >= 'A' && character <= 'Z')
-            || (character >= '0' && character <= '9')
-    containsQueryOrFragment value =
-        BS8.elem '?' value || BS8.elem '#' value
-    validScpLike value =
-        case BS8.break (== ':') value of
-            (authority, path) ->
-                let (username, separatorAndHost) = BS8.break (== '@') authority
-                    host = BS.drop 1 separatorAndHost
-                in validUsername username
-                    && not (BS.null separatorAndHost)
-                    && validHost host
-                    && not (BS8.elem '@' host)
-                    && not (BS8.elem '%' authority)
-                    && BS.length path > 1
-                    && not (BS8.elem '@' path)
-                    && not (containsQueryOrFragment value)
-
-githubRepositoryFromUrl :: BS.ByteString -> Maybe Text
-githubRepositoryFromUrl bytes
-    | not (BS.all (< 0x80) bytes) = Nothing
-    | otherwise =
-        let url = Text.pack (BS8.unpack bytes)
-        in parseHttps url
-            <|> parseSsh url
-            <|> parseScp url
-  where
-    parseHttps url =
-        Text.stripPrefix "https://github.com/" url >>= repositoryPath
-    parseSsh url =
-        (Text.stripPrefix "ssh://git@github.com/" url
-            <|> Text.stripPrefix "ssh://github.com/" url)
-            >>= repositoryPath
-    parseScp url =
-        Text.stripPrefix "git@github.com:" url >>= repositoryPath
-    repositoryPath path =
-        let withoutGit = fromMaybe path (Text.stripSuffix ".git" path)
-        in if validateRepositoryName withoutGit
-            then Just withoutGit
-            else Nothing
-
 remoteMatchesExpected :: DeliveryStatus -> Maybe Text -> Bool
 remoteMatchesExpected status =
     (== expectedRemoteHead status)
@@ -1347,75 +1147,6 @@ validatePullRequestInput base title body
         Left (DeliveryInvalidRequest "pull-request body contains a NUL byte")
     | otherwise = Right ()
 
-validateBranchName :: Text -> Bool
-validateBranchName branch =
-    validateFullBranchRef ("refs/heads/" <> branch)
-
-validateFullBranchRef :: Text -> Bool
-validateFullBranchRef ref =
-    not (Text.null ref)
-        && Text.length ref <= 1024
-        && "refs/heads/" `Text.isPrefixOf` ref
-        && not ("/" `Text.isSuffixOf` ref)
-        && not ("." `Text.isSuffixOf` ref)
-        && not ("." `Text.isPrefixOf` ref)
-        && not ("-" `Text.isPrefixOf` Text.drop (Text.length "refs/heads/") ref)
-        && not (".." `Text.isInfixOf` ref)
-        && not ("@{" `Text.isInfixOf` ref)
-        && not ("//" `Text.isInfixOf` ref)
-        && Text.all safeRefCharacter ref
-        && all validComponent (Text.splitOn "/" ref)
-  where
-    safeRefCharacter character =
-        not (isSpace character)
-            && character >= '\x20'
-            && character /= '\x7f'
-            && character `notElem` ("~^:?*[\\" :: String)
-    validComponent component =
-        not (Text.null component)
-            && not ("." `Text.isPrefixOf` component)
-            && component /= "."
-            && component /= ".."
-            && not (".lock" `Text.isSuffixOf` component)
-
-validateRemoteName :: Text -> Bool
-validateRemoteName remote =
-    not (Text.null remote)
-        && Text.length remote <= 255
-        && Text.head remote /= '-'
-        && Text.all
-            (\character ->
-                isAlphaNum character
-                    || character `elem` ("._/-" :: String))
-            remote
-        && not (".." `Text.isInfixOf` remote)
-        && not ("//" `Text.isInfixOf` remote)
-
-validateRepositoryName :: Text -> Bool
-validateRepositoryName name =
-    case Text.splitOn "/" name of
-        [owner, repository] ->
-            validPart owner && validPart repository
-        _ -> False
-  where
-    validPart value =
-        not (Text.null value)
-            && value /= "."
-            && value /= ".."
-            && Text.length value <= 100
-            && Text.all
-                (\character ->
-                    isAlphaNum character
-                        || character `elem` ("-._" :: String))
-                value
-
-validObjectId :: Text -> Bool
-validObjectId oid =
-    Text.length oid `elem` [40, 64] && Text.all isHexDigit oid
-
-zeroObjectId :: Text -> Text
-zeroObjectId oid = Text.replicate (Text.length oid) "0"
-
 parseAheadBehind :: BS.ByteString -> Maybe (Int, Int)
 parseAheadBehind bytes =
     case map (reads . BS8.unpack) (BS8.words bytes) of
@@ -1439,25 +1170,16 @@ storeConfirmation root confirmation = do
     token <- randomToken
     let expiresAt = wallNow + confirmationLifetimeSeconds
         deadline = saturatingAdd monotonicNow confirmationLifetimeNanos
-    stored <- modifyMVar deliveryConfirmations \confirmations ->
-        let active = Map.filter
-                (\entry -> entry.storedDeadlineNanos > monotonicNow)
-                confirmations
-        in if Map.size active >= maxActiveConfirmations
-            || Map.member token active
-            then pure (active, False)
-            else
-                pure
-                    ( Map.insert
-                        token
-                        StoredConfirmation
-                            { storedRoot = root
-                            , storedDeadlineNanos = deadline
-                            , storedConfirmation = confirmation
-                            }
-                        active
-                    , True
-                    )
+    stored <-
+        insertConfirmation
+            deliveryConfirmations
+            maxActiveConfirmations
+            token
+            deadline
+            StoredConfirmation
+                { storedRoot = root
+                , storedConfirmation = confirmation
+                }
     unless stored (fail "repository delivery confirmation capacity exhausted")
     pure (token, expiresAt)
 
@@ -1487,34 +1209,27 @@ consumeConfirmation requested token
                             "repository state could not be verified"))
             Just (Right snapshot) -> do
                 monotonicNow <- getMonotonicTimeNSec
-                modifyMVar deliveryConfirmations \confirmations ->
-                    let pruned = Map.filter
-                            (\stored ->
-                                stored.storedDeadlineNanos > monotonicNow)
-                            confirmations
-                    in case Map.lookup token pruned of
+                takeConfirmation
+                    deliveryConfirmations
+                    token
+                    monotonicNow >>= \case
                         Nothing ->
                             pure
-                                ( pruned
-                                , Left
+                                (Left
                                     (DeliveryConfirmationRejected
                                         "confirmation token expired or was already used")
                                 )
                         Just stored ->
-                            let remaining = Map.delete token pruned
-                            in if stored.storedRoot /= snapshot.snapshotRoot
+                            if stored.storedRoot /= snapshot.snapshotRoot
                                 then
                                     pure
-                                        ( remaining
-                                        , Left
+                                        (Left
                                             (DeliveryConfirmationRejected
                                                 "confirmation token belongs to another repository")
                                         )
                                 else
                                     pure
-                                        ( remaining
-                                        , Right stored.storedConfirmation
-                                        )
+                                        (Right stored.storedConfirmation)
 
 randomToken :: IO Text
 randomToken =
@@ -1928,342 +1643,12 @@ runGh root arguments input timeoutMicros = do
                         (DeliveryUnavailable
                             "GitHub CLI command failed"))
 
-runCommand
-    :: FilePath
-    -> FilePath
-    -> [String]
-    -> BS.ByteString
-    -> Int
-    -> IO (Either ProcessFailure ProcessResult)
-runCommand root =
-    runCommandWithEnvironment [] root root
-
-runCommandWithEnvironment
-    :: [(String, String)]
-    -> FilePath
-    -> FilePath
-    -> FilePath
-    -> [String]
-    -> BS.ByteString
-    -> Int
-    -> IO (Either ProcessFailure ProcessResult)
-runCommandWithEnvironment
-    overrides
-    trustRoot
-    workingDirectory
-    executable
-    arguments
-    input
-    timeoutMicros = do
-    launched <- trySynchronous
-        (bracket start stop \processData ->
-            timeout timeoutMicros (run processData))
-    pure case launched of
-        Left _ -> Left ProcessLaunchFailed
-        Right Nothing -> Left ProcessTimedOut
-        Right (Just result) -> result
-  where
-    start = mask \_ -> do
-        resolvedExecutable <-
-            resolveExecutableOutside trustRoot executable
-                >>= either (fail . Text.unpack) pure
-        environment <- applyEnvironmentOverrides overrides
-            <$> nonInteractiveEnvironment trustRoot executable
-        (maybeInput, maybeOutput, maybeError, process) <-
-            createProcess
-                (proc resolvedExecutable arguments)
-                    { cwd = Just workingDirectory
-                    , std_in = CreatePipe
-                    , std_out = CreatePipe
-                    , std_err = CreatePipe
-                    , close_fds = True
-                    , create_group = True
-                    , env = Just environment
-                    }
-        case (maybeInput, maybeOutput, maybeError) of
-            (Just inputHandle, Just outputHandle, Just errorHandle) -> do
-                let closePipes = do
-                        closeQuietly inputHandle
-                        closeQuietly outputHandle
-                        closeQuietly errorHandle
-                    cleanupWithoutGroup = do
-                        closePipes
-                        _ <- tryAny (terminateProcess process)
-                        _ <- tryAny (waitForProcess process)
-                        pure ()
-                processGroup <- getPid process
-                    `onException` cleanupWithoutGroup
-                completed <- newIORef False
-                    `onException` do
-                        closePipes
-                        terminateProcessGroup sigKILL processGroup process
-                        _ <- tryAny (waitForProcess process)
-                        pure ()
-                pure
-                    ( inputHandle
-                    , outputHandle
-                    , errorHandle
-                    , process
-                    , processGroup
-                    , completed
-                    )
-            _ -> do
-                terminateProcess process
-                _ <- waitForProcess process
-                fail "could not create command pipes"
-    stop
-        ( inputHandle
-        , outputHandle
-        , errorHandle
-        , process
-        , processGroup
-        , completed
-        ) = do
-        closeQuietly inputHandle
-        closeQuietly outputHandle
-        closeQuietly errorHandle
-        finished <- readIORef completed
-        unless finished do
-            terminateProcessGroup sigTERM processGroup process
-            threadDelay 100_000
-            -- A descendant can retain the group and pipes after its leader
-            -- exits, so always escalate the captured process group.
-            terminateProcessGroup sigKILL processGroup process
-        _ <- tryAny (waitForProcess process)
-        pure ()
-    run
-        ( inputHandle
-        , outputHandle
-        , errorHandle
-        , process
-        , processGroup
-        , completed
-        ) =
-        withAsync
-            (BS.hPut inputHandle input `finally` closeQuietly inputHandle)
-            \inputWriter ->
-                withAsync (readBounded outputHandle) \outputReader ->
-                    withAsync (readBounded errorHandle) \errorReader -> do
-                        exitCode <- waitForProcess process
-                        inputFinished <- timeout processPipeTeardownMicros
-                            (wait inputWriter)
-                        case inputFinished of
-                            Just () -> pure ()
-                            Nothing -> do
-                                closeQuietly inputHandle
-                                cancel inputWriter
-                        let drainReaders =
-                                (,) <$> wait outputReader <*> wait errorReader
-                        -- Give ordinary buffered output a short chance to
-                        -- drain. The captured group is then terminated even
-                        -- when EOF already arrived: a descendant may close
-                        -- its pipes while continuing to run.
-                        naturallyDrained <- timeout
-                            processPipeTeardownMicros
-                            drainReaders
-                        terminateProcessGroup sigTERM processGroup process
-                        drainedAfterTerm <- case naturallyDrained of
-                            Just values -> pure (Just values)
-                            Nothing ->
-                                timeout processGroupTermGraceMicros drainReaders
-                        -- Always escalate the captured group so a descendant
-                        -- cannot outlive a successful leader.
-                        terminateProcessGroup sigKILL processGroup process
-                        drained <- case drainedAfterTerm of
-                            Just values -> pure (Just values)
-                            Nothing ->
-                                timeout processPipeTeardownMicros drainReaders
-                        case drained of
-                            Nothing -> do
-                                closeQuietly outputHandle
-                                closeQuietly errorHandle
-                                cancel outputReader
-                                cancel errorReader
-                                pure (Left ProcessTimedOut)
-                            Just
-                                ( (output, outputTruncated)
-                                , (errors, errorsTruncated)
-                                ) -> do
-                                    writeIORef completed True
-                                    let truncated =
-                                            outputTruncated || errorsTruncated
-                                    pure
-                                        (if truncated
-                                            then Left ProcessOutputExceeded
-                                            else
-                                                Right
-                                                    ProcessResult
-                                                        { processExitCode =
-                                                            exitCode
-                                                        , processStdout = output
-                                                        , processStderr = errors
-                                                        , processOutputTruncated =
-                                                            False
-                                                        })
-
-applyEnvironmentOverrides
-    :: [(String, String)]
-    -> [(String, String)]
-    -> [(String, String)]
-applyEnvironmentOverrides overrides inherited =
-    overrides
-        <> filter
-            (\(name, _) -> name `notElem` map fst overrides)
-            inherited
-
-data BoundedReadState = BoundedReadState
-    { boundedChunks :: ![BS.ByteString]
-    , boundedRetainedBytes :: !Int
-    , boundedTruncated :: !Bool
-    }
-
-emptyBoundedReadState :: BoundedReadState
-emptyBoundedReadState = BoundedReadState
-    { boundedChunks = []
-    , boundedRetainedBytes = 0
-    , boundedTruncated = False
-    }
-
-retainBoundedChunk :: BoundedReadState -> BS.ByteString -> BoundedReadState
-retainBoundedChunk state chunk =
-    BoundedReadState
-        { boundedChunks =
-            if BS.null kept
-                then state.boundedChunks
-                else kept : state.boundedChunks
-        , boundedRetainedBytes =
-            state.boundedRetainedBytes + BS.length kept
-        , boundedTruncated =
-            state.boundedTruncated || BS.length kept < BS.length chunk
-        }
-  where
-    room = max 0 (maxProcessOutputBytes - state.boundedRetainedBytes)
-    kept = BS.take room chunk
-
-readBounded :: Handle -> IO (BS.ByteString, Bool)
-readBounded handle = do
-    finalState <-
-        drain emptyBoundedReadState `finally` closeQuietly handle
-    pure
-        ( BS.concat (reverse finalState.boundedChunks)
-        , finalState.boundedTruncated
-        )
-  where
-    drain state = do
-        chunk <- BS.hGetSome handle (64 * 1024)
-        if BS.null chunk
-            then pure state
-            else do
-                let nextState = retainBoundedChunk state chunk
-                nextState `seq` drain nextState
-
-terminateProcessGroup
-    :: Signal
-    -> Maybe ProcessID
-    -> ProcessHandle
-    -> IO ()
-terminateProcessGroup signal processGroup process = do
-    pid <- maybe (getPid process) (pure . Just) processGroup
-    case pid of
-        Nothing -> do
-            _ <- tryAny (terminateProcess process)
-            pure ()
-        Just processId -> do
-            _ <- tryAny (signalProcessGroup signal processId)
-            pure ()
-
 stripLineEnding :: BS.ByteString -> BS.ByteString
 stripLineEnding = BS8.dropWhileEnd (`elem` ['\r', '\n'])
 
 decodeTrimmed :: BS.ByteString -> Text
 decodeTrimmed =
     Text.strip . TextEncoding.decodeUtf8With lenientDecode
-
-closeQuietly :: Handle -> IO ()
-closeQuietly handle = do
-    _ <- tryAny (hClose handle)
-    pure ()
-
-nonInteractiveEnvironment :: FilePath -> FilePath -> IO [(String, String)]
-nonInteractiveEnvironment root executable = do
-    inherited <- getEnvironment
-    let blocked =
-            [ "GIT_TERMINAL_PROMPT"
-            , "GCM_INTERACTIVE"
-            , "GH_PROMPT_DISABLED"
-            , "GH_REPO"
-            , "GH_HOST"
-            , "SSH_ASKPASS_REQUIRE"
-            , "GIT_DIR"
-            , "GIT_WORK_TREE"
-            , "GIT_INDEX_FILE"
-            , "GIT_OBJECT_DIRECTORY"
-            , "GIT_ALTERNATE_OBJECT_DIRECTORIES"
-            , "GIT_COMMON_DIR"
-            , "GIT_CONFIG_COUNT"
-            , "GIT_CONFIG_KEY_0"
-            , "GIT_CONFIG_VALUE_0"
-            , "GIT_CONFIG_PARAMETERS"
-            , "GIT_CONFIG_GLOBAL"
-            , "GIT_CONFIG_SYSTEM"
-            , "GIT_CONFIG_NOSYSTEM"
-            , "GIT_ATTR_NOSYSTEM"
-            , "GIT_CEILING_DIRECTORIES"
-            , "GIT_SSH_COMMAND"
-            , "GIT_ASKPASS"
-            , "GIT_PROXY_COMMAND"
-            , "GIT_EXEC_PATH"
-            ]
-        sanitized = filter
-            (\(name, _) ->
-                name `notElem` blocked
-                    && not ("GIT_CONFIG_KEY_" `prefixOf` name)
-                    && not ("GIT_CONFIG_VALUE_" `prefixOf` name))
-            inherited
-    safePath <-
-        case lookup "PATH" sanitized of
-            Nothing -> pure Nothing
-            Just value -> sanitizeSearchPathOutside root value
-    let
-        sanitizedWithSafePath =
-            case safePath of
-                Nothing -> filter ((/= "PATH") . fst) sanitized
-                Just value ->
-                    ("PATH", value) : filter ((/= "PATH") . fst) sanitized
-        retained
-            | executable == "git" =
-                filter (\(name, _) -> name `elem` gitEnvironmentAllowlist)
-                    sanitizedWithSafePath
-            | otherwise = sanitizedWithSafePath
-    pure
-        ( [ ("GIT_TERMINAL_PROMPT", "0")
-          , ("GCM_INTERACTIVE", "never")
-          , ("GH_PROMPT_DISABLED", "true")
-          , ("SSH_ASKPASS_REQUIRE", "never")
-          ]
-            <> retained
-        )
-  where
-    prefixOf prefix value = take (length prefix) value == prefix
-    gitEnvironmentAllowlist =
-        [ "PATH"
-        , "HOME"
-        , "TMPDIR"
-        , "TMP"
-        , "TEMP"
-        , "LANG"
-        , "LC_ALL"
-        , "LC_CTYPE"
-        , "USER"
-        , "LOGNAME"
-        , "SSH_AUTH_SOCK"
-        , "XDG_CONFIG_HOME"
-        , "XDG_CONFIG_DIRS"
-        , "SSL_CERT_FILE"
-        , "SSL_CERT_DIR"
-        , "NIX_SSL_CERT_FILE"
-        , "TERM"
-        ]
 
 deliveryErrorText :: DeliveryError -> Text
 deliveryErrorText = \case
@@ -2272,14 +1657,6 @@ deliveryErrorText = \case
     DeliveryUnavailable message -> message
     DeliveryCommandFailed message -> message
     DeliveryConfirmationRejected message -> message
-
-trySynchronous :: IO value -> IO (Either SomeException value)
-trySynchronous action =
-    tryAny action >>= \case
-        Left exception
-            | isAsyncException exception -> throwIO exception
-            | otherwise -> pure (Left exception)
-        Right value -> pure (Right value)
 
 confirmationLifetimeSeconds :: POSIXTime
 confirmationLifetimeSeconds = 10 * 60
@@ -2298,33 +1675,13 @@ localTimeoutMicros = 15 * 1_000_000
 networkTimeoutMicros :: Int
 networkTimeoutMicros = 60 * 1_000_000
 
-processPipeTeardownMicros :: Int
-processPipeTeardownMicros = 1_000_000
-
-processGroupTermGraceMicros :: Int
-processGroupTermGraceMicros = 2_000_000
-
-maxProcessOutputBytes :: Int
-maxProcessOutputBytes = 1024 * 1024
-
 maxActiveConfirmations :: Int
 maxActiveConfirmations = 1024
 
 {-# NOINLINE deliveryConfirmations #-}
-deliveryConfirmations :: MVar (Map Text StoredConfirmation)
-deliveryConfirmations = unsafePerformIO do
-    confirmations <- newMVar Map.empty
-    _ <- forkIO $ forever do
-        threadDelay 60_000_000
-        monotonicNow <- getMonotonicTimeNSec
-        modifyMVar_ confirmations
-            (pure . Map.filter
-                (\stored -> stored.storedDeadlineNanos > monotonicNow))
-    pure confirmations
+deliveryConfirmations :: ConfirmationStore StoredConfirmation
+deliveryConfirmations = unsafePerformIO newConfirmationStore
 
-
--- | Read-only sidebar metadata for the checkout's current branch. The native
--- caller throttles refreshes; failures must never be presented as passing CI.
 data RepositoryPullRequest = RepositoryPullRequest
     { repositoryPullRequestNumber :: !Int
     , repositoryPullRequestUrl :: !Text

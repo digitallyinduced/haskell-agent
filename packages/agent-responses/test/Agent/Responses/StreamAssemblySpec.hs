@@ -314,6 +314,30 @@ spec = describe "buildStreamResponse" do
             | CustomToolCallItem CustomToolCall { input } <- response.output
             ] `shouldBe` ["*** Begin Patch"]
 
+    it "retains async markers when sparse done items omit them" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-async-sparse\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc-async\",\"call_id\":\"function-async\",\"name\":\"read_file\",\"arguments\":\"\",\"async\":true}}"
+            , sseBlock "response.output_item.done"
+                "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc-async\",\"call_id\":\"function-async\",\"name\":\"read_file\",\"arguments\":\"{}\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc-async\",\"call_id\":\"custom-async\",\"name\":\"apply_patch\",\"input\":\"\",\"async\":true}}"
+            , sseBlock "response.output_item.done"
+                "{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc-async\",\"call_id\":\"custom-async\",\"name\":\"apply_patch\",\"input\":\"patch\"}}"
+            , sseBlock "response.completed"
+                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-async-sparse\",\"output\":[]}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        [async
+            | FunctionCallItem FunctionCall { async } <- response.output
+            ] `shouldBe` [Just True]
+        [async
+            | CustomToolCallItem CustomToolCall { async } <- response.output
+            ] `shouldBe` [Just True]
+
     it "assembles many tiny argument deltas without retaining the event list" do
         let deltaCount = 10_000
             events =
@@ -330,6 +354,7 @@ spec = describe "buildStreamResponse" do
                         , arguments = ""
                         , encryptedFunctionArgs = Nothing
                         , status = Nothing
+                        , async = Nothing
                         })
                     (Just 0)
                     Nothing
@@ -639,6 +664,7 @@ testFunctionCall itemId callId name =
         , arguments = ""
         , encryptedFunctionArgs = Nothing
         , status = Nothing
+        , async = Nothing
         }
 
 testReasoningItem :: Text -> ResponseItem
@@ -833,7 +859,7 @@ toResponseItem fragment =
         , arguments = fragment.fragmentArguments
         , encryptedFunctionArgs = Nothing
         , status = fragment.fragmentStatus
-
+        , async = Nothing
         }
 
 applyExpected :: StreamModel -> IndexedOperation -> StreamModel

@@ -43,7 +43,8 @@ common common-opts
 
 library
     import:           common-opts
-    exposed-modules:  Agent.Responses.Types
+    exposed-modules:  Agent.ToolOutcome
+                    ,  Agent.Responses.Types
                     , Agent.Responses.Types.Content
                     , Agent.Responses.Types.Items
                     , Agent.Responses.Types.Items.Known

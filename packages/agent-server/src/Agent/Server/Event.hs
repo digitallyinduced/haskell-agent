@@ -20,8 +20,11 @@ import Agent.Loop
     )
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallMode(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , toolCallMode
+    , toolCallResultMode
     , toolCallResultImages
     )
 import Data.Aeson (Value, object, (.=))
@@ -328,6 +331,7 @@ toolCallValue call = object
     , "name" .= publicText call.name
     , "kind" .= toolCallKindText call.callKind
     , "argumentsEncrypted" .= call.argumentsEncrypted
+    , "async" .= (toolCallMode call == AsyncToolCall)
     , "arguments" .=
         if call.argumentsEncrypted
             then Nothing
@@ -341,6 +345,7 @@ toolResultValue :: ToolCallResult -> Value
 toolResultValue result = object
     [ "callId" .= publicText result.callId
     , "kind" .= toolCallKindText result.callKind
+    , "async" .= (toolCallResultMode result == AsyncToolCall)
     , "output" .= fst (boundedPublicText result.output)
     , "truncated" .= snd (boundedPublicText result.output)
     -- Deliberately do not serialize image URLs/data URLs into SSE.

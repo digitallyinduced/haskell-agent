@@ -1,8 +1,9 @@
 -- | Fail-closed, versioned transport to one tenant's sandbox runner.
 --
--- The runner owns the microVM lifecycle. Its stdout is reserved for bounded
--- newline-delimited JSON; stderr is drained and discarded so an untrusted guest
--- cannot block the server or inject into its logs.
+-- The runner owns the gVisor lifecycle. Its stdout is reserved for bounded
+-- newline-delimited JSON. Stderr is continuously drained into a bounded tail;
+-- startup failures log a single sanitized diagnostic line to the private
+-- service journal, never to the sandbox protocol or public API.
 module Agent.Server.Sandbox
     ( TenantSandbox
     , openTenantSandbox
@@ -18,13 +19,16 @@ import Agent.Server.Tenant
     )
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallMode(..)
+    , toolCallMode
     , ToolCallKind(..)
     , ToolHandlerResult(..)
     , ToolResultImage(..)
     , passthroughTool
     )
 import Agent.Tools.Types
-    ( AppTool(..)
+    ( ApprovalRule(..)
+    , AppTool(..)
     , AppToolGroup(..)
     )
 import Control.Concurrent
@@ -72,6 +76,7 @@ import Data.ByteString qualified as ByteString
 import Data.ByteString.Lazy qualified as LazyByteString
 import Data.IORef
     ( IORef
+    , atomicModifyIORef'
     , newIORef
     , readIORef
     , writeIORef
@@ -79,6 +84,7 @@ import Data.IORef
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
+import Data.Text.IO qualified as TextIO
 import System.Directory
     ( createDirectoryIfMissing
     )
@@ -97,6 +103,7 @@ import System.IO
     , hFlush
     , hSetBinaryMode
     , hSetBuffering
+    , stderr
     )
 import System.Posix.Files (setFileMode)
 import System.Posix.Signals
@@ -132,7 +139,10 @@ maximumToolDurationMicroseconds :: Int
 maximumToolDurationMicroseconds = 15 * 60 * 1000 * 1000
 
 maximumReadinessDurationMicroseconds :: Int
-maximumReadinessDurationMicroseconds = 120 * 1000 * 1000
+maximumReadinessDurationMicroseconds = 60 * 1000 * 1000
+
+maximumRunnerStderrBytes :: Int
+maximumRunnerStderrBytes = 16 * 1024
 
 data TenantSandbox = TenantSandbox
     { sandboxRunner :: !FilePath
@@ -147,6 +157,7 @@ data RunningSandbox = RunningSandbox
     , runningOutput :: !Handle
     , runningProcess :: !ProcessHandle
     , runningStderrDrain :: !(Async ())
+    , runningStderrBuffer :: !(IORef ByteString)
     , runningGeneration :: !Text
     , runningReadBuffer :: !(IORef ByteString)
     }
@@ -214,6 +225,9 @@ composeSandboxTools sandbox sessionId cwd dialect =
             -- Host resource resolvers must not inspect paths for a guest
             -- operation. The tenant broker serializes calls itself.
             , appToolResourceClaims = Nothing
+            -- Only tools actually routed into the tenant sandbox get YOLO.
+            -- Host services (including MCP writes) retain their own approvals.
+            , appToolApproval = AutoApprove tool.appToolApproval
             }
 
 invokeTenantTool
@@ -346,6 +360,7 @@ launchSandbox sandbox = mask \restore -> do
                         <> Text.pack (displayException exception)))
         Right (Just input, Just output, Just stderrHandle, process) -> do
             readBuffer <- newIORef ByteString.empty
+            stderrBuffer <- newIORef ByteString.empty
             let stopUnmanaged =
                     stopUnmanagedSandbox
                         input
@@ -358,13 +373,14 @@ launchSandbox sandbox = mask \restore -> do
                 configurePipe stderrHandle)
                 `onException` stopUnmanaged
             stderrDrain <-
-                async (drainHandle stderrHandle)
+                async (drainHandle stderrBuffer stderrHandle)
                     `onException` stopUnmanaged
             let provisional = RunningSandbox
                     { runningInput = input
                     , runningOutput = output
                     , runningProcess = process
                     , runningStderrDrain = stderrDrain
+                    , runningStderrBuffer = stderrBuffer
                     , runningGeneration = ""
                     , runningReadBuffer = readBuffer
                     }
@@ -380,19 +396,23 @@ launchSandbox sandbox = mask \restore -> do
             case handshake of
                 Left () -> do
                     stopSandbox provisional
+                    logRunnerStartupFailure provisional
                     pure (Left "the tenant sandbox readiness handshake timed out")
                 Right (Left err) -> do
                     stopSandbox provisional
+                    logRunnerStartupFailure provisional
                     pure (Left ("invalid tenant sandbox handshake: " <> err))
                 Right (Right value) ->
                     case parseReady value of
                         Left err -> do
                             stopSandbox provisional
+                            logRunnerStartupFailure provisional
                             pure (Left ("invalid tenant sandbox handshake: " <> err))
                         Right ready ->
                             case validateReady tenant ready of
                                 Left err -> do
                                     stopSandbox provisional
+                                    logRunnerStartupFailure provisional
                                     pure (Left err)
                                 Right () ->
                                     pure $
@@ -481,8 +501,12 @@ stopSandbox running = do
     void (tryAny (hClose running.runningInput))
     void (tryAny (hClose running.runningOutput))
     stopSandboxProcess running.runningProcess
-    cancel running.runningStderrDrain
-    void (waitCatch running.runningStderrDrain)
+    timeout (1 * 1000 * 1000) (waitCatch running.runningStderrDrain)
+        >>= \case
+            Just _ -> pure ()
+            Nothing -> do
+                cancel running.runningStderrDrain
+                void (waitCatch running.runningStderrDrain)
 
 stopUnmanagedSandbox
     :: Handle
@@ -514,13 +538,42 @@ configurePipe handle = do
     hSetBinaryMode handle True
     hSetBuffering handle NoBuffering
 
-drainHandle :: Handle -> IO ()
-drainHandle handle = do
+drainHandle :: IORef ByteString -> Handle -> IO ()
+drainHandle buffer handle = do
     let loop =
             ByteString.hGetSome handle 4096 >>= \chunk ->
-                unless (ByteString.null chunk) loop
+                unless (ByteString.null chunk) do
+                    atomicModifyIORef' buffer \previous ->
+                        let combined = previous <> chunk
+                            retained =
+                                ByteString.drop
+                                    (max
+                                        0
+                                        (ByteString.length combined
+                                            - maximumRunnerStderrBytes))
+                                    combined
+                        in (retained, ())
+                    loop
     void (tryAny loop)
     void (tryAny (hClose handle))
+
+logRunnerStartupFailure :: RunningSandbox -> IO ()
+logRunnerStartupFailure running = do
+    captured <- readIORef running.runningStderrBuffer
+    unless (ByteString.null captured) do
+        let safeByte byte
+                | byte >= 0x20 && byte <= 0x7e = byte
+                | otherwise = 0x20
+            sanitized =
+                Text.unwords
+                    (Text.words
+                        (TextEncoding.decodeLatin1
+                            (ByteString.map safeByte captured)))
+        unless (Text.null sanitized) $
+            TextIO.hPutStrLn stderr
+                ("agent-server: sandbox runner startup failed; "
+                    <> "runner stderr: "
+                    <> sanitized)
 
 readBoundedJson
     :: Handle
@@ -594,15 +647,19 @@ encodeToolRequest sandbox running requestId sessionId cwd dialect call =
             , "cwd" .= cwd
             , "dialect" .= dialectSlug dialect
             , "call" .= object
-                [ "id" .= call.callId
-                , "name" .= call.name
-                , "arguments" .=
-                    translateArgumentsToGuest
-                        sandbox.sandboxTenant
-                        call
-                , "kind" .= callKindText call.callKind
-                , "argumentsEncrypted" .= call.argumentsEncrypted
-                ]
+                ( [ "id" .= call.callId
+                  , "name" .= call.name
+                  , "arguments" .=
+                        translateArgumentsToGuest
+                            sandbox.sandboxTenant
+                            call
+                  , "kind" .= callKindText call.callKind
+                  , "argumentsEncrypted" .= call.argumentsEncrypted
+                  ]
+                    <> [ "async" .= True
+                       | toolCallMode call == AsyncToolCall
+                       ]
+                )
             ]
 
 parseReady :: Value -> Either Text BrokerReady

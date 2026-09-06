@@ -1,61 +1,39 @@
 module Agent.CLI.Runtime.Orchestration.Providers.OpenAI
-    ( runOpenAiProvider
+    ( withOpenAiProvider
     ) where
 
-import Agent.CLI.Auth.Types
-    ( LoadedAuth(..)
-    , isGatewayLoadedAuth
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
     )
 import Agent.CLI.Compaction
     ( decorateCompactOutcomeWithTaskPlan
     , installLiveCompactOutcome
     , runProviderCompactWith
     )
-import Agent.CLI.PendingInputs (withPendingInputs)
-import Agent.CLI.Options (CliOptions(..))
 import Agent.CLI.Provider.OpenAI
     ( OpenAiPersistentConnection(..)
     , lockedOpenAiSession
     )
-import Agent.CLI.Provider.Switch
-    ( chooseStartupProviderTransition
-    , prepareTransitionBackend
-    )
-import Agent.CLI.ProviderFallback (isProviderUnavailable)
-import Agent.CLI.ProviderTransition
-    ( ProviderTransition(transitionCause)
-    , TransitionCause(AutomaticFallback)
-    )
 import Agent.CLI.Runtime.Orchestration.Providers.Common
     ( decorateManualCompact
-    , runSession
-    , startupFailure
     )
 import Agent.CLI.Runtime.Orchestration.Providers.Types
-    ( AgentProviderRequest(..)
-    )
-import Agent.CLI.Runtime.Orchestration.Types
-    ( AccountSwitchRequest(..)
-    , NativeRunCapabilities(..)
-    )
-import Agent.CLI.Runtime.Types
-    ( RunResult(RunProviderStartFailed, RunSwitchProvider)
+    ( OpenAiConfig(..), OpenAiAccounts(..), ProviderHost(..)
+    , ProviderCompaction(..), ProviderRuntime(..)
+    , ProviderAccountSelection(..), ProviderSubagents(..)
     )
 import Agent.CLI.Session.History (readLiveTranscript)
 import Agent.CLI.Session.Runtime.Types
     ( SessionBackend(..)
-    , StartupRuntime(..)
     )
-import Agent.CLI.Subagents.Runtime
+import Agent.CLI.Subagents.Runtime.OpenAI
     ( freshOpenAiBackend
-    , runCodexSubagent
     )
 import Agent.Error (ApiError(..))
 import Agent.OpenAI.Auth (Pool)
 import Agent.OpenAI.ModelMetadata (codexEffectiveContextWindowFor)
 import Agent.OpenAI.WebSocketClient
-    ( CodexAuthFailed(..)
-    , CodexConn
+    ( CodexConn
     , closeCodexConn
     , codexConnTurnState
     , codexConnUsesHttpFallback
@@ -67,11 +45,8 @@ import Agent.OpenAI.WebSocketClient
 import Agent.Provider
     ( Credential(..)
     , Provider(OpenAIProvider)
-    , tokenProviderBillingMode
     )
 import Agent.Responses.Types (ResponseCreateParams(model))
-import Agent.Subagents (setSubagentRunner)
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Control.Concurrent.Async (link, withAsync)
 import Control.Concurrent.Chan
     ( Chan
@@ -88,7 +63,7 @@ import Control.Concurrent.MVar
     , tryPutMVar
     , withMVar
     )
-import Control.Exception.Safe (catchAny, finally, try)
+import Control.Exception.Safe (catchAny, finally)
 import Control.Monad (when)
 import Data.IORef
     ( IORef
@@ -101,15 +76,17 @@ import Data.Text (Text)
 import qualified Agent.OpenAI.Auth as OpenAI
 import qualified Data.Text as Text
 
-runOpenAiProvider
-    :: AgentProviderRequest
-    -> NativeRunCapabilities
-    -> IO RunResult
-runOpenAiProvider request@AgentProviderRequest{tokenProvider} nativeCapabilities =
-    try @_ @CodexAuthFailed
-        (withCodexWsWithProviderOrHttpFallback tokenProvider \conn credential ->
-            runConnectedOpenAiProvider request conn credential)
-        >>= handleOpenAiProviderResult request nativeCapabilities
+withOpenAiProvider
+    :: OpenAiConfig
+    -> ProviderHost
+    -> (ProviderRuntime -> IO a)
+    -> IO a
+withOpenAiProvider config@OpenAiConfig{tokenProvider} host use =
+    withCodexWsWithProviderOrHttpFallback tokenProvider \conn credential ->
+        withConnectedOpenAiProvider config host conn credential use
+
+data AccountSwitchRequest
+    = AccountSwitchRequest !Credential !(MVar (Either ApiError Text))
 
 data OpenAiProviderRuntime = OpenAiProviderRuntime
     { openAiWsLock :: MVar ()
@@ -141,11 +118,11 @@ newOpenAiConnectionState conn credential = do
     pure OpenAiConnectionState{..}
 
 newOpenAiProviderRuntime
-    :: AgentProviderRequest
+    :: OpenAiAccounts
     -> CodexConn
     -> Credential
     -> IO OpenAiProviderRuntime
-newOpenAiProviderRuntime AgentProviderRequest{..} conn credential = do
+newOpenAiProviderRuntime OpenAiAccounts{..} conn credential = do
     OpenAiConnectionState
         { openAiConnectionLock = wsLock
         , openAiConnectionRef =
@@ -155,9 +132,7 @@ newOpenAiProviderRuntime AgentProviderRequest{..} conn credential = do
         } <- newOpenAiConnectionState conn credential
     switchRequests <-
         newChan :: IO (Chan AccountSwitchRequest)
-    let selectableOpenAiPool
-            | isGatewayLoadedAuth loaded = Nothing
-            | otherwise = loaded.loadedOpenAiPool
+    let selectableOpenAiPool = selectablePool
         selectAccount =
             selectOpenAiAccount switchRequests
                 <$> selectableOpenAiPool
@@ -201,7 +176,7 @@ newOpenAiProviderRuntime AgentProviderRequest{..} conn credential = do
                                     newIORef
                                         (not usesHttp)
                                 label <-
-                                    resolveActiveAccountLabel
+                                    resolveAccountLabel
                                         newCredential
                                 writeIORef
                                     activeConnectionRef $
@@ -209,15 +184,7 @@ newOpenAiProviderRuntime AgentProviderRequest{..} conn credential = do
                                         newCredential
                                         newHealthy
                                         newConn
-                                writeIORef
-                                    activeAccountIdRef
-                                    newCredential.accountId
-                                writeIORef
-                                    activeSelectionRef
-                                    newCredential.accountId
-                                writeIORef
-                                    activeAccountRef
-                                    label
+                                installAccount newCredential label
                                 writeIORef
                                     httpFallbackActive
                                     usesHttp
@@ -231,7 +198,7 @@ newOpenAiProviderRuntime AgentProviderRequest{..} conn credential = do
                     oldConnection <-
                         readIORef activeConnectionRef
                     previousAccountId <-
-                        readIORef activeAccountIdRef
+                        readActiveAccountId
                     let OpenAiPersistentConnection
                             _
                             oldHealthy
@@ -239,9 +206,7 @@ newOpenAiProviderRuntime AgentProviderRequest{..} conn credential = do
                                 oldConnection
                     writeIORef oldHealthy False
                     closeCodexConn oldConn
-                    writeIORef
-                        preferredOpenAiAccountRef
-                        (Just selectedCredential.accountId)
+                    preferAccount selectedCredential.accountId
                     let connectSelected =
                             withCodexWsCredentialOrHttpFallback
                                 selectedCredential
@@ -260,9 +225,7 @@ newOpenAiProviderRuntime AgentProviderRequest{..} conn credential = do
                             | Text.null previousAccountId =
                                 failSwitch selectedError
                             | otherwise = do
-                                writeIORef
-                                    preferredOpenAiAccountRef
-                                    (Just previousAccountId)
+                                preferAccount previousAccountId
                                 OpenAI.getAccessTokenForAccount
                                     pool
                                     previousAccountId
@@ -351,12 +314,16 @@ selectOpenAiAccount switchRequests pool selectedAccountId = do
                     reply
             takeMVar reply
 
-runConnectedOpenAiProvider
-    :: AgentProviderRequest
+withConnectedOpenAiProvider
+    :: OpenAiConfig
+    -> ProviderHost
     -> CodexConn
     -> Credential
-    -> IO RunResult
-runConnectedOpenAiProvider request@AgentProviderRequest{..} conn credential = do
+    -> (ProviderRuntime -> IO a)
+    -> IO a
+withConnectedOpenAiProvider OpenAiConfig{..}
+        ProviderHost{compaction = ProviderCompaction{..}, networkRecovery}
+        conn credential use = do
     OpenAiProviderRuntime
         { openAiWsLock = wsLock
         , openAiActiveConnectionRef =
@@ -368,46 +335,29 @@ runConnectedOpenAiProvider request@AgentProviderRequest{..} conn credential = do
         , openAiSelectAccount = selectAccount
         , openAiSwitchLoop = switchLoop
         } <- newOpenAiProviderRuntime
-            request
+            accounts
             conn
             credential
-    case multiCtx of
-        Just ctx ->
-            setSubagentRunner ctx.multiRegistry $
-                runCodexSubagent
-                    (isGatewayWebSocketCredential
-                        credential)
-                    subagentRuntime
-                    selectableTokenProvider
-                    ctx.multiSendToRoot
-        Nothing -> pure ()
     let (compactSender, lockedBackend) =
             lockedOpenAiSession
-                startup.startupNetworkRecovery
+                networkRecovery
                 (isGatewayWebSocketCredential
                     credential)
-                options.optCompactThreshold
-                options.optShowRawReasoning
+                compactThreshold
+                showRawReasoning
                 wsLock
                 httpFallbackActive
                 tokenProvider
                 activeConnectionRef
-                (readIORef paramsRef)
+                (readSessionRequestParams paramsRef)
                 contextTokensRef
                 recordCompactionUsage
                 (decorateCompactOutcomeWithTaskPlan
                     taskPlan)
-                (\outcome inputs ->
-                    readIORef
-                        automaticCompactionHookRef
-                        >>= \hook ->
-                            hook outcome inputs)
-        noticingBackend =
-            withPendingInputs pendingNotices
-                lockedBackend
+                installAutomaticCompact
         btwBackend privateParams =
             freshOpenAiBackend
-                options.optShowRawReasoning
+                showRawReasoning
                 tokenProvider
                 (pure privateParams)
         compactRunner focus =
@@ -430,34 +380,23 @@ runConnectedOpenAiProvider request@AgentProviderRequest{..} conn credential = do
                                 runProviderCompactWith
                                     (Just compactSender)
                                     recordCompactionUsage
-                                    provider
+                                    OpenAIProvider
                                     (Just tokenProvider)
                                     paramsRef
                                     historyRef
                                     requestedFocus
-                                    >>= decorateManualCompact request
+                                    >>= decorateManualCompact (readSessionRequestParams paramsRef) taskPlan
                                         (codexEffectiveContextWindowFor
                                             . (.model)))
                             focus
                 resetCodexTurnState turnState
                 runCompact `finally`
                     resetCodexTurnState turnState
-    activeBackend <-
-        prepareTransitionBackend
-            modelSwitchScope home projectRoot
-            transition persist noticingBackend
     withAsync switchLoop \switchWorker -> do
         link switchWorker
-        runSession
-            (sessionRequest
-                startupUnavailable
-                (Just tokenProvider)
-                selectableOpenAiPool
-                selectAccount
-                (currentModelContextWindow transportModel)
-                compactRunner)
-            SessionBackend
-                { backend = activeBackend
+        use ProviderRuntime
+            { sessionBackend = SessionBackend
+                { backend = lockedBackend
                 , btwBackend
                 , interruptBackend = pure ()
                 , resetBackendState = do
@@ -466,43 +405,10 @@ runConnectedOpenAiProvider request@AgentProviderRequest{..} conn credential = do
                         _connectionHealthy
                         activeConn <-
                             readIORef activeConnectionRef
-                    resetCodexTurnState
-                        (codexConnTurnState activeConn)
+                    resetCodexTurnState (codexConnTurnState activeConn)
                 }
-
-handleOpenAiProviderResult
-    :: AgentProviderRequest
-    -> NativeRunCapabilities
-    -> Either CodexAuthFailed RunResult
-    -> IO RunResult
-handleOpenAiProviderResult request@AgentProviderRequest{..} nativeCapabilities = \case
-    Left (CodexAuthFailed err) ->
-        case transition of
-            Just active
-                | active.transitionCause == AutomaticFallback ->
-                    pure (RunProviderStartFailed err)
-            _
-                | shouldProbeAtStartup
-                , not (isGatewayLoadedAuth loaded)
-                , isProviderUnavailable err ->
-                    chooseStartupProviderTransition
-                        nativeCapabilities.nativeProviderFallback
-                        catalog
-                        projectRoot
-                        fullscreen
-                        (tokenProviderBillingMode
-                            tokenProvider)
-                        provider
-                        model
-                        unavailableProviders
-                        Nothing
-                        err >>= \case
-                            Just next ->
-                                pure
-                                    (RunSwitchProvider
-                                        next)
-                            Nothing ->
-                                startupFailure request err
-            _ ->
-                startupFailure request err
-    Right result -> pure result
+            , currentContextWindow = currentModelContextWindow transportModel
+            , compactRunner
+            , accountSelection = OpenAiAccountSelection selectableOpenAiPool selectAccount
+            , subagents = CodexSubagents (isGatewayWebSocketCredential credential)
+            }

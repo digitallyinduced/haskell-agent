@@ -90,6 +90,7 @@ functionCall callId = FunctionCallItem FunctionCall
     , arguments = "{}"
     , encryptedFunctionArgs = Nothing
     , status = Nothing
+    , async = Nothing
     }
 
 newtype FunctionCallStream = FunctionCallStream [ResponseItem]

@@ -225,6 +225,72 @@ spec = do
             resumeNeedsGeneratedContext [ordinarySummaryHeading]
                 `shouldBe` False
 
+    describe "resolveSessionInitialContext" do
+        it "requests generated context for a fresh session" do
+            let initial = resolveSessionInitialContext False False Nothing
+            initial.initialContextItems `shouldBe` []
+            initial.initialContextResumeNeedsFresh `shouldBe` False
+            initial.initialContextPrevious `shouldBe` Nothing
+            initial.initialContextNeeded `shouldBe` True
+            initial.initialContextMayRestoreSnapshot `shouldBe` False
+
+        it "reuses a compatible response chain without regenerating context" do
+            let meta =
+                    (sampleMeta "abc" "first")
+                        { metaLastResponseId = Just "response-1"
+                        }
+                initial =
+                    resolveSessionInitialContext
+                        False
+                        False
+                        (Just (meta, [sampleTurn]))
+            initial.initialContextPrevious `shouldBe` Just "response-1"
+            initial.initialContextNeeded `shouldBe` False
+            initial.initialContextMayRestoreSnapshot `shouldBe` False
+
+        it "drops the response chain when the provider target changes" do
+            let meta =
+                    (sampleMeta "abc" "first")
+                        { metaLastResponseId = Just "response-1"
+                        }
+                initial =
+                    resolveSessionInitialContext
+                        False
+                        True
+                        (Just (meta, [sampleTurn]))
+            initial.initialContextPrevious `shouldBe` Nothing
+            initial.initialContextNeeded `shouldBe` False
+            initial.initialContextMayRestoreSnapshot `shouldBe` False
+
+        it "requests generated context after a transcript reset" do
+            let boundary =
+                    sampleTurn
+                        { turnEffect = TranscriptReset
+                        }
+                initial =
+                    resolveSessionInitialContext
+                        False
+                        False
+                        (Just (sampleMeta "abc" "first", [boundary]))
+            initial.initialContextResumeNeedsFresh `shouldBe` True
+            initial.initialContextNeeded `shouldBe` True
+            initial.initialContextMayRestoreSnapshot `shouldBe` False
+
+        it "marks a saved prompt snapshot as a possible fast resume" do
+            let meta =
+                    (sampleMeta "abc" "first")
+                        { metaLastResponseId = Nothing
+                        , metaPromptSnapshot =
+                            Just (error "snapshot value should remain lazy")
+                        }
+                initial =
+                    resolveSessionInitialContext
+                        False
+                        False
+                        (Just (meta, []))
+            initial.initialContextNeeded `shouldBe` True
+            initial.initialContextMayRestoreSnapshot `shouldBe` True
+
     describe "applyResumeKey" do
         let entries =
                 resumeEntriesFrom

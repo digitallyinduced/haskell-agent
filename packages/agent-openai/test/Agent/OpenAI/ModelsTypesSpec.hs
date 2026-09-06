@@ -14,11 +14,11 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "bundled Codex model catalog" do
-        it "loads the current upstream catalog and selects Sol by priority" do
+        it "loads the current upstream catalog and selects Astra by priority" do
             catalog <- loadBundledModelsOrThrow
-            length catalog.models `shouldBe` 10
+            length catalog.models `shouldBe` 11
             defaultModelForCatalog True catalog
-                `shouldBe` Just "gpt-5.6-sol"
+                `shouldBe` Just "gpt-6-astra"
             catalog.catalogGeneration `shouldBe` Nothing
             decodeModelsOrFail (Aeson.toJSON catalog) `shouldBe` catalog
 
@@ -41,18 +41,31 @@ spec = do
                 ]
             let pickerModels = map (.model) (pickerModelPresets True catalog)
             pickerModels `shouldBe`
-                [ "gpt-5.6-sol"
+                [ "gpt-6-astra"
+                , "gpt-5.6-sol"
                 , "gpt-5.6-terra"
                 , "gpt-5.6-luna"
                 , "gpt-5.5"
                 , "gpt-5.2"
                 ]
 
-        it "exposes current 5.6 dialect selectors and reasoning defaults" do
+        it "exposes current frontier dialect selectors and reasoning defaults" do
             catalog <- loadBundledModelsOrThrow
-            let sol = modelInfoForSlug "gpt-5.6-sol" catalog
+            let astra = modelInfoForSlug "gpt-6-astra" catalog
+                sol = modelInfoForSlug "gpt-5.6-sol" catalog
                 terra = modelInfoForSlug "gpt-5.6-terra" catalog
                 luna = modelInfoForSlug "gpt-5.6-luna" catalog
+            astra.useResponsesLite `shouldBe` True
+            toolModeForInfo CoreTools.ConventionalToolMode astra
+                `shouldBe` CoreTools.CodeOnlyToolMode
+            astra.multiAgentVersion `shouldBe` Just MultiAgentV2
+            astra.contextWindow `shouldBe` Just 272_000
+            astra.maxContextWindow `shouldBe` Just 872_000
+            defaultReasoningEffortForInfo astra
+                `shouldBe` Just ReasoningEffortLow
+            defaultVerbosityForInfo astra `shouldBe` Just VerbosityLow
+            modelSupportsReasoningEffort astra ReasoningEffortUltra
+                `shouldBe` True
             sol.useResponsesLite `shouldBe` True
             toolModeForInfo CoreTools.ConventionalToolMode sol
                 `shouldBe` CoreTools.CodeOnlyToolMode

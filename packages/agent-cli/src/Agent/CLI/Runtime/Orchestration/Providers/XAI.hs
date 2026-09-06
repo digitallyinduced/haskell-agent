@@ -1,10 +1,9 @@
 module Agent.CLI.Runtime.Orchestration.Providers.XAI
-    ( runXaiProvider
+    ( withXaiProvider
     ) where
 
-import Agent.CLI.Auth.Types
-    ( LoadedAuth(..)
-    , isGatewayLoadedAuth
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
     )
 import Agent.CLI.Compaction
     ( autoCompactBackendWith
@@ -14,48 +13,40 @@ import Agent.CLI.Compaction
     , runXaiResponsesCompactWithContextWindow
     )
 import Agent.Connectivity (withConnectionRecoveryOn)
-import Agent.CLI.Options (CliOptions(..))
-import Agent.CLI.PendingInputs (withPendingInputs)
-import Agent.CLI.Provider.Switch (prepareTransitionBackend)
 import Agent.CLI.Runtime.Orchestration.Providers.Common
     ( decorateAutomaticCompact
     , decorateManualCompact
-    , runSession
     )
 import Agent.CLI.Runtime.Orchestration.Providers.Types
-    ( AgentProviderRequest(..)
+    ( ProviderHost(..), ProviderCompaction(..), ProviderRuntime(..)
+    , ProviderAccountSelection(..), ProviderSubagents(..)
     )
-import Agent.CLI.Runtime.Orchestration.Types
-    ( NativeRunCapabilities(..)
-    )
-import Agent.CLI.Runtime.Types (RunResult)
 import Agent.CLI.Session.History (readLiveTranscript)
 import Agent.CLI.Session.Runtime.Types
     ( SessionBackend(..)
-    , StartupRuntime(..)
     )
-import Agent.CLI.Subagents.Runtime (runXaiParentSubagent)
-import Agent.Provider (runWithTokenProvider)
+import Agent.Provider (TokenProvider, runWithTokenProvider)
 import Agent.Responses.Types (ResponseCreateParams(model))
-import Agent.Subagents (setSubagentRunner)
-import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.XAI.LoopBackend (xaiBackendWithClientOptions)
-import Data.IORef (newIORef, readIORef)
-import Data.Maybe (fromMaybe, isJust)
+import Data.IORef (newIORef)
+import Data.Maybe (fromMaybe)
 import qualified Agent.XAI.Client as XAIClient
 import qualified Agent.XAI.Options as XAI
 import qualified Agent.XAI.Request as XAIRequest
 
-runXaiProvider
-    :: AgentProviderRequest
-    -> NativeRunCapabilities
-    -> IO RunResult
-runXaiProvider request@AgentProviderRequest{..} nativeCapabilities = do
+withXaiProvider
+    :: TokenProvider
+    -> Bool
+    -> ProviderHost
+    -> (ProviderRuntime -> IO a)
+    -> IO a
+withXaiProvider tokenProvider hostedTools
+        ProviderHost{compaction = ProviderCompaction{..}, networkRecovery} use = do
     xaiOptions0 <- XAI.clientOptionsFromEnv
     let xaiOptions =
             xaiOptions0
                 { XAI.hostedXSearchEnabled =
-                    nativeCapabilities.nativeProviderHostedTools
+                    hostedTools
                 }
     let xaiContextWindow =
             contextWindowForParams
@@ -74,7 +65,7 @@ runXaiProvider request@AgentProviderRequest{..} nativeCapabilities = do
                         (XAI.grokAutoCompactTokenLimit
                             (xaiWireModel currentParams)
                             contextWindow)
-                        options.optCompactThreshold
+                        compactThreshold
         xaiOptionsFor currentParams =
             xaiOptions
                 { XAI.autoCompactTokenLimit =
@@ -84,35 +75,20 @@ runXaiProvider request@AgentProviderRequest{..} nativeCapabilities = do
                 }
         xaiCompactThreshold =
             xaiCompactThresholdFor
-                <$> readIORef paramsRef
+                <$> readSessionRequestParams paramsRef
         protectXaiOverflow occupancy getParams backend =
             boundCompletedToolContinuations
                 xaiContextWindow
                 getParams
                 occupancy
                 backend
-    case multiCtx of
-        Just ctx ->
-            setSubagentRunner ctx.multiRegistry $
-                runXaiParentSubagent
-                    subagentRuntime
-                    dialect
-                    ctx.multiSendToRoot
-                    xaiContextWindow
-                    xaiCompactThresholdFor
-                    (\childParams ->
-                        xaiBackendWithClientOptions
-                            xaiOptionsFor
-                            tokenProvider
-                            (pure childParams))
-        Nothing -> pure ()
     let btwBackend privateParams =
             xaiBackendWithClientOptions
                 xaiOptionsFor
                 tokenProvider
                 (pure privateParams)
         compactHistory history _inputs = do
-            currentParams <- readIORef paramsRef
+            currentParams <- readSessionRequestParams paramsRef
             runXaiBackendCompactHistoryWithContextWindow
                 (xaiContextWindow currentParams)
                 btwBackend
@@ -120,35 +96,29 @@ runXaiProvider request@AgentProviderRequest{..} nativeCapabilities = do
                 currentParams
                 history
                 Nothing
-                >>= decorateAutomaticCompact request
+                >>= decorateAutomaticCompact (readSessionRequestParams paramsRef) taskPlan
                     xaiContextWindow
         -- Reconnection wraps only the continuation. Keeping automatic
         -- compaction outside it prevents a failed continuation from
         -- rerunning the summary.
         requestBackend =
             withConnectionRecoveryOn
-                startup.startupNetworkRecovery $
+                networkRecovery $
                 protectXaiOverflow
                     contextTokensRef
-                    (readIORef paramsRef)
+                    (readSessionRequestParams paramsRef)
                     (xaiBackendWithClientOptions
                         xaiOptionsFor
                         tokenProvider
-                        (readIORef paramsRef))
+                        (readSessionRequestParams paramsRef))
         compactingBackend =
             autoCompactBackendWith
                 xaiCompactThreshold
                 compactHistory
-                (\outcome inputs ->
-                    readIORef automaticCompactionHookRef
-                        >>= \hook ->
-                            hook outcome inputs)
-                (readIORef paramsRef)
+                installAutomaticCompact
+                (readSessionRequestParams paramsRef)
                 contextTokensRef
                 requestBackend
-        backend =
-            withPendingInputs pendingNotices
-                compactingBackend
         compactRunner focus = do
             contextWindow <-
                 currentModelContextWindow
@@ -172,28 +142,20 @@ runXaiProvider request@AgentProviderRequest{..} nativeCapabilities = do
                         paramsRef
                         historyRef
                         requestedFocus
-                        >>= decorateManualCompact request
+                        >>= decorateManualCompact (readSessionRequestParams paramsRef) taskPlan
                             xaiContextWindow)
                 focus
-    activeBackend <-
-        prepareTransitionBackend
-            modelSwitchScope home projectRoot
-            transition persist backend
-    runSession
-        (sessionRequest
-            startupUnavailable
-            (Just tokenProvider)
-            loaded.loadedOpenAiPool
-            (if isGatewayLoadedAuth loaded
-                || isJust customGenericOptions
-                then Nothing
-                else Just selectHttpAccount)
-            (Just . xaiContextWindow
-                <$> readIORef paramsRef)
-            compactRunner)
-        SessionBackend
-            { backend = activeBackend
+    use ProviderRuntime
+        { sessionBackend = SessionBackend
+            { backend = compactingBackend
             , btwBackend
             , interruptBackend = pure ()
             , resetBackendState = pure ()
             }
+        , currentContextWindow = Just . xaiContextWindow <$> readSessionRequestParams paramsRef
+        , compactRunner
+        , accountSelection = HttpAccountSelection
+        , subagents = XaiSubagents xaiContextWindow xaiCompactThresholdFor
+            (\childParams ->
+                xaiBackendWithClientOptions xaiOptionsFor tokenProvider (pure childParams))
+        }

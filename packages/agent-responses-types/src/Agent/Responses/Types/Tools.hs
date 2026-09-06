@@ -99,33 +99,36 @@ data FunctionTool = FunctionTool
     , description :: !(Maybe Text)
     , parameters  :: !(Maybe RawJson)
     , strict      :: !(Maybe Bool)
-
+    , async       :: !(Maybe Bool)
     } deriving stock (Eq, Show)
 
 instance ToJSON FunctionTool where
     toJSON FunctionTool
-        { name, description, parameters, strict } =
+        { name, description, parameters, strict, async } =
             objectWith
                 [ Just (field "type" ("function" :: Text))
                 , Just (field "name" name)
                 , optionalField "description" description
                 , optionalField "parameters" parameters
                 , optionalField "strict" strict
+                , optionalField "async" async
                 ]
 
 data CustomTool = CustomTool
     { name        :: !Text
     , description :: !(Maybe Text)
     , format      :: !(Maybe RawJson)
+    , async       :: !(Maybe Bool)
     } deriving stock (Eq, Show)
 
 instance ToJSON CustomTool where
-    toJSON CustomTool { name, description, format } =
+    toJSON CustomTool { name, description, format, async } =
         objectWith
             [ Just (field "type" ("custom" :: Text))
             , Just (field "name" name)
             , optionalField "description" description
             , optionalField "format" format
+            , optionalField "async" async
             ]
 
 data NamespaceTool = NamespaceTool
@@ -186,6 +189,7 @@ functionToolDecoder = Hermes.object $
         <*> optionalAtKey "description" Hermes.text
         <*> optionalAtKey "parameters" rawJsonDecoder
         <*> optionalAtKey "strict" Hermes.bool
+        <*> optionalAtKey "async" Hermes.bool
 
 customToolDecoder :: Hermes.Decoder CustomTool
 customToolDecoder = Hermes.object $
@@ -193,6 +197,7 @@ customToolDecoder = Hermes.object $
         <$> Hermes.atKey "name" Hermes.text
         <*> optionalAtKey "description" Hermes.text
         <*> optionalAtKey "format" rawJsonDecoder
+        <*> optionalAtKey "async" Hermes.bool
 
 namespaceToolDecoder :: Hermes.Decoder NamespaceTool
 namespaceToolDecoder = Hermes.object $

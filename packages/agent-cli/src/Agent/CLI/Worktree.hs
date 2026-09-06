@@ -4,6 +4,7 @@ module Agent.CLI.Worktree
     , createWorktreeWithFetch
     , createManagedWorktree
     , createManagedWorktreeWithProgress
+    , createManagedWorktreeFromConfigWithProgress
     , removeWorktree
     , cleanupStaleWorktrees
     , defaultWorktreeKeepCount
@@ -170,9 +171,9 @@ createWorktreeWithFetchProgress report fetchLatest source root = runExceptT do
     withGitWorktreeLock repo $
         addUnique repo root repoName day start base 0
 
--- | Create a worktree using the machine-wide policy under the supplied home.
--- Configuration is read for every creation so startup, slash-command, and
--- subagent worktrees all follow the same current setting.
+-- | Create a worktree using the current machine-wide policy under the
+-- supplied home. Interactive and subagent creation use this fresh-read entry
+-- point; initial CLI startup uses its already validated snapshot below.
 createManagedWorktree :: OsPath -> OsPath -> IO (Either Text OsPath)
 createManagedWorktree =
     createManagedWorktreeWithProgress (const (pure ()))
@@ -186,11 +187,28 @@ createManagedWorktreeWithProgress report home source =
     loadHarnessConfig home >>= \case
         Left err -> pure (Left err)
         Right config ->
-            createWorktreeWithFetchProgress
+            createManagedWorktreeFromConfigWithProgress
                 report
-                config.configWorktree.worktreeFetchLatestUpstream
+                config
+                home
                 source
-                (worktreeRoot home)
+
+-- | Create an initial managed worktree from an already validated startup
+-- configuration snapshot. Later interactive worktree creation deliberately
+-- continues through 'createManagedWorktreeWithProgress' so it observes
+-- configuration changes made after startup.
+createManagedWorktreeFromConfigWithProgress
+    :: (WorktreeProgress -> IO ())
+    -> HarnessConfig
+    -> OsPath
+    -> OsPath
+    -> IO (Either Text OsPath)
+createManagedWorktreeFromConfigWithProgress report config home source =
+    createWorktreeWithFetchProgress
+        report
+        config.configWorktree.worktreeFetchLatestUpstream
+        source
+        (worktreeRoot home)
 
 -- | Remove a managed worktree and the branch created for it.
 removeWorktree :: OsPath -> OsPath -> IO (Either Text ())

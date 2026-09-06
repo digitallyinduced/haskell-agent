@@ -18,14 +18,17 @@ module Agent.CLI.McpOAuth
 import Agent.CLI.Config (HarnessConfig(..), McpOAuthConfig(..), McpServerConfig(..), loadHarnessConfig)
 import Agent.CLI.McpOAuthStore (loadMcpOAuthRecord, mcpOAuthStorePath, saveMcpOAuthRecord)
 import qualified Agent.MCP.OAuth as OAuth
-import Control.Exception.Safe (bracket, bracketOnError, tryAny)
-import Control.Monad (forM_, when)
+import Control.Concurrent.MVar
+    ( newEmptyMVar
+    , putMVar
+    , readMVar
+    , tryPutMVar
+    )
+import Control.Exception.Safe (bracket, bracketOnError, finally, tryAny)
+import Control.Monad (forM_, void, when)
 import Crypto.Hash (Digest, SHA256, hash)
 import qualified Data.ByteArray as BA
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Base64.URL as Base64
-import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
@@ -33,13 +36,23 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Encoding
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Network.HTTP.Client.TLS (newTlsManager)
-import Network.HTTP.Types.URI (urlEncode)
+import Network.HTTP.Types
+    ( hCacheControl
+    , hConnection
+    , hContentType
+    , methodGet
+    , status200
+    , status404
+    , status405
+    )
+import Network.HTTP.Types.URI (Query, urlEncode)
 import Network.Socket
-    ( AddrInfo(..), Socket, SockAddr(..), SocketType(Stream), accept, bind, close
+    ( AddrInfo(..), Socket, SockAddr(..), SocketType(Stream), bind, close
     , defaultHints, defaultProtocol, getAddrInfo, getSocketName, listen
     , setSocketOption, socket, SocketOption(ReuseAddr)
     )
-import qualified Network.Socket.ByteString as Socket
+import qualified Network.Wai as Wai
+import qualified Network.Wai.Handler.Warp as Warp
 import qualified System.Directory.OsPath as Dir
 import qualified System.Entropy
 import System.Exit (ExitCode(..))
@@ -276,50 +289,56 @@ callbackPort sock = do
     pure (fromIntegral port)
 
 receiveCallback :: Socket -> IO Callback
-receiveCallback listener = bracket (fst <$> accept listener) close $ \sock -> do
-    bytes <- Socket.recv sock 8192
-    let requestLine = case BS8.lines bytes of line : _ -> line; _ -> ""
-        target = case BS8.words requestLine of _method : path : _ -> path; _ -> "/"
-        query = snd (BS.break (== 63) target)
-        params = parseQuery (BS.drop 1 query)
-        response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: "
-            <> Encoding.encodeUtf8 (Text.pack (show (LBS.length OAuth.oauthCallbackSuccessPage)))
-            <> "\r\nConnection: close\r\n\r\n" <> LBS.toStrict OAuth.oauthCallbackSuccessPage
-    Socket.sendAll sock response
-    pure Callback
-        { callbackCode = lookup "code" params
-        , callbackState = lookup "state" params
-        , callbackIss = lookup "iss" params
-        , callbackError = lookup "error" params
-        , callbackErrorDescription = lookup "error_description" params
-        }
-
-parseQuery :: BS.ByteString -> [(Text, Text)]
-parseQuery raw = map parsePair (filter (not . BS.null) (BS.split 38 raw))
+receiveCallback listener = do
+    resultVar <- newEmptyMVar
+    shutdownVar <- newEmptyMVar
+    let settings =
+            Warp.setHost "127.0.0.1"
+                $ Warp.setMaxTotalHeaderLength 8_192
+                $ Warp.setInstallShutdownHandler (putMVar shutdownVar)
+                    Warp.defaultSettings
+        application request respond
+            | Wai.requestMethod request /= methodGet =
+                respond (plainResponse status405 "Method Not Allowed")
+            | Wai.rawPathInfo request /= "/callback" =
+                respond (plainResponse status404 "Not Found")
+            | otherwise = do
+                let callback = callbackFromQuery (Wai.queryString request)
+                    finish = do
+                        void (tryPutMVar resultVar callback)
+                        readMVar shutdownVar >>= id
+                respond
+                    (Wai.responseLBS
+                        status200
+                        [ (hContentType, "text/html; charset=utf-8")
+                        , (hCacheControl, "no-store")
+                        , (hConnection, "close")
+                        , ("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+                        ]
+                        OAuth.oauthCallbackSuccessPage)
+                    `finally` finish
+    Warp.runSettingsSocket settings listener application
+    readMVar resultVar
   where
-    parsePair item =
-        let (key, value) = BS.break (== 61) item
-        in (decode key, decode (BS.drop 1 value))
-    decode = Encoding.decodeUtf8 . urlDecode
-    urlDecode = BS.concat . go
-    go input = case BS.uncons input of
-        Nothing -> []
-        Just (37, a) -> case BS.uncons a of
-            Just (x, b) -> case BS.uncons b of
-                Just (y, rest) -> maybe [BS.singleton 37] (\v -> [BS.singleton v]) (hex x y) <> go rest
-                _ -> [BS.singleton 37] <> go a
-            _ -> [BS.singleton 37] <> go a
-        Just (43, rest) -> BS.singleton 32 : go rest
-        Just (x, rest) -> BS.singleton x : go rest
-    hex x y = do
-        a <- digit x
-        b <- digit y
-        pure (a * 16 + b)
-    digit c
-        | c >= 48 && c <= 57 = Just (c - 48)
-        | c >= 65 && c <= 70 = Just (c - 55)
-        | c >= 97 && c <= 102 = Just (c - 87)
-        | otherwise = Nothing
+    plainResponse status body =
+        Wai.responseLBS
+            status
+            [ (hContentType, "text/plain; charset=utf-8")
+            , (hConnection, "close")
+            ]
+            body
+
+callbackFromQuery :: Query -> Callback
+callbackFromQuery query = Callback
+    { callbackCode = parameter "code"
+    , callbackState = parameter "state"
+    , callbackIss = parameter "iss"
+    , callbackError = parameter "error"
+    , callbackErrorDescription = parameter "error_description"
+    }
+  where
+    parameter name =
+        lookup name query >>= id >>= either (const Nothing) Just . Encoding.decodeUtf8'
 
 randomUrlBytes :: Int -> IO Text
 randomUrlBytes n = do

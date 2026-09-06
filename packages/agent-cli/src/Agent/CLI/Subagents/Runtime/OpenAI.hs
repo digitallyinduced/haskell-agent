@@ -4,7 +4,7 @@ module Agent.CLI.Subagents.Runtime.OpenAI
     , freshOpenAiBackendWithTurnState
     ) where
 
-import Agent.Loop (Backend(..))
+import Agent.Loop (Backend(..), backendWithCallbacks)
 import Agent.OpenAI.LoopBackend (openAiBackendWithReasoningVisibility)
 import Agent.OpenAI.WebSocketClient
     ( CodexTurnState
@@ -19,12 +19,12 @@ import Agent.Responses.Types (ResponseCreateParams)
 freshOpenAiBackend
     :: Bool -> TokenProvider -> IO ResponseCreateParams -> Backend
 freshOpenAiBackend showRawReasoning provider getParams =
-    Backend \state previous inputs onEvent -> do
+    backendWithCallbacks \state previous inputs callbacks -> do
         turnState <- newCodexTurnState
-        let Backend submit =
+        let backend =
                 freshOpenAiBackendWithTurnState
                     showRawReasoning turnState provider getParams
-        submit state previous inputs onEvent
+        backend.submitTurnWithCallbacks state previous inputs callbacks
 
 -- | Every request dials its own connection attached to the shared logical
 -- turn. That includes the resubmission after a socket died mid-response: the
@@ -34,9 +34,9 @@ freshOpenAiBackendWithTurnState
     :: Bool -> CodexTurnState -> TokenProvider
     -> IO ResponseCreateParams -> Backend
 freshOpenAiBackendWithTurnState showRawReasoning turnState provider getParams =
-    Backend \state previous inputs onEvent ->
+    backendWithCallbacks \state previous inputs callbacks ->
         runWithTokenProvider provider \credential ->
-            let Backend submit =
+            let backend =
                     openAiBackendWithReasoningVisibility
                         showRawReasoning
                         (\request previousResponseId onStreamEvent ->
@@ -46,4 +46,5 @@ freshOpenAiBackendWithTurnState showRawReasoning turnState provider getParams =
                                     sendWsRequestWithEvents conn request
                                         previousResponseId onStreamEvent)
                         getParams
-            in submit state previous inputs onEvent
+            in backend.submitTurnWithCallbacks
+                state previous inputs callbacks

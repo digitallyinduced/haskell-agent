@@ -337,19 +337,35 @@ sessionToolEvent = \case
                     "computer"
                     (TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $
                         Aeson.object ["summary" Aeson..= summary])
+                    (fromMaybe False call.async)
     FunctionCallItem call ->
-        Just (toolStartedJSON call.callId call.name call.arguments)
+        Just
+            (toolStartedJSON
+                call.callId
+                call.name
+                call.arguments
+                (fromMaybe False call.async))
     CustomToolCallItem call ->
-        Just (toolStartedJSON call.callId call.name call.input)
+        Just
+            (toolStartedJSON
+                call.callId
+                call.name
+                call.input
+                (fromMaybe False call.async))
     FunctionCallOutputItem result ->
         Just
             (toolFinishedJSON
                 result.callId
                 (if containsInputImage result.output
                     then "Screenshot captured"
-                    else renderToolValue result.output))
+                    else renderToolValue result.output)
+                (fromMaybe False result.async))
     CustomToolCallOutputItem result ->
-        Just (toolFinishedJSON result.callId (renderToolValue result.output))
+        Just
+            (toolFinishedJSON
+                result.callId
+                (renderToolValue result.output)
+                (fromMaybe False result.async))
     ComputerCallItem call ->
         Just $
             toolStartedJSON
@@ -359,11 +375,13 @@ sessionToolEvent = \case
                     Aeson.object
                         [ "summary" Aeson..= summarizeComputerCall call
                         ])
+                False
     ComputerCallOutputItem result ->
         Just
             (toolFinishedJSON
                 result.computerOutputCallId
-                "Screenshot captured")
+                "Screenshot captured"
+                False)
     _ -> Nothing
 
 containsInputImage :: RawJson -> Bool
@@ -379,8 +397,8 @@ containsInputImageValue = \case
     Aeson.Array values -> any containsInputImageValue values
     _ -> False
 
-toolStartedJSON :: Text -> Text -> Text -> Aeson.Value
-toolStartedJSON callId name arguments =
+toolStartedJSON :: Text -> Text -> Text -> Bool -> Aeson.Value
+toolStartedJSON callId name arguments isAsync =
     let (visible, truncated) = boundedSessionToolText arguments
     in Aeson.object
         [ "type" Aeson..= ("tool_started" :: Text)
@@ -388,16 +406,18 @@ toolStartedJSON callId name arguments =
         , "name" Aeson..= name
         , "arguments" Aeson..= visible
         , "argumentsEncrypted" Aeson..= False
+        , "async" Aeson..= isAsync
         , "truncated" Aeson..= truncated
         ]
 
-toolFinishedJSON :: Text -> Text -> Aeson.Value
-toolFinishedJSON callId output =
+toolFinishedJSON :: Text -> Text -> Bool -> Aeson.Value
+toolFinishedJSON callId output isAsync =
     let (visible, truncated) = boundedSessionToolText output
     in Aeson.object
         [ "type" Aeson..= ("tool_finished" :: Text)
         , "callId" Aeson..= callId
         , "output" Aeson..= visible
+        , "async" Aeson..= isAsync
         , "truncated" Aeson..= truncated
         ]
 

@@ -8,6 +8,14 @@ module Agent.CLI.Session.Interaction
     , syncFullscreenPrompt
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    , modifySessionRequestOptions
+    )
+import Agent.CLI.ActiveAccount
+    ( ActiveAccount(..)
+    , readActiveAccount
+    )
 import Agent.CLI.Btw
     ( formatBtwError
     , runBtwWithCancel
@@ -73,8 +81,7 @@ import Agent.TUI.Model
     )
 import Control.Monad (forM_)
 import Data.IORef
-    ( modifyIORef'
-    , readIORef
+    ( readIORef
     , writeIORef
     )
 import Data.Maybe (isJust)
@@ -88,9 +95,9 @@ syncFullscreenPrompt env = do
     syncFullscreenContext env
     forM_ env.sessionFullscreen \runtime -> do
         planState <- readIORef env.sessionPlanMode.planStateRef
-        params <- readIORef env.sessionParams
+        params <- readSessionRequestParams env.sessionParams
         policy <- readIORef env.sessionPolicy
-        account <- readIORef env.sessionAccount
+        account <- (.activeAccountLabel) <$> readActiveAccount env.sessionAccount
         usage <- readIORef env.sessionUsage
         attachments <- readLiveAttachments env.sessionConversation
         emitUiEvent runtime $ UiSetPrompt $
@@ -110,7 +117,7 @@ syncFullscreenContext :: SessionEnv -> IO ()
 syncFullscreenContext env =
     forM_ env.sessionFullscreen \runtime -> do
         occupancy <- readIORef env.sessionContextOccupancy
-        params <- readIORef env.sessionParams
+        params <- readSessionRequestParams env.sessionParams
         history <- readLiveTranscript env.sessionConversation
         contextWindow <- env.sessionContextWindow
         emitUiEvent runtime $
@@ -150,7 +157,7 @@ buildPromptState activeDialect params planState policy account accountSelectable
 
 setSessionEffort :: SessionEnv -> ReasoningEffort -> IO ()
 setSessionEffort env level = do
-    modifyIORef' env.sessionParams (setReasoningEffort level)
+    modifySessionRequestOptions env.sessionParams (setReasoningEffort level)
     let levelText = reasoningEffortText level
     case env.sessionFullscreen of
         Just runtime ->
@@ -189,7 +196,7 @@ runBtwQuestion registerCancel env question = do
         stdoutHandle = env.sessionRender.renderStdout
         stderrHandle = env.sessionRender.renderStderr
     color <- resolveColor stdoutHandle
-    params <- readIORef env.sessionParams
+    params <- readSessionRequestParams env.sessionParams
     transcript <- readLiveTranscript env.sessionConversation
     let snapshot = sideCallSnapshot params transcript
     forM_ fullscreen \runtime ->
@@ -207,7 +214,7 @@ runBtwQuestion registerCancel env question = do
                                     | otherwise ->
                                         withEscCancel
                                             cancel
-                                            env.sessionEscPaused
+                                            env.sessionStdinControl
                                             action
                                 Just _ -> action
                     else action)

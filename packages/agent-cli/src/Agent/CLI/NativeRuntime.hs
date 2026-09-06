@@ -25,6 +25,10 @@ import Agent.CLI.AgentSessions
     , closeSessionThreadManager
     , newSessionThreadManager
     )
+import Agent.Loop
+    ( TurnAttachment(ImageAttachmentItem)
+    , userMessageWithAttachments
+    )
 import Agent.CLI.Options
     ( Command(..)
     , CliOptions(..)
@@ -53,23 +57,24 @@ import Agent.CLI.Runtime.Orchestration.Types
     , nativeRunMode
     )
 import Agent.CLI.Runtime.Types (DevResult(..), StartupFailure(..))
-import Agent.Provider (Provider)
-import Agent.ReasoningEffort (ReasoningEffort)
+import Agent.Runtime.Request
+    ( NativeSessionTarget(..)
+    , NativeTurnRequest(..)
+    , validateNativeTurnRequest
+    )
 import Agent.TUI.Motion (MotionMode(..))
 import qualified Agent.MCP as MCP
 import Control.Concurrent.Async
     ( Async
-    , async
+    , asyncWithUnmask
     , cancel
-    , waitCatch
     )
 import Control.Concurrent.MVar
     ( newEmptyMVar
     , putMVar
     , takeMVar
     )
-import Control.Exception.Safe (finally, mask_, onException)
-import Control.Monad (void)
+import Control.Exception.Safe (finally, mask, mask_, onException)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -80,33 +85,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import System.IO (Handle)
 import System.OsPath (OsPath)
-
--- | Whether a native turn creates a durable session or resumes one.
---
--- Keeping this as a sum type prevents transport adapters from constructing
--- ambiguous combinations of @save@ and @resume@ flags.
-data NativeSessionTarget
-    = NativeNewSession
-    | NativeResumeSession !Text
-    deriving (Eq, Show)
-
--- | Typed, transport-neutral inputs for one native agent turn.
---
--- Native turns intentionally exclude CLI-only capabilities such as worktree
--- creation, computer use, prompt files, and implicit non-interactive
--- auto-approval. The supplied 'NativeRunHooks' remain responsible for all
--- interactive approval and plan-mode callbacks.
-data NativeTurnRequest = NativeTurnRequest
-    { nativeTurnPrompt :: !Text
-    , nativeTurnSession :: !NativeSessionTarget
-    , nativeTurnProvider :: !(Maybe Provider)
-    , nativeTurnModel :: !(Maybe Text)
-    , nativeTurnCwd :: !OsPath
-    , nativeTurnEffort :: !(Maybe ReasoningEffort)
-    , nativeTurnInteractionMode :: !NativeInteractionMode
-    , nativeTurnShellMode :: !NativeShellMode
-    }
-    deriving (Eq, Show)
 
 data NativeProcessRuntime = NativeProcessRuntime
     { nativeMcpSupervisor :: !MCP.McpSupervisor
@@ -120,14 +98,13 @@ data NativeProcessRuntime = NativeProcessRuntime
     }
 
 newNativeProcessRuntime :: OsPath -> IO NativeProcessRuntime
-newNativeProcessRuntime root = do
+newNativeProcessRuntime root = mask \restore -> do
     elicitationRef <- newIORef Nothing
     cleanupStarted <- newIORef False
     cleanupRequest <- newEmptyMVar
-    cleanupWorker <- async (takeMVar cleanupRequest >>= id)
-    let closeCleanupWorker = do
-            cancel cleanupWorker
-            void (waitCatch cleanupWorker)
+    cleanupWorker <- asyncWithUnmask \unmask ->
+        unmask (takeMVar cleanupRequest >>= id)
+    let closeCleanupWorker = cancel cleanupWorker
         startCleanup action = mask_ do
             shouldStart <- atomicModifyIORef'
                 cleanupStarted
@@ -136,17 +113,18 @@ newNativeProcessRuntime root = do
                 then putMVar cleanupRequest action
                 else pure ()
     networkMonitor <-
-        newNetworkRecoveryMonitor
+        restore newNetworkRecoveryMonitor
             `onException` closeCleanupWorker
     mcpSupervisor <-
-        MCP.newMcpSupervisorWith
-            MCP.defaultMcpHostHooks
-                { MCP.mcpHostElicit = readIORef elicitationRef }
+        restore
+            (MCP.newMcpSupervisorWith
+                MCP.defaultMcpHostHooks
+                    { MCP.mcpHostElicit = readIORef elicitationRef })
             `onException`
                 (closeNetworkRecoveryMonitor networkMonitor
                     `finally` closeCleanupWorker)
     sessionThreads <-
-        newSessionThreadManager root
+        restore (newSessionThreadManager root)
             `onException`
                 (MCP.closeMcpSupervisor mcpSupervisor
                     `finally`
@@ -169,9 +147,7 @@ closeNativeProcessRuntime runtime =
                 `finally`
                     (closeNetworkRecoveryMonitor
                         runtime.nativeNetworkRecovery
-                        `finally` do
-                            cancel runtime.nativeCleanupWorker
-                            void (waitCatch runtime.nativeCleanupWorker)))
+                        `finally` cancel runtime.nativeCleanupWorker))
 
 restartNativeMcpRuntime :: NativeProcessRuntime -> IO ()
 restartNativeMcpRuntime runtime =
@@ -201,22 +177,29 @@ runNativeTurn runtime output hooks request =
                     { nativeInteractionMode =
                         request.nativeTurnInteractionMode
                     , nativeShellMode = request.nativeTurnShellMode
+                    , nativeInitialTurnInputs =
+                        Just
+                            [ userMessageWithAttachments
+                                initialPrompt
+                                (map ImageAttachmentItem request.nativeTurnImages)
+                            ]
                     }
                 options
+  where
+    initialPrompt
+        | Text.null (Text.strip request.nativeTurnPrompt)
+        , not (null request.nativeTurnImages) = "Image attached."
+        | otherwise = request.nativeTurnPrompt
 
 -- | Lower a typed native request into the existing orchestration options.
 --
--- This function is public so transport adapters can validate requests before
--- queue admission. It never enables capabilities excluded from native turns.
+-- This compatibility adapter never enables capabilities excluded from native
+-- turns. Transport adapters can validate without CLI options using
+-- 'validateNativeTurnRequest'.
 nativeTurnOptions :: NativeTurnRequest -> Either Text CliOptions
-nativeTurnOptions request
-    | request.nativeTurnInteractionMode == NativeYolo =
-        Left "typed native turns do not support auto-approval"
-    | NativeResumeSession sessionId <- request.nativeTurnSession
-    , Text.null (Text.strip sessionId) =
-        Left "native resume session id must not be empty"
-    | otherwise =
-        Right defaultCliOptions
+nativeTurnOptions request = do
+    validateNativeTurnRequest request
+    pure defaultCliOptions
             { optProvider = request.nativeTurnProvider
             , optModel = request.nativeTurnModel
             , optCwd = Just request.nativeTurnCwd

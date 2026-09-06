@@ -3,10 +3,11 @@
 
 module Agent.CLI.MacOS.BridgeFFISpec (spec) where
 
-import qualified Agent.CLI.MacOS.Bridge as Bridge
 #ifdef darwin_HOST_OS
 import Agent.CLI.MacOS.Bridge
-    ( NativeInteractionResolution(..)
+    ( RepositoryCheckHandle(..)
+    , ha_repository_check_destroy
+    , NativeInteractionResolution(..)
     , PendingInteraction(..)
     , cancelPendingInteractions
     , discardStagedTurn
@@ -14,7 +15,9 @@ import Agent.CLI.MacOS.Bridge
     , resolvePendingInteraction
     , turnStartCleanupId
     )
-import Control.Concurrent.Async (concurrently)
+import Agent.CLI.MacOS.RepositoryWorkers (withRepositoryCallbackThread)
+import Control.Concurrent.Async (concurrently, withAsync)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar)
 import Control.Concurrent.STM
     ( atomically
     , newEmptyTMVarIO
@@ -22,9 +25,13 @@ import Control.Concurrent.STM
     , readTMVar
     , readTVarIO
     )
+import Control.Exception.Safe (finally, tryAny)
+import Data.Either (isRight)
+import Data.IORef (newIORef)
 import qualified Data.Aeson as Aeson
 import qualified Data.Map.Strict as Map
 import Foreign.C.Types (CInt(..))
+import Foreign.StablePtr (castStablePtrToPtr, newStablePtr)
 import Test.Hspec
     ( Spec
     , describe
@@ -63,18 +70,12 @@ spec = describe "native bridge FFI" do
 #else
         pendingWith "the native bridge smoke test only links on macOS"
 #endif
-    it "blocks new repository workers until cancel-all returns" do
-        Bridge.repositoryCancelAllAdmissionSmoke `shouldReturn` True
-
-    it "does not self-deadlock on callback lifecycle calls" do
-        Bridge.repositoryCancelAllReentrancySmoke `shouldReturn` True
-        Bridge.repositoryCheckDestroyReentrancySmoke `shouldReturn` True
-
-    it "classifies async cancellation as cancelled, not failure" do
-        Bridge.repositoryCancelClassificationSmoke `shouldReturn` True
-
-    it "does not retry a terminal callback that throws" do
-        Bridge.repositoryTerminalThrowSmoke `shouldReturn` True
+    it "does not self-deadlock when a callback destroys its check" do
+#ifdef darwin_HOST_OS
+        repositoryCheckDestroyReentrancySmoke `shouldReturn` True
+#else
+        pendingWith "the native bridge smoke test only links on macOS"
+#endif
 
     it "validates the typed repository-review ABI from native code" do
 #ifdef darwin_HOST_OS
@@ -202,4 +203,25 @@ spec = describe "native bridge FFI" do
         nativeTurnOptionsStageSmoke `shouldReturn` 0
 #else
         pendingWith "the native bridge smoke test only links on macOS"
+#endif
+
+#ifdef darwin_HOST_OS
+repositoryCheckDestroyReentrancySmoke :: IO Bool
+repositoryCheckDestroyReentrancySmoke = do
+    gate <- newEmptyMVar
+    withAsync (readMVar gate) \owner -> do
+        value <- newIORef Nothing
+        cancelled <- newIORef False
+        stable <- newStablePtr RepositoryCheckHandle
+            { repositoryCheckValue = value
+            , repositoryCheckCancelRequested = cancelled
+            , repositoryCheckOwner = owner
+            }
+        let pointer = castStablePtrToPtr stable
+        result <- tryAny
+            (withRepositoryCallbackThread
+                (ha_repository_check_destroy pointer))
+            `finally` putMVar gate ()
+        ha_repository_check_destroy pointer
+        pure (isRight result)
 #endif

@@ -31,6 +31,46 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.CLI.Config" do
+    describe "mcpServerEnabledForRuntime" do
+        it "keeps remote HTTP MCP enabled without host command extensions" do
+            mcpServerEnabledForRuntime True False httpMcpServer
+                `shouldBe` True
+
+        it "rejects command MCP without host command extensions" do
+            mcpServerEnabledForRuntime True False commandMcpServer
+                `shouldBe` False
+
+        it "rejects every MCP transport when MCP tools are disabled" do
+            mcpServerEnabledForRuntime False True httpMcpServer
+                `shouldBe` False
+            mcpServerEnabledForRuntime False True commandMcpServer
+                `shouldBe` False
+
+    describe "mcpServersForRuntime" do
+        it "keeps only remote HTTP MCP in an MCP-only runtime" do
+            let config =
+                    defaultHarnessConfig
+                        { configMcpServers =
+                            Map.fromList
+                                [ ("command", commandMcpServer)
+                                , ("remote", httpMcpServer)
+                                ]
+                        }
+            map fst (mcpServersForRuntime True False config)
+                `shouldBe` ["remote"]
+
+        it "rejects every configured server without MCP capability" do
+            let config =
+                    defaultHarnessConfig
+                        { configMcpServers =
+                            Map.fromList
+                                [ ("command", commandMcpServer)
+                                , ("remote", httpMcpServer)
+                                ]
+                        }
+            mcpServersForRuntime False True config
+                `shouldBe` []
+
     it "uses ~/.haskell-agent/config.json" do
         harnessConfigPath (path "/Users/test")
             `shouldBe` path "/Users/test/.haskell-agent/config.json"
@@ -448,3 +488,30 @@ path = unsafeEncodeUtf
 
 filePath :: OsPath -> FilePath
 filePath value = either (error . show) id (decodeUtf value)
+
+httpMcpServer :: McpServerConfig
+httpMcpServer =
+    testMcpServer
+        { mcpUrl = Just "https://example.test/mcp"
+        }
+
+commandMcpServer :: McpServerConfig
+commandMcpServer =
+    testMcpServer
+        { mcpCommand = "example-mcp"
+        }
+
+testMcpServer :: McpServerConfig
+testMcpServer =
+    McpServerConfig
+        { mcpEnabled = True
+        , mcpUrl = Nothing
+        , mcpCommand = ""
+        , mcpArgs = []
+        , mcpCwd = Nothing
+        , mcpEnv = Map.empty
+        , mcpStartupTimeoutSeconds = 30
+        , mcpRequestTimeoutSeconds = 60
+        , mcpOAuth = Nothing
+        , mcpProtocol = McpProtocolAuto
+        }

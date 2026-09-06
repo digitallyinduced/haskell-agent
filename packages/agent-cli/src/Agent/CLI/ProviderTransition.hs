@@ -36,7 +36,8 @@ data PendingTurn = PendingTurn
 
 data TransitionCause
     = ManualTransition
-    | AutomaticFallback
+    -- | Retain the initiating session's billing boundary across retries.
+    | AutomaticFallback !BillingMode
     deriving (Eq, Show)
 
 data ProviderTransition = ProviderTransition
@@ -52,10 +53,6 @@ data ProviderTransition = ProviderTransition
     , transitionPendingTurn :: !(Maybe PendingTurn)
     , transitionUnavailableProviders :: !(Set Provider)
     , transitionCause :: !TransitionCause
-    -- | Billing class of the session that initiated an automatic fallback.
-    -- Preserved across failed replacement providers so the whole chain obeys
-    -- the original billing boundary. Manual transitions use 'Nothing'.
-    , transitionAutomaticBilling :: !(Maybe BillingMode)
     }
 
 data TurnResult
@@ -102,7 +99,9 @@ resumePendingTurnIfPresent pendingTurnRef resume noPendingTurn =
 -- completes a request successfully, including fallbacks chosen at startup.
 transitionCommitsImmediately :: ProviderTransition -> Bool
 transitionCommitsImmediately transition =
-    transition.transitionCause == ManualTransition
+    case transition.transitionCause of
+        ManualTransition -> True
+        AutomaticFallback _ -> False
 
 -- | Publish a provisional prompt target before a slow validation action,
 -- restoring the prior target if that action rejects, throws, or is cancelled.

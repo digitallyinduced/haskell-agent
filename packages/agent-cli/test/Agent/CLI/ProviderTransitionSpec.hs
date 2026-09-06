@@ -111,8 +111,7 @@ transition sessionId pending = ProviderTransition
     , transitionSessionId = sessionId
     , transitionPendingTurn = pending
     , transitionUnavailableProviders = Set.singleton XAIProvider
-    , transitionCause = AutomaticFallback
-    , transitionAutomaticBilling = Just SubscriptionBilled
+    , transitionCause = AutomaticFallback SubscriptionBilled
     }
 
 pendingTurn :: PendingTurn

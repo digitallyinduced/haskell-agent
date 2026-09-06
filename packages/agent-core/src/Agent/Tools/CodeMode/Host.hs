@@ -60,6 +60,7 @@ import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
     , cancel
+    , mapConcurrently_
     , race
     , waitCatch
     )
@@ -901,8 +902,7 @@ cancelCellCallbacks :: Cell -> IO ()
 cancelCellCallbacks cell = do
     callbacks <- modifyMVar cell.cellCallbacks \current ->
         pure ([], current)
-    mapM_ cancel callbacks
-    mapM_ (void . waitCatch) callbacks
+    mapConcurrently_ cancel callbacks
 
 stopIncomplete
     :: Handle

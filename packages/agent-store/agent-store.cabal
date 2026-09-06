@@ -46,6 +46,8 @@ library
                     , Agent.Store.Postgres.Managed
                     , Agent.Store.Postgres.Migrations
                     , Agent.Store.Postgres.Scope
+                    , Agent.Store.Postgres.ServerTurn
+                    , Agent.Store.Postgres.ServerHumanRequest
                     , Agent.Store.Postgres.Session
                     , Agent.Store.Postgres.Skill
                     , Agent.Store.Postgres.Tenant
@@ -62,6 +64,7 @@ library
                     , Agent.Store.Postgres.Session.Write
                     , Agent.Store.Postgres.Hasql
                     , Agent.Store.Postgres.Sql
+                    , Agent.Store.Postgres.ServerTurn.OwnerFence
                     , Agent.Store.Postgres.SessionItem
                     , Agent.Store.Postgres.SessionItem.Mapping.Statements.BaseRows
                     , Agent.Store.Postgres.SessionItem.Mapping.Statements.ContentParts
@@ -76,6 +79,7 @@ library
                     , Agent.Store.Postgres.SessionItem.Mapping.Statements.Tagged
                     , Agent.Store.Postgres.SessionItem.Read
                     , Agent.Store.Postgres.SessionItem.Write
+                    , Agent.Store.Postgres.Skill.Mapping.Codec
                     , Agent.Store.Postgres.Skill.Mapping.Types
                     , Agent.Store.Postgres.Skill.Mapping.Statements.InsertRevision
                     , Agent.Store.Postgres.Skill.Mapping.Statements.InsertSkill
@@ -90,7 +94,8 @@ library
                     , Agent.Store.Postgres.Skill.Mapping.Statements.UpdateSkill
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
-                    , async
+                    , aeson
+                    , async >= 2.2.6 && < 2.3
                     , bytestring
                     , containers
                     , contravariant
@@ -100,6 +105,7 @@ library
                     , hasql
                     , hasql-pool
                     , hasql-transaction
+                    , pqi
                     , pqi-ffi
                     , process
                     , safe-exceptions
@@ -163,6 +169,19 @@ benchmark real-session-load-bench
                     , time
                     , vector
 
+benchmark managed-startup-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ManagedStartup.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-store
+                    , base >= 4.14 && < 5
+                    , hasql
+                    , safe-exceptions
+                    , temporary
+                    , text
+
 test-suite agent-store-test
     import:           common-opts
     type:             exitcode-stdio-1.0
@@ -174,6 +193,8 @@ test-suite agent-store-test
                     , Agent.Store.Postgres.ManagedSpec
                     , Agent.Store.PoolCacheSpec
                     , Agent.Store.Postgres.ScopeSpec
+                    , Agent.Store.Postgres.ServerTurnRecoverySpec
+                    , Agent.Store.Postgres.ServerTurnSpec
                     , Agent.Store.Postgres.SessionSpec
                     , Agent.Store.Postgres.SkillSpec
                     , Agent.Store.Postgres.TenantSpec

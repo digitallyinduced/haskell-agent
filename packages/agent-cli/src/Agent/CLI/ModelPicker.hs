@@ -7,6 +7,7 @@ module Agent.CLI.ModelPicker
     , pickModelWithEffort
     , pickModelState
     , pickModelStateWithEffort
+    , pickModelStateWithEffortAndUsage
     , formatCatalogListing
     , initialModelPickerState
     , applyModelPickerEvent
@@ -69,6 +70,7 @@ data ModelPickerState = ModelPickerState
     { modelPickerModels :: !PickerState
     , modelPickerEfforts
         :: !(Map.Map (Text, Text, DialectId) ReasoningEffort)
+    , modelPickerUsage :: !(Map.Map Text Text)
     }
     deriving (Eq, Show)
 
@@ -178,9 +180,22 @@ pickModelStateWithEffort
     -> ReasoningEffort
     -> PickerState
     -> IO (Maybe ModelPickerSelection)
-pickModelStateWithEffort color currentEffort models = do
+pickModelStateWithEffort color currentEffort =
+    pickModelStateWithEffortAndUsage color currentEffort Map.empty
+
+-- | Open the model picker with compact usage text keyed by public model alias.
+-- Usage is presentation-only and never changes the alias used for routing.
+pickModelStateWithEffortAndUsage
+    :: Bool
+    -> ReasoningEffort
+    -> Map.Map Text Text
+    -> PickerState
+    -> IO (Maybe ModelPickerSelection)
+pickModelStateWithEffortAndUsage color currentEffort usage models = do
     isTty <- hIsTerminalDevice stdin
-    let state0 = initialModelPickerState currentEffort models
+    let state0 =
+            (initialModelPickerState currentEffort models)
+                { modelPickerUsage = usage }
     if not isTty
         then do
             Text.hPutStrLn stderr
@@ -210,6 +225,7 @@ initialModelPickerState currentEffort models =
                 [ (modelIdentity option, initialModelEffort models currentEffort option)
                 | option <- models.pickerAll
                 ]
+        , modelPickerUsage = Map.empty
         }
 
 -- | Efforts supported by a model-facing dialect.
@@ -360,6 +376,10 @@ renderModelPickerFrame color state =
                         gatewayMode
                         color
                         (index == selectedIndex)
+                        (not (Map.null state.modelPickerUsage))
+                        (Map.lookup
+                            option.modelTarget.targetModelId
+                            state.modelPickerUsage)
                         models.pickerConnectionId
                         models.pickerCurrent
                         models.pickerCurrentDialect
@@ -414,6 +434,8 @@ renderRow
     :: Bool
     -> Bool
     -> Bool
+    -> Bool
+    -> Maybe Text
     -> Text
     -> Text
     -> DialectId
@@ -424,6 +446,8 @@ renderRow
         gatewayMode
         color
         selected
+        showUsage
+        usage
         currentConnection
         current
         currentDialect
@@ -431,8 +455,19 @@ renderRow
         option =
     if selected
         then roleSelected color
-            ("› " <> clippedName <> padding <> "← " <> indicator <> " →")
-        else "  " <> clippedName <> padding <> roleMuted color indicator
+            ( "› "
+                <> clippedName
+                <> padding
+                <> usageColumn
+                <> "← "
+                <> indicator
+                <> " →"
+            )
+        else
+            "  "
+                <> clippedName
+                <> padding
+                <> roleMuted color (usageColumn <> indicator)
   where
     plainName =
         displayPickerText
@@ -443,15 +478,32 @@ renderRow
                 <> if isCurrent currentConnection current currentDialect option
                     then " ✓"
                     else "")
-    clippedName = Text.take modelNameWidth plainName
+    nameWidth
+        | showUsage = modelNameWithUsageWidth
+        | otherwise = modelNameWidth
+    clippedName = Text.take nameWidth plainName
     padding =
         Text.replicate
-            (max 2 (modelNameWidth - Text.length clippedName + 2))
+            (max 2 (nameWidth - Text.length clippedName + 2))
             " "
+    usageColumn
+        | not showUsage = ""
+        | otherwise =
+            clippedUsage
+                <> Text.replicate
+                    (max 2 (modelUsageWidth - Text.length clippedUsage + 2))
+                    " "
+    clippedUsage = Text.take modelUsageWidth (fromMaybe "" usage)
     indicator = renderEffortIndicator option effort
 
 modelNameWidth :: Int
 modelNameWidth = 44
+
+modelNameWithUsageWidth :: Int
+modelNameWithUsageWidth = 28
+
+modelUsageWidth :: Int
+modelUsageWidth = 30
 
 -- | Render a compact absolute effort gauge plus its canonical label.
 renderEffortIndicator :: ModelOption -> ReasoningEffort -> Text

@@ -513,6 +513,7 @@ mergeFunctionCall previous next =
         { itemId = itemId <|> previous.itemId
         , namespace = namespace <|> previous.namespace
         , status = status <|> previous.status
+        , async = async <|> previous.async
         , ..
         }
 
@@ -523,6 +524,7 @@ mergeCustomToolCall previous next =
         { itemId = itemId <|> previous.itemId
         , namespace = namespace <|> previous.namespace
         , status = status <|> previous.status
+        , async = async <|> previous.async
         , ..
         }
 
@@ -801,6 +803,7 @@ mapFunctionCall itemId update = \case
             , arguments = ""
             , encryptedFunctionArgs = Nothing
             , status = Nothing
+            , async = Nothing
             })
 
 mapCustomCall
@@ -820,6 +823,7 @@ mapCustomCall itemId callId update = \case
             , namespace = Nothing
             , input = ""
             , status = Nothing
+            , async = Nothing
             })
 
 mapReasoning

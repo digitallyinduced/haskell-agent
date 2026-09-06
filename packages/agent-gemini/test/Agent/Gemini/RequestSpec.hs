@@ -37,6 +37,7 @@ spec = describe "Gemini request projection" do
                 , description = Just "Look up a value"
                 , parameters = Nothing
                 , strict = Nothing
+                , async = Nothing
                 }
             params :: ResponseCreateParams
             params = defaultResponseCreateParams
@@ -126,6 +127,7 @@ spec = describe "Gemini request projection" do
                 { name = "apply_patch"
                 , description = Just "Apply a patch."
                 , format = Nothing
+                , async = Nothing
                 }
             call = functionCall "apply_patch" patch
             params = defaultResponseCreateParams
@@ -189,6 +191,7 @@ spec = describe "Gemini request projection" do
                 { name = "apply_patch"
                 , description = Just "Apply a patch."
                 , format = Nothing
+                , async = Nothing
                 }
             params = defaultResponseCreateParams
                 { tools = Just [custom]
@@ -267,6 +270,7 @@ spec = describe "Gemini request projection" do
         , arguments = callArguments
         , encryptedFunctionArgs = Nothing
         , status = Just ItemCompleted
+        , async = Nothing
         }
     member key objectValue = KeyMap.member (Key.fromText key) objectValue
 

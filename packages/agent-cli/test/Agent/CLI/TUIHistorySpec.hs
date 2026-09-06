@@ -4,6 +4,9 @@
 
 module Agent.CLI.TUIHistorySpec (spec) where
 
+import Agent.CLI.Session.StoreCodec (fromStoredResponseItem, toStoredResponseItem)
+import Agent.Loop (LoopEvent(..))
+import Agent.ToolDispatch (ToolOutcome(..), functionToolCall)
 import Agent.CLI.Session
     ( SessionTurn(..)
     , TranscriptEffect(..)
@@ -12,7 +15,14 @@ import Agent.CLI.TUI.History
 import Agent.Json (rawJsonFromEncoding)
 import Agent.CLI.TUI.Composer (composerScrollbackAvailable)
 import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
+import Agent.Responses.LoopBackend (toolResultToItem)
 import Agent.Responses.Types
+import Agent.ToolDispatch
+    ( ToolCallKind(..)
+    , ToolCallResult(..)
+    , ToolCallMode(..)
+    , ToolResultImage(..)
+    )
 import qualified Data.Aeson as Aeson
 import Data.Foldable (toList)
 import Agent.TUI.Model
@@ -25,6 +35,7 @@ import Agent.TUI.Model
     , initialUiState
     , reduceUi
     )
+import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Data.Int (Int64)
 import qualified Data.Text as Text
@@ -34,6 +45,62 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "bounded fullscreen history window" do
+    it "preserves execution facts through storage and history without sending them to providers" do
+        let cases =
+                [ (ToolSucceeded, "Error: quoted log entry", BlockComplete)
+                , (ToolSucceeded, "tool call rejected by user", BlockComplete)
+                , (ToolSucceeded, "Exit code: 7", BlockComplete)
+                , (ToolFailed, "plain explanation", BlockFailed)
+                , (ToolDenied, "custom approval policy", BlockDenied)
+                , (ToolCancelled, "stopped by owner", BlockCancelled)
+                , (ShellExited 7, "Exit code: 0\noutput", BlockFailed)
+                , (ShellCancelled, "output", BlockCancelled)
+                , (ShellTimedOut, "output", BlockFailed)
+                ]
+        mapM_ (\(kind, (outcome, body, expected)) -> do
+            let result = ToolCallResult "call" body kind BlockingToolCall [] (Just outcome)
+                item = toolResultToItem result
+                call = functionToolCall "call" "echo" "{}"
+                live = reduceUi (UiLoop (ToolFinished result))
+                    (reduceUi (UiLoop (ToolStarted call)) initialUiState)
+            map (.blockState) (toList live.uiBlocks) `shouldBe` [expected]
+            restored <- expectRight (fromStoredResponseItem (toStoredResponseItem item))
+            restored `shouldBe` item
+            let history = sessionHistoryTurn (0 :: Int)
+                    (sessionTurn TranscriptAppend "" [FunctionCallItem FunctionCall
+                        { itemId = Nothing, callId = "call", name = "echo", namespace = Nothing
+                        , provider = Nothing, arguments = "{}", encryptedFunctionArgs = Nothing
+                        , status = Nothing, async = Nothing }
+                        , restored])
+            map (.blockState) (toList history.historyTurnBlocks) `shouldBe` [expected]
+            Aeson.toJSON item `shouldBe`
+                Aeson.toJSON (toolResultToItem (ToolCallResult "call" body kind BlockingToolCall [] Nothing)))
+            [(kind, testCase) | kind <- [FunctionCallKind, CustomCallKind], testCase <- cases]
+
+    it "uses a typed shell session id even if output contains a different id" do
+        let call = functionToolCall "shell" "shell_command" "{\"command\":\"echo hi\"}"
+            result = ToolCallResult "shell"
+                "Process still running.\nsession_id: 999\nworking" FunctionCallKind BlockingToolCall [] (Just (ShellRunning 42))
+            state = reduceUi (UiLoop (ToolFinished result))
+                (reduceUi (UiLoop (ToolStarted call)) initialUiState)
+        map (.blockState) (toList state.uiBlocks) `shouldBe` [BlockRunning]
+        Map.keys state.uiShellProcesses `shouldBe` [42]
+        let item = toolResultToItem result
+        fromStoredResponseItem (toStoredResponseItem item) `shouldBe` Right item
+
+    it "does not mistake a failed stdin interaction for a stopped process" do
+        let call = functionToolCall "shell" "shell_command" "{\"command\":\"cat\"}"
+            running = ToolCallResult "shell"
+                "Process still running.\nsession_id: 42\n" FunctionCallKind BlockingToolCall [] (Just (ShellRunning 42))
+            state = reduceUi (UiLoop (ToolFinished running))
+                (reduceUi (UiLoop (ToolStarted call)) initialUiState)
+            poll = functionToolCall "poll" "write_stdin" "{\"session_id\":42}"
+            failed = ToolCallResult "poll" "input unavailable" FunctionCallKind BlockingToolCall [] (Just ToolFailed)
+            afterPoll = reduceUi (UiLoop (ToolFinished failed))
+                (reduceUi (UiLoop (ToolStarted poll)) state)
+        Map.keys afterPoll.uiShellProcesses `shouldBe` [42]
+        map (.blockState) (toList afterPoll.uiBlocks) `shouldBe` [BlockRunning]
+
     it "allows keyboard scrollback when only persisted history is loaded" do
         let generation = HistoryGeneration 1
             empty = emptyHistoryWindow generation 10 20 1_000_000
@@ -300,6 +367,69 @@ spec = describe "bounded fullscreen history window" do
             `shouldBe` Seq.singleton (HistoryCursor 2)
         historyWindowLoadedBytes window `shouldSatisfy` (<= 180)
 
+    it "keeps an oversized completed turn visible after archiving its live blocks" do
+        let generation = HistoryGeneration 6
+            initial = emptyHistoryWindow generation 100 100 180
+            page =
+                HistoryPage
+                    { historyPageGeneration = generation
+                    , historyPageDirection = HistoryNewer
+                    , historyPageTurns = Seq.singleton (turn 1 1)
+                    , historyPageGenerationStart = HistoryCursor 0
+                    , historyPageTotalTurns = 2
+                    , historyPageHasOlder = True
+                    , historyPageHasNewer = False
+                    }
+        loaded <- expectRight (applyHistoryPage page initial)
+        let completed = appendHistoryTurn (turn 2 2) loaded
+        historyWindowCursors completed
+            `shouldBe` Seq.singleton (HistoryCursor 2)
+        historyWindowLoadedBytes completed `shouldSatisfy` (> 180)
+        historyWindowOlderAvailable completed `shouldBe` True
+
+    it "matches single-eviction semantics and indexes across budgets and anchors" do
+        let generation = HistoryGeneration 6
+            existing = Seq.fromList [turn 2 1, turn 3 3, turn 4 2]
+            cases =
+                [ (direction, visible, selected, maxTurns, maxBlocks, maxBytes)
+                | direction <- [HistoryOlder, HistoryNewer]
+                , visible <- [Nothing, Just (HistoryCursor 2), Just (HistoryCursor 4)]
+                , selected <- [Nothing, Just (HistoryCursor 3), Just (HistoryCursor 4)]
+                , maxTurns <- [1, 3, 10]
+                , maxBlocks <- [1, 4, 100]
+                , maxBytes <- [1, 400, 1_000_000]
+                ]
+        mapM_ (\(direction, visible, selected, maxTurns, maxBlocks, maxBytes) -> do
+            let initial = historyWindowSetAnchors visible selected $
+                    setHistoryWindowTurns existing $
+                        emptyHistoryWindow generation maxTurns maxBlocks maxBytes
+                page = HistoryPage
+                    { historyPageGeneration = generation
+                    , historyPageDirection = direction
+                    -- Unsorted, overlapping, duplicate, and empty turns.
+                    , historyPageTurns =
+                        Seq.fromList [turn 5 2, turn 2 4, turn 1 0, turn 5 1]
+                    , historyPageGenerationStart = HistoryCursor 1
+                    , historyPageTotalTurns = 5
+                    , historyPageHasOlder = False
+                    , historyPageHasNewer = False
+                    }
+                unlimited = initial
+                    { historyWindowMaxTurns = maxBound
+                    , historyWindowMaxBlocks = maxBound
+                    , historyWindowMaxBytes = maxBound
+                    }
+            merged <- expectRight (applyHistoryPage page unlimited)
+            actual <- expectRight (applyHistoryPage page initial)
+            let expected = referenceTrim direction merged
+                    { historyWindowMaxTurns = maxTurns
+                    , historyWindowMaxBlocks = maxBlocks
+                    , historyWindowMaxBytes = maxBytes
+                    }
+            -- Equality checks both indexes, flags, metadata, and anchors,
+            -- not just the surviving cursor range.
+            actual `shouldBe` expected) cases
+
     it "omits persisted reasoning while projecting tool and assistant history" do
         let projected =
                 sessionHistoryTurn
@@ -331,9 +461,11 @@ spec = describe "bounded fullscreen history window" do
                             , arguments = "{\"command\":\"pwd\"}"
                             , encryptedFunctionArgs = Nothing
                             , status = Nothing
+                            , async = Nothing
                             }
                         , FunctionCallOutputItem FunctionCallOutput
-                            { itemId = Nothing
+                            { localOutcome = Nothing
+                            , itemId = Nothing
                             , callId = "call-1"
                             , name = Nothing
                             , namespace = Nothing
@@ -341,6 +473,7 @@ spec = describe "bounded fullscreen history window" do
                             , output = rawJsonFromEncoding
                                 (Aeson.toEncoding ("/tmp/project" :: Text.Text))
                             , status = Nothing
+                            , async = Nothing
                             }
                         , assistantMessage "Done"
                         ])
@@ -357,6 +490,87 @@ spec = describe "bounded fullscreen history window" do
         map (.blockBody) blocks
             `shouldSatisfy`
                 all (not . Text.isInfixOf "Don't mention skills")
+
+    it "does not render persisted image payloads as tool output" do
+        let summary = "Viewed image file: example.png"
+            payloadMarker = "VERY_SECRET_IMAGE_BYTES"
+            imageOutput =
+                toolResultToItem
+                    (ToolCallResult
+                        "image-call"
+                        summary
+                        FunctionCallKind
+                        BlockingToolCall
+                        [ ToolResultImage
+                            ("data:image/png;base64," <> payloadMarker)
+                            (Just "high")
+                        ] Nothing)
+            rendered = projectedToolResult imageOutput
+        rendered `shouldSatisfy` Text.isInfixOf summary
+        rendered `shouldSatisfy` (not . Text.isInfixOf payloadMarker)
+        rendered `shouldSatisfy` (not . Text.isInfixOf "base64")
+        rendered `shouldSatisfy` (not . Text.isInfixOf "\"input_image\"")
+
+    it "fails closed for schema-drifted persisted media output" do
+        let summary = "Viewed schema-drifted image"
+            payloadMarker = "SCHEMA_DRIFT_IMAGE_BYTES"
+            rendered =
+                projectedToolResult $
+                    toolOutputItem
+                        [ Aeson.object
+                            [ "type" Aeson..= ("input_image" :: Text.Text)
+                            , "image_url" Aeson..= (7 :: Int)
+                            , "payload" Aeson..=
+                                ("data:image/png;base64," <> payloadMarker)
+                            ]
+                        , Aeson.object
+                            [ "type" Aeson..= ("input_text" :: Text.Text)
+                            , "text" Aeson..= summary
+                            ]
+                        ]
+        rendered `shouldSatisfy` Text.isInfixOf summary
+        rendered `shouldSatisfy` (not . Text.isInfixOf payloadMarker)
+        rendered `shouldSatisfy` (not . Text.isInfixOf "base64")
+
+    it "fails closed for future persisted media content parts" do
+        let summary = "Viewed future image"
+            payloadMarker = "FUTURE_IMAGE_BYTES"
+            rendered =
+                projectedToolResult $
+                    toolOutputItem
+                        [ Aeson.object
+                            [ "type" Aeson..= ("future_media" :: Text.Text)
+                            , "payload" Aeson..=
+                                (" DATA:image/png;BASE64," <> payloadMarker)
+                            ]
+                        , Aeson.object
+                            [ "type" Aeson..= ("input_text" :: Text.Text)
+                            , "text" Aeson..= summary
+                            ]
+                        ]
+        rendered `shouldSatisfy` Text.isInfixOf summary
+        rendered `shouldSatisfy` (not . Text.isInfixOf payloadMarker)
+        rendered `shouldSatisfy` (not . Text.isInfixOf "BASE64")
+
+    it "does not trust text fields inside persisted media arrays" do
+        let payloadMarker = "TEXT_FIELD_IMAGE_BYTES"
+            rendered =
+                projectedToolResult $
+                    toolOutputItem
+                        [ Aeson.object
+                            [ "type" Aeson..= ("input_image" :: Text.Text)
+                            , "image_url" Aeson..=
+                                ("https://example.test/image.png" :: Text.Text)
+                            ]
+                        , Aeson.object
+                            [ "type" Aeson..= ("input_text" :: Text.Text)
+                            , "text" Aeson..=
+                                ("data:image/png;base64," <> payloadMarker)
+                            ]
+                        ]
+        rendered `shouldSatisfy` Text.isInfixOf "[image]"
+        rendered `shouldSatisfy` (not . Text.isInfixOf payloadMarker)
+        rendered `shouldSatisfy` (not . Text.isInfixOf "base64")
 
     it "preserves partial assistant output in a cancelled durable turn" do
         let turnValue =
@@ -385,10 +599,12 @@ spec = describe "bounded fullscreen history window" do
                     , arguments
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemInProgress
+                    , async = Nothing
                     }
             output callId body status =
                 FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId
                     , name = Nothing
                     , namespace = Nothing
@@ -397,6 +613,7 @@ spec = describe "bounded fullscreen history window" do
                         rawJsonFromEncoding
                             (Aeson.toEncoding (body :: Text.Text))
                     , status = Just status
+                    , async = Nothing
                     }
             turnValue =
                 (sessionTurn TranscriptAppend "fix it" [userMessage "fix it"])
@@ -444,10 +661,12 @@ spec = describe "bounded fullscreen history window" do
                     , arguments
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemInProgress
+                    , async = Nothing
                     }
             output body status =
                 FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = "same"
                     , name = Nothing
                     , namespace = Nothing
@@ -456,6 +675,7 @@ spec = describe "bounded fullscreen history window" do
                         rawJsonFromEncoding
                             (Aeson.toEncoding (body :: Text.Text))
                     , status = Just status
+                    , async = Nothing
                     }
             boundary =
                 UnknownResponseItem
@@ -512,9 +732,11 @@ spec = describe "bounded fullscreen history window" do
                         , arguments = "{\"command\":\"pwd\"}"
                         , encryptedFunctionArgs = Nothing
                         , status = Nothing
+                        , async = Nothing
                         }
                     , FunctionCallOutputItem FunctionCallOutput
-                        { itemId = Nothing
+                        { localOutcome = Nothing
+                        , itemId = Nothing
                         , callId = "call-1"
                         , name = Nothing
                         , namespace = Nothing
@@ -522,6 +744,7 @@ spec = describe "bounded fullscreen history window" do
                         , output = rawJsonFromEncoding
                             (Aeson.toEncoding ("/tmp/project" :: Text.Text))
                         , status = Nothing
+                        , async = Nothing
                         }
                     ])
                     { turnAssistantText = Just "already visible"
@@ -646,6 +869,40 @@ spec = describe "bounded fullscreen history window" do
         map (.blockKind) blocks `shouldBe` [BlockSystem]
         map (.blockBody) blocks `shouldBe` ["Earlier conversation summary"]
 
+-- Deliberately retain the old repeated-eviction algorithm as a simple oracle.
+referenceTrim :: HistoryDirection -> HistoryWindow -> HistoryWindow
+referenceTrim incoming window
+    | historyWindowLoadedTurns window <= window.historyWindowMaxTurns
+        && historyWindowLoadedBlocks window <= window.historyWindowMaxBlocks
+        && historyWindowLoadedBytes window <= window.historyWindowMaxBytes =
+        window
+    | historyWindowLoadedTurns window <= 1 = window
+    | otherwise =
+        case filter canEvict [preferred, incoming] of
+            [] -> window
+            direction : _ ->
+                referenceTrim incoming $
+                    case direction of
+                        HistoryOlder ->
+                            setHistoryWindowTurns (Seq.drop 1 turns)
+                                window { historyWindowHasOlder = True }
+                        HistoryNewer ->
+                            setHistoryWindowTurns (Seq.take (Seq.length turns - 1) turns)
+                                window { historyWindowHasNewer = True }
+  where
+    turns = window.historyWindowTurns
+    preferred = case incoming of
+        HistoryOlder -> HistoryNewer
+        HistoryNewer -> HistoryOlder
+    canEvict direction =
+        case turns Seq.!? (case direction of
+                HistoryOlder -> 0
+                HistoryNewer -> Seq.length turns - 1) of
+            Nothing -> False
+            Just edge ->
+                Just edge.historyTurnCursor /= window.historyWindowVisibleAnchor
+                    && Just edge.historyTurnCursor /= window.historyWindowSelectedAnchor
+
 turn :: Int64 -> Int -> HistoryTurn
 turn cursor blocks =
     HistoryTurn
@@ -724,6 +981,46 @@ assistantMessage text =
         , phase = Nothing
         , passthrough = Nothing
         }
+
+toolOutputItem :: [Aeson.Value] -> ResponseItem
+toolOutputItem parts =
+    FunctionCallOutputItem FunctionCallOutput
+        { localOutcome = Nothing
+        , itemId = Nothing
+        , callId = "image-call"
+        , name = Nothing
+        , namespace = Nothing
+        , provider = Nothing
+        , output = rawJsonFromEncoding (Aeson.toEncoding parts)
+        , status = Nothing
+        , async = Nothing
+        }
+
+projectedToolResult :: ResponseItem -> Text.Text
+projectedToolResult outputItem =
+    Text.intercalate "\n" $
+        map (.blockBody) (toList projected.historyTurnBlocks)
+  where
+    projected =
+        sessionHistoryTurn
+            (13 :: Int)
+            (sessionTurn
+                TranscriptAppend
+                "inspect the image"
+                [ userMessage "inspect the image"
+                , FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "image-call"
+                    , name = "view_image"
+                    , namespace = Nothing
+                    , provider = Nothing
+                    , arguments = "{\"path\":\"example.png\"}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Nothing
+                    , async = Nothing
+                    }
+                , outputItem
+                ])
 
 fixedTime :: UTCTime
 fixedTime =

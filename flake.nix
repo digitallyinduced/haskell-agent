@@ -75,10 +75,10 @@
                 # vendored, mirroring how other third-party dependencies enter
                 # the closure. The runtime additionally refreshes the catalog
                 # from the ChatGPT /models endpoint when credentials permit.
-                codexUpstreamRev = "4f39251a010a8bd7d692d25fb33832ff06f1635a";
+                codexUpstreamRev = "a97cf1b72eaad05aa49847bc81d09ceac9327754";
                 codexModelsJson = pkgs.fetchurl {
                     url = "https://raw.githubusercontent.com/openai/codex/${codexUpstreamRev}/codex-rs/models-manager/models.json";
-                    hash = "sha256-6w17ml3K8QOJXF+KFMFrJp30bgObN1pVupf2I4VC0u0=";
+                    hash = "sha256-1xNqQTz6wbWxaG2eDcxcgMoFvr7V6fw5ETdlYdDvbug=";
                 };
                 codexPromptMd = pkgs.fetchurl {
                     url = "https://raw.githubusercontent.com/openai/codex/${codexUpstreamRev}/codex-rs/models-manager/prompt.md";
@@ -97,6 +97,16 @@
                         "LICENSE"
                         "README.md"
                         "UPSTREAM.md"
+                    ];
+                };
+
+                agentServerClientSource = nix-filter.lib {
+                    root = ./packages/agent-server-client;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-server-client.cabal"
+                        "LICENSE"
                     ];
                 };
 
@@ -687,6 +697,14 @@
                                     src = agentStoreSource;
                                 })
                             [ pkgs.postgresql_18 ]);
+                        agent-server-client = localPackage
+                            (pkgs.haskell.lib.overrideSrc
+                                (final.callPackage
+                                    ./packages/agent-server-client/package.nix
+                                    { })
+                                {
+                                    src = agentServerClientSource;
+                                });
                         agent-cli-runtime = localPackage
                             (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc
@@ -859,6 +877,8 @@
                     productionHaskellPackages.agent-native-bridge;
                 agentTelegramPackage = productionHaskellPackages.agent-telegram;
                 agentServerPackage = productionHaskellPackages.agent-server;
+                agentServerClientPackage =
+                    productionHaskellPackages.agent-server-client;
                 # Exercise these packages' own test suites against the
                 # production dependency graph. Referencing the all-check
                 # package set here would also rerun every transitive local
@@ -879,13 +899,31 @@
                     });
                 # Both installable CLI variants expose the same advertised
                 # runtime capabilities; only the harness linkage differs.
+                agentCliGstreamerCorePlugins =
+                    pkgs.lib.getLib pkgs.gst_all_1.gstreamer;
+                agentCliGstreamerPlugins =
+                    pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                        # Core elements supplies filesink, which terminates
+                        # the Wayland portal screenshot pipeline.
+                        agentCliGstreamerCorePlugins
+                        pkgs.gst_all_1.gst-plugins-base
+                        pkgs.gst_all_1.gst-plugins-good
+                        pkgs.gst_all_1.gst-plugins-bad
+                    ];
+                agentCliLinuxComputerUseTools =
+                    pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                        pkgs.gst_all_1.gstreamer
+                        pkgs.maim
+                        pkgs.xdotool
+                        pkgs.xrandr
+                    ];
                 agentCliRuntimeTools = [
                     pkgs.ffmpeg
                     bun_1_4
                     pkgs.postgresql_18
                     pkgs.ripgrep
                     pkgs.zstd
-                ];
+                ] ++ agentCliLinuxComputerUseTools;
                 prepareAgentCli = package:
                     package.overrideAttrs
                         (old: {
@@ -933,13 +971,27 @@
                             postInstall =
                                 (old.postInstall or "")
                                 + ''
+                                    computerUseWrapperArgs=()
+                                ''
+                                + pkgs.lib.optionalString
+                                    pkgs.stdenv.hostPlatform.isLinux
+                                    ''
+                                        computerUseWrapperArgs+=(
+                                            --prefix GST_PLUGIN_SYSTEM_PATH_1_0 :
+                                            "${pkgs.lib.makeSearchPath
+                                                "lib/gstreamer-1.0"
+                                                agentCliGstreamerPlugins}"
+                                        )
+                                    ''
+                                + ''
                                     wrapProgram "$out/bin/agent-cli" \
                                         --set-default AGENT_SYNTAX_DIR \
                                             "${skylightingSyntaxDirectory}" \
                                         --set-default AGENT_POSTGRES_BIN \
                                             "${pkgs.postgresql_18}/bin" \
                                         --prefix PATH : \
-                                            "${pkgs.lib.makeBinPath agentCliRuntimeTools}"
+                                            "${pkgs.lib.makeBinPath agentCliRuntimeTools}" \
+                                        "''${computerUseWrapperArgs[@]}"
                                 '';
                         });
                 agentCliBareExecutable =
@@ -990,6 +1042,33 @@
                                 run_agent storage stop || true
                             }
                             trap cleanup EXIT
+
+                            wrapper="${agentCliStaticExecutable}/bin/agent-cli"
+                            for dependency in \
+                                ${pkgs.gst_all_1.gstreamer} \
+                                ${pkgs.maim} \
+                                ${pkgs.xdotool} \
+                                ${pkgs.xrandr}
+                            do
+                                ${pkgs.gnugrep}/bin/grep -F \
+                                    "$dependency/bin" "$wrapper"
+                            done
+                            ${pkgs.gnugrep}/bin/grep -F \
+                                "GST_PLUGIN_SYSTEM_PATH_1_0" "$wrapper"
+                            pluginPath="${pkgs.lib.makeSearchPath
+                                "lib/gstreamer-1.0"
+                                agentCliGstreamerPlugins}"
+                            ${pkgs.gnugrep}/bin/grep -F \
+                                "${
+                                    agentCliGstreamerCorePlugins
+                                }/lib/gstreamer-1.0" \
+                                "$wrapper"
+                            env -i \
+                                HOME="$home" \
+                                GST_PLUGIN_SYSTEM_PATH_1_0="$pluginPath" \
+                                GST_REGISTRY_1_0="$TMPDIR/gstreamer-registry.bin" \
+                                ${pkgs.gst_all_1.gstreamer}/bin/gst-inspect-1.0 \
+                                filesink >/dev/null
 
                             run_agent storage start
                             test "$(
@@ -1049,22 +1128,27 @@
                                     haskellPackages.ghc
                                     (old.disallowedRequisites or [ ]);
                             });
-                agentSandboxVm =
+                agentSandboxWorkerExecutable =
+                    (pkgs.haskell.lib.justStaticExecutables
+                        agentServerPackage).overrideAttrs
+                        (old: {
+                            postInstall = (old.postInstall or "") + ''
+                                rm -f "$out/bin/agent-server"
+                            '';
+                        });
+                agentSandboxRootfs =
                     if pkgs.stdenv.hostPlatform.isLinux then
-                        (nixpkgs.lib.nixosSystem {
-                            inherit system;
-                            specialArgs = {
-                                agentServer = agentServerExecutable;
-                            };
-                            modules = [ ./nix/sandbox-vm.nix ];
-                        }).config.system.build.vm
+                        import ./nix/sandbox-rootfs.nix {
+                            inherit pkgs;
+                            agentServer = agentSandboxWorkerExecutable;
+                        }
                     else
                         null;
                 agentSandboxRunner =
                     if pkgs.stdenv.hostPlatform.isLinux then
                         import ./nix/sandbox-runner.nix {
                             inherit pkgs;
-                            vm = agentSandboxVm;
+                            rootfs = agentSandboxRootfs;
                         }
                     else
                         null;
@@ -1221,8 +1305,11 @@
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;
                 packages.agent-server = agentServerExecutable;
+                packages.agent-server-client = agentServerClientPackage;
                 packages.${if pkgs.stdenv.hostPlatform.isLinux
                     then "agent-sandbox-runner" else null} = agentSandboxRunner;
+                packages.${if pkgs.stdenv.hostPlatform.isLinux
+                    then "agent-sandbox-rootfs" else null} = agentSandboxRootfs;
                 packages.${if pkgs.stdenv.hostPlatform.isDarwin
                     then "agent-native-bridge" else null} = agentNativeBridgePackage;
                 packages.${if pkgs.stdenv.hostPlatform.isDarwin
@@ -1345,6 +1432,8 @@
                             ripgrep
                             zstd
                         ])
+                        ++ agentCliLinuxComputerUseTools
+                        ++ agentCliGstreamerPlugins
                         ++ [ agentRepl ];
                 };
 
@@ -1373,6 +1462,8 @@
                         '';
                     agent-telegram = agentTelegramCheckPackage;
                     agent-server = agentServerCheckPackage;
+                    agent-server-client =
+                        haskellPackages.agent-server-client;
                     agent-core = haskellPackages.agent-core;
                     agent-mcp = haskellPackages.agent-mcp;
                     agent-json = haskellPackages.agent-json;
@@ -1397,8 +1488,15 @@
                 } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
                     agent-cli-static-runtime = agentCliStaticRuntimeCheck;
                     agent-sandbox-runner = agentSandboxRunner;
+                    agent-server-nixos-module = import ./nix/tests/agent-server-module.nix {
+                        inherit self nixpkgs pkgs system;
+                    };
                     nixos-module = import ./nix/tests/telegram-module.nix {
                         inherit self nixpkgs pkgs system;
+                    };
+                } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+                    agent-server-nixos-module-vm = import ./nix/tests/agent-server-module-vm.nix {
+                        inherit self pkgs;
                     };
                 } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
                     agent-cli-macos-bundle = agentCliMacosRelease.bundle;
@@ -1417,6 +1515,9 @@
             }
         )
         // {
+            nixosModules.agent-server = import ./nix/modules/agent-server.nix {
+                inherit self;
+            };
             nixosModules.telegram = import ./nix/modules/telegram.nix {
                 inherit self;
             };

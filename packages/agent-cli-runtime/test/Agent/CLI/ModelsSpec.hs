@@ -39,26 +39,28 @@ spec = do
     describe "modelsForProvider" do
         it "puts the provider default first" do
             firstId (modelsForProvider catalog XAIProvider)
-                `shouldBe` defaultModelFor catalog XAIProvider
+                `shouldBe` Just (defaultModelFor catalog XAIProvider)
             firstId (modelsForProvider catalog OpenAIProvider)
-                `shouldBe` defaultModelFor catalog OpenAIProvider
+                `shouldBe` Just (defaultModelFor catalog OpenAIProvider)
             firstId (modelsForProvider catalog OpenRouterProvider)
-                `shouldBe` defaultModelFor catalog OpenRouterProvider
+                `shouldBe` Just (defaultModelFor catalog OpenRouterProvider)
             firstId (modelsForProvider catalog GeminiProvider)
-                `shouldBe` defaultModelFor catalog GeminiProvider
+                `shouldBe` Just (defaultModelFor catalog GeminiProvider)
             firstId (modelsForProvider catalog ClaudeCodeProvider)
-                `shouldBe` defaultModelFor catalog ClaudeCodeProvider
+                `shouldBe` Just (defaultModelFor catalog ClaudeCodeProvider)
 
         it "ships the configured frontier models for each provider" do
-            modelIdsFor OpenAIProvider `shouldContain` ["gpt-5.6-sol"]
+            modelIdsFor OpenAIProvider
+                `shouldContain` ["gpt-5.6-sol", "gpt-6-astra"]
             modelIdsFor XAIProvider `shouldContain` ["grok-4.6"]
             modelIdsFor OpenRouterProvider `shouldContain` ["stealth/ox-alpha"]
             modelIdsFor GeminiProvider `shouldContain` ["gemini-3.7-flash"]
 
-        it "ships the GPT-5.6 series and each other provider frontier model" do
+        it "ships the OpenAI frontier models and each other provider frontier model" do
             modelIdsFor OpenAIProvider
                 `shouldBe`
                     [ "gpt-5.6-sol"
+                    , "gpt-6-astra"
                     , "gpt-5.6-terra"
                     , "gpt-5.6-luna"
                     ]
@@ -214,6 +216,23 @@ spec = do
                         && target.targetWireModelId == target.targetModelId)
                 options
                 `shouldBe` True
+
+        it "uses Grok capabilities for the gateway Grok model" do
+            gatewayModelOptions catalog OpenAIProvider ["grok-4.6"]
+                `shouldBe`
+                    [ ModelOption
+                        { modelTarget =
+                            ModelTarget
+                                OpenAIProvider
+                                organizationGatewayConnectionId
+                                "grok-4.6"
+                                "grok-4.6"
+                                GrokBuildDialect
+                        , modelContextWindow = Just 500_000
+                        , modelLabel = Nothing
+                        , modelFallbackPriority = Nothing
+                        }
+                    ]
 
         it "rejects a persisted gateway route after disconnection" do
             let resolve deferToGateway =
@@ -496,9 +515,7 @@ spec = do
 
         it "does not duplicate a known current model" do
             let base = modelsForProvider catalog XAIProvider
-                def = fromMaybe
-                    (error "shipped xAI default is missing")
-                    (defaultModelFor catalog XAIProvider)
+                def = defaultModelFor catalog XAIProvider
                 opts =
                     ensureCurrentInList
                         "xai"

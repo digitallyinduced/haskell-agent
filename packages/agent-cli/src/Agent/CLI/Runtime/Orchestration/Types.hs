@@ -1,6 +1,5 @@
 module Agent.CLI.Runtime.Orchestration.Types
     ( ActiveHttpAuth(..)
-    , AccountSwitchRequest(..)
     , AgentProcessRuntime(..)
     , AgentRunMode(..)
     , NativeInteractionMode(..)
@@ -23,14 +22,13 @@ import Agent.CLI.Options ( CliOptions )
 import Agent.CLI.Project ( ProjectSettings )
 import Agent.Connectivity.NetworkPath ( NetworkRecovery )
 import Agent.CLI.Permission ( PermissionChoice )
-import Agent.Error ( ApiError )
-import Agent.Loop ( LoopEvent )
+import Agent.Loop ( LoopEvent, TurnInput )
 import Agent.Provider ( Credential, TokenProvider )
+import Agent.Runtime.Request (NativeInteractionMode(..), NativeShellMode(..))
 import Agent.Store.Postgres ( Store )
 import Agent.ToolDispatch ( ToolCall )
 import Agent.Tools.PlanMode ( PlanModeHooks )
 import Agent.Tools.Types ( AppTool, AppToolGroup )
-import Control.Concurrent.MVar ( MVar )
 import Data.IORef ( IORef )
 import Data.Text ( Text )
 import System.IO ( Handle, stderr, stdout )
@@ -45,9 +43,6 @@ data ActiveHttpAuth = ActiveHttpAuth
     , activeHttpAccountId :: !Text
     }
 
-data AccountSwitchRequest
-    = AccountSwitchRequest !Credential !(MVar (Either ApiError Text))
-
 data AgentProcessRuntime = AgentProcessRuntime
     { processMcpSupervisor :: !MCP.McpSupervisor
     , processSessionThreads :: !SessionThreadManager
@@ -60,22 +55,6 @@ data AgentProcessRuntime = AgentProcessRuntime
     -- every MCP fleet the supervisor starts.
     , processNetworkRecovery :: !(Maybe NetworkRecovery)
     }
-
-data NativeInteractionMode
-    = NativeAsk
-    -- ^ Prompt before mutating tools.
-    | NativePlan
-    -- ^ Begin this turn with plan mode active.
-    | NativeYolo
-    -- ^ Auto-approve mutating tools.
-    deriving (Eq, Show)
-
-data NativeShellMode
-    = NativeShellNone
-    | NativeShellBash
-    | NativeShellGhci
-    | NativeShellBoth
-    deriving (Eq, Show)
 
 -- | Host-side discovery results supplied by an embedding that does not want
 -- generic orchestration to inspect the turn workspace.
@@ -116,6 +95,7 @@ data NativeRunCapabilities = NativeRunCapabilities
     { nativeProviderFallback :: !Bool
     , nativeProviderHostedTools :: !Bool
     , nativeHostExtensions :: !Bool
+    , nativeMcpTools :: !Bool
     , nativeCollaboration :: !Bool
     , nativeProviderNativeTools :: !Bool
     }
@@ -126,12 +106,14 @@ fullNativeRunCapabilities = NativeRunCapabilities
     { nativeProviderFallback = True
     , nativeProviderHostedTools = True
     , nativeHostExtensions = True
+    , nativeMcpTools = True
     , nativeCollaboration = True
     , nativeProviderNativeTools = True
     }
 
 data NativeRunHooks = NativeRunHooks
     { nativeOnLoopEvent :: !(LoopEvent -> IO ())
+    , nativeInitialTurnInputs :: !(Maybe [TurnInput])
     , nativeOnSessionId :: !(Text -> IO ())
     , nativeRegisterCancel :: !(IO () -> IO ())
     , nativeRegisterAgentSnapshot :: !(IO [AgentEntry] -> IO ())

@@ -235,16 +235,16 @@ nativeFailureSpec =
 nativeSessionBoundarySpec :: Spec
 nativeSessionBoundarySpec =
     describe "native session gateway boundary" do
-        it "allows only direct sessions while disconnected" do
+        it "allows persisted sessions while disconnected" do
             nativeSessionRouteMatchesBoundary Nothing "openai" Nothing
                 `shouldBe` True
             nativeSessionRouteMatchesBoundary
                 Nothing
                 "organization-gateway"
                 (Just "gateway-a")
-                `shouldBe` False
+                `shouldBe` True
 
-        it "allows every gateway session while a gateway is connected" do
+        it "allows persisted sessions while a gateway is connected" do
             nativeSessionRouteMatchesBoundary
                 (Just "gateway-a")
                 "organization-gateway"
@@ -264,7 +264,7 @@ nativeSessionBoundarySpec =
                 (Just "gateway-a")
                 "openai"
                 Nothing
-                `shouldBe` False
+                `shouldBe` True
 
 decodeStart :: String -> Either String TurnStart
 decodeStart = Aeson.eitherDecode . LBS8.pack

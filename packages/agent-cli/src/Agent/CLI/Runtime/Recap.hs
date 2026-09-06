@@ -3,6 +3,9 @@ module Agent.CLI.Runtime.Recap
     , runSessionTurnSummary
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    )
 import Agent.CLI.Btw (sideCallSnapshot)
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Interrupt (withTurnCancel)
@@ -45,7 +48,7 @@ runSessionRecap :: Bool -> SessionEnv -> RecapKind -> IO ()
 runSessionRecap registerCancel env kind = do
     let fullscreen = env.sessionFullscreen
         stdoutHandle = env.sessionRender.renderStdout
-    params <- readIORef env.sessionParams
+    params <- readSessionRequestParams env.sessionParams
     transcript <- readLiveTranscript env.sessionConversation
     let snapshot = sideCallSnapshot params transcript
     color <- resolveColor stdoutHandle
@@ -80,7 +83,7 @@ runSessionRecap registerCancel env kind = do
                                             | otherwise ->
                                             withEscCancel
                                                 cancel
-                                                env.sessionEscPaused
+                                                env.sessionStdinControl
                                                 action
                                         Just _ -> action
                             else action)
@@ -166,7 +169,7 @@ recapFailed env message = do
 
 runSessionTurnSummary :: SessionEnv -> IO ()
 runSessionTurnSummary env = do
-    params <- readIORef env.sessionParams
+    params <- readSessionRequestParams env.sessionParams
     transcript <- readLiveTranscript env.sessionConversation
     let snapshot = sideCallSnapshot params transcript
     result <-

@@ -225,10 +225,11 @@ waitForInitialYield session commandId task yieldMs onSnapshot =
                 (threadDelay (max 1 yieldMs * 1000))
                 (readMVar task.managedRunning.runningResult))
         case stopped of
-            Left () ->
+            Left () -> do
                 removeCommand session commandId
-                    >> stopManagedCommand session task
-                    >> pure (Left "Error: Command cancelled")
+                stopManagedCommand session task
+                result <- readMVar task.managedRunning.runningResult
+                pure (Right (CodexShellFinished result { commandCancelled = True }))
             Right (Left ()) ->
                 do
                     running <- runningResult commandId task

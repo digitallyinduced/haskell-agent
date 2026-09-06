@@ -1,13 +1,25 @@
 module Agent.LoopSpec (spec) where
 
+import Agent.Json (RawJson, rawJsonBytes, rawJsonDecoder)
 import qualified Agent.Json.Decode as Json
 import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Error (ApiError(..))
 import Agent.Loop
-import Agent.Responses.Types (ResponseItem(..), TaggedObject(..))
-import Agent.Telemetry (TurnTelemetry(..))
-import Agent.ToolArgs (objectArgs, reqText)
+import Agent.Loop.InputItems (turnInputsToItems)
+import Agent.Loop.Fixtures
+import qualified Agent.Loop.EventDeliverySpec as EventDelivery
+import qualified Agent.Loop.FailedDisplaySpec as FailedDisplay
+import Agent.Responses.Types
+    ( FunctionCallOutput(..)
+    , MessageContent(..)
+    , ReasoningItem(..)
+    , ResponseContentPart(..)
+    , ResponseItem(..)
+    , ResponseMessage(..)
+    , ResponseRole(..)
+    )
 import Agent.ToolDispatch
+import Agent.Telemetry (TurnTelemetry(..))
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
     , ToolResource(..)
@@ -16,15 +28,29 @@ import Agent.Tools.Scheduling
     , schedulingPlansConflict
     )
 import Agent.Tools.Types
-    ( AppTool
-    , ApprovalRule(..)
+    ( ApprovalRule(..)
     , ToolExecutionPolicy(..)
-    , ToolRegistry
     , jsonAppToolWithExecution
-    , mkToolRegistry
     , toolExecutionPolicyFor
     , withToolResourceClaims
     )
+import Codec.Picture
+    ( Image
+    , PixelRGB8(..)
+    , PixelRGBA8(..)
+    , convertRGB8
+    , convertRGBA8
+    , decodeImage
+    , encodeBitmap
+    , encodeJpegAtQuality
+    , encodePng
+    , generateImage
+    , imageHeight
+    , imageWidth
+    , pixelAt
+    )
+import Codec.Picture.Types (convertImage)
+import qualified Codec.Compression.Zlib as Zlib
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (cancel, wait, withAsync)
 import Control.Concurrent.MVar
@@ -35,26 +61,177 @@ import Control.Concurrent.MVar
     , tryReadMVar
     )
 import qualified Control.Exception as Exception
+import Control.Monad (when)
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Bits (complement, shiftR, xor, (.&.))
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Base64 as Base64
+import Data.ByteString.Builder
+    ( Builder
+    , byteString
+    , toLazyByteString
+    , word8
+    , word32BE
+    )
+import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
+import Data.Word (Word32)
 import System.Timeout (timeout)
 import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
-emptyTestTelemetry :: TurnTelemetry
-emptyTestTelemetry = TurnTelemetry
-    { telemetryDurationMs = Nothing
-    , telemetryApiDurationMs = Nothing
-    , telemetryCostUsd = Nothing
-    , telemetryStopReason = Nothing
-    , telemetryProviderTurns = Nothing
-    , telemetryModels = mempty
-    , telemetryStructuredOutput = Nothing
-    }
-
 spec :: Spec
 spec = describe "runLoop" do
+    describe "interruption recovery checkpoints" do
+        it "retains explicit recovery separately from unfinished display output" do
+            let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                    callbacks.onRecoveryCheckpoint "Assistant reported: opened PR #86."
+                    callbacks.onLoopEvent (TextDelta "unfinished answer")
+                    pure (Left (ConnectionError "offline"))
+            config <- testConfig backend
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+            execution.executionProgress `shouldBe` ResponseCommitted
+            execution.executionPendingInputs `shouldBe` []
+            let retained = execution.executionState
+            take 1 retained `shouldBe` turnInputsToItems [UserMessage "fix it"]
+            length retained `shouldBe` 2
+            show retained `shouldContain` "Assistant reported: opened PR #86."
+            show retained `shouldNotContain` "unfinished answer"
+            execution.executionUncommittedAssistantText `shouldBe` Just "unfinished answer"
+            stored <- config.loopBackendState.readBackendState
+            stored.backendItems `shouldBe` retained
+            stored.backendContinuation `shouldBe` Nothing
+
+        it "keeps the last checkpoint after cancellation joins the provider" do
+            ready <- newEmptyMVar
+            release <- newEmptyMVar
+            joined <- newIORef False
+            let backend = backendWithCallbacks \_ _ _ callbacks ->
+                    (do
+                        callbacks.onRecoveryCheckpoint "Tool result: file saved."
+                        putMVar ready ()
+                        takeMVar release
+                        pure (Left (ConnectionError "interrupted")))
+                    `Exception.finally` writeIORef joined True
+            config0 <- testConfig backend
+            let config = config0 { loopInterrupt = putMVar release () }
+            withAsync (runLoopInputsDetailed config Nothing [UserMessage "fix it"]) \running -> do
+                takeMVar ready
+                requestCancel config.loopCancel
+                execution <- wait running
+                execution.executionResult `shouldBe` Left (LoopCancelled [])
+                execution.executionProgress `shouldBe` ResponseCommitted
+                show execution.executionState `shouldContain` "Tool result: file saved."
+                readIORef joined `shouldReturn` True
+
+        it "recovers complete messages when submission throws" do
+            let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                    callbacks.onRecoveryCheckpoint "Tool result: branch pushed."
+                    Exception.throwIO (userError "broken transport")
+            config <- testConfig backend
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+            execution.executionProgress `shouldBe` ResponseCommitted
+            show execution.executionState `shouldContain` "Tool result: branch pushed."
+
+        it "does not duplicate recovery on a successful turn or accept late callbacks" do
+            escaped <- newEmptyMVar
+            let backend = backendWithCallbacks \state _ _ callbacks -> do
+                    callbacks.onRecoveryCheckpoint "earlier progress"
+                    putMVar escaped callbacks.onRecoveryCheckpoint
+                    pure $ Right BackendResult
+                        { backendOutput = emptyTurnOutput "complete" [] (Just "done")
+                        , backendState = appendStateMarker state
+                        }
+            config <- testConfig backend
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+            execution.executionState `shouldBe` [stateMarker]
+            checkpoint <- takeMVar escaped
+            checkpoint "late obsolete work"
+            stored <- config.loopBackendState.readBackendState
+            stored.backendItems `shouldBe` [stateMarker]
+
+        mapM_ (\event ->
+            it ("clears checkpoints on " <> show event) do
+                let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                        callbacks.onRecoveryCheckpoint "obsolete attempt"
+                        callbacks.onLoopEvent event
+                        pure (Left (ConnectionError "offline"))
+                config <- testConfig backend
+                execution <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+                execution.executionProgress `shouldBe` NoResponseCommitted
+                execution.executionState `shouldBe` [])
+            [ResponseAttemptDiscarded, ResponseRestarted "retry"]
+
+        it "does not resurrect a checkpoint superseded by a reset" do
+            reset <- newEmptyMVar
+            let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                    callbacks.onRecoveryCheckpoint "obsolete work"
+                    joinReset <- takeMVar reset
+                    joinReset
+                    pure (Left (ConnectionError "offline"))
+            config <- testConfig backend
+            let resetState = advanceBackendSnapshot emptyBackendSnapshot [] Nothing
+            putMVar reset $ do
+                _ <- config.loopBackendState.commitBackendState resetState
+                pure ()
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+            execution.executionProgress `shouldBe` NoResponseCommitted
+            config.loopBackendState.readBackendState `shouldReturn` resetState
+
+        it "bounds checkpoint retention and replaces rather than appends summaries" do
+            let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                    callbacks.onRecoveryCheckpoint "old summary"
+                    callbacks.onRecoveryCheckpoint (Text.replicate 40000 "x")
+                    pure (Left (ConnectionError "offline"))
+            config <- testConfig backend
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+            show execution.executionState `shouldNotContain` "old summary"
+            length (show execution.executionState) `shouldSatisfy` (< 35000)
+
+        it "acknowledges steering retained in recovery exactly once" do
+            acknowledgements <- newIORef []
+            let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                    callbacks.onRecoveryCheckpoint "Tool result: task updated."
+                    pure (Left (ConnectionError "offline"))
+            config0 <- testConfig backend
+            let config = config0
+                    { loopReadSteering = pure [UserMessage "also update tests"]
+                    , loopCommitSteering = \count ->
+                        modifyIORef' acknowledgements (<> [count])
+                    }
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+            take 2 execution.executionState `shouldBe`
+                turnInputsToItems [UserMessage "fix it", UserMessage "also update tests"]
+            readIORef acknowledgements `shouldReturn` [1]
+
+        it "supplies recovery to go without replaying a provider tool call" do
+            seen <- newIORef []
+            let interrupted = backendWithCallbacks \_ _ _ callbacks -> do
+                    callbacks.onRecoveryCheckpoint "Tool Bash (call-1) returned: PR #86 opened."
+                    pure (Left (ConnectionError "offline"))
+                resumed = Backend \state previous inputs _ -> do
+                    previous `shouldBe` Nothing
+                    inputs `shouldBe` [UserMessage "go"]
+                    writeIORef seen state.backendItems
+                    pure $ Right BackendResult
+                        { backendOutput = emptyTurnOutput "resumed" [] (Just "verified existing PR")
+                        , backendState = advanceBackendSnapshot state
+                            (state.backendItems <> turnInputsToItems inputs) Nothing
+                        }
+            config <- testConfig interrupted
+            first <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+            second <- runLoopInputsDetailed config { loopBackend = resumed }
+                Nothing [UserMessage "go"]
+            readIORef seen `shouldReturn` first.executionState
+            length second.executionState `shouldBe` 3
+            second.executionState `shouldSatisfy` all (\case
+                MessageItem{} -> True
+                _ -> False)
+
     it "shows image metadata without exposing attachment bytes" do
         let image = ImageAttachment "image/png" "secret-image-bytes"
             rendered = show image
@@ -144,6 +321,363 @@ spec = describe "runLoop" do
         seen <- readIORef submissions
         seen `shouldBe` [(Nothing, inputs)]
 
+    it "normalizes oversized images before backend submission" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-image" [] (Just "saw it")
+            ]
+        let sourceBytes = oversizedFixtureBytes
+            input =
+                userMessageWithAttachments
+                    "see this"
+                    [ ImageAttachmentItem
+                        (ImageAttachment "image/bmp" sourceBytes)
+                    ]
+        ByteString.length sourceBytes `shouldSatisfy` (> 1500000)
+        config <- testConfig backend
+        result <- runLoopInputs config Nothing [input]
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-image"
+            , finalText = Just "saw it"
+            , turnsUsed = 1
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        case seen of
+            [(Nothing, [submitted])] ->
+                case turnInputImages submitted of
+                    [normalized] ->
+                        assertNormalizedImage
+                            sourceBytes
+                            normalized.imageMime
+                            normalized.imageBytes
+                    images ->
+                        expectationFailure $
+                            "expected one submitted image, got "
+                                <> show (length images)
+            submissionsSeen ->
+                expectationFailure $
+                    "unexpected submissions: " <> show submissionsSeen
+
+    it "rejects unsafe encoded dimensions before decoding a raster" do
+        finished <-
+            timeout 2000000 $
+                runSingleImageSubmission "image/png" unsafeDimensionPng
+        case finished of
+            Nothing ->
+                expectationFailure
+                    "image dimension preflight did not return promptly"
+            Just (Left failure) ->
+                expectationFailure failure
+            Just (Right (result, submittedImage)) -> do
+                result `shouldBe` completedImageLoopResult
+                submittedImage.imageMime `shouldBe` "image/png"
+                submittedImage.imageBytes `shouldBe` unsafeDimensionPng
+
+    it "bounds PNG inflation before allocating the decoded raster" do
+        _ <- Exception.evaluate (ByteString.length pngInflationBomb)
+        finished <-
+            timeout 500000 $
+                runSingleImageSubmission "image/png" pngInflationBomb
+        case finished of
+            Nothing ->
+                expectationFailure
+                    "PNG inflation preflight did not return promptly"
+            Just (Left failure) ->
+                expectationFailure failure
+            Just (Right (result, submittedImage)) -> do
+                result `shouldBe` completedImageLoopResult
+                submittedImage.imageMime `shouldBe` "image/png"
+                submittedImage.imageBytes `shouldBe` pngInflationBomb
+
+    it "bounds PNG chunk metadata before collecting image data" do
+        _ <-
+            Exception.evaluate
+                (ByteString.length pngWithExcessiveImageDataChunks)
+        finished <-
+            timeout 500000 $
+                runSingleImageSubmission
+                    "image/png"
+                    pngWithExcessiveImageDataChunks
+        case finished of
+            Nothing ->
+                expectationFailure
+                    "PNG chunk preflight did not return promptly"
+            Just (Left failure) ->
+                expectationFailure failure
+            Just (Right (result, submittedImage)) -> do
+                result `shouldBe` completedImageLoopResult
+                submittedImage.imageMime `shouldBe` "image/png"
+                submittedImage.imageBytes
+                    `shouldBe` pngWithExcessiveImageDataChunks
+
+    it "does not decode GIF frames without a bounded frame preflight" do
+        finished <-
+            timeout 2000000 $
+                runSingleImageSubmission "image/gif" oversizedGifFrame
+        case finished of
+            Nothing ->
+                expectationFailure
+                    "unsupported GIF normalization did not return promptly"
+            Just (Left failure) ->
+                expectationFailure failure
+            Just (Right (result, submittedImage)) -> do
+                result `shouldBe` completedImageLoopResult
+                submittedImage.imageMime `shouldBe` "image/gif"
+                submittedImage.imageBytes `shouldBe` oversizedGifFrame
+
+    it "resizes transparent pixels in premultiplied-alpha space" do
+        let sourceBytes =
+                LazyByteString.toStrict
+                    (encodePng transparentEdgeFixture)
+        submission <- runSingleImageSubmission "image/png" sourceBytes
+        case submission of
+            Left failure ->
+                expectationFailure failure
+            Right (result, submittedImage) -> do
+                result `shouldBe` completedImageLoopResult
+                submittedImage.imageMime `shouldBe` "image/png"
+                submittedImage.imageBytes `shouldNotBe` sourceBytes
+                case decodeImage submittedImage.imageBytes of
+                    Left decodeError ->
+                        expectationFailure decodeError
+                    Right dynamicImage ->
+                        pixelAt (convertRGBA8 dynamicImage) 0 0
+                            `shouldBe` PixelRGBA8 255 255 255 128
+
+    it "normalizes retained backend history only for provider submission" do
+        submittedState <- newIORef Nothing
+        let sourceUrl = imageDataUrl "image/bmp" oversizedFixtureBytes
+            rawSourceUrl =
+                "DATA:IMAGE/BMP;BASE64,"
+                    <> TextEncoding.decodeUtf8
+                        (Base64.encode oversizedFixtureBytes)
+            rawHistoryOutput =
+                rawJsonFixture $
+                    "{\"type\":\"input_image\",\"image_url\":\""
+                        <> "DATA:IMAGE\\/BMP;BASE64,"
+                        <> Base64.encode oversizedFixtureBytes
+                        <> "\"}"
+            messageHistoryItem =
+                MessageItem ResponseMessage
+                    { messageId = Just "history-message"
+                    , content =
+                        MessageContentParts
+                            [ InputImagePart
+                                { detail = Just "high"
+                                , fileId = Nothing
+                                , imageUrl = Just sourceUrl
+                                , promptCacheBreakpoint = Nothing
+                                }
+                            ]
+                    , role = RoleUser
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+            reasoningHistoryItem =
+                ReasoningItemValue ReasoningItem
+                    { itemId = Just "history-reasoning"
+                    , summary = []
+                    , content =
+                        Just
+                            [ InputImagePart
+                                { detail = Just "high"
+                                , fileId = Nothing
+                                , imageUrl = Just sourceUrl
+                                , promptCacheBreakpoint = Nothing
+                                }
+                            ]
+                    , encryptedContent = Nothing
+                    , status = Nothing
+                    }
+            functionHistoryItem =
+                FunctionCallOutputItem FunctionCallOutput
+                    { localOutcome = Nothing
+                    , itemId = Just "history-function-output"
+                    , callId = "history-call"
+                    , name = Just "image"
+                    , namespace = Nothing
+                    , provider = Nothing
+                    , output = rawHistoryOutput
+                    , status = Nothing
+                    , async = Nothing
+                    }
+            initialState =
+                initialBackendSnapshot
+                    [ messageHistoryItem
+                    , reasoningHistoryItem
+                    , functionHistoryItem
+                    ]
+            backend = Backend \state _previous _inputs _onEvent -> do
+                writeIORef submittedState (Just state)
+                pure (Left (ConnectionError "down"))
+        storedState <- newIORef initialState
+        config0 <- testConfig backend
+        let config = config0
+                { loopBackendState = BackendStateStore
+                    { readBackendState = readIORef storedState
+                    , commitBackendState = \state -> do
+                        writeIORef storedState state
+                        pure state
+                    }
+                }
+        execution <-
+            runLoopInputsDetailed config Nothing [UserMessage "continue"]
+        execution.executionResult
+            `shouldBe` Left (LoopTransport (ConnectionError "down"))
+        readIORef storedState `shouldReturn` initialState
+        readIORef submittedState >>= \case
+            Just BackendSnapshot{
+                backendItems =
+                    [ MessageItem ResponseMessage{
+                        content =
+                            MessageContentParts
+                                [ InputImagePart{
+                                    imageUrl = Just normalizedMessageUrl
+                                }
+                                ]
+                    }
+                    , ReasoningItemValue ReasoningItem{
+                        content =
+                            Just
+                                [ InputImagePart{
+                                    imageUrl = Just normalizedReasoningUrl
+                                }
+                                ]
+                    }
+                    , FunctionCallOutputItem FunctionCallOutput{
+                        output = normalizedRawOutput
+                    }
+                    ]
+            } -> do
+                assertNormalizedDataUrl
+                    oversizedFixtureBytes
+                    sourceUrl
+                    normalizedMessageUrl
+                assertNormalizedDataUrl
+                    oversizedFixtureBytes
+                    sourceUrl
+                    normalizedReasoningUrl
+                case rawJsonImageUrl normalizedRawOutput of
+                    Left failure ->
+                        expectationFailure failure
+                    Right normalizedRawUrl ->
+                        assertNormalizedDataUrl
+                            oversizedFixtureBytes
+                            rawSourceUrl
+                            normalizedRawUrl
+            state ->
+                expectationFailure $
+                    "unexpected submitted backend state: " <> show state
+
+    it "normalizes oversized tool images before follow-up submission" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-tool-image"
+                [functionToolCall "c1" "image" "{}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-tool-done" [] (Just "saw it")
+            ]
+        let sourceUrl =
+                "data:image/bmp;base64,"
+                    <> TextEncoding.decodeUtf8
+                        (Base64.encode oversizedFixtureBytes)
+            imageTool =
+                passthroughTool "image" \_emit _call ->
+                    pure . Right $ ToolHandlerResult
+                        { resultText = "viewed image"
+                        , resultImages =
+                            [ToolResultImage sourceUrl (Just "auto")]
+                        }
+        config0 <- testConfig backend
+        result <- runLoop
+            config0 { loopTools = registryFromHandlers [imageTool] }
+            Nothing
+            "show it"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-tool-done"
+            , finalText = Just "saw it"
+            , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        case seen of
+            [ _
+              , ( Just "resp-tool-image"
+                , [ CompletedTool ToolCallResult{
+                        toolResultImages = [normalized]
+                    }
+                  ]
+                )
+              ] -> do
+                normalized.imageUrl `shouldNotBe` sourceUrl
+                let (metadata, payloadWithComma) =
+                        Text.breakOn "," normalized.imageUrl
+                metadata
+                    `shouldSatisfy`
+                        (`elem`
+                            [ "data:image/png;base64"
+                            , "data:image/jpeg;base64"
+                            ])
+                case Base64.decode
+                        (TextEncoding.encodeUtf8
+                            (Text.drop 1 payloadWithComma)) of
+                    Left decodeError ->
+                        expectationFailure decodeError
+                    Right normalizedBytes ->
+                        assertNormalizedImage
+                            oversizedFixtureBytes
+                            (Text.drop 5 (Text.dropEnd 7 metadata))
+                            normalizedBytes
+            submissionsSeen ->
+                expectationFailure $
+                    "unexpected submissions: " <> show submissionsSeen
+
+    it "applies EXIF orientation while normalizing oversized camera JPEGs" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-oriented-image" [] (Just "saw it")
+            ]
+        let sourceBytes = orientedFixtureBytes
+            input =
+                userMessageWithAttachments
+                    "see this"
+                    [ ImageAttachmentItem
+                        (ImageAttachment "image/jpeg" sourceBytes)
+                    ]
+        config <- testConfig backend
+        result <- runLoopInputs config Nothing [input]
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-oriented-image"
+            , finalText = Just "saw it"
+            , turnsUsed = 1
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        case seen of
+            [(Nothing, [submitted])] ->
+                case turnInputImages submitted of
+                    [normalized] -> do
+                        assertNormalizedImage
+                            sourceBytes
+                            normalized.imageMime
+                            normalized.imageBytes
+                        case decodeImage normalized.imageBytes of
+                            Left decodeError ->
+                                expectationFailure decodeError
+                            Right dynamicImage -> do
+                                let image = convertRGB8 dynamicImage
+                                imageHeight image
+                                    `shouldSatisfy` (> imageWidth image)
+                    images ->
+                        expectationFailure $
+                            "expected one submitted image, got "
+                                <> show (length images)
+            submissionsSeen ->
+                expectationFailure $
+                    "unexpected submissions: " <> show submissionsSeen
+
     it "accepts file attachments in multimodal turns" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
@@ -169,396 +703,7 @@ spec = describe "runLoop" do
         seen <- readIORef submissions
         seen `shouldBe` [(Nothing, inputs)]
 
-    it "serializes loopOnEvent across parallel tool calls" do
-        inFlight <- newIORef (0 :: Int)
-        maxInFlight <- newIORef (0 :: Int)
-        submissions <- newIORef []
-        backend <- scriptedBackend submissions
-            [ Right $ emptyTurnOutput "resp-1"
-                [ functionToolCall "c1" "a" "{}"
-                , functionToolCall "c2" "b" "{}"
-                ]
-                Nothing
-            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
-            ]
-        let onEvent _ = do
-                now <- atomicModifyIORef' inFlight \n -> (n + 1, n + 1)
-                atomicModifyIORef' maxInFlight \seen -> (max seen now, ())
-                threadDelay 30000
-                atomicModifyIORef' inFlight \n -> (n - 1, ())
-            handlers =
-                [ noArgsTool "a" (pure (Right "ok"))
-                , noArgsTool "b" (pure (Right "ok"))
-                ]
-        config0 <- testConfig backend
-        let config = config0
-                { loopTools = registryFromHandlers handlers
-                , loopOnEvent = onEvent
-                }
-        result <- runLoop config Nothing "go"
-        result `shouldBe` Right LoopResult
-            { finalResponseId = "resp-2"
-            , finalText = Just "ok"
-            , turnsUsed = 2
-            , tokenUsage = emptyTokenUsage
-            }
-        readIORef maxInFlight `shouldReturn` 1
-
-    it "delivers events off the backend thread and flushes before returning" do
-        sinkStarted <- newEmptyMVar
-        releaseSink <- newEmptyMVar
-        backendEntered <- newEmptyMVar
-        let backend = Backend \_state _prev _inputs _onEvent -> do
-                putMVar backendEntered ()
-                pure $ Right BackendResult
-                    { backendOutput =
-                        emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = emptyBackendSnapshot
-                    }
-            onEvent = \case
-                TurnStarted -> do
-                    putMVar sinkStarted ()
-                    takeMVar releaseSink
-                _ -> pure ()
-        config0 <- testConfig backend
-        let config = config0 { loopOnEvent = onEvent }
-        withAsync (runLoop config Nothing "go") \running -> do
-            takeMVar sinkStarted
-            timeout 1000000 (takeMVar backendEntered)
-                `shouldReturn` Just ()
-            timeout 100000 (wait running)
-                `shouldReturn` Nothing
-            putMVar releaseSink ()
-            wait running `shouldReturn` Right LoopResult
-                { finalResponseId = "resp-1"
-                , finalText = Just "done"
-                , turnsUsed = 1
-                , tokenUsage = emptyTokenUsage
-                }
-
-    it "bounds queued events when the sink falls behind" do
-        sinkStarted <- newEmptyMVar
-        releaseSink <- newEmptyMVar
-        backendStarted <- newEmptyMVar
-        backendFinished <- newEmptyMVar
-        let backend = Backend \_state _prev _inputs onEvent -> do
-                putMVar backendStarted ()
-                mapM_ (const (onEvent (WarningRaised "x"))) [1 .. 300 :: Int]
-                putMVar backendFinished ()
-                pure $ Right BackendResult
-                    { backendOutput =
-                        emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = emptyBackendSnapshot
-                    }
-            onEvent = \case
-                TurnStarted -> do
-                    putMVar sinkStarted ()
-                    takeMVar releaseSink
-                _ -> pure ()
-        config0 <- testConfig backend
-        let config = config0 { loopOnEvent = onEvent }
-        withAsync (runLoop config Nothing "go") \running -> do
-            takeMVar sinkStarted
-            takeMVar backendStarted
-            timeout 100000 (takeMVar backendFinished)
-                `shouldReturn` Nothing
-            putMVar releaseSink ()
-            timeout 3000000 (takeMVar backendFinished)
-                `shouldReturn` Just ()
-            wait running `shouldReturn` Right LoopResult
-                { finalResponseId = "resp-1"
-                , finalText = Just "done"
-                , turnsUsed = 1
-                , tokenUsage = emptyTokenUsage
-                }
-
-    it "wakes a producer blocked on a full queue when the sink fails" do
-        sinkStarted <- newEmptyMVar
-        releaseSink <- newEmptyMVar
-        backendStarted <- newEmptyMVar
-        backendFinished <- newEmptyMVar
-        let backend = Backend \_state _prev _inputs onEvent -> do
-                putMVar backendStarted ()
-                mapM_ (const (onEvent (WarningRaised "queued")))
-                    [1 .. 300 :: Int]
-                putMVar backendFinished ()
-                pure $ Right BackendResult
-                    { backendOutput =
-                        emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = emptyBackendSnapshot
-                    }
-            onEvent = \case
-                TurnStarted -> do
-                    putMVar sinkStarted ()
-                    takeMVar releaseSink
-                    Exception.throwIO (userError "renderer exploded")
-                _ -> pure ()
-        config0 <- testConfig backend
-        let config = config0 { loopOnEvent = onEvent }
-        withAsync (runLoop config Nothing "go") \running -> do
-            takeMVar sinkStarted
-            takeMVar backendStarted
-            timeout 100000 (takeMVar backendFinished)
-                `shouldReturn` Nothing
-            putMVar releaseSink ()
-            timeout 1000000 (wait running)
-                `shouldReturn`
-                    Just
-                        (Left
-                            (LoopUnexpected
-                                "user error (renderer exploded)"))
-
-    it "coalesces adjacent deltas while preserving event boundaries" do
-        sinkStarted <- newEmptyMVar
-        releaseSink <- newEmptyMVar
-        backendFinished <- newEmptyMVar
-        events <- newIORef []
-        let backend = Backend \_state _prev _inputs onEvent -> do
-                onEvent (TextDelta "a")
-                onEvent (TextDelta "b")
-                onEvent (WarningRaised "boundary")
-                onEvent (ReasoningDelta "r1")
-                onEvent (ReasoningDelta "r2")
-                onEvent (TextDelta "c")
-                onEvent (TextDelta "d")
-                putMVar backendFinished ()
-                pure $ Right BackendResult
-                    { backendOutput =
-                        emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = emptyBackendSnapshot
-                    }
-            onEvent event = do
-                modifyIORef' events (event :)
-                case event of
-                    TurnStarted -> do
-                        putMVar sinkStarted ()
-                        takeMVar releaseSink
-                    _ -> pure ()
-        config0 <- testConfig backend
-        let config = config0 { loopOnEvent = onEvent }
-        withAsync (runLoop config Nothing "go") \running -> do
-            takeMVar sinkStarted
-            takeMVar backendFinished
-            putMVar releaseSink ()
-            wait running `shouldReturn` Right LoopResult
-                { finalResponseId = "resp-1"
-                , finalText = Just "done"
-                , turnsUsed = 1
-                , tokenUsage = emptyTokenUsage
-                }
-        reverse <$> readIORef events `shouldReturn`
-            [ TurnStarted
-            , TextDelta "ab"
-            , WarningRaised "boundary"
-            , ReasoningDelta "r1r2"
-            , TextDelta "cd"
-            , TurnFinished (emptyTurnOutput "resp-1" [] (Just "done"))
-            ]
-
-    it "backpressures a coalesced text tail by logical payload bytes" do
-        sinkStarted <- newEmptyMVar
-        releaseSink <- newEmptyMVar
-        backendFinished <- newEmptyMVar
-        deliveredChars <- newIORef (0 :: Int)
-        let chunk = Text.replicate (1024 * 1024) "x"
-            backend = Backend \_state _prev _inputs onEvent -> do
-                -- The chunks cross the conservative 8 MiB logical-byte
-                -- budget while TurnStarted blocks the consumer, even though
-                -- they would otherwise occupy only one TBQueue node.
-                mapM_ (onEvent . TextDelta) [chunk, chunk, chunk]
-                putMVar backendFinished ()
-                pure $ Right BackendResult
-                    { backendOutput =
-                        emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = emptyBackendSnapshot
-                    }
-            onEvent = \case
-                TurnStarted -> do
-                    putMVar sinkStarted ()
-                    takeMVar releaseSink
-                TextDelta text ->
-                    modifyIORef' deliveredChars (+ Text.length text)
-                _ -> pure ()
-        config0 <- testConfig backend
-        let config = config0 { loopOnEvent = onEvent }
-        withAsync (runLoop config Nothing "go") \running -> do
-            takeMVar sinkStarted
-            timeout 100000 (takeMVar backendFinished)
-                `shouldReturn` Nothing
-            putMVar releaseSink ()
-            timeout 1000000 (takeMVar backendFinished)
-                `shouldReturn` Just ()
-            wait running `shouldReturn` Right LoopResult
-                { finalResponseId = "resp-1"
-                , finalText = Just "done"
-                , turnsUsed = 1
-                , tokenUsage = emptyTokenUsage
-                }
-        readIORef deliveredChars
-            `shouldReturn` 3 * Text.length chunk
-
-    it "backpressures and coalesces provider-native child output" do
-        sinkStarted <- newEmptyMVar
-        releaseSink <- newEmptyMVar
-        backendFinished <- newEmptyMVar
-        deliveredChars <- newIORef (0 :: Int)
-        let chunk = Text.replicate (1024 * 1024) "x"
-            backend = Backend \_state _prev _inputs onEvent -> do
-                mapM_
-                    (onEvent . NativeAgentOutput "child")
-                    [chunk, chunk, chunk]
-                putMVar backendFinished ()
-                pure $ Right BackendResult
-                    { backendOutput =
-                        emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = emptyBackendSnapshot
-                    }
-            onEvent = \case
-                TurnStarted -> do
-                    putMVar sinkStarted ()
-                    takeMVar releaseSink
-                NativeAgentOutput "child" output ->
-                    modifyIORef' deliveredChars (+ Text.length output)
-                _ -> pure ()
-        config0 <- testConfig backend
-        let config = config0 { loopOnEvent = onEvent }
-        withAsync (runLoop config Nothing "go") \running -> do
-            takeMVar sinkStarted
-            timeout 100000 (takeMVar backendFinished)
-                `shouldReturn` Nothing
-            putMVar releaseSink ()
-            timeout 1000000 (takeMVar backendFinished)
-                `shouldReturn` Just ()
-            wait running `shouldReturn` Right LoopResult
-                { finalResponseId = "resp-1"
-                , finalText = Just "done"
-                , turnsUsed = 1
-                , tokenUsage = emptyTokenUsage
-                }
-        readIORef deliveredChars
-            `shouldReturn` 3 * Text.length chunk
-
-    it "keeps only the latest adjacent tool-output snapshot per call" do
-        sinkStarted <- newEmptyMVar
-        releaseSink <- newEmptyMVar
-        backendFinished <- newEmptyMVar
-        events <- newIORef []
-        let backend = Backend \_state _prev _inputs onEvent -> do
-                onEvent (ToolOutputUpdated "c1" "a")
-                onEvent (ToolOutputUpdated "c1" "ab")
-                onEvent (ToolOutputUpdated "c2" "x")
-                onEvent (ToolOutputUpdated "c2" "xy")
-                onEvent (ToolOutputUpdated "c1" "abc")
-                putMVar backendFinished ()
-                pure $ Right BackendResult
-                    { backendOutput =
-                        emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = emptyBackendSnapshot
-                    }
-            onEvent event = do
-                modifyIORef' events (event :)
-                case event of
-                    TurnStarted -> do
-                        putMVar sinkStarted ()
-                        takeMVar releaseSink
-                    _ -> pure ()
-        config0 <- testConfig backend
-        let config = config0 { loopOnEvent = onEvent }
-        withAsync (runLoop config Nothing "go") \running -> do
-            takeMVar sinkStarted
-            takeMVar backendFinished
-            putMVar releaseSink ()
-            wait running `shouldReturn` Right LoopResult
-                { finalResponseId = "resp-1"
-                , finalText = Just "done"
-                , turnsUsed = 1
-                , tokenUsage = emptyTokenUsage
-                }
-        reverse <$> readIORef events `shouldReturn`
-            [ TurnStarted
-            , ToolOutputUpdated "c1" "ab"
-            , ToolOutputUpdated "c2" "xy"
-            , ToolOutputUpdated "c1" "abc"
-            , TurnFinished (emptyTurnOutput "resp-1" [] (Just "done"))
-            ]
-
-    it "keeps only the latest adjacent tool-argument snapshot per call" do
-        sinkStarted <- newEmptyMVar
-        releaseSink <- newEmptyMVar
-        backendFinished <- newEmptyMVar
-        events <- newIORef []
-        let preview callId arguments =
-                ToolArgumentsUpdated
-                    (functionToolCall callId "apply_patch" arguments)
-            backend = Backend \_state _prev _inputs onEvent -> do
-                onEvent (preview "c1" "a")
-                onEvent (preview "c1" "ab")
-                onEvent (preview "c2" "x")
-                onEvent (preview "c2" "xy")
-                onEvent (preview "c1" "abc")
-                putMVar backendFinished ()
-                pure $ Right BackendResult
-                    { backendOutput =
-                        emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = emptyBackendSnapshot
-                    }
-            onEvent event = do
-                modifyIORef' events (event :)
-                case event of
-                    TurnStarted -> do
-                        putMVar sinkStarted ()
-                        takeMVar releaseSink
-                    _ -> pure ()
-        config0 <- testConfig backend
-        let config = config0 { loopOnEvent = onEvent }
-        withAsync (runLoop config Nothing "go") \running -> do
-            takeMVar sinkStarted
-            takeMVar backendFinished
-            putMVar releaseSink ()
-            wait running `shouldReturn` Right LoopResult
-                { finalResponseId = "resp-1"
-                , finalText = Just "done"
-                , turnsUsed = 1
-                , tokenUsage = emptyTokenUsage
-                }
-        reverse <$> readIORef events `shouldReturn`
-            [ TurnStarted
-            , preview "c1" "ab"
-            , preview "c2" "xy"
-            , preview "c1" "abc"
-            , TurnFinished (emptyTurnOutput "resp-1" [] (Just "done"))
-            ]
-
-    it "bounds a single oversized live tool-output snapshot" do
-        delivered <- newIORef Nothing
-        let oversized =
-                Text.replicate (3 * 1024 * 1024) "x" <> "newest-tail"
-            backend = Backend \_state _prev _inputs onEvent -> do
-                onEvent (ToolOutputUpdated "large" oversized)
-                pure $ Right BackendResult
-                    { backendOutput =
-                        emptyTurnOutput "resp-1" [] (Just "done")
-                    , backendState = emptyBackendSnapshot
-                    }
-            onEvent = \case
-                ToolOutputUpdated "large" output ->
-                    writeIORef delivered (Just output)
-                _ -> pure ()
-        config0 <- testConfig backend
-        result <- runLoop config0 { loopOnEvent = onEvent } Nothing "go"
-        result `shouldBe` Right LoopResult
-            { finalResponseId = "resp-1"
-            , finalText = Just "done"
-            , turnsUsed = 1
-            , tokenUsage = emptyTokenUsage
-            }
-        readIORef delivered >>= \case
-            Nothing -> expectationFailure "missing tool-output update"
-            Just output -> do
-                Text.length output `shouldSatisfy` (<= 2 * 1024 * 1024)
-                output `shouldSatisfy`
-                    Text.isPrefixOf "[earlier tool output truncated]"
-                output `shouldSatisfy` Text.isSuffixOf "newest-tail"
+    EventDelivery.spec
 
     it "dispatches consecutive parallel-safe tool calls concurrently" do
         firstStarted <- newEmptyMVar
@@ -917,6 +1062,7 @@ spec = describe "runLoop" do
 
     it "evaluates dynamic-call approvals serially in model order" do
         approvalOrder <- newIORef []
+        approvalsFinished <- newEmptyMVar
         releaseFirst <- newEmptyMVar
         firstStarted <- newEmptyMVar
         let first = do
@@ -943,10 +1089,14 @@ spec = describe "runLoop" do
                 { loopTools = registryFromTools tools
                 , loopApprove = \call -> do
                     modifyIORef' approvalOrder (<> [call.name])
+                    when (call.name == "independent") $
+                        putMVar approvalsFinished ()
                     pure (Right True)
                 }
         withAsync (runLoop config Nothing "go") \running -> do
             timeout concurrencyProbeMicros (takeMVar firstStarted)
+                `shouldReturn` Just ()
+            timeout concurrencyProbeMicros (takeMVar approvalsFinished)
                 `shouldReturn` Just ()
             readIORef approvalOrder
                 `shouldReturn` ["first", "conflicting", "independent"]
@@ -983,6 +1133,293 @@ spec = describe "runLoop" do
         result <- runLoop config Nothing "go"
         result `shouldSatisfy` either (const False) (const True)
         readIORef resolverCalls `shouldReturn` 0
+
+    it "starts async calls while streaming, deduplicates the committed call, and waits before finalizing" do
+        handlerStarted <- newEmptyMVar
+        backendReturned <- newEmptyMVar
+        releaseHandler <- newEmptyMVar
+        invocations <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        step <- newIORef (0 :: Int)
+        let call = asyncFunctionToolCall "async-1" "slow" "{}"
+            tool = asyncNoArgsTool "slow" do
+                modifyIORef' invocations (+ 1)
+                putMVar handlerStarted ()
+                takeMVar releaseHandler
+                pure (Right "finished")
+            backend = backendWithCallbacks \state _previous inputs callbacks -> do
+                modifyIORef' submissions (<> [inputs])
+                current <- atomicModifyIORef' step \value ->
+                    (value + 1, value + 1)
+                case current of
+                    1 -> do
+                        callbacks.onAsyncToolCall call
+                        timeout concurrencyProbeMicros (readMVar handlerStarted)
+                            >>= \case
+                                Nothing ->
+                                    Exception.throwIO $
+                                        userError "async handler did not start"
+                                Just () -> pure ()
+                        putMVar backendReturned ()
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput
+                                    "resp-async-1"
+                                    [call]
+                                    (Just "premature answer")
+                            , backendState = appendStateMarker state
+                            }
+                    _ ->
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput
+                                    "resp-async-2"
+                                    []
+                                    (Just "done")
+                            , backendState = appendStateMarker state
+                            }
+        config0 <- testConfig backend
+        withAsync
+            (runLoop
+                config0 { loopTools = registryFromTools [tool] }
+                Nothing
+                "go")
+            \running -> do
+                timeout concurrencyProbeMicros (readMVar backendReturned)
+                    `shouldReturn` Just ()
+                timeout 100000 (wait running) `shouldReturn` Nothing
+                putMVar releaseHandler ()
+                wait running `shouldReturn` Right LoopResult
+                    { finalResponseId = "resp-async-2"
+                    , finalText = Just "done"
+                    , turnsUsed = 2
+                    , tokenUsage = emptyTokenUsage
+                    }
+        readIORef invocations `shouldReturn` 1
+        readIORef submissions >>= \case
+            [ [UserMessage "go"]
+              , [CompletedTool completed]
+              ] -> do
+                completed.callId `shouldBe` "async-1"
+                completed.output `shouldBe` "finished"
+            seen ->
+                expectationFailure $
+                    "unexpected async submissions: " <> show seen
+
+    it "fails closed when an async call_id is reused for a different call" do
+        firstInvocations <- newIORef (0 :: Int)
+        secondInvocations <- newIORef (0 :: Int)
+        let first = asyncFunctionToolCall "duplicate" "first" "{}"
+            conflicting = asyncFunctionToolCall "duplicate" "second" "{}"
+            backend = backendWithCallbacks \_state _previous _inputs callbacks -> do
+                callbacks.onAsyncToolCall first
+                callbacks.onAsyncToolCall conflicting
+                Exception.throwIO $
+                    userError "conflicting async callback unexpectedly returned"
+            tools =
+                [ asyncNoArgsTool "first" do
+                    modifyIORef' firstInvocations (+ 1)
+                    pure (Right "first")
+                , asyncNoArgsTool "second" do
+                    modifyIORef' secondInvocations (+ 1)
+                    pure (Right "second")
+                ]
+        config0 <- testConfig backend
+        result <-
+            runLoop
+                config0 { loopTools = registryFromTools tools }
+                Nothing
+                "go"
+        result `shouldSatisfy` \case
+            Left (LoopUnexpected message) ->
+                "Conflicting tool calls reused call_id duplicate"
+                    `Text.isInfixOf` message
+            _ -> False
+        readIORef firstInvocations >>= (`shouldSatisfy` (<= 1))
+        readIORef secondInvocations `shouldReturn` 0
+
+    it "submits async results in completion order" do
+        slowStarted <- newEmptyMVar
+        releaseSlow <- newEmptyMVar
+        submissions <- newIORef []
+        step <- newIORef (0 :: Int)
+        let slowCall = asyncFunctionToolCall "slow-call" "slow" "{}"
+            fastCall = asyncFunctionToolCall "fast-call" "fast" "{}"
+            tools =
+                [ asyncNoArgsTool "slow" do
+                    putMVar slowStarted ()
+                    takeMVar releaseSlow
+                    pure (Right "slow")
+                , asyncNoArgsTool "fast" do
+                    readMVar slowStarted
+                    pure (Right "fast")
+                ]
+            backend = backendWithCallbacks \state _previous inputs callbacks -> do
+                modifyIORef' submissions (<> [inputs])
+                current <- atomicModifyIORef' step \value ->
+                    (value + 1, value + 1)
+                case current of
+                    1 -> do
+                        callbacks.onAsyncToolCall slowCall
+                        callbacks.onAsyncToolCall fastCall
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput
+                                    "resp-order-1"
+                                    [slowCall, fastCall]
+                                    Nothing
+                            , backendState = appendStateMarker state
+                            }
+                    2 -> do
+                        putMVar releaseSlow ()
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput
+                                    "resp-order-2"
+                                    []
+                                    (Just "waiting")
+                            , backendState = appendStateMarker state
+                            }
+                    _ ->
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput
+                                    "resp-order-3"
+                                    []
+                                    (Just "done")
+                            , backendState = appendStateMarker state
+                            }
+        config0 <- testConfig backend
+        result <-
+            runLoop
+                config0 { loopTools = registryFromTools tools }
+                Nothing
+                "go"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-order-3"
+            , finalText = Just "done"
+            , turnsUsed = 3
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        fmap completedCallIds seen
+            `shouldBe` [[], ["fast-call"], ["slow-call"]]
+
+    it "rejects async execution for a blocking-only tool" do
+        invocations <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        step <- newIORef (0 :: Int)
+        let call = asyncFunctionToolCall "blocked-async" "blocking" "{}"
+            backend = backendWithCallbacks \state _previous inputs callbacks -> do
+                modifyIORef' submissions (<> [inputs])
+                current <- atomicModifyIORef' step \value ->
+                    (value + 1, value + 1)
+                if current == 1
+                    then do
+                        callbacks.onAsyncToolCall call
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput "resp-blocked-1" [call] Nothing
+                            , backendState = appendStateMarker state
+                            }
+                    else
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput
+                                    "resp-blocked-2"
+                                    []
+                                    (Just "done")
+                            , backendState = appendStateMarker state
+                            }
+            blockingTool =
+                noArgsAppTool "blocking" do
+                    modifyIORef' invocations (+ 1)
+                    pure (Right "unexpected")
+        config0 <- testConfig backend
+        result <-
+            runLoop
+                config0 { loopTools = registryFromTools [blockingTool] }
+                Nothing
+                "go"
+        result `shouldSatisfy` either (const False) (const True)
+        readIORef invocations `shouldReturn` 0
+        readIORef submissions >>= \case
+            [_, [CompletedTool completed]] ->
+                completed.output
+                    `shouldSatisfy`
+                        Text.isInfixOf
+                            "does not support asynchronous execution"
+            seen ->
+                expectationFailure $
+                    "unexpected blocking-only submissions: " <> show seen
+
+    it "cancels and joins an async handler with the loop" do
+        handlerStarted <- newEmptyMVar
+        handlerFinished <- newEmptyMVar
+        providerRelease <- newEmptyMVar
+        handlerRelease <- newEmptyMVar
+        cancelFlag <- newCancelFlag
+        let call = asyncFunctionToolCall "cancel-async" "slow" "{}"
+            tool = asyncNoArgsTool "slow" $
+                Exception.finally
+                    (putMVar handlerStarted ()
+                        >> takeMVar handlerRelease
+                        >> pure (Right "unexpected"))
+                    (putMVar handlerFinished ())
+            backend = backendWithCallbacks \state _previous _inputs callbacks -> do
+                callbacks.onAsyncToolCall call
+                takeMVar providerRelease
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-cancel" [call] Nothing
+                    , backendState = appendStateMarker state
+                    }
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools [tool]
+                , loopCancel = cancelFlag
+                , loopInterrupt = putMVar providerRelease ()
+                }
+        withAsync (runLoop config Nothing "go") \running -> do
+            timeout concurrencyProbeMicros (readMVar handlerStarted)
+                `shouldReturn` Just ()
+            requestCancel cancelFlag
+            timeout concurrencyProbeMicros (wait running)
+                `shouldReturn` Just (Left (LoopCancelled []))
+            readMVar handlerFinished `shouldReturn` ()
+
+    it "cancels promptly while an admitted async call is awaiting approval" do
+        approvalStarted <- newEmptyMVar
+        releaseApproval <- newEmptyMVar
+        handlerInvocations <- newIORef (0 :: Int)
+        cancelFlag <- newCancelFlag
+        let call = asyncFunctionToolCall "approval-async" "guarded" "{}"
+            tool = asyncNoArgsTool "guarded" do
+                modifyIORef' handlerInvocations (+ 1)
+                pure (Right "unexpected")
+            backend = backendWithCallbacks \state _previous _inputs callbacks -> do
+                callbacks.onAsyncToolCall call
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-approval" [call] Nothing
+                    , backendState = appendStateMarker state
+                    }
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools [tool]
+                , loopApprove = \_ -> do
+                    putMVar approvalStarted ()
+                    takeMVar releaseApproval
+                    pure (Right True)
+                , loopCancel = cancelFlag
+                }
+        withAsync (runLoop config Nothing "go") \running -> do
+            timeout concurrencyProbeMicros (readMVar approvalStarted)
+                `shouldReturn` Just ()
+            requestCancel cancelFlag
+            timeout concurrencyProbeMicros (wait running)
+                `shouldReturn` Just (Left (LoopCancelled []))
+        readIORef handlerInvocations `shouldReturn` 0
 
     it "detects overlapping filesystem resource claims" do
         let root = unsafeEncodeUtf "/workspace/src"
@@ -1027,8 +1464,9 @@ spec = describe "runLoop" do
             }
         seen <- readIORef submissions
         case seen of
-            [_, (Just "resp-1", [CompletedTool denied])] ->
+            [_, (Just "resp-1", [CompletedTool denied])] -> do
                 denied.output `shouldBe` "Tool call rejected by user."
+                toolCallResultOutcome denied `shouldBe` Just ToolDenied
             other -> expectationFailure ("unexpected submissions: " <> show other)
 
     it "defaults to a 2000-turn budget" do
@@ -1162,7 +1600,7 @@ spec = describe "runLoop" do
         config <- testConfig backend
         execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
         execution.executionPendingInputs `shouldBe`
-            [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind)]
+            [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind BlockingToolCall [] (Just ToolSucceeded))]
 
     it "interrupts the provider in-band before tearing down a cancelled submission" do
         started <- newEmptyMVar
@@ -1255,7 +1693,7 @@ spec = describe "runLoop" do
         execution.executionResult `shouldBe` Left (LoopCancelled [])
         execution.executionProgress `shouldBe` ResponseCommitted
         execution.executionPendingInputs `shouldBe`
-            [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind)]
+            [CompletedTool (ToolCallResult "c1" "echo:hi" FunctionCallKind BlockingToolCall [] (Just ToolSucceeded))]
 
     it "retains committed state when a later callback throws" do
         submissions <- newIORef []
@@ -1313,156 +1751,7 @@ spec = describe "runLoop" do
         execution.executionResult
             `shouldBe` Left (LoopUnexpected "user error (renderer exploded)")
 
-    it "marks a transport failure after streamed output as interrupted" do
-        observed <- newIORef []
-        let backend = Backend \_state _prev _inputs onEvent -> do
-                onEvent (TextDelta "partial")
-                pure (Left (ConnectionError "down"))
-        config0 <- testConfig backend
-        let config = config0
-                { loopOnEvent = \event ->
-                    modifyIORef' observed (<> [event])
-                }
-        execution <-
-            runLoopInputsDetailed config Nothing [UserMessage "hello"]
-        execution.executionResult `shouldBe`
-            Left (LoopTransportAfterOutput (ConnectionError "down"))
-        execution.executionUncommittedDisplayEvents
-            `shouldBe` [TextDelta "partial"]
-        readIORef observed `shouldReturn`
-            [TurnStarted, TextDelta "partial", ResponseAttemptFailed]
-
-    it "coalesces retained text without crossing tool boundaries" do
-        let call =
-                functionToolCall "c1" "shell_command"
-                    "{\"command\":\"git status\"}"
-            backend = Backend \_state _prev _inputs onEvent -> do
-                onEvent (TextDelta "before")
-                onEvent (TextDelta " tool")
-                onEvent (ToolStarted call)
-                onEvent (TextDelta "after")
-                onEvent (TextDelta " tool")
-                pure (Left (ConnectionError "down"))
-        config <- testConfig backend
-        execution <-
-            runLoopInputsDetailed config Nothing [UserMessage "hello"]
-        execution.executionUncommittedDisplayEvents
-            `shouldBe`
-                [ TextDelta "before tool"
-                , ToolStarted call
-                , TextDelta "after tool"
-                ]
-
-    it "retains tool-only activity as display metadata on failure" do
-        let call =
-                functionToolCall "c1" "shell_command"
-                    "{\"command\":\"git status\"}"
-            backend = Backend \_state _prev _inputs onEvent -> do
-                onEvent (ToolStarted call)
-                onEvent (ToolOutputUpdated "c1" "still running")
-                pure (Left (ConnectionError "down"))
-        config <- testConfig backend
-        execution <-
-            runLoopInputsDetailed config Nothing [UserMessage "hello"]
-        execution.executionResult `shouldBe`
-            Left (LoopTransportAfterOutput (ConnectionError "down"))
-        execution.executionUncommittedDisplayEvents
-            `shouldBe`
-                [ ToolStarted call
-                , ToolOutputUpdated "c1" "still running"
-                ]
-
-    it "keeps earlier restarted attempts in display metadata" do
-        let backend = Backend \_state _prev _inputs onEvent -> do
-                onEvent (TextDelta "fir")
-                onEvent (TextDelta "st")
-                onEvent (ResponseRestarted "retrying")
-                onEvent (TextDelta "sec")
-                onEvent (TextDelta "ond")
-                pure (Left (ConnectionError "down"))
-        config <- testConfig backend
-        execution <-
-            runLoopInputsDetailed config Nothing [UserMessage "hello"]
-        execution.executionUncommittedDisplayEvents
-            `shouldBe`
-                [ TextDelta "first"
-                , ResponseRestarted "retrying"
-                , TextDelta "second"
-                ]
-        execution.executionUncommittedAssistantText
-            `shouldBe` Just "first\n\nsecond"
-
-    it "still marks failure after a later retry attempt is discarded" do
-        observed <- newIORef []
-        let backend = Backend \_state _prev _inputs onEvent -> do
-                onEvent (TextDelta "fir")
-                onEvent (TextDelta "st")
-                onEvent (ResponseRestarted "retrying")
-                onEvent (TextDelta "discard")
-                onEvent (TextDelta " me")
-                onEvent ResponseAttemptDiscarded
-                pure (Left (ConnectionError "down"))
-        config0 <- testConfig backend
-        let config = config0
-                { loopOnEvent = \event ->
-                    modifyIORef' observed (<> [event])
-                }
-        execution <-
-            runLoopInputsDetailed config Nothing [UserMessage "hello"]
-        execution.executionResult `shouldBe`
-            Left (LoopTransportAfterOutput (ConnectionError "down"))
-        execution.executionUncommittedDisplayEvents
-            `shouldBe`
-                [ TextDelta "first"
-                , ResponseRestarted "retrying"
-                ]
-        observedEvents <- readIORef observed
-        filter
-            (\case
-                TextDelta _ -> False
-                _ -> True)
-            observedEvents
-            `shouldBe`
-                [ TurnStarted
-                , ResponseRestarted "retrying"
-                , ResponseAttemptDiscarded
-                , ResponseAttemptFailed
-                ]
-
-    it "treats a transport failure after a discarded attempt as pre-output" do
-        let backend = Backend \_state _prev _inputs onEvent -> do
-                onEvent (TextDelta "partial")
-                onEvent ResponseAttemptDiscarded
-                pure (Left (ConnectionError "down"))
-        config <- testConfig backend
-        result <- runLoop config Nothing "hello"
-        result `shouldBe` Left (LoopTransport (ConnectionError "down"))
-
-    it "bounds completed tool output retained after failure" do
-        let oversized =
-                Text.replicate (3 * 1024 * 1024) "x" <> "newest-tail"
-            backend = Backend \_state _prev _inputs onEvent -> do
-                onEvent
-                    (ToolFinished
-                        (ToolCallResult
-                            "large"
-                            oversized
-                            FunctionCallKind))
-                pure (Left (ConnectionError "down"))
-        config <- testConfig backend
-        execution <-
-            runLoopInputsDetailed config Nothing [UserMessage "hello"]
-        case execution.executionUncommittedDisplayEvents of
-            [ToolFinished result] -> do
-                Text.length result.output
-                    `shouldSatisfy` (<= 2 * 1024 * 1024)
-                result.output `shouldSatisfy`
-                    Text.isPrefixOf "[earlier tool output truncated]"
-                result.output `shouldSatisfy`
-                    Text.isSuffixOf "newest-tail"
-            other ->
-                expectationFailure
-                    ("unexpected display events: " <> show other)
+    FailedDisplay.spec
 
     it "turns synchronous backend exceptions into a failed turn" do
         config <- testConfig $ Backend \_state _prev _inputs _onEvent ->
@@ -1790,6 +2079,7 @@ spec = describe "runLoop" do
                 , toolCalls = [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
                 , assistantText = Just "calling"
                 , tokenUsage = TokenUsage 10 4 2
+                , contextUsage = Just (TokenUsage 10 4 2)
                 , providerTelemetry = Just firstTelemetry
                 , completion = TurnCompleted
                 }
@@ -1798,6 +2088,7 @@ spec = describe "runLoop" do
                 , toolCalls = []
                 , assistantText = Just "done"
                 , tokenUsage = TokenUsage 12 6 0
+                , contextUsage = Just (TokenUsage 12 6 0)
                 , providerTelemetry = Just secondTelemetry
                 , completion = TurnCompleted
                 }
@@ -1990,6 +2281,7 @@ spec = describe "runLoop" do
                     [functionToolCall "c1" "echo" "{\"message\":\"unsafe\"}"]
                 , assistantText = Just "partial"
                 , tokenUsage = TokenUsage 120 32768 0
+                , contextUsage = Just (TokenUsage 120 32768 0)
                 , providerTelemetry = Nothing
                 , completion = TurnIncomplete
                     { incompleteReason = "max_output_tokens"
@@ -2018,6 +2310,7 @@ spec = describe "runLoop" do
                             "c1" "echo" "{\"message\":\"unsafe\"}"]
                     , assistantText = Just "partial"
                     , tokenUsage = TokenUsage 120 32768 0
+                    , contextUsage = Just (TokenUsage 120 32768 0)
                     , providerTelemetry = Nothing
                     , completion = TurnIncomplete
                         { incompleteReason = "max_output_tokens"
@@ -2037,124 +2330,254 @@ spec = describe "runLoop" do
 -- Helpers
 --------------------------------------------------------------------------------
 
-testConfig :: Backend -> IO LoopConfig
-testConfig backend = do
-    cancel <- newCancelFlag
-    state <- newIORef emptyBackendSnapshot
-    pure LoopConfig
-        { loopBackend = backend
-        , loopBackendState = BackendStateStore
-            { readBackendState = readIORef state
-            , commitBackendState = \snapshot -> do
-                writeIORef state snapshot
-                pure snapshot
-            }
-        , loopTools = registryFromHandlers
-            [ typedTool "echo" echoArgsDecoder $ \EchoArgs { message } ->
-                pure (Right ("echo:" <> message))
-            ]
-        , loopDispatch = defaultLoopDispatch
-        , loopMaxTurns = defaultLoopMaxTurns
-        , loopOnEvent = \_ -> pure ()
-        , loopApprove = \_ -> pure (Right True)
-        , loopReadSteering = pure []
-        , loopCommitSteering = \_ -> pure ()
-        , loopInterrupt = pure ()
-        , loopCancel = cancel
+completedImageLoopResult :: Either LoopError LoopResult
+completedImageLoopResult =
+    Right LoopResult
+        { finalResponseId = "resp-image-check"
+        , finalText = Just "saw it"
+        , turnsUsed = 1
+        , tokenUsage = emptyTokenUsage
         }
 
-registryFromHandlers :: [ToolHandler] -> ToolRegistry
-registryFromHandlers =
-    registryFromPolicies . map (\handler -> (ParallelSafe, handler))
+runSingleImageSubmission
+    :: Text
+    -> ByteString.ByteString
+    -> IO
+        ( Either
+            String
+            (Either LoopError LoopResult, ImageAttachment)
+        )
+runSingleImageSubmission mime bytes = do
+    submissions <- newIORef []
+    backend <- scriptedBackend submissions
+        [ Right $ emptyTurnOutput "resp-image-check" [] (Just "saw it")
+        ]
+    config <- testConfig backend
+    result <-
+        runLoopInputs config Nothing
+            [ userMessageWithAttachments
+                "see this"
+                [ImageAttachmentItem (ImageAttachment mime bytes)]
+            ]
+    readIORef submissions >>= \case
+        [(Nothing, [submitted])] ->
+            case turnInputImages submitted of
+                [image] -> do
+                    _ <- Exception.evaluate (ByteString.length image.imageBytes)
+                    pure (Right (result, image))
+                images ->
+                    pure . Left $
+                        "expected one submitted image, got "
+                            <> show (length images)
+        submissionsSeen ->
+            pure . Left $
+                "unexpected submissions: " <> show submissionsSeen
 
-registryFromPolicies :: [(ToolExecutionPolicy, ToolHandler)] -> ToolRegistry
-registryFromPolicies tools =
-    either (error . Text.unpack) id $ mkToolRegistry
-        [ jsonAppToolWithExecution
-            (handlerName handler)
-            ""
-            []
-            AlwaysReadOnly
-            execution
-            handler
-        | (execution, handler) <- tools
+unsafeDimensionPng :: ByteString.ByteString
+unsafeDimensionPng =
+    LazyByteString.toStrict $
+        encodePng (generateImage (\_ _ -> PixelRGB8 0 0 0) 8193 1)
+
+pngInflationBomb :: ByteString.ByteString
+pngInflationBomb =
+    LazyByteString.toStrict . toLazyByteString $
+        byteString "\137PNG\r\n\SUB\n"
+            <> pngChunk "IHDR" header
+            <> pngChunk "IDAT" compressedPayload
+            <> pngChunk "IEND" ""
+  where
+    header =
+        LazyByteString.toStrict . toLazyByteString $
+            word32BE 2001
+                <> word32BE 1
+                <> word8 8
+                <> word8 2
+                <> word8 0
+                <> word8 0
+                <> word8 0
+    compressedPayload =
+        LazyByteString.toStrict . Zlib.compress $
+            LazyByteString.replicate (256 * 1024 * 1024) 0
+
+pngWithExcessiveImageDataChunks :: ByteString.ByteString
+pngWithExcessiveImageDataChunks =
+    LazyByteString.toStrict . toLazyByteString $
+        byteString "\137PNG\r\n\SUB\n"
+            <> pngChunk "IHDR" header
+            <> mconcat (replicate 4097 (pngChunk "IDAT" ""))
+            <> pngChunk "IDAT" compressedPayload
+            <> pngChunk "IEND" ""
+  where
+    header =
+        LazyByteString.toStrict . toLazyByteString $
+            word32BE 2001
+                <> word32BE 1
+                <> word8 8
+                <> word8 2
+                <> word8 0
+                <> word8 0
+                <> word8 0
+    compressedPayload =
+        LazyByteString.toStrict . Zlib.compress $
+            LazyByteString.replicate 6004 0
+
+pngChunk :: ByteString.ByteString -> ByteString.ByteString -> Builder
+pngChunk chunkType payload =
+    word32BE (fromIntegral (ByteString.length payload))
+        <> byteString chunkType
+        <> byteString payload
+        <> word32BE (pngCrc32 (chunkType <> payload))
+
+pngCrc32 :: ByteString.ByteString -> Word32
+pngCrc32 =
+    complement
+        . ByteString.foldl' updateCrc maxBound
+  where
+    updateCrc crc byte =
+        updateBits 8 (crc `xor` fromIntegral byte)
+
+    updateBits :: Int -> Word32 -> Word32
+    updateBits remaining value
+        | remaining <= 0 = value
+        | value .&. 1 == 1 =
+            updateBits
+                (remaining - 1)
+                ((value `shiftR` 1) `xor` 0xedb88320)
+        | otherwise =
+            updateBits (remaining - 1) (value `shiftR` 1)
+
+oversizedGifFrame :: ByteString.ByteString
+oversizedGifFrame =
+    ByteString.pack
+        [ 0x47, 0x49, 0x46, 0x38, 0x39, 0x61
+        , 0xd1, 0x07, 0x01, 0x00
+        , 0x00, 0x00, 0x00
+        , 0x2c
+        , 0x00, 0x00, 0x00, 0x00
+        , 0xff, 0xff, 0xff, 0xff
+        , 0x00
+        , 0x02, 0x01, 0x00, 0x00
+        , 0x3b
         ]
 
-registryFromTools :: [AppTool] -> ToolRegistry
-registryFromTools =
-    either (error . Text.unpack) id . mkToolRegistry
+transparentEdgeFixture :: Image PixelRGBA8
+transparentEdgeFixture =
+    generateImage pixel 4000 1
+  where
+    pixel x _
+        | even x = PixelRGBA8 255 255 255 255
+        | otherwise = PixelRGBA8 0 0 0 0
 
-resourceTool :: Text -> Text -> IO (Either Text Text) -> AppTool
-resourceTool name resource action =
-    withToolResourceClaims
-        (\_ ->
-            pure $ Right
-                [ ToolResourceClaim ToolWrite
-                    (ToolNamedResource resource)
+oversizedFixtureBytes :: ByteString.ByteString
+oversizedFixtureBytes =
+    LazyByteString.toStrict (encodeBitmap sourceImage)
+  where
+    sourceImage =
+        generateImage fixturePixel 2200 1200
+    fixturePixel x y =
+        PixelRGB8
+            (channel 73 151 x y)
+            (channel 193 41 x y)
+            (channel 17 239 x y)
+    channel xFactor yFactor x y =
+        fromIntegral
+            ((x * xFactor + y * yFactor + x * y) `mod` 256)
+
+orientedFixtureBytes :: ByteString.ByteString
+orientedFixtureBytes =
+    addExifOrientation 6 $
+        LazyByteString.toStrict
+            (encodeJpegAtQuality 90 (convertImage sourceImage))
+  where
+    sourceImage =
+        generateImage fixturePixel 2200 800
+    fixturePixel x y =
+        PixelRGB8
+            (fromIntegral (x `mod` 256))
+            (fromIntegral (y `mod` 256))
+            (fromIntegral ((x + y) `mod` 256))
+
+addExifOrientation :: Int -> ByteString.ByteString -> ByteString.ByteString
+addExifOrientation orientation jpeg
+    | ByteString.take 2 jpeg == ByteString.pack [0xff, 0xd8] =
+        ByteString.take 2 jpeg
+            <> ByteString.pack
+                [ 0xff, 0xe1, 0x00, 0x22
+                , 0x45, 0x78, 0x69, 0x66, 0x00, 0x00
+                , 0x4d, 0x4d, 0x00, 0x2a
+                , 0x00, 0x00, 0x00, 0x08
+                , 0x00, 0x01
+                , 0x01, 0x12
+                , 0x00, 0x03
+                , 0x00, 0x00, 0x00, 0x01
+                , 0x00, fromIntegral orientation, 0x00, 0x00
+                , 0x00, 0x00, 0x00, 0x00
+                ]
+            <> ByteString.drop 2 jpeg
+    | otherwise = jpeg
+
+assertNormalizedImage
+    :: ByteString.ByteString
+    -> Text
+    -> ByteString.ByteString
+    -> Expectation
+assertNormalizedImage sourceBytes mime bytes = do
+    ByteString.length bytes `shouldSatisfy` (<= 1500000)
+    bytes `shouldNotBe` sourceBytes
+    mime `shouldSatisfy` (`elem` ["image/png", "image/jpeg"])
+    case decodeImage bytes of
+        Left decodeError ->
+            expectationFailure decodeError
+        Right dynamicImage -> do
+            let image = convertRGB8 dynamicImage
+                width = imageWidth image
+                height = imageHeight image
+            width `shouldSatisfy` (<= 2000)
+            height `shouldSatisfy` (<= 2000)
+            width * height `shouldSatisfy` (<= 2408448)
+
+imageDataUrl :: Text -> ByteString.ByteString -> Text
+imageDataUrl mime bytes =
+    "data:"
+        <> mime
+        <> ";base64,"
+        <> TextEncoding.decodeUtf8 (Base64.encode bytes)
+
+rawJsonFixture :: ByteString.ByteString -> RawJson
+rawJsonFixture bytes =
+    either (error . show) id
+        (Json.decodeEither rawJsonDecoder bytes)
+
+rawJsonImageUrl :: RawJson -> Either String Text
+rawJsonImageUrl raw =
+    case Aeson.decodeStrict' (rawJsonBytes raw) of
+        Just (Aeson.Object object) ->
+            case KeyMap.lookup "image_url" object of
+                Just (Aeson.String imageUrl) -> Right imageUrl
+                _ -> Left "normalized raw JSON has no image_url string"
+        _ -> Left "normalized tool output is not a JSON object"
+
+assertNormalizedDataUrl
+    :: ByteString.ByteString
+    -> Text
+    -> Text
+    -> Expectation
+assertNormalizedDataUrl sourceBytes sourceUrl normalizedUrl = do
+    normalizedUrl `shouldNotBe` sourceUrl
+    let (metadata, payloadWithComma) =
+            Text.breakOn "," normalizedUrl
+    metadata
+        `shouldSatisfy`
+            (`elem`
+                [ "data:image/png;base64"
+                , "data:image/jpeg;base64"
                 ])
-        (jsonAppToolWithExecution
-            name
-            ""
-            []
-            AlwaysReadOnly
-            TurnSequential
-            (noArgsTool name action))
-
-concurrencyProbeMicros :: Int
-concurrencyProbeMicros = 5000000
-
-data EchoArgs = EchoArgs { message :: Text }
-
-echoArgsDecoder :: Json.Decoder EchoArgs
-echoArgsDecoder = objectArgs $ \object -> EchoArgs <$> reqText object "message"
-
-functionResult :: Text -> Text -> ToolCallResult
-functionResult callId output = ToolCallResult
-    { callId
-    , output
-    , callKind = FunctionCallKind
-    }
-
-scriptedBackend
-    :: IORef [(Maybe Text, [TurnInput])]
-    -> [Either ApiError TurnOutput]
-    -> IO Backend
-scriptedBackend submissions answers = do
-    remaining <- newIORef answers
-    pure $ Backend \state prev inputs _onEvent -> do
-        modifyIORef' submissions (++ [(prev, inputs)])
-        atomicModifyIORef' remaining \case
-            [] -> ([], Left (ConnectionError "scripted backend exhausted"))
-            next : rest ->
-                ( rest
-                , fmap
-                    (\output -> BackendResult
-                        { backendOutput = output
-                        , backendState = appendStateMarker state
-                        })
-                    next
-                )
-
-endlessToolsBackend :: IO Backend
-endlessToolsBackend = do
-    counter <- newIORef (0 :: Int)
-    pure $ Backend \state _prev _inputs _onEvent -> do
-        n <- atomicModifyIORef' counter \i -> (i + 1, i + 1)
-        let responseId = "resp-" <> Text.pack (show n)
-        pure $ Right BackendResult
-            { backendOutput = emptyTurnOutput responseId
-                [functionToolCall "c1" "echo" "{\"message\":\"again\"}"]
-                Nothing
-            , backendState = appendStateMarker state
-            }
-
-stateMarker :: ResponseItem
-stateMarker = UnknownResponseItem TaggedObject
-    { tag = "test_state"
-    }
-
-appendStateMarker :: BackendSnapshot -> BackendSnapshot
-appendStateMarker snapshot =
-    advanceBackendSnapshot snapshot
-        (snapshot.backendItems <> [stateMarker])
-        snapshot.backendContinuation
+    case Base64.decode
+        (TextEncoding.encodeUtf8 (Text.drop 1 payloadWithComma)) of
+        Left decodeError ->
+            expectationFailure decodeError
+        Right normalizedBytes ->
+            assertNormalizedImage
+                sourceBytes
+                (Text.drop 5 (Text.dropEnd 7 metadata))
+                normalizedBytes

@@ -16,6 +16,7 @@ import Agent.CLI.TUI.Types
     ( AppState(..)
     , ChoiceOverlay(..)
     , ChoicePresentation(..)
+    , PendingDialog(..)
     , TextInputMode(..)
     , TextOverlay(..)
     )
@@ -24,6 +25,7 @@ import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     , functionToolCall
     )
 import Agent.TUI.Model
@@ -242,6 +244,9 @@ spec = do
                 finish callId output =
                     ToolCallResult
                         { callId
+                        , toolResultMode = BlockingToolCall
+                        , toolResultImages = []
+                        , toolResultOutcome = Nothing
                         , output
                         , callKind = FunctionCallKind
                         }
@@ -284,6 +289,9 @@ spec = do
                     \across many columns if the panel used wrapping text"
                 todoResult = ToolCallResult
                     { callId = "todo-1"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output =
                         "- [completed] 1: Find and clone repos\n\
                         \- [in_progress] 2: "
@@ -335,6 +343,9 @@ spec = do
                         , UiLoop
                             (ToolFinished ToolCallResult
                                 { callId = "call-1"
+                                , toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
                                 , output = "tool output"
                                 , callKind = FunctionCallKind
                                 })
@@ -400,6 +411,9 @@ spec = do
                     { callId = "todo-1"
                     , output = "- [in_progress] 1: Review Model.hs"
                     , callKind = FunctionCallKind
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     }
                 conversation =
                     foldl
@@ -650,7 +664,7 @@ applyAction action harness =
                 { harnessApp =
                     harness.harnessApp
                         { appChoice =
-                            Just ChoiceOverlay
+                            Just $ PendingDialog (const (pure ())) ChoiceOverlay
                                 { choicePresentation = presentation
                                 , choiceTitle = title
                                 , choiceBody = body
@@ -671,7 +685,7 @@ applyAction action harness =
                     harness.harnessApp
                         { appChoice = Nothing
                         , appTextPrompt =
-                            Just TextOverlay
+                            Just $ PendingDialog (const (pure ())) TextOverlay
                                 { textTitle = title
                                 , textBody = body
                                 , textDraft = draft

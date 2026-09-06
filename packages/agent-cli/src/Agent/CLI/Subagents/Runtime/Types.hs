@@ -7,6 +7,9 @@ module Agent.CLI.Subagents.Runtime.Types
     , SubagentStoreRoot
     ) where
 
+import Agent.CLI.Session.Request
+    ( SessionRequestState
+    )
 import Agent.CLI.Compaction (OccupancySnapshot)
 import Agent.CLI.Options (ApprovalPolicy, CliOptions)
 import Agent.Connectivity.NetworkPath (NetworkRecovery)
@@ -66,7 +69,7 @@ data SubagentRuntime = SubagentRuntime
     , subagentRootAccessRequest :: !(IORef (Maybe (OsPath -> IO Bool)))
     , subagentSessionTmp :: !(IORef (Maybe OsPath))
     , subagentMcpTools :: ![AppTool]
-    , subagentParams :: !(IORef ResponseCreateParams)
+    , subagentParams :: !(SessionRequestState)
     , subagentRegistry :: !SubagentRegistry
     , subagentSessions :: !(IORef (Map SubagentId SubagentSession))
     , subagentStoreRoot :: !SubagentStoreRoot

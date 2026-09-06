@@ -6,7 +6,7 @@ import Agent.CLI.Permission.Types (PermissionChoice(..))
 import Agent.Loop (LoopEvent(..), defaultLoopDispatch)
 import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (unsafeToFilePath)
-import Agent.Json (rawJsonBytes)
+import Agent.Json (rawJsonBytes, rawJsonDecoder)
 import Agent.ToolDispatch
     ( ToolCallResult(..)
     , dispatchToolCall
@@ -17,6 +17,8 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, wait)
 import Control.Exception.Safe (bracket)
 import Data.Aeson (Value(..))
+import qualified Data.Aeson.Encoding as Encoding
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (listToMaybe)
 import System.Directory
@@ -32,6 +34,22 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.CLI.GatewayBridge" do
+    it "encodes an envelope without changing opaque payload bytes" do
+        let payloadBytes = "{ \"amount\" : 123456789012345678901234567890, \"items\": [null,true] }"
+        payload <- either (fail . show) pure $
+            Hermes.decodeEither rawJsonDecoder payloadBytes
+        let request = ManagedBridgeRequest
+                { bridgeRequestVersion = 1
+                , bridgeRequestId = "request-1"
+                , bridgeRequestKind = "send_document"
+                , bridgeRequestPayload = payload
+                }
+            bytes = LBS.toStrict $ Encoding.encodingToLazyByteString $
+                managedBridgeRequestEncoding request
+        bytes `shouldSatisfy` BS.isInfixOf payloadBytes
+        Hermes.decodeEither managedBridgeRequestDecoder bytes
+            `shouldBe` Right request
+
     it "round-trips a channel tool request through private files" $
         withBridgeRequest \request -> do
             let call = functionToolCall

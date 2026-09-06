@@ -308,7 +308,7 @@ spec = describe "requestParams" do
                         [webSearchTool, functionTool "lookup", computerTool]
                         "high"
             lite =
-                setRequestModel OpenAIProvider "gpt-5.6-terra" generic
+                setRequestModel OpenAIProvider "gpt-6-astra" generic
             restored =
                 setRequestModel OpenAIProvider "gpt-generic-2" lite
 
@@ -378,6 +378,7 @@ functionTool toolName = FunctionToolValue FunctionTool
     , description = Nothing
     , parameters = Nothing
     , strict = Just True
+    , async = Nothing
     }
 
 documentedFunctionTool :: Text -> Text -> ResponseTool
@@ -387,6 +388,7 @@ documentedFunctionTool toolName documentation =
         , description = Just documentation
         , parameters = Nothing
         , strict = Just True
+        , async = Nothing
         }
 
 customTool :: Text -> ResponseTool
@@ -394,6 +396,7 @@ customTool toolName = CustomToolValue CustomTool
     { name = toolName
     , description = Nothing
     , format = Nothing
+    , async = Nothing
     }
 
 namespaceTool :: Text -> Maybe Text -> [ResponseTool] -> ResponseTool

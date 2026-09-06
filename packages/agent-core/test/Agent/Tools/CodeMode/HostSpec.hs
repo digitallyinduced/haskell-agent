@@ -4,9 +4,9 @@ import Agent.Loop (defaultLoopDispatch)
 import qualified Agent.Json.Decode as Json
 import Agent.ToolArgs (objectArgsExact, reqInt)
 import Agent.ToolDispatch
-    ( ToolCall(..)
-    , ToolCallKind(..)
+    ( ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     , ToolHandler
     , customToolCall
     , dispatchToolCall
@@ -21,6 +21,7 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
+    , appToolSupportsAsync
     , freeformApplyPatchAppToolWithExecution
     , jsonAppToolWithExecution
     )
@@ -30,9 +31,11 @@ import Control.Concurrent
     , readMVar
     , takeMVar
     , threadDelay
+    , tryPutMVar
     )
 import Control.Concurrent.Async (async, cancel, wait, withAsync)
-import Control.Exception.Safe (bracket, finally)
+import Control.Exception.Safe (bracket, finally, uninterruptibleMask_)
+import Control.Monad (void)
 import Data.Aeson (Value(..))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -155,6 +158,61 @@ spec = describe "code-mode Bun host" do
                 terminateCodeCell host "1" `shouldReturn`
                     Left (CodeModeUnknownCell "1")
         closeCodeModeHost host
+
+    it "cancels concurrent nested tools before waiting for either cleanup" do
+        firstStarted <- newEmptyMVar
+        secondStarted <- newEmptyMVar
+        firstCancelling <- newEmptyMVar
+        secondCancelling <- newEmptyMVar
+        releaseCleanup <- newEmptyMVar
+        let blockedHandler started cancelling =
+                finally
+                    ( putMVar started ()
+                        >> threadDelay maxBound
+                        >> pure (Right Null)
+                    )
+                    ( uninterruptibleMask_ do
+                        putMVar cancelling ()
+                        readMVar releaseCleanup
+                    )
+            handler name _
+                | name == "first" =
+                    blockedHandler firstStarted firstCancelling
+                | name == "second" =
+                    blockedHandler secondStarted secondCancelling
+                | otherwise = pure (Left "unexpected tool call")
+            config = defaultCodeModeConfig
+                "data/code-mode/worker.mjs"
+                handler
+        bracket (newCodeModeHost config) closeCodeModeHost \host ->
+            (do
+                started <- execCodeCell
+                    host
+                    "await Promise.all([tools.first({}), tools.second({})]);"
+                    ["first", "second"]
+                    1
+                started `shouldBe`
+                    Right CodeModeRunning
+                        { cellId = "1"
+                        , cellOutput = emptyContent
+                        }
+                timeout
+                    5000000
+                    (readMVar firstStarted >> readMVar secondStarted)
+                    `shouldReturn` Just ()
+                withAsync (terminateCodeCell host "1") \terminating -> do
+                    cancelled <- timeout
+                        500000
+                        (readMVar firstCancelling >> readMVar secondCancelling)
+                    _ <- tryPutMVar releaseCleanup ()
+                    result <- wait terminating
+                    result `shouldBe`
+                        Right CodeModeTerminated
+                            { cellId = "1"
+                            , cellValue = emptyContent
+                            }
+                    cancelled `shouldBe` Just ())
+                `finally` void (tryPutMVar releaseCleanup ())
 
     it "keeps JavaScript globals isolated when reusing a pooled worker" do
         let config = defaultCodeModeConfig
@@ -694,7 +752,7 @@ spec = describe "code-mode Bun host" do
                 ParallelSafe
                 (typedTool "lookup" emptyObjectDecoder \() -> pure (Right "value"))
             invoke _ = pure
-                (Right (ToolCallResult "nested" "value" FunctionCallKind))
+                (Right (ToolCallResult "nested" "value" FunctionCallKind BlockingToolCall [] Nothing))
         codeOnly <- newCodeModeToolSet
             CodeOnlyToolMode ImageDetailVisible worker invoke
             [plainNested lookupTool]
@@ -720,9 +778,23 @@ spec = describe "code-mode Bun host" do
         mixedDescription `shouldSatisfy`
             (not . Text.isInfixOf "### `lookup`")
 
+    it "marks both code-mode host tools async-capable" do
+        worker <- codeModeWorkerPath
+        let invoke _ = pure
+                (Right (ToolCallResult "nested" "value" FunctionCallKind BlockingToolCall [] Nothing))
+        created <- newCodeModeToolSet
+            CodeToolMode ImageDetailVisible worker invoke []
+        toolSet <- either
+            (\err -> expectationFailure (show err) >> fail "unreachable")
+            pure
+            created
+        map appToolSupportsAsync toolSet.codeModeTools
+            `shouldBe` [True, True]
+        toolSet.closeCodeModeToolSet
+
     it "fails closed before advertising a missing worker" do
         let invoke _ = pure
-                (Right (ToolCallResult "nested" "value" FunctionCallKind))
+                (Right (ToolCallResult "nested" "value" FunctionCallKind BlockingToolCall [] Nothing))
         unavailable <- newCodeModeToolSet
             CodeOnlyToolMode
             ImageDetailVisible

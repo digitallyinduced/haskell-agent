@@ -42,6 +42,7 @@ module Agent.CLI.Render
     , renderAssistantTextForHandle
     , renderEvent
     , renderPrintedText
+    , renderToolOutputValue
     , resetRenderPrintedText
     , setRenderActivity
     , streamMarkdown
@@ -120,6 +121,12 @@ import Agent.Loop
     , generationTokensPerSecond
     , liveTokensPerSecond
     )
+import Agent.Json (RawJson, rawJsonBytes)
+import Agent.Json.Decode qualified as Hermes
+import Agent.Responses.Types
+    ( ResponseContentPart(..)
+    )
+import Agent.Responses.Types.Content (responseContentPartDecoder)
 import Agent.TUI.Presentation
     ( SearchReplaceAction(..)
     , SearchReplaceDiff(..)
@@ -147,15 +154,20 @@ import Agent.TextBuffer
     )
 import Agent.Telemetry (telemetrySummary)
 import Control.Applicative ((<|>))
-import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (Async, asyncWithUnmask, cancel)
 import Control.Concurrent.MVar (MVar, withMVar)
-import Control.Exception.Safe (tryIO)
+import Control.Exception.Safe (mask_, tryIO)
 import Control.Monad (forM_, unless, void, when)
+import qualified Data.Aeson as Aeson
+import Data.Aeson.Key (Key)
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import Data.Word (Word64)
@@ -183,15 +195,152 @@ summarizeToolCallRelative workspace call =
         (Presentation.summarizeToolCallRelative workspace call)
         (summarizeComputerToolCall call)
 
+-- | Render a persisted tool result without exposing encoded media payloads.
+--
+-- Rich tool results are stored as Responses content-part arrays so the model
+-- can consume their media. The live UI only sees the short textual result; a
+-- restored transcript must preserve that behavior instead of dumping the
+-- array's data URLs. Other structured JSON output remains unchanged.
+renderToolOutputValue :: RawJson -> Text
+renderToolOutputValue value =
+    case Hermes.decodeEither
+            (Hermes.nullable Hermes.text)
+            bytes of
+        Right (Just text) -> text
+        Right Nothing -> ""
+        Left _ ->
+            case Hermes.decodeEither
+                    (Hermes.list responseContentPartDecoder)
+                    bytes of
+                Right parts
+                    | any isOpaqueContentPart parts ->
+                        renderRichToolOutput parts
+                _ ->
+                    fromMaybe
+                        (TextEncoding.decodeUtf8 bytes)
+                        (renderOpaqueJsonArray value)
+  where
+    bytes = rawJsonBytes value
+
+isOpaqueContentPart :: ResponseContentPart -> Bool
+isOpaqueContentPart = \case
+    InputImagePart{} -> True
+    InputFilePart{} -> True
+    InputAudioPart{} -> True
+    EncryptedContentPart{} -> True
+    _ -> False
+
+-- Keep media payloads hidden even if a future or malformed content part no
+-- longer decodes through 'responseContentPartDecoder'. This deliberately only
+-- handles top-level arrays, which is how rich tool results are persisted, so
+-- structured JSON outside that envelope still renders verbatim.
+renderOpaqueJsonArray :: RawJson -> Maybe Text
+renderOpaqueJsonArray value =
+    case Aeson.decodeStrict' (rawJsonBytes value) of
+        Just (Aeson.Array parts)
+            | any jsonContainsOpaqueContent parts ->
+                Just $
+                    Text.intercalate "\n" $
+                        case filter (not . Text.null . Text.strip)
+                                (foldMap jsonContentText parts) of
+                            [] -> ["[media]"]
+                            textParts -> textParts
+        _ -> Nothing
+
+jsonContainsOpaqueContent :: Aeson.Value -> Bool
+jsonContainsOpaqueContent = \case
+    Aeson.Object object ->
+        hasOpaqueContentType object
+            || any (`KeyMap.member` object) opaqueContentKeys
+            || any jsonContainsOpaqueContent object
+    Aeson.Array values -> any jsonContainsOpaqueContent values
+    Aeson.String text -> looksLikeEncodedDataUrl text
+    _ -> False
+
+hasOpaqueContentType :: Aeson.Object -> Bool
+hasOpaqueContentType object =
+    case KeyMap.lookup "type" object of
+        Just (Aeson.String contentType) ->
+            contentType `elem`
+                [ "input_image"
+                , "input_file"
+                , "input_audio"
+                , "encrypted_content"
+                ]
+        _ -> False
+
+opaqueContentKeys :: [Key]
+opaqueContentKeys =
+    [ "image_url"
+    , "file_data"
+    , "file_url"
+    , "input_audio"
+    , "encrypted_content"
+    ]
+
+jsonContentText :: Aeson.Value -> [Text]
+jsonContentText = \case
+    Aeson.Object object ->
+        [ text
+        | key <- ["text", "refusal"]
+        , Just (Aeson.String text) <- [KeyMap.lookup key object]
+        , not (looksLikeEncodedDataUrl text)
+        ]
+    _ -> []
+
+looksLikeEncodedDataUrl :: Text -> Bool
+looksLikeEncodedDataUrl text =
+    let header = Text.toLower (Text.take 512 (Text.stripStart text))
+    in "data:" `Text.isPrefixOf` header
+        && ";base64," `Text.isInfixOf` header
+
+renderRichToolOutput :: [ResponseContentPart] -> Text
+renderRichToolOutput parts =
+    Text.intercalate "\n" $
+        case filter (not . Text.null . Text.strip)
+                (concatMap contentPartText parts) of
+            [] -> concatMap contentPartPlaceholder parts
+            textParts -> textParts
+
+contentPartText :: ResponseContentPart -> [Text]
+contentPartText part =
+    filter (not . looksLikeEncodedDataUrl) $
+        case part of
+            InputTextPart text _ -> [text]
+            OutputTextPart text _ _ -> [text]
+            RefusalPart refusal -> [refusal]
+            ReasoningTextPart text -> [text]
+            SummaryTextPart text -> [text]
+            PlainTextPart text -> [text]
+            _ -> []
+
+contentPartPlaceholder :: ResponseContentPart -> [Text]
+contentPartPlaceholder = \case
+    InputImagePart{} -> ["[image]"]
+    InputFilePart _ _ _ _ filename _ ->
+        [ "[file"
+            <> maybe
+                ""
+                (\name ->
+                    if looksLikeEncodedDataUrl name
+                        then ""
+                        else " " <> name)
+                filename
+            <> "]"
+        ]
+    InputAudioPart{} -> ["[audio]"]
+    EncryptedContentPart{} -> ["[encrypted content]"]
+    _ -> []
+
 data RenderConfig = RenderConfig
     { renderShowThinking :: !Bool
-    , renderThinkingSpinner :: !(IORef (Maybe ThreadId))
+    , renderThinkingSpinner :: !(IORef (Maybe (Async ())))
     , renderState :: !(IORef RenderState)
     , renderColor :: !Bool
     , renderLock :: !(MVar ())
     , renderStdout :: !Handle
     , renderStderr :: !Handle
-    , renderModelRef :: !(IORef Text)
+    , renderModel :: !(IO Text)
     , renderNativeProgress :: !Bool -- ^ Ghostty / WT OSC 9;4; off in tests
     , renderMotionMode :: !MotionMode
     , renderWorkspace :: !Text
@@ -453,95 +602,17 @@ renderEventUnlocked config = \case
             unless (Text.null summary) $
                 putTextLn config.renderStderr
                     (roleMuted config.renderColor summary)
-    ToolStarted call -> do
-        commitThinkingUnlocked config
-        alreadyVisible <- modifyRenderState config \state ->
-            ( state
-                { stateToolCalls = Map.insert call.callId call state.stateToolCalls
-                , stateActivity =
-                    summarizeToolCallRelative config.renderWorkspace call
-                }
-            , Map.member call.callId state.stateToolCalls
-            )
-        unless (alreadyVisible || isTodoTool call.name) do
-            putTextLn config.renderStderr
-                (formatToolStartedRelative
-                    config.renderColor
-                    config.renderWorkspace
-                    call)
-            let extra =
-                    formatToolBodyRelative
-                        config.renderColor
-                        config.renderWorkspace
-                        call
-            unless (Text.null extra) do
-                putTextLn config.renderStderr extra
-        when config.renderShowThinking do
-            visible <- (.stateThinkingVisible) <$> readRenderState config
-            if visible
-                then paintThinkingFrame config
-                else startThinkingSpinnerUnlocked config
+    ToolStarted call ->
+        renderToolStartedUnlocked config call
     -- The append-only renderer cannot safely repaint accumulated snapshots
     -- without duplicating output in terminal scrollback. The retained TUI
     -- handles these updates; minimal mode prints the final ToolFinished result.
     ToolOutputUpdated _callId _output ->
         pure ()
-    ToolFinished result -> do
-        calls <- modifyRenderState config \state ->
-            ( state{stateToolCalls = Map.delete result.callId state.stateToolCalls}
-            , state.stateToolCalls
-            )
-        let maybeCall = Map.lookup result.callId calls
-            formatted = maybe result.output
-                (\call ->
-                    formatToolOutputRelative
-                        config.renderWorkspace
-                        call
-                        result.output)
-                maybeCall
-            painted = case maybeCall of
-                Just call
-                    | isTodoTool call.name -> Nothing
-                _ ->
-                    Just
-                        (roleToolOutput
-                            config.renderColor
-                            (truncateToolOutput formatted))
-        case painted of
-            Nothing -> pure ()
-            Just line -> putTextLn config.renderStderr line
-    ToolUpdated call -> do
-        previous <- modifyRenderState config \state ->
-            ( state
-                { stateToolCalls =
-                    Map.insert call.callId call state.stateToolCalls
-                , stateActivity =
-                    summarizeToolCallRelative config.renderWorkspace call
-                }
-            , Map.lookup call.callId state.stateToolCalls
-            )
-        -- An early streamed start may only show a placeholder. Append the
-        -- canonical rendering once when the done item supplies arguments;
-        -- the later execution-time ToolStarted is deduplicated by call id.
-        when
-            ( maybe False
-                (Text.null . Text.strip . (.arguments))
-                previous
-                && not (Text.null (Text.strip call.arguments))
-                && not (isTodoTool call.name)
-            ) do
-                putTextLn config.renderStderr
-                    (formatToolStartedRelative
-                        config.renderColor
-                        config.renderWorkspace
-                        call)
-                let extra =
-                        formatToolBodyRelative
-                            config.renderColor
-                            config.renderWorkspace
-                            call
-                unless (Text.null extra) do
-                    putTextLn config.renderStderr extra
+    ToolFinished result ->
+        renderToolFinishedUnlocked config result
+    ToolUpdated call ->
+        renderToolUpdatedUnlocked config call
     -- Partial arguments can be repainted by the retained fullscreen UI, but
     -- cannot be updated safely in append-only terminal scrollback.
     ToolArgumentsUpdated _ ->
@@ -561,6 +632,96 @@ renderEventUnlocked config = \case
         pure ()
     NativeAgentFinished{} ->
         pure ()
+
+renderToolStartedUnlocked :: RenderConfig -> ToolCall -> IO ()
+renderToolStartedUnlocked config call = do
+    commitThinkingUnlocked config
+    alreadyVisible <- modifyRenderState config \state ->
+        ( state
+            { stateToolCalls = Map.insert call.callId call state.stateToolCalls
+            , stateActivity =
+                summarizeToolCallRelative config.renderWorkspace call
+            }
+        , Map.member call.callId state.stateToolCalls
+        )
+    unless (alreadyVisible || isTodoTool call.name) do
+        putTextLn config.renderStderr
+            (formatToolStartedRelative
+                config.renderColor
+                config.renderWorkspace
+                call)
+        let extra =
+                formatToolBodyRelative
+                    config.renderColor
+                    config.renderWorkspace
+                    call
+        unless (Text.null extra) do
+            putTextLn config.renderStderr extra
+    when config.renderShowThinking do
+        visible <- (.stateThinkingVisible) <$> readRenderState config
+        if visible
+            then paintThinkingFrame config
+            else startThinkingSpinnerUnlocked config
+
+renderToolFinishedUnlocked :: RenderConfig -> ToolCallResult -> IO ()
+renderToolFinishedUnlocked config result = do
+    calls <- modifyRenderState config \state ->
+        ( state{stateToolCalls = Map.delete result.callId state.stateToolCalls}
+        , state.stateToolCalls
+        )
+    let maybeCall = Map.lookup result.callId calls
+        formatted = maybe result.output
+            (\call ->
+                formatToolOutputRelative
+                    config.renderWorkspace
+                    call
+                    result.output)
+            maybeCall
+        painted = case maybeCall of
+            Just call
+                | isTodoTool call.name -> Nothing
+            _ ->
+                Just
+                    (roleToolOutput
+                        config.renderColor
+                        (truncateToolOutput formatted))
+    case painted of
+        Nothing -> pure ()
+        Just line -> putTextLn config.renderStderr line
+
+renderToolUpdatedUnlocked :: RenderConfig -> ToolCall -> IO ()
+renderToolUpdatedUnlocked config call = do
+    previous <- modifyRenderState config \state ->
+        ( state
+            { stateToolCalls =
+                Map.insert call.callId call state.stateToolCalls
+            , stateActivity =
+                summarizeToolCallRelative config.renderWorkspace call
+            }
+        , Map.lookup call.callId state.stateToolCalls
+        )
+    -- An early streamed start may only show a placeholder. Append the
+    -- canonical rendering once when the done item supplies arguments;
+    -- the later execution-time ToolStarted is deduplicated by call id.
+    when
+        ( maybe False
+            (Text.null . Text.strip . (.arguments))
+            previous
+            && not (Text.null (Text.strip call.arguments))
+            && not (isTodoTool call.name)
+        ) do
+            putTextLn config.renderStderr
+                (formatToolStartedRelative
+                    config.renderColor
+                    config.renderWorkspace
+                    call)
+            let extra =
+                    formatToolBodyRelative
+                        config.renderColor
+                        config.renderWorkspace
+                        call
+            unless (Text.null extra) do
+                putTextLn config.renderStderr extra
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
 -- The terminal theme owns the default assistant background.
@@ -699,17 +860,19 @@ startThinkingSpinnerUnlocked config
                     (state{stateThinkingVisible = True}, ())
                 paintThinkingFrame config
                 started <- getMonotonicTimeNSec
-                tid <- forkIO (spinnerLoop config started 0)
-                writeIORef config.renderThinkingSpinner (Just tid)
+                mask_ do
+                    worker <- asyncWithUnmask \unmask ->
+                        unmask (spinnerLoop config started 0)
+                    writeIORef config.renderThinkingSpinner (Just worker)
 
 -- | Stop the spinner and erase its in-place status line. Does not commit a
 -- reasoning block; callers that need that use 'commitThinkingUnlocked'.
 stopThinkingSpinnerUnlocked :: RenderConfig -> IO ()
 stopThinkingSpinnerUnlocked config = do
-    mtid <- atomicModifyIORef' config.renderThinkingSpinner \mt -> (Nothing, mt)
-    case mtid of
-        Just tid -> killThread tid
-        Nothing -> pure ()
+    mworker <-
+        atomicModifyIORef' config.renderThinkingSpinner \worker ->
+            (Nothing, worker)
+    forM_ mworker cancel
     visible <- (.stateThinkingVisible) <$> readRenderState config
     when visible do
         void $ tryIO do

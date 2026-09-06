@@ -25,6 +25,7 @@ import Agent.Loop (LoopEvent(..))
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     , functionToolCall
     )
 import qualified Data.Aeson as Aeson
@@ -194,6 +195,9 @@ spec = do
                         , UiLoop
                             (ToolFinished ToolCallResult
                                 { callId = "todo-1"
+                                , toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
                                 , output = "- [in_progress] 1: Review Model.hs"
                                 , callKind = FunctionCallKind
                                 })
@@ -522,30 +526,35 @@ functionCallItem callId name arguments status =
         , arguments
         , encryptedFunctionArgs = Nothing
         , status
+        , async = Nothing
         }
 
 functionOutputItem :: Text -> Maybe ItemStatus -> ResponseItem
 functionOutputItem callId status =
     FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = Nothing
+        , itemId = Nothing
         , callId
         , name = Nothing
         , namespace = Nothing
         , provider = Nothing
         , output = rawJsonFromEncoding (Aeson.toEncoding ("ok" :: Text))
         , status
+        , async = Nothing
         }
 
 functionOutputText :: Text -> Text -> ResponseItem
 functionOutputText callId output =
     FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = Nothing
+        , itemId = Nothing
         , callId
         , name = Nothing
         , namespace = Nothing
         , provider = Nothing
         , output = rawJsonFromEncoding (Aeson.toEncoding output)
         , status = Just ItemCompleted
+        , async = Nothing
         }
 
 agentMessageItem :: Text -> ResponseItem

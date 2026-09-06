@@ -9,6 +9,9 @@ import Agent.CLI.Render (summarizeToolCall)
 import Agent.Loop (LoopEvent(..), TokenUsage(..), TurnOutput(..))
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallMode(..)
+    , toolCallMode
+    , toolCallResultMode
     , ToolCallResult(..)
     , isComputerToolCallKind
     )
@@ -49,7 +52,11 @@ encodeNativeLoopEvent turnId event =
                     "Screenshot captured"
                 | otherwise = result.output
             (output, truncated) = boundedEventText safeOutput
-            flags = if truncated then 2 else 0
+            flags =
+                (if truncated then 2 else 0)
+                    + (if toolCallResultMode result == AsyncToolCall
+                        then 4
+                        else 0)
             finishedFields = [Just result.callId, Just output]
         TurnFinished output ->
             encodeNativeUsageEvent
@@ -75,6 +82,7 @@ encodeNativeLoopEvent turnId event =
         flags =
             (if call.argumentsEncrypted then 1 else 0)
                 + (if truncated then 2 else 0)
+                + (if toolCallMode call == AsyncToolCall then 4 else 0)
 
 encodeNativeUsageEvent
     :: Bool

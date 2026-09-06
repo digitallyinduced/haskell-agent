@@ -65,6 +65,7 @@ import Agent.Tools.Types
     , ToolSchema(..)
     , freeformGrammarAppToolWithExecution
     , jsonAppToolWithExecution
+    , withAsyncToolCalls
     )
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (finally)
@@ -352,6 +353,7 @@ defaultWaitYieldTimeMs = 10000
 
 execTool :: CodeModeHost -> [CodeModeToolMetadata] -> Text -> AppTool
 execTool host nestedTools description =
+    withAsyncToolCalls $
     freeformGrammarAppToolWithExecution
         "exec"
         description
@@ -465,6 +467,7 @@ waitArgsDecoder = objectArgsExact
 
 waitTool :: CodeModeHost -> AppTool
 waitTool host =
+    withAsyncToolCalls $
     jsonAppToolWithExecution
         "wait"
         waitDescription

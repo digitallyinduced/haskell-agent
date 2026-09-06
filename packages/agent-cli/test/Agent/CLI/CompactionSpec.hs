@@ -1,5 +1,8 @@
 module Agent.CLI.CompactionSpec (spec) where
 
+import Agent.CLI.CompactionSpec.Fixtures
+import qualified Agent.CLI.CompactionSpec.ManualOpenAI as ManualOpenAI
+import qualified Agent.CLI.CompactionSpec.TaskPlan as TaskPlan
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
     , CompactionInstall(..)
@@ -11,11 +14,9 @@ import Agent.CLI.Compaction
     , autoCompactOpenAiBackendWithSenderHookAndDecorator
     , autoCompactOpenAiBackendWithThreshold
     , codexAutoCompactTokenLimit
-    , compactOpenAIWith
     , claudeAutoCompactTokenLimit
     , claudeCompactionInputLimit
     , decorateCompactOutcomeWithTaskPlan
-    , decorateCompactOutcomeWithTaskPlanWithin
     , estimatedOccupancy
     , installCompactOutcome
     , reportedOccupancy
@@ -23,6 +24,8 @@ import Agent.CLI.Compaction
     , runProviderCompactWith
     , runBackendCompactWithContextWindow
     , runBackendCompactWithLimits
+    , runClaudeBackendCompactWithLimits
+    , runClaudeBackendCompactHistoryWithLimits
     , runResponsesCompactWith
     , runResponsesCompactWithContextWindow
     , runXaiBackendCompactHistoryWithContextWindow
@@ -30,7 +33,6 @@ import Agent.CLI.Compaction
     )
 import Agent.Connectivity (withConnectionRecoveryUsing)
 import Agent.Error (ApiError(..), ErrorType(..))
-import Agent.Json.Decode qualified as Hermes
 import Agent.Loop
 import Agent.OpenAI.Compaction
     ( assistantSummaryItem
@@ -45,22 +47,20 @@ import Agent.OpenAI.ModelMetadata (codexEffectiveContextWindowFor)
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
 import Agent.XAI.LoopBackend (xaiCompactionCheckpointOriginItem)
 import Agent.Tools.TaskPlan
-    ( CurrentTaskPlan(..)
-    , TaskPlan(..)
+    ( TaskPlan(..)
     , TaskPlanItem(..)
     , TaskPlanStatus(..)
-    , isTaskPlanContextText
     , newTaskPlanEnv
     , replaceTaskPlan
     , taskPlanContextText
     )
 import qualified Data.Aeson as Aeson
-import Data.Aeson ((.=))
 import Agent.Provider
     ( BillingMode(..)
     , Provider(..)
@@ -75,10 +75,8 @@ import Control.Exception
     , try
     )
 import Data.IORef
-import Control.Monad.Trans.Except (runExceptT)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LBS
-import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Test.Hspec
@@ -87,7 +85,7 @@ spec :: Spec
 spec = do
     describe "runProviderCompact" do
         it "reports a provider-specific error when credentials are unavailable" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef []
             runProviderCompact OpenAIProvider Nothing params transcript Nothing
                 `shouldReturn` Left "openai compact requires a token provider"
@@ -99,7 +97,7 @@ spec = do
                 `shouldReturn` Left "gemini compact requires a token provider"
 
         it "short-circuits an empty transcript before using credentials" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef []
             let provider = tokenProvider SubscriptionBilled \_ ->
                     error "empty compaction unexpectedly requested credentials"
@@ -107,7 +105,7 @@ spec = do
                 `shouldReturn` Left "nothing to compact"
 
         it "uses an injected OpenAI sender and records its response usage" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             let history = [userTextItem "old context"]
             transcript <- newIORef history
             requests <- newIORef []
@@ -132,7 +130,7 @@ spec = do
             readIORef recordedUsage `shouldReturn` [compactionUsage]
 
         it "records completed-response usage with asynchronous exceptions masked" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [userTextItem "old context"]
             senderMasking <- newIORef MaskedUninterruptible
             recorderMasking <- newIORef Unmasked
@@ -152,7 +150,7 @@ spec = do
             readIORef recorderMasking `shouldReturn` MaskedInterruptible
 
         it "records local-summary response usage when summary text is missing" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [userTextItem "old context"]
             recordedUsage <- newIORef []
             result <-
@@ -172,7 +170,7 @@ spec = do
             readIORef recordedUsage `shouldReturn` [compactionUsage]
 
         it "rejects incomplete local summaries" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [userTextItem "old context"]
             result <-
                 runProviderCompactWith
@@ -195,13 +193,15 @@ spec = do
         it "clears tool and continuation controls for local summaries" do
             let paramsValue =
                     (defaultResponseCreateParams :: ResponseCreateParams)
-                        { tools =
+                        { model = Just "gpt-5.6-sol"
+                        , tools =
                             Just
                                 [ FunctionToolValue FunctionTool
                                     { name = "must_call"
                                     , description = Nothing
                                     , parameters = Nothing
                                     , strict = Just True
+                                    , async = Nothing
                                     }
                                 ]
                         , toolChoice =
@@ -210,7 +210,7 @@ spec = do
                         , previousResponseId = Just "resp-old"
                         , conversation = Just (ConversationId "conv-old")
                         }
-            params <- newIORef paramsValue
+            params <- testRequestState paramsValue
             transcript <- newIORef [userTextItem "old context"]
             requests <- newIORef []
             result <-
@@ -264,7 +264,7 @@ spec = do
                     , knownContextCheckpoint
                     , remoteTrigger
                     ]
-            params <- newIORef paramsValue
+            params <- testRequestState paramsValue
             transcript <- newIORef history
             requests <- newIORef []
             result <-
@@ -324,7 +324,7 @@ spec = do
                     , trigger
                     ]
                 prompt = userTextItem (summarizationPrompt (Just "focus"))
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef history
             requests <- newIORef []
             result <-
@@ -354,7 +354,7 @@ spec = do
                         }
                 retained = userTextItem "portable context"
                 prompt = userTextItem (summarizationPrompt Nothing)
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [foreignCheckpoint, retained]
             requests <- newIORef []
             result <-
@@ -375,7 +375,7 @@ spec = do
             let remoteCheckpoint =
                     KnownResponseItem ItemCompaction (TaggedObject "compaction")
                 history = [userTextItem "old context", remoteCheckpoint]
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef history
             requests <- newIORef []
             result <-
@@ -399,7 +399,7 @@ spec = do
         it "rejects portable summaries with only opaque checkpoints" do
             let remoteCheckpoint =
                     KnownResponseItem ItemCompaction (TaggedObject "compaction")
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [remoteCheckpoint]
             requests <- newIORef (0 :: Int)
             result <-
@@ -423,7 +423,7 @@ spec = do
                     (defaultResponseCreateParams :: ResponseCreateParams)
                         { model = Just "custom-small-model"
                         }
-            params <- newIORef paramsValue
+            params <- testRequestState paramsValue
             transcript <- newIORef [userTextItem "old context"]
             requests <- newIORef (0 :: Int)
             result <-
@@ -449,7 +449,7 @@ spec = do
                     (defaultResponseCreateParams :: ResponseCreateParams)
                         { model = Just "large-portable-model"
                         }
-            params <- newIORef paramsValue
+            params <- testRequestState paramsValue
             transcript <- newIORef [userTextItem huge]
             requests <- newIORef []
             result <-
@@ -502,7 +502,7 @@ spec = do
                     (defaultResponseCreateParams :: ResponseCreateParams)
                         { model = Just "small-portable-model"
                         }
-            params <- newIORef paramsValue
+            params <- testRequestState paramsValue
             transcript <- newIORef
                 [ userTextItem (Text.replicate 100_000 "old ")
                 , userTextItem "recent request"
@@ -535,7 +535,7 @@ spec = do
                             <> show (length seen))
 
         it "bounds oversized local-summary requests before sending them" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             let huge = Text.replicate 1_100_000 "x"
             transcript <- newIORef
                 [ userTextItem huge
@@ -592,7 +592,7 @@ spec = do
                             ("message-" <> Text.pack (show index)))
                     | index <- [1 :: Int .. 6]
                     ]
-            params <- newIORef paramsValue
+            params <- testRequestState paramsValue
             transcript <- newIORef history
             result <-
                 runProviderCompactWith
@@ -612,7 +612,7 @@ spec = do
                         `shouldSatisfy` (<= contextWindow)
 
         it "rejects blank local summaries" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [userTextItem "old context"]
             result <-
                 runProviderCompactWith
@@ -630,7 +630,7 @@ spec = do
                 Right _ -> False
 
         it "does not record usage for a transport failure" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [userTextItem "old context"]
             recordedUsage <- newIORef []
             result <-
@@ -648,7 +648,7 @@ spec = do
             readIORef recordedUsage `shouldReturn` []
 
         it "records completed-response usage even when the checkpoint is invalid" do
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef [userTextItem "old context"]
             recordedUsage <- newIORef []
             result <-
@@ -666,6 +666,151 @@ spec = do
                 Right _ -> False
             readIORef recordedUsage `shouldReturn` [compactionUsage]
 
+    describe "Claude isolated compaction recovery" do
+        let history =
+                [ userTextItem
+                    (Text.pack (show index) <> Text.replicate 2_000 "x")
+                | index <- [1 .. 32 :: Int]
+                ]
+            contextError =
+                ProviderError ContextWindowExceeded "Prompt is too long" Nothing
+            summaryOutput = TurnOutput
+                { responseId = "claude-summary-session"
+                , toolCalls = []
+                , assistantText = Just "portable summary"
+                , tokenUsage = compactionUsage
+                , contextUsage = Nothing
+                , providerTelemetry = Nothing
+                , completion = TurnCompleted
+                }
+            runSummary makeBackend record =
+                runClaudeBackendCompactHistoryWithLimits
+                    200_000 167_000 makeBackend record
+                    defaultResponseCreateParams history Nothing
+
+        it "retries a context rejection with a smaller fresh request and records usage once" do
+            requests <- newIORef []
+            recordedUsage <- newIORef []
+            transcript <- newIORef history
+            params <- testRequestState defaultResponseCreateParams
+            let makeBackend summaryParams =
+                    Backend \snapshot previous inputs _onEvent -> do
+                        readIORef transcript `shouldReturn` history
+                        priorRequests <- readIORef requests
+                        modifyIORef' requests
+                            (<> [(summaryParams, snapshot, previous, inputs)])
+                        pure $
+                            if null priorRequests
+                                then Left contextError
+                                else successful snapshot summaryOutput
+            result <- runClaudeBackendCompactWithLimits
+                200_000 167_000 makeBackend
+                (\usage -> modifyIORef' recordedUsage (<> [usage]))
+                params transcript Nothing
+            result `shouldSatisfy` either (const False)
+                ((== "portable summary") . (.compactSummary))
+            readIORef transcript `shouldReturn` history
+            readIORef recordedUsage `shouldReturn` [compactionUsage]
+            readIORef requests >>= \case
+                [(firstParams, first, _, _), (secondParams, second, previous, inputs)] -> do
+                    let size requestParams snapshot =
+                            estimateRequestTokensWithItems requestParams
+                                (snapshot.backendItems
+                                    <> [userTextItem (summarizationPrompt Nothing)])
+                    size secondParams second `shouldSatisfy`
+                        (< size firstParams first)
+                    second.backendItems `shouldSatisfy` (not . null)
+                    second.backendContinuation `shouldBe` Nothing
+                    previous `shouldBe` Nothing
+                    secondParams.tools `shouldBe` Nothing
+                    inputs `shouldBe` [UserMessage (summarizationPrompt Nothing)]
+                _ -> expectationFailure "expected exactly two isolated requests"
+
+        it "bounds retries to four strictly shrinking submissions" do
+            requests <- newIORef []
+            let makeBackend summaryParams =
+                    Backend \snapshot _previous _inputs _onEvent -> do
+                        modifyIORef' requests
+                            (<> [estimateRequestTokensWithItems summaryParams
+                                (snapshot.backendItems
+                                    <> [userTextItem (summarizationPrompt Nothing)])])
+                        pure (Left contextError)
+            runSummary makeBackend (\_ -> expectationFailure "unexpected usage")
+                `shouldReturn` Left contextError
+            sizes <- readIORef requests
+            length sizes `shouldBe` 4
+            and (zipWith (>) sizes (drop 1 sizes)) `shouldBe` True
+
+        it "does not submit an empty-history retry when nothing smaller fits" do
+            submissions <- newIORef (0 :: Int)
+            let makeBackend _ =
+                    Backend \_ _ _ _ -> do
+                        modifyIORef' submissions (+ 1)
+                        pure (Left contextError)
+            runClaudeBackendCompactHistoryWithLimits
+                200_000 167_000 makeBackend (const (pure ()))
+                defaultResponseCreateParams [userTextItem "short history"] Nothing
+                `shouldReturn` Left contextError
+            readIORef submissions `shouldReturn` 1
+
+        it "does not retry non-context errors" do
+            let errors =
+                    [ ProviderError AuthenticationError "expired" Nothing
+                    , ProviderError RateLimitError "quota" Nothing
+                    , ProviderError ApiErrorType "internal" Nothing
+                    , ConnectionError "disconnected"
+                    ]
+            mapM_ (\err -> do
+                submissions <- newIORef (0 :: Int)
+                let makeBackend _ = Backend \_ _ _ _ -> do
+                        modifyIORef' submissions (+ 1)
+                        pure (Left err)
+                runSummary makeBackend (const (pure ()))
+                    `shouldReturn` Left err
+                readIORef submissions `shouldReturn` 1) errors
+
+        it "propagates cancellation during recovery without retrying or recording usage" do
+            submissions <- newIORef (0 :: Int)
+            let makeBackend _ = Backend \_ _ _ _ -> do
+                    attempt <- atomicModifyIORef' submissions \count ->
+                        (count + 1, count)
+                    if attempt == 0
+                        then pure (Left contextError)
+                        else throwIO UserInterrupt
+            result <- try @AsyncException $
+                runSummary makeBackend
+                    (\_ -> expectationFailure "unexpected usage")
+            result `shouldBe` Left UserInterrupt
+            readIORef submissions `shouldReturn` 2
+
+        it "records incomplete summary usage without retrying it" do
+            submissions <- newIORef (0 :: Int)
+            recordedUsage <- newIORef []
+            let makeBackend _ = Backend \snapshot _ _ _ -> do
+                    modifyIORef' submissions (+ 1)
+                    pure $ successful snapshot
+                        summaryOutput
+                            { completion = TurnIncomplete "max_tokens" Nothing }
+            result <- runSummary makeBackend
+                (\usage -> modifyIORef' recordedUsage (<> [usage]))
+            result `shouldSatisfy` either (const True) (const False)
+            readIORef submissions `shouldReturn` 1
+            readIORef recordedUsage `shouldReturn` [compactionUsage]
+
+        it "keeps generic backend compaction single-attempt" do
+            submissions <- newIORef (0 :: Int)
+            params <- testRequestState defaultResponseCreateParams
+            transcript <- newIORef history
+            let makeBackend _ = Backend \_ _ _ _ -> do
+                    modifyIORef' submissions (+ 1)
+                    pure (Left contextError)
+            result <- runBackendCompactWithLimits
+                200_000 167_000 makeBackend (const (pure ()))
+                params transcript Nothing
+            result `shouldSatisfy` either (const True) (const False)
+            readIORef submissions `shouldReturn` 1
+            readIORef transcript `shouldReturn` history
+
     describe "runBackendCompactWithContextWindow" do
         it "matches Claude Code headroom for a 200k context window" do
             claudeAutoCompactTokenLimit 200_000 `shouldBe` 144_000
@@ -682,11 +827,12 @@ spec = do
                                     , description = Nothing
                                     , parameters = Nothing
                                     , strict = Just True
+                                    , async = Nothing
                                     }
                                 ]
                         , previousResponseId = Just "resp-old"
                         }
-            params <- newIORef paramsValue
+            params <- testRequestState paramsValue
             transcript <- newIORef history
             requests <- newIORef []
             recordedUsage <- newIORef []
@@ -699,6 +845,7 @@ spec = do
                             , toolCalls = []
                             , assistantText = Just "portable summary"
                             , tokenUsage = compactionUsage
+                            , contextUsage = Nothing
                             , providerTelemetry = Nothing
                             , completion = TurnCompleted
                             }
@@ -747,6 +894,7 @@ spec = do
                             , toolCalls = []
                             , assistantText = Just "same-transport summary"
                             , tokenUsage = compactionUsage
+                            , contextUsage = Nothing
                             , providerTelemetry = Nothing
                             , completion = TurnCompleted
                             }
@@ -772,7 +920,7 @@ spec = do
                     , userTextItem "recent"
                     ]
                 inputLimit = 2_000
-            params <- newIORef defaultResponseCreateParams
+            params <- testRequestState defaultResponseCreateParams
             transcript <- newIORef history
             requests <- newIORef []
             let makeBackend summaryParams =
@@ -784,6 +932,7 @@ spec = do
                             , toolCalls = []
                             , assistantText = Just "portable summary"
                             , tokenUsage = compactionUsage
+                            , contextUsage = Nothing
                             , providerTelemetry = Nothing
                             , completion = TurnCompleted
                             }
@@ -835,6 +984,7 @@ spec = do
                             , toolCalls = []
                             , assistantText = Just "continued"
                             , tokenUsage = TokenUsage 5 1 0
+                            , contextUsage = Just (TokenUsage 5 1 0)
                             , providerTelemetry = Nothing
                             , completion = TurnCompleted
                             }
@@ -923,6 +1073,7 @@ spec = do
                                 Just (Text.replicate 4_000 "schema")
                             , parameters = Nothing
                             , strict = Just True
+                            , async = Nothing
                             }
                         ]
                     }
@@ -953,6 +1104,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -980,6 +1132,7 @@ spec = do
                                 Just (Text.replicate 4_000 "schema")
                             , parameters = Nothing
                             , strict = Just True
+                            , async = Nothing
                             }
                         ]
                     }
@@ -1010,6 +1163,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1045,6 +1199,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1086,6 +1241,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1120,6 +1276,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1156,6 +1313,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1195,6 +1353,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1216,304 +1375,9 @@ spec = do
             result `shouldSatisfy` either (const False) (const True)
             readIORef hookCalls `shouldReturn` 1
 
-    describe "compactOpenAIWith" do
-        it "uses remote compaction v2 on normal Responses" do
-            requests <- newIORef []
-            let provider = tokenProvider SubscriptionBilled \_ ->
-                    error "remote compaction unexpectedly requested credentials"
-                send _ request = do
-                    modifyIORef' requests (<> [request])
-                    pure (Right remoteCompactionResponse)
-                history = [userTextItem "old context"]
-                params = defaultResponseCreateParams
-                    { instructions = Just "keep these instructions"
-                    , tools = Just []
-                    , stream = Just False
-                    }
-            result <- runExceptT $
-                compactOpenAIWith send
-                    (Just provider)
-                    params
-                    history
-                    100
-                    Nothing
-            case result of
-                Left err -> expectationFailure (show err)
-                Right outcome -> do
-                    outcome.compactSummary
-                        `shouldBe` "Context compacted remotely."
-                    outcome.compactHistory
-                        `shouldSatisfy` hasCompactionCheckpoint
-            seen <- readIORef requests
-            length seen `shouldBe` 1
-            map (.instructions) seen `shouldBe` [Just "keep these instructions"]
-            map (.tools) seen `shouldBe` [Just []]
-            map (.parallelToolCalls) seen `shouldBe` [Just True]
-            map (.previousResponseId) seen `shouldBe` [Nothing]
-            map (.store) seen `shouldBe` [Just False]
-            map (.stream) seen `shouldBe` [Just True]
-            map (.toolChoice) seen
-                `shouldBe` [Just (ToolChoiceMode ToolChoiceAuto)]
-            map requestItems seen
-                `shouldBe` [history <> [compactionTriggerItem]]
+    ManualOpenAI.spec
 
-        it "disables parallel tool calls for Responses Lite remote compaction" do
-            requests <- newIORef []
-            let provider = tokenProvider SubscriptionBilled \_ ->
-                    error "remote compaction unexpectedly requested credentials"
-                send _ request = do
-                    modifyIORef' requests (<> [request])
-                    pure (Right remoteCompactionResponse)
-                history = [userTextItem "old context"]
-                params = defaultResponseCreateParams
-                    { model = Just "gpt-5.6-sol"
-                    , instructions = Just "keep these instructions"
-                    , store = Just True
-                    , tools = Just []
-                    }
-            result <- runExceptT $
-                compactOpenAIWith send
-                    (Just provider)
-                    params
-                    history
-                    100
-                    Nothing
-            case result of
-                Left err -> expectationFailure (show err)
-                Right outcome ->
-                    outcome.compactSummary
-                        `shouldBe` "Context compacted remotely."
-            map (.parallelToolCalls) <$> readIORef requests
-                `shouldReturn` [Just False]
-
-        it "rejects remote checkpoints that cannot fit the installed snapshot" do
-            let provider = tokenProvider SubscriptionBilled \_ ->
-                    error "remote compaction unexpectedly requested credentials"
-                contextWindow =
-                    codexEffectiveContextWindowFor
-                        defaultResponseCreateParams.model
-                oversizedResponse =
-                    responseWithOutput
-                        [ Aeson.object
-                            [ "type" .= ("compaction" :: Text)
-                            , "encrypted_content" .=
-                                Text.replicate (contextWindow * 4 + 10_000) "x"
-                            ]
-                        ]
-                send _ _ = pure (Right oversizedResponse)
-                history = [userTextItem "old context"]
-            result <- runExceptT $
-                compactOpenAIWith send
-                    (Just provider)
-                    defaultResponseCreateParams
-                    history
-                    100
-                    Nothing
-            result `shouldSatisfy` \case
-                Left message ->
-                    "remote compacted snapshot request cannot fit"
-                        `Text.isInfixOf` message
-                Right _ -> False
-
-        it "keeps focused manual compaction on local summarization" do
-            requests <- newIORef []
-            let provider = tokenProvider SubscriptionBilled \_ ->
-                    error "local summarization unexpectedly requested credentials"
-                send _ request = do
-                    modifyIORef' requests (<> [request])
-                    pure (Right (summaryResponse "local summary"))
-                history = [userTextItem "old context"]
-            result <- runExceptT $
-                compactOpenAIWith send
-                    (Just provider)
-                    defaultResponseCreateParams
-                    history
-                    100
-                    (Just "focus on auth")
-            case result of
-                Left err -> expectationFailure (show err)
-                Right outcome -> do
-                    outcome.compactSummary `shouldBe` "local summary"
-                    outcome.compactHistory
-                        `shouldBe`
-                            [ userTextItem "old context"
-                            , assistantSummaryItem "local summary"
-                            ]
-            seen <- readIORef requests
-            map (.tools) seen `shouldBe` [Nothing]
-            map (.parallelToolCalls) seen `shouldBe` [Just False]
-            map (.stream) seen `shouldBe` [Just True]
-
-        it "returns friendly provider errors from manual compaction" do
-            let provider = tokenProvider SubscriptionBilled \_ ->
-                    error "compaction unexpectedly requested credentials"
-                send _ _ =
-                    pure $ Left $
-                        ProviderError UsageLimitReached
-                            "quota exhausted"
-                            (Just 120)
-                history = [userTextItem "old context"]
-            result <- runExceptT $
-                compactOpenAIWith send
-                    (Just provider)
-                    defaultResponseCreateParams
-                    history
-                    100
-                    Nothing
-            case result of
-                Left err -> do
-                    err `shouldSatisfy`
-                        Text.isInfixOf "Usage limit reached"
-                    err `shouldSatisfy`
-                        Text.isInfixOf "Try again in 2m"
-                    err `shouldNotSatisfy`
-                        Text.isInfixOf "ProviderError"
-                Right _ ->
-                    expectationFailure "expected compaction to fail"
-
-    describe "task-plan compaction context" do
-        it "removes generated task plans before remote compaction" do
-            let stale =
-                    taskPlanContextText $
-                        CurrentTaskPlan 8 $
-                            TaskPlan Nothing
-                                [TaskPlanItem "stale" TaskPlanInProgress]
-                history =
-                    [ taskPlanMessage RoleDeveloper stale
-                    , userTextItem stale
-                    , userTextItem "retained"
-                    ]
-            params <- newIORef defaultResponseCreateParams
-            transcript <- newIORef history
-            requests <- newIORef []
-            result <-
-                runProviderCompactWith
-                    (Just \request -> do
-                        modifyIORef' requests (<> [request])
-                        pure (Right remoteCompactionResponse))
-                    (const (pure ()))
-                    OpenAIProvider
-                    Nothing
-                    params
-                    transcript
-                    Nothing
-            result `shouldSatisfy` either (const False) (const True)
-            map requestItems <$> readIORef requests
-                `shouldReturn`
-                    [ [ userTextItem "retained"
-                      , compactionTriggerItem
-                      ]
-                    ]
-
-        it "removes generated task plans before local summarization" do
-            let stale =
-                    taskPlanContextText $
-                        CurrentTaskPlan 8 $
-                            TaskPlan Nothing
-                                [TaskPlanItem "stale" TaskPlanInProgress]
-                history =
-                    [ taskPlanMessage RoleDeveloper stale
-                    , userTextItem stale
-                    , userTextItem "retained"
-                    ]
-                focus = Just "focus on the remaining work"
-            params <- newIORef defaultResponseCreateParams
-            transcript <- newIORef history
-            requests <- newIORef []
-            result <-
-                runProviderCompactWith
-                    (Just \request -> do
-                        modifyIORef' requests (<> [request])
-                        pure (Right (summaryResponse "local summary")))
-                    (const (pure ()))
-                    OpenAIProvider
-                    Nothing
-                    params
-                    transcript
-                    focus
-            result `shouldSatisfy` either (const False) (const True)
-            map requestItems <$> readIORef requests
-                `shouldReturn`
-                    [ [ userTextItem "retained"
-                      , userTextItem (summarizationPrompt focus)
-                      ]
-                    ]
-
-        it "replaces stale generated copies from authoritative state" do
-            let stale =
-                    taskPlanContextText $
-                        CurrentTaskPlan 8 $
-                            TaskPlan Nothing
-                                [TaskPlanItem "stale" TaskPlanPending]
-                plan = TaskPlan
-                    (Just "continue here")
-                    [TaskPlanItem "current" TaskPlanInProgress]
-                current = CurrentTaskPlan 1 plan
-                outcome = CompactOutcome
-                    { compactBeforeTokens = 20
-                    , compactAfterTokens = 10
-                    , compactHistory =
-                        [userTextItem stale, userTextItem "retained"]
-                    , compactSummary = "summary"
-                    }
-            env <- newTaskPlanEnv Nothing Nothing
-            replaceTaskPlan env plan `shouldReturn` Right current
-            decorated <-
-                decorateCompactOutcomeWithTaskPlan (Just env) outcome
-            filter responseItemHasTaskPlan decorated.compactHistory
-                `shouldSatisfy` \case
-                    [MessageItem message] ->
-                        message.role == RoleDeveloper
-                            && responseMessageHasText
-                                (taskPlanContextText current)
-                                message
-                    _ -> False
-
-        it "does not reconstruct a plan from pre-compaction history" do
-            let stale =
-                    taskPlanContextText $
-                        CurrentTaskPlan 8 $
-                            TaskPlan Nothing
-                                [TaskPlanItem "stale" TaskPlanInProgress]
-                outcome = CompactOutcome
-                    { compactBeforeTokens = 20
-                    , compactAfterTokens = 10
-                    , compactHistory =
-                        [userTextItem stale, userTextItem "retained"]
-                    , compactSummary = "summary"
-                    }
-            env <- newTaskPlanEnv Nothing Nothing
-            decorated <-
-                decorateCompactOutcomeWithTaskPlan (Just env) outcome
-            decorated.compactHistory
-                `shouldBe` [userTextItem "retained"]
-
-        it "rejects a generated plan that cannot fit the compacted request" do
-            let plan = TaskPlan Nothing
-                    [TaskPlanItem "current" TaskPlanInProgress]
-                outcome = CompactOutcome
-                    { compactBeforeTokens = 20
-                    , compactAfterTokens = 1
-                    , compactHistory = []
-                    , compactSummary = "summary"
-                    }
-                rawLimit =
-                    estimateRequestTokensWithItems
-                        defaultResponseCreateParams
-                        outcome.compactHistory
-            env <- newTaskPlanEnv Nothing Nothing
-            _ <- replaceTaskPlan env plan
-            result <-
-                decorateCompactOutcomeWithTaskPlanWithin
-                    rawLimit
-                    defaultResponseCreateParams
-                    (Just env)
-                    outcome
-            result `shouldSatisfy` \case
-                Left message ->
-                    "authoritative task plan does not fit"
-                        `Text.isInfixOf` message
-                Right _ -> False
+    TaskPlan.spec
 
     describe "autoCompactOpenAiBackendWith" do
         it "decorates before publishing and continuing automatic compaction" do
@@ -1536,6 +1400,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1586,6 +1451,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1671,6 +1537,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1719,6 +1586,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1777,6 +1645,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1817,6 +1686,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1930,6 +1800,7 @@ spec = do
                                     , toolCalls = []
                                     , assistantText = Just "ok"
                                     , tokenUsage = TokenUsage 20 5 0
+                                    , contextUsage = Just (TokenUsage 20 5 0)
                                     , providerTelemetry = Nothing
                                     , completion = TurnCompleted
                                     }
@@ -1964,11 +1835,15 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory = [userTextItem "run it", danglingCall]
                 toolOutputText = Text.replicate 400 "x"
                 toolResult = ToolCallResult
                     { callId = "call-1"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = toolOutputText
                     , callKind = FunctionCallKind
                     }
@@ -1993,6 +1868,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2043,12 +1919,16 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory = [userTextItem "run it", danglingCall]
                 originalOutput =
                     Text.replicate ((contextWindow + 10_000) * 4) "x"
                 toolResult = ToolCallResult
                     { callId = "call-oversized"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = originalOutput
                     , callKind = FunctionCallKind
                     }
@@ -2072,6 +1952,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2119,6 +2000,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = usage
+                        , contextUsage = Just usage
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2162,6 +2044,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2193,6 +2076,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory =
                     [ userTextItem
@@ -2201,6 +2085,9 @@ spec = do
                     ]
                 toolResult = ToolCallResult
                     { callId = "call-keep"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = "hello from the tool"
                     , callKind = FunctionCallKind
                     }
@@ -2220,6 +2107,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2249,11 +2137,15 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory = [userTextItem "run it", danglingCall]
                 originalOutput = Text.replicate 80_000 "x"
                 toolResult = ToolCallResult
                     { callId = "call-occupancy"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = originalOutput
                     , callKind = FunctionCallKind
                     }
@@ -2277,6 +2169,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2319,6 +2212,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = emptyTokenUsage
+                        , contextUsage = Nothing
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2348,6 +2242,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory =
                     [ userTextItem
@@ -2356,6 +2251,9 @@ spec = do
                     ]
                 toolResult = ToolCallResult
                     { callId = "call-live"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = "ok"
                     , callKind = FunctionCallKind
                     }
@@ -2379,6 +2277,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2410,6 +2309,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 oldHistory =
                     [ userTextItem
@@ -2418,6 +2318,9 @@ spec = do
                     ]
                 toolResult = ToolCallResult
                     { callId = "call-replay"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = "ok"
                     , callKind = FunctionCallKind
                     }
@@ -2439,6 +2342,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2506,6 +2410,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2544,6 +2449,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2554,128 +2460,3 @@ spec = do
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
-
-responseItemHasTaskPlan :: ResponseItem -> Bool
-responseItemHasTaskPlan = \case
-    MessageItem message ->
-        any isTaskPlanContextText (responseMessageTexts message)
-    _ -> False
-
-taskPlanMessage :: ResponseRole -> Text -> ResponseItem
-taskPlanMessage role text =
-    MessageItem ResponseMessage
-        { messageId = Nothing
-        , content = MessageContentParts [InputTextPart text Nothing]
-        , role = role
-        , status = Nothing
-        , phase = Nothing
-        , passthrough = Nothing
-        }
-
-responseMessageHasText :: Text -> ResponseMessage -> Bool
-responseMessageHasText expected =
-    elem expected . responseMessageTexts
-
-responseMessageTexts :: ResponseMessage -> [Text]
-responseMessageTexts message =
-    case message.content of
-        MessageContentText text -> [text]
-        MessageContentParts parts ->
-            [ text
-            | part <- parts
-            , text <- case part of
-                InputTextPart{text} -> [text]
-                OutputTextPart{text} -> [text]
-                PlainTextPart{text} -> [text]
-                _ -> []
-            ]
-
-successful
-    :: BackendSnapshot
-    -> TurnOutput
-    -> Either ApiError BackendResult
-successful state output =
-    Right BackendResult
-        { backendOutput = output
-        , backendState = state
-        }
-
-requestItems :: ResponseCreateParams -> [ResponseItem]
-requestItems request = case request.input of
-    Just (ResponseInputItems items) -> items
-    _ -> []
-
-remoteCompactionResponse :: Response
-remoteCompactionResponse =
-    responseWithOutput
-        [ Aeson.object
-            [ "type" .= ("compaction" :: Text)
-            , "encrypted_content" .= ("opaque" :: Text)
-            ]
-        ]
-
-responseWithoutCompaction :: Response
-responseWithoutCompaction =
-    responseWithOutput []
-
-responseWithOutput :: [Aeson.Value] -> Response
-responseWithOutput output =
-    decodeResponseFixture $ Aeson.object
-        [ "id" .= ("resp-compact" :: Text)
-        , "created_at" .= (0 :: Int)
-        , "status" .= ("completed" :: Text)
-        , "model" .= ("gpt-test" :: Text)
-        , "output" .= output
-        , "usage" .= Aeson.object
-            [ "input_tokens" .= compactionUsage.inputTokens
-            , "output_tokens" .= compactionUsage.outputTokens
-            , "total_tokens" .=
-                (compactionUsage.inputTokens + compactionUsage.outputTokens)
-            , "input_tokens_details" .= Aeson.object
-                [ "cached_tokens" .= compactionUsage.cachedTokens
-                ]
-            ]
-        ]
-
-decodeResponseFixture :: Aeson.Value -> Response
-decodeResponseFixture fixture =
-    case Hermes.decodeEither responseDecoder
-            (LBS.toStrict (Aeson.encode fixture)) of
-        Right response -> response
-        Left err -> error (Text.unpack (Hermes.jsonErrorMessage err))
-
-compactionUsage :: TokenUsage
-compactionUsage = TokenUsage
-    { inputTokens = 80
-    , outputTokens = 6
-    , cachedTokens = 40
-    }
-
-withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
-withModel nextModel ResponseCreateParams { model = _, .. } =
-    ResponseCreateParams { model = nextModel, .. }
-
-summaryResponse :: Text -> Response
-summaryResponse summary =
-    summaryResponseWithStatus "completed" summary
-
-summaryResponseWithStatus :: Text -> Text -> Response
-summaryResponseWithStatus responseStatus summary =
-    decodeResponseFixture $ Aeson.object
-        [ "id" .= ("resp-summary" :: Text)
-        , "created_at" .= (0 :: Int)
-        , "status" .= responseStatus
-        , "model" .= ("gpt-test" :: Text)
-        , "output" .=
-            [ Aeson.object
-                [ "type" .= ("message" :: Text)
-                , "role" .= ("assistant" :: Text)
-                , "content" .=
-                    [ Aeson.object
-                        [ "type" .= ("output_text" :: Text)
-                        , "text" .= summary
-                        ]
-                    ]
-                ]
-            ]
-        ]

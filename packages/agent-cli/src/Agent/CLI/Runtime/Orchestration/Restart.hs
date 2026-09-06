@@ -72,7 +72,7 @@ runFullscreenRestartLoop callbacks runtime =
                 RunProviderStartFailed apiError ->
                     case transition of
                         Just failed
-                            | failed.transitionCause == AutomaticFallback ->
+                            | AutomaticFallback _ <- failed.transitionCause ->
                                 callbacks.restartFallback failed apiError
                                     >>= \case
                                     Just next -> do

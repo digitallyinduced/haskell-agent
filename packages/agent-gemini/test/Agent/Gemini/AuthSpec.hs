@@ -5,6 +5,7 @@ import Agent.Gemini.TestSupport (withLoopbackApplication)
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (concurrently)
 import Control.Exception.Safe (bracket)
+import Control.Monad (forM_)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
@@ -73,6 +74,26 @@ spec = do
                     , tokenType = Just "Bearer"
                     , scope = Nothing
                     }
+
+        it "rejects callbacks with the wrong method or path" do
+            forM_
+                [ ("POST", "/oauth2callback", "Google OAuth callback must use GET")
+                , ("GET", "/unexpected", "Google OAuth callback used an unexpected path")
+                ]
+                \(method, path, expectedError) -> do
+                    recorded <- newIORef []
+                    withLoopbackApplication (pure (tokenApp recorded)) \port -> do
+                        presentedUrl <- newEmptyMVar
+                        let options = (testOAuthOptions port) { timeoutSeconds = 5 }
+                        (result, response) <- concurrently
+                            (runLoopbackOAuth options (putMVar presentedUrl))
+                            (takeMVar presentedUrl >>= \url ->
+                                sendOAuthCallback method path url)
+                        result `shouldBe` Left expectedError
+                        response `shouldSatisfy`
+                            BS8.isInfixOf
+                                "Location: https://developers.google.com/gemini-code-assist/auth_failure_gemini"
+                        readIORef recorded `shouldReturn` []
 
         it "exchanges a code and refreshes without losing the refresh token" do
             recorded <- newIORef []
@@ -227,6 +248,25 @@ spec = do
                 readIORef calls `shouldReturn` 2
                 readIORef presented `shouldReturn`
                     [("https://accounts.example.test/validate", "Verify please")]
+
+        it "rejects malformed or credential-bearing validation URLs" do
+            forM_
+                [ "http://accounts.example.test/validate"
+                , "https://?continue=yes"
+                , "https://user@accounts.example.test/validate"
+                , "https://accounts.example.test:invalid/validate"
+                , "https:///validate"
+                ]
+                \validationUrl ->
+                    withLoopbackApplication
+                        (pure (invalidValidationUrlApp validationUrl))
+                        \port -> do
+                            result <- setupCodeAssistWithValidation
+                                (testCodeAssistOptions port)
+                                "bearer"
+                                (Just (\_ _ -> pure ()))
+                            result `shouldBe` Left
+                                "Google account validation returned an invalid non-HTTPS URL"
 
         it "includes the configured project for standard-tier onboarding" do
             bodies <- newIORef []
@@ -408,6 +448,18 @@ validationRequiredApp calls _request respond = do
                 ("validated-project" :: Text)
             ]))
 
+invalidValidationUrlApp :: Text -> Application
+invalidValidationUrlApp validationUrl _request respond =
+    respond (jsonResponse status200 (Aeson.object
+        [ "ineligibleTiers" Aeson..=
+            [ Aeson.object
+                [ "reasonCode" Aeson..= ("VALIDATION_REQUIRED" :: Text)
+                , "reasonMessage" Aeson..= ("Verify please" :: Text)
+                , "validationUrl" Aeson..= validationUrl
+                ]
+            ]
+        ]))
+
 standardOnboardingApp
     :: IORef [(BS.ByteString, BS.ByteString)]
     -> Application
@@ -558,6 +610,44 @@ sendSplitOAuthCallback authorization = do
                     <> " HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
             _ <- Net.recv socket 4096
             pure ()
+
+sendOAuthCallback
+    :: BS.ByteString
+    -> BS.ByteString
+    -> Text
+    -> IO BS.ByteString
+sendOAuthCallback method path authorization = do
+    redirect <- maybe
+        (expectationFailure "authorization URL has no redirect_uri" >> pure "")
+        pure
+        (queryParameter "redirect_uri" authorization)
+    state <- maybe
+        (expectationFailure "authorization URL has no state" >> pure "")
+        pure
+        (queryParameter "state" authorization)
+    port <- maybe
+        (expectationFailure "redirect_uri has no loopback port" >> pure 0)
+        pure
+        (loopbackPort redirect)
+    bracket
+        (Net.socket Net.AF_INET Net.Stream Net.defaultProtocol)
+        Net.close
+        \socket -> do
+            Net.connect socket
+                (Net.SockAddrInet
+                    (fromIntegral port)
+                    (Net.tupleToHostAddress (127, 0, 0, 1)))
+            Net.sendAll socket
+                (method <> " " <> path <> "?code=code&state="
+                    <> TextEncoding.encodeUtf8 state
+                    <> " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            receiveAll socket
+  where
+    receiveAll socket = go []
+      where
+        go chunks = Net.recv socket 4096 >>= \case
+            chunk | BS.null chunk -> pure (BS.concat (reverse chunks))
+            chunk -> go (chunk : chunks)
 
 queryParameter :: Text -> Text -> Maybe Text
 queryParameter key url = do

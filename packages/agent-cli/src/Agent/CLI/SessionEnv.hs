@@ -4,6 +4,11 @@ module Agent.CLI.SessionEnv
     , SessionEnv(..)
     ) where
 
+import Agent.CLI.Session.Request
+    ( SessionRequestState
+    )
+import Agent.CLI.ActiveAccount (ActiveAccountRef)
+import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.AgentViewport (AgentViewportEnv)
 import Agent.CLI.GatewayClient (GatewayModelAccess)
@@ -20,6 +25,7 @@ import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (Persistence, SessionHandle)
 import Agent.CLI.Session.History (LiveConversation)
+import Agent.CLI.Session.Workspace (WorkspaceContext)
 import Agent.CLI.SessionTitle (SessionTitleManager)
 import Agent.CLI.Terminal (TerminalCapabilities)
 import Agent.CLI.SteeringInputs (SteeringInputs)
@@ -30,7 +36,6 @@ import Agent.GrokBuild.Dialect.Runtime (GrokRuntimeControl)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
 import Agent.MCP (McpFleet, McpToolRegistration)
 import qualified Agent.OpenAI.Auth as OpenAI
-import Agent.Responses.Types (ResponseCreateParams)
 import Agent.OpenAI.Models.Types (ModelInfo)
 import System.OsPath (OsPath)
 import Agent.Provider (Credential, Provider, TokenProvider)
@@ -70,7 +75,7 @@ data SessionEnv = SessionEnv
     , sessionConversation :: !(IORef LiveConversation)
     , sessionAutomaticCompaction
         :: !(IORef (Maybe AutomaticCompactionBoundary))
-    , sessionParams :: !(IORef ResponseCreateParams)
+    , sessionParams :: !(SessionRequestState)
     , sessionContextOccupancy :: !(IORef (Maybe OccupancySnapshot))
     , sessionContextWindow :: !(IO (Maybe Int))
     , sessionPolicy :: !(IORef ApprovalPolicy)
@@ -80,14 +85,12 @@ data SessionEnv = SessionEnv
     , sessionTitleTurnCount :: !(IORef Int)
     , sessionPlanMode :: !PlanModeEnv
     , sessionTaskPlan :: !(Maybe TaskPlanEnv)
-    , sessionProjectRoot :: !OsPath
-    , sessionCwd :: !OsPath
+    , sessionWorkspace :: !WorkspaceContext
     , sessionProviderFallback :: !Bool
     -- | Prepared environment facts avoid inspecting the host workspace.
     -- 'Nothing' requests ordinary local discovery.
     , sessionPreparedWorkspaceEnvironment
         :: !(Maybe PreparedWorkspaceEnvironment)
-    , sessionHome :: !OsPath
     , sessionMcpRegistrations :: ![McpToolRegistration]
     , sessionMcpWarnings :: ![Text]
     , sessionMcpFleet :: !(Maybe McpFleet)
@@ -105,8 +108,9 @@ data SessionEnv = SessionEnv
     , sessionSetShellMode :: !(ShellMode -> IO Text)
     , sessionComputerUseEnabled :: !(IO Bool)
     , sessionSetComputerUseEnabled :: !(Bool -> IO Text)
+    , sessionRefreshRequestParams :: !(IO ())
     , sessionBackground :: !Bool
-    , sessionEscPaused :: !(IORef Bool)
+    , sessionStdinControl :: !StdinControl
     , sessionDraft :: !(IORef Text)
     , sessionPreviewId :: !(IORef Int)
     , sessionInterrupt :: !InterruptState
@@ -114,9 +118,7 @@ data SessionEnv = SessionEnv
     , sessionLastFailedTurn :: !(IORef (Maybe PendingTurn))
     , sessionStoreRoot :: !(IORef (Maybe OsPath))
     , sessionUsage :: !(IORef TokenUsage)
-    , sessionAccount :: !(IORef Text)
-    , sessionAccountId :: !(IORef Text)
-    , sessionAccountSelectionId :: !(IORef Text)
+    , sessionAccount :: !ActiveAccountRef
     , sessionAccountLabel :: !(Credential -> IO Text)
     , sessionSelectAccount
         :: !(Maybe (Text -> IO (Either ApiError Text)))

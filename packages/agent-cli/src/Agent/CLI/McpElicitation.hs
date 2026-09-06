@@ -10,7 +10,7 @@ module Agent.CLI.McpElicitation
     , renderElicitationHeader
     ) where
 
-import Agent.CLI.CancelWatch (withStdinPaused)
+import Agent.CLI.CancelWatch (StdinControl, withStdinPaused)
 import Agent.CLI.Input (readApprovalLine)
 import Agent.CLI.Notification
     ( AttentionRequest(InputRequested)
@@ -57,15 +57,15 @@ import System.Process (rawSystem)
 -- | Elicitation hook for the CLI. Uses the fullscreen UI when one is active
 -- and the terminal otherwise; without a terminal the request is cancelled.
 cliMcpElicitation
-    :: IORef Bool
+    :: StdinControl
     -> IORef (Maybe FullscreenRuntime)
     -> McpElicitRequest
     -> IO McpElicitResult
-cliMcpElicitation escPaused runtimeRef request = do
+cliMcpElicitation stdinControl runtimeRef request = do
     runtime <- readIORef runtimeRef
     case runtime of
         Just active -> fullscreenElicitation active request
-        Nothing -> lineElicitation escPaused request
+        Nothing -> lineElicitation stdinControl request
 
 -- | The host component of a URL, shown prominently so users can judge where
 -- a URL-mode elicitation leads.
@@ -88,9 +88,9 @@ sanitize = Text.map (\character -> if isControl character && character /= '\n' t
 
 -- * Line mode
 
-lineElicitation :: IORef Bool -> McpElicitRequest -> IO McpElicitResult
-lineElicitation escPaused request =
-    withStdinPaused escPaused do
+lineElicitation :: StdinControl -> McpElicitRequest -> IO McpElicitResult
+lineElicitation stdinControl request =
+    withStdinPaused stdinControl do
         tty <- hIsTerminalDevice stdin
         if not tty
             then pure McpElicitCancel

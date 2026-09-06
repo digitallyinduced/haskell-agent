@@ -26,6 +26,7 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     , customToolCall
     , functionToolCall
     )
@@ -36,6 +37,7 @@ import Agent.TextBuffer
 import Agent.Telemetry (TurnTelemetry(..))
 import Agent.TUI.Motion (MotionMode(..), foregroundIndicator)
 import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.Async (asyncThreadId, poll)
 import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Exception (finally)
 import Control.Monad (forM_)
@@ -44,7 +46,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Calendar (fromGregorian)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Time.Clock (UTCTime(..), addUTCTime, diffUTCTime, getCurrentTime)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (BufferMode(..), Handle, hClose, hSetBuffering, openTempFile)
@@ -266,13 +268,12 @@ spec = do
 
         it "uses the redacted computer-action summary for privileged calls" do
             summarizeToolCall
-                ( (functionToolCall
+                (ToolCall
                     "computer-1"
                     "computer"
-                    "{\"actions\":[{\"type\":\"type\",\"text\":\"secret\"}]}")
-                    { callKind = ComputerCallKind
-                    }
-                )
+                    "{\"actions\":[{\"type\":\"type\",\"text\":\"secret\"}]}"
+                    ComputerCallKind
+                    False)
                 `shouldBe` "Computer: type 6 characters"
 
     describe "truncateToolOutput" do
@@ -473,6 +474,7 @@ spec = do
                 , toolCalls = []
                 , assistantText = Just "almost"
                 , tokenUsage = emptyTokenUsage
+                , contextUsage = Nothing
                 , providerTelemetry = Nothing
                 , completion = TurnCompleted
                 })
@@ -485,6 +487,7 @@ spec = do
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
                         { outputTokens = 32768 }
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnIncomplete
                         { incompleteReason = "max_output_tokens"
@@ -660,7 +663,21 @@ spec = do
                 first <- readIORef config.renderThinkingSpinner
                 renderEvent config TurnStarted
                 second <- readIORef config.renderThinkingSpinner
-                second `shouldBe` first
+                fmap asyncThreadId second `shouldBe` fmap asyncThreadId first
+
+        it "joins the spinner worker before clearing its owner" do
+            withRenderConfig True False \config _handle _path -> do
+                renderEvent config TurnStarted
+                worker <-
+                    readIORef config.renderThinkingSpinner
+                        >>= maybe
+                            (expectationFailure "spinner worker was not started"
+                                >> fail "missing spinner worker")
+                            pure
+                clearThinking config
+                (isJust <$> readIORef config.renderThinkingSpinner)
+                    `shouldReturn` False
+                poll worker >>= (`shouldSatisfy` isJust)
 
         it "commits buffered reasoning before a continuation TurnStarted" do
             withRenderConfig True False \config handle path -> do
@@ -719,6 +736,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Just "Complete"
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -748,6 +766,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -771,6 +790,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -802,6 +822,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -824,6 +845,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -856,6 +878,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -886,6 +909,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Nothing
                         , tokenUsage = emptyTokenUsage
+                        , contextUsage = Nothing
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         })
@@ -919,6 +943,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -939,6 +964,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -959,6 +985,7 @@ spec = do
                     , toolCalls = [call]
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -974,6 +1001,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Just "see `file.txt`"
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -989,6 +1017,9 @@ spec = do
                 renderEvent config (ToolStarted call)
                 renderEvent config (ToolFinished ToolCallResult
                     { callId = "c1"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = "ok\nmore"
                     , callKind = FunctionCallKind
                     })
@@ -1012,6 +1043,9 @@ spec = do
                         "- [completed] 1: Find and clone Grok Build and Codex repos\n\
                         \- [pending] 2: Investigate Codex"
                     , callKind = FunctionCallKind
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     })
                 hClose handle
                 body <- Text.readFile path
@@ -1133,7 +1167,7 @@ withRenderConfigNativeMode showThinking color native motionMode action = do
                 , renderLock = lock
                 , renderStdout = handle
                 , renderStderr = handle
-                , renderModelRef = modelRef
+                , renderModel = readIORef modelRef
                 , renderNativeProgress = native
                 , renderMotionMode = motionMode
                 , renderWorkspace = ""

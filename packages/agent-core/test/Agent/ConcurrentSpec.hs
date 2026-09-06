@@ -31,14 +31,8 @@ spec = describe "bounded concurrency" do
             `shouldReturn` [1 .. 12]
         readIORef peak `shouldReturn` 3
 
-    it "clamps a non-positive limit to one worker" do
-        active <- newIORef (0 :: Int)
-        peak <- newIORef (0 :: Int)
-        mapConcurrentlyBounded 0
-            (\value -> bracketActive active peak (pure value))
-            [1 .. 4 :: Int]
-            `shouldReturn` [1 .. 4]
-        readIORef peak `shouldReturn` 1
+    it "clamps zero and negative limits to one worker" do
+        mapM_ assertSingleWorker [0, -3]
 
     it "cancels and joins sibling workers when one fails" do
         siblingStarted <- newEmptyMVar
@@ -76,3 +70,13 @@ bracketActive active peak action = do
 shouldReturnSatisfy :: Show a => IO a -> (a -> Bool) -> Expectation
 shouldReturnSatisfy action predicate =
     action >>= (`shouldSatisfy` predicate)
+
+assertSingleWorker :: Int -> Expectation
+assertSingleWorker limit = do
+    active <- newIORef (0 :: Int)
+    peak <- newIORef (0 :: Int)
+    mapConcurrentlyBounded limit
+        (\value -> bracketActive active peak (pure value))
+        [1 .. 4 :: Int]
+        `shouldReturn` [1 .. 4]
+    readIORef peak `shouldReturn` 1

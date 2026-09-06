@@ -1,75 +1,72 @@
 module Agent.CLI.Runtime.Orchestration.Providers.Common
-    ( decorateAutomaticCompact
+    ( HttpProviderTransport(..)
+    , withHttpProvider
+    , decorateAutomaticCompact
     , decorateManualCompact
-    , runSession
-    , startupFailure
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    )
 import Agent.CLI.Compaction
     ( CompactOutcome
+    , OccupancySnapshot
+    , boundCompletedToolContinuations
+    , installLiveCompactOutcome
+    , runResponsesCompactWithContextWindow
     , decorateCompactOutcomeWithTaskPlanWithin
     )
-import Agent.CLI.Error (formatApiErrorAt)
 import Agent.CLI.Runtime.Orchestration.Providers.Types
-    ( AgentProviderRequest(..)
+    ( ProviderHost(..), ProviderCompaction(..), ProviderRuntime(..)
+    , ProviderAccountSelection(..), ProviderSubagents(..)
     )
-import Agent.CLI.Runtime.Orchestration.Startup (finishStartup)
-import Agent.CLI.Runtime.Recap
-    ( runSessionRecap
-    , runSessionTurnSummary
-    )
-import Agent.CLI.Runtime.Repl
-    ( finishTurn
-    , preparePromptSkillInputsWithPaste
-    , repl
-    , replWithDraft
-    , runPendingTurn
-    )
-import Agent.CLI.Runtime.Types (RunResult)
-import Agent.CLI.Session.Runtime.Types
-    ( SessionBackend
-    , SessionRequest
-    )
+import Agent.CLI.Session.History (readLiveTranscript)
+import Agent.CLI.Session.Runtime.Types (SessionBackend(..))
+import Agent.Connectivity (withConnectionRecoveryOn)
+import Agent.Loop (Backend)
+import Data.IORef (IORef, newIORef)
 import Agent.Error
     ( ApiError(ProviderError)
     , ErrorType(InvalidRequestError)
     )
-import Agent.Responses.Types (ResponseCreateParams)
-import Data.IORef (readIORef)
+import Agent.Responses.Types (ResponseCreateParams, Response)
+import Agent.Tools.TaskPlan (TaskPlanEnv)
 import Data.Text (Text)
-import Data.Time.Clock (getCurrentTime)
-import qualified Agent.CLI.Session.Runner as SessionRunner
-import qualified Agent.CLI.Startup.Auth as Startup
 
 decorateManualCompact
-    :: AgentProviderRequest
+    :: IO ResponseCreateParams
+    -> Maybe TaskPlanEnv
     -> (ResponseCreateParams -> Int)
     -> Either Text CompactOutcome
     -> IO (Either Text CompactOutcome)
 decorateManualCompact
-    request
+    getParams
+    taskPlan
     contextWindowForResult = \case
         Left err -> pure (Left err)
         Right outcome -> do
-            currentParams <- readIORef request.paramsRef
+            currentParams <- getParams
             decorateCompactOutcomeWithTaskPlanWithin
                 (contextWindowForResult currentParams)
                 currentParams
-                request.taskPlan
+                taskPlan
                 outcome
 
 decorateAutomaticCompact
-    :: AgentProviderRequest
+    :: IO ResponseCreateParams
+    -> Maybe TaskPlanEnv
     -> (ResponseCreateParams -> Int)
     -> Either ApiError CompactOutcome
     -> IO (Either ApiError CompactOutcome)
 decorateAutomaticCompact
-    request
+    getParams
+    taskPlan
     contextWindowForResult = \case
         Left err -> pure (Left err)
         Right outcome ->
             decorateManualCompact
-                request
+                getParams
+                taskPlan
                 contextWindowForResult
                 (Right outcome) >>= pure . \case
                     Left message ->
@@ -80,30 +77,60 @@ decorateAutomaticCompact
                                 Nothing)
                     Right decorated -> Right decorated
 
-startupFailure
-    :: AgentProviderRequest
-    -> ApiError
-    -> IO RunResult
-startupFailure AgentProviderRequest{startup} err = do
-    now <- getCurrentTime
-    Startup.startupDie startup
-        (formatApiErrorAt now err)
+-- | Gemini and OpenRouter share HTTP backend and manual-compaction assembly.
+-- The transport chooses its sender, model mapping, and occupancy state; the
+-- consumer owns session startup, persistence, notices, and subagent registration.
+data HttpProviderTransport = HttpProviderTransport
+    { httpMakeBackend :: IO ResponseCreateParams -> Backend
+    , httpSendCompact :: ResponseCreateParams -> IO (Either ApiError Response)
+    , httpTransportModel :: Text -> Text
+    , httpOccupancy :: IORef (Maybe OccupancySnapshot)
+    }
 
-sessionRunnerContinuation :: SessionRunner.SessionRunnerContinuation
-sessionRunnerContinuation =
-    SessionRunner.SessionRunnerContinuation
-        { runnerRepl = repl
-        , runnerReplWithDraft = replWithDraft
-        , runnerRunPendingTurn = runPendingTurn
-        , runnerFinishTurn = finishTurn
-        , runnerFinishStartup = finishStartup
-        , runnerPreparePromptSkillInputs = preparePromptSkillInputsWithPaste
-        , runnerRunSessionRecap = runSessionRecap
-        , runnerRunSessionTurnSummary = runSessionTurnSummary
+withHttpProvider
+    :: ProviderHost
+    -> HttpProviderTransport
+    -> (ProviderRuntime -> IO a)
+    -> IO a
+withHttpProvider
+        ProviderHost{compaction = ProviderCompaction{..}, networkRecovery}
+        HttpProviderTransport{..} use = do
+    let contextWindowFor = contextWindowForParams httpTransportModel 1_048_576
+        protectOverflow getParams =
+            boundCompletedToolContinuations
+                contextWindowFor getParams httpOccupancy
+        backend =
+            withConnectionRecoveryOn networkRecovery $
+                protectOverflow
+                    (readSessionRequestParams paramsRef)
+                    (httpMakeBackend (readSessionRequestParams paramsRef))
+        compactRunner focus = do
+            contextWindow <- currentModelContextWindow httpTransportModel
+            historyRef <- newIORef =<< readLiveTranscript conversationRef
+            installLiveCompactOutcome conversationRef Nothing
+                (\requestedFocus ->
+                    runResponsesCompactWithContextWindow
+                        contextWindow
+                        httpSendCompact
+                        recordCompactionUsage
+                        paramsRef
+                        historyRef
+                        requestedFocus
+                        >>= decorateManualCompact
+                            (readSessionRequestParams paramsRef) taskPlan contextWindowFor)
+                focus
+    use ProviderRuntime
+        { sessionBackend = SessionBackend
+            { backend
+            , btwBackend = httpMakeBackend . pure
+            , interruptBackend = pure ()
+            , resetBackendState = pure ()
+            }
+        , currentContextWindow = Just . contextWindowFor <$> readSessionRequestParams paramsRef
+        , compactRunner
+        , accountSelection = HttpAccountSelection
+        , subagents = HttpSubagents \childParams ->
+            protectOverflow
+                (pure childParams)
+                (httpMakeBackend (pure childParams))
         }
-
-runSession
-    :: SessionRequest
-    -> SessionBackend
-    -> IO RunResult
-runSession = SessionRunner.runSession sessionRunnerContinuation

@@ -71,6 +71,7 @@ spec = do
                         { name = "grammar"
                         , description = Nothing
                         , format = Nothing
+                        , async = Nothing
                         }
                     , NamespaceToolValue NamespaceTool
                         { name = "tools"
@@ -190,6 +191,7 @@ sampleRequest = defaultResponseCreateParams
             , parameters = Just $
                 rawJsonFromEncoding (Aeson.toEncoding (Aeson.object []))
             , strict = Nothing
+            , async = Nothing
             }
         , KnownResponseTool ToolWebSearch
         , KnownResponseTool ToolComputer

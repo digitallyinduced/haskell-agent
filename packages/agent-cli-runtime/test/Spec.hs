@@ -1,5 +1,7 @@
 module Main (main) where
 
+import qualified Agent.CLI.SessionActivitySpec as SessionActivitySpec
+import qualified Agent.CLI.SessionRequestSpec as SessionRequestSpec
 import Agent.CLI.Session.TitlePolicy (titleRefreshIndex)
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
 import qualified Agent.CLI.EnvironmentSpec as EnvironmentSpec
@@ -11,10 +13,15 @@ import qualified Agent.CLI.ManagedTurnSpec as ManagedTurnSpec
 import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
 import qualified Agent.CLI.SessionSpec as SessionSpec
+import qualified Agent.Runtime.RequestSpec as RuntimeRequestSpec
+import qualified Agent.Runtime.TurnEngineSpec as TurnEngineSpec
+import qualified Agent.Runtime.TurnStateSpec as TurnStateSpec
 import Test.Hspec
 
 main :: IO ()
 main = hspec do
+    SessionActivitySpec.spec
+    SessionRequestSpec.spec
     describe "titleRefreshIndex" do
         it "advances only at the persisted title milestones" do
             map titleRefreshIndex [0, 1, 2, 3, 5, 6, 10]
@@ -29,3 +36,6 @@ main = hspec do
     ModelConfigSpec.spec
     ModelsSpec.spec
     SessionSpec.spec
+    RuntimeRequestSpec.spec
+    TurnEngineSpec.spec
+    TurnStateSpec.spec

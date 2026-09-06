@@ -9,7 +9,10 @@ import Agent.CLI.ModelConfig
 import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
 import Agent.Dialect (DialectId(..))
 import Agent.Provider (Provider(ClaudeCodeProvider, OpenAIProvider))
-import Data.Map.Strict qualified as Map
+import Data.Aeson qualified as Aeson
+import Data.Aeson ((.=))
+import Data.Text (Text)
+import Data.Text qualified as Text
 import Test.Hspec
 
 spec :: Spec
@@ -33,9 +36,9 @@ spec = describe "Agent.CLI.GatewayModels" do
     it "uses only direct catalog entries while disconnected" do
         let options = modelOptionsForGatewayState testCatalog Nothing
         map (.modelTarget.targetModelId) options
-            `shouldBe` ["router-default"]
+            `shouldBe` ["router-default", "grok", "gemini", "router", "sonnet"]
         map (.modelTarget.targetConnectionId) options
-            `shouldBe` ["openai"]
+            `shouldBe` ["openai", "xai", "gemini", "openrouter", "claude-code"]
 
     it "maps the unified catalog to Responses and Claude transports" do
         let options =
@@ -72,57 +75,50 @@ spec = describe "Agent.CLI.GatewayModels" do
         gatewayProviderForStartup Nothing Nothing Nothing
             `shouldBe` OpenAIProvider
 
+-- Exercise the same validated construction boundary as production. A catalog
+-- now always includes a default for each builtin provider.
 testCatalog :: ModelCatalog
-testCatalog =
-    ModelCatalog
-        { catalogConnections =
-            Map.fromList
-                [ ( "openai"
-                  , ModelConnection
-                        { connectionId = "openai"
-                        , connectionKind = BuiltinConnection OpenAIProvider
-                        }
-                  )
-                , ( organizationGatewayConnectionId
-                  , ModelConnection
-                        { connectionId = organizationGatewayConnectionId
-                        , connectionKind = OrganizationGatewayConnection
-                        }
-                  )
-                ]
-        , catalogModels = [directModel, gatewayMetadata]
-        , catalogModelsById =
-            Map.singleton directModel.catalogModelId directModel
-        , catalogGatewayModelsById =
-            Map.singleton gatewayMetadata.catalogModelId gatewayMetadata
-        }
-
-directModel :: CatalogModel
-directModel =
-    CatalogModel
-        { catalogModelId = "router-default"
-        , catalogModelConnectionId = "openai"
-        , catalogModelWireId = "router-default"
-        , catalogModelDialect = CodexDialect
-        , catalogModelContextWindow = Nothing
-        , catalogModelLabel = Nothing
-        , catalogModelReasoningEfforts = Nothing
-        , catalogModelDefaultReasoningEffort = Nothing
-        , catalogModelDefault = True
-        , catalogModelFallbackPriority = Nothing
-        }
-
-gatewayMetadata :: CatalogModel
-gatewayMetadata =
-    CatalogModel
-        { catalogModelId = "company-a"
-        , catalogModelConnectionId = organizationGatewayConnectionId
-        , catalogModelWireId = "company-a"
-        , catalogModelDialect = GenericResponsesDialect
-        , catalogModelContextWindow = Just 131_072
-        , catalogModelLabel = Just "Company A"
-        , catalogModelReasoningEfforts = Just ["high"]
-        , catalogModelDefaultReasoningEffort = Just "high"
-        , catalogModelDefault = False
-        , catalogModelFallbackPriority = Nothing
-        }
+testCatalog = either (error . Text.unpack) id $
+    decodeModelConfig "gateway-test.json" $ Aeson.encode $ Aeson.object
+        [ "version" .= (1 :: Int)
+        , "connections" .= Aeson.object
+            [ "openai" .= builtin "openai"
+            , "xai" .= builtin "xai"
+            , "gemini" .= builtin "gemini"
+            , "openrouter" .= builtin "openrouter"
+            , "claude-code" .= builtin "claude-code"
+            , "organization-gateway" .= Aeson.object ["api" .= ("gateway" :: Text)]
+            ]
+        , "models" .=
+            ( [ Aeson.object
+                    [ "id" .= model
+                    , "connection" .= provider
+                    , "dialect" .= dialect
+                    , "default" .= True
+                    ]
+              | (provider, model, dialect) <- builtinModels
+              ]
+                <> [ Aeson.object
+                        [ "id" .= ("company-a" :: Text)
+                        , "connection" .= organizationGatewayConnectionId
+                        , "dialect" .= ("generic-responses" :: Text)
+                        , "context_window" .= (131_072 :: Int)
+                        , "label" .= ("Company A" :: Text)
+                        , "reasoning_efforts" .= ["high" :: Text]
+                        , "default_reasoning_effort" .= ("high" :: Text)
+                        ]
+                   ]
+            )
+        ]
+  where
+    builtin :: Text -> Aeson.Value
+    builtin provider = Aeson.object
+        [ "api" .= ("builtin" :: Text), "provider" .= provider ]
+    builtinModels :: [(Text, Text, Text)]
+    builtinModels =
+        [ ("openai", "router-default", "codex")
+        , ("xai", "grok", "grok-build")
+        , ("gemini", "gemini", "generic-responses")
+        , ("openrouter", "router", "generic-responses")
+        , ("claude-code", "sonnet", "claude-code")
+        ]

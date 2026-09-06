@@ -4,10 +4,10 @@ module Agent.CLI.Runtime.Repl.MetaConsole
     ) where
 
 import Agent.CLI.Command
-    ( ReplAction(ReplSetEffort, ReplToggleFast, ReplSetModel,
-                 ReplSetShell, ReplToggleComputerUse, ReplSetComputerUse,
+    ( ReplAction(ReplSelection, ReplSetShell, ReplToggleComputerUse, ReplSetComputerUse,
                  ReplToggleAlwaysApprove, ReplSetAgentLimit,
                  ReplEnableCodeMode, ReplSkills)
+    , SelectionAction(ReplSetEffort, ReplToggleFast, ReplSetModel)
     , SlashCatalog
     , parseReplLineWithCatalog
     )
@@ -47,6 +47,7 @@ import Agent.CLI.Session
     , ensureSession
     )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Style
     ( glyphOk, glyphSession, roleError, roleMuted, roleSuccess )
 import Agent.CLI.TUI.App
@@ -97,7 +98,7 @@ handleMetaConsoleRequest replContext slashCatalog executeCommand rawRequest
     | Text.null request =
         metaFailure runtime "Meta Console request must not be empty"
     | otherwise =
-        loadHarnessConfig env.sessionHome >>= \case
+        loadHarnessConfig env.sessionWorkspace.home >>= \case
             Left err -> metaFailure runtime err
             Right config -> do
                 plannerContext <- buildMetaContext env config
@@ -255,7 +256,7 @@ applyMetaPlan runtime initial plan =
                 if any isMetaConfigAction plan.metaActions
                     then
                         updateHarnessConfig
-                            (metaEnv runtime).sessionHome
+                            (metaEnv runtime).sessionWorkspace.home
                             (applyMetaConfigActions
                                 secrets
                                 plan.metaActions)
@@ -358,7 +359,7 @@ promptMetaSecret runtime title body =
             requestFullscreenSecret fullscreen title body
         Nothing ->
             promptSecretLine
-                (metaEnv runtime).sessionEscPaused
+                (metaEnv runtime).sessionStdinControl
                 body
                 (Just
                     "Meta Console configuration; the value is written only to the local config file")
@@ -453,9 +454,9 @@ runMetaSessionCommand runtime command =
 
 safeMetaSessionAction :: ReplAction -> Bool
 safeMetaSessionAction = \case
-    ReplSetEffort{} -> True
-    ReplToggleFast -> True
-    ReplSetModel{} -> True
+    ReplSelection ReplSetEffort{} -> True
+    ReplSelection ReplToggleFast -> True
+    ReplSelection ReplSetModel{} -> True
     ReplSetShell{} -> True
     ReplToggleComputerUse -> True
     ReplSetComputerUse{} -> True

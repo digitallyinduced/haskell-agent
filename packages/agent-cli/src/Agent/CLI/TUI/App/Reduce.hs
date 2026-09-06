@@ -358,7 +358,7 @@ applyUiEvent uiEvent state =
                         else state.appNativeProgressKeepaliveBucket
                 }
         nextState =
-            case state.appChoice of
+            case choiceOverlay state of
                 Just choice
                     | choiceClosesOnUiTransition
                         previousUi
@@ -366,7 +366,6 @@ applyUiEvent uiEvent state =
                         choice ->
                         nextState0
                             { appChoice = Nothing
-                            , appChoiceReply = Nothing
                             }
                 _ -> nextState0
     in Composer.applyComposerUiEvent uiEvent nextState
