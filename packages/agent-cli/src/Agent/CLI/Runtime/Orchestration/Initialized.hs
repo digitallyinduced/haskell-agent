@@ -107,11 +107,13 @@ import Agent.CLI.Session.Runtime.Types
     ( StartupRuntime(startupToolEnv, startupStderr, startupStdout,
                      startupStdoutTty, startupStdinTty, startupFullscreen,
                      startupUiRuntimeRef, startupStdinControl, startupInterrupt,
-                     startupDatabaseStore, startupNativeHooks) )
+                     startupDatabaseStore, startupNativeHooks,
+                     startupStartedAt, startupTimings) )
 import Agent.CLI.SessionLock ( releaseSessionLock, SessionLock )
 import Agent.CLI.Skills ( loadSkillsCatalogQuiet )
 import Agent.CLI.Startup.Auth
-    ( loadStartupAuth, loadStartupAuthFromResult, markStartupStage, startupDie )
+    ( loadStartupAuth, loadStartupAuthFromResult, markStartupStage,
+      recordStartupTiming, startupDie )
 import Agent.CLI.Style ( setCliWindowTitle )
 import Agent.CLI.TUI.App
     ( setFullscreenHistorySource, setFullscreenWindowTitle )
@@ -348,6 +350,9 @@ prepareInitializedWorkspace request = do
         preparedDiscovery =
             nativePreparedDiscovery . (.nativeWorkspaceDiscovery)
                 =<< startup.startupNativeHooks
+        checkpoint =
+            recordStartupTiming startup.startupStartedAt startup.startupTimings
+    checkpoint "workspace discovery started"
     projectRoot <-
         maybe
             (resolveProjectRoot cwd)
@@ -364,6 +369,7 @@ prepareInitializedWorkspace request = do
             projectRootPath >>= \case
             Left err -> startupDie startup err
             Right scopes -> pure scopes
+    checkpoint "workspace scopes ready"
     let loadWorkspaceMetadata =
             concurrently
                 (concurrently
@@ -398,6 +404,7 @@ prepareInitializedWorkspace request = do
             else do
                 metadata <- loadWorkspaceMetadata
                 pure (metadata, SkillCatalog [] [])
+    checkpoint "workspace metadata and skills ready"
     let projectSettings =
             withInheritedLastModel projectSettings0 userSettings
     catalog <- either

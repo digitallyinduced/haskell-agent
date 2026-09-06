@@ -161,7 +161,7 @@ import Control.Applicative ( (<|>) )
 import Control.Concurrent.MVar
     ( MVar, newEmptyMVar, newMVar, readMVar, tryPutMVar )
 import Control.Exception.Safe
-    ( displayException, finally, onException, throwIO, try, tryAny )
+    ( bracketOnError, displayException, finally, onException, throwIO, try, tryAny )
 import Control.Monad ( when, forM_, void, unless )
 import Data.IORef
     ( IORef, atomicModifyIORef', newIORef, readIORef, writeIORef )
@@ -633,7 +633,10 @@ data AgentIterationRequest = AgentIterationRequest
     , iterationTransition :: Maybe ProviderTransition
     }
 
-data AgentIterationResources = AgentIterationResources
+-- | Only the local information needed to draw the first editable frame.
+-- Database connections, gateway credentials and resumed history belong to the
+-- backend worker, not the terminal's initialization path.
+data AgentIterationBootstrap = AgentIterationBootstrap
     { iterationStartedAt :: UTCTime
     , iterationStartupTimings :: IORef [(Text, NominalDiffTime)]
     , iterationSyntaxLoadDuration :: IORef (Maybe NominalDiffTime)
@@ -642,6 +645,11 @@ data AgentIterationResources = AgentIterationResources
     , iterationConfiguredTheme :: ThemeKind
     , iterationHome :: OsPath
     , iterationRoot :: OsPath
+    , iterationInitialSource :: OsPath
+    }
+
+data AgentIterationResources = AgentIterationResources
+    { iterationBootstrap :: AgentIterationBootstrap
     , iterationDatabaseStore :: Store
     , iterationConnectedGateway :: Maybe GatewayCredential
     , iterationResumed :: Maybe (SessionMeta, [SessionTurn])
@@ -655,7 +663,7 @@ data AgentIterationInterface = AgentIterationInterface
     , iterationUiRuntimeRef :: IORef (Maybe FullscreenRuntime)
     , iterationCancelToolRef :: IORef (IO ())
     , iterationInstallToolRuntime :: ToolEnv -> IO ()
-    , iterationBuildStartupRuntime :: ToolEnv -> StartupRuntime
+    , iterationBuildStartupRuntime :: Store -> ToolEnv -> StartupRuntime
     }
 
 prepareAgentIterationTracked
@@ -692,26 +700,33 @@ prepareTrackedAgentIteration request = do
     forM_
         request.iterationActiveFullscreen
         resetFullscreenSessionActions
-    resources <- prepareAgentIterationResources request
-    interface <- prepareAgentIterationInterface request resources
-    resumeLock <- readIORef request.iterationResumeLockRef
-    let action =
+    bootstrap <- prepareAgentIterationBootstrap request
+    interface <- prepareAgentIterationInterface request bootstrap
+    -- Run resource preparation inside the existing fullscreen worker. Input
+    -- can be edited/queued immediately, but no session action or model request
+    -- is installed until initialization and resume validation have succeeded.
+    let activeRequest =
+            request
+                { iterationActiveFullscreen = interface.iterationFullscreen }
+        action = do
+            resources <- prepareAgentIterationResources activeRequest bootstrap
+            resumeLock <- readIORef request.iterationResumeLockRef
             prepareAgentIterationAction
                 request
                 resources
                 interface
                 resumeLock
         cleanup =
-            cleanupAgentIteration request resources interface
+            cleanupAgentIteration request interface
     pure PreparedAgent
         { preparedFullscreen = interface.iterationFullscreen
         , preparedRun = action `finally` cleanup
         }
 
-prepareAgentIterationResources
+prepareAgentIterationBootstrap
     :: AgentIterationRequest
-    -> IO AgentIterationResources
-prepareAgentIterationResources request = do
+    -> IO AgentIterationBootstrap
+prepareAgentIterationBootstrap request = do
     startedAt <- getCurrentTime
     startupTimingsRef <- newIORef []
     syntaxLoadDurationRef <- newIORef Nothing
@@ -726,52 +741,14 @@ prepareAgentIterationResources request = do
             Right config -> pure config
     let configuredTheme = harnessConfig.configTheme
     let root = sessionsRoot home
-    databaseStore <-
-        case
-            request.iterationRunMode.runNativeHooks
-                >>= (.nativeDatabaseStore)
-        of
-        Just borrowed -> pure borrowed
-        Nothing -> do
-            databaseConfig <- managedPostgresConfigForHome home
-            openStore databaseConfig >>= \case
-                Left err ->
-                    failAgentIterationPreparation request
-                        (renderStoreError err)
-                Right store -> do
-                    writeIORef request.iterationDatabaseStoreRef (Just store)
-                    pure store
-    connectedGateway <-
-        loadGatewayCredentialAt home >>= \case
-            Left err ->
-                failAgentIterationPreparation request
-                    ("Could not load gateway credentials: " <> err)
-            Right credential -> pure credential
-    let connectedGatewayIdentity =
-            gatewayCredentialIdentity <$> connectedGateway
-    resumed <-
-        loadAgentIterationResume
-            request
-            root
-            databaseStore
-            connectedGatewayIdentity
-    source <- case request.iterationOptions.optCwd of
-        Just requestedCwd -> makeAbsolute requestedCwd
-        Nothing -> case resumed of
-            Just (meta, _) -> makeAbsolute meta.metaCwd
-            Nothing ->
-                maybe
-                    getCurrentDirectory
-                    makeAbsolute
-                    request.iterationRunMode.runCwdHint
-    -- Native resumes supply optCwd too. Restore the selected effective cwd,
-    -- not an unrelated historical path when the caller overrides it.
-    forM_ resumed $ \_ ->
-        restoreManagedWorktree (worktreeRoot home) source >>= \case
-            Left err -> failAgentIterationPreparation request
-                ("Could not restore session worktree: " <> err)
-            Right () -> pure ()
-    pure AgentIterationResources
+    initialSource <-
+        maybe
+            getCurrentDirectory
+            makeAbsolute
+            (request.iterationOptions.optCwd
+                <|> request.iterationRunMode.runCwdHint)
+    recordStartupTiming startedAt startupTimingsRef "configuration"
+    pure AgentIterationBootstrap
         { iterationStartedAt = startedAt
         , iterationStartupTimings = startupTimingsRef
         , iterationSyntaxLoadDuration = syntaxLoadDurationRef
@@ -780,6 +757,72 @@ prepareAgentIterationResources request = do
         , iterationConfiguredTheme = configuredTheme
         , iterationHome = home
         , iterationRoot = root
+        , iterationInitialSource = initialSource
+        }
+
+prepareAgentIterationResources
+    :: AgentIterationRequest
+    -> AgentIterationBootstrap
+    -> IO AgentIterationResources
+prepareAgentIterationResources request bootstrap = do
+    let home = bootstrap.iterationHome
+        root = bootstrap.iterationRoot
+        recordStage =
+            recordStartupTiming
+                bootstrap.iterationStartedAt
+                bootstrap.iterationStartupTimings
+    setStartupNotice request.iterationActiveFullscreen "Opening session storage…"
+    databaseStore <-
+        case
+            request.iterationRunMode.runNativeHooks
+                >>= (.nativeDatabaseStore)
+        of
+        Just borrowed -> pure borrowed
+        Nothing -> do
+            databaseConfig <- managedPostgresConfigForHome home
+            trackPreparationResource
+                request.iterationDatabaseStoreRef
+                closeStore
+                (openStore databaseConfig) >>= \case
+                Left err ->
+                    failAgentIterationPreparation request
+                        (renderStoreError err)
+                Right store -> pure store
+    recordStage "database"
+    connectedGateway <-
+        loadGatewayCredentialAt home >>= \case
+            Left err ->
+                failAgentIterationPreparation request
+                    ("Could not load gateway credentials: " <> err)
+            Right credential -> pure credential
+    recordStage "gateway credentials"
+    let connectedGatewayIdentity =
+            gatewayCredentialIdentity <$> connectedGateway
+    resumed <-
+        loadAgentIterationResume
+            request
+            root
+            databaseStore
+            connectedGatewayIdentity
+    recordStage "resume"
+    source <- case request.iterationOptions.optCwd of
+        Just requestedCwd -> makeAbsolute requestedCwd
+        Nothing -> case resumed of
+            Just (meta, _) -> makeAbsolute meta.metaCwd
+            Nothing -> pure bootstrap.iterationInitialSource
+    -- Native resumes supply optCwd too. Restore the selected effective cwd,
+    -- not an unrelated historical path when the caller overrides it.
+    forM_ resumed $ \_ ->
+        restoreManagedWorktree (worktreeRoot home) source >>= \case
+            Left err -> failAgentIterationPreparation request
+                ("Could not restore session worktree: " <> err)
+            Right () -> pure ()
+    setStartupNotice request.iterationActiveFullscreen
+        (if request.iterationOptions.optWorktree && isNothing resumed
+            then "Creating worktree…"
+            else "Loading project…")
+    pure AgentIterationResources
+        { iterationBootstrap = bootstrap
         , iterationDatabaseStore = databaseStore
         , iterationConnectedGateway = connectedGateway
         , iterationResumed = resumed
@@ -808,12 +851,14 @@ loadAgentIterationResume request root databaseStore connectedGatewayIdentity =
                 let err = "session not found: " <> sessionId
                 signalAgentIterationReady request (Left err)
                 failAgentIterationPreparation request err
-            acquireSessionLock dir sessionId >>= \case
+            trackPreparationResource
+                request.iterationResumeLockRef
+                releaseSessionLock
+                (acquireSessionLock dir sessionId) >>= \case
                 Left err -> do
                     signalAgentIterationReady request (Left err)
                     failAgentIterationPreparation request err
-                Right lock -> do
-                    writeIORef request.iterationResumeLockRef (Just lock)
+                Right _ -> do
                     loadSessionMeta sessionPool root sessionId >>= \case
                         Left err -> do
                             signalAgentIterationReady request (Left err)
@@ -884,15 +929,15 @@ failAgentIterationPreparation request message =
 
 prepareAgentIterationInterface
     :: AgentIterationRequest
-    -> AgentIterationResources
+    -> AgentIterationBootstrap
     -> IO AgentIterationInterface
-prepareAgentIterationInterface request resources = do
+prepareAgentIterationInterface request bootstrap = do
     let runMode = request.iterationRunMode
         options = request.iterationOptions
         stdoutHandle = runMode.runStdout
         stderrHandle = runMode.runStderr
         background = runMode.runInBackground
-        initialCwd = resources.iterationSource
+        initialCwd = bootstrap.iterationInitialSource
     uiRuntimeRef <- newIORef Nothing
     cancelToolRef <- newIORef (pure ())
     interrupt <- newInterruptState \msg -> do
@@ -928,10 +973,7 @@ prepareAgentIterationInterface request resources = do
         initialFullscreenState =
             (reduceUi
                 (UiSetNotice
-                    (Just (progressNotice
-                        (if options.optWorktree
-                            then "Creating worktree…"
-                            else "Loading project…"))))
+                    (Just (progressNotice "Opening session storage…")))
                 (reduceUi
                     (UiSetRepository
                         ""
@@ -950,7 +992,7 @@ prepareAgentIterationInterface request resources = do
         Nothing
             | fullscreenEnabled ->
                 Just <$> newFullscreenRuntimeWithTheme
-                    resources.iterationConfiguredTheme
+                    bootstrap.iterationConfiguredTheme
                     request.iterationFullscreenInputs
                     (readIORef cancelToolRef >>= id)
                     (\level ->
@@ -968,12 +1010,12 @@ prepareAgentIterationInterface request resources = do
                     (\target -> readIORef agentSelectRef >>= ($ target))
                     (do
                         recordStartupTiming
-                            resources.iterationStartedAt
-                            resources.iterationStartupTimings
+                            bootstrap.iterationStartedAt
+                            bootstrap.iterationStartupTimings
                             "first frame"
                         void (tryPutMVar firstFrameReady ()))
                     (writeIORef
-                        resources.iterationSyntaxLoadDuration . Just)
+                        bootstrap.iterationSyntaxLoadDuration . Just)
                     options.optMotionMode
                     useColor
                     initialFullscreenState
@@ -1001,12 +1043,12 @@ prepareAgentIterationInterface request resources = do
                     (noteFullscreenCtrlC interrupt)
                     (readIORef agentSnapshotRef >>= id)
                     (\target -> readIORef agentSelectRef >>= ($ target))
-        buildStartupRuntime toolEnv = StartupRuntime
+        buildStartupRuntime databaseStore toolEnv = StartupRuntime
             { startupToolEnv = toolEnv
-            , startupHarnessConfig = resources.iterationHarnessConfig
+            , startupHarnessConfig = bootstrap.iterationHarnessConfig
             , startupNetworkRecovery =
                 request.iterationProcessRuntime.processNetworkRecovery
-            , startupDatabaseStore = resources.iterationDatabaseStore
+            , startupDatabaseStore = databaseStore
             , startupInterrupt = interrupt
             , startupStdinControl = stdinControl
             , startupUiRuntimeRef = uiRuntimeRef
@@ -1024,11 +1066,11 @@ prepareAgentIterationInterface request resources = do
             , startupAgentSnapshot = agentSnapshotRef
             , startupAgentSelect = agentSelectRef
             , startupRestartEffort = restartEffortActionRef
-            , startupStartedAt = resources.iterationStartedAt
-            , startupTimings = resources.iterationStartupTimings
+            , startupStartedAt = bootstrap.iterationStartedAt
+            , startupTimings = bootstrap.iterationStartupTimings
             , startupSyntaxLoadDuration =
-                resources.iterationSyntaxLoadDuration
-            , startupFinished = resources.iterationStartupFinished
+                bootstrap.iterationSyntaxLoadDuration
+            , startupFinished = bootstrap.iterationStartupFinished
             , startupSessionState = request.iterationSessionState
             , startupNativeHooks = runMode.runNativeHooks
             }
@@ -1095,14 +1137,17 @@ runPreparedAgentIteration
         terminalCwd
     toolEnv <- defaultToolEnv cwd
     interface.iterationInstallToolRuntime toolEnv
-    let startup = interface.iterationBuildStartupRuntime toolEnv
+    let startup =
+            interface.iterationBuildStartupRuntime
+                resources.iterationDatabaseStore
+                toolEnv
     runAgentInitialized
         (runAgentWithRuntime request.iterationProcessRuntime)
         request.iterationProcessRuntime
         request.iterationOptions
         request.iterationTransition
-        resources.iterationHome
-        resources.iterationRoot
+        resources.iterationBootstrap.iterationHome
+        resources.iterationBootstrap.iterationRoot
         resources.iterationResumed
         resumeLock
         cwd
@@ -1124,8 +1169,8 @@ resolveAgentIterationCwd request resources interface resumeLock =
                 readMVar interface.iterationFirstFrameReady
                 createManagedWorktreeFromConfigWithProgress
                     reportWorktreeProgress
-                    resources.iterationHarnessConfig
-                    resources.iterationHome
+                    resources.iterationBootstrap.iterationHarnessConfig
+                    resources.iterationBootstrap.iterationHome
                     resources.iterationSource
                     >>= either worktreeFailed worktreeCreated
             | otherwise -> pure resources.iterationSource
@@ -1160,31 +1205,54 @@ resolveAgentIterationCwd request resources interface resumeLock =
 
 cleanupAgentIteration
     :: AgentIterationRequest
-    -> AgentIterationResources
     -> AgentIterationInterface
     -> IO ()
-cleanupAgentIteration request resources interface = do
-    let runMode = request.iterationRunMode
-    forM_ runMode.runNativeHooks \hooks ->
-        hooks.nativeRegisterCancel (pure ())
-    writeIORef interface.iterationUiRuntimeRef Nothing
-    writeIORef interface.iterationCancelToolRef (pure ())
-    forM_
-        interface.iterationFullscreen
-        resetFullscreenSessionActions
-    case runMode.runNativeHooks >>= (.nativeDatabaseStore) of
-        Just _ -> pure ()
-        Nothing -> closeStore resources.iterationDatabaseStore
+cleanupAgentIteration request interface =
+    resetInterface `finally`
+        releasePreparationResources
+            request.iterationResumeLockRef
+            request.iterationDatabaseStoreRef
+  where
+    resetInterface = do
+        let runMode = request.iterationRunMode
+        forM_ runMode.runNativeHooks \hooks ->
+            hooks.nativeRegisterCancel (pure ())
+        writeIORef interface.iterationUiRuntimeRef Nothing
+        writeIORef interface.iterationCancelToolRef (pure ())
+        forM_
+            interface.iterationFullscreen
+            resetFullscreenSessionActions
 
 releasePreparationResources
     :: IORef (Maybe SessionLock)
     -> IORef (Maybe Store)
     -> IO ()
 releasePreparationResources resumeLockRef databaseStoreRef = do
+    -- Session storage may already have released a successfully resumed lock.
+    -- filelock guards unlockFile with an atomic alive flag, so this also covers
+    -- cancellation before that ownership handoff without unlocking twice.
     atomicModifyIORef' resumeLockRef (\current -> (Nothing, current))
         >>= mapM_ releaseSessionLock
     atomicModifyIORef' databaseStoreRef (\current -> (Nothing, current))
         >>= mapM_ closeStore
+
+-- | Transfer a freshly acquired resource into its initially empty tracking
+-- slot without leaking it if fullscreen cancellation lands during handoff.
+-- Once the callback returns, the enclosing iteration's finalizer owns it.
+trackPreparationResource
+    :: IORef (Maybe a)
+    -> (a -> IO ())
+    -> IO (Either e a)
+    -> IO (Either e a)
+trackPreparationResource ref release acquire =
+    bracketOnError
+        acquire
+        (mapM_ \resource -> do
+            writeIORef ref Nothing
+            release resource)
+        \result -> do
+            forM_ result (writeIORef ref . Just)
+            pure result
 
 resetFullscreenSessionActions :: FullscreenRuntime -> IO ()
 resetFullscreenSessionActions runtime =
