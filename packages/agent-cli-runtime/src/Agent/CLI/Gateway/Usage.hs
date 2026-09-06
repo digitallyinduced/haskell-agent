@@ -7,6 +7,7 @@ import Agent.CLI.Gateway.Credentials
     , withGatewayCredentialLease
     )
 import Agent.CLI.Gateway.Http (gatewayMaxResponseBytes, readBoundedBody)
+import Agent.ClientIdentity (gatewayUserAgent)
 import Agent.OpenAI.Usage (UsageSnapshot, decodeUsageResponse)
 import Agent.Server.Client.GatewayIdentity (GatewayCredential(..))
 import Control.Exception.Safe (tryAny)
@@ -59,6 +60,7 @@ requestGatewayUsage credential model =
                         <> "/backend-api/wham/usage"
                         <> query
             outcome <- tryAny do
+                userAgent <- gatewayUserAgent
                 manager <- newTlsManager
                 initial <- HTTP.parseRequest (Text.unpack endpoint)
                 let request =
@@ -71,6 +73,7 @@ requestGatewayUsage credential model =
                                             credential.gatewayAccessToken
                                   )
                                 , (hAccept, "application/json")
+                                , ("User-Agent", userAgent)
                                 ]
                             , HTTP.checkResponse = \_ _ -> pure ()
                             -- Never forward the gateway bearer to a redirect.

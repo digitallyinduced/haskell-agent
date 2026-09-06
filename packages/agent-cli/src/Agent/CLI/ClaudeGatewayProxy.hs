@@ -5,6 +5,7 @@ import Agent.CLI.GatewayClient
     , validateGatewayCredential
     )
 import Agent.Claude (ClaudeCodeTransport(..))
+import Agent.ClientIdentity (gatewayUserAgent)
 import Control.Concurrent.Async (withAsync)
 import Control.Exception.Safe (bracket, tryAny)
 import Control.Monad (unless)
@@ -98,6 +99,7 @@ forward
     -> (Response -> IO ResponseReceived)
     -> IO ResponseReceived
 forward manager credential downstream body respond = do
+    userAgent <- gatewayUserAgent
     initial <-
         HTTP.parseRequest $
             Text.unpack credential.gatewayBaseUrl <> "/anthropic/v1/messages"
@@ -105,17 +107,18 @@ forward manager credential downstream body respond = do
         initial
             { HTTP.method = "POST"
             , HTTP.requestHeaders =
-                ( hAuthorization
-                , "Bearer " <> Text.encodeUtf8 credential.gatewayAccessToken
-                )
-                    : filter
+                [ (hUserAgent, userAgent)
+                , ( hAuthorization
+                  , "Bearer " <> Text.encodeUtf8 credential.gatewayAccessToken
+                  )
+                ]
+                    <> filter
                         (\(name, _) ->
                             name `elem`
                                 [ hAccept
                                 , hContentType
                                 , "anthropic-version"
                                 , "anthropic-beta"
-                                , hUserAgent
                                 ])
                         downstream.requestHeaders
             , HTTP.requestBody = HTTP.RequestBodyBS body

@@ -7,6 +7,7 @@ import Agent.CLI.Gateway.Credentials
     , withGatewayCredentialTurnLease
     )
 import Agent.CLI.Gateway.Http (gatewayMaxResponseBytes, readBoundedBody)
+import Agent.ClientIdentity (gatewayUserAgent)
 import Agent.OpenAI.Transcription
     ( ChatGPTDictationStreamFailure(..)
     , encodePcm16Wav
@@ -50,6 +51,7 @@ transcribeGatewayPcmWith admitted produceAudio onTranscript =
                     case gatewayDictationWebSocketUrl current of
                         Left err -> pure (Left err)
                         Right websocketUrl -> do
+                            userAgent <- gatewayUserAgent
                             chunks <- newIORef []
                             capturedBytes <- newIORef 0
                             let captureAndBuffer sendAudio =
@@ -72,6 +74,7 @@ transcribeGatewayPcmWith admitted produceAudio onTranscript =
                                         <> TextEncoding.encodeUtf8
                                             current.gatewayAccessToken
                                   )
+                                , ("User-Agent", userAgent)
                                 ]
                                 captureAndBuffer
                                 onTranscript >>= \case
@@ -190,6 +193,7 @@ postGatewayTranscription credential wav =
                         (Text.strip credential.gatewayBaseUrl)
                         <> "/v1/audio/transcriptions"
             outcome <- tryAny do
+                userAgent <- gatewayUserAgent
                 manager <- newTlsManager
                 initial <- HTTP.parseRequest (Text.unpack endpoint)
                 let baseRequest =
@@ -202,6 +206,7 @@ postGatewayTranscription credential wav =
                                             credential.gatewayAccessToken
                                   )
                                 , (hAccept, "application/json")
+                                , ("User-Agent", userAgent)
                                 ]
                             , HTTP.checkResponse = \_ _ -> pure ()
                             -- Never forward the gateway bearer to a redirect.

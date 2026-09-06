@@ -11,6 +11,8 @@ int32_t ha_runtime_init(void) {
     pthread_mutex_lock(&runtime_lock);
     if (!runtime_initialized) {
         int argc = 1;
+        /* Agent.ClientIdentity uses this explicit RTS product name to
+         * distinguish desktop traffic from the CLI (including CLI on macOS). */
         char *argv[] = {"haskell-agent-macos", NULL};
         char **argv_pointer = argv;
         hs_init(&argc, &argv_pointer);
