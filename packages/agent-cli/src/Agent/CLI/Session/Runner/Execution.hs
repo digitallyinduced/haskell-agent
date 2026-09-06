@@ -70,6 +70,7 @@ import Agent.CLI.SessionState
 import Agent.CLI.Render
 import Agent.CLI.Session
 import Agent.CLI.Session.History
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.SessionEnv
 import Agent.CLI.SessionLock
     ( acquireSessionActivityLock
@@ -452,7 +453,7 @@ newSessionControlRuntime host SessionRequest{..} = do
         newAgentViewportRuntime AgentViewportRuntimeConfig
             { viewportConfigShowRawReasoning =
                 options.optShowRawReasoning
-            , viewportConfigWorkspace = toText cwd
+            , viewportConfigWorkspace = toText workspace.cwd
             , viewportConfigReadRootTranscript =
                 readLiveTranscript conversationRef
             , viewportConfigListChildren = listChildAgents
@@ -563,8 +564,8 @@ buildSkillContextRuntime
                         SuppressAgentsContextLoaded
                         options
                         dialect
-                        home
-                        cwd
+                        workspace.home
+                        workspace.cwd
                         []
                         Nothing
                         ((.catalogEnvironmentContext)
@@ -575,7 +576,8 @@ buildSkillContextRuntime
                             <$> codexCatalogSession)
         freshSkills <-
             if loadsHostWorkspaceContext
-                then loadSkillsCatalogQuiet options home projectRoot cwd
+                then loadSkillsCatalogQuiet
+                    options workspace.home workspace.projectRoot workspace.cwd
                 else pure (SkillCatalog [] [])
         (omitted, _) <-
             installSkills freshAgents True freshSkills
@@ -609,7 +611,8 @@ buildSkillContextRuntime
     refreshSkills queueContext = do
         refreshed <-
             if loadsHostWorkspaceContext
-                then loadSkillsCatalogQuiet options home projectRoot cwd
+                then loadSkillsCatalogQuiet
+                    options workspace.home workspace.projectRoot workspace.cwd
                 else pure (SkillCatalog [] [])
         (omitted, _) <-
             installSkills startupContext queueContext refreshed
@@ -734,7 +737,7 @@ buildSessionLoopEventRuntime
                 && terminal.terminalNativeProgress
                 && nativeProgressAnimationEnabled options.optMotionMode
         , renderMotionMode = options.optMotionMode
-        , renderWorkspace = toText cwd
+        , renderWorkspace = toText workspace.cwd
         }
     emitLoop event = do
         recordAgentViewportEvent agentViewportRuntime event
@@ -829,15 +832,15 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                                             resolveColor host.hostStderrHandle
                                         promptPermission
                                             color
-                                            (toText cwd)
+                                            (toText workspace.cwd)
                                             requested)
                                 reportLineApproval
-                                (saveProjectAutoApprove projectRoot True)
+                                (saveProjectAutoApprove workspace.projectRoot True)
                         Just runtime ->
                             approve
                                 (requestFullscreenPermission
                                     runtime
-                                    (toText cwd))
+                                    (toText workspace.cwd))
                                 (\case
                                     ApprovalWarning _ -> pure ()
                                     ApprovalSuccess message ->
@@ -846,7 +849,7 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                                                 (Just
                                                     (successNotice
                                                         message))))
-                                (saveProjectAutoApprove projectRoot True)
+                                (saveProjectAutoApprove workspace.projectRoot True)
         classify = const (pure classifiedReadOnly)
         approve request report persist =
             approveToolDecisionWithReporterAndPersistenceClassified
@@ -1015,7 +1018,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
                             commitAttributionModel
                             commitAttributionEffort
                             enabledNames
-                            cwd
+                            workspace.cwd
                             sessionTmp
                             today
                             (isOneShot options)
@@ -1132,7 +1135,7 @@ buildSessionSubagentRuntime SessionRequest{..} =
         case multiCtx of
             Just ctx -> setMaxConcurrent ctx.multiRegistry next
             Nothing -> pure ()
-        saveProjectMaxConcurrentAgents projectRoot next
+        saveProjectMaxConcurrentAgents workspace.projectRoot next
         pure ("concurrent agent limit: " <> Text.pack (show next))
 
 buildSessionLoopConfig
@@ -1451,13 +1454,11 @@ buildSessionEnv
         , sessionTitleTurnCount = controls.controlTitleTurnCount
         , sessionPlanMode = planMode
         , sessionTaskPlan = taskPlan
-        , sessionProjectRoot = projectRoot
-        , sessionCwd = cwd
+        , sessionWorkspace = workspace
         , sessionProviderFallback =
             host.hostNativeCapabilities.nativeProviderFallback
         , sessionPreparedWorkspaceEnvironment =
             host.hostPreparedWorkspaceEnvironment
-        , sessionHome = home
         , sessionMcpRegistrations = mcpRegistrations
         , sessionMcpWarnings = mcpWarnings
         , sessionMcpFleet = mcpFleet
@@ -1624,7 +1625,7 @@ installSessionActions
                         copyImmediate
                             "worktree path"
                             "worktree path is unavailable"
-                            (Just (toText cwd))
+                            (Just (toText workspace.cwd))
                     ReplCopySession ->
                         currentSessionId persist >>= copyImmediate
                             "session id"
@@ -1681,7 +1682,7 @@ runSessionInteraction
                 inputs <-
                     case startup.startupNativeHooks >>= (.nativeInitialTurnInputs) of
                         Just nativeInputs -> pure nativeInputs
-                        Nothing -> managedTurnInputs cwd request
+                        Nothing -> managedTurnInputs workspace.cwd request
                 skillInputs <-
                     callbacks.runnerPreparePromptSkillInputs
                         env

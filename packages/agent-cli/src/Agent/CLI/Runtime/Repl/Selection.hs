@@ -66,6 +66,7 @@ import Agent.CLI.ModelPicker
     ( ModelPickerSelection(modelPickerEffort, modelPickerOption) )
 import Agent.CLI.Session.Interaction ( setSessionEffort )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Style
     ( glyphOk, glyphSession, roleError, roleMuted )
 import Agent.CLI.TUI.App
@@ -305,8 +306,7 @@ handleSelection
             , sessionDialect = dialect
             , sessionParams = paramsRef
             , sessionPersist = persist
-            , sessionProjectRoot = projectRoot
-            , sessionHome = home
+            , sessionWorkspace = WorkspaceContext{projectRoot, home}
             , sessionDraft = draftRef
             }
         continue
@@ -466,8 +466,7 @@ chooseModel env@SessionEnv
     , sessionProvider = provider
     , sessionDialect = dialect
     , sessionParams = paramsRef
-    , sessionHome = home
-    , sessionProjectRoot = projectRoot
+    , sessionWorkspace = WorkspaceContext{home, projectRoot}
     , sessionRender = render
     , sessionConversation = conversationRef
     , sessionPersist = persist
@@ -592,7 +591,7 @@ setTheme env theme next =
             next
         Just runtime -> do
             updateHarnessConfig
-                env.sessionHome
+                env.sessionWorkspace.home
                 (\config -> Right config { configTheme = theme })
                 >>= \case
                 Left err -> do

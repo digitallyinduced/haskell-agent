@@ -47,6 +47,7 @@ import Agent.CLI.Session
     , ensureSession
     )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Style
     ( glyphOk, glyphSession, roleError, roleMuted, roleSuccess )
 import Agent.CLI.TUI.App
@@ -97,7 +98,7 @@ handleMetaConsoleRequest replContext slashCatalog executeCommand rawRequest
     | Text.null request =
         metaFailure runtime "Meta Console request must not be empty"
     | otherwise =
-        loadHarnessConfig env.sessionHome >>= \case
+        loadHarnessConfig env.sessionWorkspace.home >>= \case
             Left err -> metaFailure runtime err
             Right config -> do
                 plannerContext <- buildMetaContext env config
@@ -255,7 +256,7 @@ applyMetaPlan runtime initial plan =
                 if any isMetaConfigAction plan.metaActions
                     then
                         updateHarnessConfig
-                            (metaEnv runtime).sessionHome
+                            (metaEnv runtime).sessionWorkspace.home
                             (applyMetaConfigActions
                                 secrets
                                 plan.metaActions)

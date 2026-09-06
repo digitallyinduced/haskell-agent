@@ -126,6 +126,7 @@ import Agent.CLI.Session.Interaction ( runBtwQuestion )
 import Agent.CLI.Session.Selection
     ( currentSessionId, pickAgentChoice )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Skills
     ( formatSkillsListing
     , resolvePromptSkillMentions
@@ -214,7 +215,7 @@ handleReplLine
             { sessionProvider = provider
             , sessionPolicy = policyRef
             , sessionPlanMode = planMode
-            , sessionProjectRoot = projectRoot
+            , sessionWorkspace = WorkspaceContext{projectRoot}
             , sessionFullscreen = fullscreen
             }
         continueWith
@@ -574,7 +575,7 @@ manageMcpServers handlerContext next = do
             legacy $
                 runMcpManager
                     color
-                    env.sessionHome
+                    env.sessionWorkspace.home
                     env.sessionMcpRegistrations
                     env.sessionMcpWarnings
         if restart
@@ -684,7 +685,7 @@ toggleApprovalMode handlerContext next
     env = handlerContext.handlerSessionEnv
     provider = env.sessionProvider
     policyRef = env.sessionPolicy
-    projectRoot = env.sessionProjectRoot
+    projectRoot = env.sessionWorkspace.projectRoot
     displayInfo = displayReplInfo handlerContext
 
 showSavedPlan :: ReplHandlerContext -> IO RunResult -> IO RunResult
@@ -823,7 +824,7 @@ manageLogin env next = do
             else next
   where
     fullscreen = env.sessionFullscreen
-    cwd = env.sessionCwd
+    cwd = env.sessionWorkspace.cwd
 
 showUsage :: ReplHandlerContext -> IO RunResult -> IO RunResult
 showUsage handlerContext next = do
@@ -917,7 +918,7 @@ initializeProjectGuide handlerContext submitExpandedTurn next color line = do
                         (roleMuted color (glyphSession <> message))
                 next
   where
-    cwd = handlerContext.handlerSessionEnv.sessionCwd
+    cwd = handlerContext.handlerSessionEnv.sessionWorkspace.cwd
     displayInfo = displayReplInfo handlerContext
     displayError = displayReplError handlerContext
 
@@ -1089,7 +1090,7 @@ showWorkingTreeDiff :: ReplHandlerContext -> IO RunResult -> Bool -> IO RunResul
 showWorkingTreeDiff handlerContext next color = do
     result <-
         withCommandActivity env "Loading Git diff…" $
-            getGitDiff env.sessionCwd
+            getGitDiff env.sessionWorkspace.cwd
     case result of
         Left err -> do
             displayError err $
@@ -1136,7 +1137,7 @@ choosePermissions handlerContext next color
                     message <-
                         setApprovalPolicy
                             env.sessionPolicy
-                            env.sessionProjectRoot
+                            env.sessionWorkspace.projectRoot
                             (approvalPolicyAt index)
                     displayInfo message $
                         Text.hPutStrLn stderr
@@ -1233,7 +1234,7 @@ chooseReviewTarget handlerContext =
                                         (ReviewCustom
                                             <$> nonBlank instructions))
   where
-    cwd = handlerContext.handlerSessionEnv.sessionCwd
+    cwd = handlerContext.handlerSessionEnv.sessionWorkspace.cwd
     requestChoice = requestReplChoice handlerContext
     requestText = requestReplText handlerContext
     withReplActivity = withCommandActivity handlerContext.handlerSessionEnv
