@@ -4,9 +4,9 @@
 module Agent.ClientIdentity (gatewayUserAgent) where
 
 import Data.ByteString (ByteString)
-import Data.ByteString.Char8 qualified as BS
+import qualified Data.ByteString.Char8 as BS
 import Data.Version (showVersion)
-import Paths_agent_core qualified as Paths
+import qualified Paths_agent_core as Paths
 import System.Environment (getProgName)
 import System.Info (arch, os)
 

@@ -1,7 +1,7 @@
 module Agent.ClientIdentitySpec (spec) where
 
 import Agent.ClientIdentity (gatewayUserAgent)
-import Data.ByteString.Char8 qualified as BS
+import qualified Data.ByteString.Char8 as BS
 import System.Environment (withProgName)
 import Test.Hspec
 
