@@ -368,6 +368,10 @@ runFullscreen runtime workerAction = do
                     DictationControl
                         { dictationWaitForStop =
                             job.dictationJobWaitForStop
+                        , dictationOnRecording =
+                            enqueueAppEvent runtime $
+                                AppDictationRecording
+                                    job.dictationJobRecordingSession
                         , dictationOnTranscript =
                             enqueueAppEvent runtime . AppDictationPartial
                         }

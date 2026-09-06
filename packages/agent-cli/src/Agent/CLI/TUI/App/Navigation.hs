@@ -179,7 +179,8 @@ handleNormalKey event = do
     state <- get
     case state.appDictation of
         Just session ->
-            Composer.handleDictationKey handleCtrlC session event
+            Composer.handleDictationKey
+                applyLocalUiEvent handleCtrlC session event
         Nothing
             | Bridge.isSendNowKey event ->
                 Composer.handleComposerKey

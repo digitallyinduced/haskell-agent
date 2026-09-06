@@ -14,6 +14,8 @@ module Agent.CLI.TUI.Composer
     , DictationKeyAction(..)
     , dictationKeyAction
     , dictationProgressNotice
+    , dictationStartingNotice
+    , dictationSessionIsRecording
     , draftCursorLocation
     , draftWindowStart
     , drawComposer
@@ -73,12 +75,12 @@ import Agent.TUI.TextWidth
     , previousGraphemeBoundary
     )
 import Brick
-import Control.Concurrent (newEmptyMVar, takeMVar, tryPutMVar)
+import Control.Concurrent (MVar, isEmptyMVar, newEmptyMVar, readMVar, tryPutMVar)
 import Control.Concurrent.STM (atomically, writeTQueue)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Data.IORef (newIORef, writeIORef)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (elemIndex)
 import Data.Maybe (fromMaybe)
 import qualified Data.Sequence as Seq
@@ -110,6 +112,20 @@ dictationKeyAction = \case
             Just DictationAbort
     _ -> Nothing
 
+dictationStartingNotice :: UiNotice
+dictationStartingNotice =
+    progressNotice "Starting microphone… Enter to stop · Esc to cancel"
+
+-- | A ready event can arrive after stop or after the session has finished.
+-- Keep the stop signal filled so consuming it cannot revive the listening UI.
+dictationSessionIsRecording :: MVar () -> Maybe DictationSession -> IO Bool
+dictationSessionIsRecording stop = \case
+    Just session | session.dictationStop == stop -> do
+        notStopped <- isEmptyMVar stop
+        aborted <- readIORef session.dictationAbort
+        pure (notStopped && not aborted)
+    _ -> pure False
+
 dictationProgressNotice :: Text -> UiNotice
 dictationProgressNotice transcript =
     progressNotice $
@@ -125,16 +141,21 @@ requestDictationStop session abort = do
     void (tryPutMVar session.dictationStop ())
 
 handleDictationKey
-    :: EventM Name AppState CtrlCDecision
+    :: (UiEvent -> EventM Name AppState ())
+    -> EventM Name AppState CtrlCDecision
     -> DictationSession
     -> V.Event
     -> EventM Name AppState ()
-handleDictationKey handleCtrlC session event =
+handleDictationKey applyUiEvent handleCtrlC session event =
     case dictationKeyAction event of
-        Just DictationCommit ->
+        Just DictationCommit -> do
             liftIO (requestDictationStop session False)
+            applyUiEvent $
+                UiSetNotice (Just (progressNotice "Transcribing…"))
         Just DictationAbort -> do
             liftIO (requestDictationStop session True)
+            applyUiEvent $
+                UiSetNotice (Just (progressNotice "Cancelling dictation…"))
             case event of
                 V.EvKey (V.KChar 'c') modifiers
                     | V.MCtrl `elem` modifiers ->
@@ -525,13 +546,14 @@ startDictation applyUiEvent = do
                         , dictationAbort = abort
                         }
             applyUiEvent
-                (UiSetNotice (Just (dictationProgressNotice "")))
+                (UiSetNotice (Just dictationStartingNotice))
                 \state -> state { appDictation = Just session }
             liftIO $ atomically $
                 writeTQueue
                     current.appRuntime.runtimeDictationJobs
                     DictationJob
-                        { dictationJobWaitForStop = takeMVar stop
+                        { dictationJobWaitForStop = readMVar stop
+                        , dictationJobRecordingSession = stop
                         }
 
 submitRaw :: ApplyLocalUiEvent -> ReplLine -> EventM Name AppState ()
