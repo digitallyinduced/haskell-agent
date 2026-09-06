@@ -102,6 +102,7 @@ foreign-library haskell-agent-bridge
                     , Agent.CLI.MacOS.LearnedSkillsBridge
                     , Agent.CLI.MacOS.RepositoryInput
                     , Agent.CLI.MacOS.ResourceAdmin
+                    , Agent.CLI.MacOS.SessionTransferBridge
     c-sources:        cbits/HaskellAgentBridgeRuntime.c
     include-dirs:     include
     includes:         HaskellAgentBridge.h
@@ -173,6 +174,7 @@ test-suite agent-native-bridge-test
                     , cbits/HaskellAgentBridgeRuntime.c
         include-dirs: include
         other-modules: Agent.CLI.MacOS.Bridge
+                     , Agent.CLI.MacOS.SessionTransferBridge
                      , Agent.CLI.MacOS.AgentSnapshot
                      , Agent.CLI.MacOS.EngineCallbacks
                      , Agent.CLI.MacOS.EngineEvents
