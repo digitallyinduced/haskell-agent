@@ -5,6 +5,7 @@ import Agent.Server.ApplicationSpec qualified
 import Agent.Server.AuthSpec qualified
 import Agent.Server.ConfigSpec qualified
 import Agent.Server.EventSpec qualified
+import Agent.Server.RepositoryCheckoutSpec qualified
 import Agent.Server.SandboxSpec qualified
 import Agent.Server.SupervisorSpec qualified
 import Agent.Server.TenantSpec qualified
@@ -21,6 +22,7 @@ main = do
                 Agent.Server.AuthSpec.spec
                 Agent.Server.ConfigSpec.spec
                 Agent.Server.EventSpec.spec
+                Agent.Server.RepositoryCheckoutSpec.spec
                 Agent.Server.SupervisorSpec.spec
                 Agent.Server.TenantSpec.spec
                 Agent.Server.SandboxSpec.spec

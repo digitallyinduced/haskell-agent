@@ -920,6 +920,10 @@
                 agentCliRuntimeTools = [
                     pkgs.ffmpeg
                     bun_1_4
+                    pkgs.curl
+                    pkgs.gh
+                    pkgs.git
+                    pkgs.jq
                     pkgs.postgresql_18
                     pkgs.ripgrep
                     pkgs.zstd

@@ -16,6 +16,7 @@ let
       file
       findutils
       gawk
+      gh
       gitMinimal
       gnugrep
       gnused
