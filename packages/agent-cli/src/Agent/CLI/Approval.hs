@@ -54,6 +54,7 @@ import Agent.Tools.Types
     , lookupRegisteredTool
     , toolAcceptsCall
     , toolAllowsWithoutPrompt
+    , toolAutoApproves
     )
 import Data.IORef
     ( IORef
@@ -208,7 +209,7 @@ approveToolDecisionWithReporterAndPersistenceClassified
             planActive <- isPlanModeActive planMode
             planPath <- planFilePath planMode
             let initialFacts = ApprovalFacts
-                    { policy
+                    { policy = scopedToolPolicy policy tools call
                     , planActive
                     , planPath
                     , readOnly = Nothing
@@ -284,7 +285,7 @@ childApprove _ _ call
     | isComputerToolCallKind call.callKind =
         pure $ Left
             "Computer use must be approved in the interactive parent session."
-childApprove policy tools call = case policy of
+childApprove policy tools call = case scopedToolPolicy policy tools call of
     ApproveAll -> pure (Right True)
     DenyMutating -> do
         allowed <- isReadOnlyCall tools call
@@ -297,6 +298,15 @@ childApprove policy tools call = case policy of
                 "Subagent cannot prompt for approval on mutating tools. \
                 \Re-run the parent with auto-approve/--yolo, or have the \
                 \parent perform this edit."
+
+-- Only the ordinary mutation prompt is waived. Classification, plan mode,
+-- dangerous-command checks and computer-use consent still run as before.
+-- Do not change the live policy or persist a project-wide YOLO setting.
+scopedToolPolicy :: ApprovalPolicy -> ToolRegistry -> ToolCall -> ApprovalPolicy
+scopedToolPolicy PromptMutating tools call
+    | Just tool <- lookupRegisteredTool call.name tools
+    , toolAutoApproves tool = ApproveAll
+scopedToolPolicy policy _ _ = policy
 
 isReadOnlyCall :: ToolRegistry -> ToolCall -> IO Bool
 isReadOnlyCall tools call = case lookupRegisteredTool call.name tools of

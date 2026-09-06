@@ -429,3 +429,4 @@ approvalLabel = \case
     AlwaysAllowed -> "always-allowed"
     AlwaysPrompt -> "prompt"
     ClassifyReadOnly _ -> "classified"
+    AutoApprove original -> "auto-approve:" <> approvalLabel original

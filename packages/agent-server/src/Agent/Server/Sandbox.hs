@@ -27,7 +27,8 @@ import Agent.ToolDispatch
     , passthroughTool
     )
 import Agent.Tools.Types
-    ( AppTool(..)
+    ( ApprovalRule(..)
+    , AppTool(..)
     , AppToolGroup(..)
     )
 import Control.Concurrent
@@ -224,6 +225,9 @@ composeSandboxTools sandbox sessionId cwd dialect =
             -- Host resource resolvers must not inspect paths for a guest
             -- operation. The tenant broker serializes calls itself.
             , appToolResourceClaims = Nothing
+            -- Only tools actually routed into the tenant sandbox get YOLO.
+            -- Host services (including MCP writes) retain their own approvals.
+            , appToolApproval = AutoApprove tool.appToolApproval
             }
 
 invokeTenantTool

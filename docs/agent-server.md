@@ -48,6 +48,20 @@ guest. Host-side project instructions, filesystem skills, Git status, and
 project settings are disabled in this mode so tenant-controlled workspace
 symlinks cannot turn startup discovery into a host read or write.
 
+Sandbox execution tools are auto-approved by default: workspace edits, shell
+commands, builds and tests do not create human approval requests. This applies
+to existing sessions on their next turn as well as new sessions. It is scoped
+to tools actually proxied into the tenant sandbox, not a global `--yolo` policy:
+host services, including mutating MCP calls, retain their existing approvals.
+Plan-mode restrictions, dangerous-command checks and the sandbox boundary are
+unchanged. Single-tenant servers without a sandbox and local CLI sessions keep
+their existing approval behavior.
+
+Sandbox networking remains available, so automatic shell approval is not a
+semantic guarantee against external side effects (for example a command using
+credentials that a user has placed in the workspace). Do not place production
+credentials in an auto-approved sandbox unless that access is intended.
+
 Use the exported NixOS module for a production multi-tenant deployment:
 
 ```nix

@@ -240,6 +240,7 @@ isStaticallyReadOnly = \case
     AlwaysAllowed -> False
     AlwaysPrompt -> False
     ClassifyReadOnly _ -> False
+    AutoApprove original -> isStaticallyReadOnly original
 
 requestedProtocolVersion :: Maybe Value -> Text
 requestedProtocolVersion = \case
