@@ -15,6 +15,7 @@ module Claude.Agent.SDK.Types
     , UserContentBlock(..)
     , ContentBlock(..)
     , ToolResultContent(..)
+    , ToolResultPart(..)
     , StreamToolUse(..)
     , OpaqueMessage(..)
     , UserMessage(..)
@@ -277,12 +278,26 @@ data ContentBlock
         }
     deriving (Eq, Show)
 
--- | Opaque tool-result JSON plus the protocol-specific text projection used
--- for loop events and persisted tool output.
+-- | Opaque wire JSON, a display projection, and ordered typed content for
+-- persistence and model input. Image payloads never belong in display text.
 data ToolResultContent = ToolResultContent
     { raw :: !RawJson
     , renderedText :: !Text
+    , blocks :: ![ToolResultPart]
     } deriving (Eq, Show)
+
+data ToolResultPart
+    = ToolResultText !Text
+    | ToolResultImage
+        { mediaType :: !Text
+        , imageBytes :: !ByteString
+        }
+    deriving (Eq)
+
+instance Show ToolResultPart where
+    show (ToolResultText text) = "ToolResultText " <> show text
+    show ToolResultImage{mediaType} =
+        "ToolResultImage " <> show mediaType <> " <redacted>"
 
 data StreamToolUse = StreamToolUse
     { toolUseId :: !Text

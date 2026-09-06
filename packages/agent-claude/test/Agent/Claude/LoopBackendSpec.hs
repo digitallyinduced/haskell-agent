@@ -17,7 +17,7 @@ import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Cancel (newCancelFlag, requestCancel)
 import qualified Agent.Loop as Loop
 import Agent.Tools.Types (mkToolRegistry)
-import Agent.Json (rawJsonBytes)
+import Agent.Json (rawJsonBytes, rawJsonFromEncoding)
 import Agent.Loop
     ( Backend(..)
     , BackendContinuation(..)
@@ -65,6 +65,7 @@ import Control.Exception.Safe (bracket, finally)
 import Control.Concurrent.MVar (newEmptyMVar, takeMVar)
 import Control.Monad (when)
 import qualified Data.Foldable as Foldable
+import qualified Data.Aeson as Aeson
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -530,6 +531,113 @@ spec = do
                             | FunctionCallOutputItem output <- history
                             ]
                             `shouldBe` ["\"Tool reference: WebFetch\\nloaded\""]
+
+        it "preserves tool-result images as typed content across a fresh SDK session" $
+            withFakeClaude \fake ->
+                withEnvironmentVariables [("FAKE_CLAUDE_IMAGE_RESULT", Just "1")] do
+                    transcript <- newIORef []
+                    events <- newIORef []
+                    let options = defaultClaudeCodeOptions fake.executable fake.workingDirectory
+                        runTurn = do
+                            initialHistory <- readIORef transcript
+                            state <- newIORef (initialBackendSnapshot initialHistory)
+                            withClaudeCodeBackend options Nothing
+                                (pure defaultResponseCreateParams) transcript \backend ->
+                                    submitBackendWithState state backend Nothing [UserMessage "inspect"]
+                                        (\event -> modifyIORef' events (<> [event]))
+                    first <- timeout 5_000_000 runTurn
+                    first `shouldSatisfy` \case
+                        Just (Right _) -> True
+                        _ -> False
+                    history <- readIORef transcript
+                    let outputs = [output.output | FunctionCallOutputItem output <- history]
+                        image mime payload = InputImagePart
+                            { detail = Nothing, fileId = Nothing
+                            , imageUrl = Just ("data:" <> mime <> ";base64," <> payload)
+                            , promptCacheBreakpoint = Nothing
+                            }
+                    map (Aeson.decodeStrict' . rawJsonBytes) outputs `shouldBe`
+                        [Just (Aeson.toJSON
+                            [ InputTextPart "before" Nothing
+                            , image "image/png" "b25l"
+                            , InputTextPart "between" Nothing
+                            , image "image/jpeg" "dHdv"
+                            , InputTextPart "after" Nothing
+                            ])]
+                    observed <- readIORef events
+                    observed `shouldContain`
+                        [ToolFinished expectedFakeToolResult
+                            { output = "before\n[image image/png]\nbetween\n[image image/jpeg]\nafter" }]
+                    second <- timeout 5_000_000 runTurn
+                    second `shouldSatisfy` \case
+                        Just (Right _) -> True
+                        _ -> False
+                    submitted <- readFile fake.promptLog
+                    Text.count "\"type\":\"image\"" (Text.pack submitted) `shouldBe` 2
+                    submitted `shouldContain` "\"data\":\"b25l\""
+                    submitted `shouldContain` "\"data\":\"dHdv\""
+                    submitted `shouldContain` "Tool result fake-tool"
+                    submitted `shouldNotContain` "data:image/"
+                    submitted `shouldNotContain` "[image image/png]"
+
+        it "retains ordinary JSON tool-result arrays and text-tagged objects during fresh import" $
+            withFakeClaude \fake -> do
+                let output = rawJsonFromEncoding (Aeson.toEncoding ([1, 2] :: [Int]))
+                let textObject = rawJsonFromEncoding $ Aeson.toEncoding $
+                        Aeson.object ["type" Aeson..= ("text" :: Text), "text" Aeson..= ("legacy object" :: Text)]
+                transcript <- newIORef [FunctionCallOutputItem FunctionCallOutput
+                    { itemId = Nothing, callId = "legacy-json", name = Nothing
+                    , namespace = Nothing, provider = Nothing, output = value
+                    , status = Nothing, async = Nothing, localOutcome = Nothing
+                    } | value <- [output, textObject]]
+                initialHistory <- readIORef transcript
+                state <- newIORef (initialBackendSnapshot initialHistory)
+                result <- timeout 5_000_000 $
+                    withClaudeCodeBackend
+                        (defaultClaudeCodeOptions fake.executable fake.workingDirectory)
+                        Nothing (pure defaultResponseCreateParams) transcript \backend ->
+                            submitBackendWithState state backend Nothing [UserMessage "continue"] (const (pure ()))
+                result `shouldSatisfy` \case
+                    Just (Right _) -> True
+                    _ -> False
+                submitted <- readFile fake.promptLog
+                submitted `shouldContain` "[1,2]"
+                submitted `shouldContain` "legacy object"
+                submitted `shouldNotContain` "content unavailable"
+
+        it "isolates malformed historical tool images without losing valid siblings or leaking payloads" $
+            withFakeClaude \fake -> do
+                let output = rawJsonFromEncoding $ Aeson.toEncoding
+                        [ Aeson.object ["type" Aeson..= ("input_text" :: Text), "text" Aeson..= ("before" :: Text)]
+                        , Aeson.object ["type" Aeson..= ("input_image" :: Text), "image_url" Aeson..= ("data:image/png;base64,SECRET_BAD!" :: Text)]
+                        , Aeson.object ["type" Aeson..= ("input_image" :: Text), "image_url" Aeson..= (42 :: Int)]
+                        , Aeson.object ["type" Aeson..= ("input_image" :: Text), "image_url" Aeson..= ("data:image/png;base64,b25l" :: Text)]
+                        , Aeson.object ["type" Aeson..= ("input_text" :: Text), "text" Aeson..= ("after" :: Text)]
+                        ]
+                transcript <- newIORef [FunctionCallOutputItem FunctionCallOutput
+                    { itemId = Nothing, callId = "malformed-image", name = Nothing
+                    , namespace = Nothing, provider = Nothing, output
+                    , status = Nothing, async = Nothing, localOutcome = Nothing
+                    }]
+                initialHistory <- readIORef transcript
+                state <- newIORef (initialBackendSnapshot initialHistory)
+                result <- timeout 5_000_000 $
+                    withClaudeCodeBackend
+                        (defaultClaudeCodeOptions fake.executable fake.workingDirectory)
+                        Nothing (pure defaultResponseCreateParams) transcript \backend ->
+                            submitBackendWithState state backend Nothing [UserMessage "continue"] (const (pure ()))
+                result `shouldSatisfy` \case
+                    Just (Right _) -> True
+                    _ -> False
+                submitted <- readFile fake.promptLog
+                submitted `shouldContain` "before"
+                submitted `shouldContain` "after"
+                submitted `shouldContain` "Historical image unavailable"
+                submitted `shouldContain` "Historical tool result content unavailable"
+                submitted `shouldContain` "\"data\":\"b25l\""
+                Text.count "\"type\":\"image\"" (Text.pack submitted) `shouldBe` 1
+                submitted `shouldNotContain` "SECRET_BAD"
+                submitted `shouldNotContain` "data:image/"
 
         it "starts from partial tool records and enriches canonical arguments" $
             withFakeClaude \fake ->
@@ -1965,7 +2073,9 @@ fakeClaudeScript promptLog startLog argumentLog =
         , "  fi"
         , "  if [ \"$FAKE_CLAUDE_PAUSE_AFTER_TOOL\" = 1 ]; then sleep 1; fi"
         , "  if [ \"$FAKE_CLAUDE_RECOVERY_PROGRESS\" = 1 ]; then printf '%s' saved > recovery-side-effect; fi"
-        , "  if [ \"$FAKE_CLAUDE_STRUCTURED_RESULT\" = 1 ]; then"
+        , "  if [ \"$FAKE_CLAUDE_IMAGE_RESULT\" = 1 ]; then"
+        , "    printf '{\"type\":\"user\",\"uuid\":\"tool-result-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":[{\"type\":\"text\",\"text\":\"before\"},{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"b25l\"}},{\"type\":\"text\",\"text\":\"between\"},{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/jpeg\",\"data\":\"dHdv\"}},{\"type\":\"text\",\"text\":\"after\"}]}]}}\\n' \"$turn\" \"$session_id\""
+        , "  elif [ \"$FAKE_CLAUDE_STRUCTURED_RESULT\" = 1 ]; then"
         , "    printf '{\"type\":\"user\",\"uuid\":\"tool-result-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":[{\"type\":\"tool_reference\",\"tool_name\":\"WebFetch\"},{\"type\":\"text\",\"text\":\"loaded\"}]}]}}\\n' \"$turn\" \"$session_id\""
         , "  else"
         , "    printf '{\"type\":\"user\",\"uuid\":\"tool-result-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":\"fake contents\"}]}}\\n' \"$turn\" \"$session_id\""

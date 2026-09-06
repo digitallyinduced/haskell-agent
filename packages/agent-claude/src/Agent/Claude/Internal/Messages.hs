@@ -49,6 +49,7 @@ import Claude.Agent.SDK.Types
     , SystemMessage(..)
     , Usage(..)
     , ToolResultContent(..)
+    , ToolResultPart(..)
     , UserMessage(..)
     , QueryMessageScope(..)
     , QueryProgress(..)
@@ -58,7 +59,9 @@ import Claude.Agent.SDK.Types
     , messageUuid
     , modelUsageToUsage
     )
+import qualified Data.Aeson as AesonValue
 import qualified Data.Aeson.Encoding as Aeson
+import qualified Data.ByteString.Base64 as Base64
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
@@ -639,10 +642,27 @@ functionCallItem callId name input =
         , async = Nothing
         }
 
--- | Persist the text projection rather than the wire JSON: structured
--- results (tool references, image reads carrying base64 payloads) are
--- replayed into the transcript view and imported into later prompts as
--- plain text.
+encodeResultContent :: ToolResultContent -> RawJson
+encodeResultContent content
+    | any isImage content.blocks =
+        rawJsonFromEncoding (AesonValue.toEncoding (map toPart content.blocks))
+    | otherwise = rawJsonFromEncoding (Aeson.text (renderResultContent content))
+  where
+    isImage ToolResultImage{} = True
+    isImage _ = False
+    toPart (ToolResultText text) = InputTextPart text Nothing
+    toPart ToolResultImage{mediaType, imageBytes} =
+        InputImagePart
+            { detail = Nothing
+            , fileId = Nothing
+            , imageUrl = Just $
+                "data:" <> mediaType <> ";base64,"
+                    <> TextEncoding.decodeUtf8 (Base64.encode imageBytes)
+            , promptCacheBreakpoint = Nothing
+            }
+
+-- | Persist validated images as canonical content parts, never as wire JSON
+-- embedded in prompt text. Text-only results retain their historical encoding.
 functionOutputItem
     :: Text
     -> Maybe ToolResultContent
@@ -659,7 +679,7 @@ functionOutputItem callId content isError =
         , output =
             maybe
                 (rawJsonFromEncoding Aeson.null_)
-                (rawJsonFromEncoding . Aeson.text . renderResultContent)
+                encodeResultContent
                 content
         , status =
             Just $
