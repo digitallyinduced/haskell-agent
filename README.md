@@ -282,6 +282,24 @@ commits, staged changes, working-tree changes, and non-ignored untracked files.
 Conversation history is not deleted; resuming a collected session restores
 its checkout. Recovery snapshots do not automatically expire.
 
+A checkout whose exact `HEAD` is already an ancestor of the repository's
+default branch is eligible after **24 hours of inactivity**, rather than the
+normal configured interval. This means idle time, not 24 hours since merge;
+commit author/committer timestamps are not activity or merge clocks. Additional
+commits not incorporated into the default branch disqualify this fast path.
+Dirty checkouts still require the same verified recovery snapshot, and all
+ownership, active-session, protection and safety checks still apply.
+
+Maintenance resolves the selected remote's existing local symbolic
+`refs/remotes/<remote>/HEAD`, using the branch's configured remote, then
+`upstream`, `origin`, or a sole remaining remote. It does not fetch, guess
+`master`/`main`, or use the currently checked-out branch as the default.
+Missing default-branch evidence keeps the normal interval. Locally cached refs
+can be stale: this proves incorporation into the available ref, not the current
+server state, and may miss recent merges. Squash/rebase merges without exact
+ancestry proof also keep the normal interval; matching commit messages or trees
+are not merge evidence.
+
 **Ignored untracked files are not backed up.** This includes ignored `.env`
 files, build output, and local databases. Move important ignored data outside
 the checkout or protect the worktree before relying on it.

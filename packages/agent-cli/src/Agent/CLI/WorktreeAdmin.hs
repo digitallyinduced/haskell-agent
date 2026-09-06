@@ -76,6 +76,7 @@ renderWorktreeCleanupReport :: Bool -> Int -> WorktreeCleanupReport -> Text
 renderWorktreeCleanupReport dryRun days report = Text.unlines $
     [ (if dryRun then "Dry run" else "Collection pass")
         <> " — inactivity expiry: " <> tshow days <> " days"
+    , "HEAD incorporated into the resolved default branch: 24 hours of inactivity."
     , "Ignored untracked files are NOT backed up or restored."
     , if dryRun then "Automatic adoption is simulated; no registry or snapshot is written."
         else "Verified existing agent worktrees are adopted using saved-session activity."

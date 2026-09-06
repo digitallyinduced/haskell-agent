@@ -9,6 +9,7 @@ module Agent.CLI.Worktree
     , cleanupStaleWorktrees
     , gcWorktrees
     , gcWorktreesWithActivity
+    , worktreeInactive
     , enrollWorktree
     , protectWorktree
     , restoreManagedWorktree
@@ -473,7 +474,8 @@ gcWorktreesWithActivity loadActivity root days dryRun protected = do
                             throwE ("state: " <> record.recordState)
                         _ -> pure ()
                     record <- resolveRecord path activity existing
-                    if recent now record then pure (retained path "recent activity") else do
+                    isRecent <- lift (recent path now record)
+                    if isRecent then pure (retained path "recent activity") else do
                         lift $ modifyIORef' attempts (+ 1)
                         common <- inspectManagedIdentity root path
                         unless (unsafeToFilePath common == record.recordCommonDir)
@@ -487,7 +489,8 @@ gcWorktreesWithActivity loadActivity root days dryRun protected = do
                                 latest <- lift loadActivity
                                 refreshed <- resolveRecord path latest existing
                                 recheckedAt <- lift getCurrentTime
-                                when (recent recheckedAt refreshed)
+                                recheckedRecent <- lift (recent path recheckedAt refreshed)
+                                when recheckedRecent
                                     (throwE "recent activity")
                                 unless (refreshed.recordCommonDir == record.recordCommonDir)
                                     (throwE "repository identity changed during adoption")
@@ -495,7 +498,8 @@ gcWorktreesWithActivity loadActivity root days dryRun protected = do
                                 finalActivity <- lift loadActivity
                                 finalRecord <- resolveRecord path finalActivity existing
                                 finalAt <- lift getCurrentTime
-                                when (recent finalAt finalRecord)
+                                finalRecent <- lift (recent path finalAt finalRecord)
+                                when finalRecent
                                     (throwE "recent activity")
                                 finalCommon <- inspectManagedIdentity root path
                                 unless (finalCommon == common && finalRecord.recordCommonDir == record.recordCommonDir)
@@ -504,6 +508,11 @@ gcWorktreesWithActivity loadActivity root days dryRun protected = do
                                 -- activity, never an artificial 'now' timestamp.
                                 let saved = finalRecord { recordSnapshot = Just snapshot, recordState = "collecting" }
                                 ExceptT $ writeRecord root path saved
+                                removalAt <- lift getCurrentTime
+                                removalRecent <- lift (recent path removalAt finalRecord)
+                                when removalRecent do
+                                    ExceptT $ writeRecord root path saved { recordState = "present" }
+                                    throwE "recent activity or default-branch ancestry changed before removal"
                                 verified <- lift $ Snapshot.verifySnapshotUnchanged path snapshot
                                 case verified of
                                     Right () -> pure ()
@@ -517,7 +526,10 @@ gcWorktreesWithActivity loadActivity root days dryRun protected = do
                 Nothing -> retained path "maintenance deadline exceeded; recovery record retained"
                 Just (Left err) -> retained path err
                 Just (Right one) -> one
-    recent now record = diffUTCTime now record.recordLastActivity < fromIntegral (max 0 days) * 86400
+    recent path now record
+        | worktreeInactive days False now record.recordLastActivity = pure False
+        | not (worktreeInactive days True now record.recordLastActivity) = pure True
+        | otherwise = not <$> headInDefaultBranch path
     checkoutLock path
         | dryRun = withReadOnlyLock (worktreeLeasePath root path)
         | otherwise = withExclusiveManaged root path
@@ -547,6 +559,41 @@ gcWorktreesWithActivity loadActivity root days dryRun protected = do
                     , recordState = "present"
                     , recordSnapshot = Nothing
                     }
+
+-- | Inactivity, not commit age or time since merge. Exact ancestry proof permits
+-- the one-day fast path; uncertainty keeps the configured normal threshold.
+worktreeInactive :: Int -> Bool -> UTCTime -> UTCTime -> Bool
+worktreeInactive days incorporated now lastActivity =
+    diffUTCTime now lastActivity >= fromIntegral threshold * 86400
+  where
+    threshold = if incorporated then min 1 (max 0 days) else max 0 days
+
+-- | Resolve only an existing remote-default symbolic ref, never infer the
+-- default from a familiar branch name or from the current checkout. No fetch,
+-- network request or ref mutation is performed by maintenance. Stale/missing
+-- tracking refs can miss merges; squash/rebase equivalence is not ancestry.
+-- This proof is recomputed after snapshotting so newer commits cannot inherit
+-- an older HEAD's eligibility. Final snapshot verification also checks HEAD.
+headInDefaultBranch :: OsPath -> IO Bool
+headInDefaultBranch path = do
+    result <- runExceptT do
+        graftPath <- Text.strip <$> ExceptT
+            (git path ["rev-parse", "--path-format=absolute", "--git-path", "info/grafts"])
+        grafts <- lift $ Directory.doesPathExist (Text.unpack graftPath)
+        when grafts (throwE "grafted history is not merge evidence")
+        remote <- selectUpstreamRemote path >>= maybe (throwE "no default remote") pure
+        let prefix = "refs/remotes/" <> remote <> "/"
+        target <- Text.strip <$> ExceptT
+            (git path ["symbolic-ref", "--quiet", Text.unpack (prefix <> "HEAD")])
+        unless (prefix `Text.isPrefixOf` target && target /= prefix <> "HEAD")
+            (throwE "default branch is outside the selected remote")
+        base <- Text.strip <$> ExceptT
+            (git path ["--no-replace-objects", "rev-parse", "--verify", Text.unpack (target <> "^{commit}")])
+        headCommit <- Text.strip <$> ExceptT
+            (git path ["--no-replace-objects", "rev-parse", "--verify", "HEAD^{commit}"])
+        void $ ExceptT
+            (git path ["--no-replace-objects", "merge-base", "--is-ancestor", Text.unpack headCommit, Text.unpack base])
+    pure $ either (const False) (const True) result
 
 discoverManagedPaths :: OsPath -> IO [OsPath]
 discoverManagedPaths root = do

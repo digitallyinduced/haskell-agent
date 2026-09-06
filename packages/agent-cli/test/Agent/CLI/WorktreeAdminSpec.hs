@@ -19,6 +19,7 @@ spec = describe "worktree cleanup report" do
         mapM_ (\part -> rendered `shouldSatisfy` Text.isInfixOf part)
             [ "Dry run"
             , "14 days"
+            , "HEAD incorporated into the resolved default branch: 24 hours of inactivity."
             , "estimated bytes: 1234"
             , "unknown saved-session activity"
             , "Automatic adoption is simulated; no registry or snapshot is written."
@@ -31,7 +32,7 @@ spec = describe "worktree cleanup report" do
         let report = mempty { cleanupRetained = [(unsafeEncodeUtf "/line\nbreak", "protected")] }
             rendered = renderWorktreeCleanupReport True 7 report
         rendered `shouldSatisfy` Text.isInfixOf "/line\\nbreak"
-        length (Text.lines rendered) `shouldBe` 6
+        length (Text.lines rendered) `shouldBe` 7
     it "sums only eligible estimates and does not describe estimates as recovered space" do
         let report = mempty
                 { cleanupEligible = [(unsafeEncodeUtf "/one", 1234), (unsafeEncodeUtf "/two", 4321)]
