@@ -10,17 +10,9 @@ module Agent.CLI.Compaction.Types
     ) where
 
 import Agent.Error (ApiError)
-import Agent.Loop (TurnInput)
 import Agent.Responses.Types (Response, ResponseCreateParams, ResponseItem)
+import Agent.Runtime.Compaction (AutomaticCompactionBoundary(..))
 import Data.Text (Text)
-
--- | A provider compaction checkpoint that has already been installed in the
--- live conversation and durable transcript. The enclosing user turn uses this
--- as its new prefix so it appends only post-checkpoint items.
-data AutomaticCompactionBoundary = AutomaticCompactionBoundary
-    { automaticCompactionHistory :: ![ResponseItem]
-    , automaticCompactionPendingInputs :: ![TurnInput]
-    } deriving (Eq, Show)
 
 -- | Whether an automatic-compaction hook installed the checkpoint outside the
 -- provider wrapper. Root sessions return 'CompactionInstalled' after their

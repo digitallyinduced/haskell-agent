@@ -114,25 +114,20 @@ import Agent.CLI.TurnState
     , GrokContextUpdate(..)
     , PreparedTurn(..)
     , StartupUpdate(..)
-    , TurnAbort(..)
     , finishConversation
-    , interruptedTurnItems
     , rebasePreparedTurn
     , restoreStartupContext
     , turnInputsWithContext
-    , turnNewItems
     , turnReplacesTranscript
-    , uncommittedDisplayItems
     )
+import Agent.Runtime.TurnEngine qualified as Engine
 import Agent.Dialect (DialectId(..), dialectId)
 import Agent.Error (ApiError)
 import Agent.Loop
     ( LoopConfig(..)
     , LoopExecution(..)
     , LoopError(..)
-    , LoopProgress(..)
     , LoopResult(..)
-    , TurnCompletion(..)
     , TurnInput(..)
     , TurnOutput(..)
     , addTokenUsage
@@ -297,9 +292,8 @@ data ExecutedBusyTurn = ExecutedBusyTurn
     , executedLoop :: LoopExecution
     , executedAutomaticCompaction :: Maybe AutomaticCompactionBoundary
     , executedCommittedTurn :: PreparedTurn
-    , executedResult :: Either LoopError LoopResult
+    , executedFinalization :: Engine.FinalizedTurn
     , executedFinishedAt :: UTCTime
-    , executedRestartEffort :: Maybe Text
     }
 
 prepareBusyTurn :: BusyTurnRequest -> IO PreparedBusyTurn
@@ -532,14 +526,20 @@ executeBusyTurn request preparation = do
         `onException`
             rollbackExceptionalTurn request preparation rootTurnId
     automaticCompaction <- readIORef env.sessionAutomaticCompaction
-    let committedPrepared =
-            rebasePreparedTurn automaticCompaction prepared
-        result = execution.executionResult
     clearThinking render
     finishedAt <- getCurrentTime
     restartEffort <-
         atomicModifyIORef' env.sessionRestartEffort \requested ->
             (Nothing, requested)
+    let finalized = Engine.finalizeTurn
+            Engine.TurnPolicy
+                { providerUnavailable = isProviderUnavailable
+                , normalizeAssistant = stripBracketedTimestamps
+                }
+            restartEffort
+            automaticCompaction
+            prepared
+            execution
     pure ExecutedBusyTurn
         { executedRequest = request
         , executedPreparation = preparation
@@ -548,10 +548,9 @@ executeBusyTurn request preparation = do
         , executedRootTurnId = rootTurnId
         , executedLoop = execution
         , executedAutomaticCompaction = automaticCompaction
-        , executedCommittedTurn = committedPrepared
-        , executedResult = result
+        , executedCommittedTurn = finalized.finalizedPrepared
+        , executedFinalization = finalized
         , executedFinishedAt = finishedAt
-        , executedRestartEffort = restartEffort
         }
 
 rollbackExceptionalTurn
@@ -592,7 +591,7 @@ elapsedBusyTurn executed extra =
 
 persistIncompleteTurn
     :: ExecutedBusyTurn
-    -> [ResponseItem]
+    -> Engine.ModelItems
     -> Text
     -> Maybe TurnOutput
     -> Maybe Text
@@ -608,7 +607,8 @@ persistIncompleteTurn
                 (Just handle.sessionDir)
             writeIORef env.sessionStoreRoot (Just handle.sessionDir)
             let displayItems =
-                    uncommittedDisplayItems executed.executedLoop
+                    Engine.displayItems
+                        executed.executedFinalization.finalizedDisplayItems
                 turn = SessionTurn
                     { turnAt = now
                     , turnUserText = request.busyPromptText
@@ -619,7 +619,7 @@ persistIncompleteTurn
                     , turnError = Just errorText
                     , turnResponseId = (.responseId) <$> maybeTurn
                     , turnEffect = TranscriptAppend
-                    , turnItems = retainedItems
+                    , turnItems = Engine.modelItems retainedItems
                     , turnDisplayItems = displayItems
                     , turnUsage = (.tokenUsage) <$> maybeTurn
                     , turnProviderTelemetry =
@@ -641,16 +641,19 @@ persistIncompleteTurn
 
 finishBusyTurn :: ExecutedBusyTurn -> IO TurnResult
 finishBusyTurn executed =
-    case
-        ( executed.executedRestartEffort
-        , executed.executedResult
-        )
-    of
-        (Just level, _) -> finishRestartedTurn executed level
-        (Nothing, Left cancelled@(LoopCancelled _)) ->
+    case executed.executedFinalization.finalizedDisposition of
+        Engine.TurnRestarted level -> finishRestartedTurn executed level
+        Engine.TurnCancelled cancelled ->
             finishCancelledTurn executed cancelled
-        (Nothing, Left err) -> finishFailedTurn executed err
-        (Nothing, Right loopResult) ->
+        Engine.TurnProviderUnavailable apiError -> do
+            let env = executed.executedRequest.busyEnv
+            env.sessionAbortSubagentTurn executed.executedRootTurnId
+            finishProviderUnavailableTurn executed apiError
+        Engine.TurnFailed err -> do
+            let env = executed.executedRequest.busyEnv
+            env.sessionAbortSubagentTurn executed.executedRootTurnId
+            finishGeneralFailureTurn executed err
+        Engine.TurnCompleted loopResult ->
             finishSuccessfulTurn executed loopResult
 
 finishRestartedTurn :: ExecutedBusyTurn -> Text -> IO TurnResult
@@ -659,9 +662,7 @@ finishRestartedTurn executed level = do
         env = request.busyEnv
     env.sessionAbortSubagentTurn executed.executedRootTurnId
     commitConversationPatch env
-        (finishConversation
-            executed.executedCommittedTurn
-            ConversationRestarted)
+        executed.executedFinalization.finalizedPatch
     restoreTaskPlanAfterUncompactedTurn executed
     planState <- readIORef env.sessionPlanMode.planStateRef
     case env.sessionFullscreen of
@@ -711,14 +712,9 @@ finishCancelledTurn executed cancelled = do
     -- The prepared inputs already contain any consumed startup context.
     -- Completed model steps stay with them; only an uncommitted sample drops.
     let retained =
-            interruptedTurnItems
-                executed.executedCommittedTurn
-                executed.executedLoop
-                TurnAbortedByUser
+            executed.executedFinalization.finalizedModelItems
     commitConversationPatch env
-        (finishConversation
-            executed.executedCommittedTurn
-            (ConversationCancelled retained))
+        executed.executedFinalization.finalizedPatch
     model <- render.renderModel
     case fullscreen of
         Just runtime -> do
@@ -742,18 +738,6 @@ finishCancelledTurn executed cancelled = do
         (uncommittedAssistantText executed.executedLoop)
     pure TurnCancelled
 
-finishFailedTurn :: ExecutedBusyTurn -> LoopError -> IO TurnResult
-finishFailedTurn executed err = do
-    let env = executed.executedRequest.busyEnv
-        execution = executed.executedLoop
-    env.sessionAbortSubagentTurn executed.executedRootTurnId
-    case err of
-        LoopTransport apiError
-            | execution.executionProgress == NoResponseCommitted
-            , isProviderUnavailable apiError ->
-                finishProviderUnavailableTurn executed apiError
-        _ -> finishGeneralFailureTurn executed err
-
 finishProviderUnavailableTurn
     :: ExecutedBusyTurn
     -> ApiError
@@ -763,9 +747,7 @@ finishProviderUnavailableTurn executed apiError = do
         env = request.busyEnv
         fullscreen = env.sessionFullscreen
     commitConversationPatch env
-        (finishConversation
-            executed.executedCommittedTurn
-            ConversationProviderUnavailable)
+        executed.executedFinalization.finalizedPatch
     restoreTaskPlanAfterUncompactedTurn executed
     case fullscreen of
         Nothing -> pure ()
@@ -814,14 +796,9 @@ finishGeneralFailureTurn executed err = do
         1
         (Just "Agent turn failed")
     let retained =
-            interruptedTurnItems
-                executed.executedCommittedTurn
-                executed.executedLoop
-                (TurnAbortedByFailure (loopErrorAbortReason err))
+            executed.executedFinalization.finalizedModelItems
     commitConversationPatch env
-        (finishConversation
-            executed.executedCommittedTurn
-            (ConversationFailed retained))
+        executed.executedFinalization.finalizedPatch
     model <- render.renderModel
     case fullscreen of
         Just runtime -> do
@@ -883,20 +860,13 @@ finishSuccessfulTurn executed loopResult = do
     let assistantText =
             fmap stripBracketedTimestamps loopResult.finalText
     commitConversationPatch env
-        (finishConversation
-            executed.executedCommittedTurn
-            (ConversationCompleted
-                loopResult.finalResponseId
-                loopResult.tokenUsage
-                assistantText))
+        executed.executedFinalization.finalizedPatch
     reportSuccessfulTurn executed loopResult
     followUp <-
         handleProposedPlan env.sessionPlanMode loopResult.finalText
     printUnrenderedAssistant env assistantText
     let newItems =
-            turnNewItems
-                executed.executedCommittedTurn.preparedBeforeItems
-                executed.executedLoop.executionState
+            Engine.modelItems executed.executedFinalization.finalizedModelItems
         effect =
             if turnReplacesTranscript
                 executed.executedCommittedTurn.preparedBeforeItems
@@ -1182,21 +1152,6 @@ isPendingPersistence = \case
 uncommittedAssistantText :: LoopExecution -> Maybe Text
 uncommittedAssistantText execution =
     fmap stripBracketedTimestamps execution.executionUncommittedAssistantText
-
--- | Short reason recorded on the synthetic outputs of tool calls a failed
--- turn never executed.
-loopErrorAbortReason :: LoopError -> Text
-loopErrorAbortReason = \case
-    LoopIncomplete turn -> case turn.completion of
-        TurnIncomplete reason _ ->
-            "the response was cut off (" <> reason <> ")"
-        TurnCompleted -> "the response was cut off"
-    LoopMaxTurns _ -> "the turn reached its maximum number of model steps"
-    LoopTransport _ -> "the provider request failed"
-    LoopTransportAfterOutput _ -> "the provider connection was interrupted"
-    LoopNoResponseId -> "the provider returned no response id"
-    LoopUnexpected _ -> "the agent hit an unexpected error"
-    LoopCancelled _ -> "the turn was cancelled"
 
 requestConversationTitle :: SessionEnv -> SessionHandle -> Int -> IO ()
 requestConversationTitle env handle milestone =

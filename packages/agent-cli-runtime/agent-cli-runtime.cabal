@@ -45,7 +45,11 @@ library
                     , Agent.CLI.Session.TempWorkspace
                     , Agent.CLI.Session.Transfer
                     , Paths_agent_cli_runtime
-    exposed-modules:  Agent.CLI.AgentSessions.Process
+    exposed-modules:  Agent.Runtime.Compaction
+                    , Agent.Runtime.Request
+                    , Agent.Runtime.TurnEngine
+                    , Agent.Runtime.TurnState
+                    , Agent.CLI.AgentSessions.Process
                     , Agent.CLI.Auth
                     , Agent.CLI.Auth.Gemini
                     , Agent.CLI.Auth.Grok
@@ -83,6 +87,7 @@ library
                     , agent-openai >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2
                     , agent-process >= 0.1 && < 0.2
+                    , agent-responses >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2
                     , agent-xai >= 0.1 && < 0.2
@@ -121,7 +126,10 @@ test-suite agent-cli-runtime-test
     ghc-options:      -threaded
     hs-source-dirs:   test
     main-is:          Spec.hs
-    other-modules:    Agent.CLI.CredentialStoreSpec
+    other-modules:    Agent.Runtime.RequestSpec
+                    , Agent.Runtime.TurnEngineSpec
+                    , Agent.Runtime.TurnStateSpec
+                    , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.EnvironmentSpec
                     , Agent.CLI.ErrorSpec
                     , Agent.CLI.GatewayBridgeSpec
@@ -136,6 +144,7 @@ test-suite agent-cli-runtime-test
     build-depends:    agent-cli-runtime
                     , agent-core
                     , agent-json
+                    , agent-responses
                     , agent-responses-types
                     , agent-store
                     , aeson
