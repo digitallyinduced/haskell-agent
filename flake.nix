@@ -1427,8 +1427,15 @@
                 } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
                     agent-cli-static-runtime = agentCliStaticRuntimeCheck;
                     agent-sandbox-runner = agentSandboxRunner;
+                    agent-server-nixos-module = import ./nix/tests/agent-server-module.nix {
+                        inherit self nixpkgs pkgs system;
+                    };
                     nixos-module = import ./nix/tests/telegram-module.nix {
                         inherit self nixpkgs pkgs system;
+                    };
+                } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+                    agent-server-nixos-module-vm = import ./nix/tests/agent-server-module-vm.nix {
+                        inherit self pkgs;
                     };
                 } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
                     agent-cli-macos-bundle = agentCliMacosRelease.bundle;
@@ -1447,6 +1454,9 @@
             }
         )
         // {
+            nixosModules.agent-server = import ./nix/modules/agent-server.nix {
+                inherit self;
+            };
             nixosModules.telegram = import ./nix/modules/telegram.nix {
                 inherit self;
             };
