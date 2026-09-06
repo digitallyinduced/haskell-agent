@@ -19,9 +19,8 @@ import Agent.CLI.Compaction
     ( AutomaticCompactionBoundary(..)
     , CompactOutcome(..)
     , CompactionInstall(CompactionInstalled)
-    , reportedOccupancy
     )
-import Agent.CLI.Compaction.Projection (reportedContextTokens)
+import Agent.CLI.Compaction.Projection (occupancyOnTurnFinished)
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
 import Agent.CLI.Context (contextUsageTokens, formatContextReport)
 import Agent.Responses.LoopBackend (turnInputsToItems)
@@ -745,11 +744,12 @@ buildSessionLoopEventRuntime
             hooks.nativeOnLoopEvent event
         managedLoopPublisher event
         case event of
-            TurnFinished turn -> do
-                history <- readLiveTranscript conversationRef
-                forM_ (reportedContextTokens turn.tokenUsage) \tokens ->
-                    writeIORef contextOccupancyRef $
-                        Just (reportedOccupancy tokens (length history))
+            TurnFinished turn ->
+                -- Keep the provider checkpoint recorded by middleware:
+                -- a host-renumbered commit may restart the live process.
+                withLiveBackendState conversationRef \snapshot ->
+                    modifyIORef' contextOccupancyRef $
+                        occupancyOnTurnFinished snapshot turn
             _ -> pure ()
         case fullscreen of
             Nothing -> renderEvent render event

@@ -1932,6 +1932,7 @@ spec = describe "runLoop" do
                 , toolCalls = [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
                 , assistantText = Just "calling"
                 , tokenUsage = TokenUsage 10 4 2
+                , contextUsage = Just (TokenUsage 10 4 2)
                 , providerTelemetry = Just firstTelemetry
                 , completion = TurnCompleted
                 }
@@ -1940,6 +1941,7 @@ spec = describe "runLoop" do
                 , toolCalls = []
                 , assistantText = Just "done"
                 , tokenUsage = TokenUsage 12 6 0
+                , contextUsage = Just (TokenUsage 12 6 0)
                 , providerTelemetry = Just secondTelemetry
                 , completion = TurnCompleted
                 }
@@ -2132,6 +2134,7 @@ spec = describe "runLoop" do
                     [functionToolCall "c1" "echo" "{\"message\":\"unsafe\"}"]
                 , assistantText = Just "partial"
                 , tokenUsage = TokenUsage 120 32768 0
+                , contextUsage = Just (TokenUsage 120 32768 0)
                 , providerTelemetry = Nothing
                 , completion = TurnIncomplete
                     { incompleteReason = "max_output_tokens"
@@ -2160,6 +2163,7 @@ spec = describe "runLoop" do
                             "c1" "echo" "{\"message\":\"unsafe\"}"]
                     , assistantText = Just "partial"
                     , tokenUsage = TokenUsage 120 32768 0
+                    , contextUsage = Just (TokenUsage 120 32768 0)
                     , providerTelemetry = Nothing
                     , completion = TurnIncomplete
                         { incompleteReason = "max_output_tokens"

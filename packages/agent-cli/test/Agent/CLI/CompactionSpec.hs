@@ -24,6 +24,8 @@ import Agent.CLI.Compaction
     , runProviderCompactWith
     , runBackendCompactWithContextWindow
     , runBackendCompactWithLimits
+    , runClaudeBackendCompactWithLimits
+    , runClaudeBackendCompactHistoryWithLimits
     , runResponsesCompactWith
     , runResponsesCompactWithContextWindow
     , runXaiBackendCompactHistoryWithContextWindow
@@ -664,6 +666,151 @@ spec = do
                 Right _ -> False
             readIORef recordedUsage `shouldReturn` [compactionUsage]
 
+    describe "Claude isolated compaction recovery" do
+        let history =
+                [ userTextItem
+                    (Text.pack (show index) <> Text.replicate 2_000 "x")
+                | index <- [1 .. 32 :: Int]
+                ]
+            contextError =
+                ProviderError ContextWindowExceeded "Prompt is too long" Nothing
+            summaryOutput = TurnOutput
+                { responseId = "claude-summary-session"
+                , toolCalls = []
+                , assistantText = Just "portable summary"
+                , tokenUsage = compactionUsage
+                , contextUsage = Nothing
+                , providerTelemetry = Nothing
+                , completion = TurnCompleted
+                }
+            runSummary makeBackend record =
+                runClaudeBackendCompactHistoryWithLimits
+                    200_000 167_000 makeBackend record
+                    defaultResponseCreateParams history Nothing
+
+        it "retries a context rejection with a smaller fresh request and records usage once" do
+            requests <- newIORef []
+            recordedUsage <- newIORef []
+            transcript <- newIORef history
+            params <- testRequestState defaultResponseCreateParams
+            let makeBackend summaryParams =
+                    Backend \snapshot previous inputs _onEvent -> do
+                        readIORef transcript `shouldReturn` history
+                        priorRequests <- readIORef requests
+                        modifyIORef' requests
+                            (<> [(summaryParams, snapshot, previous, inputs)])
+                        pure $
+                            if null priorRequests
+                                then Left contextError
+                                else successful snapshot summaryOutput
+            result <- runClaudeBackendCompactWithLimits
+                200_000 167_000 makeBackend
+                (\usage -> modifyIORef' recordedUsage (<> [usage]))
+                params transcript Nothing
+            result `shouldSatisfy` either (const False)
+                ((== "portable summary") . (.compactSummary))
+            readIORef transcript `shouldReturn` history
+            readIORef recordedUsage `shouldReturn` [compactionUsage]
+            readIORef requests >>= \case
+                [(firstParams, first, _, _), (secondParams, second, previous, inputs)] -> do
+                    let size requestParams snapshot =
+                            estimateRequestTokensWithItems requestParams
+                                (snapshot.backendItems
+                                    <> [userTextItem (summarizationPrompt Nothing)])
+                    size secondParams second `shouldSatisfy`
+                        (< size firstParams first)
+                    second.backendItems `shouldSatisfy` (not . null)
+                    second.backendContinuation `shouldBe` Nothing
+                    previous `shouldBe` Nothing
+                    secondParams.tools `shouldBe` Nothing
+                    inputs `shouldBe` [UserMessage (summarizationPrompt Nothing)]
+                _ -> expectationFailure "expected exactly two isolated requests"
+
+        it "bounds retries to four strictly shrinking submissions" do
+            requests <- newIORef []
+            let makeBackend summaryParams =
+                    Backend \snapshot _previous _inputs _onEvent -> do
+                        modifyIORef' requests
+                            (<> [estimateRequestTokensWithItems summaryParams
+                                (snapshot.backendItems
+                                    <> [userTextItem (summarizationPrompt Nothing)])])
+                        pure (Left contextError)
+            runSummary makeBackend (\_ -> expectationFailure "unexpected usage")
+                `shouldReturn` Left contextError
+            sizes <- readIORef requests
+            length sizes `shouldBe` 4
+            and (zipWith (>) sizes (drop 1 sizes)) `shouldBe` True
+
+        it "does not submit an empty-history retry when nothing smaller fits" do
+            submissions <- newIORef (0 :: Int)
+            let makeBackend _ =
+                    Backend \_ _ _ _ -> do
+                        modifyIORef' submissions (+ 1)
+                        pure (Left contextError)
+            runClaudeBackendCompactHistoryWithLimits
+                200_000 167_000 makeBackend (const (pure ()))
+                defaultResponseCreateParams [userTextItem "short history"] Nothing
+                `shouldReturn` Left contextError
+            readIORef submissions `shouldReturn` 1
+
+        it "does not retry non-context errors" do
+            let errors =
+                    [ ProviderError AuthenticationError "expired" Nothing
+                    , ProviderError RateLimitError "quota" Nothing
+                    , ProviderError ApiErrorType "internal" Nothing
+                    , ConnectionError "disconnected"
+                    ]
+            mapM_ (\err -> do
+                submissions <- newIORef (0 :: Int)
+                let makeBackend _ = Backend \_ _ _ _ -> do
+                        modifyIORef' submissions (+ 1)
+                        pure (Left err)
+                runSummary makeBackend (const (pure ()))
+                    `shouldReturn` Left err
+                readIORef submissions `shouldReturn` 1) errors
+
+        it "propagates cancellation during recovery without retrying or recording usage" do
+            submissions <- newIORef (0 :: Int)
+            let makeBackend _ = Backend \_ _ _ _ -> do
+                    attempt <- atomicModifyIORef' submissions \count ->
+                        (count + 1, count)
+                    if attempt == 0
+                        then pure (Left contextError)
+                        else throwIO UserInterrupt
+            result <- try @AsyncException $
+                runSummary makeBackend
+                    (\_ -> expectationFailure "unexpected usage")
+            result `shouldBe` Left UserInterrupt
+            readIORef submissions `shouldReturn` 2
+
+        it "records incomplete summary usage without retrying it" do
+            submissions <- newIORef (0 :: Int)
+            recordedUsage <- newIORef []
+            let makeBackend _ = Backend \snapshot _ _ _ -> do
+                    modifyIORef' submissions (+ 1)
+                    pure $ successful snapshot
+                        summaryOutput
+                            { completion = TurnIncomplete "max_tokens" Nothing }
+            result <- runSummary makeBackend
+                (\usage -> modifyIORef' recordedUsage (<> [usage]))
+            result `shouldSatisfy` either (const True) (const False)
+            readIORef submissions `shouldReturn` 1
+            readIORef recordedUsage `shouldReturn` [compactionUsage]
+
+        it "keeps generic backend compaction single-attempt" do
+            submissions <- newIORef (0 :: Int)
+            params <- testRequestState defaultResponseCreateParams
+            transcript <- newIORef history
+            let makeBackend _ = Backend \_ _ _ _ -> do
+                    modifyIORef' submissions (+ 1)
+                    pure (Left contextError)
+            result <- runBackendCompactWithLimits
+                200_000 167_000 makeBackend (const (pure ()))
+                params transcript Nothing
+            result `shouldSatisfy` either (const True) (const False)
+            readIORef submissions `shouldReturn` 1
+            readIORef transcript `shouldReturn` history
+
     describe "runBackendCompactWithContextWindow" do
         it "matches Claude Code headroom for a 200k context window" do
             claudeAutoCompactTokenLimit 200_000 `shouldBe` 144_000
@@ -698,6 +845,7 @@ spec = do
                             , toolCalls = []
                             , assistantText = Just "portable summary"
                             , tokenUsage = compactionUsage
+                            , contextUsage = Nothing
                             , providerTelemetry = Nothing
                             , completion = TurnCompleted
                             }
@@ -746,6 +894,7 @@ spec = do
                             , toolCalls = []
                             , assistantText = Just "same-transport summary"
                             , tokenUsage = compactionUsage
+                            , contextUsage = Nothing
                             , providerTelemetry = Nothing
                             , completion = TurnCompleted
                             }
@@ -783,6 +932,7 @@ spec = do
                             , toolCalls = []
                             , assistantText = Just "portable summary"
                             , tokenUsage = compactionUsage
+                            , contextUsage = Nothing
                             , providerTelemetry = Nothing
                             , completion = TurnCompleted
                             }
@@ -834,6 +984,7 @@ spec = do
                             , toolCalls = []
                             , assistantText = Just "continued"
                             , tokenUsage = TokenUsage 5 1 0
+                            , contextUsage = Just (TokenUsage 5 1 0)
                             , providerTelemetry = Nothing
                             , completion = TurnCompleted
                             }
@@ -953,6 +1104,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1011,6 +1163,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1046,6 +1199,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1087,6 +1241,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1121,6 +1276,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1157,6 +1313,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1196,6 +1353,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1242,6 +1400,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1292,6 +1451,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1377,6 +1537,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1425,6 +1586,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1483,6 +1645,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1523,6 +1686,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1636,6 +1800,7 @@ spec = do
                                     , toolCalls = []
                                     , assistantText = Just "ok"
                                     , tokenUsage = TokenUsage 20 5 0
+                                    , contextUsage = Just (TokenUsage 20 5 0)
                                     , providerTelemetry = Nothing
                                     , completion = TurnCompleted
                                     }
@@ -1703,6 +1868,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1786,6 +1952,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1833,6 +2000,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = usage
+                        , contextUsage = Just usage
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1876,6 +2044,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1938,6 +2107,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -1999,6 +2169,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2041,6 +2212,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = emptyTokenUsage
+                        , contextUsage = Nothing
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2105,6 +2277,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2169,6 +2342,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2236,6 +2410,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }
@@ -2274,6 +2449,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         }

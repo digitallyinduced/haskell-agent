@@ -872,6 +872,149 @@ spec = describe "query" do
                 }
         messages `shouldBe` []
 
+    describe "final streamed usage" do
+        it "reconciles final counters onto every block of the matching API message" do
+            completed <- expectRight =<< runQueryResultLines
+                [ usageStreamLine Nothing usageStartEvent
+                , usageAssistantLine "block-1" Nothing
+                , usageAssistantLine "block-2" Nothing
+                , usageStreamLine Nothing $
+                    usageDeltaEvent
+                        "{\"input_tokens\":110,\"cache_creation_input_tokens\":25,\
+                        \\"cache_read_input_tokens\":85,\"output_tokens\":8}"
+                , usageStreamLine Nothing $
+                    usageDeltaEvent
+                        "{\"input_tokens\":0,\"cache_creation_input_tokens\":0,\
+                        \\"cache_read_input_tokens\":0,\"output_tokens\":9}"
+                , usageStreamLine Nothing usageStopEvent
+                , successResult testSessionId
+                ]
+            assistantUsages completed.queryMessages `shouldBe`
+                [ Just (Usage 220 9 85), Just (Usage 220 9 85) ]
+            [assistant.stopReason | MessageAssistant assistant <- completed.queryMessages]
+                `shouldBe` [Just "end_turn", Just "end_turn"]
+            -- Partial records never become transcript items.
+            length completed.queryMessages `shouldBe` 3
+
+        it "isolates interleaved child usage even when API message ids match" do
+            completed <- expectRight =<< runQueryResultLines
+                [ usageStreamLine Nothing usageStartEvent
+                , Text.replace
+                    "{\"type\":\"text\",\"text\":\"block\"}"
+                    "{\"type\":\"tool_use\",\"id\":\"child-tool\",\"name\":\"Agent\",\"input\":{}}" $
+                    usageAssistantLine "parent-block" Nothing
+                , usageStreamLine (Just "child-tool") usageStartEvent
+                , usageAssistantLine "child-block" (Just "child-tool")
+                , usageStreamLine (Just "child-tool") $
+                    usageDeltaEvent "{\"input_tokens\":900000,\"output_tokens\":900}"
+                , usageStreamLine (Just "child-tool") usageStopEvent
+                , usageStreamLine Nothing $
+                    usageDeltaEvent "{\"output_tokens\":9}"
+                , usageStreamLine Nothing usageStopEvent
+                , successResult testSessionId
+                ]
+            assistantUsages completed.queryMessages `shouldBe`
+                [ Just (Usage 200 9 80), Just (Usage 900100 900 80) ]
+
+        mapM_ (\(label, events) ->
+            it ("leaves usage unavailable " <> label) do
+                completed <- expectRight =<< runQueryResultLines
+                    ( [ usageStreamLine Nothing usageStartEvent
+                      , usageAssistantLine "partial" Nothing
+                      ]
+                        <> events
+                        <> [successResult testSessionId]
+                    )
+                assistantUsages completed.queryMessages `shouldBe` [Nothing])
+            [ ("without final events", [])
+            , ("without message_stop",
+                [ usageStreamLine Nothing $
+                    usageDeltaEvent "{\"output_tokens\":9}" ])
+            , ("without final output usage",
+                [ usageStreamLine Nothing $
+                    usageDeltaEvent "{\"input_tokens\":110}"
+                , usageStreamLine Nothing usageStopEvent
+                ])
+            , ("without a terminal stop reason",
+                [ usageStreamLine Nothing
+                    "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":null},\
+                    \\"usage\":{\"output_tokens\":9}}"
+                , usageStreamLine Nothing usageStopEvent
+                ])
+            , ("after malformed counters",
+                [ usageStreamLine Nothing $
+                    usageDeltaEvent "{\"output_tokens\":-1}"
+                , usageStreamLine Nothing usageStopEvent
+                ])
+            , ("after a compact boundary",
+                [ usageStreamLine Nothing $
+                    usageDeltaEvent "{\"output_tokens\":9}"
+                , usageCompactBoundary
+                , usageStreamLine Nothing usageStopEvent
+                ])
+            , ("when a later stream uses a different API message id",
+                [ usageStreamLine Nothing $
+                    Text.replace "api-message" "different-message" usageStartEvent
+                , usageStreamLine Nothing $
+                    usageDeltaEvent "{\"output_tokens\":9}"
+                , usageStreamLine Nothing usageStopEvent
+                ])
+            ]
+
+        it "does not resurrect retracted assistant blocks when usage completes" do
+            completed <- expectRight =<< runQueryResultLines
+                [ usageStreamLine Nothing usageStartEvent
+                , usageAssistantLine "retracted-block" Nothing
+                , "{\"type\":\"system\",\"subtype\":\"model_refusal_fallback\",\
+                  \\"uuid\":\"fallback-usage\",\"session_id\":\""
+                    <> testSessionId
+                    <> "\",\"retracted_message_uuids\":[\"retracted-block\"]}"
+                , usageStreamLine Nothing $
+                    usageDeltaEvent "{\"output_tokens\":9}"
+                , usageStreamLine Nothing usageStopEvent
+                , successResult testSessionId
+                ]
+            assistantUsages completed.queryMessages `shouldBe` []
+
+        it "keeps explicitly completed non-streaming usage but clears provisional usage" do
+            completed <- expectRight =<< runQueryResultLines
+                [ usageAssistantLine "provisional" Nothing
+                , Text.replace "\"stop_reason\":null" "\"stop_reason\":\"end_turn\"" $
+                    usageAssistantLine "complete" Nothing
+                , successResult testSessionId
+                ]
+            assistantUsages completed.queryMessages `shouldBe`
+                [Nothing, Just (Usage 200 1 80)]
+
+    it "renders error results with success subtype as failures" do
+        (result, messages) <- runQueryLines
+            [ "{\"type\":\"result\",\"subtype\":\"success\",\
+              \\"is_error\":true,\"session_id\":\""
+                <> testSessionId
+                <> "\",\"result\":\"Prompt is too long\"}"
+            ]
+
+        fmap (const ()) result `shouldBe`
+            Left ResultError
+                { subtype = "success"
+                , apiErrorStatus = Nothing
+                , errors = []
+                , result = Just "Prompt is too long"
+                }
+        either renderClaudeSDKError (const "unexpected success") result
+            `shouldBe` "Claude Code request failed: Prompt is too long"
+        messages `shouldBe` []
+
+    it "retains failure subtypes and HTTP status in rendered errors" do
+        renderClaudeSDKError ResultError
+            { subtype = "error_during_execution"
+            , apiErrorStatus = Just 529
+            , errors = ["overloaded", "retry later"]
+            , result = Just "request failed"
+            }
+            `shouldBe`
+                "Claude Code error_during_execution (HTTP 529): overloaded; retry later"
+
     it "validates the terminal session before publishing any messages" do
         (result, messages) <- runQueryLines
             [ assistantLine "buffered" "must not escape"
@@ -1156,6 +1299,44 @@ successResult sessionId =
     \\"session_id\":\""
         <> sessionId
         <> "\",\"uuid\":\"result\",\"result\":\"ok\"}"
+
+-- Claude Code emits assistant blocks before message_delta/message_stop.
+-- These fixtures deliberately give the early block provisional usage.
+usageAssistantLine :: Text -> Maybe Text -> Text
+usageAssistantLine uuid parent =
+    "{\"type\":\"assistant\",\"uuid\":\"" <> uuid
+        <> "\",\"session_id\":\"" <> testSessionId <> "\""
+        <> usageParentField parent
+        <> ",\"message\":{\"id\":\"api-message\",\"stop_reason\":null,\
+           \\"content\":[{\"type\":\"text\",\"text\":\"block\"}],\
+           \\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":20,\
+           \\"cache_read_input_tokens\":80,\"output_tokens\":1}}}"
+
+usageStreamLine :: Maybe Text -> Text -> Text
+usageStreamLine parent event =
+    "{\"type\":\"stream_event\",\"session_id\":\"" <> testSessionId <> "\""
+        <> usageParentField parent <> ",\"event\":" <> event <> "}"
+
+usageParentField :: Maybe Text -> Text
+usageParentField = maybe "" (\parent -> ",\"parent_tool_use_id\":\"" <> parent <> "\"")
+
+usageStartEvent, usageStopEvent, usageCompactBoundary :: Text
+usageStartEvent =
+    "{\"type\":\"message_start\",\"message\":{\"id\":\"api-message\",\
+    \\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":20,\
+    \\"cache_read_input_tokens\":80,\"output_tokens\":1}}}"
+usageStopEvent = "{\"type\":\"message_stop\"}"
+usageCompactBoundary =
+    "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"uuid\":\"compact-usage\",\
+    \\"session_id\":\"" <> testSessionId <> "\"}"
+
+usageDeltaEvent :: Text -> Text
+usageDeltaEvent usage =
+    "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\
+    \\"usage\":" <> usage <> "}"
+
+assistantUsages :: [Message] -> [Maybe Usage]
+assistantUsages messages = [assistant.usage | MessageAssistant assistant <- messages]
 
 successResultWithModelUsage :: Text -> Text
 successResultWithModelUsage modelUsage =

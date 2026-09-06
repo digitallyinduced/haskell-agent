@@ -74,6 +74,9 @@ data CompletedClaudeTurn = CompletedClaudeTurn
     -- whatever 'streamClaudeMessage' has not already exposed.
     , liveEvents :: ![ClaudeLiveEvent]
     , tokenUsage :: !Usage
+    -- | Usage of the latest main-conversation model response, not the
+    -- aggregate billing usage of Claude Code's entire tool loop.
+    , contextUsage :: !(Maybe Usage)
     , cumulativeModelUsage :: !(Maybe Usage)
     -- | Host transcript items for this turn in wire order: assistant text
     -- interleaved with tool calls and outputs, always ending in at least
@@ -461,9 +464,33 @@ interpretClaudeTurnWithCredentialValidation validateCredential messages result =
         , assistantText
         , liveEvents
         , tokenUsage = result.usage
+        , contextUsage = latestContextUsage visibleMessages
         , cumulativeModelUsage = cumulative
         , turnItems
         }
+
+-- | The SDK's canonical messages have already had retractions applied.
+-- Never sum their usage: each input count describes a complete request,
+-- including cache creation and cache reads normalized by the SDK decoder.
+-- A boundary without a subsequent measured response invalidates the count,
+-- as does a final assistant record without valid usage.
+latestContextUsage :: [Message] -> Maybe Usage
+latestContextUsage = foldl' step Nothing
+  where
+    step previous = \case
+        MessageAssistant assistant
+            | assistant.error /= Nothing -> Nothing
+            | otherwise -> assistant.usage >>= validUsage
+        MessageSystem system
+            | system.subtype == "compact_boundary" -> Nothing
+        _ -> previous
+    validUsage :: Usage -> Maybe Usage
+    validUsage usage
+        | usage.inputTokens > 0
+        , usage.outputTokens >= 0
+        , usage.cachedTokens >= 0
+        , usage.cachedTokens <= usage.inputTokens = Just usage
+        | otherwise = Nothing
 
 validateSubscriptionSource :: [Message] -> Either ClaudeInterpretationError ()
 validateSubscriptionSource messages =

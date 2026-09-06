@@ -40,6 +40,7 @@ responseToTurnOutput response = TurnOutput
     , toolCalls = mapMaybe responseItemToToolCall response.output
     , assistantText = assistantTextFromResponse response
     , tokenUsage = responseTokenUsage response
+    , contextUsage = tokenUsageFromResponse . Just <$> response.usage
     , providerTelemetry = Nothing
     , completion = case response.status of
         ResponseIncomplete

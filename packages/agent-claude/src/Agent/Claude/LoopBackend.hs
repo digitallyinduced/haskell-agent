@@ -453,6 +453,7 @@ submitClaudeCodeTurn
                 , toolCalls = []
                 , assistantText = completed.assistantText
                 , tokenUsage = sdkUsageToTokenUsage usage
+                , contextUsage = sdkUsageToTokenUsage <$> completed.contextUsage
                 , providerTelemetry = claudeResultTelemetry result
                 , completion = TurnCompleted
                 }
@@ -852,7 +853,8 @@ classifyResultMessage message
         AuthenticationError
     | any (`Text.isInfixOf` message) ["permission", "forbidden", "not allowed"] =
         PermissionError
-    | any (`Text.isInfixOf` message) ["context length", "context window", "too many tokens"] =
+    | any (`Text.isInfixOf` message)
+        ["context length", "context window", "too many tokens", "prompt is too long"] =
         ContextWindowExceeded
     | any (`Text.isInfixOf` message) ["rate limit", "rate_limit", "too many requests"] =
         RateLimitError
