@@ -63,6 +63,25 @@ foreign-library haskell-agent-bridge
     options:          standalone
     hs-source-dirs:   ffi
     other-modules:    Agent.CLI.MacOS.Bridge
+                   , Agent.CLI.MacOS.AgentSnapshot
+                   , Agent.CLI.MacOS.EngineCallbacks
+                   , Agent.CLI.MacOS.EngineEvents
+                   , Agent.CLI.MacOS.EngineHandle
+                   , Agent.CLI.MacOS.EngineHostRegistration
+                   , Agent.CLI.MacOS.EngineLifecycle
+                   , Agent.CLI.MacOS.EngineStaging
+                   , Agent.CLI.MacOS.EngineState
+                   , Agent.CLI.MacOS.EngineStore
+                   , Agent.CLI.MacOS.EngineSubmission
+                   , Agent.CLI.MacOS.InteractionState
+                   , Agent.CLI.MacOS.NativeInteraction
+                   , Agent.CLI.MacOS.NativeRequestHandler
+                   , Agent.CLI.MacOS.NativeSessionCommands
+                   , Agent.CLI.MacOS.NativeSupervisor
+                   , Agent.CLI.MacOS.TurnEvents
+                   , Agent.CLI.MacOS.TurnExecution
+                   , Agent.CLI.MacOS.TurnInputs
+                   , Agent.CLI.MacOS.TurnState
                     , Agent.CLI.MacOS.AccountConnection
                     , Agent.CLI.MacOS.AccountBridge
                     , Agent.CLI.MacOS.BrowserBridge
@@ -154,6 +173,25 @@ test-suite agent-native-bridge-test
                     , cbits/HaskellAgentBridgeRuntime.c
         include-dirs: include
         other-modules: Agent.CLI.MacOS.Bridge
+                     , Agent.CLI.MacOS.AgentSnapshot
+                     , Agent.CLI.MacOS.EngineCallbacks
+                     , Agent.CLI.MacOS.EngineEvents
+                     , Agent.CLI.MacOS.EngineHandle
+                     , Agent.CLI.MacOS.EngineHostRegistration
+                     , Agent.CLI.MacOS.EngineLifecycle
+                     , Agent.CLI.MacOS.EngineStaging
+                     , Agent.CLI.MacOS.EngineState
+                     , Agent.CLI.MacOS.EngineStore
+                     , Agent.CLI.MacOS.EngineSubmission
+                     , Agent.CLI.MacOS.InteractionState
+                     , Agent.CLI.MacOS.NativeInteraction
+                     , Agent.CLI.MacOS.NativeRequestHandler
+                     , Agent.CLI.MacOS.NativeSessionCommands
+                     , Agent.CLI.MacOS.NativeSupervisor
+                     , Agent.CLI.MacOS.TurnEvents
+                     , Agent.CLI.MacOS.TurnExecution
+                     , Agent.CLI.MacOS.TurnInputs
+                     , Agent.CLI.MacOS.TurnState
                      , Agent.CLI.MacOS.AccountConnection
                      , Agent.CLI.MacOS.AccountConnectionSpec
                      , Agent.CLI.MacOS.AccountBridge
