@@ -65,6 +65,7 @@ import Agent.CLI.Session.Interaction
     )
 import Agent.CLI.Session.Lifecycle ( SessionContinuation(..) )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
+import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Skills ( skillInvocationCommand )
 import Agent.CLI.Status ( formatReplStatusLine )
 import Agent.CLI.Style
@@ -159,7 +160,10 @@ repl env = replWithDraft env ""
 replWithDraft :: SessionEnv -> Text -> IO RunResult
 replWithDraft env@SessionEnv
     { sessionRender = render
-    , sessionConversation = conversationRef
+    , sessionState = RuntimeState.SessionState
+        { stateConversation = conversationRef
+        , stateUsage = usageRef
+        }
     , sessionProvider = provider
     , sessionModelCatalog = catalog
     , sessionGatewayModels = gatewayModelsRef
@@ -173,7 +177,6 @@ replWithDraft env@SessionEnv
     , sessionActiveToolNames = readActiveToolNames
     , sessionDraft = draftRef
     , sessionInterrupt = interrupt
-    , sessionUsage = usageRef
     , sessionAccount = accountRef
     , sessionSelectAccount = selectAccount
     , sessionTerminal = terminal

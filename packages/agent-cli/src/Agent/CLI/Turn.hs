@@ -80,8 +80,6 @@ import Agent.CLI.Session.History
     , evictLiveTranscript
     , readLivePreviousResponseId
     , withLiveTranscript
-    , writeLivePreviousResponseId
-    , writeLiveTranscript
     )
 import Agent.CLI.SessionTitle
     ( SessionTitleResult(..)
@@ -109,17 +107,14 @@ import Agent.CLI.Timestamp
     , stripBracketedTimestamps
     )
 import Agent.CLI.TurnState
-    ( ConversationPatch(..)
-    , FieldUpdate(..)
-    , GrokContextUpdate(..)
+    ( ConversationPatch
     , PreparedTurn(..)
-    , StartupUpdate(..)
-    , restoreStartupContext
     , turnInputsWithContext
     , turnReplacesTranscript
     )
 import Agent.Runtime.TurnEngine qualified as Engine
 import Agent.Runtime.TurnExecution qualified as Execution
+import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.Dialect (DialectId(..), dialectId)
 import Agent.Error (ApiError)
 import Agent.Loop
@@ -208,17 +203,17 @@ runOneTurnWithContext includeTurnContext env promptText inputs = do
     -- Automatic compaction is scoped to one enclosing user turn. A committed
     -- boundary from an earlier attempt is already represented by the live and
     -- durable transcripts and must not affect this turn's suffix calculation.
-    writeIORef env.sessionAutomaticCompaction Nothing
+    writeIORef env.sessionState.stateAutomaticCompaction Nothing
     bracket_
         env.sessionBeginWindowTitleBusy
         env.sessionEndWindowTitleBusy
         (bracket_
             env.sessionBeginTurnActivity
             env.sessionEndTurnActivity
-            (withLiveTranscript env.sessionConversation \beforeItems ->
+            (withLiveTranscript env.sessionState.stateConversation \beforeItems ->
                 runOneTurnBusy
                     includeTurnContext env beforeItems promptText inputs))
-        `finally` writeIORef env.sessionAutomaticCompaction Nothing
+        `finally` writeIORef env.sessionState.stateAutomaticCompaction Nothing
 
 timestampConversationBounds
     :: Persistence
@@ -299,19 +294,17 @@ prepareBusyTurn request = do
     let env = request.busyEnv
         planMode = env.sessionPlanMode
         taskPlan = env.sessionTaskPlan
-        startupContext = env.sessionStartupContext
-        grokFirstTurnContext = env.sessionGrokFirstTurnContext
+        grokFirstTurnContext = env.sessionState.stateGrokFirstTurnContext
     applyPendingSessionTitles env
     initialPlanState <- readIORef planMode.planStateRef
     when (initialPlanState == PlanPending) (activatePlanMode planMode)
-    prev <- readLivePreviousResponseId env.sessionConversation
+    prev <- readLivePreviousResponseId env.sessionState.stateConversation
     when request.busyIncludeTurnContext $
         env.sessionRecordImageGenerationInputs
             (concatMap turnInputImages request.busyInputs)
     pendingStartup <-
         if request.busyIncludeTurnContext
-            then atomicModifyIORef' startupContext \pendingCtx ->
-                (Nothing, pendingCtx)
+            then RuntimeState.takeStartupContext env.sessionState
             else pure Nothing
     planReminder <-
         if request.busyIncludeTurnContext
@@ -401,16 +394,8 @@ restoreConsumedPromptContext
 restoreConsumedPromptContext
         request sentStartupContext pendingGrokContext taskPlanReminder = do
     let env = request.busyEnv
-    forM_ sentStartupContext \consumed ->
-        atomicModifyIORef' env.sessionStartupContext \current ->
-            (restoreStartupContext consumed current, ())
-    forM_ pendingGrokContext \consumed ->
-        atomicModifyIORef' env.sessionGrokFirstTurnContext \current ->
-            ( case current of
-                Nothing -> Just consumed
-                Just _ -> current
-            , ()
-            )
+    RuntimeState.restoreConsumedPromptContext env.sessionState
+        sentStartupContext pendingGrokContext
     forM_ taskPlanReminder \reminder ->
         forM_ env.sessionTaskPlan \taskPlan ->
             restoreTaskPlanReminder taskPlan reminder
@@ -473,33 +458,8 @@ persistTurnPromptSnapshot request sentStartupContext pendingGrokContext =
     env = request.busyEnv
 
 commitConversationPatch :: SessionEnv -> ConversationPatch -> IO ()
-commitConversationPatch env patch = do
-    case patch.patchPreviousResponseId of
-        KeepField -> pure ()
-        SetField value ->
-            writeLivePreviousResponseId env.sessionConversation value
-    case patch.patchTranscript of
-        KeepField -> pure ()
-        SetField value -> writeLiveTranscript env.sessionConversation value
-    case patch.patchStartupContext of
-        KeepStartup -> pure ()
-        RestoreStartup consumed ->
-            atomicModifyIORef' env.sessionStartupContext \current ->
-                (restoreStartupContext consumed current, ())
-    case patch.patchGrokFirstTurnContext of
-        KeepGrokContext -> pure ()
-        RestoreGrokContext consumed ->
-            atomicModifyIORef' env.sessionGrokFirstTurnContext \current ->
-                ( case current of
-                    Nothing -> Just consumed
-                    Just _ -> current
-                , ()
-                )
-    atomicModifyIORef' env.sessionUsage \current ->
-        (addTokenUsage current patch.patchUsageDelta, ())
-    case patch.patchLastAssistant of
-        KeepField -> pure ()
-        SetField value -> writeIORef env.sessionLastAssistant value
+commitConversationPatch env =
+    RuntimeState.commitConversationPatch env.sessionState
 
 executeBusyTurn
     :: BusyTurnRequest
@@ -524,7 +484,7 @@ executeBusyTurn request preparation = do
                     preparation.preparedPreviousResponseId
                 , executionPreparedTurn = prepared
                 }
-            (readIORef env.sessionAutomaticCompaction)
+            (readIORef env.sessionState.stateAutomaticCompaction)
             (rollbackExceptionalTurn request preparation rootTurnId)
     let execution = executed.executedLoop
         automaticCompaction = executed.executedCompaction
@@ -816,7 +776,7 @@ finishGeneralFailureTurn executed err = do
             LoopIncomplete turn -> Just turn
             _ -> Nothing
     forM_ maybeIncompleteTurn \turn ->
-        atomicModifyIORef' env.sessionUsage \current ->
+        atomicModifyIORef' env.sessionState.stateUsage \current ->
             (addTokenUsage current turn.tokenUsage, ())
     -- Retain the same items in the live and durable transcripts. Response id,
     -- usage, and the incomplete reason remain available in turn metadata.
@@ -990,7 +950,7 @@ persistSuccessfulTurn
 evictDurableConversation :: SessionEnv -> SessionHandle -> IO ()
 evictDurableConversation env handle = do
     generation <-
-        currentLiveTranscriptGeneration env.sessionConversation
+        currentLiveTranscriptGeneration env.sessionState.stateConversation
     let sessionId = handle.sessionMeta.metaId
         checkpoint =
             durableTranscriptCheckpoint
@@ -999,7 +959,7 @@ evictDurableConversation env handle = do
                 sessionId
     evicted <-
         evictLiveTranscript
-            env.sessionConversation generation checkpoint
+            env.sessionState.stateConversation generation checkpoint
     when evicted performMajorGC
 
 -- | Wrap the last actual user payload in the Grok Build request envelope.

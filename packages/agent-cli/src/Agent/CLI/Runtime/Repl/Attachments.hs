@@ -20,6 +20,7 @@ import Agent.CLI.SessionState (removeImageAttachmentAt)
 import Agent.CLI.Session.History
     ( modifyLiveAttachments, readLiveAttachments )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
+import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Style ( glyphOk, glyphSession, roleError, roleMuted )
 import Agent.CLI.TUI.App
     ( emitUiEvent, setFullscreenImagePreviews )
@@ -53,7 +54,8 @@ handleClipboardInput
     -> IO RunResult
 handleClipboardInput
         SessionEnv
-            { sessionConversation = conversationRef
+            { sessionState = RuntimeState.SessionState
+                { stateConversation = conversationRef }
             , sessionPreviewId = previewIdRef
             , sessionFullscreen = fullscreen
             }
@@ -141,7 +143,8 @@ handleAttachmentAction
 handleAttachmentAction
         env@SessionEnv
             { sessionRender = render
-            , sessionConversation = conversationRef
+            , sessionState = RuntimeState.SessionState
+                { stateConversation = conversationRef }
             , sessionPreviewId = previewIdRef
             , sessionFullscreen = fullscreen
             }

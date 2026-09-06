@@ -46,7 +46,6 @@ import qualified Agent.CLI.ComputerUseSpec as ComputerUseSpec
 import qualified Agent.CLI.ConfigSpec as ConfigSpec
 import qualified Agent.CLI.CompactionSpec as CompactionSpec
 import qualified Agent.CLI.ContextSpec as ContextSpec
-import qualified Agent.CLI.ConversationStoreSpec as ConversationStoreSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.DialectsSpec as DialectsSpec
 import qualified Agent.CLI.DatabaseSpec as DatabaseSpec
@@ -177,7 +176,6 @@ specs = do
     ConfigSpec.spec
     CompactionSpec.spec
     ContextSpec.spec
-    ConversationStoreSpec.spec
     ConnectivitySpec.spec
     DialectsSpec.spec
     DatabaseSpec.spec

@@ -61,6 +61,7 @@ import Agent.CLI.Session
 import Agent.CLI.Session.Selection
     ( handleConversationSearch, handleResume )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
+import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.SessionTitle
     ( invalidateSessionTitles, requestSessionTitle )
@@ -718,7 +719,7 @@ handleShowSessionInfoAction runtime = do
     let env = runtime.actionEnv
     color <- resolveColor stdout
     params <- readSessionRequestParams env.sessionParams
-    usage <- readIORef env.sessionUsage
+    usage <- readIORef env.sessionState.stateUsage
     shellMode <- env.sessionShellMode
     (persistenceState, sessionId, sessionTitle) <-
         case env.sessionPersist of
