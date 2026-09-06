@@ -38,6 +38,12 @@ library
     import:           common-options
     hs-source-dirs:   src
     other-modules:    Agent.CLI.ProcessSecurity
+                    , Agent.CLI.RepositoryDelivery.Process
+                    , Agent.CLI.RepositoryDelivery.Validation
+                    , Agent.CLI.RepositoryReview.Checks
+                    , Agent.CLI.RepositoryReview.Error
+                    , Agent.CLI.RepositoryReview.GitOutput
+                    , Agent.CLI.RepositoryReview.ProcessSupport
     exposed-modules:  Agent.CLI.RepositoryDelivery
                     , Agent.CLI.RepositoryDelivery.ConfirmationStore
                     , Agent.CLI.RepositoryReview
