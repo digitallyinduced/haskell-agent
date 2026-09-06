@@ -50,6 +50,13 @@ moved_modules=(
   Agent.CLI.MacOS.ResourceAdmin
 )
 
+if rg --line-number 'CliOptions|Agent\.CLI\.Options|nativePrepareOptions' \
+  "$root/packages/agent-server/src/Agent/Server/Runtime.hs" \
+  "$root/packages/agent-cli/src/Agent/CLI/Runtime/Orchestration/Types.hs" \
+  "$root/packages/agent-cli-runtime/src/Agent/Runtime/StartupPolicy.hs"; then
+  fail "native startup contracts and server runtime must not depend on CLI options"
+fi
+
 for module in "${moved_modules[@]}"; do
   if rg --line-number --fixed-strings "$module" "$cli"; then
     fail "$module leaked back into agent-cli"
@@ -99,6 +106,7 @@ for registration in \
 done
 
 required_files=(
+  packages/agent-cli-runtime/src/Agent/Runtime/StartupPolicy.hs
   packages/agent-cli-runtime/src/Agent/Runtime/ConversationStore.hs
   packages/agent-cli-runtime/src/Agent/Runtime/SessionState.hs
   packages/agent-cli-runtime/test/Agent/Runtime/ConversationStoreSpec.hs

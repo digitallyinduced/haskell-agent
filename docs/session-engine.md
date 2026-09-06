@@ -6,6 +6,10 @@
 
 - `Request`: typed native turn requests and validation, independent of
   `CliOptions`. Existing CLI exports remain compatibility reexports.
+- `StartupPolicy`: host-owned permissions for workspace instruction/skill
+  context and host startup facilities. Native hooks carry this typed policy,
+  not an arbitrary CLI-options transformation. The server selects the restricted
+  preset for sandbox turns; the desktop bridge retains the host preset.
 - `Compaction`: the installed automatic-compaction checkpoint.
 - `TurnState`: preparation, conversation patches, interrupted-turn retention,
   response-chain invalidation, startup-context merging, and checkpoint rebasing.
@@ -27,6 +31,21 @@ The extraction deliberately preserves the exception scope and ordering:
 execute loop with exceptional rollback; read the compaction checkpoint outside
 that handler; clear thinking and capture timing; consume the restart request;
 finalize. A failure after loop execution must not retroactively roll it back.
+
+### Native startup policy boundary
+
+`Agent.CLI.NativeRuntime` remains the legacy execution adapter. It translates
+the native startup policy after preparing typed requests or legacy arguments.
+Restricted startup pins the admitted cwd and disables worktrees, automatic
+approval, startup input files, computer use, and code mode; supplied-context-only
+startup disables AGENTS.md and skills. These are the previous server sandbox
+restrictions, now enforced in the adapter rather than through server-owned
+`CliOptions` mutation. Host policy preserves legacy desktop options unchanged.
+Typed native turns independently retain their stricter request invariants.
+
+This removes CLI options from the server startup contract, not the server's
+dependency on CLI orchestration. Shared startup/session composition still needs
+extraction before server and CLI can call the same frontend-neutral entry point.
 
 Finalization preserves this precedence:
 

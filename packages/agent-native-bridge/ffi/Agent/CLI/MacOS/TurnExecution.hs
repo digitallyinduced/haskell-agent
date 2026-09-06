@@ -27,6 +27,7 @@ import Agent.CLI.NativeRuntime
     )
 import Agent.Loop
     ( ImageAttachment, LoopEvent(..), TurnOutput(..), emptyTokenUsage )
+import Agent.Runtime.StartupPolicy (hostNativeStartupPolicy)
 import Agent.Tools.Types (AppTool(..), AppToolGroup(..), appToolsFromGroups)
 import Control.Concurrent.STM (atomically, writeTVar)
 import Control.Exception.Safe (SomeException, fromException, tryAny)
@@ -127,7 +128,7 @@ runNativeTurn
             , nativeDatabaseScopeNamespace = Nothing
             , nativeWorkspaceDiscovery = DiscoverHostWorkspace
             , nativeCapabilities = fullNativeRunCapabilities
-            , nativePrepareOptions = Right
+            , nativeStartupPolicy = hostNativeStartupPolicy
             }
         args = nativeTurnArguments start
     result <- tryAny $

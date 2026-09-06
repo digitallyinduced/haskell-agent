@@ -111,6 +111,7 @@ foreign-library haskell-agent-bridge
     build-depends:    agent-native-bridge
                     , agent-repository >= 0.1 && < 0.2
                     , agent-cli >= 0.1 && < 0.2
+                    , agent-cli-runtime >= 0.1 && < 0.2
                     , agent-runtime-daemon >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2

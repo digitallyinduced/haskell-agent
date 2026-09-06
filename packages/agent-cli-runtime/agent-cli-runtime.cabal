@@ -58,6 +58,7 @@ library
                     , Agent.Runtime.SessionState
                     , Agent.CLI.NativeProcess
                     , Agent.Runtime.Request
+                    , Agent.Runtime.StartupPolicy
                     , Agent.Runtime.TurnEngine
                     , Agent.Runtime.TurnExecution
                     , Agent.Runtime.TurnState
@@ -142,6 +143,7 @@ test-suite agent-cli-runtime-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.Runtime.RequestSpec
+                    , Agent.Runtime.StartupPolicySpec
                     , Agent.Runtime.ConversationStoreSpec
                     , Agent.Runtime.ConversationSessionSpec
                     , Agent.Runtime.TurnEngineSpec

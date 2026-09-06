@@ -10,12 +10,17 @@ import Agent.CLI.NativeRuntime
     , nativeLoadsHostWorkspaceContext
     , nativePreparedDiscovery
     , nativeTurnOptions
+    , applyNativeStartupPolicy
     )
 import Agent.CLI.Options
     ( CliOptions(..)
     , ScreenMode(..)
+    , defaultCliOptions
     )
+import Agent.Runtime.StartupPolicy
+import Control.Monad (forM_)
 import Agent.Provider (Provider(..))
+import Agent.Loop (ImageAttachment(..))
 import Agent.CLI.Project (defaultProjectSettings)
 import Agent.ReasoningEffort (ReasoningEffort(..))
 import Agent.TUI.Motion (MotionMode(..))
@@ -24,6 +29,78 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "nativeTurnOptions" do
+    it "preserves legacy host startup options exactly" do
+        applyNativeStartupPolicy hostNativeStartupPolicy
+            (unsafeEncodeUtf "/admitted") conflictingOptions
+            `shouldBe` conflictingOptions
+
+    it "enforces every restricted startup setting against conflicting options" do
+        let cwd = unsafeEncodeUtf "/admitted"
+            actual = applyNativeStartupPolicy restrictedNativeStartupPolicy cwd
+                conflictingOptions
+            expected = conflictingOptions
+                { optCwd = Just cwd
+                , optWorktree = False
+                , optYolo = False
+                , optNoYolo = True
+                , optPromptFile = Nothing
+                , optManagedTurnFile = Nothing
+                , optAgentsMd = False
+                , optSkills = False
+                , optComputerUse = False
+                , optCodeMode = False
+                }
+        actual `shouldBe` expected
+        applyNativeStartupPolicy restrictedNativeStartupPolicy cwd actual
+            `shouldBe` actual
+
+    it "can exclude workspace context without changing execution facilities" do
+        let policy = hostNativeStartupPolicy
+                { nativeContextSources = SuppliedContextOnly }
+        applyNativeStartupPolicy policy (unsafeEncodeUtf "/admitted") conflictingOptions
+            `shouldBe` conflictingOptions { optAgentsMd = False, optSkills = False }
+
+    it "does not re-enable caller-disabled context under host policy" do
+        let options = defaultCliOptions { optAgentsMd = False, optSkills = False }
+        applyNativeStartupPolicy hostNativeStartupPolicy (unsafeEncodeUtf "/admitted") options
+            `shouldBe` options
+
+    it "accepts image-only typed requests without introducing startup input files" do
+        let request = baseRequest
+                { nativeTurnPrompt = ""
+                , nativeTurnImages = [ImageAttachment "image/png" "image bytes"]
+                }
+        lowered <- shouldReturnRight (nativeTurnOptions request)
+        forM_ [hostNativeStartupPolicy, restrictedNativeStartupPolicy] \policy -> do
+            let options = applyNativeStartupPolicy policy request.nativeTurnCwd lowered
+            options.optPrompt `shouldBe` Just ""
+            options.optPromptFile `shouldBe` Nothing
+            options.optManagedTurnFile `shouldBe` Nothing
+
+    forM_ [hostNativeStartupPolicy, restrictedNativeStartupPolicy] \policy ->
+        forM_ [NativeNewSession, NativeResumeSession "existing"] \session ->
+            forM_ [NativeAsk, NativePlan] \interaction ->
+                forM_ [NativeShellNone, NativeShellGhci, NativeShellBash, NativeShellBoth] \shell ->
+                    it ("preserves typed turn fields under " <> show (policy, session, interaction, shell)) do
+                        let request = baseRequest
+                                { nativeTurnSession = session
+                                , nativeTurnInteractionMode = interaction
+                                , nativeTurnShellMode = shell
+                                }
+                        lowered <- shouldReturnRight (nativeTurnOptions request)
+                        let options = applyNativeStartupPolicy policy request.nativeTurnCwd lowered
+                        options.optPrompt `shouldBe` lowered.optPrompt
+                        options.optResume `shouldBe` lowered.optResume
+                        options.optGhci `shouldBe` lowered.optGhci
+                        options.optBash `shouldBe` lowered.optBash
+                        options.optCwd `shouldBe` Just request.nativeTurnCwd
+                        options.optYolo `shouldBe` False
+                        options.optNoYolo `shouldBe` True
+                        options.optWorktree `shouldBe` False
+                        options.optPromptFile `shouldBe` Nothing
+                        options.optManagedTurnFile `shouldBe` Nothing
+                        options.optComputerUse `shouldBe` False
+
     it "lowers a new typed turn without enabling native-only capabilities" do
         let cwd = unsafeEncodeUtf "/tmp/project"
             request = NativeTurnRequest
@@ -78,6 +155,15 @@ spec = describe "nativeTurnOptions" do
             )
             `shouldBe` Left "typed native turns do not support auto-approval"
 
+    it "keeps approval validation ahead of resume validation under either policy" do
+        forM_ [hostNativeStartupPolicy, restrictedNativeStartupPolicy] \policy -> do
+            let request = baseRequest
+                    { nativeTurnInteractionMode = NativeYolo
+                    , nativeTurnSession = NativeResumeSession " "
+                    }
+            (applyNativeStartupPolicy policy request.nativeTurnCwd <$> nativeTurnOptions request)
+                `shouldBe` Left "typed native turns do not support auto-approval"
+
     it "requires prepared discovery whenever host discovery is disabled" do
         let root = unsafeEncodeUtf "/prepared/root"
             prepared = NativeDiscoveryContext
@@ -122,6 +208,22 @@ baseRequest = NativeTurnRequest
     , nativeTurnEffort = Nothing
     , nativeTurnInteractionMode = NativeAsk
     , nativeTurnShellMode = NativeShellNone
+    }
+
+conflictingOptions :: CliOptions
+conflictingOptions = defaultCliOptions
+    { optCwd = Just (unsafeEncodeUtf "/untrusted")
+    , optWorktree = True
+    , optYolo = True
+    , optNoYolo = False
+    , optPromptFile = Just (unsafeEncodeUtf "/untrusted/prompt")
+    , optManagedTurnFile = Just (unsafeEncodeUtf "/untrusted/turn")
+    , optAgentsMd = True
+    , optSkills = True
+    , optComputerUse = True
+    , optCodeMode = True
+    , optPrompt = Just "preserve supplied input"
+    , optResume = Just "preserve-session"
     }
 
 shouldReturnRight :: (Show err) => Either err value -> IO value

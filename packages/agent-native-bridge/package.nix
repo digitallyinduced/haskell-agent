@@ -15,7 +15,7 @@ mkDerivation {
     agent-cli agent-core agent-json agent-mcp agent-store base
     base64-bytestring bytestring containers filepath network-uri text time transformers
   ] ++ lib.optionals stdenv.hostPlatform.isDarwin [
-    aeson agent-openai agent-openrouter agent-repository
+    aeson agent-cli-runtime agent-openai agent-openrouter agent-repository
     agent-responses-types agent-runtime-daemon agent-xai async directory
     filelock JuicyPixels safe-exceptions stm
   ];

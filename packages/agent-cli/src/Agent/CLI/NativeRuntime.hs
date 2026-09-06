@@ -15,6 +15,7 @@ module Agent.CLI.NativeRuntime
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
     , nativeTurnOptions
+    , applyNativeStartupPolicy
     , restartNativeMcpRuntime
     , runNativeAgent
     , runNativeTurn
@@ -31,6 +32,11 @@ import Agent.CLI.NativeProcess
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
     , restartNativeMcpRuntime
+    )
+import Agent.Runtime.StartupPolicy
+    ( NativeStartupPolicy(..)
+    , NativeContextSources(..)
+    , NativeExecutionFacilities(..)
     )
 import Agent.Loop
     ( TurnAttachment(ImageAttachmentItem)
@@ -161,29 +167,53 @@ runNativeOptions
     -> CliOptions
     -> IO (Either Text ())
 runNativeOptions runtime output cwd hooks options =
-    case hooks.nativePrepareOptions options of
-        Left err -> pure (Left err)
-        Right preparedOptions ->
-            runAgentWithRuntime
-                AgentProcessRuntime
-                    { processMcpSupervisor = runtime.nativeMcpSupervisor
-                    , processSessionThreads = runtime.nativeSessionThreads
-                    , processStartCleanup = runtime.nativeStartCleanup
-                    , processMcpElicitation = runtime.nativeMcpElicitation
-                    , processNetworkRecovery =
-                        networkRecovery runtime.nativeNetworkRecovery
-                    }
-                (nativeRunMode output cwd hooks)
-                (shellOptions preparedOptions) >>= \case
-                    DevQuit -> pure (Right ())
-                    DevReload _ ->
-                        pure (Left
-                            "native turn unexpectedly requested a reload")
+    runAgentWithRuntime
+        AgentProcessRuntime
+            { processMcpSupervisor = runtime.nativeMcpSupervisor
+            , processSessionThreads = runtime.nativeSessionThreads
+            , processStartCleanup = runtime.nativeStartCleanup
+            , processMcpElicitation = runtime.nativeMcpElicitation
+            , processNetworkRecovery =
+                networkRecovery runtime.nativeNetworkRecovery
+            }
+        (nativeRunMode output cwd hooks)
+        (applyNativeStartupPolicy hooks.nativeStartupPolicy cwd
+            (shellOptions options)) >>= \case
+            DevQuit -> pure (Right ())
+            DevReload _ ->
+                pure (Left
+                    "native turn unexpectedly requested a reload")
   where
     shellOptions prepared =
         prepared
             { optGhci = nativeGhciEnabled hooks.nativeShellMode
             , optBash = nativeBashEnabled hooks.nativeShellMode
+            }
+
+-- | The only legacy-options translation of native startup permissions.
+-- Apply after request/argument preparation so conflicting options cannot
+-- relax the embedding's restrictions. Typed-turn invariants are enforced
+-- independently by 'nativeTurnOptions'.
+applyNativeStartupPolicy :: NativeStartupPolicy -> OsPath -> CliOptions -> CliOptions
+applyNativeStartupPolicy policy cwd = restrictContext . restrictFacilities
+  where
+    restrictContext options = case policy.nativeContextSources of
+        WorkspaceContextAllowed -> options
+        SuppliedContextOnly -> options
+            { optAgentsMd = False
+            , optSkills = False
+            }
+    restrictFacilities options = case policy.nativeExecutionFacilities of
+        HostStartupFacilities -> options
+        TurnScopedFacilities -> options
+            { optCwd = Just cwd
+            , optWorktree = False
+            , optYolo = False
+            , optNoYolo = True
+            , optPromptFile = Nothing
+            , optManagedTurnFile = Nothing
+            , optComputerUse = False
+            , optCodeMode = False
             }
 
 nativeGhciEnabled :: NativeShellMode -> Bool

@@ -18,13 +18,13 @@ module Agent.CLI.Runtime.Orchestration.Types
 
 import Agent.CLI.AgentSessions ( SessionThreadManager )
 import Agent.CLI.AgentViewport ( AgentEntry )
-import Agent.CLI.Options ( CliOptions )
 import Agent.CLI.Project ( ProjectSettings )
 import Agent.Connectivity.NetworkPath ( NetworkRecovery )
 import Agent.CLI.Permission ( PermissionChoice )
 import Agent.Loop ( LoopEvent, TurnInput )
 import Agent.Provider ( Credential, TokenProvider )
 import Agent.Runtime.Request (NativeInteractionMode(..), NativeShellMode(..))
+import Agent.Runtime.StartupPolicy (NativeStartupPolicy)
 import Agent.Store.Postgres ( Store )
 import Agent.ToolDispatch ( ToolCall )
 import Agent.Tools.PlanMode ( PlanModeHooks )
@@ -138,8 +138,8 @@ data NativeRunHooks = NativeRunHooks
     , nativeDatabaseScopeNamespace :: !(Maybe Text)
     , nativeWorkspaceDiscovery :: !NativeWorkspaceDiscovery
     , nativeCapabilities :: !NativeRunCapabilities
-    -- | Last-mile option policy owned by the embedding.
-    , nativePrepareOptions :: !(CliOptions -> Either Text CliOptions)
+    -- | Startup permissions owned by the embedding, not an options callback.
+    , nativeStartupPolicy :: !NativeStartupPolicy
     }
 
 data AgentRunMode = AgentRunMode
