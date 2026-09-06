@@ -74,6 +74,14 @@ spec = describe "Agent.Telegram" do
                 Text.isInfixOf "Follow the language and style"
             prompt `shouldSatisfy`
                 Text.isInfixOf "For example: I'll take a quick look."
+            prompt `shouldSatisfy`
+                Text.isInfixOf "create_agent_session and wait_agent_session"
+            prompt `shouldSatisfy`
+                Text.isInfixOf "delegate implementation and testing"
+            prompt `shouldSatisfy`
+                Text.isInfixOf "retain responsibility for verification"
+            prompt `shouldSatisfy`
+                Text.isInfixOf "Do not use this indirection for small edits"
             prompt `shouldNotSatisfy` Text.isInfixOf "Ich schaue"
             prompt `shouldSatisfy`
                 Text.isPrefixOf "Inspect the failing tests"
