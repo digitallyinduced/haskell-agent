@@ -81,6 +81,24 @@ spec = describe "Agent.CLI.Skills" do
         map (.skillScope) matching `shouldBe` [BuiltinSkill]
         map (.skillModelInvocable) matching `shouldBe` [True]
 
+    it "loads the packaged wait-for-ci skill" do
+        catalog <- loadSkillsCatalog
+            defaultCliOptions
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            False
+        let matching =
+                filter ((== "wait-for-ci") . (.skillName))
+                    catalog.catalogSkills
+        map (.skillScope) matching `shouldBe` [BuiltinSkill]
+        map (.skillModelInvocable) matching `shouldBe` [True]
+        map (.skillUserInvocable) matching `shouldBe` [True]
+        map (.skillWhenToUse) matching `shouldBe`
+            [ Just
+                "Apply after a push or pull-request update when CI checks are running, queued, or expected and the task depends on their result."
+            ]
+
     it "loads the packaged learn-about-user skill" do
         catalog <- loadSkillsCatalog
             defaultCliOptions
