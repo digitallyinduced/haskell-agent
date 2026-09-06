@@ -168,6 +168,7 @@ projectCodeModeTools mode tools = case mode of
     isHostedComputerTool tool =
         case tool.appToolSchema of
             HostedComputerSchema -> True
+            HostedComputerFunctionSchema _ -> True
             _ -> False
 
 projectCodeModeToolsFor

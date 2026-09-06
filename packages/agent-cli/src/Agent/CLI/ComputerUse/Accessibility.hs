@@ -40,7 +40,7 @@ instance Aeson.ToJSON AccessibilitySnapshot where
 instance Aeson.FromJSON AccessibilitySnapshot where
     parseJSON = Aeson.withObject "AccessibilitySnapshot" \object -> do
         schemaVersion <- object Aeson..: "schema_version"
-        if schemaVersion /= (1 :: Int)
+        if schemaVersion `notElem` ([1, 2] :: [Int])
             then fail "unsupported accessibility snapshot schema_version"
             else AccessibilitySnapshot schemaVersion
                 <$> object Aeson..: "scope"

@@ -98,6 +98,10 @@ data ToolSchema
     -- caller-defined JSON functions prevents an unrelated MCP tool from
     -- acquiring the desktop-control handler or its output encoding.
     | HostedComputerSchema
+    -- | A host-supplied schema for the privileged local computer function.
+    -- Native embeddings use this to expose semantic accessibility operations
+    -- without allowing an ordinary raw-JSON tool to acquire computer calls.
+    | HostedComputerFunctionSchema !Value
     deriving (Eq, Show)
 
 -- | Whether a tool may be selected for provider-requested asynchronous calls.
@@ -529,6 +533,9 @@ toolAcceptsCall tool call =
         (HostedComputerSchema, ComputerCallKind) -> True
         (HostedComputerSchema, ComputerFunctionCallKind) -> True
         (HostedComputerSchema, _) -> False
+        (HostedComputerFunctionSchema _, ComputerCallKind) -> True
+        (HostedComputerFunctionSchema _, ComputerFunctionCallKind) -> True
+        (HostedComputerFunctionSchema _, _) -> False
         (_, ComputerCallKind) -> False
         (_, ComputerFunctionCallKind) -> False
         _ -> True
@@ -540,6 +547,7 @@ jsonToolParameters tool = case tool.appToolSchema of
     FreeformApplyPatchSchema -> Nothing
     FreeformGrammarSchema _ _ -> Nothing
     HostedComputerSchema -> Nothing
+    HostedComputerFunctionSchema _ -> Nothing
 
 -- | Compatibility helper for direct handler consumers. New dispatch paths
 -- should retain and use 'ToolRegistry' instead.

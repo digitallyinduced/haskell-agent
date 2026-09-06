@@ -90,6 +90,52 @@ spec = describe "schemasFromAppTools" do
             else schemasFromAppTools codexDialect [computerUseTool]
                 `shouldBe` [webSearchTool]
 
+    it "advertises a privileged host-supplied computer schema verbatim" do
+        let parameters = Aeson.object
+                [ "type" Aeson..= ("object" :: Text)
+                , "properties" Aeson..= Aeson.object
+                    [ "operation" Aeson..= Aeson.object
+                        ["const" Aeson..= ("observe" :: Text)]
+                    ]
+                , "required" Aeson..= ["operation" :: Text]
+                , "additionalProperties" Aeson..= False
+                ]
+            nativeComputer = computerUseTool
+                { appToolSchema = HostedComputerFunctionSchema parameters }
+        if os == "darwin"
+            then case schemasFromAppTools codexDialect [nativeComputer] of
+                [_, FunctionToolValue function] -> do
+                    function.name `shouldBe` computerFunctionName
+                    function.strict `shouldBe` Just True
+                    fmap (Aeson.decodeStrict' . rawJsonBytes)
+                        function.parameters
+                        `shouldBe` Just (Just parameters)
+                other -> expectationFailure
+                    ("expected semantic computer function, got " <> show other)
+            else schemasFromAppTools codexDialect [nativeComputer]
+                `shouldBe` [webSearchTool]
+
+    it "does not claim strictness for an optional host computer schema" do
+        let parameters = Aeson.object
+                [ "type" Aeson..= ("object" :: Text)
+                , "properties" Aeson..= Aeson.object
+                    [ "operation" Aeson..= Aeson.object
+                        ["type" Aeson..= ("string" :: Text)]
+                    ]
+                , "required" Aeson..= ([] :: [Text])
+                , "additionalProperties" Aeson..= False
+                ]
+            nativeComputer = computerUseTool
+                { appToolSchema = HostedComputerFunctionSchema parameters }
+        if os == "darwin"
+            then case schemasFromAppTools codexDialect [nativeComputer] of
+                [_, FunctionToolValue function] ->
+                    function.strict `shouldBe` Just False
+                other -> expectationFailure
+                    ("expected semantic computer function, got " <> show other)
+            else schemasFromAppTools codexDialect [nativeComputer]
+                `shouldBe` [webSearchTool]
+
     it "reserves the model-facing computer_use function identity" do
         let collision =
                 jsonAppTool computerFunctionName "Unrelated MCP function" []
@@ -98,6 +144,18 @@ spec = describe "schemasFromAppTools" do
         schemasFromAppTools codexDialect [collision]
             `shouldBe` [webSearchTool]
         requireToolRegistry [computerUseTool, collision]
+            `shouldThrow` anyIOException
+
+    it "keeps the host-supplied computer schema privileged" do
+        let parameters = Aeson.object ["type" Aeson..= ("object" :: Text)]
+            nativeComputer = computerUseTool
+                { appToolSchema = HostedComputerFunctionSchema parameters }
+            collision =
+                rawJsonAppTool computerFunctionName "Unrelated MCP function"
+                    parameters
+                    AlwaysPrompt
+                    (noArgsTool computerFunctionName (pure (Right "ok")))
+        requireToolRegistry [nativeComputer, collision]
             `shouldThrow` anyIOException
 
     it "keeps an unrelated function named computer as a function" do

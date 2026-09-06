@@ -58,7 +58,9 @@ import Agent.Tools.Types
     )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Foldable as Foldable
 import Data.List (partition)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
@@ -77,7 +79,7 @@ requireToolRegistry tools
   where
     reservesComputerFunction tool =
         canonicalToolName tool.appToolName == computerFunctionName
-            && tool.appToolSchema /= HostedComputerSchema
+            && not (isHostedComputerSchema tool.appToolSchema)
 
 lookupAppTool :: Text -> [AppTool] -> Maybe AppTool
 lookupAppTool name tools =
@@ -202,7 +204,7 @@ isImageGenerationTool tool =
 schemaFromAppTool :: Bool -> Dialect -> AppTool -> Maybe ResponseTool
 schemaFromAppTool _ _ tool
     | canonicalToolName tool.appToolName == computerFunctionName
-    , tool.appToolSchema /= HostedComputerSchema =
+    , not (isHostedComputerSchema tool.appToolSchema) =
         Nothing
 schemaFromAppTool modelSupportsAsync dialect tool =
     fmap (setAsyncCapability supportsAsync) $
@@ -217,6 +219,19 @@ schemaFromAppTool modelSupportsAsync dialect tool =
                             (rawJsonFromEncoding
                                 (Aeson.toEncoding computerFunctionParameters))
                         , strict = Just True
+                        , async = Nothing
+                        })
+                    else Nothing
+            HostedComputerFunctionSchema parameters ->
+                if os == "darwin" && dialectId dialect == CodexDialect
+                    then Just (FunctionToolValue FunctionTool
+                        { name = computerFunctionName
+                        , description = Just tool.appToolDescription
+                        , parameters = Just
+                            (rawJsonFromEncoding
+                                (Aeson.toEncoding parameters))
+                        , strict = Just
+                            (isStrictHostedFunctionSchema parameters)
                         , async = Nothing
                         })
                     else Nothing
@@ -360,6 +375,70 @@ namespaceTool modelSupportsAsync namespaceName namespaceDescription tools =
         FreeformApplyPatchSchema -> Aeson.object []
         FreeformGrammarSchema _ _ -> Aeson.object []
         HostedComputerSchema -> Aeson.object []
+        HostedComputerFunctionSchema _ -> Aeson.object []
+
+isHostedComputerSchema :: ToolSchema -> Bool
+isHostedComputerSchema = \case
+    HostedComputerSchema -> True
+    HostedComputerFunctionSchema _ -> True
+    _ -> False
+
+isStrictHostedFunctionSchema :: Aeson.Value -> Bool
+isStrictHostedFunctionSchema value@(Aeson.Object object) =
+    KeyMap.lookup "type" object == Just (Aeson.String "object")
+        && strictSchemaNode value
+isStrictHostedFunctionSchema _ = False
+
+strictSchemaNode :: Aeson.Value -> Bool
+strictSchemaNode (Aeson.Object object)
+    | any (`KeyMap.member` object)
+        ["allOf", "oneOf", "not", "if", "then", "else", "$ref"] =
+        False
+    | schemaIncludesType "object" object =
+        case
+            ( KeyMap.lookup "properties" object
+            , KeyMap.lookup "required" object
+            , KeyMap.lookup "additionalProperties" object
+            ) of
+            ( Just (Aeson.Object properties)
+                , Just (Aeson.Array required)
+                , Just (Aeson.Bool False)
+                ) ->
+                    let propertyNames =
+                            map (Key.toText) (KeyMap.keys properties)
+                        requiredNames =
+                            [ name
+                            | Aeson.String name <- Foldable.toList required
+                            ]
+                    in length requiredNames == Foldable.length required
+                        && length requiredNames == length propertyNames
+                        && all (`elem` requiredNames) propertyNames
+                        && all strictSchemaNode properties
+            _ -> False
+    | schemaIncludesType "array" object =
+        maybe False strictSchemaNode (KeyMap.lookup "items" object)
+            && strictAlternatives object
+    | otherwise = strictAlternatives object
+strictSchemaNode (Aeson.Array values) =
+    all strictSchemaNode values
+strictSchemaNode _ = True
+
+strictAlternatives :: Aeson.Object -> Bool
+strictAlternatives object =
+    case KeyMap.lookup "anyOf" object of
+        Nothing -> True
+        Just (Aeson.Array alternatives) ->
+            not (Foldable.null alternatives)
+                && all strictSchemaNode alternatives
+        Just _ -> False
+
+schemaIncludesType :: Text -> Aeson.Object -> Bool
+schemaIncludesType expected object =
+    case KeyMap.lookup "type" object of
+        Just (Aeson.String actual) -> actual == expected
+        Just (Aeson.Array actual) ->
+            Aeson.String expected `elem` Foldable.toList actual
+        _ -> False
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.
 applyPatchCustomTool :: Text -> Text -> ResponseTool

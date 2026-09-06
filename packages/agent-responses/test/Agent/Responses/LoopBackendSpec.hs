@@ -362,6 +362,53 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             other -> expectationFailure
                 ("unexpected native computer continuation: " <> show other)
 
+    it "keeps AX-only computer results text-only" do
+        let result = ToolCallResult
+                { callId = "call-ax-only"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , output = "Current macOS accessibility state"
+                , callKind = ComputerFunctionCallKind
+                }
+        case toolResultToItem result of
+            FunctionCallOutputItem output ->
+                Aeson.toJSON output.output `shouldBe`
+                    Aeson.String "Current macOS accessibility state"
+            other -> expectationFailure
+                ("expected text-only computer output, got " <> show other)
+
+    it "preserves explicitly requested computer screenshots as image content" do
+        let result = ToolCallResult
+                { callId = "call-ax-image"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages =
+                    [ ToolResultImage
+                        { imageUrl = "data:image/png;base64,AA=="
+                        , imageDetail = Just "high"
+                        }
+                    ]
+                , toolResultOutcome = Nothing
+                , output = "Current macOS accessibility state"
+                , callKind = ComputerFunctionCallKind
+                }
+        case toolResultToItem result of
+            FunctionCallOutputItem output ->
+                Aeson.toJSON output.output `shouldBe` Aeson.toJSON
+                    [ InputImagePart
+                        { detail = Just "high"
+                        , fileId = Nothing
+                        , imageUrl = Just "data:image/png;base64,AA=="
+                        , promptCacheBreakpoint = Nothing
+                        }
+                    , InputTextPart
+                        { text = "Current macOS accessibility state"
+                        , promptCacheBreakpoint = Nothing
+                        }
+                    ]
+            other -> expectationFailure
+                ("expected rich computer output, got " <> show other)
+
     it "labels a structured full accessibility snapshot with its revision" do
         let accessibilityState = Aeson.object
                 [ "kind" Aeson..= ("full" :: Text.Text)

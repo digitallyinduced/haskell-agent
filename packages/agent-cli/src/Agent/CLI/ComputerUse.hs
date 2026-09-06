@@ -92,6 +92,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isControl, isDigit)
+import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -1228,15 +1229,106 @@ summarizeComputerToolCall call
     | call.name /= computerToolName
         || not (isComputerToolCallKind call.callKind) = Nothing
     | otherwise =
-        case Json.decodeText computerToolInputDecoder call.arguments of
-            Left _ -> Just "Computer action"
-            Right input ->
-                let computerCall = computerCallFromInput call input
-                    detail = summarizeComputerCall computerCall
-                in Just $
-                    if Text.null detail
-                        then "Computer action"
-                        else "Computer: " <> detail
+        case summarizeSemanticComputerCall call.arguments of
+            Just detail -> Just ("Computer: " <> detail)
+            Nothing ->
+                case Json.decodeText computerToolInputDecoder call.arguments of
+                    Left _ -> Just "Computer action"
+                    Right input ->
+                        let computerCall = computerCallFromInput call input
+                            detail = summarizeComputerCall computerCall
+                        in Just $
+                            if Text.null detail
+                                then "Computer action"
+                                else "Computer: " <> detail
+
+summarizeSemanticComputerCall :: Text -> Maybe Text
+summarizeSemanticComputerCall arguments = do
+    Aeson.Object object <-
+        Aeson.decodeStrict' (TextEncoding.encodeUtf8 arguments)
+    Aeson.String operation <- KeyMap.lookup "operation" object
+    let screenshotSuffix =
+            case KeyMap.lookup "include_screenshot" object of
+                Just (Aeson.Bool True) -> " and capture a screenshot"
+                _ -> ""
+    case operation of
+        "list_targets" -> Just "list accessible windows"
+        "bind" ->
+            case KeyMap.lookup "target_id" object of
+                Just (Aeson.String targetId) ->
+                    Just
+                        ( "bind accessible target "
+                            <> safeQuoted 128 targetId
+                            <> screenshotSuffix
+                        )
+                _ -> Just ("bind an accessible window" <> screenshotSuffix)
+        "observe" ->
+            Just ("inspect the bound accessible window" <> screenshotSuffix)
+        "act" -> do
+            Aeson.Array actions <- KeyMap.lookup "actions" object
+            let summaries =
+                    take 64
+                        (map summarizeSemanticAction (toList actions))
+            Just $
+                Text.intercalate "; " summaries
+                    <> screenshotSuffix
+        _ -> Nothing
+  where
+    summarizeSemanticAction = \case
+        Aeson.Object object ->
+            case KeyMap.lookup "type" object of
+                Just (Aeson.String "perform") ->
+                    case
+                        ( KeyMap.lookup "action" object
+                        , semanticElement object
+                        ) of
+                        (Just (Aeson.String action), Just element) ->
+                            "perform " <> safeQuoted 64 action
+                                <> " on accessibility element "
+                                <> element
+                        _ -> "perform an accessibility action"
+                Just (Aeson.String "set_value") ->
+                    case semanticElement object of
+                        Just element ->
+                            "set "
+                                <> semanticValueDescription
+                                    (KeyMap.lookup "value" object)
+                                <> " on accessibility element "
+                                <> element
+                        Nothing -> "set an accessibility value"
+                Just (Aeson.String "replace_selected_text") ->
+                    case
+                        ( KeyMap.lookup "text" object
+                        , semanticElement object
+                        ) of
+                        (Just (Aeson.String text), Just element) ->
+                            let prefix = Text.take 8193 text
+                                count = Text.length prefix
+                            in if count > 8192
+                                then
+                                    "replace more than 8192 selected characters on "
+                                        <> "accessibility element "
+                                        <> element
+                                else "replace "
+                                    <> Text.pack (show count)
+                                    <> " selected characters on accessibility element "
+                                    <> element
+                        _ -> "replace selected text"
+                _ -> "run an accessibility action"
+        _ -> "run an accessibility action"
+    semanticElement object =
+        case KeyMap.lookup "element_id" object of
+            Just (Aeson.String elementId) -> Just (safeQuoted 128 elementId)
+            _ -> Nothing
+    semanticValueDescription = \case
+        Just (Aeson.String value) ->
+            let count = Text.length (Text.take 8193 value)
+            in if count > 8192
+                then "a text value longer than 8192 characters"
+                else "a " <> Text.pack (show count) <> "-character text value"
+        Just (Aeson.Number _) -> "a numeric value"
+        Just (Aeson.Bool _) -> "a boolean value"
+        _ -> "an accessibility value"
 
 computerToolCallHasPendingSafetyChecks :: ToolCall -> Bool
 computerToolCallHasPendingSafetyChecks call

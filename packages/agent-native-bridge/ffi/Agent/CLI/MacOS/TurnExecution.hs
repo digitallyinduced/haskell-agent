@@ -63,7 +63,7 @@ runNativeTurn
     -> NativeProcessRuntime
     -> TurnControl
     -> [AppTool]
-    -> Maybe (AppTool, IO ())
+    -> Maybe (AppTool, IO (), IO ())
     -> TurnStart
     -> [ImageAttachment]
     -> NativeTurnOptions
@@ -82,7 +82,7 @@ runNativeTurn
                         writeIORef completedRef True
                         modifyIORef' usageRef (<> output.tokenUsage)
                     ModelContextReset ->
-                        forM_ nativeComputerSession snd
+                        forM_ nativeComputerSession \(_, reset, _) -> reset
                     _ -> pure ()
                 case encodeNativeLoopEvent control.turnControlId event of
                     Just bytes -> sendBinaryEvent callback context bytes
@@ -115,7 +115,8 @@ runNativeTurn
                 requestRootAccessFromClient callback context control
             , nativeToolGroups = [HostToolGroup nativeBrowserTools]
             , nativeComposeTools =
-                composeNativeTools (fst <$> nativeComputerSession)
+                composeNativeTools
+                    ((\(tool, _, _) -> tool) <$> nativeComputerSession)
             , nativePlanHooks =
                 nativePlanModeHooks control interactions
             , nativeInteractionMode =

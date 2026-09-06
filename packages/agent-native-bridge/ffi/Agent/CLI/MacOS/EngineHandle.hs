@@ -4,7 +4,8 @@
 module Agent.CLI.MacOS.EngineHandle () where
 
 import Agent.CLI.MacOS.BrowserBridge (BrowserHost(..))
-import Agent.CLI.MacOS.ComputerBridge (ComputerHost(..), newComputerHost)
+import Agent.CLI.MacOS.ComputerBridge
+    ( newComputerHost, replaceComputerRegistration )
 import Agent.CLI.MacOS.EngineEvents (EventCallback, sendEvent, failureEvent)
 import Agent.CLI.MacOS.EngineLifecycle (workerLifecycle)
 import Agent.CLI.MacOS.EngineMailbox (newEngineMailboxIO, closeEngineMailbox)
@@ -88,13 +89,13 @@ ha_engine_destroy pointer
     | pointer == nullPtr = pure ()
     | otherwise = void $ tryAny do
         let stable = castPtrToStablePtr pointer :: StablePtr Engine
-        (do
-            engine <- deRefStablePtr stable
-            modifyMVar_
-                engine.engineComputer.computerRegistration
-                (const (pure Nothing))
+        engine <- deRefStablePtr stable
+        ((do
             _ <- atomically
                 (closeEngineMailbox engine.engineCommands EngineStop)
             void (waitCatch engine.engineWorker)
             modifyMVar_ engine.engineBrowser.browserRegistration (const (pure Nothing)))
-            `finally` freeStablePtr stable
+            `finally`
+                replaceComputerRegistration engine.engineComputer Nothing)
+            `finally`
+                freeStablePtr stable

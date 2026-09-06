@@ -15,6 +15,9 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , isComputerToolCallKind
     )
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as LBS
@@ -47,11 +50,11 @@ encodeNativeLoopEvent turnId event =
         ToolFinished result ->
             toolEvent 5 flags finishedFields
           where
-            safeOutput
+            eventOutput
                 | isComputerToolCallKind result.callKind =
-                    "Screenshot captured"
+                    redactComputerScreenshot result.output
                 | otherwise = result.output
-            (output, truncated) = boundedEventText safeOutput
+            (output, truncated) = boundedEventText eventOutput
             flags =
                 (if truncated then 2 else 0)
                     + (if toolCallResultMode result == AsyncToolCall
@@ -136,3 +139,35 @@ boundedEventText :: Text -> (Text, Bool)
 boundedEventText value =
     let (visible, remainder) = Text.splitAt 8192 value
     in (visible, not (Text.null remainder))
+
+redactComputerScreenshot :: Text -> Text
+redactComputerScreenshot output
+    | hasDataImagePrefix output =
+        screenshotOmitted
+    | otherwise =
+        case Aeson.decodeStrict' (TextEncoding.encodeUtf8 output) of
+            Just value ->
+                TextEncoding.decodeUtf8
+                    (LBS.toStrict (Aeson.encode (redactValue value)))
+            Nothing
+                | "data:image/" `Text.isInfixOf` Text.toLower output ->
+                    screenshotOmitted
+                | otherwise -> output
+  where
+    redactValue = \case
+        Aeson.Object object ->
+            Aeson.Object (KeyMap.mapMaybeWithKey redactField object)
+        Aeson.Array values -> Aeson.Array (fmap redactValue values)
+        Aeson.String value
+            | hasDataImagePrefix value ->
+                Aeson.String screenshotOmitted
+        value -> value
+    redactField key value
+        | normalizeKey key == "screenshotdataurl" = Nothing
+        | otherwise = Just (redactValue value)
+    normalizeKey = Text.filter (/= '_') . Text.toLower . Key.toText
+    hasDataImagePrefix value =
+        "data:image/" `Text.isPrefixOf` Text.toLower value
+
+screenshotOmitted :: Text
+screenshotOmitted = "Screenshot omitted from event"

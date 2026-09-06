@@ -214,6 +214,7 @@ buildNestedTools =
   where
     add current spec
         | HostedComputerSchema <- tool.appToolSchema = Right current
+        | HostedComputerFunctionSchema _ <- tool.appToolSchema = Right current
         | codeName `elem` ["exec", "wait"] = Right current
         | Map.member codeName current =
             -- Match Codex's stable first-wins projection when two provider

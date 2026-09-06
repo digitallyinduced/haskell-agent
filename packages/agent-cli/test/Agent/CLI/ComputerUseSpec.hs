@@ -23,6 +23,7 @@ import Agent.CLI.ComputerUse
     , parseSessionLocked
     , pointerScript
     , summarizeComputerCall
+    , summarizeComputerToolCall
     , validateComputerCall
     , validateComputerCallForDisplay
     )
@@ -2202,9 +2203,21 @@ spec = do
                         (Aeson.object ["pid" Aeson..= (42 :: Int)])
                         (Aeson.toJSON ([] :: [Int])))
 
+        it "accepts normalized native snapshot schema v2" do
+            decodeAccessibilitySnapshot
+                "{\"schema_version\":2,\"scope\":{\"pid\":42},\"contents\":{\"roots\":[],\"nodes\":{}}}"
+                `shouldBe` Right
+                    (AccessibilitySnapshot
+                        2
+                        (Aeson.object ["pid" Aeson..= (42 :: Int)])
+                        (Aeson.object
+                            [ "roots" Aeson..= ([] :: [Text.Text])
+                            , "nodes" Aeson..= Aeson.object []
+                            ]))
+
         it "rejects unsupported snapshot schema versions" do
             decodeAccessibilitySnapshot
-                "{\"schema_version\":2,\"scope\":{},\"contents\":[]}"
+                "{\"schema_version\":3,\"scope\":{},\"contents\":[]}"
                 `shouldSatisfy` either
                     (Text.isInfixOf "unsupported")
                     (const False)
@@ -2612,6 +2625,56 @@ spec = do
                 `shouldBe` Right ()
 
     describe "computer approval summaries" do
+        it "identifies the AX target being bound" do
+            let call = ToolCall
+                    { callId = "call-bind"
+                    , name = "computer"
+                    , arguments =
+                        "{\"operation\":\"bind\",\"target_id\":\"target-42\",\
+                        \\"actions\":null,\"include_screenshot\":false}"
+                    , argumentsEncrypted = False
+                    , callKind = ComputerFunctionCallKind
+                    }
+            summarizeComputerToolCall call `shouldBe`
+                Just "Computer: bind accessible target \"target-42\""
+
+        it "describes semantic AX actions without exposing entered text" do
+            let call = ToolCall
+                    { callId = "call-ax"
+                    , name = "computer"
+                    , arguments =
+                        "{\"operation\":\"act\",\"target_id\":null,\
+                        \\"actions\":[\
+                        \{\"type\":\"perform\",\"element_id\":\"element-1\",\
+                        \\"action\":\"AXPress\",\"value\":null,\"text\":null},\
+                        \{\"type\":\"set_value\",\"element_id\":\"element-value\",\
+                        \\"action\":null,\"value\":\"another secret\",\"text\":null},\
+                        \{\"type\":\"replace_selected_text\",\
+                        \\"element_id\":\"element-2\",\"action\":null,\
+                        \\"value\":null,\"text\":\"top secret\"}],\
+                        \\"include_screenshot\":true}"
+                    , argumentsEncrypted = False
+                    , callKind = ComputerFunctionCallKind
+                    }
+                summary = summarizeComputerToolCall call
+            summary `shouldSatisfy` maybe False
+                ("perform \"AXPress\"" `Text.isInfixOf`)
+            summary `shouldSatisfy` maybe False
+                ("\"element-1\"" `Text.isInfixOf`)
+            summary `shouldSatisfy` maybe False
+                ("a 14-character text value" `Text.isInfixOf`)
+            summary `shouldSatisfy` maybe False
+                ("\"element-value\"" `Text.isInfixOf`)
+            summary `shouldSatisfy` maybe False
+                ("replace 10 selected characters on accessibility element \"element-2\""
+                    `Text.isInfixOf`)
+            summary `shouldSatisfy` maybe False
+                ("capture a screenshot" `Text.isInfixOf`)
+            summary `shouldSatisfy` maybe False
+                (not . ("top secret" `Text.isInfixOf`))
+            summary `shouldSatisfy` maybe False
+                (not . ("another secret" `Text.isInfixOf`))
+
         it "redacts typed text while surfacing actions and safety checks" do
             let call = ComputerCall
                     { computerCallItemId = Nothing

@@ -4,7 +4,11 @@
 module Agent.CLI.MacOS.EngineHostRegistration () where
 
 import Agent.CLI.MacOS.BrowserBridge (BrowserHost(..), BrowserRegistration(..), BrowserCallback, BrowserCancelCallback)
-import Agent.CLI.MacOS.ComputerBridge (ComputerHost(..), ComputerRegistration(..), ComputerCallback)
+import Agent.CLI.MacOS.ComputerBridge
+    ( ComputerCallback
+    , ComputerRegistration(..)
+    , replaceComputerRegistration
+    )
 import Agent.CLI.MacOS.EngineState (Engine(..))
 import Agent.CLI.MacOS.InteractionState
     ( InteractionCallback
@@ -66,14 +70,13 @@ ha_engine_set_computer_callback pointer callback context
         updated <- tryAny do
             let stable = castPtrToStablePtr pointer :: StablePtr Engine
             engine <- deRefStablePtr stable
-            modifyMVar_ engine.engineComputer.computerRegistration $ \_ ->
-                pure
-                    if callback == nullFunPtr
-                        then Nothing
-                        else Just ComputerRegistration
-                            { computerCallback = callback
-                            , computerContext = context
-                            }
+            replaceComputerRegistration engine.engineComputer $
+                if callback == nullFunPtr
+                    then Nothing
+                    else Just ComputerRegistration
+                        { computerCallback = callback
+                        , computerContext = context
+                        }
         pure $ case updated of
             Left _ -> 2
             Right () -> 0
