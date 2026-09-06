@@ -273,6 +273,13 @@ spec = describe "PostgreSQL session schema" do
                                             })
                             createSession pool metadata
                                 `shouldReturn` Right True
+                            loadSessionPullRequests pool "session-1" `shouldReturn` Right Nothing
+                            let prURLs = ["https://github.com/o/app/pull/1", "https://github.com/o/runtime/pull/2"]
+                            saveSessionPullRequests pool "session-1" 5 prURLs `shouldReturn` Right ()
+                            loadSessionPullRequests pool "session-1" `shouldReturn` Right (Just (5, prURLs))
+                            saveSessionPullRequests pool "session-1" 3 [] `shouldReturn` Right ()
+                            loadSessionPullRequests pool "session-1" `shouldReturn` Right (Just (5, prURLs))
+                            loadSessionPullRequests pool "other-session" `shouldReturn` Right Nothing
                             let initialPlanItems =
                                     [ SessionTaskPlanItem
                                         "inspect storage"

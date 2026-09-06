@@ -2,7 +2,7 @@
 
 -- | Standalone session history and transfer endpoints. Each asynchronous call
 -- owns its store bracket and keeps borrowed callback buffers invocation-scoped.
-module Agent.CLI.MacOS.SessionTransferBridge () where
+module Agent.CLI.MacOS.SessionTransferBridge (withNativeSessionStore) where
 
 import Agent.CLI.MacOS.Marshalling
 import Agent.CLI.MacOS.NativeGatewayBoundary

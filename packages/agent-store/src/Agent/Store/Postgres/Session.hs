@@ -72,12 +72,15 @@ module Agent.Store.Postgres.Session
     , deleteSession
     , importLegacySession
     , withSessionAdvisoryLock
+    , loadSessionPullRequests
+    , saveSessionPullRequests
     , loadSessionTaskPlan
     , replaceSessionTaskPlan
     , clearSessionTaskPlan
     , copySessionTaskPlan
     ) where
 
+import Agent.Store.Postgres.Session.PullRequests
 import Agent.Store.Postgres.Session.Read
 import Agent.Store.Postgres.Session.Schema
 import Agent.Store.Postgres.Session.TaskPlan

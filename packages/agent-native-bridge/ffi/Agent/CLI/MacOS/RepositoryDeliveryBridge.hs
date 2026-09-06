@@ -10,7 +10,18 @@ import Agent.CLI.MacOS.RepositoryWorkers
     ( startRepositoryWorker, tryRepositorySynchronous )
 import qualified Agent.CLI.RepositoryDelivery as RepositoryDelivery
 import Control.Concurrent (MVar, modifyMVar, newMVar)
-import Control.Exception.Safe (mask)
+import Control.Exception.Safe (mask, tryAny)
+import Agent.CLI.MacOS.NativeGatewayBoundary (withNativeSessionBoundary, validateNativeSessionBoundary)
+import Agent.CLI.MacOS.SessionTransferBridge (withNativeSessionStore)
+import Agent.CLI.Session
+    ( SessionMeta(..), SessionTurn(..), SessionTurnPage(..), isValidSessionId
+    , loadSessionHistorySnapshot, loadSessionHistoryTurnsRangeBounded )
+import Agent.Store.Postgres.Connection (StorePool)
+import Agent.Store.Types (renderStoreError)
+import qualified Agent.Store.Postgres.Session as PRStore
+import qualified Data.Aeson as Aeson
+import qualified Data.List as PRList
+import System.OsPath (OsPath, decodeFS)
 import Control.Monad (when)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -416,3 +427,117 @@ deliveryRefLimit = 1024
 deliveryTitleLimit, deliveryBodyLimit :: Int
 deliveryTitleLimit = 4 * 1024
 deliveryBodyLimit = 1024 * 1024
+
+-- Narrow asynchronous read-only PR/CI surface; no JSON crosses the ABI.
+type RepositoryPullRequestStatusCallback =
+    Ptr () -> CInt -> CLLong -> CString -> CSize -> CInt -> CInt -> IO ()
+
+foreign import ccall "dynamic"
+    invokeRepositoryPullRequestStatusCallback
+        :: FunPtr RepositoryPullRequestStatusCallback -> RepositoryPullRequestStatusCallback
+
+foreign export ccall ha_repository_pr_status
+    :: Ptr Word8 -> CSize -> FunPtr RepositoryPullRequestStatusCallback -> Ptr () -> IO CInt
+
+ha_repository_pr_status
+    :: Ptr Word8 -> CSize -> FunPtr RepositoryPullRequestStatusCallback -> Ptr () -> IO CInt
+ha_repository_pr_status pathBytes pathLength callback context
+    | callback == nullFunPtr = pure 1
+    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit) = pure 2
+    | otherwise = copyRequiredTexts [(pathBytes, pathLength)] >>= \case
+        Right [path] -> do
+            terminal <- newMVar False
+            let empty status = invokeRepositoryPullRequestStatusCallback callback context status 0 nullPtr 0 0 0
+                emit Nothing = empty 1
+                emit (Just pr) = withText pr.repositoryPullRequestUrl \url size ->
+                    invokeRepositoryPullRequestStatusCallback callback context 0
+                        (fromIntegral pr.repositoryPullRequestNumber) url size
+                        (fromIntegral pr.repositoryPullRequestState)
+                        (fromIntegral pr.repositoryPullRequestCI)
+            started <- startRepositoryWorker
+                (emitDeliveryOnce terminal (empty (-3))) $
+                prepareDeliveryResult terminal
+                    (RepositoryDelivery.repositoryPullRequest (Text.unpack path))
+                    (empty (-1)) (\_ _ -> empty (-1)) emit
+            pure (if started then 0 else 3)
+        _ -> pure 2
+
+
+-- One item callback per PR followed by exactly one terminal callback. All
+-- access to session history is subject to the native gateway boundary.
+foreign export ccall ha_session_pr_status
+    :: Ptr Word8 -> CSize -> FunPtr RepositoryPullRequestStatusCallback -> Ptr () -> IO CInt
+
+ha_session_pr_status
+    :: Ptr Word8 -> CSize -> FunPtr RepositoryPullRequestStatusCallback -> Ptr () -> IO CInt
+ha_session_pr_status sessionBytes sessionLength callback context
+    | callback == nullFunPtr = pure 1
+    | not (deliveryInputValid sessionBytes sessionLength 1024) = pure 2
+    | otherwise = copyRequiredTexts [(sessionBytes, sessionLength)] >>= \case
+        Right [sessionId] | isValidSessionId sessionId -> do
+            terminal <- newMVar False
+            let finish status = emitDeliveryOnce terminal $
+                    invokeRepositoryPullRequestStatusCallback callback context status 0 nullPtr 0 0 0
+                emit pr = withText pr.repositoryPullRequestUrl \url size ->
+                    invokeRepositoryPullRequestStatusCallback callback context 0
+                        (fromIntegral pr.repositoryPullRequestNumber) url size
+                        (fromIntegral pr.repositoryPullRequestState) (fromIntegral pr.repositoryPullRequestCI)
+            started <- startRepositoryWorker (finish (-3)) do
+                result <- tryAny $ withNativeSessionStore \pool root ->
+                    withNativeSessionBoundary pool root sessionId \identity meta -> do
+                        loaded <- indexSessionPullRequests pool root sessionId
+                        case loaded of
+                            Left err -> pure (Left err)
+                            Right urls -> do
+                                -- Use the session cwd for fallback only. URL lookup must
+                                -- continue working after a worktree has been removed.
+                                cwd <- decodeFS meta.metaCwd
+                                prs <- if null urls
+                                    then do
+                                        RepositoryDelivery.repositoryPullRequest cwd >>= \case
+                                            Right pr -> pure (Right (maybe [] pure pr))
+                                            Left err -> pure (Left (RepositoryDelivery.deliveryErrorText err))
+                                    else Right <$> mapM (resolve cwd) (take 20 urls)
+                                validateNativeSessionBoundary pool root identity sessionId >>= \case
+                                    Left err -> pure (Left err)
+                                    Right _ -> pure prs
+                pure $ case result of
+                    Right (Right prs) -> mapM_ emit prs >> finish 1
+                    _ -> finish (-1)
+            pure (if started then 0 else 3)
+        _ -> pure 2
+  where
+    resolve directory url = RepositoryDelivery.pullRequestByURL directory url >>= \case
+        Right pr -> pure pr
+        Left _ -> pure (RepositoryDelivery.RepositoryPullRequest
+            (case reads (Text.unpack (Text.takeWhileEnd (/= '/') url)) of
+                [(n, "")] -> n
+                _ -> 0) url 0 0)
+
+indexSessionPullRequests :: StorePool -> OsPath -> Text -> IO (Either Text [Text])
+indexSessionPullRequests pool root sessionId =
+    loadSessionHistorySnapshot pool root sessionId >>= \case
+        Left err -> pure (Left err)
+        Right (_, _, total) -> PRStore.loadSessionPullRequests pool sessionId >>= \case
+            Left err -> pure (Left (renderStoreError err))
+            Right cached -> do
+                let (cursor, urls) = case cached of
+                        Just value@(next, _) | next <= total -> value
+                        _ -> (0, [])
+                scan total cursor urls
+  where
+    scan total cursor urls
+        | cursor >= total = pure (Right urls)
+        | otherwise = loadSessionHistoryTurnsRangeBounded pool root sessionId cursor total 32 >>= \case
+            Left err -> pure (Left err)
+            Right page -> case page.pageTurns of
+                [] -> pure (Left "incomplete PR association history")
+                turns -> do
+                    let next = 1 + maximum (map fst turns)
+                        discovered = concatMap (\(_, turn) ->
+                            RepositoryDelivery.conversationPullRequestURLs turn.turnUserText turn.turnAssistantText
+                                (map Aeson.toJSON (turn.turnItems <> turn.turnDisplayItems))) (reverse turns)
+                        associated = PRList.nub (discovered <> urls)
+                    PRStore.saveSessionPullRequests pool sessionId next associated >>= \case
+                        Left err -> pure (Left (renderStoreError err))
+                        Right () -> scan total next associated

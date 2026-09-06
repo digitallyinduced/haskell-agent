@@ -473,6 +473,14 @@ coreMigrations =
               \ WHERE status IN ('queued', 'running')"
             ]
         }
+    , Migration
+        { migrationVersion = 114
+        , migrationName = "conversation pull request associations"
+        , migrationStatements =
+            [ "CREATE TABLE IF NOT EXISTS harness.session_pull_requests (session_id uuid PRIMARY KEY REFERENCES harness.sessions(session_id) ON DELETE CASCADE, next_turn_index bigint NOT NULL CHECK (next_turn_index >= 0), urls text[] NOT NULL)"
+            , "GRANT SELECT, INSERT, UPDATE, DELETE ON harness.session_pull_requests TO ha_runtime"
+            ]
+        }
     ]
 
 -- | Specialize all runtime grants for a validated cluster-global role.

@@ -3,7 +3,7 @@
 -- | Host registration replacement and delivery of interaction resolutions.
 module Agent.CLI.MacOS.EngineHostRegistration () where
 
-import Agent.CLI.MacOS.BrowserBridge (BrowserHost(..), BrowserRegistration(..), BrowserCallback)
+import Agent.CLI.MacOS.BrowserBridge (BrowserHost(..), BrowserRegistration(..), BrowserCallback, BrowserCancelCallback)
 import Agent.CLI.MacOS.ComputerBridge (ComputerHost(..), ComputerRegistration(..), ComputerCallback)
 import Agent.CLI.MacOS.EngineState (Engine(..))
 import Agent.CLI.MacOS.InteractionState
@@ -24,7 +24,7 @@ import Foreign (Ptr, FunPtr, StablePtr, castPtrToStablePtr, deRefStablePtr, cast
 import Foreign.C.Types (CInt(..), CSize(..))
 
 foreign export ccall ha_engine_set_browser_callback
-    :: Ptr () -> FunPtr BrowserCallback -> Ptr () -> IO CInt
+    :: Ptr () -> FunPtr BrowserCallback -> FunPtr BrowserCancelCallback -> Ptr () -> IO CInt
 
 foreign export ccall ha_engine_set_computer_callback
     :: Ptr () -> FunPtr ComputerCallback -> Ptr () -> IO CInt
@@ -37,9 +37,10 @@ foreign export ccall ha_engine_resolve_interaction
     -> CInt -> Ptr Word8 -> CSize -> IO CInt
 
 ha_engine_set_browser_callback
-    :: Ptr () -> FunPtr BrowserCallback -> Ptr () -> IO CInt
-ha_engine_set_browser_callback pointer callback context
+    :: Ptr () -> FunPtr BrowserCallback -> FunPtr BrowserCancelCallback -> Ptr () -> IO CInt
+ha_engine_set_browser_callback pointer callback cancelCallback context
     | pointer == nullPtr = pure 1
+    | (callback == nullFunPtr) /= (cancelCallback == nullFunPtr) = pure 2
     | otherwise = do
         updated <- tryAny do
             let stable = castPtrToStablePtr pointer :: StablePtr Engine
@@ -50,6 +51,7 @@ ha_engine_set_browser_callback pointer callback context
                         then Nothing
                         else Just BrowserRegistration
                             { browserCallback = callback
+                            , browserCancelCallback = cancelCallback
                             , browserContext = context
                             }
         pure $ case updated of

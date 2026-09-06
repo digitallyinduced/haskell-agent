@@ -1,5 +1,6 @@
 module Agent.CLI.RepositoryDeliverySpec (spec) where
 
+import qualified Data.Aeson as Aeson
 import Agent.CLI.RepositoryDelivery
 import Agent.CLI.RepositoryDelivery.ConfirmationStore
     ( ConfirmationStore
@@ -21,6 +22,8 @@ import Control.Concurrent
     )
 import Control.Exception.Safe (bracket)
 import qualified Data.Text as Text
+import qualified Data.ByteString.Char8 as BS8
+import Data.Either (isLeft)
 import System.Directory
     ( createDirectory
     , doesDirectoryExist
@@ -30,7 +33,7 @@ import System.Directory
     , listDirectory
     , removePathForcibly
     )
-import System.Environment (getEnv, lookupEnv, setEnv, unsetEnv)
+import System.Environment (withArgs, getEnv, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode(..))
 import System.IO (hClose, openTempFile)
 import System.Posix.Files
@@ -49,6 +52,56 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "repository delivery service" do
+    describe "conversation pull request associations" do
+        let url = "https://github.com/owner/repo/pull/42"
+            other = "https://github.com/owner/runtime/pull/43"
+        it "extracts and deduplicates Markdown URLs and strips check fragments" do
+            pullRequestURLs ("[PR](" <> url <> "#checks) " <> url <> "/files?x=1") `shouldBe` [url]
+        it "rejects non-GitHub, spoofed, malformed and non-PR URLs" do
+            pullRequestURLs "https://github.com.evil/o/r/pull/1 https://evil/https://github.com/o/r/pull/2 https://github.com/o/r/issues/1 https://github.com/o/r/pull/0 https://github.com/o/r/pull/1abc" `shouldBe` []
+        it "keeps both repositories mentioned in an assistant creation report" do
+            conversationPullRequestURLs "" (Just ("Created PRs:\n" <> url <> "\n" <> other)) [] `shouldBe` [url, other]
+        it "associates a Markdown PR list with its work-report heading" do
+            conversationPullRequestURLs "" (Just ("PRs erstellt:\n\n- [app](" <> url <> ")\n- [runtime](" <> other <> ")")) [] `shouldBe` [url, other]
+            conversationPullRequestURLs "" (Just ("PRs for reference:\n\n- " <> url)) [] `shouldBe` []
+        it "accepts a PR URL supplied as the user task and canonicalizes repository casing" do
+            conversationPullRequestURLs "https://github.com/Owner/Repo/pull/42" Nothing [] `shouldBe` [url]
+            conversationPullRequestURLs "" (Just "https://github.com/Owner/Fixes/pull/42") [] `shouldBe` []
+        it "recognizes explicit user work on a PR" do
+            conversationPullRequestURLs ("Please review and fix " <> url) Nothing [] `shouldBe` [url]
+        it "ignores incidental links and quoted reference material" do
+            conversationPullRequestURLs ("For reference: review " <> url) (Just ("> Created " <> url)) [] `shouldBe` []
+            conversationPullRequestURLs "" (Just ("See also " <> url)) [] `shouldBe` []
+        it "associates gh creation output only when paired with the actual call" do
+            let call command = Aeson.object ["type" Aeson..= ("function_call" :: Text.Text), "call_id" Aeson..= ("c1" :: Text.Text), "arguments" Aeson..= command]
+                output = Aeson.object ["type" Aeson..= ("function_call_output" :: Text.Text), "call_id" Aeson..= ("c1" :: Text.Text), "output" Aeson..= url]
+            conversationPullRequestURLs "" Nothing [call ("gh pr create --title fix" :: Text.Text), output] `shouldBe` [url]
+            conversationPullRequestURLs "" Nothing [call ("gh search prs" :: Text.Text), output] `shouldBe` []
+            conversationPullRequestURLs "" Nothing [output] `shouldBe` []
+
+    describe "sidebar pull request status" do
+        let parse checks = parseRepositoryPullRequest "owner/repo" (BS8.pack
+                ("[{\"headRepository\":{\"name\":\"repo\",\"nameWithOwner\":\"\"},\"headRepositoryOwner\":{\"login\":\"owner\"},\"number\":42,\"url\":\"https://github.com/owner/repo/pull/42\",\"state\":\"OPEN\",\"isDraft\":false,\"statusCheckRollup\":" <> checks <> "}]"))
+            check status conclusion = "{\"__typename\":\"CheckRun\",\"status\":\"" <> status <> "\",\"conclusion\":\"" <> conclusion <> "\"}"
+            ci checks = fmap (fmap (\pr -> pr.repositoryPullRequestCI)) (parse checks)
+        it "distinguishes no PR from no checks" do
+            parseRepositoryPullRequest "owner/repo" "[]" `shouldBe` Right Nothing
+            ci "[]" `shouldBe` Right (Just 1)
+        it "requires all checks to pass and includes legacy commit statuses" do
+            ci ("[" <> check "COMPLETED" "SUCCESS" <> "," <> check "IN_PROGRESS" "" <> "]") `shouldBe` Right (Just 2)
+            ci "[{\"__typename\":\"StatusContext\",\"state\":\"SUCCESS\"}]" `shouldBe` Right (Just 3)
+        it "keeps failures visible even while another check is pending" do
+            ci ("[" <> check "COMPLETED" "FAILURE" <> "," <> check "QUEUED" "" <> "]") `shouldBe` Right (Just 4)
+            ci ("[" <> check "COMPLETED" "CANCELLED" <> "]") `shouldBe` Right (Just 4)
+        it "does not turn unknown conclusions into success" do
+            ci ("[" <> check "COMPLETED" "NEW_STATE" <> "]") `shouldBe` Right (Just 0)
+        it "rejects malformed and incomplete PR responses" do
+            parseRepositoryPullRequest "owner/repo" "{}" `shouldSatisfy` isLeft
+            parseRepositoryPullRequest "owner/repo" "[{\"headRepository\":{\"name\":\"repo\",\"nameWithOwner\":\"\"},\"headRepositoryOwner\":{\"login\":\"owner\"},\"number\":42,\"url\":\"https://github.com/owner/repo/pull/42\"}]" `shouldSatisfy` isLeft
+
+        it "ignores same-named branches from another fork and deleted head repositories" do
+            parseRepositoryPullRequest "owner/repo" "[{\"headRepository\":{\"name\":\"repo\"},\"headRepositoryOwner\":{\"login\":\"someone-else\"}}]" `shouldBe` Right Nothing
+            parseRepositoryPullRequest "owner/repo" "[{\"headRepository\":null,\"headRepositoryOwner\":null}]" `shouldBe` Right Nothing
     it "reclaims expired confirmation payloads while idle" do
         expiry <- newEmptyMVar
         bracket

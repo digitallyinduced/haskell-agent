@@ -121,11 +121,13 @@ foreign-library haskell-agent-bridge
                     , aeson >= 2.0
                     , async
                     , base >= 4.17 && < 5
+                    , base64-bytestring
                     , bytestring
                     , containers
                     , directory
                     , filelock
                     , filepath
+                    , JuicyPixels
                     , safe-exceptions
                     , stm
                     , text >= 2.0 && < 2.2
@@ -157,6 +159,7 @@ test-suite agent-native-bridge-test
                     , agent-store
                     , async
                     , base >= 4.17 && < 5
+                    , base64-bytestring
                     , bytestring
                     , containers
                     , directory
@@ -225,4 +228,5 @@ test-suite agent-native-bridge-test
                      , agent-xai
                      , aeson
                      , filelock
+                     , JuicyPixels
                      , time
