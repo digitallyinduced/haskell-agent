@@ -1,6 +1,16 @@
 -- | Function-based computer use backed by local desktop capture and input.
 module Agent.CLI.ComputerUse
     ( ComputerObservation(..)
+    , AccessibilitySnapshot(..)
+    , AccessibilityPatchOperation(..)
+    , AccessibilityObservation(..)
+    , AccessibilityDeltaState
+    , initialAccessibilityDeltaState
+    , decodeAccessibilitySnapshot
+    , advanceAccessibilityObservation
+    , unavailableAccessibilityObservation
+    , resetAccessibilityDeltaState
+    , applyAccessibilityPatch
     , ComputerUseBackend(..)
     , ScreenshotEncoding(..)
     , ComputerUseRuntime
@@ -39,8 +49,16 @@ import Agent.CLI.ComputerUse.Backend
     )
 import qualified Agent.CLI.ComputerUse.Input as Input
 import qualified Agent.CLI.ComputerUse.Linux as Linux
+import Agent.ComputerUse.Protocol
+    ( SemanticComputerAction(..)
+    , SemanticComputerRequest(..)
+    , SemanticComputerScalar(..)
+    , decodeSemanticComputerRequest
+    , semanticComputerRequestWantsScreenshot
+    )
 import qualified Agent.Json.Decode as Json
 import Agent.Loop (ImageAttachment(..))
+import Agent.CLI.ComputerUse.Accessibility
 import Agent.Responses.Types
     ( ComputerAction(..)
     , ComputerCall(..)
@@ -81,6 +99,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isControl, isDigit)
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -329,7 +348,7 @@ executeComputerCall =
 
 data ComputerObservation = ComputerObservation
     { computerObservationImage :: !ImageAttachment
-    , computerObservationAccessibility :: !(Maybe Text)
+    , computerObservationAccessibility :: !(Maybe AccessibilityObservation)
     } deriving (Eq, Show)
 
 -- | One computer-use transaction. The backend owns display discovery,
@@ -658,7 +677,7 @@ encodeComputerOutput call observation =
             , computerOutputStatus = Nothing
             , computerOutputExtra = maybe
                 KeyMap.empty
-                (KeyMap.singleton "accessibility_state" . Aeson.String)
+                (KeyMap.singleton "accessibility_state" . Aeson.toJSON)
                 observation.computerObservationAccessibility
             }
   where
@@ -1217,15 +1236,74 @@ summarizeComputerToolCall call
     | call.name /= computerToolName
         || not (isComputerToolCallKind call.callKind) = Nothing
     | otherwise =
-        case Json.decodeText computerToolInputDecoder call.arguments of
-            Left _ -> Just "Computer action"
-            Right input ->
-                let computerCall = computerCallFromInput call input
-                    detail = summarizeComputerCall computerCall
-                in Just $
-                    if Text.null detail
-                        then "Computer action"
-                        else "Computer: " <> detail
+        case summarizeSemanticComputerCall call.arguments of
+            Just detail -> Just ("Computer: " <> detail)
+            Nothing ->
+                case Json.decodeText computerToolInputDecoder call.arguments of
+                    Left _ -> Just "Computer action"
+                    Right input ->
+                        let computerCall = computerCallFromInput call input
+                            detail = summarizeComputerCall computerCall
+                        in Just $
+                            if Text.null detail
+                                then "Computer action"
+                                else "Computer: " <> detail
+
+summarizeSemanticComputerCall :: Text -> Maybe Text
+summarizeSemanticComputerCall arguments =
+    either (const Nothing) (Just . summarize) $
+        decodeSemanticComputerRequest arguments
+  where
+    summarize request =
+        case request of
+            ListComputerTargets -> "list accessible windows"
+            BindComputerTarget targetId _ ->
+                "bind accessible target "
+                    <> safeQuoted 128 targetId
+                    <> screenshotSuffix request
+            ObserveComputerTarget _ ->
+                "inspect the bound accessible window"
+                    <> screenshotSuffix request
+            ActOnComputerTarget actions _ ->
+                Text.intercalate
+                    "; "
+                    (map summarizeSemanticAction (NonEmpty.toList actions))
+                    <> screenshotSuffix request
+    screenshotSuffix request
+        | semanticComputerRequestWantsScreenshot request =
+            " and capture a screenshot"
+        | otherwise = ""
+    summarizeSemanticAction = \case
+        PerformComputerAction elementId action ->
+            "perform " <> safeQuoted 64 action
+                <> " on accessibility element "
+                <> safeQuoted 128 elementId
+        SetComputerValue elementId value ->
+            "set "
+                <> semanticValueDescription value
+                <> " on accessibility element "
+                <> safeQuoted 128 elementId
+        ReplaceComputerSelectedText elementId text ->
+            let prefix = Text.take 8193 text
+                count = Text.length prefix
+                element = safeQuoted 128 elementId
+            in if count > 8192
+                then
+                    "replace more than 8192 selected characters on "
+                        <> "accessibility element "
+                        <> element
+                else "replace "
+                    <> Text.pack (show count)
+                    <> " selected characters on accessibility element "
+                    <> element
+    semanticValueDescription = \case
+        ComputerText value ->
+            let count = Text.length (Text.take 8193 value)
+            in if count > 8192
+                then "a text value longer than 8192 characters"
+                else "a " <> Text.pack (show count) <> "-character text value"
+        ComputerNumber _ -> "a numeric value"
+        ComputerBool _ -> "a boolean value"
 
 computerToolCallHasPendingSafetyChecks :: ToolCall -> Bool
 computerToolCallHasPendingSafetyChecks call

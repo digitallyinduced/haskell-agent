@@ -115,9 +115,53 @@ spec = describe "native loop event binary encoding" do
         case encodeNativeLoopEvent "turn" (ToolFinished result) of
             Nothing -> expectationFailure "native tool event failed to encode"
             Just encoded -> do
-                encoded `shouldSatisfy` BS.isInfixOf "Screenshot captured"
+                encoded `shouldSatisfy` BS.isInfixOf "Screenshot omitted from event"
                 encoded `shouldNotSatisfy`
                     BS.isInfixOf (TextEncoding.encodeUtf8 secret)
+
+    it "redacts nested JSON screenshot fields and image data" do
+        let secret = "DATA:IMAGE/png;base64,nested-secret" :: Text.Text
+            output =
+                "{\"nested\":{\"screenshot_data_url\":\"discard\",\
+                \\"preview\":\"" <> secret <> "\"}}"
+            result = ToolCallResult
+                { callId = "computer-nested"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , output
+                , callKind = ComputerFunctionCallKind
+                }
+        case encodeNativeLoopEvent "turn" (ToolFinished result) of
+            Nothing -> expectationFailure "native tool event failed to encode"
+            Just encoded -> do
+                encoded `shouldSatisfy`
+                    BS.isInfixOf "Screenshot omitted from event"
+                encoded `shouldNotSatisfy`
+                    BS.isInfixOf (TextEncoding.encodeUtf8 secret)
+                encoded `shouldNotSatisfy`
+                    BS.isInfixOf "screenshot_data_url"
+
+    it "redacts legacy JSON screenshots but preserves accessibility JSON" do
+        let secret = "data:image/png;base64,private-screenshot" :: Text.Text
+            accessibility = "\"accessibility_state\":{\"kind\":\"full\"}"
+            result = ToolCallResult
+                { callId = "computer-json"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , output =
+                    "{\"screenshotDataUrl\":\"" <> secret <> "\","
+                        <> accessibility <> "}"
+                , callKind = ComputerFunctionCallKind
+                }
+        case encodeNativeLoopEvent "turn" (ToolFinished result) of
+            Nothing -> expectationFailure "native tool event failed to encode"
+            Just encoded -> do
+                encoded `shouldNotSatisfy`
+                    BS.isInfixOf (TextEncoding.encodeUtf8 secret)
+                encoded `shouldSatisfy`
+                    BS.isInfixOf (TextEncoding.encodeUtf8 accessibility)
 
     it "encodes terminal provider token usage without inventing cost" do
         let output =

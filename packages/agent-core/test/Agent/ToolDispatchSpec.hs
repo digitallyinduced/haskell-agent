@@ -18,6 +18,7 @@ import Agent.Tools.Types
     , withAsyncToolCalls
     )
 import qualified Control.Exception as Exception
+import qualified Data.Aeson as Aeson
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -369,6 +370,10 @@ spec = describe "dispatchToolCall" do
 
     it "accepts only privileged computer kinds at the hosted handler" do
         let hosted = computerTool (pure (Right "ok"))
+            native = hosted
+                { appToolSchema =
+                    HostedComputerFunctionSchema (Aeson.object [])
+                }
             ordinary =
                 hosted
                     { appToolSchema = JsonFunctionSchema []
@@ -381,6 +386,13 @@ spec = describe "dispatchToolCall" do
                 , argumentsEncrypted = False
                 }
         map (toolAcceptsCall hosted . call)
+            [ FunctionCallKind
+            , CustomCallKind
+            , ComputerCallKind
+            , ComputerFunctionCallKind
+            ]
+            `shouldBe` [False, False, True, True]
+        map (toolAcceptsCall native . call)
             [ FunctionCallKind
             , CustomCallKind
             , ComputerCallKind

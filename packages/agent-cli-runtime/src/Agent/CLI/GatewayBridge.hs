@@ -514,6 +514,8 @@ updateManagedActivity event state =
             state
         NativeAgentFinished{} ->
             state
+        ModelContextReset ->
+            state
         TurnFinished _ ->
             state
                 { accumulatorKind = "finished"

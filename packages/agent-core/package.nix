@@ -2,8 +2,9 @@
 , agent-responses-types, async, base, base64-bytestring, bytestring
 , containers, crypton-connection, directory, filepath, hspec
 , JuicyPixels, lib, process, QuickCheck, resourcet, retry
-, safe-exceptions, stm, template-haskell, text, text-builder, time
-, tls, transformers, unix, vector, websockets, yaml, zlib
+, safe-exceptions, scientific, stm, template-haskell, text
+, text-builder, time, tls, transformers, unix, vector, websockets
+, yaml, zlib
 }:
 mkDerivation {
   pname = "agent-core";
@@ -14,8 +15,8 @@ mkDerivation {
     aeson agent-json agent-process agent-responses-types async base
     base64-bytestring bytestring containers crypton-connection
     directory filepath JuicyPixels process resourcet retry
-    safe-exceptions stm template-haskell text time tls transformers
-    unix vector websockets yaml zlib
+    safe-exceptions scientific stm template-haskell text time tls
+    transformers unix vector websockets yaml zlib
   ];
   testHaskellDepends = [
     aeson agent-json agent-responses-types async base base64-bytestring

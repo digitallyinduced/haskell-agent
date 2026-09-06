@@ -1527,6 +1527,7 @@ spec = do
             contextState <- newIORef Nothing
             compactCalls <- newIORef (0 :: Int)
             seenHistory <- newIORef []
+            events <- newIORef []
             let sender _request = do
                     modifyIORef' compactCalls (+ 1)
                     pure (Right remoteCompactionResponse)
@@ -1550,7 +1551,8 @@ spec = do
                         contextState
                         base
             result <- backend.submitTurn (initialBackendSnapshot history) Nothing
-                [UserMessage pendingText] (const (pure ()))
+                [UserMessage pendingText]
+                (\event -> modifyIORef' events (<> [event]))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
             readIORef seenHistory >>= \case
@@ -1561,6 +1563,10 @@ spec = do
                     expectationFailure
                         ("expected one compacted continuation, got "
                             <> show (length seen))
+            readIORef events `shouldReturn`
+                [ ActivityUpdated "Compacting context…"
+                , ModelContextReset
+                ]
 
         it "rejects an oversized first turn before provider submission" do
             let params = defaultResponseCreateParams
@@ -1704,7 +1710,9 @@ spec = do
             readIORef contextState `shouldReturn`
                 Just (reportedOccupancy 25 (length compactedHistory))
             readIORef events `shouldReturn`
-                [ActivityUpdated "Compacting context…"]
+                [ ActivityUpdated "Compacting context…"
+                , ModelContextReset
+                ]
 
         it "records active-session compaction usage before a failed continuation" do
             let history = [userTextItem "old"]
@@ -1715,6 +1723,7 @@ spec = do
             requests <- newIORef []
             recordedUsage <- newIORef []
             hookCalls <- newIORef (0 :: Int)
+            events <- newIORef []
             let sender request = do
                     modifyIORef' requests (<> [request])
                     pure (Right remoteCompactionResponse)
@@ -1733,7 +1742,8 @@ spec = do
                         contextState
                         base
             backend.submitTurn (initialBackendSnapshot history) Nothing
-                [UserMessage "new"] (const (pure ()))
+                [UserMessage "new"]
+                (\event -> modifyIORef' events (<> [event]))
                 `shouldReturn` Left (ConnectionError "continuation failed")
             map requestItems <$> readIORef requests
                 `shouldReturn` [history <> [compactionTriggerItem]]
@@ -1741,6 +1751,10 @@ spec = do
             readIORef contextState >>= (`shouldSatisfy`
                 (/= oldContextState))
             readIORef hookCalls `shouldReturn` 1
+            readIORef events `shouldReturn`
+                [ ActivityUpdated "Compacting context…"
+                , ModelContextReset
+                ]
 
         it "rolls back deferred compacted state when the continuation is cancelled" do
             let history = [userTextItem "old"]
@@ -1941,6 +1955,7 @@ spec = do
             compactCalls <- newIORef (0 :: Int)
             seenPrevious <- newIORef []
             seenInputs <- newIORef []
+            events <- newIORef []
             let sender _request = do
                     modifyIORef' compactCalls (+ 1)
                     pure (Right remoteCompactionResponse)
@@ -1965,7 +1980,7 @@ spec = do
                         contextState
                         base
             result <- backend.submitTurn (initialBackendSnapshot oldHistory) (Just "resp-tool") inputs
-                (const (pure ()))
+                (\event -> modifyIORef' events (<> [event]))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 0
             readIORef seenPrevious `shouldReturn` [Just "resp-tool"]
@@ -1989,6 +2004,7 @@ spec = do
                     expectationFailure
                         ("expected one bounded tool result, got "
                             <> show submitted)
+            readIORef events `shouldReturn` [ModelContextReset]
 
         it "records provider-reported occupancy after a successful turn" do
             let history = [userTextItem "old"]
@@ -2332,6 +2348,7 @@ spec = do
             contextState <- newIORef Nothing
             compactCalls <- newIORef (0 :: Int)
             seenHistory <- newIORef []
+            events <- newIORef []
             let sender _request = do
                     modifyIORef' compactCalls (+ 1)
                     pure (Right remoteCompactionResponse)
@@ -2355,7 +2372,7 @@ spec = do
                         contextState
                         base
             result <- backend.submitTurn (initialBackendSnapshot oldHistory) Nothing inputs
-                (const (pure ()))
+                (\event -> modifyIORef' events (<> [event]))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
             readIORef seenHistory >>= \case
@@ -2366,6 +2383,11 @@ spec = do
                     expectationFailure
                         ("expected one compacted continuation, got "
                             <> show (length seen))
+            readIORef events `shouldReturn`
+                [ ModelContextReset
+                , ActivityUpdated "Compacting context…"
+                , ModelContextReset
+                ]
 
         it "preserves typed provider failures from automatic compaction" do
             let history = [userTextItem "old"]

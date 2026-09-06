@@ -157,6 +157,7 @@ test-suite agent-native-bridge-test
                     , agent-mcp
                     , agent-runtime-daemon
                     , agent-store
+                    , aeson
                     , async
                     , base >= 4.17 && < 5
                     , base64-bytestring
@@ -226,7 +227,6 @@ test-suite agent-native-bridge-test
                      , agent-openrouter
                      , agent-responses-types
                      , agent-xai
-                     , aeson
                      , filelock
                      , JuicyPixels
                      , time

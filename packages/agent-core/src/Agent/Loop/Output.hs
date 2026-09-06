@@ -51,6 +51,9 @@ data LoopEvent
     | ReasoningDelta Text
     -- | Ephemeral transport/tool activity for the live CLI status line.
     | ActivityUpdated Text
+    -- | The model-visible history was rewritten or truncated. Stateful tools
+    -- must discard baselines that referred to the previous context.
+    | ModelContextReset
     -- | Latest provider-reported limit status for retained prompt chrome.
     | ProviderLimitUpdated
         { providerLimitText :: !Text

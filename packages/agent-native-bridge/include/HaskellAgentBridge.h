@@ -231,37 +231,12 @@ int32_t ha_engine_set_browser_callback(
 );
 
 enum {
-    HA_COMPUTER_ABI_VERSION = 1,
-    HA_COMPUTER_QUERY_DISPLAY = 1,
-    HA_COMPUTER_RUN_AND_OBSERVE = 2
-};
-
-enum {
-    HA_COMPUTER_ACTION_CLICK = 1,
-    HA_COMPUTER_ACTION_DOUBLE_CLICK = 2,
-    HA_COMPUTER_ACTION_SCROLL = 3,
-    HA_COMPUTER_ACTION_MOVE = 4,
-    HA_COMPUTER_ACTION_DRAG = 5,
-    HA_COMPUTER_ACTION_TYPE = 6,
-    HA_COMPUTER_ACTION_KEYPRESS = 7,
-    HA_COMPUTER_ACTION_WAIT = 8
-};
-
-enum {
-    HA_COMPUTER_BUTTON_NONE = 0,
-    HA_COMPUTER_BUTTON_LEFT = 1,
-    HA_COMPUTER_BUTTON_RIGHT = 2,
-    HA_COMPUTER_BUTTON_MIDDLE = 3,
-    HA_COMPUTER_BUTTON_BACK = 4,
-    HA_COMPUTER_BUTTON_FORWARD = 5
-};
-
-enum {
-    HA_COMPUTER_MODIFIER_SHIFT = 1 << 0,
-    HA_COMPUTER_MODIFIER_CONTROL = 1 << 1,
-    HA_COMPUTER_MODIFIER_OPTION = 1 << 2,
-    HA_COMPUTER_MODIFIER_COMMAND = 1 << 3,
-    HA_COMPUTER_MODIFIER_FUNCTION = 1 << 4
+    HA_COMPUTER_ABI_VERSION = 3,
+    HA_COMPUTER_OPEN = 1,
+    HA_COMPUTER_LIST = 2,
+    HA_COMPUTER_BIND = 3,
+    HA_COMPUTER_OBSERVE_OR_ACT = 4,
+    HA_COMPUTER_CLOSE = 5
 };
 
 enum {
@@ -280,140 +255,93 @@ enum {
     HA_COMPUTER_STATUS_FAILED = 6,
     HA_COMPUTER_STATUS_OUTPUT_TOO_LARGE = 7,
     HA_COMPUTER_STATUS_SESSION_LOCKED = 8,
-    HA_COMPUTER_STATUS_DISPLAY_CHANGED = 9
+    HA_COMPUTER_STATUS_TARGET_STALE = 9,
+    /* Source compatibility for early ABI-v3 adopters. */
+    HA_COMPUTER_STATUS_DISPLAY_CHANGED = HA_COMPUTER_STATUS_TARGET_STALE
 };
 
 enum {
-    HA_COMPUTER_ACTION_STRUCT_SIZE_V1 = 64,
-    HA_COMPUTER_MAX_ACTIONS = 10,
-    HA_COMPUTER_MAX_POINTS_PER_ACTION = 1024,
-    HA_COMPUTER_MAX_TOTAL_POINTS = 10240,
-    HA_COMPUTER_MAX_TEXT_BYTES = 327680,
+    HA_COMPUTER_REQUEST_MAX_BYTES = 1048576,
+    HA_COMPUTER_RESULT_CAPACITY = 1048576,
     HA_COMPUTER_ERROR_CAPACITY = 65536,
-    HA_COMPUTER_OUTPUT_CAPACITY = 16777216
+    HA_COMPUTER_IMAGE_CAPACITY = 16777216,
+    HA_COMPUTER_ACCESSIBILITY_CAPACITY = 524288
 };
 
-typedef struct ha_computer_point_v1 {
-    int32_t x;
-    int32_t y;
-} ha_computer_point_v1;
-
 /*
- * Fixed-width action record for HA_COMPUTER_ABI_VERSION. struct_size must be
- * HA_COMPUTER_ACTION_STRUCT_SIZE_V1. text_offset/text_length select UTF-8 in
- * the callback's text buffer. point_offset/point_count select records in its
- * point buffer. Offsets and lengths are element counts, not byte pointers.
+ * Host accessibility-first computer callback for native agent turns.
  *
- * Pointer coordinates are integer logical pixels in the final screenshot's
- * top-left coordinate space: 0 <= x < output_width and
- * 0 <= y < output_height. CLICK uses x/y, button, and modifiers.
- * DOUBLE_CLICK and MOVE use x/y and modifiers. SCROLL uses x/y,
- * delta_x/delta_y, and modifiers; positive deltas follow browser-wheel
- * convention and move the viewport right/down. DRAG uses at least two ordered
- * points, including its start and end, and the left button. TYPE uses a text
- * range. KEYPRESS uses a nonempty text range for the final key and modifiers
- * for the chord. WAIT has no fields and waits two seconds. Every field not
- * named for an action must be zero.
- */
-typedef struct ha_computer_action_v1 {
-    uint32_t struct_size;
-    int32_t action;
-    int32_t x;
-    int32_t y;
-    int32_t delta_x;
-    int32_t delta_y;
-    int32_t button;
-    uint32_t modifiers;
-    uint64_t text_offset;
-    uint64_t text_length;
-    uint64_t point_offset;
-    uint64_t point_count;
-} ha_computer_action_v1;
-
-/*
- * Host computer-control callback for native agent turns.
+ * OPEN has session_token zero and an empty request. It returns a nonzero,
+ * opaque output_session_token and no other output. LIST, BIND, and
+ * OBSERVE_OR_ACT carry that token and a UTF-8 JSON request. CLOSE carries the
+ * token and an empty request, produces no output, and is issued exactly once.
+ * Calls for one token are sequential; calls for different tokens may overlap.
  *
- * QUERY_DISPLAY requires zero actions/points/text, expected display token and
- * dimensions and requested_image_format zero, and a writable error buffer. On
- * success it writes a nonzero opaque lease to output_display_token and positive
- * logical main-display dimensions to output_width and output_height, sets
- * output_image_format and output_length to zero, and does not write image
- * bytes.
+ * LIST receives {"operation":"list_targets"}. BIND receives operation "bind",
+ * a target_id, and include_screenshot (default false). OBSERVE_OR_ACT receives
+ * operation "observe" or "act"; act contains 1..64 semantic element actions
+ * only. Their exact JSON forms are
+ * {"type":"perform","element_id":"...","action":"AXPress"},
+ * {"type":"set_value","element_id":"...","value":...} (where value is a
+ * string, number, or boolean), and
+ * {"type":"replace_selected_text","element_id":"...","text":"..."}.
+ * The perform action string is one advertised by the AX snapshot.
+ * Model-provided coordinates are not part of this ABI. The selected target is
+ * session-local.
  *
- * RUN_AND_OBSERVE executes the complete ordered action batch, waits for the UI
- * to settle, and captures exactly one final main-display observation. It must
- * verify expected_display_token is the host's current unconsumed lease for the
- * same main display and that the logical display remains expected_width by
- * expected_height before changing input state. A stale lease must fail with
- * HA_COMPUTER_STATUS_DISPLAY_CHANGED before any side effect. The host must
- * serialize leases across every callback context controlling the same desktop
- * and invalidate a lease when a transaction starts changing input state.
- * requested_image_format is PNG or JPEG. On success, output contains encoded
- * image bytes, output_length is their length, output_display_token is a
- * nonzero successor lease distinct from expected_display_token,
- * output_width/output_height are the observed logical image dimensions, and
- * output_image_format is PNG or JPEG. The encoded image is normalized to
- * exactly output_width by output_height pixels, including on Retina displays,
- * so action coordinates map one-to-one to image pixels. Every successful RUN
- * consumes its input lease, including an observation-only run with zero
- * actions.
+ * Successful non-lifecycle calls write a UTF-8 JSON object to result. BIND,
+ * OBSERVE, and ACT normally write a schema-versioned AX snapshot to
+ * accessibility. Image is optional and must remain empty with
+ * output_image_format HA_COMPUTER_IMAGE_NONE unless include_screenshot was
+ * explicitly true. Screenshot failure is nonfatal and is described in result.
+ * The host must capture only the bound window, never fall back to a display.
  *
- * Actions contain no screenshot record: the Haskell runtime removes a final
- * screenshot marker and rejects an earlier one. actions may be NULL only when
- * action_count is zero. points and text follow the same rule. All ranges must
- * be contained in their corresponding buffers. The host must reject unknown
- * versions, operations, action values, modifiers, image formats, nonzero
- * unused fields, malformed UTF-8, and counts above the HA_COMPUTER_MAX_*
- * limits with HA_COMPUTER_STATUS_INVALID_ARGUMENT.
+ * Each length must not exceed its independent capacity. A channel that is
+ * absent has length zero. On failure all success-channel lengths and
+ * output_session_token/output_image_format are zero; error may contain a
+ * useful UTF-8 message. Input and output pointers are callback-scoped.
  *
- * output/output_length/output_display_token/output_width/output_height and
- * output_image_format are nonnull callback-scoped writable pointers. On
- * failure, set the display token, dimensions, and image format to zero and
- * write a useful UTF-8 error to output when possible. Never report
- * output_length above output_capacity. The runtime supplies
- * HA_COMPUTER_ERROR_CAPACITY for QUERY_DISPLAY and HA_COMPUTER_OUTPUT_CAPACITY
- * for RUN_AND_OBSERVE.
- *
- * The callback runs synchronously on an agent tool worker, never the setter's
- * caller or AppKit main thread, and must not call engine functions. No input
- * or output buffer remains valid after it returns. The host owns callback and
- * context. ha_engine_set_computer_callback may wait for an in-flight callback;
- * after it returns, a replaced callback/context will not be used again. Keep
- * the installed callback/context valid until replacement, disable, or engine
- * destruction returns.
+ * Actions must use direct AX APIs and must not synthesize pointer or keyboard
+ * input. Consequently sessions do not share the system cursor. Same-process
+ * AX calls may be serialized while sessions bound to different processes
+ * remain concurrent.
  */
 typedef int32_t (*ha_computer_callback)(
     void *context,
     uint32_t abi_version,
     int32_t operation,
-    uint64_t expected_display_token,
-    int32_t expected_width,
-    int32_t expected_height,
-    const ha_computer_action_v1 *actions,
-    size_t action_count,
-    const ha_computer_point_v1 *points,
-    size_t point_count,
-    const uint8_t *text,
-    size_t text_length,
-    int32_t requested_image_format,
-    uint8_t *output,
-    size_t output_capacity,
-    size_t *output_length,
-    uint64_t *output_display_token,
-    int32_t *output_width,
-    int32_t *output_height,
+    uint64_t session_token,
+    const uint8_t *request,
+    size_t request_length,
+    uint8_t *result,
+    size_t result_capacity,
+    size_t *result_length,
+    uint8_t *accessibility,
+    size_t accessibility_capacity,
+    size_t *accessibility_length,
+    uint8_t *image,
+    size_t image_capacity,
+    size_t *image_length,
+    uint8_t *error,
+    size_t error_capacity,
+    size_t *error_length,
+    uint64_t *output_session_token,
     int32_t *output_image_format
 );
 
 /*
  * Installs native computer control for future turns. A turn replaces the
  * local macOS backend only when its turn.start enables computer use and this
- * callback is nonnull. Passing NULL disables native computer control; context
- * is ignored. Tools retained by an already-started turn fail as inactive.
+ * callback is nonnull. Passing NULL disables support for new sessions; context
+ * is ignored.
  *
  * Returns 0 on success, 1 for a null engine, or 2 for an internal failure.
- * Calls must be serialized with ha_engine_destroy. This function may block
- * until a running computer callback returns.
+ * Calls must be serialized with ha_engine_destroy. Replacement is visible to
+ * new sessions immediately. Existing sessions retain the callback/context
+ * generation they opened with and finish with CLOSE on that generation.
+ * Therefore the host must retain an old callback/context until its final CLOSE
+ * returns. Engine destruction first stops turn workers, then CLOSEs remaining
+ * sessions, and only then releases registrations.
  */
 int32_t ha_engine_set_computer_callback(
     void *engine,

@@ -1568,6 +1568,7 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
         -- keep passing the inputs normally.
         installation <-
             onCompacted outcome inputs `onException` rollback
+        callbacks.onLoopEvent ModelContextReset
         let (continuationHistory, continuationInputs, rollbackIfDeferred) =
                 case installation of
                     CompactionInstalled -> (durableHistory, [], pure ())

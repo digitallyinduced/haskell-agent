@@ -182,6 +182,7 @@ library
                     , Agent.CLI.ComputerUse.Linux.Logind
                     , Agent.CLI.ComputerUse.Linux.Portal
                     , Agent.CLI.ComputerUse.Linux.X11
+                    , Agent.CLI.ComputerUse.Accessibility
                     , Agent.CLI.Config
                     , Agent.CLI.McpOAuthStore
                     , Agent.CLI.McpOAuth
@@ -446,6 +447,17 @@ benchmark history-eviction-bench
     build-depends:    agent-tui
                     , base >= 4.17 && < 5
                     , containers
+
+benchmark accessibility-delta-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          AccessibilityDelta.hs
+    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , aeson
+                    , base >= 4.17 && < 5
+                    , bytestring
                     , text
 
 benchmark concurrency-bench

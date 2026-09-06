@@ -5,7 +5,8 @@ module Agent.CLI.MacOS.NativeSupervisor
 
 import Agent.CLI.MacOS.AgentSnapshot (activeAgentSnapshot)
 import Agent.CLI.MacOS.BrowserBridge (BrowserHost, browserToolsWhenEnabled)
-import Agent.CLI.MacOS.ComputerBridge (ComputerHost, computerToolWhenEnabled)
+import Agent.CLI.MacOS.ComputerBridge
+    ( ComputerHost, computerToolSessionWhenEnabled )
 import Agent.CLI.MacOS.EngineCallbacks (invokeTaskSnapshotCallback)
 import Agent.CLI.MacOS.EngineEvents
 import Agent.CLI.MacOS.EngineMailbox
@@ -37,7 +38,7 @@ import Agent.Store.Postgres (ManagedPostgresConfig, Store)
 import Control.Concurrent.Async (asyncWithUnmask, cancel, waitCatch)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, putMVar)
 import Control.Concurrent.STM
-import Control.Exception.Safe (finally, mask, tryAny)
+import Control.Exception.Safe (bracket, finally, mask, tryAny)
 import Control.Monad (filterM, foldM, forM_, void, when)
 import Data.Aeson ((.:?))
 import qualified Data.Aeson as Aeson
@@ -406,45 +407,61 @@ supervisorLoop
             start.turnStartSessionId
             interactions
         nativeBrowserTools <- browserToolsWhenEnabled browser start.turnStartId
-        nativeComputerTool <- computerToolWhenEnabled computer
-        worker <- launchTrackedWorker start.turnStartId do
-            withGatewayCredentialTurnLease $
-                ensureNativeGatewayIdentity
-                    pending.pendingTurnGatewayIdentity >>= \case
-                        Left err ->
-                            pure
-                                TurnOutcome
-                                    { turnOutcomeSessionId =
-                                        start.turnStartSessionId
-                                    , turnOutcomeError = Just err
-                                    , turnOutcomeUsage = emptyTokenUsage
-                                    , turnOutcomeProviderCostUSD = Nothing
-                                    }
-                        Right () ->
-                            do
-                                sendTaskState
-                                    start.turnStartId
-                                    start.turnStartSessionId
-                                    "running"
-                                sendTurnStatus
-                                    callback
-                                    context
-                                    start.turnStartId
-                                    (if start.turnStartWorktree
-                                        then "Creating worktree…"
-                                        else "Starting…")
-                                runNativeTurn
-                                    callback
-                                    context
-                                    commands
-                                    processRuntime
-                                    control
-                                    nativeBrowserTools
-                                    nativeComputerTool
-                                    start
-                                    pending.pendingTurnImages
-                                    pending.pendingTurnOptions
-                                    interactions
+        worker <- launchTrackedWorker start.turnStartId $
+            bracket
+                (if start.turnStartComputerUse
+                    then computerToolSessionWhenEnabled computer
+                    else pure (Right Nothing))
+                (\case
+                    Right (Just (_, _, close)) -> close
+                    _ -> pure ())
+                (\case
+                    Left err -> pure TurnOutcome
+                        { turnOutcomeSessionId = start.turnStartSessionId
+                        , turnOutcomeError = Just err
+                        , turnOutcomeUsage = emptyTokenUsage
+                        , turnOutcomeProviderCostUSD = Nothing
+                        }
+                    Right nativeComputerTool ->
+                        withGatewayCredentialTurnLease $
+                            ensureNativeGatewayIdentity
+                                pending.pendingTurnGatewayIdentity >>= \case
+                                    Left err ->
+                                        pure
+                                            TurnOutcome
+                                                { turnOutcomeSessionId =
+                                                    start.turnStartSessionId
+                                                , turnOutcomeError = Just err
+                                                , turnOutcomeUsage =
+                                                    emptyTokenUsage
+                                                , turnOutcomeProviderCostUSD =
+                                                    Nothing
+                                                }
+                                    Right () ->
+                                        do
+                                            sendTaskState
+                                                start.turnStartId
+                                                start.turnStartSessionId
+                                                "running"
+                                            sendTurnStatus
+                                                callback
+                                                context
+                                                start.turnStartId
+                                                (if start.turnStartWorktree
+                                                    then "Creating worktree…"
+                                                    else "Starting…")
+                                            runNativeTurn
+                                                callback
+                                                context
+                                                commands
+                                                processRuntime
+                                                control
+                                                nativeBrowserTools
+                                                nativeComputerTool
+                                                start
+                                                pending.pendingTurnImages
+                                                pending.pendingTurnOptions
+                                                interactions)
         let runningTurn =
                 RunningTurn
                     { runningTurnControl = control

@@ -186,6 +186,7 @@ generatedLoopEvent = frequency
     , (3, WarningRaised <$> generatedText)
     , (2, ResponseRestarted <$> generatedText)
     , (2, pure TurnStarted)
+    , (1, pure ModelContextReset)
     ]
 
 generatedNotice :: Gen (Maybe UiNotice)
