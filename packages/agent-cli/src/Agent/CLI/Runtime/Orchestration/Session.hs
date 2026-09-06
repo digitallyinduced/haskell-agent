@@ -119,7 +119,7 @@ import Agent.CLI.Session
       Persistence(..),
       PersistenceState(PersistenceActive, PersistencePending),
       LegacySubagentTarget,
-      SessionHandle(sessionDir),
+      SessionHandle(sessionDir, sessionMeta),
       SessionMeta(metaId, metaPromptSnapshot, metaTitle),
       SessionTurn,
       SessionPromptSnapshot(..) )
@@ -1323,9 +1323,9 @@ withSelectedClaudeAuth connectedGateway loaded onError action
                 loadClaudeCodeGatewayAuth transport >>= either onError action
             either onError pure result
 
--- | Print a copy-pasteable --resume line whenever the CLI session quits.
--- Ctrl-C is normalized to the same graceful 'RunQuit' result as :q/Ctrl-D so
--- every exit path reports the persisted session exactly once.
+-- | Print a copy-pasteable --resume line whenever the CLI session quits or
+-- crashes. Ctrl-C is normalized to the same graceful 'RunQuit' result as
+-- :q/Ctrl-D so every exit path reports the persisted session exactly once.
 withResumeHintOnQuit
     :: Maybe FullscreenRuntime
     -> String
@@ -1333,7 +1333,10 @@ withResumeHintOnQuit
     -> IO RunResult
     -> IO RunResult
 withResumeHintOnQuit fullscreen progName persist action = do
-    result <- catchUserInterrupt action (pure RunQuit)
+    result <-
+        catchUserInterrupt action (pure RunQuit)
+            `Safe.onException`
+                printCrashResumeHint fullscreen progName persist
     case result of
         RunQuit -> do
             case fullscreen of
@@ -1348,6 +1351,34 @@ withResumeHintOnQuit fullscreen progName persist action = do
     -- "user interrupt" and a backtrace.
     pure result
 
+-- | Report only a session that is already durable. In particular, do not try
+-- to materialize pending persistence while handling a crash: the exception
+-- may itself be a storage failure. This handler is best-effort so it can never
+-- replace the original exception.
+printCrashResumeHint
+    :: Maybe FullscreenRuntime
+    -> String
+    -> Persistence
+    -> IO ()
+printCrashResumeHint fullscreen progName persist =
+    (do
+        sessionId <- activePersistenceSessionId persist
+        forM_ sessionId \identifier ->
+            case fullscreen of
+                Nothing -> printResumeHintForId progName identifier
+                Just runtime ->
+                    withFullscreenSuspended runtime
+                        (printResumeHintForId progName identifier)
+    ) `Safe.catchAny` \_ -> pure ()
+
+activePersistenceSessionId :: Persistence -> IO (Maybe Text)
+activePersistenceSessionId = \case
+    PersistenceDisabled -> pure Nothing
+    PersistenceEnabled slotRef ->
+        readIORef slotRef <&> \case
+            PersistencePending{} -> Nothing
+            PersistenceActive handle -> Just handle.sessionMeta.metaId
+
 printResumeHint
     :: String
     -> Persistence
@@ -1356,12 +1387,13 @@ printResumeHint progName persist = do
     -- A commit interrupted before publication is safe to adopt once. Keep the
     -- retry bounded so a later double Ctrl-C can still force a hung exit.
     sessionId <- retryUserInterruptOnce (ensurePersistenceSessionId persist)
-    case sessionId of
-        Nothing -> pure ()
-        Just sessionId -> do
-            -- Drop an in-place "Thinking…" status so the hint is its own line.
-            Text.hPutStr stderr "\r\ESC[K"
-            clearNativeProgress stderr
-            color <- resolveColor stderr
-            putTextLn stderr
-                (roleMuted color (resumeHint progName sessionId))
+    forM_ sessionId (printResumeHintForId progName)
+
+printResumeHintForId :: String -> Text -> IO ()
+printResumeHintForId progName sessionId = do
+    -- Drop an in-place "Thinking…" status so the hint is its own line.
+    Text.hPutStr stderr "\r\ESC[K"
+    clearNativeProgress stderr
+    color <- resolveColor stderr
+    putTextLn stderr
+        (roleMuted color (resumeHint progName sessionId))
