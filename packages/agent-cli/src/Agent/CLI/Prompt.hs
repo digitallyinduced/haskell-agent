@@ -92,6 +92,7 @@ systemPrompt dialect model effort cwd sessionTmp today isNonInteractive =
     Text.intercalate "\n\n" $
         filter (not . Text.null)
             [ base
+            , delegationOwnershipGuidance
             , sessionTempGuidance sessionTmp
             , commitAttributionGuidance model effort
             , ghciGuidanceForDialect dialect
@@ -141,6 +142,7 @@ systemPromptForToolsWithHostedSearch includeHostedSearch
     Text.intercalate "\n\n" $
         filter (not . Text.null)
             [ base
+            , delegationOwnershipGuidance
             , sessionTempGuidance sessionTmp
             , commitAttributionGuidanceForTools
                 dialect
@@ -209,6 +211,7 @@ systemPromptForCatalogModelWithHostedSearch
         filter (not . Text.null)
             [ Text.strip
                 (renderModelInstructions ModelPersonalityDefault info)
+            , delegationOwnershipGuidance
             , sessionTempGuidance sessionTmp
             , commitAttributionGuidanceForTools
                 dialect
@@ -226,6 +229,23 @@ systemPromptForCatalogModelWithHostedSearch
     available =
         Set.fromList
             (hostedSearchToolNamesWhen includeHostedSearch dialect ++ toolNames)
+
+-- | Shared across dialects and catalog templates. Delegation is an execution
+-- aid, not a transfer of responsibility for the user's current request.
+delegationOwnershipGuidance :: Text
+delegationOwnershipGuidance = Text.unwords
+    [ "Keep ownership of the user's task in the current session."
+    , "Do the work directly by default. When delegation tools are available,"
+    , "use subagents for bounded subtasks; retain responsibility for integration,"
+    , "verification, and the final answer. Do not delegate the entire current"
+    , "task to another session and end your turn with only a session id or"
+    , "an 'implementation is running' update."
+    , "Create or resume an independent background session only when the user"
+    , "explicitly requests independent/background work or a separate session."
+    , "Approval to implement a plan is not permission to move that work elsewhere."
+    , "When delegated work is needed for your answer, collect and review its"
+    , "results before reporting completion; a launch acknowledgement is not a result."
+    ]
 
 -- | The upstream @<environment_context>@ user fragment: working directory,
 -- shell, date, and timezone. Sent as conversation context rather than inside

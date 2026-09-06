@@ -63,6 +63,19 @@ toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = describe "Agent.CLI.AgentSessions" do
+    it "describes background session launches as explicit work, not completed results" $
+        withTempEnv \env _ -> do
+            let launchTools = filter
+                    (\tool -> tool.appToolName `elem`
+                        ["create_agent_session", "send_agent_session_message"])
+                    (agentSessionTools env)
+            length launchTools `shouldBe` 2
+            mapM_ (\tool -> do
+                tool.appToolDescription `shouldSatisfy` Text.isInfixOf "explicitly"
+                tool.appToolDescription `shouldSatisfy` Text.isInfixOf "current task"
+                tool.appToolDescription `shouldSatisfy` Text.isInfixOf "not a completed result"
+                ) launchTools
+
     it "registers create/read/message tools with mutating flags" $
         withTempEnv \env _ -> do
             map (\tool -> (tool.appToolName, isReadOnly tool.appToolApproval))

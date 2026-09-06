@@ -14,6 +14,7 @@ import Agent.Dialect
     , grokBuildDialect
     )
 import Agent.Provider (BillingMode(..), Provider(..))
+import Agent.OpenAI.Models (ModelsResponse(..), loadBundledModelsOrThrow)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (Day, fromGregorian)
@@ -51,6 +52,38 @@ systemPromptForToolsWithHostedSearch includeHostedSearch dialect =
 
 spec :: Spec
 spec = describe "systemPrompt" do
+    it "keeps ownership guidance after bundled catalog instructions" do
+        catalog <- loadBundledModelsOrThrow
+        catalog.models `shouldSatisfy` (not . null)
+        mapM_ (\info ->
+            systemPromptForCatalogModel codexDialect "gpt-5.6-sol" "high"
+                info ["create_agent_session"] Nothing
+                `shouldSatisfy` Text.isInfixOf
+                    "Keep ownership of the user's task in the current session."
+            ) catalog.models
+
+    it "keeps task ownership in the current session across all dialects and filtered tools" do
+        let day = fromGregorian 2026 9 6
+            cwd = fromFilePath "/tmp/repo"
+            dialects = [codexDialect, grokBuildDialect, genericResponsesDialect, claudeCodeDialect]
+            prompts = concatMap
+                (\dialect ->
+                    [ systemPrompt dialect cwd Nothing day False
+                    , systemPromptForTools dialect [] cwd Nothing day False
+                    , systemPromptForTools dialect ["create_agent_session"] cwd Nothing day False
+                    ])
+                dialects
+        mapM_ (\prompt -> do
+            prompt `shouldSatisfy` Text.isInfixOf
+                "Keep ownership of the user's task in the current session."
+            prompt `shouldSatisfy` Text.isInfixOf
+                "use subagents for bounded subtasks"
+            prompt `shouldSatisfy` Text.isInfixOf
+                "Approval to implement a plan is not permission"
+            prompt `shouldSatisfy` Text.isInfixOf
+                "a launch acknowledgement is not a result."
+            ) prompts
+
     it "names grok-build tools for xAI and Codex tools for OpenAI" do
         let day = fromGregorian 2026 8 19
             grok =
