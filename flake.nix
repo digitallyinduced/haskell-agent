@@ -1501,9 +1501,11 @@
                 } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
                     agent-cli-macos-bundle = agentCliMacosRelease.bundle;
                 } // pkgs.lib.optionalAttrs functionalTestEnabled {
-                    agent-cli-functional-openai-hello-world =
-                        agentCliHelloWorldFunctional "openai"
-                            (functionalTestModel "OPENAI" "gpt-5.6-terra");
+                    # Temporarily disabled while the CI OpenAI account has no
+                    # verified available usage. Keep package/unit checks enabled.
+                    # agent-cli-functional-openai-hello-world =
+                    #     agentCliHelloWorldFunctional "openai"
+                    #         (functionalTestModel "OPENAI" "gpt-5.6-terra");
                     # Temporarily disabled while the CI Grok account has no
                     # verified available usage. Keep package/unit checks enabled.
                     # agent-cli-functional-xai-hello-world =

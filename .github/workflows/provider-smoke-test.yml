@@ -17,7 +17,10 @@ concurrency:
 jobs:
   openai:
     name: OpenAI hello world
-    if: ${{ github.repository == 'digitallyinduced/haskell-agent' && github.ref == 'refs/heads/master' }}
+    # Temporarily disabled while the CI OpenAI account has no
+    # verified available usage. Keep package/unit checks enabled.
+    if: false
+    # if: ${{ github.repository == 'digitallyinduced/haskell-agent' && github.ref == 'refs/heads/master' }}
     runs-on: [self-hosted, haskell-agent, office-builder, x86_64-linux]
     timeout-minutes: 15
     env:
