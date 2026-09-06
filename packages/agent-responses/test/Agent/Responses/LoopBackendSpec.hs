@@ -1,6 +1,8 @@
 module Agent.Responses.LoopBackendSpec (spec) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Cancel (newCancelFlag)
+import qualified Agent.Loop as Loop
 import Agent.Loop
     ( Backend(..)
     , BackendCallbacks(..)
@@ -76,6 +78,8 @@ import Agent.Responses.Types.Items (responseItemDecoder)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import System.Timeout (timeout)
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Either (isLeft)
 import qualified Data.Text as Text
@@ -87,6 +91,14 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , ToolResultImage(..)
     , toolCallMode
+    , noArgsTool
+    )
+import Agent.Tools.Types
+    ( ApprovalRule(..)
+    , ToolExecutionPolicy(..)
+    , jsonAppToolWithExecution
+    , mkToolRegistry
+    , withAsyncToolCalls
     )
 import Test.Hspec
 
@@ -912,6 +924,98 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
         map (.callId) calls `shouldBe` ["async-call"]
         map toolCallMode calls `shouldBe` [AsyncToolCall]
         map (.arguments) calls `shouldBe` ["{\"path\":\"README.md\"}"]
+
+    it "recovers a completed host side effect when the stream fails after output_item.done" do
+        finished <- newEmptyMVar
+        sideEffects <- newIORef (0 :: Int)
+        state <- newIORef emptyBackendSnapshot
+        cancel <- newCancelFlag
+        let call = FunctionCall
+                { itemId = Just "uncommitted-item"
+                , callId = "side-effect-call"
+                , name = "write_receipt"
+                , namespace = Nothing
+                , provider = Nothing
+                , arguments = "{}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                , async = Just True
+                }
+            send _params onStreamEvent = do
+                onStreamEvent ResponseOutputItemDoneEvent
+                    { item = FunctionCallItem call
+                    , outputIndex = Just 0
+                    , sequenceNumber = Just 1
+                    }
+                -- The event sink acknowledges the real host result before
+                -- failing the still-open provider stream. No timing sleeps.
+                takeMVar finished
+                onStreamEvent ResponseOutputItemAddedEvent
+                    { item = FunctionCallItem call
+                        { callId = "malformed-never-admitted"
+                        , arguments = "{\"unfinished\":"
+                        , status = Just ItemIncomplete
+                        }
+                    , outputIndex = Just 1
+                    , sequenceNumber = Just 2
+                    }
+                pure (Left (ConnectionError "stream broke after side effect"))
+            backend = statelessResponsesBackend send
+                (pure defaultResponseCreateParams)
+            tool = withAsyncToolCalls $
+                jsonAppToolWithExecution "write_receipt" "" []
+                    AlwaysReadOnly ParallelSafe $
+                    noArgsTool "write_receipt" do
+                        modifyIORef' sideEffects (+ 1)
+                        pure (Right "receipt-4711 persisted")
+            registry = either (error . Text.unpack) id (mkToolRegistry [tool])
+            config = Loop.LoopConfig
+                { loopBackend = backend
+                , loopBackendState = Loop.BackendStateStore
+                    { readBackendState = readIORef state
+                    , commitBackendState = \snapshot ->
+                        writeIORef state snapshot >> pure snapshot
+                    }
+                , loopTools = registry
+                , loopDispatch = Loop.defaultLoopDispatch
+                , loopMaxTurns = Loop.defaultLoopMaxTurns
+                , loopOnEvent = \case
+                    ToolFinished _ -> putMVar finished ()
+                    _ -> pure ()
+                , loopApprove = const (pure (Right True))
+                , loopReadSteering = pure []
+                , loopCommitSteering = const (pure ())
+                , loopInterrupt = pure ()
+                , loopCancel = cancel
+                }
+        outcome <- timeout 5000000 $
+            Loop.runLoopInputsDetailed config Nothing [UserMessage "write once"]
+        execution <- case outcome of
+            Nothing -> expectationFailure "stream recovery timed out" >> fail "timeout"
+            Just value -> pure value
+        execution.executionResult `shouldSatisfy` isLeft
+        readIORef sideEffects `shouldReturn` 1
+        let history = execution.executionState
+            encodedHistory = TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode history))
+        encodedHistory `shouldSatisfy` Text.isInfixOf "receipt-4711 persisted"
+        encodedHistory `shouldSatisfy` Text.isInfixOf "write_receipt"
+        encodedHistory `shouldSatisfy` (not . Text.isInfixOf "malformed-never-admitted")
+        history `shouldSatisfy` all (\case MessageItem{} -> True; _ -> False)
+        -- Feed the recovered snapshot into a fresh provider submission. The
+        -- observation must reach the wire without recreating executable calls.
+        resumedRequests <- newIORef []
+        let resumedBackend = statelessResponsesBackend
+                (\params _ -> do
+                    modifyIORef' resumedRequests (<> [params.input])
+                    pure (Right (responseWithOutput [])))
+                (pure defaultResponseCreateParams)
+        recovered <- readIORef state
+        _ <- resumedBackend.submitTurn recovered Nothing [UserMessage "continue"]
+            (const (pure ()))
+        requests <- readIORef resumedRequests
+        requests `shouldBe`
+            [Just (ResponseInputItems (history <> turnInputsToItems [UserMessage "continue"]))]
+        readIORef sideEffects `shouldReturn` 1
 
     it "can hide raw reasoning while retaining reasoning summaries" do
         events <- newIORef []

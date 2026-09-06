@@ -18,6 +18,7 @@ import Agent.Responses.Types
     , ResponseMessage(..)
     , ResponseRole(..)
     )
+import Agent.Responses.Types.Items (responseItemDecoder)
 import Agent.ToolDispatch
 import Agent.Telemetry (TurnTelemetry(..))
 import Agent.Tools.Scheduling
@@ -32,6 +33,7 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , jsonAppToolWithExecution
     , toolExecutionPolicyFor
+    , withAsyncToolCalls
     , withToolResourceClaims
     )
 import Codec.Picture
@@ -1566,7 +1568,7 @@ spec = describe "runLoop" do
 
     it "returns the last committed state after a later transport failure" do
         submissions <- newIORef []
-        backend <- scriptedBackend submissions
+        backend <- retainingEchoCall <$> scriptedBackend submissions
             [ Right $ emptyTurnOutput "resp-1"
                 [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
                 Nothing
@@ -1591,7 +1593,7 @@ spec = describe "runLoop" do
 
     it "exposes tool results awaiting submission after a later transport failure" do
         submissions <- newIORef []
-        backend <- scriptedBackend submissions
+        backend <- retainingEchoCall <$> scriptedBackend submissions
             [ Right $ emptyTurnOutput "resp-1"
                 [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
                 Nothing
@@ -1672,7 +1674,7 @@ spec = describe "runLoop" do
     it "keeps completed tool results pending when cancelled during the next model step" do
         started <- newEmptyMVar
         calls <- newIORef (0 :: Int)
-        config0 <- testConfig $ Backend \state _prev _inputs _onEvent -> do
+        config0 <- testConfig $ retainingEchoCall $ Backend \state _prev _inputs _onEvent -> do
             call <- atomicModifyIORef' calls \n -> (n + 1, n + 1)
             if call == 1
                 then pure $ Right BackendResult
@@ -1935,6 +1937,94 @@ spec = describe "runLoop" do
             timeout 1000000 (wait running)
                 `shouldReturn` Just (Left (LoopCancelled []))
             tryReadMVar stopped `shouldReturn` Just ()
+
+    it "salvages a completed blocking result when cancellation interrupts the remaining batch" do
+        blocked <- newEmptyMVar
+        joined <- newEmptyMVar
+        invocations <- newIORef (0 :: Int)
+        let first = functionToolCall "saved" "save" "{}"
+            second = functionToolCall "blocked" "block" "{}"
+            -- The shared scheduling resource makes starting B proof that A's
+            -- manager completion was recorded, not merely painted by the UI.
+            tools =
+                [ resourceTool "save" "recovery-test" do
+                    modifyIORef' invocations (+ 1)
+                    pure (Right "file saved exactly once")
+                , resourceTool "block" "recovery-test" $
+                    (putMVar blocked () >> threadDelay maxBound
+                        >> pure (Right "must not finish"))
+                        `Exception.finally` putMVar joined ()
+                ]
+            callItems = either (error . show) id $
+                Json.decodeEither (Json.list responseItemDecoder)
+                    "[{\"type\":\"function_call\",\"call_id\":\"saved\",\"name\":\"save\",\"arguments\":\"{}\"},{\"type\":\"function_call\",\"call_id\":\"blocked\",\"name\":\"block\",\"arguments\":\"{}\"}]"
+            backend = Backend \state _ inputs _ ->
+                pure $ Right BackendResult
+                    { backendOutput = emptyTurnOutput "committed-tools" [first, second] Nothing
+                    , backendState = advanceBackendSnapshot state
+                        (state.backendItems <> turnInputsToItems inputs <> callItems) Nothing
+                    }
+        config0 <- testConfig backend
+        let config = config0 { loopTools = registryFromTools tools }
+        withAsync (runLoopInputsDetailed config Nothing [UserMessage "fix it"]) \running -> do
+            timeout concurrencyProbeMicros (takeMVar blocked) `shouldReturn` Just ()
+            requestCancel config.loopCancel
+            execution <- timeout concurrencyProbeMicros (wait running)
+                >>= maybe (fail "cancel did not join tool workers") pure
+            execution.executionProgress `shouldBe` ResponseCommitted
+            execution.executionPendingInputs `shouldBe`
+                [CompletedTool (functionResult "saved" "file saved exactly once")]
+            execution.executionResult `shouldBe`
+                Left (LoopCancelled [functionResult "saved" "file saved exactly once"])
+            tryReadMVar joined `shouldReturn` Just ()
+        readIORef invocations `shouldReturn` 1
+
+    it "recovers attributed precommit tool work without replaying failed provider output" do
+        blocked <- newEmptyMVar
+        joined <- newEmptyMVar
+        invocations <- newIORef (0 :: Int)
+        acknowledgements <- newIORef []
+        let first = asyncFunctionToolCall "saved" "save" "{}"
+            second = asyncFunctionToolCall "blocked" "block" "{}"
+            tools =
+                [ withAsyncToolCalls $ resourceTool "save" "recovery-test" do
+                    modifyIORef' invocations (+ 1)
+                    pure (Right "file saved exactly once")
+                , withAsyncToolCalls $ resourceTool "block" "recovery-test" $
+                    (putMVar blocked () >> threadDelay maxBound
+                        >> pure (Right "must not finish"))
+                        `Exception.finally` putMVar joined ()
+                ]
+            backend = backendWithCallbacks \_ _ _ callbacks -> do
+                callbacks.onAsyncToolCall first
+                callbacks.onAsyncToolCall second
+                timeout concurrencyProbeMicros (takeMVar blocked)
+                    >>= maybe (fail "second tool did not start") pure
+                callbacks.onLoopEvent (TextDelta "untrusted unfinished answer")
+                pure (Left (ConnectionError "stream failed before commit"))
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools tools
+                , loopReadSteering = pure [UserMessage "also update tests"]
+                , loopCommitSteering = \count ->
+                    modifyIORef' acknowledgements (<> [count])
+                }
+        execution <- timeout concurrencyProbeMicros
+            (runLoopInputsDetailed config Nothing [UserMessage "fix it"])
+            >>= maybe (fail "provider failure did not join tool workers") pure
+        execution.executionProgress `shouldBe` ResponseCommitted
+        take 2 execution.executionState `shouldBe`
+            turnInputsToItems [UserMessage "fix it", UserMessage "also update tests"]
+        readIORef acknowledgements `shouldReturn` [1]
+        show execution.executionState `shouldContain` "file saved exactly once"
+        show execution.executionState `shouldContain` "saved"
+        show execution.executionState `shouldContain` "blocked"
+        show execution.executionState `shouldNotContain` "untrusted unfinished answer"
+        execution.executionState `shouldSatisfy` all (\case
+            MessageItem{} -> True
+            _ -> False)
+        tryReadMVar joined `shouldReturn` Just ()
+        readIORef invocations `shouldReturn` 1
 
     it "does not render a rejected tool when approval cancels the turn" do
         events <- newIORef []
@@ -2542,6 +2632,18 @@ imageDataUrl mime bytes =
         <> mime
         <> ";base64,"
         <> TextEncoding.decodeUtf8 (Base64.encode bytes)
+
+-- These continuation tests need an actual committed call, not just the
+-- scripted backend's marker: only canonical calls may receive tool outputs.
+retainingEchoCall :: Backend -> Backend
+retainingEchoCall backend = backendWithCallbacks \state previous inputs callbacks ->
+    fmap (fmap \result -> result
+        { backendState = advanceBackendSnapshot result.backendState echoCallItems Nothing })
+        (backend.submitTurnWithCallbacks state previous inputs callbacks)
+  where
+    echoCallItems = either (error . show) id $
+        Json.decodeEither (Json.list responseItemDecoder)
+            "[{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"echo\",\"arguments\":\"{\\\"message\\\":\\\"hi\\\"}\"}]"
 
 rawJsonFixture :: ByteString.ByteString -> RawJson
 rawJsonFixture bytes =

@@ -10,6 +10,7 @@ import Agent.Dialect (DialectId(..))
 import Agent.Loop (TokenUsage(..))
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
+import Agent.Runtime.TurnStateSpec (managedRecoveryRoundTrip)
 import Agent.Store.Postgres (trustedPool)
 import qualified Agent.Store.Postgres.Session as Store
 import Agent.Tools.TaskPlan
@@ -34,6 +35,13 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "interrupted tool recovery persistence" do
+        it "persists completed batch results and resumes without rerunning them after cancellation" $
+            managedRecoveryRoundTrip persistRecovery False
+
+        it "persists attributed precommit work and resumes without replaying failed provider output" $
+            managedRecoveryRoundTrip persistRecovery True
+
     describe "PostgreSQL session persistence" do
         it "materializes and round-trips task plans through persistence hooks" $
             withTempStore \store root -> do
@@ -1039,3 +1047,25 @@ spec = do
                 _ <- newActivePersistence handle
                 doesDirectoryExist handle.sessionTempDir `shouldReturn` True
                 modeOf handle.sessionTempDir `shouldReturn` 0o700
+
+persistRecovery :: [ResponseItem] -> [ResponseItem] -> IO [ResponseItem]
+persistRecovery items displayItems =
+    withTempStore \store root -> do
+        handle <- createSession (testCreate (trustedPool store) root)
+        let persisted = SessionTurn
+                { turnAt = fixedTime
+                , turnUserText = "fix it"
+                , turnAssistantText = Nothing
+                , turnError = Just "interrupted"
+                , turnResponseId = Nothing
+                , turnItems = items
+                , turnDisplayItems = displayItems
+                , turnUsage = Nothing
+                , turnEffect = TranscriptAppend
+                , turnProviderTelemetry = []
+                }
+        saved <- appendTurn handle persisted
+        (_, turns) <- loadSessionHandle (trustedPool store) root saved.sessionMeta.metaId
+            >>= either (fail . Text.unpack) pure
+        turns `shouldBe` [persisted]
+        pure (concatMap (.turnItems) turns)
