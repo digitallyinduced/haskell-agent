@@ -37,6 +37,7 @@ import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import Agent.Store.Types (renderStoreError)
 import Control.Concurrent (threadDelay)
+import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception.Safe (SomeException, bracket, finally, try)
 import Data.IORef
@@ -49,6 +50,7 @@ import qualified System.FilePath as FilePath
 import System.Posix.Temp (mkdtemp)
 import System.Posix.Process (forkProcess, getProcessID, getProcessStatus)
 import System.Posix.Signals (sigKILL, signalProcess)
+import System.Timeout (timeout)
 import Test.Hspec
 
 isReadOnly :: ApprovalRule -> Bool
@@ -61,9 +63,142 @@ fromFilePath = unsafeEncodeUtf
 toFilePath :: OsPath -> FilePath
 toFilePath path = either (error . show) id (decodeUtf path)
 
+waitPayload :: SessionHandle -> Int -> Text.Text
+waitPayload handle milliseconds =
+    "{\"session_id\":\"" <> handle.sessionMeta.metaId
+        <> "\",\"timeout_ms\":" <> Text.pack (show milliseconds) <> "}"
+
+waitTestTurn :: Text.Text -> SessionTurn
+waitTestTurn answer = SessionTurn
+    { turnAt = fixedTime
+    , turnUserText = "question"
+    , turnAssistantText = Just answer
+    , turnError = Nothing
+    , turnResponseId = Nothing
+    , turnItems = []
+    , turnDisplayItems = []
+    , turnUsage = Nothing
+    , turnEffect = TranscriptAppend
+    , turnProviderTelemetry = []
+    }
+
 spec :: Spec
 spec = describe "Agent.CLI.AgentSessions" do
-    it "registers create/read/message tools with mutating flags" $
+    it "waits for idle sessions immediately and includes their last response" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            _ <- appendTurn handle (waitTestTurn "done")
+            result <- runTool env "wait_agent_session" (waitPayload handle 1000)
+            result `shouldSatisfy` Text.isInfixOf "Status: idle"
+            result `shouldSatisfy` Text.isInfixOf "Assistant:\n  done"
+
+    it "labels recent output separately when the target has already resumed" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            _ <- appendTurn handle (waitTestTurn "old")
+            let waiting = env { toolsPrepareSessionWait = \_ -> pure do
+                    next <- appendTurn handle (waitTestTurn "first result")
+                    _ <- appendTurn next (waitTestTurn "later result")
+                    pure "completed" }
+            result <- runTool waiting "wait_agent_session" (waitPayload handle 1000)
+            result `shouldSatisfy` Text.isInfixOf "later result"
+            result `shouldSatisfy` Text.isInfixOf "may include a later resume"
+            result `shouldNotSatisfy` Text.isInfixOf "Assistant:\n  old"
+
+    it "rejects invalid wait deadlines and self waits before preparing a wait" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            let forbidden = env
+                    { toolsPrepareSessionWait = \_ -> error "must not prepare"
+                    , toolsCurrentSessionId = pure (Just handle.sessionMeta.metaId)
+                    }
+            mapM_ (\ms -> runTool forbidden "wait_agent_session" (waitPayload handle ms)
+                >>= (`shouldSatisfy` Text.isInfixOf "timeout_ms must be")) [0, -1, 300001]
+            result <- runTool forbidden "wait_agent_session" (waitPayload handle 1000)
+            result `shouldSatisfy` Text.isInfixOf "cannot wait for the current"
+
+    it "enforces the session boundary before preparing a wait" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            let forbidden = env
+                    { toolsConnection = organizationGatewayConnectionId
+                    , toolsGatewayIdentity = Just "different-organization"
+                    , toolsPrepareSessionWait = \_ -> error "must not prepare"
+                    }
+            result <- runTool forbidden "wait_agent_session" (waitPayload handle 1000)
+            result `shouldNotSatisfy` Text.isInfixOf "Status:"
+
+    it "times out without cancelling the captured target and permits another wait" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            bracket (newSessionThreadManager env.toolsRoot) closeSessionThreadManager \manager -> do
+                gate <- newEmptyMVar
+                _ <- launchSessionThread manager handle.sessionMeta.metaId
+                    (takeMVar gate >> pure (Right ()))
+                let waiting = env { toolsPrepareSessionWait = prepareSessionThreadWait manager }
+                result <- runTool waiting "wait_agent_session" (waitPayload handle 30)
+                result `shouldSatisfy` Text.isInfixOf "Status: timed_out"
+                sessionThreadStatus manager handle.sessionMeta.metaId `shouldReturn` "running"
+                putMVar gate ()
+                result2 <- runTool waiting "wait_agent_session" (waitPayload handle 1000)
+                result2 `shouldSatisfy` Text.isInfixOf "Status: completed"
+
+    it "keeps a captured wait attached to its run after a rapid resume" $
+        withTempEnv \env _ ->
+            bracket (newSessionThreadManager env.toolsRoot) closeSessionThreadManager \manager -> do
+                gate <- newEmptyMVar
+                _ <- launchSessionThread manager "target" (takeMVar gate >> pure (Left "original failure"))
+                original <- prepareSessionThreadWait manager "target"
+                putMVar gate ()
+                original `shouldReturn` "failed (original failure)"
+                nextGate <- newEmptyMVar
+                _ <- launchSessionThread manager "target" (takeMVar nextGate >> pure (Right ()))
+                timeout 100000 original `shouldReturn` Just "failed (original failure)"
+
+    it "cancels only the waiter, not its target" $
+        withTempEnv \env _ ->
+            bracket (newSessionThreadManager env.toolsRoot) closeSessionThreadManager \manager -> do
+                gate <- newEmptyMVar
+                _ <- launchSessionThread manager "target" (takeMVar gate >> pure (Right ()))
+                wait <- prepareSessionThreadWait manager "target"
+                Async.withAsync wait \waiter -> do
+                    Async.cancel waiter
+                    sessionThreadStatus manager "target" `shouldReturn` "running"
+                putMVar gate ()
+                wait `shouldReturn` "completed"
+
+    it "reports target cancellation to an existing waiter" $
+        withTempEnv \env _ -> do
+            manager <- newSessionThreadManager env.toolsRoot
+            gate <- newEmptyMVar
+            _ <- launchSessionThread manager "target" (takeMVar gate >> pure (Right ()))
+            wait <- prepareSessionThreadWait manager "target"
+            closeSessionThreadManager manager
+            wait `shouldReturn` "cancelled"
+
+    it "does not wait on an idle interactive session's lifetime lock" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            Right lock <- acquireSessionLock handle.sessionDir handle.sessionMeta.metaId
+            flip finally (releaseSessionLock lock) $
+                bracket (newSessionThreadManager env.toolsRoot) closeSessionThreadManager \manager -> do
+                    wait <- prepareSessionThreadWait manager handle.sessionMeta.metaId
+                    timeout 100000 wait `shouldReturn` Just "idle"
+
+    it "stops waiting when an external session rapidly starts its next turn" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            bracket (newSessionThreadManager env.toolsRoot) closeSessionThreadManager \manager -> do
+                Right first <- acquireSessionActivityLock handle.sessionDir handle.sessionMeta.metaId
+                wait <- prepareSessionThreadWait manager handle.sessionMeta.metaId
+                timeout 10000 wait `shouldReturn` Nothing
+                releaseSessionLock first
+                Right second <- acquireSessionActivityLock handle.sessionDir handle.sessionMeta.metaId
+                flip finally (releaseSessionLock second) $ do
+                    sessionActivityGeneration handle.sessionDir `shouldReturn` Just 2
+                    timeout 100000 wait `shouldReturn` Just "idle"
+
+    it "registers create/read/message/wait tools with mutating flags" $
         withTempEnv \env _ -> do
             map (\tool -> (tool.appToolName, isReadOnly tool.appToolApproval))
                 (agentSessionTools env)
@@ -71,6 +206,7 @@ spec = describe "Agent.CLI.AgentSessions" do
                     [ ("create_agent_session", False)
                     , ("read_agent_session", True)
                     , ("send_agent_session_message", False)
+                    , ("wait_agent_session", True)
                     ]
 
     it "creates a persisted session and launches its first turn" $
@@ -744,6 +880,7 @@ withTempEnv action =
                 , toolsCurrentSessionId = pure Nothing
                 , toolsLaunchTurn = launch
                 , toolsSessionStatus = const (pure "running")
+                , toolsPrepareSessionWait = const (pure (pure "idle"))
                 }
         action env launched
 
