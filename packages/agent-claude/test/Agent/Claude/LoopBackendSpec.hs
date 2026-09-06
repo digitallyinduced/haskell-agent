@@ -56,6 +56,7 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     )
 import Control.Exception.Safe (bracket, finally)
 import qualified Data.Foldable as Foldable
@@ -1739,6 +1740,9 @@ expectedFakeToolCall = ToolCall
 expectedFakeToolResult :: ToolCallResult
 expectedFakeToolResult = ToolCallResult
     { callId = "fake-tool"
+    , toolResultMode = BlockingToolCall
+    , toolResultImages = []
+    , toolResultOutcome = Nothing
     , output = "fake contents"
     , callKind = FunctionCallKind
     }

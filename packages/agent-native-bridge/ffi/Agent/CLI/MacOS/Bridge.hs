@@ -30,12 +30,17 @@ module Agent.CLI.MacOS.Bridge
     ) where
 
 import Agent.CLI.MacOS.ResourceAdmin ()
+import Agent.CLI.MacOS.Marshalling
+import Agent.CLI.MacOS.BrowserBridge
+import Agent.CLI.MacOS.GatewayBridge (invokeGatewayCallbackOnce)
+import Agent.CLI.MacOS.AccountBridge ()
+import Agent.CLI.MacOS.RepositoryChecks
+import Agent.CLI.MacOS.RepositoryDeliveryBridge ()
+import Agent.CLI.MacOS.RepositoryInput
 import Agent.CLI.MacOS.RepositoryWorkers
     ( cancelRepositoryWorkers
-    , isRepositoryCallbackThread
     , startRepositoryWorker
     , tryRepositorySynchronous
-    , withRepositoryCallbackThread
     )
 import Agent.CLI.MacOS.ComputerBridge
     ( ComputerCallback
@@ -45,10 +50,6 @@ import Agent.CLI.MacOS.ComputerBridge
     , newComputerHost
     )
 import qualified Agent.CLI.AgentViewport as Viewport
-import Agent.CLI.BrowserTools
-    ( BrowserCommand(..)
-    , browserTools
-    )
 import Agent.CLI.Render (summarizeToolCall)
 import Agent.CLI.NativeRuntime
     ( NativeInteractionMode(..)
@@ -109,48 +110,12 @@ import Agent.Runtime.Daemon.TaskScheduler
     ( TaskIdentity(..)
     , selectRunnableTasks
     )
-import Agent.CLI.Environment (lookupNonEmpty)
-import Agent.CLI.Login
-    ( AccountBilling(..)
-    , AccountUsage(..)
-    , LoginAccount(..)
-    , UsageState(..)
-    , UsageWindow(..)
-    , discoverLoginAccounts
-    , loginAccountSelectionId
-    , refreshLoginAccount
-    , storeConnectedCredential
-    )
-import Agent.CLI.CredentialStore
-    ( ManagedAuthKind(..)
-    , deleteManagedCredential
-    , setManagedCredentialEnabled
-    )
-import Agent.CLI.Auth
-    ( GrokAuthState(..)
-    , grokAuthStateToJson
-    , openAIOAuthClientId
-    , openaiAuthStateFromJson
-    , xaiOAuthClientId
-    )
 import qualified Agent.CLI.GatewayBoundary as GatewayBoundary
 import Agent.CLI.GatewayClient
     ( GatewayCredential(..)
-    , GatewayDeviceAuthorization(..)
-    , GatewayPollResult(..)
-    , exchangeNativeGatewayAuthorizationCodeWith
-    , loadGatewayCredential
-    , pollNativeGatewayAuthorizationAndSaveWith
-    , removeGatewayCredentialWith
-    , startNativeGatewayAuthorization
     , withGatewayCredentialLease
     , withGatewayCredentialTurnLease
     )
-import qualified Agent.OpenAI.Login as OpenAILogin
-import qualified Agent.OpenAI.Auth as OpenAIAuth
-import qualified Agent.OpenAI.Auth.Types as OpenAIAuthTypes
-import qualified Agent.XAI.Auth as XAIAuth
-import qualified Agent.OpenRouter.Usage as OpenRouter
 import Agent.CLI.ModelConfig
     ( CatalogModel(..)
     , ModelCatalog
@@ -175,7 +140,6 @@ import Agent.CLI.Models
     , defaultModelOptionFor
     , initialPickerStateForOptions
     , initialPickerStateResolved
-    , modelCatalog
     , resolveConfiguredModel
     , resolveModelOptionById
     , resolveModelOptionDialect
@@ -189,7 +153,6 @@ import Agent.CLI.Project
     , loadProjectSettings
     , resolveProjectRoot
     )
-import qualified Agent.CLI.RepositoryDelivery as RepositoryDelivery
 import qualified Agent.CLI.RepositoryReview as RepositoryReview
 import Agent.CLI.Options (parseEffort)
 import Agent.CLI.Session
@@ -224,7 +187,7 @@ import Agent.Loop
     , emptyTokenUsage
     )
 import Agent.Dialect (dialectSlug)
-import Agent.Provider (Provider(..), providerSlug, parseProvider, BillingMode(..))
+import Agent.Provider (Provider(..), providerSlug)
 import Agent.Store.Postgres
     ( ManagedPostgresConfig
     , Store
@@ -260,7 +223,6 @@ import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
     , cancel
-    , mapConcurrently
     , waitCatch
     )
 import Control.Concurrent.MVar
@@ -270,7 +232,6 @@ import Control.Concurrent.MVar
     , newEmptyMVar
     , newMVar
     , putMVar
-    , readMVar
     , withMVar
     , takeMVar
     )
@@ -317,8 +278,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Char (ord)
 import Data.Either (isRight)
 import Data.IORef
-    ( IORef
-    , modifyIORef'
+    ( modifyIORef'
     , newIORef
     , readIORef
     , writeIORef
@@ -331,11 +291,11 @@ import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Word (Word8, Word64)
 import Foreign
@@ -352,7 +312,6 @@ import Foreign
     , newStablePtr
     , nullFunPtr
     , nullPtr
-    , alloca
     , peek
     , poke
     , plusPtr
@@ -363,14 +322,11 @@ import Foreign
     )
 import Foreign.C.String (CString)
 import Foreign.C.Types (CDouble(..), CInt(..), CLLong(..), CSize(..))
-import Foreign.Marshal.Alloc (allocaBytes)
-import Foreign.Marshal.Utils (fillBytes)
 import System.Directory
     ( getTemporaryDirectory
     , removeFile
     )
 import System.Directory.OsPath (getHomeDirectory)
-import qualified System.Exit
 import System.IO
     ( IOMode(WriteMode)
     , hClose
@@ -383,34 +339,6 @@ import System.OsPath
     , takeDirectory
     , unsafeEncodeUtf
     )
-
-decodeInput :: Ptr Word8 -> Word64 -> IO Text
-decodeInput pointer length
-    | pointer == nullPtr || length == 0 = pure ""
-    | otherwise = TextEncoding.decodeUtf8 <$> BS.packCStringLen
-        (castPtr pointer, fromIntegral length)
-
-decodeUtf8Input :: Ptr Word8 -> Word64 -> IO (Either () Text)
-decodeUtf8Input pointer length =
-    first (const ()) . TextEncoding.decodeUtf8'
-        <$> BS.packCStringLen (castPtr pointer, fromIntegral length)
-
-nonEmptyText :: Text -> Maybe Text
-nonEmptyText value
-    | Text.null value = Nothing
-    | otherwise = Just value
-
-withText :: Text -> (CString -> CSize -> IO a) -> IO a
-withText value action = BS.useAsCStringLen (TextEncoding.encodeUtf8 value) \(pointer, length) ->
-    action pointer (fromIntegral length)
-
-withOptionalText :: Maybe Text -> (CString -> CSize -> IO a) -> IO a
-withOptionalText value action = withText (fromMaybe "" value) action
-
-withNullableText :: Maybe Text -> (CString -> CSize -> IO a) -> IO a
-withNullableText value action = case value of
-    Nothing -> action nullPtr 0
-    Just text -> withText text action
 
 type EventCallback = Ptr () -> Ptr Word8 -> CSize -> IO ()
 
@@ -445,47 +373,7 @@ type InteractionCallback =
     -> Ptr CInteractionOption -> CSize
     -> IO ()
 
-type AccountListCallback =
-    Ptr () -> CInt -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize -> CString -> CSize
-    -> CInt -> CInt -> CString -> CSize -> IO ()
-
-type AccountUsageWindowCallback =
-    Ptr () -> CString -> CSize -> CString -> CSize
-    -> CInt -> CLLong -> CLLong -> IO ()
-
-type AccountResultCallback =
-    Ptr () -> CInt -> CString -> CSize -> CString -> CSize -> IO ()
-
 type SessionResultCallback =
-    Ptr () -> CInt -> CString -> CSize -> IO ()
-
-type AccountOAuthStartCallback =
-    Ptr () -> CInt -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize -> CInt -> CInt
-    -> CString -> CSize -> IO ()
-
-type GatewayStatusCallback =
-    Ptr () -> CInt
-    -> CString -> CSize
-    -> CString -> CSize
-    -> IO ()
-
-type GatewayConnectStartCallback =
-    Ptr () -> CInt
-    -> CString -> CSize
-    -> CString -> CSize
-    -> CString -> CSize
-    -> CString -> CSize
-    -> CInt -> CInt
-    -> CString -> CSize
-    -> IO ()
-
-type GatewayPollCallback =
-    Ptr () -> CInt -> CInt -> CString -> CSize -> IO ()
-
-type GatewayResultCallback =
     Ptr () -> CInt -> CString -> CSize -> IO ()
 
 -- Status is 0 for a result, 1 for completion, and -1 for failure. Every
@@ -522,15 +410,6 @@ type DataRowsCallback =
     Ptr () -> CInt -> Int64 -> Int64 -> CInt -> CInt
     -> CString -> CSize -> Int64 -> CInt
     -> CString -> CSize -> IO ()
-
-type BrowserCallback =
-    Ptr () -> CInt
-    -> Ptr Word8 -> CSize
-    -> Ptr Word8 -> CSize
-    -> CDouble -> CDouble
-    -> CInt
-    -> Ptr Word8 -> CSize -> Ptr CSize
-    -> IO CInt
 
 type McpServerCallback =
     Ptr () -> CInt -> Word64
@@ -575,38 +454,6 @@ type RepositoryResultCallback =
     -> CString -> CSize -- error
     -> IO ()
 
-type RepositoryDeliveryStatusCallback =
-    Ptr () -> CInt
-    -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize
-    -> CLLong -> CLLong -> CString -> CSize -> IO ()
-
-type RepositoryPushPreviewCallback =
-    Ptr () -> CInt -> CString -> CSize -> CLLong
-    -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize
-    -> CLLong -> CLLong -> CString -> CSize -> IO ()
-
-type RepositoryPushResultCallback =
-    Ptr () -> CInt -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> IO ()
-
-type RepositoryPullRequestPreviewCallback =
-    Ptr () -> CInt -> CString -> CSize -> CLLong
-    -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> IO ()
-
-type RepositoryPullRequestResultCallback =
-    Ptr () -> CInt -> CString -> CSize -> CString -> CSize -> IO ()
-
-type RepositoryCheckOutputCallback =
-    Ptr () -> CInt -> Ptr Word8 -> CSize -> IO ()
-
-type RepositoryCheckExitCallback =
-    Ptr () -> CInt -> CInt -> CString -> CSize -> IO ()
-
 -- Status is 0 for an active task, 1 for completion, and -1 for failure.
 -- State is 0 for queued and 1 for running. Every pointer is callback-scoped.
 type TaskSnapshotCallback =
@@ -649,40 +496,8 @@ foreign import ccall "dynamic"
         :: FunPtr InteractionCallback -> InteractionCallback
 
 foreign import ccall "dynamic"
-    invokeAccountListCallback
-        :: FunPtr AccountListCallback -> AccountListCallback
-
-foreign import ccall "dynamic"
-    invokeAccountUsageWindowCallback
-        :: FunPtr AccountUsageWindowCallback -> AccountUsageWindowCallback
-
-foreign import ccall "dynamic"
-    invokeAccountResultCallback
-        :: FunPtr AccountResultCallback -> AccountResultCallback
-
-foreign import ccall "dynamic"
     invokeSessionTransferResultCallback
         :: FunPtr SessionTransferResultCallback -> SessionTransferResultCallback
-
-foreign import ccall "dynamic"
-    invokeAccountOAuthStartCallback
-        :: FunPtr AccountOAuthStartCallback -> AccountOAuthStartCallback
-
-foreign import ccall "dynamic"
-    invokeGatewayStatusCallback
-        :: FunPtr GatewayStatusCallback -> GatewayStatusCallback
-
-foreign import ccall "dynamic"
-    invokeGatewayConnectStartCallback
-        :: FunPtr GatewayConnectStartCallback -> GatewayConnectStartCallback
-
-foreign import ccall "dynamic"
-    invokeGatewayPollCallback
-        :: FunPtr GatewayPollCallback -> GatewayPollCallback
-
-foreign import ccall "dynamic"
-    invokeGatewayResultCallback
-        :: FunPtr GatewayResultCallback -> GatewayResultCallback
 
 foreign import ccall "dynamic"
     invokeSearchCallback :: FunPtr SearchCallback -> SearchCallback
@@ -698,9 +513,6 @@ foreign import ccall "dynamic"
 foreign import ccall "dynamic"
     invokeDataRowsCallback
         :: FunPtr DataRowsCallback -> DataRowsCallback
-
-foreign import ccall "dynamic"
-    invokeBrowserCallback :: FunPtr BrowserCallback -> BrowserCallback
 
 foreign import ccall "dynamic"
     invokeMcpServerCallback
@@ -733,39 +545,6 @@ foreign import ccall "dynamic"
 foreign import ccall "dynamic"
     invokeRepositoryResultCallback
         :: FunPtr RepositoryResultCallback -> RepositoryResultCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryDeliveryStatusCallback
-        :: FunPtr RepositoryDeliveryStatusCallback
-        -> RepositoryDeliveryStatusCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryPushPreviewCallback
-        :: FunPtr RepositoryPushPreviewCallback
-        -> RepositoryPushPreviewCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryPushResultCallback
-        :: FunPtr RepositoryPushResultCallback
-        -> RepositoryPushResultCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryPullRequestPreviewCallback
-        :: FunPtr RepositoryPullRequestPreviewCallback
-        -> RepositoryPullRequestPreviewCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryPullRequestResultCallback
-        :: FunPtr RepositoryPullRequestResultCallback
-        -> RepositoryPullRequestResultCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryCheckOutputCallback
-        :: FunPtr RepositoryCheckOutputCallback -> RepositoryCheckOutputCallback
-
-foreign import ccall "dynamic"
-    invokeRepositoryCheckExitCallback
-        :: FunPtr RepositoryCheckExitCallback -> RepositoryCheckExitCallback
 
 foreign import ccall "dynamic"
     invokeTaskSnapshotCallback
@@ -932,25 +711,6 @@ instance Aeson.FromJSON ModelsListRequest where
             <$> object .: "cwd"
             <*> object .:? "sessionId"
 
-data AccountProviderRequest = AccountProviderRequest
-    { accountProvider :: !Text
-    }
-
-data AccountOAuthPollRequest = AccountOAuthPollRequest
-    { oauthPollProvider :: !Text
-    , oauthPollVerificationUrl :: !(Maybe Text)
-    , oauthPollUserCode :: !(Maybe Text)
-    , oauthPollDeviceAuthId :: !(Maybe Text)
-    , oauthPollDeviceCode :: !(Maybe Text)
-    , oauthPollIntervalSeconds :: !(Maybe Int)
-    , oauthPollExpiresInSeconds :: !(Maybe Int)
-    }
-
-data AccountAPIKeyRequest = AccountAPIKeyRequest
-    { accountAPIKeyProvider :: !Text
-    , accountAPIKey :: !Text
-    }
-
 data NativeTurnOptions = NativeTurnOptions
     { nativeTurnInteractionMode :: !NativeInteractionMode
     , nativeTurnShellMode :: !NativeShellMode
@@ -1050,15 +810,6 @@ data Engine = Engine
     , engineComputer :: !ComputerHost
     , engineStagedTurnOptions :: !(TVar (Map Text NativeTurnOptions))
     , engineInteractions :: !InteractionRuntime
-    }
-
-data BrowserRegistration = BrowserRegistration
-    { browserCallback :: !(FunPtr BrowserCallback)
-    , browserContext :: !(Ptr ())
-    }
-
-newtype BrowserHost = BrowserHost
-    { browserRegistration :: MVar (Maybe BrowserRegistration)
     }
 
 data TurnControl = TurnControl
@@ -1176,49 +927,6 @@ foreign export ccall ha_session_export
 foreign export ccall ha_session_import
     :: Ptr Word8 -> CSize
     -> FunPtr SessionTransferResultCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_accounts_list
-    :: FunPtr AccountListCallback -> FunPtr AccountUsageWindowCallback
-    -> Ptr () -> IO CInt
-
-foreign export ccall ha_account_oauth_start
-    :: Ptr Word8 -> CSize -> FunPtr AccountOAuthStartCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_account_oauth_poll
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt -> CInt
-    -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_account_api_key_connect
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_account_set_enabled
-    :: Ptr Word8 -> CSize -> CInt
-    -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_account_delete
-    :: Ptr Word8 -> CSize -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_gateway_status
-    :: FunPtr GatewayStatusCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_gateway_connect_start
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr GatewayConnectStartCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_gateway_connect_poll
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr GatewayPollCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_gateway_connect_exchange
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> Ptr Word8 -> CSize
-    -> FunPtr GatewayResultCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_gateway_disconnect
-    :: FunPtr GatewayResultCallback -> Ptr () -> IO CInt
 
 foreign export ccall ha_learned_skills_list
     :: Ptr Word8 -> CSize -> FunPtr LearnedSkillsListCallback -> Ptr () -> IO CInt
@@ -1584,39 +1292,7 @@ foreign export ccall ha_repository_commit
     :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
     -> FunPtr RepositoryResultCallback -> Ptr () -> IO CInt
 
-foreign export ccall ha_repository_delivery_status
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryDeliveryStatusCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_repository_push_preview
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPushPreviewCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_repository_push_confirm
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPushResultCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_repository_pr_preview
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPullRequestPreviewCallback -> Ptr () -> IO CInt
-
-foreign export ccall ha_repository_pr_confirm
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPullRequestResultCallback -> Ptr () -> IO CInt
-
 foreign export ccall ha_repository_cancel_all :: IO ()
-
-foreign export ccall ha_repository_check_start
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> Ptr () -> CSize
-    -> FunPtr RepositoryCheckOutputCallback
-    -> FunPtr RepositoryCheckExitCallback
-    -> Ptr () -> Ptr (Ptr ()) -> IO CInt
-
-foreign export ccall ha_repository_check_cancel :: Ptr () -> IO ()
-
-foreign export ccall ha_repository_check_destroy :: Ptr () -> IO ()
 
 ha_repository_snapshot
     :: Ptr Word8 -> CSize
@@ -1875,177 +1551,6 @@ ha_repository_commit pathBytes pathLength snapshotBytes snapshotLength
                     pure (if started then 0 else 3)
                 Right _ -> pure 3
 
-ha_repository_delivery_status
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryDeliveryStatusCallback -> Ptr () -> IO CInt
-ha_repository_delivery_status pathBytes pathLength snapshotBytes snapshotLength
-    callback context
-    | callback == nullFunPtr = pure 1
-    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
-        || not (deliveryInputValid
-            snapshotBytes snapshotLength deliveryTokenLimit) = pure 2
-    | otherwise =
-        copyRequiredTexts
-            [(pathBytes, pathLength), (snapshotBytes, snapshotLength)] >>= \case
-                Right [path, snapshot] -> do
-                    terminal <- newMVar False
-                    started <- startRepositoryWorker
-                        (emitDeliveryOnce terminal $
-                            emitDeliveryStatusFailure callback context (-3)
-                                "repository delivery was cancelled") $
-                        prepareDeliveryResult terminal
-                            (RepositoryDelivery.repositoryDeliveryStatus
-                                (Text.unpack path)
-                                snapshot)
-                            (emitDeliveryStatusFailure callback context (-1)
-                                "repository delivery failed")
-                            (emitDeliveryStatusFailure callback context)
-                            (emitDeliveryStatus callback context)
-                    pure (if started then 0 else 3)
-                _ -> pure 2
-
-ha_repository_push_preview
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPushPreviewCallback -> Ptr () -> IO CInt
-ha_repository_push_preview pathBytes pathLength snapshotBytes snapshotLength
-    callback context
-    | callback == nullFunPtr = pure 1
-    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
-        || not (deliveryInputValid
-            snapshotBytes snapshotLength deliveryTokenLimit) = pure 2
-    | otherwise =
-        copyRequiredTexts
-            [(pathBytes, pathLength), (snapshotBytes, snapshotLength)] >>= \case
-                Right [path, snapshot] -> do
-                    terminal <- newMVar False
-                    started <- startRepositoryWorker
-                        (emitDeliveryOnce terminal $
-                            emitPushPreviewFailure callback context (-3)
-                                "repository push preview was cancelled") $
-                        prepareDeliveryResult terminal
-                            (RepositoryDelivery.previewRepositoryPush
-                                (Text.unpack path)
-                                snapshot)
-                            (emitPushPreviewFailure callback context (-1)
-                                "repository push preview failed")
-                            (emitPushPreviewFailure callback context)
-                            (emitPushPreview callback context)
-                    pure (if started then 0 else 3)
-                _ -> pure 2
-
-ha_repository_push_confirm
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPushResultCallback -> Ptr () -> IO CInt
-ha_repository_push_confirm pathBytes pathLength tokenBytes tokenLength
-    callback context
-    | callback == nullFunPtr = pure 1
-    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
-        || not (deliveryInputValid tokenBytes tokenLength deliveryTokenLimit) =
-            pure 2
-    | otherwise =
-        copyRequiredTexts
-            [(pathBytes, pathLength), (tokenBytes, tokenLength)] >>= \case
-                Right [path, token] -> do
-                    terminal <- newMVar False
-                    started <- startRepositoryWorker
-                        (emitDeliveryOnce terminal $
-                            emitPushResultFailure callback context (-3)
-                                "repository push was cancelled") $
-                        prepareDeliveryResult terminal
-                            (RepositoryDelivery.confirmRepositoryPush
-                                (Text.unpack path)
-                                token)
-                            (emitPushResultFailure callback context (-1)
-                                "repository push failed")
-                            (emitPushResultFailure callback context)
-                            (\status ->
-                                        withText status.deliverySnapshotId
-                                            \snapshotPtr snapshotSize ->
-                                        withText status.deliveryHeadOid
-                                            \headPtr headSize ->
-                                                invokeRepositoryPushResultCallback
-                                                    callback context 0
-                                                    snapshotPtr snapshotSize
-                                                    headPtr headSize
-                                                    nullPtr 0)
-                    pure (if started then 0 else 3)
-                _ -> pure 2
-
-ha_repository_pr_preview
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPullRequestPreviewCallback -> Ptr () -> IO CInt
-ha_repository_pr_preview pathBytes pathLength snapshotBytes snapshotLength
-    baseBytes baseLength titleBytes titleLength bodyBytes bodyLength
-    callback context
-    | callback == nullFunPtr = pure 1
-    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
-        || not (deliveryInputValid
-            snapshotBytes snapshotLength deliveryTokenLimit)
-        || not (deliveryInputValid baseBytes baseLength deliveryRefLimit)
-        || not (deliveryInputValid titleBytes titleLength deliveryTitleLimit)
-        || not (deliveryInputValid bodyBytes bodyLength deliveryBodyLimit) =
-            pure 2
-    | otherwise =
-        copyRequiredTexts
-            [ (pathBytes, pathLength)
-            , (snapshotBytes, snapshotLength)
-            , (baseBytes, baseLength)
-            , (titleBytes, titleLength)
-            , (bodyBytes, bodyLength)
-            ] >>= \case
-                Right [path, snapshot, base, title, body] -> do
-                    terminal <- newMVar False
-                    started <- startRepositoryWorker
-                        (emitDeliveryOnce terminal $
-                            emitPullRequestPreviewFailure
-                                callback context (-3)
-                                "pull-request preview was cancelled") $
-                        prepareDeliveryResult terminal
-                            (RepositoryDelivery.previewPullRequest
-                                (Text.unpack path)
-                                snapshot base title body)
-                            (emitPullRequestPreviewFailure
-                                callback context (-1)
-                                "pull-request preview failed")
-                            (emitPullRequestPreviewFailure callback context)
-                            (emitPullRequestPreview callback context)
-                    pure (if started then 0 else 3)
-                _ -> pure 2
-
-ha_repository_pr_confirm
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr RepositoryPullRequestResultCallback -> Ptr () -> IO CInt
-ha_repository_pr_confirm pathBytes pathLength tokenBytes tokenLength
-    callback context
-    | callback == nullFunPtr = pure 1
-    | not (deliveryInputValid pathBytes pathLength deliveryPathLimit)
-        || not (deliveryInputValid tokenBytes tokenLength deliveryTokenLimit) =
-            pure 2
-    | otherwise =
-        copyRequiredTexts
-            [(pathBytes, pathLength), (tokenBytes, tokenLength)] >>= \case
-                Right [path, token] -> do
-                    terminal <- newMVar False
-                    started <- startRepositoryWorker
-                        (emitDeliveryOnce terminal $
-                            emitPullRequestResultFailure callback context (-3)
-                                "pull-request creation was cancelled") $
-                        prepareDeliveryResult terminal
-                            (RepositoryDelivery.createPullRequest
-                                (Text.unpack path)
-                                token)
-                            (emitPullRequestResultFailure callback context (-1)
-                                "pull-request creation failed")
-                            (emitPullRequestResultFailure callback context)
-                            (\url ->
-                                        withText url \urlPtr urlSize ->
-                                            invokeRepositoryPullRequestResultCallback
-                                                callback context 0
-                                                urlPtr urlSize nullPtr 0)
-                    pure (if started then 0 else 3)
-                _ -> pure 2
-
 startRepositoryMutation
     :: FunPtr RepositoryResultCallback
     -> Ptr ()
@@ -2081,201 +1586,6 @@ prepareRepositoryResult callback context action =
 
 ha_repository_cancel_all :: IO ()
 ha_repository_cancel_all = cancelRepositoryWorkers
-
-data RepositoryCheckHandle = RepositoryCheckHandle
-    { repositoryCheckValue :: !(IORef (Maybe RepositoryReview.RepositoryCheck))
-    , repositoryCheckCancelRequested :: !(IORef Bool)
-    , repositoryCheckOwner :: !(Async ())
-    }
-
-ha_repository_check_start
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> Ptr () -> CSize
-    -> FunPtr RepositoryCheckOutputCallback
-    -> FunPtr RepositoryCheckExitCallback
-    -> Ptr () -> Ptr (Ptr ()) -> IO CInt
-ha_repository_check_start pathBytes pathLength snapshotBytes snapshotLength
-    executableBytes executableLength argumentsPointer argumentCount
-    outputCallback exitCallback context outCheck
-    | outputCallback == nullFunPtr
-        || exitCallback == nullFunPtr
-        || outCheck == nullPtr = pure 1
-    | argumentsPointer == nullPtr && argumentCount > 0 = pure 2
-    | argumentCount > fromIntegral maxRepositoryCheckArguments = pure 2
-    | otherwise =
-        copyRequiredTexts
-            [ (pathBytes, pathLength)
-            , (snapshotBytes, snapshotLength)
-            , (executableBytes, executableLength)
-            ] >>= \case
-                Left _ -> pure 2
-                Right [path, expected, executable] -> do
-                    copiedArguments <- copyRepositoryCheckArguments
-                        argumentsPointer argumentCount
-                    case copiedArguments of
-                        Left _ -> pure 2
-                        Right arguments -> mask \_ -> do
-                            poke outCheck nullPtr
-                            checkRef <- newIORef Nothing
-                            cancelRef <- newIORef False
-                            gate <- newEmptyMVar
-                            owner <- asyncWithUnmask \unmask ->
-                                readMVar gate >> do
-                                    -- asyncWithUnmask starts masked. Keep
-                                    -- acquisition and publication in that
-                                    -- masked region so ownership transfer is
-                                    -- atomic with respect to cancellation. Its
-                                    -- blocking I/O remains interruptible under
-                                    -- masked-interruptible semantics and owns
-                                    -- cleanup brackets.
-                                    started <- tryRepositorySynchronous
-                                        (RepositoryReview.startRepositoryCheck
-                                            (Text.unpack path)
-                                            expected
-                                            (Text.unpack executable)
-                                            (map Text.unpack arguments)
-                                            (\stream bytes ->
-                                                BS.useAsCStringLen bytes
-                                                    \(pointer, length) ->
-                                                        withRepositoryCallbackThread
-                                                            (invokeRepositoryCheckOutputCallback
-                                                                outputCallback
-                                                                context
-                                                                (case stream of
-                                                                    RepositoryReview.RepositoryCheckStdout -> 1
-                                                                    RepositoryReview.RepositoryCheckStderr -> 2)
-                                                                (castPtr pointer)
-                                                                (fromIntegral length)))
-                                            (\cancelled exitCode ->
-                                                withRepositoryCallbackThread
-                                                    (invokeRepositoryCheckExitCallback
-                                                        exitCallback
-                                                        context
-                                                        (if cancelled then 1 else 0)
-                                                        (case exitCode of
-                                                            System.Exit.ExitSuccess -> 0
-                                                            System.Exit.ExitFailure code ->
-                                                                fromIntegral code)
-                                                        nullPtr 0)))
-                                    case started of
-                                        Left exception ->
-                                            unmask
-                                                (withText
-                                                    (Text.pack (show exception))
-                                                    \errorPtr errorLength ->
-                                                        withRepositoryCallbackThread
-                                                            (invokeRepositoryCheckExitCallback
-                                                                exitCallback
-                                                                context 0 (-1)
-                                                                errorPtr errorLength))
-                                        Right (Left err) ->
-                                            unmask
-                                                (withText
-                                                    (RepositoryReview.repositoryErrorText
-                                                        err)
-                                                    \errorPtr errorLength ->
-                                                        withRepositoryCallbackThread
-                                                            (invokeRepositoryCheckExitCallback
-                                                                exitCallback
-                                                                context 0 (-1)
-                                                                errorPtr errorLength))
-                                        Right (Right check) -> do
-                                            writeIORef checkRef (Just check)
-                                            cancelRequested <- readIORef cancelRef
-                                            when cancelRequested
-                                                (RepositoryReview.cancelRepositoryCheck
-                                                    check)
-                                            unmask
-                                                (RepositoryReview.waitRepositoryCheck
-                                                    check)
-                                                `onException`
-                                                    RepositoryReview.cancelRepositoryCheck
-                                                        check
-                            stable <- newStablePtr RepositoryCheckHandle
-                                { repositoryCheckValue = checkRef
-                                , repositoryCheckCancelRequested = cancelRef
-                                , repositoryCheckOwner = owner
-                                }
-                                `onException` cancel owner
-                            (do
-                                poke outCheck (castStablePtrToPtr stable)
-                                -- No callback can begin before the owned
-                                -- handle is visible through out_check.
-                                putMVar gate ()
-                                pure 0)
-                                `onException` do
-                                    cancel owner
-                                    freeStablePtr stable
-                                    poke outCheck nullPtr
-                Right _ -> pure 3
-
-ha_repository_check_cancel :: Ptr () -> IO ()
-ha_repository_check_cancel pointer
-    | pointer == nullPtr = pure ()
-    | otherwise = do
-        isRepositoryCallbackThread >>= \case
-            True -> pure ()
-            False -> do
-                let stable =
-                        castPtrToStablePtr pointer
-                            :: StablePtr RepositoryCheckHandle
-                handle <- deRefStablePtr stable
-                writeIORef handle.repositoryCheckCancelRequested True
-                readIORef handle.repositoryCheckValue >>= mapM_
-                    RepositoryReview.cancelRepositoryCheck
-
-ha_repository_check_destroy :: Ptr () -> IO ()
-ha_repository_check_destroy pointer
-    | pointer == nullPtr = pure ()
-    | otherwise = do
-        isRepositoryCallbackThread >>= \case
-            True -> pure ()
-            False -> do
-                let stable =
-                        castPtrToStablePtr pointer
-                            :: StablePtr RepositoryCheckHandle
-                handle <- deRefStablePtr stable
-                _ <- waitCatch handle.repositoryCheckOwner
-                freeStablePtr stable
-
-copyRepositoryCheckArguments
-    :: Ptr () -> CSize -> IO (Either () [Text])
-copyRepositoryCheckArguments pointer count
-    | count > fromIntegral maxRepositoryCheckArguments = pure (Left ())
-    | itemSize <= 0 = pure (Left ())
-    | otherwise = go 0 (0 :: Int) []
-  where
-    pointerSize = sizeOf (nullPtr :: Ptr ())
-    sizeSize = sizeOf (undefined :: CSize)
-    itemSize = pointerSize + sizeSize
-    countInt = fromIntegral count
-    go index total acc
-        | index >= countInt = pure (Right (reverse acc))
-        | index > maxBound `div` itemSize = pure (Left ())
-        | otherwise = do
-            let base = castPtr pointer `plusPtr` (index * itemSize)
-            bytes <- peekByteOff base 0 :: IO (Ptr Word8)
-            length <- peekByteOff base pointerSize :: IO CSize
-            if length > fromIntegral maxRepositoryCheckArgumentBytes
-                || toInteger total + toInteger length
-                    > toInteger maxRepositoryCheckTotalArgumentBytes
-                then pure (Left ())
-                else copyRequiredText bytes length >>= \case
-                    Left _ -> pure (Left ())
-                    Right value ->
-                        go
-                            (index + 1)
-                            (total + fromIntegral length)
-                            (value : acc)
-
-maxRepositoryCheckArguments :: Int
-maxRepositoryCheckArguments = 4096
-
-maxRepositoryCheckArgumentBytes :: Int
-maxRepositoryCheckArgumentBytes = 1024 * 1024
-
-maxRepositoryCheckTotalArgumentBytes :: Int
-maxRepositoryCheckTotalArgumentBytes = 8 * 1024 * 1024
 
 repositoryPathMutation
     :: CInt -> FilePath -> Maybe RepositoryReview.RepositoryMutation
@@ -2356,186 +1666,6 @@ emitRepositoryError callback context err =
         _ ->
             emitRepositoryFailure
                 callback context (RepositoryReview.repositoryErrorText err)
-
-emitDeliveryOnce :: MVar Bool -> IO () -> IO ()
-emitDeliveryOnce terminal callback =
-    mask \_ -> do
-        shouldRun <- modifyMVar terminal \completed ->
-            pure (True, not completed)
-        when shouldRun callback
-
-prepareDeliveryResult
-    :: MVar Bool
-    -> IO (Either RepositoryDelivery.DeliveryError value)
-    -> IO ()
-    -> (CInt -> Text -> IO ())
-    -> (value -> IO ())
-    -> IO (IO ())
-prepareDeliveryResult terminal operation unexpectedFailure knownFailure success =
-    tryRepositorySynchronous operation >>= \case
-        Left _ ->
-            pure (emitDeliveryOnce terminal unexpectedFailure)
-        Right (Left err) ->
-            pure
-                (emitDeliveryOnce terminal $
-                    knownFailure
-                        (deliveryErrorStatus err)
-                        (RepositoryDelivery.deliveryErrorText err))
-        Right (Right value) ->
-            pure (emitDeliveryOnce terminal (success value))
-
-emitDeliveryStatus
-    :: FunPtr RepositoryDeliveryStatusCallback
-    -> Ptr ()
-    -> RepositoryDelivery.DeliveryStatus
-    -> IO ()
-emitDeliveryStatus callback context status =
-    withText status.deliverySnapshotId \snapshotPtr snapshotSize ->
-    withText status.deliveryHeadOid \headPtr headSize ->
-    withText status.deliveryBranch \branchPtr branchSize ->
-    withText status.deliveryRemote \remotePtr remoteSize ->
-    withText status.deliveryUpstreamRef \upstreamPtr upstreamSize ->
-    withText status.deliveryUpstreamOid \upstreamOidPtr upstreamOidSize ->
-        invokeRepositoryDeliveryStatusCallback
-            callback context 0
-            snapshotPtr snapshotSize headPtr headSize
-            branchPtr branchSize remotePtr remoteSize
-            upstreamPtr upstreamSize upstreamOidPtr upstreamOidSize
-            (fromIntegral status.deliveryAhead)
-            (fromIntegral status.deliveryBehind)
-            nullPtr 0
-
-emitDeliveryStatusFailure
-    :: FunPtr RepositoryDeliveryStatusCallback
-    -> Ptr () -> CInt -> Text -> IO ()
-emitDeliveryStatusFailure callback context status message =
-    withText message \errorPtr errorSize ->
-        invokeRepositoryDeliveryStatusCallback
-            callback context status
-            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-            nullPtr 0 nullPtr 0 0 0 errorPtr errorSize
-
-emitPushPreview
-    :: FunPtr RepositoryPushPreviewCallback
-    -> Ptr ()
-    -> RepositoryDelivery.PushPreview
-    -> IO ()
-emitPushPreview callback context preview =
-    let status = preview.pushPreviewStatus
-        expires = fromIntegral
-            (floor preview.pushPreviewExpiresAt :: Integer)
-    in withText preview.pushPreviewConfirmation \tokenPtr tokenSize ->
-    withText status.deliveryHeadOid \headPtr headSize ->
-    withText status.deliveryBranch \branchPtr branchSize ->
-    withText status.deliveryRemote \remotePtr remoteSize ->
-    withText status.deliveryUpstreamRef \upstreamPtr upstreamSize ->
-        invokeRepositoryPushPreviewCallback
-            callback context 0 tokenPtr tokenSize expires
-            headPtr headSize branchPtr branchSize remotePtr remoteSize
-            upstreamPtr upstreamSize
-            (fromIntegral status.deliveryAhead)
-            (fromIntegral status.deliveryBehind)
-            nullPtr 0
-
-emitPushPreviewFailure
-    :: FunPtr RepositoryPushPreviewCallback
-    -> Ptr () -> CInt -> Text -> IO ()
-emitPushPreviewFailure callback context status message =
-    withText message \errorPtr errorSize ->
-        invokeRepositoryPushPreviewCallback
-            callback context status nullPtr 0 0
-            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-            0 0 errorPtr errorSize
-
-emitPushResultFailure
-    :: FunPtr RepositoryPushResultCallback
-    -> Ptr () -> CInt -> Text -> IO ()
-emitPushResultFailure callback context status message =
-    withText message \errorPtr errorSize ->
-        invokeRepositoryPushResultCallback
-            callback context status
-            nullPtr 0 nullPtr 0 errorPtr errorSize
-
-emitPullRequestPreview
-    :: FunPtr RepositoryPullRequestPreviewCallback
-    -> Ptr ()
-    -> RepositoryDelivery.PullRequestPreview
-    -> IO ()
-emitPullRequestPreview callback context preview =
-    let expires = fromIntegral
-            (floor preview.pullRequestExpiresAt :: Integer)
-    in withText preview.pullRequestConfirmation \tokenPtr tokenSize ->
-    withText preview.pullRequestRepository \repositoryPtr repositorySize ->
-    withText preview.pullRequestBaseRef \basePtr baseSize ->
-    withText preview.pullRequestHeadRef \headPtr headSize ->
-    withText preview.pullRequestTitle \titlePtr titleSize ->
-        invokeRepositoryPullRequestPreviewCallback
-            callback context 0 tokenPtr tokenSize expires
-            repositoryPtr repositorySize basePtr baseSize
-            headPtr headSize titlePtr titleSize nullPtr 0
-
-emitPullRequestPreviewFailure
-    :: FunPtr RepositoryPullRequestPreviewCallback
-    -> Ptr () -> CInt -> Text -> IO ()
-emitPullRequestPreviewFailure callback context status message =
-    withText message \errorPtr errorSize ->
-        invokeRepositoryPullRequestPreviewCallback
-            callback context status nullPtr 0 0
-            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 errorPtr errorSize
-
-emitPullRequestResultFailure
-    :: FunPtr RepositoryPullRequestResultCallback
-    -> Ptr () -> CInt -> Text -> IO ()
-emitPullRequestResultFailure callback context status message =
-    withText message \errorPtr errorSize ->
-        invokeRepositoryPullRequestResultCallback
-            callback context status nullPtr 0 errorPtr errorSize
-
-deliveryErrorStatus :: RepositoryDelivery.DeliveryError -> CInt
-deliveryErrorStatus = \case
-    RepositoryDelivery.DeliveryStale _ -> -2
-    RepositoryDelivery.DeliveryConfirmationRejected _ -> -4
-    _ -> -1
-
-deliveryInputValid :: Ptr Word8 -> CSize -> Int -> Bool
-deliveryInputValid pointer length limit =
-    pointer /= nullPtr
-        && length > 0
-        && toInteger length <= toInteger limit
-
-deliveryPathLimit, deliveryTokenLimit, deliveryRefLimit :: Int
-deliveryPathLimit = 16 * 1024
-deliveryTokenLimit = 4 * 1024
-deliveryRefLimit = 1024
-
-deliveryTitleLimit, deliveryBodyLimit :: Int
-deliveryTitleLimit = 4 * 1024
-deliveryBodyLimit = 1024 * 1024
-
-copyRequiredText :: Ptr Word8 -> CSize -> IO (Either () Text)
-copyRequiredText pointer (CSize length)
-    | pointer == nullPtr || length == 0 = pure (Left ())
-    | toInteger length > toInteger (maxBound :: Int) = pure (Left ())
-    | toInteger length > toInteger maxRepositoryRequestItemBytes =
-        pure (Left ())
-    | otherwise = do
-        bytes <- BS.packCStringLen (castPtr pointer, fromIntegral length)
-        pure (first (const ()) (TextEncoding.decodeUtf8' bytes))
-
-copyRequiredTexts
-    :: [(Ptr Word8, CSize)]
-    -> IO (Either () [Text])
-copyRequiredTexts fields
-    | sum (map (toInteger . snd) fields)
-        > toInteger maxRepositoryRequestTotalBytes = pure (Left ())
-    | otherwise =
-        fmap sequence (mapM (uncurry copyRequiredText) fields)
-
-maxRepositoryRequestItemBytes :: Int
-maxRepositoryRequestItemBytes = 8 * 1024 * 1024
-
-maxRepositoryRequestTotalBytes :: Int
-maxRepositoryRequestTotalBytes = 16 * 1024 * 1024
 
 byteStringChunks :: Int -> BS.ByteString -> [BS.ByteString]
 byteStringChunks size bytes
@@ -3361,493 +2491,6 @@ learnedSkillsTerminal callback context status errorPtr errorLength =
         nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
         nullPtr 0 nullPtr 0
         0 nullPtr 0 errorPtr errorLength
-
-ha_accounts_list
-    :: FunPtr AccountListCallback -> FunPtr AccountUsageWindowCallback
-    -> Ptr () -> IO CInt
-ha_accounts_list callback usageCallback context
-    | callback == nullFunPtr || usageCallback == nullFunPtr = pure 1
-    | otherwise = do
-        _ <- forkIO do
-            tryAny
-                (discoverLoginAccounts >>= mapConcurrently refreshLoginAccount)
-                >>= \case
-                Left exception ->
-                    withText (Text.pack (show exception)) $ \errorPtr errorLength ->
-                        invokeAccountListCallback callback context (-1)
-                            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-                            nullPtr 0 nullPtr 0 nullPtr 0
-                            0 0 errorPtr errorLength
-                Right accounts -> do
-                    forM_ accounts \account -> do
-                        withAccountStrings account $
-                            invokeAccountListCallback callback context 0
-                        invokeAccountUsageWindows usageCallback context account
-                    invokeAccountListCallback callback context 1
-                        nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-                        nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-                        0 0 nullPtr 0
-        pure 0
-
-ha_account_oauth_start
-    :: Ptr Word8 -> CSize -> FunPtr AccountOAuthStartCallback -> Ptr () -> IO CInt
-ha_account_oauth_start providerBytes (CSize providerLength) callback context
-    | callback == nullFunPtr = pure 1
-    | providerBytes == nullPtr && providerLength > 0 = pure 2
-    | otherwise = do
-        provider <- decodeInput providerBytes providerLength
-        _ <- forkIO do
-            tryAny (startAccountOAuth AccountProviderRequest
-                { accountProvider = provider }) >>= \case
-                Left exception -> withText (Text.pack (show exception)) $ \errorPtr errorLength ->
-                    invokeAccountOAuthStartCallback callback context
-                        (-1) nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 0 0
-                        errorPtr errorLength
-                Right (Left err) -> withText err $ \errorPtr errorLength ->
-                    invokeAccountOAuthStartCallback callback context
-                        (-1) nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0 0 0
-                        errorPtr errorLength
-                Right (Right value) -> case parseChallenge value of
-                    Nothing -> withText "invalid OAuth challenge"
-                        (\errorPtr errorLength ->
-                            invokeAccountOAuthStartCallback callback context
-                                (-1) nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-                                0 0 errorPtr errorLength)
-                    Just challenge ->
-                        withChallengeStrings challenge
-                            (invokeAccountOAuthStartCallback callback context 0)
-        pure 0
-
-ha_account_oauth_poll
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> CInt -> CInt
-    -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
-ha_account_oauth_poll providerBytes (CSize providerLength) urlBytes (CSize urlLength)
-    userBytes (CSize userLength) authIdBytes (CSize authIdLength)
-    deviceBytes (CSize deviceLength) pollInterval expires callback context
-    | callback == nullFunPtr = pure 1
-    | anyNonEmptyNull
-        [ (providerBytes, providerLength)
-        , (urlBytes, urlLength)
-        , (userBytes, userLength)
-        , (authIdBytes, authIdLength)
-        , (deviceBytes, deviceLength)
-        ] = pure 2
-    | otherwise = do
-        provider <- decodeInput providerBytes providerLength
-        url <- decodeInput urlBytes urlLength
-        user <- decodeInput userBytes userLength
-        authId <- decodeInput authIdBytes authIdLength
-        device <- decodeInput deviceBytes deviceLength
-        _ <- forkIO do
-            tryAny (pollAccountOAuth AccountOAuthPollRequest
-                { oauthPollProvider = provider
-                , oauthPollVerificationUrl = nonEmptyText url
-                , oauthPollUserCode = nonEmptyText user
-                , oauthPollDeviceAuthId = nonEmptyText authId
-                , oauthPollDeviceCode = nonEmptyText device
-                , oauthPollIntervalSeconds = Just (fromIntegral pollInterval)
-                , oauthPollExpiresInSeconds = Just (fromIntegral expires)
-                }) >>= \case
-                    Left exception -> invokeExceptionResult callback context exception
-                    Right result -> invokeResult callback context result
-        pure 0
-
-ha_account_api_key_connect
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
-ha_account_api_key_connect providerBytes (CSize providerLength) keyBytes (CSize keyLength) callback context
-    | callback == nullFunPtr = pure 1
-    | anyNonEmptyNull
-        [ (providerBytes, providerLength), (keyBytes, keyLength) ] = pure 2
-    | otherwise = do
-        provider <- decodeInput providerBytes providerLength
-        key <- decodeInput keyBytes keyLength
-        _ <- forkIO do
-            tryAny (connectAccountAPIKey AccountAPIKeyRequest
-                { accountAPIKeyProvider = provider, accountAPIKey = key }
-                ) >>= \case
-                    Left exception -> invokeExceptionResult callback context exception
-                    Right result -> invokeResult callback context result
-        pure 0
-
-ha_account_set_enabled
-    :: Ptr Word8 -> CSize -> CInt -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
-ha_account_set_enabled idBytes (CSize idLength) enabled callback context
-    | callback == nullFunPtr = pure 1
-    | anyNonEmptyNull [(idBytes, idLength)] = pure 2
-    | otherwise = do
-        managedId <- decodeInput idBytes idLength
-        _ <- forkIO do
-            tryAny (setManagedCredentialEnabled managedId (enabled /= 0))
-                >>= \case
-                    Left exception -> invokeExceptionResult callback context exception
-                    Right result -> invokeStoreResult callback context result
-        pure 0
-
-ha_account_delete
-    :: Ptr Word8 -> CSize -> FunPtr AccountResultCallback -> Ptr () -> IO CInt
-ha_account_delete idBytes (CSize idLength) callback context
-    | callback == nullFunPtr = pure 1
-    | anyNonEmptyNull [(idBytes, idLength)] = pure 2
-    | otherwise = do
-        managedId <- decodeInput idBytes idLength
-        _ <- forkIO do
-            tryAny (deleteManagedCredential managedId) >>= \case
-                Left exception -> invokeExceptionResult callback context exception
-                Right result -> invokeStoreResult callback context result
-        pure 0
-
-ha_gateway_status
-    :: FunPtr GatewayStatusCallback -> Ptr () -> IO CInt
-ha_gateway_status callback context
-    | callback == nullFunPtr = pure 1
-    | otherwise = do
-        _ <- forkIO do
-            tryAny
-                (withGatewayCredentialLease $
-                    loadGatewayCredential >>= \case
-                        Left err ->
-                            invokeGatewayStatusError callback context err
-                        Right Nothing ->
-                            invokeGatewayStatusCallback callback context 1
-                                nullPtr 0 nullPtr 0
-                        Right (Just credential) ->
-                            withText credential.gatewayBaseUrl $
-                                \baseUrl baseUrlLength ->
-                                    invokeGatewayStatusCallback callback context 0
-                                        baseUrl baseUrlLength nullPtr 0)
-                >>= \case
-                Left exception ->
-                    invokeGatewayStatusError callback context
-                        (Text.pack (show exception))
-                Right () -> pure ()
-        pure 0
-
-ha_gateway_connect_start
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr GatewayConnectStartCallback -> Ptr () -> IO CInt
-ha_gateway_connect_start
-    baseUrlBytes (CSize baseUrlLength)
-    clientNameBytes (CSize clientNameLength)
-    callback context
-    | callback == nullFunPtr = pure 1
-    | anyNonEmptyNull
-        [ (baseUrlBytes, baseUrlLength)
-        , (clientNameBytes, clientNameLength)
-        ] = pure 2
-    | otherwise = do
-        baseUrl <- decodeInput baseUrlBytes baseUrlLength
-        clientName <- decodeInput clientNameBytes clientNameLength
-        _ <- forkIO do
-            tryAny
-                (startNativeGatewayAuthorization baseUrl clientName)
-                >>= \case
-                Left exception ->
-                    invokeGatewayConnectStartError callback context
-                        (Text.pack (show exception))
-                Right (Left err) ->
-                    invokeGatewayConnectStartError callback context err
-                Right (Right device) ->
-                    withGatewayDeviceStrings device $
-                        invokeGatewayConnectStartCallback callback context 0
-        pure 0
-
-ha_gateway_connect_poll
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> FunPtr GatewayPollCallback -> Ptr () -> IO CInt
-ha_gateway_connect_poll
-    baseUrlBytes (CSize baseUrlLength)
-    deviceCodeBytes (CSize deviceCodeLength)
-    callback context
-    | callback == nullFunPtr = pure 1
-    | anyNonEmptyNull
-        [ (baseUrlBytes, baseUrlLength)
-        , (deviceCodeBytes, deviceCodeLength)
-        ] = pure 2
-    | otherwise = do
-        baseUrl <- decodeInput baseUrlBytes baseUrlLength
-        deviceCode <- decodeInput deviceCodeBytes deviceCodeLength
-        _ <- forkIO do
-            tryAny
-                (pollNativeGatewayAuthorizationAndSaveWith
-                    baseUrl
-                    deviceCode
-                    (invokeGatewayCallbackOnce
-                        . invokeGatewayPollResult callback context))
-                >>= \case
-                    Left exception ->
-                        invokeGatewayPollError callback context
-                            (Text.pack (show exception))
-                    Right (Left err) ->
-                        invokeGatewayPollError callback context err
-                    Right (Right (GatewayAuthorized _ _)) -> pure ()
-                    Right (Right result) ->
-                        invokeGatewayPollResult callback context result
-        pure 0
-
-ha_gateway_connect_exchange
-    :: Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
-    -> Ptr Word8 -> CSize
-    -> FunPtr GatewayResultCallback -> Ptr () -> IO CInt
-ha_gateway_connect_exchange
-    baseUrlBytes (CSize baseUrlLength)
-    clientIdBytes (CSize clientIdLength)
-    codeBytes (CSize codeLength)
-    verifierBytes (CSize verifierLength)
-    redirectUriBytes (CSize redirectUriLength)
-    callback context
-    | callback == nullFunPtr = pure 1
-    | anyNonEmptyNull
-        [ (baseUrlBytes, baseUrlLength)
-        , (clientIdBytes, clientIdLength)
-        , (codeBytes, codeLength)
-        , (verifierBytes, verifierLength)
-        , (redirectUriBytes, redirectUriLength)
-        ] = pure 2
-    | otherwise = do
-        baseUrl <- decodeInput baseUrlBytes baseUrlLength
-        clientId <- decodeInput clientIdBytes clientIdLength
-        code <- decodeInput codeBytes codeLength
-        verifier <- decodeInput verifierBytes verifierLength
-        redirectUri <- decodeInput redirectUriBytes redirectUriLength
-        _ <- forkIO do
-            tryAny
-                (exchangeNativeGatewayAuthorizationCodeWith
-                    baseUrl
-                    clientId
-                    code
-                    verifier
-                    redirectUri
-                    (invokeGatewayCallbackOnce $
-                        invokeGatewayResultCallback callback context
-                            0 nullPtr 0))
-                >>= \case
-                    Left exception ->
-                        invokeGatewayResultError callback context
-                            (Text.pack (show exception))
-                    Right (Left err) ->
-                        invokeGatewayResultError callback context err
-                    Right (Right ()) -> pure ()
-        pure 0
-
-ha_gateway_disconnect
-    :: FunPtr GatewayResultCallback -> Ptr () -> IO CInt
-ha_gateway_disconnect callback context
-    | callback == nullFunPtr = pure 1
-    | otherwise = do
-        _ <- forkIO do
-            tryAny
-                (removeGatewayCredentialWith
-                    (invokeGatewayCallbackOnce $
-                        invokeGatewayResultCallback callback context
-                            0 nullPtr 0)) >>= \case
-                Left exception ->
-                    invokeGatewayResultError callback context
-                        (Text.pack (show exception))
-                Right (Left err) ->
-                    invokeGatewayResultError callback context err
-                Right (Right ()) -> pure ()
-        pure 0
-
-invokeGatewayStatusError
-    :: FunPtr GatewayStatusCallback -> Ptr () -> Text -> IO ()
-invokeGatewayStatusError callback context err =
-    withText err $ \errorPtr errorLength ->
-        invokeGatewayStatusCallback callback context (-1)
-            nullPtr 0 errorPtr errorLength
-
-invokeGatewayConnectStartError
-    :: FunPtr GatewayConnectStartCallback -> Ptr () -> Text -> IO ()
-invokeGatewayConnectStartError callback context err =
-    withText err $ \errorPtr errorLength ->
-        invokeGatewayConnectStartCallback callback context (-1)
-            nullPtr 0 nullPtr 0 nullPtr 0 nullPtr 0
-            0 0 errorPtr errorLength
-
-withGatewayDeviceStrings
-    :: GatewayDeviceAuthorization
-    -> (CString -> CSize -> CString -> CSize
-        -> CString -> CSize -> CString -> CSize
-        -> CInt -> CInt -> CString -> CSize -> IO a)
-    -> IO a
-withGatewayDeviceStrings device action =
-    withText device.userCode $ \userCode userCodeLength ->
-    withText device.verificationUri $ \verificationUri verificationUriLength ->
-    withText device.verificationUriComplete $
-        \verificationComplete verificationCompleteLength ->
-    withText device.deviceCode $ \deviceCode deviceCodeLength ->
-        action
-            userCode userCodeLength
-            verificationUri verificationUriLength
-            verificationComplete verificationCompleteLength
-            deviceCode deviceCodeLength
-            (fromIntegral device.pollIntervalSeconds)
-            (fromIntegral device.expiresInSeconds)
-            nullPtr 0
-
-invokeGatewayPollResult
-    :: FunPtr GatewayPollCallback -> Ptr () -> GatewayPollResult -> IO ()
-invokeGatewayPollResult callback context = \case
-    GatewayAuthorized _ _ ->
-        invokeGatewayPollCallback callback context 0 0 nullPtr 0
-    GatewayAuthorizationPending retryInterval ->
-        invokeGatewayPollCallback callback context 1
-            (fromIntegral (fromMaybe 0 retryInterval)) nullPtr 0
-    GatewaySlowDown retryInterval ->
-        invokeGatewayPollCallback callback context 2
-            (fromIntegral (fromMaybe 0 retryInterval)) nullPtr 0
-    GatewayAccessDenied ->
-        invokeGatewayPollError callback context
-            "Gateway authorization was denied."
-    GatewayExpired ->
-        invokeGatewayPollError callback context
-            "Gateway authorization expired."
-    GatewayPollFailed code ->
-        invokeGatewayPollError callback context
-            ("Gateway authorization failed: " <> code)
-
-invokeGatewayPollError
-    :: FunPtr GatewayPollCallback -> Ptr () -> Text -> IO ()
-invokeGatewayPollError callback context err =
-    withText err $ \errorPtr errorLength ->
-        invokeGatewayPollCallback callback context (-1) 0 errorPtr errorLength
-
-invokeGatewayResultError
-    :: FunPtr GatewayResultCallback -> Ptr () -> Text -> IO ()
-invokeGatewayResultError callback context err =
-    withText err $ \errorPtr errorLength ->
-        invokeGatewayResultCallback callback context (-1) errorPtr errorLength
-
--- Credential transition callbacks are terminal. Contain a host exception
--- after the durable mutation so it cannot be misreported as a failed
--- transition or retried with a second terminal callback.
-invokeGatewayCallbackOnce :: IO () -> IO ()
-invokeGatewayCallbackOnce callback =
-    void (tryAny callback)
-
-anyNonEmptyNull :: [(Ptr Word8, Word64)] -> Bool
-anyNonEmptyNull = any \(pointer, length) ->
-    pointer == nullPtr && length > 0
-
-withAccountStrings :: LoginAccount -> (CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize -> CString -> CSize
-    -> CString -> CSize -> CString -> CSize -> CString -> CSize
-    -> CInt -> CInt -> CString -> CSize -> IO a) -> IO a
-withAccountStrings account action =
-    withText (providerSlug account.loginProvider) $ \provider providerLength ->
-    withText (billingText account.loginBilling) $ \billing billingLength ->
-    withText (loginAccountSelectionId account) $ \selection selectionLength ->
-    withText account.loginAccountId $ \accountId accountIdLength ->
-    withText account.loginLabel $ \label labelLength ->
-    withText account.loginSource $ \source sourceLength ->
-        withText
-            (accountUsageSummary account)
-            $ \detail detailLength ->
-        withOptionalText account.loginManagedId $ \managedId managedLength ->
-        action provider providerLength billing billingLength
-            selection selectionLength accountId accountIdLength label labelLength
-            detail detailLength managedId managedLength source sourceLength
-            (if account.loginEnabled then 1 else 0)
-            (if account.loginManagedId == Nothing then 0 else 1)
-            nullPtr 0
-
-billingText :: AccountBilling -> Text
-billingText = \case
-    SubscriptionBilling _ -> "subscription"
-    ApiCreditsBilling -> "api"
-
-accountUsageSummary :: LoginAccount -> Text
-accountUsageSummary account =
-    Text.intercalate " · " $
-        billing <> case account.loginUsage of
-            UsageNotChecked -> []
-            UsageUnavailable _ -> ["usage unavailable"]
-            UsageAvailable usage ->
-                maybeToList usage.usagePlan
-                    <> maybeToList
-                        (("credits " <>) <$> usage.creditsRemaining)
-                    <> maybeToList
-                        (("used " <>) <$> usage.creditsUsed)
-  where
-    billing = case account.loginBilling of
-        ApiCreditsBilling -> ["API credits"]
-        SubscriptionBilling plan ->
-            maybe ["subscription"] (\value -> ["subscription", value]) plan
-    maybeToList = maybe [] pure
-
-invokeAccountUsageWindows
-    :: FunPtr AccountUsageWindowCallback -> Ptr () -> LoginAccount -> IO ()
-invokeAccountUsageWindows callback context account =
-    case account.loginUsage of
-        UsageAvailable usage ->
-            forM_ usage.usageWindows \window ->
-                withText (loginAccountSelectionId account) $ \selection selectionLength ->
-                withText window.windowName $ \name nameLength ->
-                    invokeAccountUsageWindowCallback callback context
-                        selection selectionLength name nameLength
-                        (fromIntegral window.usedPercent)
-                        (fromIntegral window.windowSeconds)
-                        (round (utcTimeToPOSIXSeconds window.resetsAt))
-        _ -> pure ()
-
-parseChallenge :: Aeson.Value
-    -> Maybe (Text, Text, Maybe Text, Maybe Text, Int, Int)
-parseChallenge = Aeson.parseMaybe $ Aeson.withObject "challenge" \object ->
-    (,,,,,)
-        <$> object Aeson..: "verificationUrl"
-        <*> object Aeson..: "userCode"
-        <*> object Aeson..:? "deviceAuthId"
-        <*> object Aeson..:? "deviceCode"
-        <*> (object Aeson..:? "pollIntervalSeconds" Aeson..!= 5)
-        <*> (object Aeson..:? "expiresInSeconds" Aeson..!= 0)
-
-withChallengeStrings
-    :: (Text, Text, Maybe Text, Maybe Text, Int, Int)
-    -> (CString -> CSize -> CString -> CSize -> CString -> CSize -> CString -> CSize
-        -> CInt -> CInt -> CString -> CSize -> IO a)
-    -> IO a
-withChallengeStrings (url, user, authId, device, interval, expires) action =
-    withText url $ \urlPtr urlLength ->
-    withText user $ \userPtr userLength ->
-    withOptionalText authId $ \authPtr authLength ->
-    withOptionalText device $ \devicePtr deviceLength ->
-        action urlPtr urlLength userPtr userLength authPtr authLength
-            devicePtr deviceLength (fromIntegral interval) (fromIntegral expires)
-            nullPtr 0
-
-invokeResult :: FunPtr AccountResultCallback -> Ptr ()
-    -> Either Text Aeson.Value -> IO ()
-invokeResult callback context result = case result of
-    Left errorText -> withText errorText $ \errorPtr errorLength ->
-        invokeAccountResultCallback callback context (-1)
-            nullPtr 0 errorPtr errorLength
-    Right value ->
-        let status = Aeson.parseMaybe (Aeson.withObject "result"
-                (\object -> object Aeson..: "status")) value
-            accountId = Aeson.parseMaybe (Aeson.withObject "result"
-                (\object -> object Aeson..:? "accountID")) value >>= id
-        in case status of
-            Just ("pending" :: Text) ->
-                invokeAccountResultCallback callback context 1 nullPtr 0 nullPtr 0
-            _ -> withOptionalText accountId $ \idPtr idLength ->
-                invokeAccountResultCallback callback context 0 idPtr idLength nullPtr 0
-
-invokeStoreResult :: FunPtr AccountResultCallback -> Ptr ()
-    -> Either Text () -> IO ()
-invokeStoreResult callback context result = case result of
-    Left errorText -> withText errorText $ \errorPtr errorLength ->
-        invokeAccountResultCallback callback context (-1)
-            nullPtr 0 errorPtr errorLength
-    Right () -> invokeAccountResultCallback callback context 0 nullPtr 0 nullPtr 0
-
-invokeExceptionResult :: FunPtr AccountResultCallback -> Ptr ()
-    -> SomeException -> IO ()
-invokeExceptionResult callback context exception =
-    withText (Text.pack (show exception)) $ \errorPtr errorLength ->
-        invokeAccountResultCallback callback context (-1)
-            nullPtr 0 errorPtr errorLength
 
 foreign export ccall ha_engine_search_conversations
     :: Ptr () -> Ptr Word8 -> CSize -> CSize
@@ -5103,12 +3746,6 @@ searchRoleCode = \case
     Just "assistant" -> 2
     _ -> 0
 
-browserToolsWhenEnabled :: BrowserHost -> IO [AppTool]
-browserToolsWhenEnabled host =
-    withMVar host.browserRegistration \case
-        Nothing -> pure []
-        Just _ -> pure (browserTools (invokeBrowserCommand host))
-
 -- | Replace, rather than append, the generic desktop backend. This keeps the
 -- command-line computer-use flag authoritative and guarantees a single
 -- model-visible @computer@ tool.
@@ -5125,98 +3762,6 @@ composeNativeTools (Just nativeComputer) =
             replaceFirst True tools
         | otherwise =
             nativeComputer : replaceFirst True tools
-
-invokeBrowserCommand
-    :: BrowserHost
-    -> BrowserCommand
-    -> IO (Either Text Text)
-invokeBrowserCommand host command =
-    tryAny (withMVar host.browserRegistration invoke) >>= \case
-        Left exception -> pure (Left (Text.pack (show exception)))
-        Right result -> pure result
-  where
-    invoke Nothing =
-        pure (Left "The browser view is not active.")
-    invoke (Just registration) = do
-        let
-            ( commandCode
-                , argument1
-                , argument2
-                , scrollDeltaX
-                , scrollDeltaY
-                , flags
-                ) =
-                browserCommandABI command
-        withText argument1 \argument1Ptr argument1Length ->
-            withText argument2 \argument2Ptr argument2Length ->
-                allocaBytes browserOutputCapacity \output ->
-                    alloca \outputLength -> do
-                        -- The callback controls the reported length. Zero the
-                        -- buffer so unwritten stack bytes are never exposed.
-                        fillBytes output 0 browserOutputCapacity
-                        poke outputLength 0
-                        status <- invokeBrowserCallback
-                            registration.browserCallback
-                            registration.browserContext
-                            commandCode
-                            (castPtr argument1Ptr)
-                            argument1Length
-                            (castPtr argument2Ptr)
-                            argument2Length
-                            scrollDeltaX
-                            scrollDeltaY
-                            flags
-                            output
-                            (fromIntegral browserOutputCapacity)
-                            outputLength
-                        CSize length <- peek outputLength
-                        if length > fromIntegral browserOutputCapacity
-                            then pure (Left
-                                "The browser returned more than the 256 KiB output limit.")
-                            else do
-                                bytes <- BS.packCStringLen
-                                    (castPtr output, fromIntegral length)
-                                pure $ case TextEncoding.decodeUtf8' bytes of
-                                    Left _ ->
-                                        Left "The browser returned invalid UTF-8."
-                                    Right text
-                                        | status == 0 -> Right text
-                                        | Text.null text ->
-                                            Left (browserStatusMessage status)
-                                        | otherwise -> Left text
-
-browserCommandABI
-    :: BrowserCommand
-    -> (CInt, Text, Text, CDouble, CDouble, CInt)
-browserCommandABI = \case
-    BrowserNavigate url -> (1, url, "", 0, 0, 0)
-    BrowserSnapshot -> (2, "", "", 0, 0, 0)
-    BrowserClick selector -> (3, selector, "", 0, 0, 0)
-    BrowserType selector text submit ->
-        (4, selector, text, 0, 0, if submit then 1 else 0)
-    BrowserBack -> (5, "", "", 0, 0, 0)
-    BrowserForward -> (6, "", "", 0, 0, 0)
-    BrowserReload -> (7, "", "", 0, 0, 0)
-    BrowserKey key -> (8, key, "", 0, 0, 0)
-    BrowserScroll deltaX deltaY ->
-        (9, "", "", realToFrac deltaX, realToFrac deltaY, 0)
-
-browserOutputCapacity :: Int
-browserOutputCapacity = 256 * 1024
-
-browserStatusMessage :: CInt -> Text
-browserStatusMessage = \case
-    1 -> "The browser host rejected an invalid argument."
-    2 -> "The native browser bridge is unavailable."
-    3 -> "The browser command timed out."
-    4 -> "The browser host denied website or extension access."
-    5 -> "The browser host does not support this operation."
-    6 -> "The native browser bridge failed internally."
-    7 -> "The browser host returned a result that was too large."
-    status ->
-        "The browser command failed (status "
-            <> Text.pack (show status)
-            <> ")."
 
 runNativeTurn
     :: FunPtr EventCallback
@@ -6124,174 +4669,6 @@ parseParams request =
     case Aeson.parseEither Aeson.parseJSON request.requestParams of
         Left err -> Left (Text.pack err)
         Right value -> Right value
-
-startAccountOAuth
-    :: AccountProviderRequest
-    -> IO (Either Text Aeson.Value)
-startAccountOAuth request =
-    case parseProvider request.accountProvider of
-        Just OpenAIProvider -> do
-            clientId <- openAIOAuthClientId <$> lookupNonEmpty
-                "OPENAI_OAUTH_CLIENT_ID"
-            OpenAILogin.requestDeviceCode
-                (OpenAILogin.defaultLoginOptions clientId) >>= \case
-                    Left err -> pure (Left err)
-                    Right code -> pure $ Right (Aeson.object
-                        [ "provider" Aeson..= ("openai" :: Text)
-                        , "verificationUrl" Aeson..= code.verificationUrl
-                        , "userCode" Aeson..= code.userCode
-                        , "deviceAuthId" Aeson..= code.deviceAuthId
-                        , "pollIntervalSeconds" Aeson..=
-                            code.pollIntervalSeconds
-                        ])
-        Just XAIProvider -> do
-            clientId <- xaiOAuthClientId <$> lookupNonEmpty
-                "XAI_OAUTH_CLIENT_ID"
-            XAIAuth.requestDeviceAuthorization
-                (XAIAuth.defaultOAuthOptions clientId) >>= \case
-                    Left err -> pure (Left err)
-                    Right code -> pure $ Right (Aeson.object
-                        [ "provider" Aeson..= ("xai" :: Text)
-                        , "verificationUrl" Aeson..= code.verificationUrl
-                        , "userCode" Aeson..= code.userCode
-                        , "deviceCode" Aeson..= code.deviceCode
-                        , "pollIntervalSeconds" Aeson..=
-                            code.pollIntervalSeconds
-                        , "expiresInSeconds" Aeson..=
-                            code.expiresInSeconds
-                        ])
-        _ -> pure (Left "OAuth account connection is not supported for this provider")
-
-pollAccountOAuth
-    :: AccountOAuthPollRequest
-    -> IO (Either Text Aeson.Value)
-pollAccountOAuth request =
-    case parseProvider request.oauthPollProvider of
-        Just OpenAIProvider -> case
-            (request.oauthPollVerificationUrl, request.oauthPollUserCode,
-                request.oauthPollDeviceAuthId) of
-            (Just url, Just userCode, Just authId) ->
-                do
-                    clientId <- openAIOAuthClientId <$> lookupNonEmpty
-                        "OPENAI_OAUTH_CLIENT_ID"
-                    OpenAILogin.pollDeviceCode
-                        (OpenAILogin.defaultLoginOptions clientId)
-                        OpenAILogin.DeviceCode
-                            { OpenAILogin.verificationUrl = Text.unpack url
-                            , OpenAILogin.userCode = userCode
-                            , OpenAILogin.deviceAuthId = authId
-                            , OpenAILogin.pollIntervalSeconds =
-                                fromMaybe 5 request.oauthPollIntervalSeconds
-                            } >>= \case
-                            Left err -> pure (Left err)
-                            Right Nothing -> pure $ Right
-                                (Aeson.object ["status" Aeson..= ("pending" :: Text)])
-                            Right (Just authJson) -> do
-                                now <- getCurrentTime
-                                case openaiAuthStateFromJson now
-                                    (Aeson.encode authJson) of
-                                    Nothing -> pure (Left
-                                        "OpenAI returned invalid account data")
-                                    Just auth -> do
-                                        let accountId =
-                                                case auth of
-                                                    OpenAIAuthTypes.AuthState
-                                                        _ _ value _ _ -> value
-                                        stored <- storeConnectedCredential
-                                            False OpenAIProvider
-                                                accountId
-                                            "ChatGPT" SubscriptionBilled
-                                            ManagedOpenAIAuthJson
-                                            (TextEncoding.decodeUtf8
-                                                (LBS.toStrict
-                                                    (Aeson.encode authJson)))
-                                        pure $ if stored
-                                            then Right (Aeson.object
-                                                [ "status" Aeson..=
-                                                    ("connected" :: Text)
-                                                , "accountID" Aeson..=
-                                                    auth.accountId
-                                                ])
-                                            else Left "could not store account"
-            _ -> pure (Left "OAuth challenge is missing required fields")
-        Just XAIProvider -> case
-            (request.oauthPollUserCode, request.oauthPollDeviceCode) of
-            (Just _, Just deviceCode) -> do
-                clientId <- xaiOAuthClientId <$> lookupNonEmpty
-                    "XAI_OAUTH_CLIENT_ID"
-                let challenge = XAIAuth.DeviceAuthorization
-                        { XAIAuth.deviceCode = deviceCode
-                        , XAIAuth.userCode = fromMaybe "" request.oauthPollUserCode
-                        , XAIAuth.verificationUrl =
-                            fromMaybe "" request.oauthPollVerificationUrl
-                        , XAIAuth.pollIntervalSeconds =
-                            fromMaybe 5 request.oauthPollIntervalSeconds
-                        , XAIAuth.expiresInSeconds =
-                            request.oauthPollExpiresInSeconds
-                        }
-                XAIAuth.pollDeviceAuthorization
-                    (XAIAuth.defaultOAuthOptions clientId) challenge >>= \case
-                        Left err -> pure (Left err)
-                        Right Nothing -> pure $ Right
-                            (Aeson.object ["status" Aeson..= ("pending" :: Text)])
-                        Right (Just tokens) -> do
-                            now <- getCurrentTime
-                            let accountId = fromMaybe "grok"
-                                    (XAIAuth.accountIdFromAccessToken
-                                        tokens.accessToken)
-                                label = fromMaybe "Grok" $
-                                    (tokens.idToken >>= XAIAuth.emailFromToken)
-                                    <|> XAIAuth.emailFromToken tokens.accessToken
-                                authJson = grokAuthStateToJson GrokAuthState
-                                    { grokAccessToken = tokens.accessToken
-                                    , grokRefreshToken = tokens.refreshToken
-                                    , grokIdToken = tokens.idToken
-                                    , grokExpiresAt =
-                                        ((`addUTCTime` now) . fromIntegral
-                                            <$> tokens.expiresInSeconds)
-                                    }
-                            case tokens.refreshToken of
-                                Nothing -> pure (Left
-                                    "Grok login did not return a refresh token")
-                                Just _ -> do
-                                    stored <- storeConnectedCredential
-                                        False XAIProvider accountId label
-                                        SubscriptionBilled ManagedGrokAuthJson
-                                        (TextEncoding.decodeUtf8
-                                            (LBS.toStrict
-                                                (Aeson.encode authJson)))
-                                    pure $ if stored
-                                        then Right (Aeson.object
-                                            [ "status" Aeson..=
-                                                ("connected" :: Text)
-                                            , "accountID" Aeson..= accountId
-                                            ])
-                                        else Left "could not store account"
-            _ -> pure (Left "OAuth challenge is missing required fields")
-        _ -> pure (Left "OAuth account connection is not supported for this provider")
-
-connectAccountAPIKey
-    :: AccountAPIKeyRequest
-    -> IO (Either Text Aeson.Value)
-connectAccountAPIKey request =
-    case parseProvider request.accountAPIKeyProvider of
-        Just OpenRouterProvider
-            | not (Text.null (Text.strip request.accountAPIKey)) ->
-                OpenRouter.fetchOpenRouterUsage request.accountAPIKey >>= \case
-                    Left err -> pure (Left ("OpenRouter rejected the key: " <> err))
-                    Right usage -> do
-                        let accountId = fromMaybe "openrouter" usage.keyLabel
-                            label = fromMaybe "OpenRouter" usage.keyLabel
-                        stored <- storeConnectedCredential
-                            False OpenRouterProvider accountId label ApiBilled
-                            ManagedBearerToken request.accountAPIKey
-                        pure $ if stored
-                            then Right (Aeson.object
-                                [ "status" Aeson..= ("connected" :: Text)
-                                , "accountID" Aeson..= accountId
-                                ])
-                            else Left "could not store account"
-        _ -> pure (Left "API-key connections are supported for OpenRouter")
 
 acquireStore :: ManagedPostgresConfig -> MVar (Maybe Store) -> IO Store
 acquireStore config state =

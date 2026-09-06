@@ -68,11 +68,12 @@ import Agent.CLI.TUI.Types
                     choiceTitle, choiceBody, choiceSearch, choiceQuery,
                     choiceAdjustments, choiceAdjustmentIndices),
       choiceVisibleRows,
+      choiceOverlay,
       selectedChoiceIndex,
       ChoicePresentation(ChoiceOnboarding, ChoiceDialog, ChoiceDocument,
                          ChoiceTheme),
       AppState(appRuntime,
-               appDictation, appTextPrompt, appChoice, appMetaConsole,
+               appDictation, appTextPrompt, appMetaConsole,
                appMotionElapsedMillis, appUi, appTerminalFocus),
       activeTheme,
       FullscreenRuntime(runtimeMotionMode, runtimeColor, runtimeWaveTrough),
@@ -254,7 +255,7 @@ drawFooter state =
     footer = case
         ( state.appDictation
         , state.appTextPrompt
-        , state.appChoice
+        , choiceOverlay state
         , state.appMetaConsole
         , state.appUi.uiFocus
         , state.appUi.uiPermission

@@ -144,7 +144,7 @@ spec = do
                         (ToolCallResult
                             "large"
                             oversized
-                            FunctionCallKind))
+                            FunctionCallKind BlockingToolCall [] Nothing))
                 pure (Left (ConnectionError "down"))
         config <- testConfig backend
         execution <-

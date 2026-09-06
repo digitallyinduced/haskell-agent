@@ -151,11 +151,12 @@ echoArgsDecoder :: Json.Decoder EchoArgs
 echoArgsDecoder = objectArgs $ \object -> EchoArgs <$> reqText object "message"
 
 functionResult :: Text -> Text -> ToolCallResult
-functionResult callId output = ToolCallResultWithOutcome
+functionResult callId output = ToolCallResult
     { callId
     , output
+    , toolResultMode = BlockingToolCall
     , toolResultImages = []
-    , toolResultOutcome = ToolSucceeded
+    , toolResultOutcome = Just ToolSucceeded
     , callKind = FunctionCallKind
     }
 

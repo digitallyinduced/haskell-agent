@@ -29,6 +29,22 @@ Provider-neutral infrastructure shared by the harness transports:
   unfinished exchanges poison the session so abandoned frames cannot leak
   into its successor.
 
+## Loop implementation boundaries
+
+`Agent.Loop` remains the public facade. Its private implementation modules are:
+
+- `Loop.Input`: turn inputs, attachments, and prompt-image normalization.
+- `Loop.TokenUsage`: token accounting and generation-rate estimates.
+- `Loop.Output`: completed responses and the live event protocol.
+- `Loop.Backend`: provider callbacks and immutable checkpoint contracts.
+- `Loop.DisplayJournal`: bounded live-event projection and display-only history
+  of uncommitted attempts. This history must never enter backend/model state.
+- `Loop.EventPump`: generic bounded, single-consumer event delivery.
+- `Loop.Internal`: response progression and scoped tool-worker ownership.
+
+Keep cancellation, commit ordering, and worker lifetimes together in the
+execution module; the leaf modules do not own worker lifetimes.
+
 ## Backend middleware
 
 `Backend` represents one provider/model submission. The corresponding

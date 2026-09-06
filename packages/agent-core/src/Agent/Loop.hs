@@ -53,7 +53,11 @@ module Agent.Loop
     , userMessageWithAttachments
     ) where
 
+import Agent.Loop.Backend
+import Agent.Loop.Input
 import Agent.Loop.Internal
+import Agent.Loop.Output
+import Agent.Loop.TokenUsage
 import Agent.ToolDispatch (ToolDispatchConfig(..))
 import Control.Exception.Safe (SomeException)
 import qualified Data.Text as Text

@@ -861,7 +861,9 @@ handleAskChoiceEvent presentation title body initial rows reply = do
     liftIO (state.appRuntime.runtimeNativeProgress False)
     modify' \current ->
         current
-            { appChoice = Just ChoiceOverlay
+            { appChoice = Just $ PendingDialog
+                (atomically . putTMVar reply . fmap (.choiceSelectionIndex))
+                ChoiceOverlay
                 { choicePresentation = presentation
                 , choiceTitle = title
                 , choiceBody = body
@@ -874,11 +876,6 @@ handleAskChoiceEvent presentation title body initial rows reply = do
                 , choiceAdjustmentIndices = []
                 , choiceCloseOnTurnEnd = False
                 }
-            , appChoiceReply =
-                Just
-                    (atomically
-                        . putTMVar reply
-                        . fmap (.choiceSelectionIndex))
             , appAgentHover = Nothing
             }
     vScrollToBeginning (viewportScroll OverlayViewport)
@@ -894,7 +891,9 @@ handleAskFilterChoiceEvent title initial rows reply = do
     liftIO (state.appRuntime.runtimeNativeProgress False)
     modify' \current ->
         current
-            { appChoice = Just ChoiceOverlay
+            { appChoice = Just $ PendingDialog
+                (atomically . putTMVar reply . fmap (.choiceSelectionIndex))
+                ChoiceOverlay
                 { choicePresentation = ChoiceDialog
                 , choiceTitle = title
                 , choiceBody = ""
@@ -907,11 +906,6 @@ handleAskFilterChoiceEvent title initial rows reply = do
                 , choiceAdjustmentIndices = []
                 , choiceCloseOnTurnEnd = False
                 }
-            , appChoiceReply =
-                Just
-                    (atomically
-                        . putTMVar reply
-                        . fmap (.choiceSelectionIndex))
             , appAgentHover = Nothing
             }
     vScrollToBeginning (viewportScroll OverlayViewport)
@@ -943,7 +937,9 @@ handleAskAdjustableFilterChoiceEvent title initial adjustableRows reply = do
             )
     modify' \current ->
         current
-            { appChoice = Just ChoiceOverlay
+            { appChoice = Just $ PendingDialog
+                (atomically . putTMVar reply . replySelection)
+                ChoiceOverlay
                 { choicePresentation = ChoiceDialog
                 , choiceTitle = title
                 , choiceBody = ""
@@ -956,11 +952,6 @@ handleAskAdjustableFilterChoiceEvent title initial adjustableRows reply = do
                 , choiceAdjustmentIndices = adjustmentIndices
                 , choiceCloseOnTurnEnd = False
                 }
-            , appChoiceReply =
-                Just
-                    (atomically
-                        . putTMVar reply
-                        . replySelection)
             , appAgentHover = Nothing
             }
     vScrollToBeginning (viewportScroll OverlayViewport)
@@ -982,13 +973,16 @@ handleAskResumeEvent
         liftIO (state.appRuntime.runtimeNativeProgress False)
         modify' \current ->
             current
-                { appResume = Just ResumeOverlay
+                { appResume = Just $ PendingDialog
+                    ResumeActions
+                        { resumeReply = reply
+                        , resumeLoad = loadEntry
+                        , resumeDelete = deleteEntry
+                        , resumeSearch = searchEntries
+                        }
+                    ResumeOverlay
                     { resumeOverlayBrowser = browser
                     }
-                , appResumeReply = Just reply
-                , appResumeLoad = Just loadEntry
-                , appResumeDelete = Just deleteEntry
-                , appResumeSearch = Just searchEntries
                 , appAgentHover = Nothing
                 }
         vScrollToBeginning (viewportScroll ResumeViewport)
@@ -1005,14 +999,15 @@ handleAskTextEvent mode title body initial reply = do
     liftIO (state.appRuntime.runtimeNativeProgress False)
     modify' \current ->
         current
-            { appTextPrompt = Just TextOverlay
+            { appTextPrompt = Just $ PendingDialog
+                (atomically . putTMVar reply)
+                TextOverlay
                 { textTitle = title
                 , textBody = body
                 , textDraft = initial
                 , textCursor = Text.length initial
                 , textInputMode = mode
                 }
-            , appTextReply = Just reply
             , appAgentHover = Nothing
             }
     vScrollToBeginning (viewportScroll OverlayViewport)

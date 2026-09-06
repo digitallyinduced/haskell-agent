@@ -929,6 +929,30 @@ spec = describe "turn supervisor" do
             first.serverEventType `shouldBe` "a.four"
             subscription.subscriptionClose
 
+    it "preserves empty, current, and future replay cursor semantics" do
+        withSupervisor (\_ _ -> pure (Right testOutput)) \supervisor -> do
+            let check cursor expectedReset expectedIds expectedLatest =
+                    bracket
+                        (subscribeEvents supervisor localAccessBoundary cursor >>= expectRight)
+                        (.subscriptionClose)
+                        \subscription -> do
+                            subscription.subscriptionResetRequired
+                                `shouldBe` expectedReset
+                            map (.serverEventId) subscription.subscriptionReplay
+                                `shouldBe` expectedIds
+                            subscription.subscriptionLatestEventId
+                                `shouldBe` expectedLatest
+            check Nothing False [] Nothing
+            check (Just 0) False [] Nothing
+            check (Just 1) True [] Nothing
+            publishEvent supervisor localAccessBoundary "one" Nothing Nothing (object [])
+            publishEvent supervisor localAccessBoundary "two" Nothing Nothing (object [])
+            publishEvent supervisor localAccessBoundary "three" Nothing Nothing (object [])
+            check Nothing False [] (Just 3)
+            check (Just 1) False [2, 3] (Just 3)
+            check (Just 3) False [] (Just 3)
+            check (Just 4) True [] (Just 3)
+
     it "bounds event subscribers globally and by tenant" do
         let config =
                 defaultConfig
