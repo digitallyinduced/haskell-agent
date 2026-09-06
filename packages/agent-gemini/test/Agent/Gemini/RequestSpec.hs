@@ -4,6 +4,8 @@ import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Gemini.Request
 import Agent.Responses.Types
 import Data.Aeson (Value(..), object, (.=))
+import qualified Data.Aeson as Aeson
+import Agent.Json (rawJsonFromEncoding)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Set as Set
@@ -12,6 +14,76 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Gemini request projection" do
+    it "projects Claude tool-result images as ordered native parts, not JSON text" do
+        let parts =
+                [ InputTextPart "before" Nothing
+                , InputImagePart Nothing Nothing
+                    (Just "data:image/png;base64,cG5nLWJ5dGVz") Nothing
+                , InputTextPart "after" Nothing
+                ]
+            output = FunctionCallOutputItem FunctionCallOutput
+                { localOutcome = Nothing, itemId = Nothing
+                , callId = "claude-image-read", name = Just "Read"
+                , namespace = Nothing, provider = Just "claude-code"
+                , output = rawJsonFromEncoding (Aeson.toEncoding parts)
+                , status = Just ItemCompleted, async = Nothing
+                }
+            params :: ResponseCreateParams
+            params = defaultResponseCreateParams
+                { input = Just (ResponseInputItems [output]) }
+        fmap (.requestBody) (buildRequest "gemini-test" params)
+            `shouldBe` Right (object
+                [ "contents" .= [object
+                    [ "role" .= ("user" :: Text)
+                    , "parts" .=
+                        [ object ["functionResponse" .= object
+                            [ "id" .= ("claude-image-read" :: Text)
+                            , "name" .= ("Read" :: Text)
+                            , "response" .= object
+                                ["result" .= ("Tool result content follows." :: Text)]
+                            ]]
+                        , object ["text" .= ("before" :: Text)]
+                        , object ["inlineData" .= object
+                            [ "mimeType" .= ("image/png" :: Text)
+                            , "data" .= ("cG5nLWJ5dGVz" :: Text)
+                            ]]
+                        , object ["text" .= ("after" :: Text)]
+                        ]
+                    ]]
+                ])
+
+    it "omits malformed image-only tool results instead of exposing raw image JSON" do
+        let malformed = [object
+                [ "type" .= ("input_image" :: Text)
+                , "image_url" .= object
+                    ["url" .= ("data:image/png;base64,cG5nLWJ5dGVz" :: Text)]
+                ]]
+            output = FunctionCallOutputItem FunctionCallOutput
+                { localOutcome = Nothing, itemId = Nothing
+                , callId = "malformed-image", name = Just "Read"
+                , namespace = Nothing, provider = Just "claude-code"
+                , output = rawJsonFromEncoding (Aeson.toEncoding malformed)
+                , status = Just ItemCompleted, async = Nothing
+                }
+            params :: ResponseCreateParams
+            params = defaultResponseCreateParams
+                { input = Just (ResponseInputItems [output]) }
+        fmap (.requestBody) (buildRequest "gemini-test" params)
+            `shouldBe` Right (object
+                [ "contents" .= [object
+                    [ "role" .= ("user" :: Text)
+                    , "parts" .=
+                        [ object ["functionResponse" .= object
+                            [ "id" .= ("malformed-image" :: Text)
+                            , "name" .= ("Read" :: Text)
+                            , "response" .= object
+                                ["result" .= ("Tool result content follows." :: Text)]
+                            ]]
+                        , object ["text" .= ("[Unsupported tool result content omitted]" :: Text)]
+                        ]
+                    ]]
+                ])
+
     it "projects instructions, user text, and model normalization" do
         let params = defaultResponseCreateParams
                 { model = Just " models/gemini-test "

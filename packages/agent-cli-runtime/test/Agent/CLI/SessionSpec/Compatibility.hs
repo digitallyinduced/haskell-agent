@@ -9,6 +9,7 @@ import Agent.CLI.Request (requestParams)
 import Agent.CLI.Session.StoreCodec (fromStoredResponseItem, toStoredResponseItem)
 import Agent.Dialect (DialectId(..))
 import Agent.Provider (Provider(..))
+import Agent.Responses.LoopBackend (withRequestInput)
 import Agent.Responses.Types
 import Agent.Store.SessionItem
 import Control.Concurrent (newEmptyMVar, putMVar, readMVar, takeMVar)
@@ -184,6 +185,39 @@ spec = do
                         ("unexpected stored item: " <> show stored)
             fromStoredResponseItem (toStoredResponseItem item)
                 `shouldBe` Right item
+
+        it "preserves ordered Claude tool-result images through storage and Responses replay" do
+            let parts =
+                    [ InputTextPart "before" Nothing
+                    , InputImagePart Nothing Nothing
+                        (Just "data:image/png;base64,cG5nLWJ5dGVz") Nothing
+                    , InputTextPart "after" Nothing
+                    ]
+                output = FunctionCallOutput
+                    { localOutcome = Nothing
+                    , itemId = Nothing
+                    , callId = "claude-image-read"
+                    , name = Nothing
+                    , namespace = Nothing
+                    , provider = Just "claude-code"
+                    , output = rawJsonValue (Aeson.toJSON parts)
+                    , status = Just ItemCompleted
+                    , async = Nothing
+                    }
+                item = FunctionCallOutputItem output
+            restored <- either (fail . show) pure
+                (fromStoredResponseItem (toStoredResponseItem item))
+            restored `shouldBe` item
+            let request = withRequestInput defaultResponseCreateParams [restored]
+            case request.input of
+                Just (ResponseInputItems [FunctionCallOutputItem replayed]) -> do
+                    replayed.callId `shouldBe` output.callId
+                    replayed.provider `shouldBe` Just "claude-code"
+                    replayed.status `shouldBe` Nothing
+                    -- This must stay a typed content array on the wire, never
+                    -- a JSON string containing base64 masquerading as text.
+                    Aeson.toJSON replayed.output `shouldBe` Aeson.toJSON parts
+                other -> expectationFailure ("unexpected replay input: " <> show other)
 
         it "keeps hosted and malformed attachment URLs as text" do
             let item = MessageItem ResponseMessage

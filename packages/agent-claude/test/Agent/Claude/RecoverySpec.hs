@@ -109,6 +109,7 @@ spec = describe "Claude interrupted-work recovery" do
         let content = ToolResultContent
                 { raw = json "[{\"type\":\"text\",\"text\":\"useful\"},{\"type\":\"image\",\"source\":{\"data\":\"IMAGE_SECRET\"}},{\"credential\":\"SECRET_FIELD\"}]"
                 , renderedText = "UNSAFE_FALLBACK"
+                , blocks = []
                 }
             rendered = summary $ recordRecoveryMessage
                 (user [ToolResultBlock "call" (Just content) Nothing]) emptyRecovery
@@ -148,6 +149,7 @@ result :: Text -> ToolResultContent
 result text = ToolResultContent
     { raw = rawJsonFromEncoding (Encoding.text text)
     , renderedText = text
+    , blocks = []
     }
 
 assistant :: Text -> [ContentBlock] -> Message
