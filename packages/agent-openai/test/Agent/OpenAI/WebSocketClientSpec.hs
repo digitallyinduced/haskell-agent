@@ -2,6 +2,7 @@ module Agent.OpenAI.WebSocketClientSpec (spec) where
 
 import Test.Hspec
 import Agent.Error
+import Agent.ClientIdentity (gatewayUserAgent)
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
 import qualified Agent.Responses.Codec as ResponsesCodec
@@ -83,6 +84,23 @@ spec = do
         readCodexTurnState turnState `shouldReturn` Nothing
 
   describe "buildCodexWsHeaders" do
+    it "identifies gateway clients without changing direct-provider handshakes" do
+        let gateway = Credential
+                { accessToken = "gateway-token"
+                , accountId = "wss://gateway.example/v1/responses"
+                , leaseId = Nothing
+                , provider = OpenAIProvider
+                }
+            direct = gateway { accountId = "chatgpt-account" }
+        userAgent <- gatewayUserAgent
+        headers <- buildCodexWsHandshakeHeaders gateway
+        [value | (name, value) <- headers, name == "User-Agent"]
+            `shouldBe` [userAgent]
+        lookup "Authorization" headers `shouldBe` Just "Bearer gateway-token"
+        lookup "chatgpt-account-id" headers `shouldBe` Nothing
+        buildCodexWsHandshakeHeaders direct
+            `shouldReturn` buildCodexWsHeaders direct
+
     it "advertises remote compaction v2 on the session handshake" do
         let credential = Credential
                 { accessToken = "token"

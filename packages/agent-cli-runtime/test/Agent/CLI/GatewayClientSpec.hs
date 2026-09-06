@@ -1,6 +1,7 @@
 module Agent.CLI.GatewayClientSpec (spec) where
 
 import Agent.CLI.GatewayClient
+import Agent.ClientIdentity (gatewayUserAgent)
 import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Agent.Json.Decode qualified as Hermes
 import Control.Concurrent
@@ -55,6 +56,25 @@ decodeGatewayModels bytes =
 
 spec :: Spec
 spec = describe "gateway device authorization" do
+    it "sends the versioned User-Agent when discovering gateway models" do
+        received <- newEmptyMVar
+        expected <- gatewayUserAgent
+        let application request respond = do
+                putMVar received (Wai.requestHeaders request)
+                respond $ Wai.responseLBS status200
+                    [(hContentType, "application/json")]
+                    "{\"data\":[{\"id\":\"company-model\",\"protocol\":\"responses\"}]}"
+        Warp.testWithApplication (pure application) \port -> do
+            let base = "http://127.0.0.1:" <> Text.pack (show port)
+                credential = GatewayCredential base
+                    (Text.replace "http://" "ws://" base <> "/v1/responses")
+                    "test-token"
+            fetchGatewayModels credential `shouldReturn`
+                Right [GatewayModel "company-model" GatewayResponsesProtocol]
+            headers <- takeMVar received
+            lookup "User-Agent" headers `shouldBe` Just expected
+            lookup "Authorization" headers `shouldBe` Just "Bearer test-token"
+
     it "binds sessions to the exact gateway credential without exposing it" do
         let first =
                 GatewayCredential
@@ -323,7 +343,10 @@ spec = describe "gateway device authorization" do
 
     it "serves and shuts down a successful loopback callback" do
         baseUrlVar <- newEmptyMVar
-        let gatewayApplication _request respond = do
+        expectedUserAgent <- gatewayUserAgent
+        let gatewayApplication request respond = do
+                lookup "User-Agent" (Wai.requestHeaders request)
+                    `shouldBe` Just expectedUserAgent
                 baseUrl <- readMVar baseUrlVar
                 let websocketUrl =
                         Text.replace "http://" "ws://" baseUrl

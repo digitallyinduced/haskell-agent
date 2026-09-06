@@ -3,6 +3,7 @@ module Agent.CLI.ClaudeGatewayProxySpec (spec) where
 import Agent.CLI.ClaudeGatewayProxy (withClaudeGatewayProxy)
 import Agent.CLI.GatewayClient (GatewayCredential(..))
 import Agent.Claude (ClaudeCodeTransport(..))
+import Agent.ClientIdentity (gatewayUserAgent)
 import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as LBS
 import Data.IORef
@@ -18,6 +19,7 @@ import Test.Hspec
 spec :: Spec
 spec = describe "Claude gateway loopback proxy" do
     it "keeps the organization bearer in the parent process" do
+        userAgent <- gatewayUserAgent
         observed <- newIORef Nothing
         Warp.testWithApplication (pure (upstream observed)) \port -> do
             manager <- HTTP.newManager HTTP.defaultManagerSettings
@@ -49,6 +51,7 @@ spec = describe "Claude gateway loopback proxy" do
                                                 <> Text.encodeUtf8 gatewayToken
                                           )
                                         , (hContentType, "application/json")
+                                        , (hUserAgent, "claude-code/downstream")
                                         ]
                                     , HTTP.requestBody =
                                         HTTP.RequestBodyLBS
@@ -63,16 +66,21 @@ spec = describe "Claude gateway loopback proxy" do
                         ( ["anthropic", "v1", "messages"]
                         , Just "Bearer organization-secret"
                         , "{\"model\":\"sonnet\"}"
+                        , [userAgent]
                         )
 
 upstream
-    :: IORef (Maybe ([Text], Maybe ByteString, LBS.ByteString))
+    :: IORef (Maybe ([Text], Maybe ByteString, LBS.ByteString, [ByteString]))
     -> Application
 upstream observed request respond = do
     body <- strictRequestBody request
     writeIORef observed $
         Just
-            (request.pathInfo, lookup hAuthorization request.requestHeaders, body)
+            ( request.pathInfo
+            , lookup hAuthorization request.requestHeaders
+            , body
+            , [value | (name, value) <- request.requestHeaders, name == hUserAgent]
+            )
     respond $
         responseLBS
             status200

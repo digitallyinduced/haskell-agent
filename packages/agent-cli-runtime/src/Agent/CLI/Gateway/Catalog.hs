@@ -19,6 +19,7 @@ module Agent.CLI.Gateway.Catalog
 import Agent.CLI.Gateway.Credentials (validateGatewayCredential)
 import Agent.CLI.Gateway.Dictation (transcribeGatewayPcmWith)
 import Agent.CLI.Gateway.Usage (fetchGatewayUsageWithCredential)
+import Agent.ClientIdentity (gatewayUserAgent)
 import Agent.OpenAI.Usage (UsageSnapshot)
 import Agent.Server.Client.GatewayIdentity (GatewayCredential(..))
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
@@ -240,6 +241,7 @@ fetchGatewayModels credential =
         Left _ -> pure (Left "Gateway credential is invalid.")
         Right () -> do
             response <- tryAny do
+                userAgent <- gatewayUserAgent
                 manager <- newTlsManager
                 initial <-
                     HTTP.parseRequest
@@ -257,6 +259,7 @@ fetchGatewayModels credential =
                                         credential.gatewayAccessToken
                               )
                             , (hAccept, "application/json")
+                            , ("User-Agent", userAgent)
                             ]
                         , HTTP.checkResponse = \_ _ -> pure ()
                         -- Never follow a redirect with the gateway bearer.

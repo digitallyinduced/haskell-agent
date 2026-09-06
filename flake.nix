@@ -588,9 +588,16 @@
                                 }));
                         agent-core = localPackage (
                             pkgs.haskell.lib.addTestToolDepends
-                            (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
+                            ((pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
                                 src = agentCoreSource;
-                            })
+                            }).overrideAttrs (old: {
+                                # Match the CLI's production build identity,
+                                # while retaining stable check-package caches.
+                                configureFlags = (old.configureFlags or [ ])
+                                    ++ pkgs.lib.optionals (packageMode != "check") [
+                                        "--ghc-option=-DAGENT_BUILD_COMMIT=\"${agentBuildCommit}\""
+                                    ];
+                            }))
                             [
                                 pkgs.git
                                 bun_1_4

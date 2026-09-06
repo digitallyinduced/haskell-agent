@@ -13,6 +13,7 @@ module Agent.CLI.Gateway.OAuth
     , pollUntilAuthorized
     ) where
 
+import Agent.ClientIdentity (gatewayUserAgent)
 import Agent.CLI.Gateway.Credentials
     ( saveGatewayCredential
     , saveGatewayCredentialWith
@@ -362,6 +363,7 @@ postJson
     -> Hermes.Decoder value
     -> IO (Either Text value)
 postJson manager url payload decoder = do
+    userAgent <- gatewayUserAgent
     parsed <- tryAny (HTTP.parseRequest (Text.unpack url))
     case parsed of
         Left exception -> pure (Left (Text.pack (show exception)))
@@ -371,7 +373,10 @@ postJson manager url payload decoder = do
                     HTTP.httpLbs
                         initial
                             { HTTP.method = "POST"
-                            , HTTP.requestHeaders = [(hContentType, "application/json")]
+                            , HTTP.requestHeaders =
+                                [ (hContentType, "application/json")
+                                , ("User-Agent", userAgent)
+                                ]
                             , HTTP.requestBody = HTTP.RequestBodyLBS (Aeson.encode payload)
                             , HTTP.checkResponse = \_ _ -> pure ()
                             }
@@ -475,6 +480,7 @@ postGatewayOAuthForm
     -> [(Text, Text)]
     -> IO (Either Text GatewayAuthorizationCodeResponse)
 postGatewayOAuthForm manager url fields = do
+    userAgent <- gatewayUserAgent
     parsed <- tryAny (HTTP.parseRequest (Text.unpack url))
     case parsed of
         Left _ ->
@@ -489,6 +495,7 @@ postGatewayOAuthForm manager url fields = do
                                 [ ( hContentType
                                   , "application/x-www-form-urlencoded"
                                   )
+                                , ("User-Agent", userAgent)
                                 ]
                             , HTTP.requestBody =
                                 HTTP.RequestBodyLBS $
