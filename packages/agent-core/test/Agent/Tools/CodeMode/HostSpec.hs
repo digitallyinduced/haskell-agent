@@ -6,6 +6,7 @@ import Agent.ToolArgs (objectArgsExact, reqInt)
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     , ToolHandler
     , customToolCall
     , dispatchToolCall
@@ -751,7 +752,7 @@ spec = describe "code-mode Bun host" do
                 ParallelSafe
                 (typedTool "lookup" emptyObjectDecoder \() -> pure (Right "value"))
             invoke _ = pure
-                (Right (ToolCallResult "nested" "value" FunctionCallKind))
+                (Right (ToolCallResult "nested" "value" FunctionCallKind BlockingToolCall [] Nothing))
         codeOnly <- newCodeModeToolSet
             CodeOnlyToolMode ImageDetailVisible worker invoke
             [plainNested lookupTool]
@@ -780,7 +781,7 @@ spec = describe "code-mode Bun host" do
     it "marks both code-mode host tools async-capable" do
         worker <- codeModeWorkerPath
         let invoke _ = pure
-                (Right (ToolCallResult "nested" "value" FunctionCallKind))
+                (Right (ToolCallResult "nested" "value" FunctionCallKind BlockingToolCall [] Nothing))
         created <- newCodeModeToolSet
             CodeToolMode ImageDetailVisible worker invoke []
         toolSet <- either
@@ -793,7 +794,7 @@ spec = describe "code-mode Bun host" do
 
     it "fails closed before advertising a missing worker" do
         let invoke _ = pure
-                (Right (ToolCallResult "nested" "value" FunctionCallKind))
+                (Right (ToolCallResult "nested" "value" FunctionCallKind BlockingToolCall [] Nothing))
         unavailable <- newCodeModeToolSet
             CodeOnlyToolMode
             ImageDetailVisible

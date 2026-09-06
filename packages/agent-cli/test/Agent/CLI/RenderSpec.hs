@@ -26,6 +26,7 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     , customToolCall
     , functionToolCall
     )
@@ -1003,6 +1004,9 @@ spec = do
                 renderEvent config (ToolStarted call)
                 renderEvent config (ToolFinished ToolCallResult
                     { callId = "c1"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = "ok\nmore"
                     , callKind = FunctionCallKind
                     })
@@ -1026,6 +1030,9 @@ spec = do
                         "- [completed] 1: Find and clone Grok Build and Codex repos\n\
                         \- [pending] 2: Investigate Codex"
                     , callKind = FunctionCallKind
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     })
                 hClose handle
                 body <- Text.readFile path

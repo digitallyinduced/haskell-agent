@@ -254,6 +254,9 @@ test-suite agent-core-test
                     , Agent.ErrorSpec
                     , Agent.Http.HeaderSpec
                     , Agent.LoopSpec
+                    , Agent.Loop.EventDeliverySpec
+                    , Agent.Loop.FailedDisplaySpec
+                    , Agent.Loop.Fixtures
                     , Agent.OsPathSpec
                     , Agent.JsonTextSpec
                     , Agent.ProjectInstructionsSpec

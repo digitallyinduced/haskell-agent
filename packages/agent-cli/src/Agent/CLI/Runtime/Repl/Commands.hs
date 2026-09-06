@@ -211,28 +211,11 @@ handleReplLine
     -> IO RunResult
 handleReplLine
         env@SessionEnv
-            { sessionCompact = compactRunner
-            , sessionRender = render
-            , sessionConversation = conversationRef
-            , sessionContextOccupancy = contextOccupancyRef
-            , sessionContextWindow = currentContextWindow
-            , sessionProvider = provider
+            { sessionProvider = provider
             , sessionPolicy = policyRef
-            , sessionPersist = persist
             , sessionPlanMode = planMode
             , sessionProjectRoot = projectRoot
-            , sessionCwd = cwd
-            , sessionTokenProvider = tokenProvider
-            , sessionOpenAiPool = openAiPool
-            , sessionGatewayModels = gatewayModelsRef
-            , sessionSkills = skillsRef
-            , sessionSkillInvocations = skillInvocationsRef
-            , sessionRefreshSkills = refreshSkills
-            , sessionDraft = draftRef
-            , sessionPreviewId = previewIdRef
-            , sessionTerminal = terminal
             , sessionFullscreen = fullscreen
-            , sessionAgentViewport = agentViewport
             }
         continueWith
         finishTurn
@@ -300,7 +283,11 @@ handleReplLine
             retryPendingTurn
             (ChooseAccount keptDraft)
     ReplMeta request ->
-        runMetaConsoleRequest request
+        handleMetaConsoleRequest
+            handlerContext
+            slashCatalog
+            (submit (pure RunQuit) False)
+            request
     ReplRemovePendingImage keptDraft index ->
         handleAttachmentAction
             env
@@ -308,11 +295,9 @@ handleReplLine
             (continueWith keptDraft)
             (ReplRemoveAttachment index)
     ReplPasted pasted ->
-        submitLine slashCatalog skillInvocations
-            continue stdoutColor True pasted
+        submit (continueWith "") True pasted
     ReplText line ->
-        submitLine slashCatalog skillInvocations
-            continue stdoutColor False line
+        submit (continueWith "") False line
   where
     handlerContext =
         ReplHandlerContext
@@ -320,6 +305,35 @@ handleReplLine
             , handlerContinueWith = continueWith
             , handlerStdoutColor = stdoutColor
             }
+    displayInfo = displayReplInfo handlerContext
+    submit =
+        submitReplLine
+            handlerContext finishTurn retryPendingTurn slashCatalog skillInvocations
+
+-- | Submit editor text, keeping the caller's continuation distinct from the
+-- continuation used by one-shot meta-console requests.
+submitReplLine
+    :: ReplHandlerContext
+    -> (Bool -> TurnResult -> IO RunResult)
+    -> (PendingTurn -> IO RunResult)
+    -> SlashCatalog
+    -> [SkillInvocation]
+    -> IO RunResult
+    -> Bool
+    -> Text
+    -> IO RunResult
+submitReplLine handlerContext finishTurn retryPendingTurn slashCatalog skillInvocations next pasted line =
+    submitLine slashCatalog skillInvocations next stdoutColor pasted line
+  where
+    ReplHandlerContext
+        { handlerSessionEnv = env
+        , handlerStdoutColor = stdoutColor
+        } = handlerContext
+    SessionEnv
+        { sessionConversation = conversationRef
+        , sessionPersist = persist
+        , sessionFullscreen = fullscreen
+        } = env
     submitLine
             slashCatalog skillInvocations
             continue color pasted line = do
@@ -340,23 +354,25 @@ handleReplLine
                     ReplMetaConsole request ->
                         runMetaConsoleRequest request
                     ReplPrompt text ->
-                        submitPrompt pasted continue color text
+                        submitPrompt handlerContext finishTurn pasted continue color text
                     ReplExpandedPrompt original expanded ->
                         submitExpandedTurnWithPaste
                             pasted continue color original expanded
                     ReplInit ->
-                        initializeProjectGuide continue color line
+                        initializeProjectGuide handlerContext submitExpandedTurn continue color line
                     ReplReview review ->
-                        submitReview continue color line review
+                        submitReview handlerContext submitExpandedTurn continue color line review
                     ReplDiff ->
-                        showWorkingTreeDiff continue color
+                        showWorkingTreeDiff handlerContext continue color
                     ReplExport maybePath ->
                         handleTranscriptAction handlerContext
                             (ExportTranscript maybePath)
                     ReplPermissions ->
-                        choosePermissions continue color
+                        choosePermissions handlerContext continue color
                     ReplInvokeSkill invocationName arguments ->
                         submitSkillInvocation
+                            handlerContext
+                            finishTurn
                             skillInvocations
                             continue
                             color
@@ -364,11 +380,11 @@ handleReplLine
                             invocationName
                             arguments
                     ReplSkills reloadFirst ->
-                        showSkills continue color reloadFirst
+                        showSkills handlerContext continue color reloadFirst
                     ReplShowShell ->
-                        showShellMode continue color
+                        showShellMode handlerContext continue color
                     ReplSetShell mode ->
-                        setShellMode continue color mode
+                        setShellMode handlerContext continue color mode
                     ReplToggleComputerUse -> do
                         enabled <- env.sessionComputerUseEnabled
                         message <-
@@ -386,15 +402,16 @@ handleReplLine
                     ReplAttachment action ->
                         handleAttachmentAction env finishTurn continue action
                     ReplShowAgentLimit ->
-                        showAgentLimit continue
+                        showAgentLimit handlerContext continue
                     ReplSetAgentLimit limit ->
-                        setAgentLimit continue limit
+                        setAgentLimit handlerContext continue limit
                     ReplAgents ->
-                        chooseAgent continue
+                        chooseAgent env continue
                     ReplMcp ->
-                        manageMcpServers continue
+                        manageMcpServers handlerContext continue
                     ReplMcpPrompt server name arguments ->
                         submitMcpPrompt
+                            handlerContext submitExpandedTurn
                             continue color server name arguments
                     ReplWorkflow action ->
                         handleWorkflowAction env submitExpandedTurn color continue action
@@ -411,41 +428,41 @@ handleReplLine
                     ReplCopySession ->
                         handleTranscriptAction handlerContext CopySessionId
                     ReplDesktop ->
-                        openDesktopSession continue
+                        openDesktopSession handlerContext continue
                     ReplShowTerminal ->
-                        showTerminalCapabilities continue color
+                        showTerminalCapabilities handlerContext continue color
                     ReplChangelog ->
-                        showChangelog continue
+                        showChangelog handlerContext continue
                     ReplSelection action ->
                         handleSelectionAction env continue action
                     ReplEnableCodeMode ->
                         requestCodeModeRestart fullscreen persist
                     ReplToggleAlwaysApprove ->
-                        toggleApprovalMode continue
+                        toggleApprovalMode handlerContext continue
                     ReplCompact focus ->
-                        compactContext continue focus
+                        compactContext handlerContext continue focus
                     ReplViewPlan ->
-                        showSavedPlan continue
+                        showSavedPlan handlerContext continue
                     ReplPlan maybeDescription ->
-                        enterPlanCommand continue maybeDescription
+                        enterPlanCommand handlerContext continue maybeDescription
                     ReplQueue ->
-                        showQueuedPrompts continue
+                        showQueuedPrompts handlerContext continue
                     ReplContext ->
-                        showContextReport continue
+                        showContextReport handlerContext continue
                     ReplHistory ->
-                        showPromptHistory continue color
+                        showPromptHistory handlerContext continue color
                     ReplTranscript ->
                         handleTranscriptAction handlerContext ShowTranscript
                     ReplFind maybeQuery ->
                         handleTranscriptAction handlerContext
                             (FindTranscript maybeQuery)
                     ReplEditPrompt ->
-                        editCurrentPrompt continue color
+                        editCurrentPrompt handlerContext continue color
                     ReplBtw question -> do
                         runBtwQuestion True env question
                         continue
                     ReplRecap ->
-                        requestSessionRecap continue
+                        requestSessionRecap env continue
                     ReplRetry ->
                         resumePendingTurnIfPresent
                             env.sessionLastFailedTurn
@@ -458,16 +475,32 @@ handleReplLine
                     ReplSession action ->
                         handleSessionAction env slashCatalog continue action
                     ReplLogin ->
-                        manageLogin continue
+                        manageLogin env continue
                     ReplUsage ->
-                        showUsage continue
+                        showUsage handlerContext continue
                     ReplReloadAuth ->
-                        reloadProviderAuth continue
+                        reloadProviderAuth handlerContext continue
                     ReplHelp maybeName ->
-                        showCommandHelp slashCatalog continue maybeName
+                        showCommandHelp handlerContext slashCatalog continue maybeName
                     ReplCommandError err ->
-                        showCommandError continue err
-    showShellMode next color = do
+                        showCommandError handlerContext continue err
+    submitExpandedTurn = submitExpandedTurnWithPaste False
+    submitExpandedTurnWithPaste =
+        submitExpandedPrompt handlerContext finishTurn
+    runMetaConsoleRequest =
+        handleMetaConsoleRequest
+            handlerContext
+            slashCatalog
+            (submitLine
+                slashCatalog
+                skillInvocations
+                (pure RunQuit)
+                stdoutColor
+                False)
+    displayInfo = displayReplInfo handlerContext
+
+showShellMode :: ReplHandlerContext -> IO RunResult -> Bool -> IO RunResult
+showShellMode handlerContext next color = do
         mode <- env.sessionShellMode
         let message = "shell tools: " <> case mode of
                 ShellGhci -> "ghci"
@@ -478,12 +511,22 @@ handleReplLine
             Text.putStrLn
                 (roleMuted color (glyphSession <> message))
         next
-    setShellMode next color mode = do
+  where
+    env = handlerContext.handlerSessionEnv
+    displayInfo = displayReplInfo handlerContext
+
+setShellMode :: ReplHandlerContext -> IO RunResult -> Bool -> ShellMode -> IO RunResult
+setShellMode handlerContext next color mode = do
         message <- env.sessionSetShellMode mode
         displayInfo message $
             Text.putStrLn (roleMuted color (glyphOk <> message))
         next
-    showAgentLimit next = do
+  where
+    env = handlerContext.handlerSessionEnv
+    displayInfo = displayReplInfo handlerContext
+
+showAgentLimit :: ReplHandlerContext -> IO RunResult -> IO RunResult
+showAgentLimit handlerContext next = do
         limit <- env.sessionConcurrentLimit
         let message =
                 "concurrent agent limit: " <> Text.pack (show limit)
@@ -492,13 +535,23 @@ handleReplLine
             Text.putStrLn
                 (roleMuted color (glyphSession <> message))
         next
-    setAgentLimit next limit = do
+  where
+    env = handlerContext.handlerSessionEnv
+    displayInfo = displayReplInfo handlerContext
+
+setAgentLimit :: ReplHandlerContext -> IO RunResult -> Int -> IO RunResult
+setAgentLimit handlerContext next limit = do
         message <- env.sessionSetConcurrentLimit limit
         color <- resolveColor stdout
         displayInfo message $
             Text.putStrLn (roleMuted color (glyphOk <> message))
         next
-    chooseAgent next =
+  where
+    env = handlerContext.handlerSessionEnv
+    displayInfo = displayReplInfo handlerContext
+
+chooseAgent :: SessionEnv -> IO RunResult -> IO RunResult
+chooseAgent env next =
         case agentViewport of
             Nothing -> next
             Just viewport -> do
@@ -510,7 +563,12 @@ handleReplLine
                         Nothing -> pure ()
                         Just target -> viewport.viewportSelect target
                 next
-    manageMcpServers next = do
+  where
+    agentViewport = env.sessionAgentViewport
+    fullscreen = env.sessionFullscreen
+
+manageMcpServers :: ReplHandlerContext -> IO RunResult -> IO RunResult
+manageMcpServers handlerContext next = do
         color <- resolveColor stderr
         restart <-
             legacy $
@@ -522,7 +580,19 @@ handleReplLine
         if restart
             then requestMcpRestart fullscreen persist
             else next
-    submitMcpPrompt next color server name arguments = do
+  where
+    env = handlerContext.handlerSessionEnv
+    fullscreen = env.sessionFullscreen
+    persist = env.sessionPersist
+    legacy = withReplSuspended handlerContext
+
+-- | Submit an expanded prompt with the original command retained for display.
+type ExpandedTurn = IO RunResult -> Bool -> Text -> Text -> IO RunResult
+
+submitMcpPrompt
+    :: ReplHandlerContext -> ExpandedTurn -> IO RunResult -> Bool
+    -> Text -> Text -> [(Text, Text)] -> IO RunResult
+submitMcpPrompt handlerContext submitExpandedTurn next color server name arguments = do
         outcome <- case env.sessionMcpFleet of
             Nothing -> pure (Left "no MCP servers are configured")
             Just fleet ->
@@ -538,7 +608,12 @@ handleReplLine
                     color
                     ("/mcp prompt " <> server <> " " <> name)
                     (MCP.renderMcpPromptResult result)
-    openDesktopSession next = do
+  where
+    env = handlerContext.handlerSessionEnv
+    displayError = displayReplError handlerContext
+
+openDesktopSession :: ReplHandlerContext -> IO RunResult -> IO RunResult
+openDesktopSession handlerContext next = do
         currentSessionId persist >>= \case
             Nothing -> do
                 let err = "/desktop requires a persisted conversation"
@@ -559,12 +634,23 @@ handleReplLine
                             Text.hPutStrLn stderr
                                 (roleSuccess color (glyphOk <> message))
         next
-    showTerminalCapabilities next color = do
+  where
+    persist = handlerContext.handlerSessionEnv.sessionPersist
+    displayInfo = displayReplInfo handlerContext
+    displayError = displayReplError handlerContext
+
+showTerminalCapabilities :: ReplHandlerContext -> IO RunResult -> Bool -> IO RunResult
+showTerminalCapabilities handlerContext next color = do
         let message = formatTerminalCapabilities terminal
         displayInfo message $
             Text.putStrLn (roleMuted color message)
         next
-    showChangelog next = do
+  where
+    terminal = handlerContext.handlerSessionEnv.sessionTerminal
+    displayInfo = displayReplInfo handlerContext
+
+showChangelog :: ReplHandlerContext -> IO RunResult -> IO RunResult
+showChangelog handlerContext next = do
         releaseNotes <- loadReleaseNotes
         case fullscreen of
             Just runtime ->
@@ -575,7 +661,12 @@ handleReplLine
             Nothing ->
                 displayInfo releaseNotes (Text.putStrLn releaseNotes)
         next
-    toggleApprovalMode next
+  where
+    fullscreen = handlerContext.handlerSessionEnv.sessionFullscreen
+    displayInfo = displayReplInfo handlerContext
+
+toggleApprovalMode :: ReplHandlerContext -> IO RunResult -> IO RunResult
+toggleApprovalMode handlerContext next
         | provider == ClaudeCodeProvider = do
             let message =
                     "Claude Code permissions are fixed for this provider session; restart with --yolo or --no-yolo."
@@ -589,68 +680,15 @@ handleReplLine
             displayInfo message $
                 putTextLn stderr (roleMuted color message)
             next
-    compactContext next focus = do
-        color <- resolveColor stderr
-        result <-
-            withReplActivity "Compacting context…" $
-                compactRunner focus
-        case result of
-            Left err -> do
-                displayError err $
-                    Text.hPutStrLn stderr (roleError color err)
-                next
-            Right outcome -> do
-                persistCompactOutcome focus outcome
-                let statsMessage =
-                        "compacted "
-                            <> Text.pack
-                                (show outcome.compactBeforeTokens)
-                            <> " → "
-                            <> Text.pack
-                                (show outcome.compactAfterTokens)
-                            <> " tokens ("
-                            <> Text.pack
-                                (show (length outcome.compactHistory))
-                            <> " items)"
-                displayInfo statsMessage $
-                    Text.hPutStrLn stderr
-                        (roleMuted color (glyphSession <> statsMessage))
-                next
-    persistCompactOutcome focus outcome =
-        case persist of
-            PersistenceDisabled ->
-                fullscreenEvent
-                    (UiSystemMessage outcome.compactSummary)
-            PersistenceEnabled slotRef -> do
-                forM_ fullscreen beginFullscreenLiveHistory
-                fullscreenEvent
-                    (UiSystemMessage outcome.compactSummary)
-                now <- getCurrentTime
-                handle <- ensureSession slotRef
-                let turn = SessionTurn
-                        { turnAt = now
-                        , turnUserText = compactSessionUserText focus
-                        , turnAssistantText = Just outcome.compactSummary
-                        , turnError = Nothing
-                        , turnResponseId = Nothing
-                        , turnEffect = TranscriptReplace
-                        , turnItems = outcome.compactHistory
-                        , turnDisplayItems = []
-                        -- Compaction response usage is recorded immediately
-                        -- by compactRunner, including response-level failures.
-                        , turnUsage = Nothing
-                        , turnProviderTelemetry = []
-                        }
-                (handle', turnIndex) <-
-                    appendTurnWithMetaUpdateIndexed handle turn
-                        \meta -> meta { metaLastResponseId = Nothing }
-                writeIORef slotRef (PersistenceActive handle')
-                forM_ fullscreen \runtime ->
-                    commitFullscreenHistoryTurn
-                        runtime
-                        (sessionHistoryTurn turnIndex turn)
-                        HistoryCommitAppend
-    showSavedPlan next = do
+  where
+    env = handlerContext.handlerSessionEnv
+    provider = env.sessionProvider
+    policyRef = env.sessionPolicy
+    projectRoot = env.sessionProjectRoot
+    displayInfo = displayReplInfo handlerContext
+
+showSavedPlan :: ReplHandlerContext -> IO RunResult -> IO RunResult
+showSavedPlan handlerContext next = do
         markdown <- readPlanMarkdown planMode
         if Text.null (Text.strip markdown)
             then do
@@ -660,7 +698,12 @@ handleReplLine
             else
                 displayInfo markdown (Text.putStrLn markdown)
         next
-    enterPlanCommand next maybeDescription
+  where
+    planMode = handlerContext.handlerSessionEnv.sessionPlanMode
+    displayInfo = displayReplInfo handlerContext
+
+enterPlanCommand :: ReplHandlerContext -> IO RunResult -> Maybe Text -> IO RunResult
+enterPlanCommand handlerContext next maybeDescription
         | provider == ClaudeCodeProvider = do
             let message =
                     "Outer plan mode is unavailable for Claude Code because its tools run inside the Claude CLI."
@@ -673,7 +716,13 @@ handleReplLine
                 Just providerSwitch ->
                     pure (RunSwitchProvider providerSwitch)
                 Nothing -> next
-    showQueuedPrompts next = do
+  where
+    env = handlerContext.handlerSessionEnv
+    provider = env.sessionProvider
+    displayInfo = displayReplInfo handlerContext
+
+showQueuedPrompts :: ReplHandlerContext -> IO RunResult -> IO RunResult
+showQueuedPrompts handlerContext next = do
         prompts <- case fullscreen of
             Nothing -> pure []
             Just runtime ->
@@ -682,7 +731,12 @@ handleReplLine
         let message = formatQueuedPrompts prompts
         displayInfo message (Text.putStrLn message)
         next
-    showContextReport next = do
+  where
+    fullscreen = handlerContext.handlerSessionEnv.sessionFullscreen
+    displayInfo = displayReplInfo handlerContext
+
+showContextReport :: ReplHandlerContext -> IO RunResult -> IO RunResult
+showContextReport handlerContext next = do
         currentParams <- readSessionRequestParams env.sessionParams
         history <- readLiveTranscript conversationRef
         occupancy <- readIORef contextOccupancyRef
@@ -699,7 +753,15 @@ handleReplLine
                     activeTools
         displayInfo message (Text.putStrLn message)
         next
-    showPromptHistory next color = do
+  where
+    env = handlerContext.handlerSessionEnv
+    conversationRef = env.sessionConversation
+    contextOccupancyRef = env.sessionContextOccupancy
+    currentContextWindow = env.sessionContextWindow
+    displayInfo = displayReplInfo handlerContext
+
+showPromptHistory :: ReplHandlerContext -> IO RunResult -> Bool -> IO RunResult
+showPromptHistory handlerContext next color = do
         prompts <-
             filter
                 ((/= "/history") . Text.toCaseFold . Text.strip)
@@ -729,14 +791,13 @@ handleReplLine
                                     (historyLabel prompt))
                             prompts
                 maybe next continueWith selected
-    editCurrentPrompt next color =
-        legacy editPrompt >>= \case
-            Left err -> do
-                displayError err $
-                    Text.hPutStrLn stderr (roleError color err)
-                next
-            Right edited -> continueWith edited
-    requestSessionRecap next =
+  where
+    fullscreen = handlerContext.handlerSessionEnv.sessionFullscreen
+    continueWith = handlerContext.handlerContinueWith
+    displayInfo = displayReplInfo handlerContext
+
+requestSessionRecap :: SessionEnv -> IO RunResult -> IO RunResult
+requestSessionRecap env next =
         case fullscreen of
             Just runtime -> do
                 emitUiEvent runtime UiRecapStarted
@@ -745,7 +806,11 @@ handleReplLine
             Nothing -> do
                 runSessionRecap True env RecapManual
                 next
-    manageLogin next = do
+  where
+    fullscreen = env.sessionFullscreen
+
+manageLogin :: SessionEnv -> IO RunResult -> IO RunResult
+manageLogin env next = do
         gatewayBefore <- loadGatewayCredential
         case fullscreen of
             Just runtime -> runFullscreenLoginManager runtime
@@ -756,7 +821,12 @@ handleReplLine
         if gatewayRoutingChanged gatewayBefore gatewayAfter
             then requestGatewayRestart fullscreen cwd
             else next
-    showUsage next = do
+  where
+    fullscreen = env.sessionFullscreen
+    cwd = env.sessionCwd
+
+showUsage :: ReplHandlerContext -> IO RunResult -> IO RunResult
+showUsage handlerContext next = do
         readIORef gatewayModelsRef >>= \case
             Just _ ->
                 displayInfo
@@ -773,7 +843,18 @@ handleReplLine
                             False provider tokenProvider openAiPool
                             >>= emitUiEvent runtime . UiSystemMessage
         next
-    reloadProviderAuth next = do
+  where
+    env = handlerContext.handlerSessionEnv
+    gatewayModelsRef = env.sessionGatewayModels
+    fullscreen = env.sessionFullscreen
+    provider = env.sessionProvider
+    tokenProvider = env.sessionTokenProvider
+    openAiPool = env.sessionOpenAiPool
+    stdoutColor = handlerContext.handlerStdoutColor
+    displayInfo = displayReplInfo handlerContext
+
+reloadProviderAuth :: ReplHandlerContext -> IO RunResult -> IO RunResult
+reloadProviderAuth handlerContext next = do
         reloadResult <- reloadAuth provider tokenProvider
         color <- resolveColor stderr
         case reloadResult of
@@ -784,58 +865,36 @@ handleReplLine
                 displayInfo message $
                     putTextLn stderr (roleMuted color message)
         next
-    showCommandHelp catalog next maybeName = do
+  where
+    env = handlerContext.handlerSessionEnv
+    provider = env.sessionProvider
+    tokenProvider = env.sessionTokenProvider
+    displayInfo = displayReplInfo handlerContext
+    displayError = displayReplError handlerContext
+
+showCommandHelp :: ReplHandlerContext -> SlashCatalog -> IO RunResult -> Maybe Text -> IO RunResult
+showCommandHelp handlerContext catalog next maybeName = do
         color <- resolveColor stdout
         displayInfo
             (formatSlashHelpWithCatalog False catalog maybeName) $
             Text.putStrLn
                 (formatSlashHelpWithCatalog color catalog maybeName)
         next
-    showCommandError next err = do
+  where
+    displayInfo = displayReplInfo handlerContext
+
+showCommandError :: ReplHandlerContext -> IO RunResult -> Text -> IO RunResult
+showCommandError handlerContext next err = do
         color <- resolveColor stderr
         displayError err $
             Text.hPutStrLn stderr (roleError color err)
         next
-    submitPrompt pasted next color text = do
-        -- Native Cmd+V of a Finder image often pastes a path rather than
-        -- bitmap bytes. Treat a prompt that is only image path(s) as an attach
-        -- plus in-terminal preview, matching Grok Build's paste chip.
-        pastedImages <- loadImagesFromPastedText text
-        case pastedImages of
-            Just images@(_:_) -> do
-                message <- queueAttachedImages
-                    conversationRef
-                    previewIdRef
-                    color
-                    (isNothing fullscreen)
-                    images
-                syncFullscreenImagePreviews
-                displayInfo message $
-                    Text.putStrLn
-                        (roleMuted color (glyphOk <> message))
-                next
-            _ -> do
-                pendingImages <-
-                    modifyLiveAttachments conversationRef \imgs -> ([], imgs)
-                forM_ fullscreen \runtime ->
-                    commitFullscreenImagePreviews runtime pendingImages
-                resetRenderPrintedText render
-                let turnInputs =
-                        [ userMessageWithAttachments
-                            text
-                            (map ImageAttachmentItem pendingImages)
-                        ]
-                preparePromptSkillInputsWithPaste
-                    env pasted text turnInputs >>= \case
-                        Left err -> do
-                            displayError err $
-                                Text.hPutStrLn stderr (roleError color err)
-                            next
-                        Right skillInputs -> do
-                            fullscreenEvent (UiUserSubmitted text)
-                            result <- runOneTurn env text skillInputs
-                            finishTurn False result
-    initializeProjectGuide next color line = do
+  where
+    displayError = displayReplError handlerContext
+
+initializeProjectGuide
+    :: ReplHandlerContext -> ExpandedTurn -> IO RunResult -> Bool -> Text -> IO RunResult
+initializeProjectGuide handlerContext submitExpandedTurn next color line = do
         let guidePath = cwd </> unsafeEncodeUtf "AGENTS.md"
         tryIO
             (getSymbolicLinkStatus
@@ -857,7 +916,15 @@ handleReplLine
                     Text.putStrLn
                         (roleMuted color (glyphSession <> message))
                 next
-    submitReview next color line = \case
+  where
+    cwd = handlerContext.handlerSessionEnv.sessionCwd
+    displayInfo = displayReplInfo handlerContext
+    displayError = displayReplError handlerContext
+
+submitReview
+    :: ReplHandlerContext -> ExpandedTurn -> IO RunResult -> Bool
+    -> Text -> Maybe Text -> IO RunResult
+submitReview handlerContext submitExpandedTurn next color line = \case
         Just instructions ->
             submitExpandedTurn
                 next
@@ -865,7 +932,7 @@ handleReplLine
                 line
                 (reviewPrompt (ReviewCustom instructions))
         Nothing ->
-            chooseReviewTarget >>= \case
+            chooseReviewTarget handlerContext >>= \case
                 Left err -> do
                     displayError err $
                         Text.hPutStrLn stderr (roleError color err)
@@ -877,58 +944,13 @@ handleReplLine
                         color
                         line
                         (reviewPrompt target)
-    showWorkingTreeDiff next color = do
-        result <-
-            withReplActivity "Loading Git diff…" $
-                getGitDiff cwd
-        case result of
-            Left err -> do
-                displayError err $
-                    Text.hPutStrLn stderr (roleError color err)
-                next
-            Right GitDiffNotRepository -> do
-                let message = "not a Git repository"
-                displayError message $
-                    Text.hPutStrLn stderr (roleError color message)
-                next
-            Right (GitDiffOutput diff)
-                | Text.null (Text.strip diff) -> do
-                    let message = "No working-tree changes."
-                    displayInfo message $
-                        Text.putStrLn
-                            (roleMuted color (glyphSession <> message))
-                    next
-                | otherwise -> do
-                    displayInfo diff $
-                        Text.putStrLn (colorizeGitDiff color diff)
-                    next
-    choosePermissions next color
-        | provider == ClaudeCodeProvider = do
-            let message =
-                    "Claude Code permissions are fixed for this provider session; restart with --yolo or --no-yolo."
-            displayInfo message $
-                Text.hPutStrLn stderr (roleMuted color message)
-            next
-        | otherwise = do
-            current <- readIORef policyRef
-            requestChoice
-                "Permissions"
-                "Choose how mutating tools are handled."
-                (approvalPolicyIndex current)
-                approvalPolicyRows >>= \case
-                    Nothing -> next
-                    Just index -> do
-                        message <-
-                            setApprovalPolicy
-                                policyRef
-                                projectRoot
-                                (approvalPolicyAt index)
-                        displayInfo message $
-                            Text.hPutStrLn stderr
-                                (roleMuted color (glyphOk <> message))
-                        next
-    submitSkillInvocation
-            invocations next color line invocationName arguments =
+  where
+    displayError = displayReplError handlerContext
+
+submitSkillInvocation
+    :: ReplHandlerContext -> (Bool -> TurnResult -> IO RunResult)
+    -> [SkillInvocation] -> IO RunResult -> Bool -> Text -> Text -> Text -> IO RunResult
+submitSkillInvocation handlerContext finishTurn invocations next color line invocationName arguments =
         case resolveSkillInvocation invocations invocationName of
             Left err -> do
                 displayError err $
@@ -958,7 +980,16 @@ handleReplLine
                 fullscreenEvent (UiUserSubmitted line)
                 result <- runOneTurn env line skillInputs
                 finishTurn False result
-    showSkills next color reloadFirst = do
+  where
+    env = handlerContext.handlerSessionEnv
+    conversationRef = env.sessionConversation
+    fullscreen = env.sessionFullscreen
+    render = env.sessionRender
+    fullscreenEvent = emitReplEvent env
+    displayError = displayReplError handlerContext
+
+showSkills :: ReplHandlerContext -> IO RunResult -> Bool -> Bool -> IO RunResult
+showSkills handlerContext next color reloadFirst = do
         when reloadFirst (refreshSkills True)
         current <- readIORef skillsRef
         invocations <- readIORef skillInvocationsRef
@@ -966,8 +997,17 @@ handleReplLine
         displayInfo (formatSkillsListing False current invocations) $
             Text.putStrLn listing
         next
-    submitExpandedTurn = submitExpandedTurnWithPaste False
-    submitExpandedTurnWithPaste pasted next color original expanded = do
+  where
+    env = handlerContext.handlerSessionEnv
+    refreshSkills = env.sessionRefreshSkills
+    skillsRef = env.sessionSkills
+    skillInvocationsRef = env.sessionSkillInvocations
+    displayInfo = displayReplInfo handlerContext
+
+submitExpandedPrompt
+    :: ReplHandlerContext -> (Bool -> TurnResult -> IO RunResult)
+    -> Bool -> ExpandedTurn
+submitExpandedPrompt handlerContext finishTurn pasted next color original expanded = do
         pendingImages <-
             modifyLiveAttachments conversationRef \imgs -> ([], imgs)
         forM_ fullscreen \runtime ->
@@ -987,19 +1027,127 @@ handleReplLine
                 fullscreenEvent (UiUserSubmitted original)
                 result <- runOneTurn env original skillInputs
                 finishTurn False result
-    runMetaConsoleRequest =
-        handleMetaConsoleRequest
-            handlerContext
-            slashCatalog
-            (submitLine
-                slashCatalog
-                skillInvocations
-                (pure RunQuit)
-                stdoutColor
-                False)
+  where
+    env = handlerContext.handlerSessionEnv
+    conversationRef = env.sessionConversation
+    fullscreen = env.sessionFullscreen
+    render = env.sessionRender
+    fullscreenEvent = emitReplEvent env
+    displayError = displayReplError handlerContext
 
-    continue = continueWith ""
-    chooseReviewTarget =
+submitPrompt
+    :: ReplHandlerContext
+    -> (Bool -> TurnResult -> IO RunResult)
+    -> Bool -> IO RunResult -> Bool -> Text -> IO RunResult
+submitPrompt handlerContext finishTurn pasted next color text = do
+    -- Native Cmd+V of a Finder image often pastes a path rather than
+    -- bitmap bytes. Treat a prompt that is only image path(s) as an attach
+    -- plus in-terminal preview, matching Grok Build's paste chip.
+    pastedImages <- loadImagesFromPastedText text
+    case pastedImages of
+        Just images@(_:_) -> do
+            message <- queueAttachedImages
+                conversationRef
+                env.sessionPreviewId
+                color
+                (isNothing fullscreen)
+                images
+            forM_ fullscreen \runtime ->
+                readLiveAttachments conversationRef
+                    >>= setFullscreenImagePreviews runtime
+            displayReplInfo handlerContext message $
+                Text.putStrLn
+                    (roleMuted color (glyphOk <> message))
+            next
+        _ -> do
+            pendingImages <-
+                modifyLiveAttachments conversationRef \imgs -> ([], imgs)
+            forM_ fullscreen \runtime ->
+                commitFullscreenImagePreviews runtime pendingImages
+            resetRenderPrintedText env.sessionRender
+            let turnInputs =
+                    [ userMessageWithAttachments
+                        text
+                        (map ImageAttachmentItem pendingImages)
+                    ]
+            preparePromptSkillInputsWithPaste
+                env pasted text turnInputs >>= \case
+                    Left err -> do
+                        displayReplError handlerContext err $
+                            Text.hPutStrLn stderr (roleError color err)
+                        next
+                    Right skillInputs -> do
+                        emitReplEvent env (UiUserSubmitted text)
+                        result <- runOneTurn env text skillInputs
+                        finishTurn False result
+  where
+    env = handlerContext.handlerSessionEnv
+    conversationRef = env.sessionConversation
+    fullscreen = env.sessionFullscreen
+
+showWorkingTreeDiff :: ReplHandlerContext -> IO RunResult -> Bool -> IO RunResult
+showWorkingTreeDiff handlerContext next color = do
+    result <-
+        withCommandActivity env "Loading Git diff…" $
+            getGitDiff env.sessionCwd
+    case result of
+        Left err -> do
+            displayError err $
+                Text.hPutStrLn stderr (roleError color err)
+            next
+        Right GitDiffNotRepository -> do
+            let message = "not a Git repository"
+            displayError message $
+                Text.hPutStrLn stderr (roleError color message)
+            next
+        Right (GitDiffOutput diff)
+            | Text.null (Text.strip diff) -> do
+                let message = "No working-tree changes."
+                displayInfo message $
+                    Text.putStrLn
+                        (roleMuted color (glyphSession <> message))
+                next
+            | otherwise -> do
+                displayInfo diff $
+                    Text.putStrLn (colorizeGitDiff color diff)
+                next
+  where
+    env = handlerContext.handlerSessionEnv
+    displayInfo = displayReplInfo handlerContext
+    displayError = displayReplError handlerContext
+
+choosePermissions :: ReplHandlerContext -> IO RunResult -> Bool -> IO RunResult
+choosePermissions handlerContext next color
+    | env.sessionProvider == ClaudeCodeProvider = do
+        let message =
+                "Claude Code permissions are fixed for this provider session; restart with --yolo or --no-yolo."
+        displayInfo message $
+            Text.hPutStrLn stderr (roleMuted color message)
+        next
+    | otherwise = do
+        current <- readIORef env.sessionPolicy
+        requestReplChoice handlerContext
+            "Permissions"
+            "Choose how mutating tools are handled."
+            (approvalPolicyIndex current)
+            approvalPolicyRows >>= \case
+                Nothing -> next
+                Just index -> do
+                    message <-
+                        setApprovalPolicy
+                            env.sessionPolicy
+                            env.sessionProjectRoot
+                            (approvalPolicyAt index)
+                    displayInfo message $
+                        Text.hPutStrLn stderr
+                            (roleMuted color (glyphOk <> message))
+                    next
+  where
+    env = handlerContext.handlerSessionEnv
+    displayInfo = displayReplInfo handlerContext
+
+chooseReviewTarget :: ReplHandlerContext -> IO (Either Text (Maybe ReviewTarget))
+chooseReviewTarget handlerContext =
         requestChoice
             "Review"
             "Select what the agent should review."
@@ -1084,86 +1232,172 @@ handleReplLine
                                     (Right
                                         (ReviewCustom
                                             <$> nonBlank instructions))
+  where
+    cwd = handlerContext.handlerSessionEnv.sessionCwd
     requestChoice = requestReplChoice handlerContext
     requestText = requestReplText handlerContext
-    approvalPolicyRows =
-        [ (label, detail)
-        | (_, label, detail) <- approvalPolicyOptions
-        ]
-    approvalPolicyIndex policy =
-        fromMaybe 0 $
-            findIndex
-                (\(candidate, _, _) -> candidate == policy)
-                approvalPolicyOptions
-    approvalPolicyAt index =
-        case indexMaybe index approvalPolicyOptions of
-            Just (policy, _, _) -> policy
-            Nothing -> PromptMutating
-    indexMaybe index values
-        | index < 0 = Nothing
-        | otherwise =
-            case drop index values of
-                value : _ -> Just value
-                [] -> Nothing
-    nonBlank value
-        | Text.null stripped = Nothing
-        | otherwise = Just stripped
-      where
-        stripped = Text.strip value
-    legacy = withReplSuspended handlerContext
-    fullscreenEvent event = case fullscreen of
-        Nothing -> pure ()
-        Just runtime -> emitUiEvent runtime event
-    syncFullscreenImagePreviews =
-        forM_ fullscreen \runtime ->
-            readLiveAttachments conversationRef
-                >>= setFullscreenImagePreviews runtime
-    displayInfo = displayReplInfo handlerContext
-    displayError = displayReplError handlerContext
-    withReplActivity message action = do
-        case fullscreen of
-            Nothing ->
-                renderEvent render (ActivityUpdated message)
-            Just runtime ->
-                emitUiEvent runtime
-                    (UiSetNotice (Just (progressNotice message)))
-        action `finally`
-            case fullscreen of
-                Nothing -> clearThinking render
-                Just runtime -> emitUiEvent runtime (UiSetNotice Nothing)
-    editPrompt = do
-        initialDraft <- readIORef draftRef
-        outcome <- tryAny do
-            resolveExternalProgram
-                [("VISUAL", "$VISUAL"), ("EDITOR", "$EDITOR")]
-                "vi" >>= \case
-                    Left err -> pure (Left err)
-                    Right program ->
-                        withTemporaryTextFile
-                            "agent-prompt-"
-                            initialDraft
-                            \path ->
-                                runExternalProgramOnFile program path >>= \case
-                                    Left err -> pure (Left err)
-                                    Right () ->
-                                        Right . normalizeEditedText
-                                            <$> Text.readFile path
-        pure $ case outcome of
-            Left exception ->
-                Left
-                    ( "could not edit prompt: "
-                        <> Text.pack (show exception)
-                    )
-            Right result -> result
+    withReplActivity = withCommandActivity handlerContext.handlerSessionEnv
 
-    historyLabel =
-        truncateDisplayText 120 . Text.replace "\n" " ↵ "
+approvalPolicyRows :: [(Text, Text)]
+approvalPolicyRows =
+    [ (label, detail)
+    | (_, label, detail) <- approvalPolicyOptions
+    ]
 
-    listAt index values
-        | index < 0 = Nothing
-        | otherwise = case drop index values of
+approvalPolicyIndex :: ApprovalPolicy -> Int
+approvalPolicyIndex policy =
+    fromMaybe 0 $
+        findIndex
+            (\(candidate, _, _) -> candidate == policy)
+            approvalPolicyOptions
+
+approvalPolicyAt :: Int -> ApprovalPolicy
+approvalPolicyAt index =
+    case indexMaybe index approvalPolicyOptions of
+        Just (policy, _, _) -> policy
+        Nothing -> PromptMutating
+
+indexMaybe :: Int -> [a] -> Maybe a
+indexMaybe index values
+    | index < 0 = Nothing
+    | otherwise =
+        case drop index values of
             value : _ -> Just value
             [] -> Nothing
+
+nonBlank :: Text -> Maybe Text
+nonBlank value
+    | Text.null stripped = Nothing
+    | otherwise = Just stripped
+  where
+    stripped = Text.strip value
+
+emitReplEvent :: SessionEnv -> UiEvent -> IO ()
+emitReplEvent env event = case env.sessionFullscreen of
+    Nothing -> pure ()
+    Just runtime -> emitUiEvent runtime event
+
+withCommandActivity :: SessionEnv -> Text -> IO a -> IO a
+withCommandActivity env message action = do
+    case fullscreen of
+        Nothing ->
+            renderEvent render (ActivityUpdated message)
+        Just runtime ->
+            emitUiEvent runtime
+                (UiSetNotice (Just (progressNotice message)))
+    action `finally`
+        case fullscreen of
+            Nothing -> clearThinking render
+            Just runtime -> emitUiEvent runtime (UiSetNotice Nothing)
+  where
+    fullscreen = env.sessionFullscreen
+    render = env.sessionRender
+
+editCurrentPrompt :: ReplHandlerContext -> IO RunResult -> Bool -> IO RunResult
+editCurrentPrompt handlerContext next color =
+    withReplSuspended handlerContext (editPrompt handlerContext.handlerSessionEnv) >>= \case
+        Left err -> do
+            displayReplError handlerContext err $
+                Text.hPutStrLn stderr (roleError color err)
+            next
+        Right edited -> handlerContext.handlerContinueWith edited
+
+editPrompt :: SessionEnv -> IO (Either Text Text)
+editPrompt env = do
+    initialDraft <- readIORef env.sessionDraft
+    outcome <- tryAny do
+        resolveExternalProgram
+            [("VISUAL", "$VISUAL"), ("EDITOR", "$EDITOR")]
+            "vi" >>= \case
+                Left err -> pure (Left err)
+                Right program ->
+                    withTemporaryTextFile
+                        "agent-prompt-"
+                        initialDraft
+                        \path ->
+                            runExternalProgramOnFile program path >>= \case
+                                Left err -> pure (Left err)
+                                Right () ->
+                                    Right . normalizeEditedText
+                                        <$> Text.readFile path
+    pure $ case outcome of
+        Left exception ->
+            Left
+                ( "could not edit prompt: "
+                    <> Text.pack (show exception)
+                )
+        Right result -> result
+
+historyLabel :: Text -> Text
+historyLabel =
+    truncateDisplayText 120 . Text.replace "\n" " ↵ "
+
+listAt :: Int -> [a] -> Maybe a
+listAt = indexMaybe
+
+compactContext :: ReplHandlerContext -> IO RunResult -> Maybe Text -> IO RunResult
+compactContext handlerContext next focus = do
+    color <- resolveColor stderr
+    result <-
+        withCommandActivity env "Compacting context…" $
+            env.sessionCompact focus
+    case result of
+        Left err -> do
+            displayReplError handlerContext err $
+                Text.hPutStrLn stderr (roleError color err)
+            next
+        Right outcome -> do
+            persistCompactOutcome env focus outcome
+            let statsMessage =
+                    "compacted "
+                        <> Text.pack (show outcome.compactBeforeTokens)
+                        <> " → "
+                        <> Text.pack (show outcome.compactAfterTokens)
+                        <> " tokens ("
+                        <> Text.pack (show (length outcome.compactHistory))
+                        <> " items)"
+            displayReplInfo handlerContext statsMessage $
+                Text.hPutStrLn stderr
+                    (roleMuted color (glyphSession <> statsMessage))
+            next
+  where
+    env = handlerContext.handlerSessionEnv
+
+persistCompactOutcome :: SessionEnv -> Maybe Text -> CompactOutcome -> IO ()
+persistCompactOutcome env focus outcome =
+    case env.sessionPersist of
+        PersistenceDisabled ->
+            emitReplEvent env (UiSystemMessage outcome.compactSummary)
+        PersistenceEnabled slotRef -> do
+            forM_ fullscreen beginFullscreenLiveHistory
+            emitReplEvent env (UiSystemMessage outcome.compactSummary)
+            now <- getCurrentTime
+            handle <- ensureSession slotRef
+            let turn = SessionTurn
+                    { turnAt = now
+                    , turnUserText = compactSessionUserText focus
+                    , turnAssistantText = Just outcome.compactSummary
+                    , turnError = Nothing
+                    , turnResponseId = Nothing
+                    , turnEffect = TranscriptReplace
+                    , turnItems = outcome.compactHistory
+                    , turnDisplayItems = []
+                    -- Compaction response usage is recorded immediately
+                    -- by sessionCompact, including response-level failures.
+                    , turnUsage = Nothing
+                    , turnProviderTelemetry = []
+                    }
+            (handle', turnIndex) <-
+                appendTurnWithMetaUpdateIndexed handle turn
+                    \meta -> meta { metaLastResponseId = Nothing }
+            writeIORef slotRef (PersistenceActive handle')
+            forM_ fullscreen \runtime ->
+                commitFullscreenHistoryTurn
+                    runtime
+                    (sessionHistoryTurn turnIndex turn)
+                    HistoryCommitAppend
+  where
+    fullscreen = env.sessionFullscreen
 
 formatQueuedPrompts :: [Text] -> Text
 formatQueuedPrompts [] = "No prompts are queued."

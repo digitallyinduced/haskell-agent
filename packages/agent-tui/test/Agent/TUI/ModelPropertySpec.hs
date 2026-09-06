@@ -18,6 +18,7 @@ import Agent.TUI.Model
 import Agent.TUI.TextWidth (graphemeClusters)
 import Agent.ToolDispatch
     ( ToolCallResult(..)
+    , ToolCallMode(..)
     , ToolCallKind(..)
     , functionToolCall
     )
@@ -572,7 +573,10 @@ toolEvent command = case command of
         UiLoop (ToolOutputUpdated callId output)
     FinishTool callId output ->
         UiLoop (ToolFinished ToolCallResult
-            { callId
+            { toolResultMode = BlockingToolCall
+            , toolResultImages = []
+            , toolResultOutcome = Nothing
+            , callId
             , output
             , callKind = FunctionCallKind
             })

@@ -77,8 +77,11 @@ spec = describe "native loop event binary encoding" do
             Just encoded -> BS.take 8 encoded `shouldBe` header 4 4
 
     it "marks asynchronous tool results with the forward-compatible flag" do
-        let result = AsyncToolCallResult
+        let result = ToolCallResult
                 { callId = "call-async"
+                , toolResultMode = AsyncToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 , output = "done"
                 , callKind = CustomCallKind
                 }
@@ -89,6 +92,9 @@ spec = describe "native loop event binary encoding" do
     it "encodes truncated tool output with its flag" do
         let result = ToolCallResult
                 { callId = "call-1"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 , output = Text.replicate 8193 "x"
                 , callKind = FunctionCallKind
                 }
@@ -100,6 +106,9 @@ spec = describe "native loop event binary encoding" do
         let secret = "data:image/png;base64,private-screenshot" :: Text.Text
             result = ToolCallResult
                 { callId = "computer-1"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 , output = secret
                 , callKind = ComputerFunctionCallKind
                 }
