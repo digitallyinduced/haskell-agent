@@ -1173,10 +1173,12 @@ spec = do
                                         , Loop.onAsyncToolCall = \_ -> pure ()
                                         , Loop.onRecoveryCheckpoint = writeIORef recovery
                                         }
-                                timeout 5_000_000
+                                result <- timeout 5_000_000
                                     (backend.submitTurnWithCallbacks emptyBackendSnapshot Nothing
                                         [UserMessage "read it"] callbacks)
-                                    `shouldThrow` anyIOException
+                                result `shouldSatisfy` \case
+                                    Just (Left _) -> True
+                                    _ -> False
                         note <- Text.unpack <$> readIORef recovery
                         note `shouldContain` "fake contents"
                         note `shouldContain` "PR #86 opened"
