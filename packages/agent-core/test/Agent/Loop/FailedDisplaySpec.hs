@@ -135,6 +135,78 @@ spec = do
         result <- runLoop config Nothing "hello"
         result `shouldBe` Left (LoopTransport (ConnectionError "down"))
 
+    it "replaces snapshots at their latest positions without losing intervening text" do
+        let call = functionToolCall "c1" "shell_command" "{}"
+            updated = setToolCallArguments "{\"command\":\"pwd\"}" call
+            finished = ToolCallResult
+                "c1" "done" FunctionCallKind BlockingToolCall [] Nothing
+            events =
+                [ ToolStarted call
+                , ToolUpdated call
+                , TextDelta "first"
+                , ToolArgumentsUpdated updated
+                , ToolOutputUpdated "c1" "old"
+                , TextDelta "second"
+                , ToolOutputUpdated "c1" "new"
+                , ToolFinished finished
+                ]
+            backend = Backend \_state _prev _inputs onEvent -> do
+                mapM_ onEvent events
+                pure (Left (ConnectionError "down"))
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionUncommittedDisplayEvents `shouldBe`
+            [ ToolStarted call
+            , TextDelta "first"
+            , ToolArgumentsUpdated updated
+            , TextDelta "second"
+            , ToolFinished finished
+            ]
+
+    it "scopes retraction and discard to the latest attempt when tool IDs repeat" do
+        let call = functionToolCall "same" "shell_command" "{}"
+            events =
+                [ ToolStarted call
+                , ToolOutputUpdated "same" "retained"
+                , ResponseRestarted "retry"
+                , ToolStarted call
+                , ToolOutputUpdated "same" "removed"
+                , ToolRetracted "same"
+                , TextDelta "discarded"
+                , ResponseAttemptDiscarded
+                , ResponseAttemptDiscarded
+                , ToolStarted call
+                , ToolOutputUpdated "same" "latest"
+                ]
+            backend = Backend \_state _prev _inputs onEvent -> do
+                mapM_ onEvent events
+                pure (Left (ConnectionError "down"))
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionUncommittedDisplayEvents `shouldBe`
+            [ ToolStarted call
+            , ToolOutputUpdated "same" "retained"
+            , ResponseRestarted "retry"
+            , ToolStarted call
+            , ToolOutputUpdated "same" "latest"
+            ]
+
+    it "resumes the latest text chunk after retracting a trailing tool" do
+        let call = functionToolCall "c1" "shell_command" "{}"
+            backend = Backend \_state _prev _inputs onEvent -> do
+                mapM_ onEvent
+                    [ TextDelta "before"
+                    , ToolStarted call
+                    , ToolOutputUpdated "c1" "removed"
+                    , ToolRetracted "c1"
+                    , TextDelta " after"
+                    ]
+                pure (Left (ConnectionError "down"))
+        config <- testConfig backend
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionUncommittedDisplayEvents
+            `shouldBe` [TextDelta "before after"]
+
     it "bounds completed tool output retained after failure" do
         let oversized =
                 Text.replicate (3 * 1024 * 1024) "x" <> "newest-tail"

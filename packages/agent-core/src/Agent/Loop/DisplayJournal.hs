@@ -1,7 +1,8 @@
 -- | Display-only history for uncommitted response attempts, and bounded
 -- delivery of live events. This history must never enter backend/model state.
 module Agent.Loop.DisplayJournal
-    ( DisplayJournalEntry
+    ( DisplayJournal
+    , emptyDisplayJournal
     , replayableDisplayEvent
     , recordDisplayEvent
     , displayEventsFromJournal
@@ -18,6 +19,7 @@ import Agent.Loop.EventPump
     )
 import Agent.Loop.Output (LoopEvent(..))
 import Agent.ToolDispatch (ToolCallResult(..), setToolCallArguments)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -35,104 +37,97 @@ replayableDisplayEvent = \case
     ToolRetracted _ -> True
     _ -> False
 
--- The journal and each text chunk list are stored newest-first. Keeping
--- adjacent deltas as chunks avoids repeatedly copying the accumulated prefix.
--- A restart is the boundary between the current provider attempt and older
--- attempts that remain visible.
-data DisplayJournalEntry
-    = DisplayTextChunks ![Text]
-    | DisplayEvent !LoopEvent
+-- Admission remains a cheap chunk/event cons operation: successful responses
+-- clear the journal without projecting it. Normalize only when failed output
+-- is retained. Entries and text chunks are newest-first. Tails deliberately
+-- remain lazy, preserving prefix release and sharing during retractions.
+data DisplayJournal
+    = EmptyDisplayJournal
+    | DisplayJournalText ![Text] DisplayJournal
+    | DisplayJournalEvent !LoopEvent DisplayJournal
+
+emptyDisplayJournal :: DisplayJournal
+emptyDisplayJournal = EmptyDisplayJournal
 
 recordDisplayEvent
     :: LoopEvent
-    -> [DisplayJournalEntry]
-    -> [DisplayJournalEntry]
-recordDisplayEvent event events = case event of
-    TextDelta delta ->
-        case events of
-            DisplayTextChunks chunks : rest ->
-                DisplayTextChunks (delta : chunks) : rest
-            _ -> DisplayTextChunks [delta] : events
-    ToolUpdated call ->
-        DisplayEvent event : removeCurrentToolUpdates call.callId events
-    ToolArgumentsUpdated call ->
-        DisplayEvent event : removeCurrentToolUpdates call.callId events
+    -> DisplayJournal
+    -> DisplayJournal
+recordDisplayEvent event journal = case event of
+    TextDelta delta -> case journal of
+        DisplayJournalText chunks rest ->
+            DisplayJournalText (delta : chunks) rest
+        _ -> DisplayJournalText [delta] journal
     ToolOutputUpdated callId output ->
-        DisplayEvent (ToolOutputUpdated callId (boundLoopToolOutput output))
-            : removeCurrentToolOutput callId events
+        DisplayJournalEvent
+            (ToolOutputUpdated callId (boundLoopToolOutput output)) journal
     ToolFinished result ->
-        DisplayEvent
-            (ToolFinished
-                result
-                    { output = boundLoopToolOutput result.output
-                    })
-            : removeCurrentToolOutput result.callId events
-    ToolRetracted callId ->
-        removeCurrentToolEvents callId events
-    _ -> DisplayEvent event : events
+        DisplayJournalEvent
+            (ToolFinished result { output = boundLoopToolOutput result.output }) journal
+    ToolRetracted callId -> retractRawTool callId journal
+    _ -> DisplayJournalEvent event journal
 
-displayEventsFromJournal :: [DisplayJournalEntry] -> [LoopEvent]
-displayEventsFromJournal =
-    map entryToEvent . reverse
+-- Retractions keep the former lazy-filter behavior: forcing the new journal
+-- immediately releases a removed leading prefix, and the remaining tail is
+-- filtered as demanded. Do not retain retracted payloads in a raw operation log.
+-- Distinct text nodes stay distinct, even if filtering makes them adjacent.
+retractRawTool :: Text -> DisplayJournal -> DisplayJournal
+retractRawTool callId = go
   where
-    entryToEvent = \case
-        DisplayTextChunks chunks ->
-            TextDelta (Text.concat (reverse chunks))
-        DisplayEvent event -> event
+    go EmptyDisplayJournal = EmptyDisplayJournal
+    go boundary@(DisplayJournalEvent (ResponseRestarted _) _) = boundary
+    go (DisplayJournalText chunks rest) =
+        DisplayJournalText chunks (go rest)
+    go (DisplayJournalEvent event rest)
+        | belongsToTool event = go rest
+        | otherwise = DisplayJournalEvent event (go rest)
+    belongsToTool = \case
+        ToolStarted call -> call.callId == callId
+        ToolUpdated call -> call.callId == callId
+        ToolArgumentsUpdated call -> call.callId == callId
+        ToolOutputUpdated identifier _ -> identifier == callId
+        ToolFinished result -> result.callId == callId
+        _ -> False
+
+-- One newest-first pass keeps the latest snapshot of each kind per call ID.
+-- A finish suppresses earlier output snapshots, but is itself always retained.
+-- Sets reset at restart boundaries: providers may reuse IDs on later attempts.
+-- Consing retained entries yields chronological output without an ordered map.
+-- Raw text nodes remain distinct even when retraction removed their separator.
+displayEventsFromJournal :: DisplayJournal -> [LoopEvent]
+displayEventsFromJournal journal = go journal Set.empty Set.empty []
+  where
+    go EmptyDisplayJournal _ _ result = result
+    go (DisplayJournalText chunks rest) updates outputs result =
+        go rest updates outputs
+            (TextDelta (Text.concat (reverse chunks)) : result)
+    go (DisplayJournalEvent event rest) updates outputs result =
+        case event of
+            ToolUpdated call -> keepUpdate call.callId
+            ToolArgumentsUpdated call -> keepUpdate call.callId
+            ToolOutputUpdated callId _
+                | Set.member callId outputs -> go rest updates outputs result
+                | otherwise ->
+                    go rest updates (Set.insert callId outputs) (event : result)
+            ToolFinished callResult ->
+                go rest updates (Set.insert callResult.callId outputs) (event : result)
+            ResponseRestarted _ ->
+                go rest Set.empty Set.empty (event : result)
+            _ -> go rest updates outputs (event : result)
+      where
+        keepUpdate callId
+            | Set.member callId updates = go rest updates outputs result
+            | otherwise =
+                go rest (Set.insert callId updates) outputs (event : result)
 
 discardCurrentDisplayAttempt
-    :: [DisplayJournalEntry]
-    -> [DisplayJournalEntry]
-discardCurrentDisplayAttempt =
-    dropWhile \case
-        DisplayEvent (ResponseRestarted _) -> False
-        _ -> True
-
-removeCurrentToolUpdates
-    :: Text
-    -> [DisplayJournalEntry]
-    -> [DisplayJournalEntry]
-removeCurrentToolUpdates callId =
-    filterCurrentAttempt \case
-        DisplayEvent (ToolUpdated call) -> call.callId /= callId
-        DisplayEvent (ToolArgumentsUpdated call) -> call.callId /= callId
-        _ -> True
-
-removeCurrentToolOutput
-    :: Text
-    -> [DisplayJournalEntry]
-    -> [DisplayJournalEntry]
-removeCurrentToolOutput callId =
-    filterCurrentAttempt \case
-        DisplayEvent (ToolOutputUpdated identifier _) ->
-            identifier /= callId
-        _ -> True
-
-removeCurrentToolEvents
-    :: Text
-    -> [DisplayJournalEntry]
-    -> [DisplayJournalEntry]
-removeCurrentToolEvents callId =
-    filterCurrentAttempt \case
-        DisplayEvent (ToolStarted call) -> call.callId /= callId
-        DisplayEvent (ToolUpdated call) -> call.callId /= callId
-        DisplayEvent (ToolArgumentsUpdated call) -> call.callId /= callId
-        DisplayEvent (ToolOutputUpdated identifier _) ->
-            identifier /= callId
-        DisplayEvent (ToolFinished result) -> result.callId /= callId
-        _ -> True
-
-filterCurrentAttempt
-    :: (DisplayJournalEntry -> Bool)
-    -> [DisplayJournalEntry]
-    -> [DisplayJournalEntry]
-filterCurrentAttempt keep = go
-  where
-    go [] = []
-    go allEvents@(DisplayEvent (ResponseRestarted _) : _) = allEvents
-    go (event : rest)
-        | keep event = event : go rest
-        | otherwise = go rest
+    :: DisplayJournal
+    -> DisplayJournal
+discardCurrentDisplayAttempt = \case
+    EmptyDisplayJournal -> EmptyDisplayJournal
+    boundary@(DisplayJournalEvent (ResponseRestarted _) _) -> boundary
+    DisplayJournalText _ rest -> discardCurrentDisplayAttempt rest
+    DisplayJournalEvent _ rest -> discardCurrentDisplayAttempt rest
 
 data LoopEventCoalescingKey
     = AssistantTextDelta
