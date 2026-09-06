@@ -110,6 +110,11 @@ type CallbackSubmitTurn =
 data BackendCallbacks = BackendCallbacks
     { onLoopEvent :: !(LoopEvent -> IO ())
     , onAsyncToolCall :: !(ToolCall -> IO ())
+    -- | Replace the current attempt's interruption summary using only
+    -- validated, complete provider messages. This is not a display-event
+    -- channel: partial deltas, reasoning and raw protocol data do not belong
+    -- here. The loop publishes the bounded summary only if submission fails.
+    , onRecoveryCheckpoint :: !(Text -> IO ())
     }
 
 data Backend = BackendInternal
@@ -138,13 +143,15 @@ backendWithCallbacks callbackSubmit =
         callbackSubmit snapshot previous inputs BackendCallbacks
             { onLoopEvent = onEvent
             , onAsyncToolCall = const (pure ())
+            , onRecoveryCheckpoint = const (pure ())
             }
 
 data BackendStateStore = BackendStateStore
     { readBackendState :: !(IO BackendSnapshot)
-      -- | Publish a completed provider response for live observers and later
-      -- tool continuations. Higher-level turn policy may still deliberately
-      -- roll this state back after cancellation or terminal failure.
+      -- | Publish a completed provider response, or an explicitly attributed
+      -- interruption checkpoint, for live observers and later continuations.
+      -- Higher-level turn policy may still deliberately roll this state back
+      -- after cancellation or terminal failure.
       --
       -- The returned snapshot is the authoritative committed value, including
       -- the store-assigned monotonic revision.

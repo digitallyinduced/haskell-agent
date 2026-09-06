@@ -1427,7 +1427,7 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
         _ -> False
 
     compactThenSubmit tokenLimit oldTokens oldSnapshot oldHistory inputs
-            callbacks@(BackendCallbacks emitLoopEvent _) = do
+            callbacks@(BackendCallbacks emitLoopEvent _ _) = do
         emitLoopEvent (ActivityUpdated "Compacting context…")
         -- Tool results complete protocol units that are already represented by
         -- calls in oldHistory. Put those results behind their calls before

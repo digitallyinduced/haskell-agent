@@ -47,6 +47,26 @@ spec = describe "frontend-neutral turn policy" do
         interruptedTurnItems prepared execution (TurnAbortedByFailure "offline")
             `shouldBe` committed <> [toolResultToItem result]
 
+    it "retains explicit interrupted-work context without promoting display activity" do
+        let recovery = turnInputsToItems
+                [UserMessage "<turn_aborted>\n<interrupted_work>\nAssistant reported: PR #86 opened.\n</interrupted_work>\n</turn_aborted>"]
+            committed = inputOnlyTurnItems prepared <> recovery
+            execution = failedExecution
+                { executionState = history <> committed
+                , executionProgress = ResponseCommitted
+                , executionPendingInputs = []
+                , executionUncommittedAssistantText = Just "unfinished answer"
+                , executionUncommittedDisplayEvents = [TextDelta "unfinished answer"]
+                }
+            retained = interruptedTurnItems prepared execution TurnAbortedByUser
+            resumed = applyConversationPatch
+                (finishConversation prepared (ConversationFailed retained))
+                runningState
+        retained `shouldBe` committed
+        resumed.conversationTranscript `shouldBe` history <> committed
+        resumed.conversationPreviousResponseId `shouldBe` Nothing
+        uncommittedDisplayItems execution `shouldSatisfy` (not . null)
+
     it "invalidates a failed response chain without losing newer usage" do
         let retained = inputOnlyTurnItems prepared
             state = applyConversationPatch
