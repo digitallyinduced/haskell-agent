@@ -32,6 +32,7 @@ module Agent.Server.Types
     , ServerEvent(..)
     , EventSubscription(..)
     , ApiError(..)
+    , RepositoryDescriptor(..)
     , CreateSessionRequest(..)
     , PatchSessionRequest(..)
     , ForkSessionRequest(..)
@@ -339,11 +340,39 @@ data ApiError = ApiError
     }
     deriving (Eq, Show)
 
+data RepositoryDescriptor = RepositoryDescriptor
+    { repositoryFullName :: !Text
+    , repositoryCloneUrl :: !Text
+    , repositoryDefaultBranch :: !Text
+    , repositoryCredentialBrokerUrl :: !Text
+    , repositoryCredentialLease :: !Text
+    }
+    deriving (Eq, Show)
+
+instance FromJSON RepositoryDescriptor where
+    parseJSON = withObject "RepositoryDescriptor" \value -> do
+        rejectUnknownFields
+            "RepositoryDescriptor"
+            [ "fullName"
+            , "cloneUrl"
+            , "defaultBranch"
+            , "credentialBrokerUrl"
+            , "credentialLease"
+            ]
+            value
+        RepositoryDescriptor
+            <$> value .: "fullName"
+            <*> value .: "cloneUrl"
+            <*> value .: "defaultBranch"
+            <*> value .: "credentialBrokerUrl"
+            <*> value .: "credentialLease"
+
 data CreateSessionRequest = CreateSessionRequest
     { createSessionModel :: !(Maybe Text)
     , createSessionCwd :: !(Maybe FilePath)
     , createSessionEffort :: !(Maybe Text)
     , createSessionTitle :: !(Maybe Text)
+    , createSessionRepository :: !(Maybe RepositoryDescriptor)
     }
     deriving (Eq, Show)
 
@@ -351,13 +380,14 @@ instance FromJSON CreateSessionRequest where
     parseJSON = withObject "CreateSessionRequest" \value -> do
         rejectUnknownFields
             "CreateSessionRequest"
-            ["model", "cwd", "effort", "title"]
+            ["model", "cwd", "effort", "title", "repository"]
             value
         CreateSessionRequest
             <$> value .:? "model"
             <*> value .:? "cwd"
             <*> value .:? "effort"
             <*> value .:? "title"
+            <*> value .:? "repository"
 
 data PatchSessionRequest = PatchSessionRequest
     { patchSessionTitle :: !(Maybe Text)

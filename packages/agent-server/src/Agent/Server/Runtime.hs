@@ -94,6 +94,7 @@ import Agent.Server.Event
 import Agent.Server.Identifier (newUUIDv7Text)
 import Agent.Server.Runtime.SessionCodec
 import Agent.Server.Runtime.Attachments (withMaterializedTurnFiles)
+import Agent.Server.RepositoryCheckout qualified as RepositoryCheckout
 import Agent.Server.Runtime.TurnStore qualified as TurnStore
 import Agent.Server.Sandbox
     ( TenantSandbox
@@ -927,7 +928,8 @@ listSessions environment boundary archiveFilter rawCursor limit =
                                                     (\(meta, archived) ->
                                                         sessionValue
                                                             archived
-                                                            meta)
+                                                            meta
+                                                            Nothing)
                                                     sessions
                                             , "nextCursor"
                                                 .= fmap encodeCursor
@@ -942,26 +944,26 @@ createSessionForBoundary
     -> CreateSessionRequest
     -> IO (Either ApiError Value)
 createSessionForBoundary environment boundary request =
-    resolveTenantWorkspacePath
+    resolveCreateSessionWorkspace
         environment.environmentConfig
         boundary.accessTenantId
-        request.createSessionCwd >>= \case
+        request >>= \case
             Left err -> pure (Left err)
-            Right cwd ->
+            Right (cwd, cleanupOnFailure, repositoryBranch) ->
                 loadModelOptions environment boundary cwd >>= \case
-                    Left err -> pure (Left err)
+                    Left err -> cleanupOnFailure >> pure (Left err)
                     Right (catalog, options) ->
                         case selectModel
                             boundary
                             catalog
                             options
                             request.createSessionModel of
-                                Left err -> pure (Left err)
+                                Left err -> cleanupOnFailure >> pure (Left err)
                                 Right option ->
                                     case resolveEffort
                                         option.modelTarget.targetProvider
                                         request.createSessionEffort of
-                                            Left err -> pure (Left err)
+                                            Left err -> cleanupOnFailure >> pure (Left err)
                                             Right effort -> do
                                                 created <- tryAny $
                                                     createSession SessionCreate
@@ -986,16 +988,57 @@ createSessionForBoundary environment boundary request =
                                                                 (const True)
                                                                 request.createSessionTitle
                                                         }
+                                                case created of
+                                                    Left _ -> cleanupOnFailure
+                                                    Right _ -> pure ()
                                                 pure case created of
                                                     Left _ ->
-                                                        Left
-                                                            (internalApiError
-                                                                "could not create the session")
+                                                        Left (internalApiError "could not create the session")
                                                     Right handle ->
-                                                        Right
-                                                            (sessionValue
-                                                                False
-                                                                handle.sessionMeta)
+                                                        Right (sessionValue False handle.sessionMeta repositoryBranch)
+
+resolveCreateSessionWorkspace
+    :: ResolvedServerConfig
+    -> TenantId
+    -> CreateSessionRequest
+    -> IO (Either ApiError (FilePath, IO (), Maybe Text))
+resolveCreateSessionWorkspace config tenantId request =
+    case request.createSessionRepository of
+        Nothing ->
+            fmap (, pure (), Nothing) <$> resolveTenantWorkspacePath config tenantId request.createSessionCwd
+        Just descriptor
+            | Just _ <- request.createSessionCwd ->
+                pure $
+                    Left ApiError
+                        { apiErrorStatus = 422
+                        , apiErrorCode = "repository_with_cwd"
+                        , apiErrorMessage = "repository and cwd cannot be supplied together"
+                        , apiErrorDetails = Nothing
+                        }
+            | otherwise ->
+                resolveTenantWorkspacePath config tenantId Nothing >>= \case
+                    Left err -> pure (Left err)
+                    Right workspaceRoot -> do
+                        correlation <- newUUIDv7Text
+                        RepositoryCheckout.prepareRepositoryCheckout
+                            workspaceRoot
+                            correlation
+                            descriptor >>= \case
+                                Left message ->
+                                    pure $
+                                        Left ApiError
+                                            { apiErrorStatus = 422
+                                            , apiErrorCode = "repository_checkout_failed"
+                                            , apiErrorMessage = message
+                                            , apiErrorDetails = Nothing
+                                            }
+                                Right checkout ->
+                                    pure $
+                                        Right
+                                            ( checkout.checkoutPath
+                                            , checkout.cleanupCheckout
+                                            , Just checkout.checkoutBranch
+                                            )
 
 getSessionForBoundary
     :: RuntimeEnvironment
@@ -1006,7 +1049,7 @@ getSessionForBoundary environment boundary sessionId =
     fmap
         (fmap
             (\(meta, archived) ->
-                sessionValue archived meta)) $
+                sessionValue archived meta Nothing)) $
         loadAuthorizedSession environment boundary sessionId
 
 patchSessionForBoundary
@@ -1055,12 +1098,18 @@ deleteSessionForBoundary
 deleteSessionForBoundary environment boundary sessionId =
     loadAuthorizedMeta environment boundary sessionId >>= \case
         Left err -> pure (Left err)
-        Right _ ->
-            first sessionOperationError
-                <$> deleteSession
-                    (trustedPool environment.environmentStore)
-                    environment.environmentRoot
-                    sessionId
+        Right meta -> do
+            deleted <-
+                first sessionOperationError
+                    <$> deleteSession
+                        (trustedPool environment.environmentStore)
+                        environment.environmentRoot
+                        sessionId
+            case deleted of
+                Right () ->
+                    RepositoryCheckout.cleanupRepositoryCheckout (unsafeToFilePath meta.metaCwd)
+                Left _ -> pure ()
+            pure deleted
 
 sessionHistoryForBoundary
     :: RuntimeEnvironment
@@ -1163,7 +1212,8 @@ forkSessionForBoundary environment boundary sessionId request =
                                         Right
                                             (sessionValue
                                                 False
-                                                forked.sessionMeta)
+                                                forked.sessionMeta
+                                                Nothing)
 
 runTurn
     :: RuntimeEnvironment

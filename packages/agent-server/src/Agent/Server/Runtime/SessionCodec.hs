@@ -27,8 +27,8 @@ import Data.Text qualified as Text
 import Data.Time.Clock (UTCTime)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 
-sessionValue :: Bool -> SessionMeta -> Value
-sessionValue archived meta = object
+sessionValue :: Bool -> SessionMeta -> Maybe Text -> Value
+sessionValue archived meta repositoryWorkingBranch = object
     [ "id" .= meta.metaId
     , "createdAt" .= meta.metaCreatedAt
     , "updatedAt" .= meta.metaUpdatedAt
@@ -42,6 +42,7 @@ sessionValue archived meta = object
     , "title" .= meta.metaTitle
     , "titleIsManual" .= meta.metaTitleIsManual
     , "archived" .= archived
+    , "repositoryWorkingBranch" .= repositoryWorkingBranch
     , "usage" .= object
         [ "input" .= meta.metaInputTokens
         , "output" .= meta.metaOutputTokens
@@ -62,7 +63,7 @@ modelOptionValue option = object
 
 historyValue :: SessionMeta -> Bool -> SessionTurnPage -> Value
 historyValue meta archived page = object
-    [ "session" .= sessionValue archived meta
+    [ "session" .= sessionValue archived meta Nothing
     , "data" .=
         [ object
             [ "index" .= index
