@@ -10,6 +10,7 @@ import Agent.Dialect (DialectId(..))
 import Agent.Loop (TokenUsage(..))
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
+import Agent.Runtime.TurnStateSpec (managedRecoveryRoundTrip)
 import Agent.Store.Postgres (trustedPool)
 import qualified Agent.Store.Postgres.Session as Store
 import Agent.Tools.TaskPlan
@@ -34,6 +35,13 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "interrupted tool recovery persistence" do
+        it "persists completed batch results and resumes without rerunning them after cancellation" $
+            managedRecoveryRoundTrip persistRecovery False
+
+        it "persists attributed precommit work and resumes without replaying failed provider output" $
+            managedRecoveryRoundTrip persistRecovery True
+
     describe "PostgreSQL session persistence" do
         it "materializes and round-trips task plans through persistence hooks" $
             withTempStore \store root -> do
@@ -435,6 +443,94 @@ spec = do
                 loadSession pool root handle.sessionMeta.metaId
                     `shouldReturn`
                         Left ("session not found: " <> handle.sessionMeta.metaId)
+
+        it "round-trips interrupted Claude recovery and images without promoting display-only activity" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                    create = (testCreate pool root)
+                        { createTarget = ModelTarget
+                            { targetProvider = ClaudeCodeProvider
+                            , targetConnectionId = "claude-code"
+                            , targetModelId = "claude-fable-5-1"
+                            , targetWireModelId = "claude-fable-5-1"
+                            , targetDialect = ClaudeCodeDialect
+                            }
+                        }
+                    message role parts = MessageItem ResponseMessage
+                        { messageId = Nothing
+                        , content = MessageContentParts parts
+                        , role
+                        , status = Nothing
+                        , phase = Nothing
+                        , passthrough = Nothing
+                        }
+                    imageUrls =
+                        [ "data:image/png;base64,Zmlyc3Q="
+                        , "data:image/png;base64,c2Vjb25k"
+                        , "data:image/png;base64,dGhpcmQ="
+                        ]
+                    request = message RoleUser
+                        (InputTextPart "redesign using these references" Nothing :
+                            [ InputImagePart Nothing Nothing (Just url) Nothing
+                            | url <- imageUrls
+                            ])
+                    recovery = message RoleUser
+                        [InputTextPart
+                            ("<turn_aborted>\nObserved completed tool result: PR #86 opened.\n"
+                                <> "Verify external state before repeating actions.\n</turn_aborted>")
+                            Nothing]
+                    partial = message RoleAssistant
+                        [OutputTextPart "unfinished display-only speculation" Nothing Nothing]
+                    interrupted = SessionTurn
+                        { turnAt = fixedTime
+                        , turnUserText = "redesign using these references"
+                        , turnAssistantText = Just "unfinished display-only speculation"
+                        , turnError = Just "cancelled"
+                        , turnResponseId = Nothing
+                        , turnItems = [request, recovery]
+                        , turnDisplayItems = [partial]
+                        , turnUsage = Nothing
+                        , turnEffect = TranscriptAppend
+                        , turnProviderTelemetry = []
+                        }
+                initial <- createSession create
+                saved <- appendTurn initial interrupted
+                let sessionId = saved.sessionMeta.metaId
+                loadSession pool root sessionId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right (meta, turns) -> do
+                        meta.metaLastResponseId `shouldBe` Nothing
+                        map (.turnItems) turns `shouldBe` [[request, recovery]]
+                        map (.turnDisplayItems) turns `shouldBe` [[partial]]
+                        turns `shouldBe` [interrupted]
+                -- A later successful turn must neither promote the failure
+                -- display journal nor duplicate the historical images/note.
+                let continued = interrupted
+                        { turnUserText = "go"
+                        , turnAssistantText = Just "Verified PR #86 already exists."
+                        , turnError = Nothing
+                        , turnResponseId = Just "new-claude-session"
+                        , turnItems =
+                            [ message RoleUser [InputTextPart "go" Nothing]
+                            , message RoleAssistant
+                                [OutputTextPart "Verified PR #86 already exists." Nothing Nothing]
+                            ]
+                        , turnDisplayItems = []
+                        }
+                resumed <- loadSessionHandle pool root sessionId >>= \case
+                    Left err -> fail (Text.unpack err)
+                    Right (handle, turns) -> do
+                        turns `shouldBe` [interrupted]
+                        pure handle
+                _ <- appendTurn resumed continued
+                loadSession pool root sessionId >>= \case
+                    Left err -> expectationFailure (Text.unpack err)
+                    Right (meta, turns) -> do
+                        meta.metaLastResponseId `shouldBe` Just "new-claude-session"
+                        concatMap (.turnItems) turns
+                            `shouldBe` [request, recovery] <> continued.turnItems
+                        concatMap (.turnDisplayItems) turns `shouldBe` [partial]
+                        turns `shouldBe` [interrupted, continued]
 
         it "publishes rewind branches while preserving checkpoints and usage" $
             withTempStore \store root -> do
@@ -951,3 +1047,25 @@ spec = do
                 _ <- newActivePersistence handle
                 doesDirectoryExist handle.sessionTempDir `shouldReturn` True
                 modeOf handle.sessionTempDir `shouldReturn` 0o700
+
+persistRecovery :: [ResponseItem] -> [ResponseItem] -> IO [ResponseItem]
+persistRecovery items displayItems =
+    withTempStore \store root -> do
+        handle <- createSession (testCreate (trustedPool store) root)
+        let persisted = SessionTurn
+                { turnAt = fixedTime
+                , turnUserText = "fix it"
+                , turnAssistantText = Nothing
+                , turnError = Just "interrupted"
+                , turnResponseId = Nothing
+                , turnItems = items
+                , turnDisplayItems = displayItems
+                , turnUsage = Nothing
+                , turnEffect = TranscriptAppend
+                , turnProviderTelemetry = []
+                }
+        saved <- appendTurn handle persisted
+        (_, turns) <- loadSessionHandle (trustedPool store) root saved.sessionMeta.metaId
+            >>= either (fail . Text.unpack) pure
+        turns `shouldBe` [persisted]
+        pure (concatMap (.turnItems) turns)

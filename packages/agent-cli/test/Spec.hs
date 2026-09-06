@@ -30,6 +30,7 @@ import Text.Read (readMaybe)
 import qualified Agent.CLI.ActiveAccountSpec as ActiveAccountSpec
 import qualified Agent.CLI.AccountSelectionSpec as AccountSelectionSpec
 import qualified Agent.CLI.AgentSessionsSpec as AgentSessionsSpec
+import qualified Agent.CLI.AgentSessionsWaitGraphSpec as AgentSessionsWaitGraphSpec
 import qualified Agent.CLI.AgentViewportSpec as AgentViewportSpec
 import qualified Agent.CLI.AgentViewportRuntimeSpec as AgentViewportRuntimeSpec
 import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
@@ -110,6 +111,9 @@ import qualified Agent.CLI.TUITranscriptSpec as TUITranscriptSpec
 import qualified Agent.CLI.UsageSpec as UsageSpec
 import qualified Agent.CLI.WebLspSpec as WebLspSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
+import qualified Agent.CLI.WorktreeAdminSpec as WorktreeAdminSpec
+import qualified Agent.CLI.Worktree.SnapshotSpec as SnapshotSpec
+import qualified Agent.CLI.Worktree.ProvenanceSpec as ProvenanceSpec
 main :: IO ()
 main = do
     shard <- lookupEnv "AGENT_CLI_TEST_SHARD"
@@ -159,6 +163,7 @@ specs = do
     AgentViewportSpec.spec
     AgentViewportRuntimeSpec.spec
     AgentSessionsSpec.spec
+    AgentSessionsWaitGraphSpec.spec
     ApprovalSpec.spec
     ArtifactSpec.spec
     AuthSpec.spec
@@ -237,6 +242,9 @@ specs = do
     UsageSpec.spec
     WebLspSpec.spec
     WorktreeSpec.spec
+    WorktreeAdminSpec.spec
+    ProvenanceSpec.spec
+    SnapshotSpec.spec
 
 runShards :: Int -> IO ()
 runShards count = do

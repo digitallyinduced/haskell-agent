@@ -61,6 +61,7 @@ import Agent.CLI.Session
 import Agent.CLI.Session.Selection
     ( handleConversationSearch, handleResume )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.SessionTitle
     ( invalidateSessionTitles, requestSessionTitle )
 import Agent.CLI.Status ( formatTokenUsageOrZero )
@@ -591,7 +592,7 @@ handleDeleteAction runtime = do
                                 pure
                                     (RunDeleteSession
                                         handle.sessionMeta.metaId
-                                        env.sessionCwd)
+                                        env.sessionWorkspace.cwd)
 
 handleForkAction
     :: SessionActionRuntime
@@ -627,7 +628,7 @@ handleForkAction runtime request = do
                                                     createManagedWorktreeWithProgress
                                                         (report
                                                             . worktreeProgressMessage)
-                                                        env.sessionHome
+                                                        env.sessionWorkspace.home
                                                         source.sessionMeta.metaCwd
                                                     >>= pure . fmap
                                                         (\path ->
@@ -752,7 +753,7 @@ handleShowSessionInfoAction runtime = do
                         <> dialectSlug (dialectId env.sessionDialect)
                    , "effort: "
                         <> reasoningEffortText (currentEffort params)
-                   , "cwd: " <> toText env.sessionCwd
+                   , "cwd: " <> toText env.sessionWorkspace.cwd
                    , "shell: " <> sessionShellModeText shellMode
                    , "tokens: " <> usageText
                    , "tools: "
@@ -796,14 +797,14 @@ handleAfkAction runtime rawTarget = do
                             AfkLocal ->
                                 handoffLocal
                                     handle.sessionMeta.metaId
-                                    env.sessionCwd >>= \case
+                                    env.sessionWorkspace.cwd >>= \case
                                         Left err -> failAfk err
                                         Right message ->
                                             finishAfk message
                             AfkRemote host path ->
                                 loadSession
                                     env.sessionDatabasePool
-                                    (sessionsRoot env.sessionHome)
+                                    (sessionsRoot env.sessionWorkspace.home)
                                     handle.sessionMeta.metaId
                                     >>= \case
                                         Left err -> failAfk err
@@ -838,8 +839,8 @@ handleWorktreeAction runtime = do
     result <- runtimeWithReplActivity runtime \report ->
         createManagedWorktreeWithProgress
             (report . worktreeProgressMessage)
-            env.sessionHome
-            env.sessionCwd
+            env.sessionWorkspace.home
+            env.sessionWorkspace.cwd
     case result of
         Left err -> do
             color <- resolveColor stderr

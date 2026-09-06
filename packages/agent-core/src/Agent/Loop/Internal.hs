@@ -23,9 +23,10 @@ import Agent.Loop.EventPump
     , waitEventPumpFailure
     )
 import Agent.Loop.Input
+import Agent.Loop.InputItems (turnInputsToItems)
 import Agent.Loop.Output
 import Agent.Loop.TokenUsage
-import Agent.Responses.Types (ResponseItem)
+import Agent.Responses.Types
 import Agent.Telemetry (TurnTelemetry)
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -53,7 +54,7 @@ import Control.Concurrent.Async
     , waitCatch
     , withAsync
     )
-import Control.Concurrent.MVar (newMVar, withMVar)
+import Control.Concurrent.MVar (modifyMVar, modifyMVar_, newMVar, withMVar)
 import Control.Concurrent.STM
     ( STM
     , TMVar
@@ -65,11 +66,13 @@ import Control.Concurrent.STM
     , newEmptyTMVar
     , newEmptyTMVarIO
     , newTQueueIO
+    , newTVar
     , newTVarIO
     , putTMVar
     , readTMVar
     , readTQueue
     , readTVar
+    , retry
     , throwSTM
     , tryPutTMVar
     , tryReadTMVar
@@ -83,9 +86,12 @@ import Control.Exception.Safe
     , displayException
     , isAsyncException
     , mask
+    , onException
     , tryAny
     )
 import Control.Monad (when)
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
@@ -93,8 +99,11 @@ import qualified Data.IntSet as IntSet
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (catMaybes)
+import Data.List (sortOn)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 import System.Timeout (timeout)
 
 maxEmptyContinuations :: Int
@@ -109,6 +118,8 @@ normalizeBackendSnapshotImages snapshot =
 
 data LoopProgress
     = NoResponseCommitted
+    -- Includes a provider's explicit recovery context. Display deltas alone
+    -- never advance the committed checkpoint.
     | ResponseCommitted
     deriving (Eq, Show)
 
@@ -300,9 +311,10 @@ data LoopRuntime = LoopRuntime
     , loopRuntimeAsyncToolManager :: Maybe AsyncToolManager
     , loopRuntimeProgressRef :: IORef (BackendSnapshot, LoopProgress)
     , loopRuntimePendingRef :: IORef [TurnInput]
+    , loopRuntimePendingSteeringRef :: IORef Int
     , loopRuntimeUncommittedTextRef :: IORef ([[Text]], [Text])
     , loopRuntimeUncommittedDisplayEventsRef
-        :: IORef [DisplayJournalEntry]
+        :: IORef DisplayJournal
     , loopRuntimeProviderAttemptActiveRef :: IORef Bool
     , loopRuntimeProviderTelemetryRef :: IORef [TurnTelemetry]
     , loopRuntimeInitialSteering :: [TurnInput]
@@ -331,11 +343,12 @@ initializeLoopRuntime config0 initialState firstInputs = do
     eventAdmissionLock <- newMVar ()
     progressRef <- newIORef (initialState, NoResponseCommitted)
     uncommittedTextRef <- newIORef ([], [])
-    uncommittedDisplayEventsRef <- newIORef []
+    uncommittedDisplayEventsRef <- newIORef emptyDisplayJournal
     providerAttemptActiveRef <- newIORef False
     providerTelemetryRef <- newIORef []
     initialSteering <- config0.loopReadSteering
     pendingRef <- newIORef (firstInputs <> initialSteering)
+    pendingSteeringRef <- newIORef (length initialSteering)
     let config = config0
             { loopOnEvent = \event ->
                 -- Provider streaming and async host tools can publish at the
@@ -355,6 +368,7 @@ initializeLoopRuntime config0 initialState firstInputs = do
         , loopRuntimeAsyncToolManager = Nothing
         , loopRuntimeProgressRef = progressRef
         , loopRuntimePendingRef = pendingRef
+        , loopRuntimePendingSteeringRef = pendingSteeringRef
         , loopRuntimeUncommittedTextRef = uncommittedTextRef
         , loopRuntimeUncommittedDisplayEventsRef =
             uncommittedDisplayEventsRef
@@ -365,7 +379,7 @@ initializeLoopRuntime config0 initialState firstInputs = do
 
 recordVisibleLoopEvent
     :: IORef ([[Text]], [Text])
-    -> IORef [DisplayJournalEntry]
+    -> IORef DisplayJournal
     -> IORef Bool
     -> LoopEvent
     -> IO ()
@@ -386,10 +400,10 @@ recordVisibleLoopEvent
         case event of
             TurnStarted -> do
                 writeIORef providerAttemptActiveRef True
-                writeIORef uncommittedDisplayEventsRef []
+                writeIORef uncommittedDisplayEventsRef emptyDisplayJournal
             TurnFinished _ -> do
                 writeIORef providerAttemptActiveRef False
-                writeIORef uncommittedDisplayEventsRef []
+                writeIORef uncommittedDisplayEventsRef emptyDisplayJournal
             ResponseRestarted _ ->
                 modifyIORef'
                     uncommittedDisplayEventsRef
@@ -474,11 +488,9 @@ unexpectedLoopCursor
     -> LoopCursor
     -> SomeException
     -> IO LoopExecution
-unexpectedLoopCursor runtime cursor =
-    unexpectedLoopExecution
-        runtime
-        cursor.cursorState
-        cursor.cursorProgress
+unexpectedLoopCursor runtime _cursor exception = do
+    (state, progress) <- readIORef runtime.loopRuntimeProgressRef
+    unexpectedLoopExecution runtime state progress exception
 
 protectLoopCursor
     :: LoopRuntime
@@ -494,6 +506,7 @@ runLoopCursor runtime cursor = do
     writeIORef runtime.loopRuntimeProgressRef
         (cursor.cursorState, cursor.cursorProgress)
     writeIORef runtime.loopRuntimePendingRef cursor.cursorInputs
+    writeIORef runtime.loopRuntimePendingSteeringRef cursor.cursorSteeringCount
     if cursor.cursorTurnsUsed >= config.loopMaxTurns
         then finishLoopCursor runtime cursor $ case cursor.cursorLastOutput of
             Just turn -> Left (LoopMaxTurns turn)
@@ -506,16 +519,22 @@ runLoopCursor runtime cursor = do
                 else do
                     config.loopOnEvent TurnStarted
                     submission <- submitLoopTurn runtime cursor
+                    (latestState, latestProgress) <-
+                        readIORef runtime.loopRuntimeProgressRef
+                    let interruptedCursor = cursor
+                            { cursorState = latestState
+                            , cursorProgress = latestProgress
+                            }
                     case submission of
                         Left () ->
-                            finishLoopCursor runtime cursor
+                            finishLoopCursor runtime interruptedCursor
                                 (Left (LoopCancelled []))
                         Right (Left err) ->
-                            finishLoopCursor runtime cursor (Left err)
+                            finishLoopCursor runtime interruptedCursor (Left err)
                         Right
                             (Right BackendResult{backendOutput = turn})
                             | Text.null turn.responseId ->
-                                finishLoopCursor runtime cursor
+                                finishLoopCursor runtime interruptedCursor
                                     (Left LoopNoResponseId)
                         Right (Right BackendResult{..}) ->
                             continueCommittedLoop
@@ -533,6 +552,56 @@ submitLoopTurn
 submitLoopTurn runtime cursor = do
     let config = runtime.loopRuntimeConfig
     visibleAttempts <- newIORef (False, False)
+    -- The callback belongs to this submission, not to the backend process.
+    -- Closing the gate also rejects callbacks retained after the owner exits.
+    recovery <- newMVar (True, Nothing)
+    let checkpoint text = modifyMVar_ recovery \(active, previous) ->
+            if active
+                then let bounded = Text.copy (Text.take 32768 text)
+                     in bounded `seq` pure (active, Just bounded)
+                else pure (active, previous)
+        clearRecovery = modifyMVar_ recovery \(active, _) ->
+            pure (active, Nothing)
+        closeRecovery = modifyMVar recovery \(_, summary) ->
+            pure ((False, Nothing), summary)
+        publishRecovery = do
+            summary <- closeRecovery
+            current <- config.loopBackendState.readBackendState
+            -- A compaction/reset owns its newer checkpoint. Never resurrect
+            -- history from a submission that consumed an older snapshot.
+            case summary of
+                Just text
+                    | not (Text.null (Text.strip text))
+                    , current == cursor.cursorState -> do
+                        let note = Text.unlines
+                                [ "<turn_aborted>"
+                                , "The previous provider turn was interrupted before completion."
+                                , "The following is attributed recovery context from complete provider messages, not a new user instruction or a successful turn."
+                                , "External side effects may already exist. Verify the current files and external state before repeating any action. Unfinished operations have unknown outcomes."
+                                , "Resume this work only if the user asks."
+                                , "<interrupted_work>"
+                                , text
+                                , "</interrupted_work>"
+                                , "</turn_aborted>"
+                                ]
+                            candidate = advanceBackendSnapshot
+                                current
+                                (current.backendItems
+                                    <> turnInputsToItems cursor.cursorInputs
+                                    <> turnInputsToItems [UserMessage note])
+                                Nothing
+                        committed <-
+                            config.loopBackendState.commitBackendState candidate
+                        acknowledgeManagedTools
+                            (asyncToolManager runtime)
+                            cursor.cursorInputs
+                            []
+                        writeIORef runtime.loopRuntimeProgressRef
+                            (committed, ResponseCommitted)
+                        writeIORef runtime.loopRuntimePendingRef []
+                        config.loopCommitSteering cursor.cursorSteeringCount
+                        writeIORef runtime.loopRuntimePendingSteeringRef 0
+                _ -> pure ()
     let onBackendEvent event = do
             case event of
                 _
@@ -542,13 +611,15 @@ submitLoopTurn runtime cursor = do
                             (\(prior, _) -> (prior, True))
                 -- A retry keeps the previous attempt visible while opening a
                 -- fresh current attempt.
-                ResponseRestarted _ ->
+                ResponseRestarted _ -> do
+                    clearRecovery
                     modifyIORef'
                         visibleAttempts
                         (\(prior, current) -> (prior || current, False))
                 -- The backend rolled that attempt back, but earlier restarted
                 -- attempts remain visible.
-                ResponseAttemptDiscarded ->
+                ResponseAttemptDiscarded -> do
+                    clearRecovery
                     modifyIORef'
                         visibleAttempts
                         (\(prior, _) -> (prior, False))
@@ -556,8 +627,8 @@ submitLoopTurn runtime cursor = do
             config.loopOnEvent event
     -- Race the model call against cancel so Ctrl-C / Esc can stop reasoning
     -- mid-stream, not only between tools.
-    raced <- mask \restore ->
-        withAsync
+    raced <- mask \restore -> do
+        normalized <- (withAsync
             (restore $
                 config.loopBackend.submitTurnWithCallbacks
                     (normalizeBackendSnapshotImages cursor.cursorState)
@@ -565,9 +636,13 @@ submitLoopTurn runtime cursor = do
                     (normalizeTurnInputs cursor.cursorInputs)
                     BackendCallbacks
                         { onLoopEvent = onBackendEvent
-                        , onAsyncToolCall =
-                            admitAsyncToolCall
-                                (asyncToolManager runtime)
+                        , onAsyncToolCall = \call ->
+                            withMVar recovery \(active, _) ->
+                                when active $
+                                    admitAsyncToolCall
+                                        (asyncToolManager runtime)
+                                        call
+                        , onRecoveryCheckpoint = checkpoint
                         })
             \submission -> do
                 result <- restore $ race
@@ -596,6 +671,10 @@ submitLoopTurn runtime cursor = do
                             committed <-
                                 config.loopBackendState.commitBackendState
                                     backendState
+                            acknowledgeManagedTools
+                                (asyncToolManager runtime)
+                                cursor.cursorInputs
+                                backendOutput.toolCalls
                             writeIORef runtime.loopRuntimeProgressRef
                                 (committed, ResponseCommitted)
                             pure
@@ -603,7 +682,14 @@ submitLoopTurn runtime cursor = do
                                     (Right backendResult
                                         { backendState = committed
                                         }))
-                    _ -> pure normalized
+                    _ -> pure normalized)
+            `onException` publishRecovery
+        case normalized of
+            Right (Right BackendResult{backendOutput})
+                | not (Text.null backendOutput.responseId) -> do
+                    _ <- closeRecovery
+                    pure normalized
+            _ -> publishRecovery >> pure normalized
     case raced of
         Left () -> pure (Left ())
         Right (Left err) -> do
@@ -631,7 +717,7 @@ continueCommittedLoop runtime cursor turn = do
     -- assistant text now lives in the committed state.
     writeIORef runtime.loopRuntimePendingRef []
     writeIORef runtime.loopRuntimeUncommittedTextRef ([], [])
-    writeIORef runtime.loopRuntimeUncommittedDisplayEventsRef []
+    writeIORef runtime.loopRuntimeUncommittedDisplayEventsRef emptyDisplayJournal
     writeIORef runtime.loopRuntimeProviderAttemptActiveRef False
     -- Result metadata belongs to the response commit even when a cancellation
     -- lands before the completion event is painted.
@@ -660,6 +746,7 @@ continueCommittedLoop runtime cursor turn = do
                             (Left (LoopIncomplete turn))
                     TurnCompleted -> do
                         config.loopCommitSteering cursor.cursorSteeringCount
+                        writeIORef runtime.loopRuntimePendingSteeringRef 0
                         racedResults <-
                             race
                                 (waitCancel config.loopCancel)
@@ -774,6 +861,14 @@ runLoopWithEventPump runtime initialState previousResponseId firstInputs =
                                 >>= maybe
                                     (pure completed)
                                     handleManagerFailure
+        -- Only inspect outcomes once the manager scope has cancelled and
+        -- joined every worker. A result waiter can lose its race while some
+        -- of its sibling tools have already finished successfully.
+        recovered <- tryAny (recoverManagedTools managedRuntime manager execution) >>= \case
+            Right recovered -> pure recovered
+            Left exception -> do
+                (state, progress) <- readIORef runtime.loopRuntimeProgressRef
+                unexpectedLoopExecution runtime state progress exception
         flushEventPump runtime.loopRuntimeEventPump >>= \case
             Left failure ->
                 readIORef runtime.loopRuntimeProgressRef
@@ -783,7 +878,154 @@ runLoopWithEventPump runtime initialState previousResponseId firstInputs =
                             state
                             progress
                             failure
-            Right () -> pure execution
+            Right () -> pure recovered
+
+-- | A tool result is acknowledged only when the response consuming it commits,
+-- not when a waiter drains it. Keep that fact across history compaction.
+acknowledgeManagedTools :: AsyncToolManager -> [TurnInput] -> [ToolCall] -> IO ()
+acknowledgeManagedTools manager inputs calls = atomically do
+    modifyTVar' manager.asyncToolAcknowledged $
+        Set.union (Set.fromList [result.callId | CompletedTool result <- inputs])
+    modifyTVar' manager.asyncToolCommittedCalls $
+        Map.union (Map.fromList [(call.callId, call) | call <- calls])
+
+recoverManagedTools
+    :: LoopRuntime
+    -> AsyncToolManager
+    -> LoopExecution
+    -> IO LoopExecution
+recoverManagedTools runtime manager execution = do
+    (records, acknowledged, committedCalls) <- atomically do
+        calls <- readTVar manager.asyncToolCalls
+        records <- traverse
+            (\record -> do
+                result <- readTVar record.managedTrustedResult
+                pure (record, result))
+            (sortOn (.managedAdmissionSequence) (Map.elems calls))
+        acknowledged <- readTVar manager.asyncToolAcknowledged
+        committedCalls <- readTVar manager.asyncToolCommittedCalls
+        pure (records, acknowledged, committedCalls)
+    let unacknowledged =
+            [ (record.managedCall, result)
+            | (record, result) <- records
+            , Set.notMember record.managedCall.callId acknowledged
+            ]
+        retainedCallIds = Set.fromList (concatMap retainedCallId execution.executionState)
+        canonical call =
+            Map.lookup call.callId committedCalls == Just call
+                && Set.member call.callId retainedCallIds
+        orphanIds = Set.fromList
+            [call.callId | (call, _) <- unacknowledged, not (canonical call)]
+        safePending = filter
+            (\case
+                CompletedTool completed -> Set.notMember completed.callId orphanIds
+                _ -> True)
+            execution.executionPendingInputs
+        pendingIds = Set.fromList
+            [ result.callId
+            | CompletedTool result <- safePending
+            ]
+        salvaged =
+            [ result
+            | (call, Just result) <- unacknowledged
+            , canonical call
+            , Set.notMember result.callId pendingIds
+            ]
+        pending = safePending <> map CompletedTool salvaged
+        orphans = [(call, result) | (call, result) <- unacknowledged, not (canonical call)]
+        result = case execution.executionResult of
+            Left (LoopCancelled previous) ->
+                Left (LoopCancelled (previous <> filter
+                    (\completed -> all ((/= completed.callId) . (.callId)) previous)
+                    salvaged))
+            other -> other
+    writeIORef runtime.loopRuntimePendingRef pending
+    if null orphans
+        then pure execution
+            { executionPendingInputs = pending
+            , executionResult = result
+            }
+        else do
+            (owned, _) <- readIORef runtime.loopRuntimeProgressRef
+            current <- runtime.loopRuntimeConfig.loopBackendState.readBackendState
+            -- Reset/compaction may have installed a newer checkpoint. Do not
+            -- resurrect a submission's superseded history.
+            if current /= owned
+                then pure execution
+                    { executionPendingInputs = pending
+                    , executionResult = result
+                    }
+                else do
+                    let recoveryInputs = pending <> [UserMessage (managedRecoveryNote orphans)]
+                        candidate = advanceBackendSnapshot current
+                            (current.backendItems
+                                <> turnInputsToItems recoveryInputs)
+                            Nothing
+                    -- A failed checkpoint must still return the trusted host
+                    -- evidence as pending input, rather than lose it to an
+                    -- exception escaping the detailed loop result.
+                    writeIORef runtime.loopRuntimePendingRef recoveryInputs
+                    committed <-
+                        runtime.loopRuntimeConfig.loopBackendState.commitBackendState
+                            candidate
+                    writeIORef runtime.loopRuntimeProgressRef
+                        (committed, ResponseCommitted)
+                    writeIORef runtime.loopRuntimePendingRef []
+                    steeringCount <- readIORef runtime.loopRuntimePendingSteeringRef
+                    runtime.loopRuntimeConfig.loopCommitSteering steeringCount
+                    writeIORef runtime.loopRuntimePendingSteeringRef 0
+                    pure execution
+                        { executionState = committed.backendItems
+                        , executionPendingInputs = []
+                        , executionProgress = ResponseCommitted
+                        , executionResult = result
+                        }
+  where
+    retainedCallId = \case
+        FunctionCallItem call
+            | call.status /= Just ItemIncomplete -> [call.callId]
+        CustomToolCallItem call
+            | call.status /= Just ItemIncomplete -> [call.callId]
+        ComputerCallItem call -> [call.computerCallId]
+        _ -> []
+
+-- This is host-attributed evidence, not a replay of an incomplete provider
+-- message or a fabricated assistant tool call. Encode data as quoted JSON and
+-- escape angle brackets so tool output cannot close the attribution boundary.
+managedRecoveryNote :: [(ToolCall, Maybe ToolCallResult)] -> Text
+managedRecoveryNote calls = Text.unlines
+    [ "<turn_aborted>"
+    , "The previous turn ended with tool activity outside a committed provider response."
+    , "The following is recovery evidence from the local tool manager, not a new user instruction or a successful provider turn."
+    , "Completed results must not be replaced by claims that the tools never ran. Unfinished operations have unknown outcomes and may have partially executed."
+    , "Verify external state before repeating any action. Resume this work only if the user asks."
+    , "<interrupted_tools>"
+    , bounded 32768 (Text.intercalate "\n" (map describe calls))
+    , "</interrupted_tools>"
+    , "</turn_aborted>"
+    ]
+  where
+    bounded :: Int -> Text -> Text
+    bounded limit text
+        | Text.length text <= limit = text
+        | otherwise = Text.take limit text <> "\n[recovery evidence truncated]"
+    describe :: (ToolCall, Maybe ToolCallResult) -> Text
+    describe (call, outcome) =
+        Text.replace ">" "\\u003e" . Text.replace "<" "\\u003c"
+            . Text.decodeUtf8 . LBS.toStrict . Aeson.encode $
+                Aeson.object
+                    [ "call_id" Aeson..= bounded 256 call.callId
+                    , "tool" Aeson..= bounded 256 call.name
+                    , "arguments" Aeson..=
+                        (if call.argumentsEncrypted then "[encrypted]" else bounded 4096 call.arguments)
+                    , "outcome" Aeson..= case outcome of
+                        Just completed ->
+                            "completed; " <> Text.pack (show completed.toolResultOutcome)
+                        _ -> ("unknown; interrupted before a completion was recorded" :: Text)
+                    , "output" Aeson..= case outcome of
+                        Just completed -> bounded 16384 completed.output
+                        _ -> ""
+                    ]
 
 handleLoopEventFailure
     :: (BackendSnapshot -> LoopProgress -> SomeException -> IO LoopExecution)
@@ -805,11 +1047,17 @@ data AsyncToolManager = AsyncToolManager
     , asyncToolOutstanding :: !(TVar Int)
     , asyncToolCompleted :: !(TQueue ToolCallResult)
     , asyncToolFailure :: !(TMVar SomeException)
+    , asyncToolAcknowledged :: !(TVar (Set.Set Text))
+    , asyncToolCommittedCalls :: !(TVar (Map Text ToolCall))
     }
 
 data ManagedToolCall = ManagedToolCall
     { managedCall :: !ToolCall
     , managedResult :: !(TMVar (Maybe ToolCallResult))
+    -- Recorded by the worker before event delivery; unlike managedResult,
+    -- this does not release scheduling barriers or normal result waiters.
+    , managedTrustedResult :: !(TVar (Maybe ToolCallResult))
+    , managedAdmissionSequence :: !Int
     }
 
 data ManagedToolRequest = ManagedToolRequest
@@ -834,6 +1082,8 @@ newAsyncToolManager =
         <*> newTVarIO 0
         <*> newTQueueIO
         <*> newEmptyTMVarIO
+        <*> newTVarIO Set.empty
+        <*> newTVarIO Map.empty
 
 asyncToolManager :: LoopRuntime -> AsyncToolManager
 asyncToolManager runtime =
@@ -876,10 +1126,13 @@ admitManagedToolCall manager call = do
                         ("Conflicting tool calls reused call_id " <> call.callId)
         Nothing -> do
             result <- newEmptyTMVar
+            trustedResult <- newTVar Nothing
             sequenceNumber <- readTVar manager.asyncToolNextSequence
             let record = ManagedToolCall
                     { managedCall = call
                     , managedResult = result
+                    , managedTrustedResult = trustedResult
+                    , managedAdmissionSequence = sequenceNumber
                     }
             writeTVar
                 manager.asyncToolCalls
@@ -903,7 +1156,25 @@ runManagedToolCalls manager calls = do
     blocking <- catMaybes <$> traverse admit calls
     blockingResults <-
         catMaybes <$> traverse (atomically . readTMVar) blocking
-    completedAsync <- atomically (takeAsyncToolCompletions manager)
+    completedAsync <- atomically do
+        ready <- takeAsyncToolCompletions manager
+        admitted <- readTVar manager.asyncToolCalls
+        committed <- readTVar manager.asyncToolCommittedCalls
+        -- A restarted provider stream may omit a call that already executed.
+        -- Keep its trusted evidence for host-attributed recovery, but never
+        -- submit an unmatched native tool result on the normal path.
+        let canonical =
+                [ result
+                | result <- ready
+                , Just record <- [Map.lookup result.callId admitted]
+                , Map.lookup result.callId committed == Just record.managedCall
+                ]
+        outstanding <- readTVar manager.asyncToolOutstanding
+        -- An orphan-only batch is not the end of the turn while other
+        -- asynchronous tools are still running. Retry also restores the queue.
+        if null canonical && outstanding > 0
+            then retry
+            else pure canonical
     pure (blockingResults <> completedAsync)
   where
     admit call =
@@ -1023,7 +1294,10 @@ runManagedToolWorker config manager request prepared plan = do
                     scheduled
     race
         (waitCancel config.loopCancel)
-        (runPreparedToolCall config prepared)
+        (runPreparedToolCallWithCompletion
+            (atomically . writeTVar request.managedRecord.managedTrustedResult . Just)
+            config
+            prepared)
         >>= \case
             Left () -> pure Nothing
             Right result -> pure result
@@ -1226,7 +1500,14 @@ runPreparedToolCall
     :: LoopConfig
     -> PreparedToolCall
     -> IO (Maybe ToolCallResult)
-runPreparedToolCall config (PreparedToolCall call approval) = do
+runPreparedToolCall = runPreparedToolCallWithCompletion (const (pure ()))
+
+runPreparedToolCallWithCompletion
+    :: (ToolCallResult -> IO ())
+    -> LoopConfig
+    -> PreparedToolCall
+    -> IO (Maybe ToolCallResult)
+runPreparedToolCallWithCompletion completed config (PreparedToolCall call approval) = do
     cancelled <- isCancelled config.loopCancel
     if cancelled
         then pure Nothing
@@ -1263,5 +1544,9 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
                             }
                         config.loopTools
                         call
+            -- The trusted result must survive cancellation or a failing event
+            -- consumer after the tool has returned. The manager's monitor is
+            -- not authoritative: its own scope can be cancelled first.
+            completed result
             config.loopOnEvent (ToolFinished result)
             pure (Just result)

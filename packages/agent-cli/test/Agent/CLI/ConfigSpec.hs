@@ -31,6 +31,46 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.CLI.Config" do
+    describe "mcpServerEnabledForRuntime" do
+        it "keeps remote HTTP MCP enabled without host command extensions" do
+            mcpServerEnabledForRuntime True False httpMcpServer
+                `shouldBe` True
+
+        it "rejects command MCP without host command extensions" do
+            mcpServerEnabledForRuntime True False commandMcpServer
+                `shouldBe` False
+
+        it "rejects every MCP transport when MCP tools are disabled" do
+            mcpServerEnabledForRuntime False True httpMcpServer
+                `shouldBe` False
+            mcpServerEnabledForRuntime False True commandMcpServer
+                `shouldBe` False
+
+    describe "mcpServersForRuntime" do
+        it "keeps only remote HTTP MCP in an MCP-only runtime" do
+            let config =
+                    defaultHarnessConfig
+                        { configMcpServers =
+                            Map.fromList
+                                [ ("command", commandMcpServer)
+                                , ("remote", httpMcpServer)
+                                ]
+                        }
+            map fst (mcpServersForRuntime True False config)
+                `shouldBe` ["remote"]
+
+        it "rejects every configured server without MCP capability" do
+            let config =
+                    defaultHarnessConfig
+                        { configMcpServers =
+                            Map.fromList
+                                [ ("command", commandMcpServer)
+                                , ("remote", httpMcpServer)
+                                ]
+                        }
+            mcpServersForRuntime False True config
+                `shouldBe` []
+
     it "uses ~/.haskell-agent/config.json" do
         harnessConfigPath (path "/Users/test")
             `shouldBe` path "/Users/test/.haskell-agent/config.json"
@@ -203,6 +243,7 @@ spec = describe "Agent.CLI.Config" do
             fmap (.configWorktree) result
                 `shouldBe` Right WorktreeConfig
                     { worktreeFetchLatestUpstream = True
+                    , worktreeInactiveDays = 7
                     }
 
     it "loads the managed worktree fetch opt-out" $
@@ -213,7 +254,23 @@ spec = describe "Agent.CLI.Config" do
             fmap (.configWorktree) result
                 `shouldBe` Right WorktreeConfig
                     { worktreeFetchLatestUpstream = False
+                    , worktreeInactiveDays = 7
                     }
+
+    it "loads configurable worktree inactivity expiry" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home "{\"worktree\":{\"inactivityDays\":30}}"
+            result <- loadHarnessConfig home
+            fmap (.configWorktree.worktreeInactiveDays) result `shouldBe` Right 30
+
+    it "rejects nonpositive worktree inactivity expiry" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home "{\"worktree\":{\"inactivityDays\":0}}"
+            result <- loadHarnessConfig home
+            result `shouldSatisfy` either (Text.isInfixOf "inactivityDays") (const False)
+            writeConfig home "{\"worktree\":{\"inactivityDays\":-1}}"
+            resultNegative <- loadHarnessConfig home
+            resultNegative `shouldSatisfy` either (Text.isInfixOf "inactivityDays") (const False)
 
     it "decodes LSP maps and retains opaque JSON options" $
         withTempDir "agent-config-" \home -> do
@@ -327,6 +384,7 @@ spec = describe "Agent.CLI.Config" do
                     { configMcpServers = Map.singleton "seo-mcp" server
                     , configWorktree = WorktreeConfig
                         { worktreeFetchLatestUpstream = True
+                        , worktreeInactiveDays = 30
                         }
                     , configMaxConcurrentAgents = Just 48
                     }
@@ -448,3 +506,30 @@ path = unsafeEncodeUtf
 
 filePath :: OsPath -> FilePath
 filePath value = either (error . show) id (decodeUtf value)
+
+httpMcpServer :: McpServerConfig
+httpMcpServer =
+    testMcpServer
+        { mcpUrl = Just "https://example.test/mcp"
+        }
+
+commandMcpServer :: McpServerConfig
+commandMcpServer =
+    testMcpServer
+        { mcpCommand = "example-mcp"
+        }
+
+testMcpServer :: McpServerConfig
+testMcpServer =
+    McpServerConfig
+        { mcpEnabled = True
+        , mcpUrl = Nothing
+        , mcpCommand = ""
+        , mcpArgs = []
+        , mcpCwd = Nothing
+        , mcpEnv = Map.empty
+        , mcpStartupTimeoutSeconds = 30
+        , mcpRequestTimeoutSeconds = 60
+        , mcpOAuth = Nothing
+        , mcpProtocol = McpProtocolAuto
+        }

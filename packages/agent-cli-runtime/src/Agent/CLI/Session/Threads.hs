@@ -4,18 +4,22 @@ module Agent.CLI.Session.Threads
     ( SessionThreadManager
     , newSessionThreadManager
     , launchSessionThread
+    , launchSessionThreadNotifying
+    , prepareSessionThreadWait
     , sessionThreadStatus
     , closeSessionThreadManager
     ) where
 
 import Agent.CLI.Error (formatException)
-import Agent.CLI.SessionLock (sessionLockIsActive, sessionLockPath)
+import Agent.CLI.SessionLock (sessionLockIsActive, sessionLockPath, sessionActivitySnapshot)
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
-    ( Async, asyncWithUnmask, cancel, poll, waitCatch )
+    ( Async, AsyncCancelled, asyncWithUnmask, cancel, poll, waitCatch )
 import Control.Concurrent.MVar
-    ( MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, takeMVar )
-import Control.Exception.Safe (mask, tryAny)
+    ( MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, takeMVar )
+import Control.Exception.Safe (mask, tryAny, SomeException, fromException)
 import Control.Monad (void)
+import Data.Maybe (isJust)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -23,7 +27,7 @@ import qualified Data.Text as Text
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 
 data ManagedSessionThread
-    = ManagedSessionThreadRunning !(Async ())
+    = ManagedSessionThreadRunning !(Async Text)
     | ManagedSessionThreadCompleted
     | ManagedSessionThreadFailed !Text
 
@@ -56,6 +60,21 @@ launchSessionThread
     -> IO (Either Text ())
     -> IO (Either Text Text)
 launchSessionThread manager sessionId action =
+    launchSessionThreadNotifying manager sessionId (const (pure ())) action
+
+-- | Enqueue one completion notification for this particular turn. The sink
+-- runs in the tracked worker while the manager lock is held, immediately
+-- before publishing the terminal state. It must be nonblocking and must not
+-- call back into the manager. This makes notification delivery and readiness
+-- for a follow-up atomic to callers, without an unowned notification thread.
+-- Rejected launches and manager shutdown do not emit completion notices.
+launchSessionThreadNotifying
+    :: SessionThreadManager
+    -> Text
+    -> (Text -> IO ())
+    -> IO (Either Text ())
+    -> IO (Either Text Text)
+launchSessionThreadNotifying manager sessionId notify action =
     mask \_ -> do
         launched <- modifyMVar manager.threadManagerState \state ->
             if state.threadManagerClosed
@@ -82,17 +101,24 @@ launchSessionThread manager sessionId action =
                                             ManagedSessionThreadFailed err
                                         Right (Right ()) ->
                                             ManagedSessionThreadCompleted
+                                let status = case terminal of
+                                        ManagedSessionThreadFailed err -> "failed (" <> err <> ")"
+                                        _ -> "completed"
                                 modifyMVar_ manager.threadManagerState \current ->
-                                    pure $
-                                        if current.threadManagerClosed
-                                            then current
-                                            else current
+                                    if current.threadManagerClosed
+                                        then pure current
+                                        else do
+                                            -- A notification failure must not
+                                            -- replace the child turn's outcome.
+                                            void (tryAny (notify status))
+                                            pure current
                                                 { managedThreads =
                                                     Map.insert
                                                         sessionId
                                                         terminal
                                                         current.managedThreads
                                                 }
+                                pure status
                         case started of
                             Left err ->
                                 pure
@@ -126,8 +152,12 @@ sessionThreadStatus manager sessionId =
             Just (ManagedSessionThreadRunning worker) ->
                 poll worker >>= \case
                     Nothing -> pure (state, "running")
-                    Just (Right ()) ->
-                        settle state ManagedSessionThreadCompleted "completed"
+                    Just (Right status) ->
+                        settle state
+                            (if status == "completed"
+                                then ManagedSessionThreadCompleted
+                                else ManagedSessionThreadFailed status)
+                            status
                     Just (Left err) ->
                         let message = "failed (" <> formatException err <> ")"
                         in settle state
@@ -163,6 +193,37 @@ sessionThreadStatus manager sessionId =
     terminalStatus state terminal = do
         locked <- lockIsActive
         pure (state, if locked then "running" else terminal)
+
+-- | Waiting on the captured Async (not repeated map lookups) prevents a quick
+-- resume from moving the waiter onto a different run. The waiter never owns or
+-- cancels the target. External interactive sessions use the turn activity lock,
+-- not the lifetime lock, which remains held while the prompt is idle.
+prepareSessionThreadWait :: SessionThreadManager -> Text -> IO (IO Text)
+prepareSessionThreadWait manager sessionId = do
+    state <- readMVar manager.threadManagerState
+    case Map.lookup sessionId state.managedThreads of
+        Just (ManagedSessionThreadRunning worker) ->
+            pure $ either waitExceptionStatus id <$> waitCatch worker
+        _ -> do
+            (generation, active) <- sessionActivitySnapshot sessionDir
+            if active
+                then pure (waitExternal generation)
+                else pure $ pure $ case Map.lookup sessionId state.managedThreads of
+                    Just ManagedSessionThreadCompleted -> "completed"
+                    Just (ManagedSessionThreadFailed err) -> "failed (" <> err <> ")"
+                    _ -> "idle"
+  where
+    sessionDir = manager.threadManagerRoot </> unsafeEncodeUtf (Text.unpack sessionId)
+    waitExternal generation = do
+        (current, active) <- sessionActivitySnapshot sessionDir
+        if active && (generation == current || generation == Nothing)
+            then threadDelay 100000 >> waitExternal current
+            else pure "idle"
+
+waitExceptionStatus :: SomeException -> Text
+waitExceptionStatus err
+    | isJust (fromException err :: Maybe AsyncCancelled) = "cancelled"
+    | otherwise = "failed (" <> formatException err <> ")"
 
 closeSessionThreadManager :: SessionThreadManager -> IO ()
 closeSessionThreadManager manager = do

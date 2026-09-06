@@ -18,6 +18,11 @@ data TurnOutput = TurnOutput
     , toolCalls :: ![ToolCall]
     , assistantText :: !(Maybe Text)
     , tokenUsage :: !TokenUsage
+    -- | Usage of the latest individual model response in the main
+    -- conversation, for context occupancy. Unlike 'tokenUsage', this must
+    -- never contain billing totals accumulated across responses or agents.
+    -- 'Nothing' means that the provider did not supply a usable measurement.
+    , contextUsage :: !(Maybe TokenUsage)
     , providerTelemetry :: !(Maybe TurnTelemetry)
     , completion :: !TurnCompletion
     } deriving (Eq, Show)
@@ -36,6 +41,7 @@ emptyTurnOutput responseId toolCalls assistantText = TurnOutput
     , toolCalls
     , assistantText
     , tokenUsage = emptyTokenUsage
+    , contextUsage = Nothing
     , providerTelemetry = Nothing
     , completion = TurnCompleted
     }

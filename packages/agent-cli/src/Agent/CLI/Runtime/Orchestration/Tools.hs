@@ -11,14 +11,16 @@ import Agent.CLI.Runtime.Orchestration.Tools.Mcp
 import Agent.CLI.Runtime.Orchestration.Tools.HostHooks
 import Agent.CLI.AgentSessions
     ( agentSessionTools,
-      launchSessionThread,
+      launchSessionThreadNotifying,
+      formatSessionCompletionNotice,
       sessionThreadStatus,
+      prepareSessionThreadWait,
       AgentSessionToolsEnv(toolsSessionStatus, AgentSessionToolsEnv,
                            toolsPool, toolsRoot, toolsProvider, toolsConnection, toolsModel,
                            toolsTransportModel, toolsDialect, toolsAllowedModels,
                            toolsResolveModelOption,
                            toolsGatewayIdentity, toolsCwd, toolsEffort,
-                           toolsCurrentSessionId, toolsLaunchTurn) )
+                           toolsCurrentSessionId, toolsLaunchTurn, toolsPrepareSessionWait) )
 import Agent.CLI.Auth (isGatewayLoadedAuth)
 import qualified Agent.CLI.ComputerUse as ComputerUse
 import Agent.CLI.Config (HarnessConfig(..))
@@ -63,6 +65,7 @@ import Agent.CLI.Resume
         )
     , resolveSessionInitialContext
     )
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Runtime.Orchestration.Session ( AgentSessionRequest(..)
     , runAgentSession
     )
@@ -115,16 +118,19 @@ import Agent.Tools.PlanMode
 import Agent.Tools.Types
     ( AppTool
     , AppToolGroup(..)
+    , BackgroundTaskHooks(..)
+    , BackgroundTaskNotice(..)
     , ToolEnv(..)
     , appToolsFromGroups
     )
 import Control.Concurrent.Async ( concurrently, concurrently_ )
 import Control.Exception.Safe
     ( SomeException, bracketOnError, finally, throwIO, try )
-import Control.Monad ( forM_, join, when )
+import Control.Monad ( forM_, join, when, void )
 import Data.IORef
     (IORef, newIORef, readIORef, writeIORef)
 import Data.Maybe (isJust)
+import Data.Unique (newUnique, hashUnique)
 import System.Info (os)
 import System.OsPath (OsPath)
 import qualified Agent.MCP as MCP
@@ -132,7 +138,7 @@ import qualified Agent.MCP as MCP
       mcpFleetMetaTools,
       mcpFleetResourceTools,
       mcpFleetTools )
-import qualified Data.Text as Text (unpack)
+import qualified Data.Text as Text (unpack, pack)
 
 data LocalToolRuntime = LocalToolRuntime
     { localCoding :: CodingTools
@@ -142,6 +148,7 @@ data LocalToolRuntime = LocalToolRuntime
 data CodingRuntime = CodingRuntime
     { runtimeCoding :: CodingTools
     , runtimeExtraTools :: [AppTool]
+    , runtimeComputerUse :: Maybe ComputerUse.ComputerUseRuntime
     , runtimeCloseExtraTools :: IO ()
     }
 
@@ -190,34 +197,43 @@ runAgentTools request = withResourceScope \resourceScope -> do
     let scratchRuntime =
             acquiredScratchRuntime
                 { scratchCleanup = releaseResource scratchKey }
-    (acquiredResources, (initialContext, initialContextPreload)) <-
+    ( (acquiredResources, (computerUseKey, runtimeComputerUse))
+      , (initialContext, initialContextPreload)
+      ) <-
         concurrently
-            ( allocateFourResourcesConcurrently
-                resourceScope
-                (acquireMcpRuntime
-                    request
-                    toolStartup
-                    toolModelRuntime
-                    collaborationRuntime
-                    scratchRuntime)
-                (.runtimeCloseMcp)
-                (acquireLocalToolRuntime
-                    request
-                    toolModelRuntime
-                    toolHostHooks
-                    collaborationRuntime
-                    scratchRuntime)
-                (.localCoding.codingClose)
-                (acquireWebFetchRuntime
-                    request
-                    toolStartup
-                    toolModelRuntime)
-                (mapM_ closeWebFetchRuntime)
-                (acquireLspStartup
-                    request
-                    toolStartup
-                    toolModelRuntime)
-                (mapM_ closeLspRuntime . (.lspStartupRuntime))
+            ( concurrently
+                ( allocateFourResourcesConcurrently
+                    resourceScope
+                    (acquireMcpRuntime
+                        request
+                        toolStartup
+                        toolModelRuntime
+                        collaborationRuntime
+                        scratchRuntime)
+                    (.runtimeCloseMcp)
+                    (acquireLocalToolRuntime
+                        request
+                        toolModelRuntime
+                        toolHostHooks
+                        collaborationRuntime
+                        scratchRuntime)
+                    (.localCoding.codingClose)
+                    (acquireWebFetchRuntime
+                        request
+                        toolStartup
+                        toolModelRuntime)
+                    (mapM_ closeWebFetchRuntime)
+                    (acquireLspStartup
+                        request
+                        toolStartup
+                        toolModelRuntime)
+                    (mapM_ closeLspRuntime . (.lspStartupRuntime))
+                )
+                ( allocateResource
+                    resourceScope
+                    (acquireComputerUseRuntime toolModelRuntime)
+                    (mapM_ ComputerUse.closeComputerUseRuntime)
+                )
             )
             (prepareInitialContextPreload request toolModelRuntime)
     let ( (mcpKey, acquiredMcpRuntime)
@@ -240,9 +256,10 @@ runAgentTools request = withResourceScope \resourceScope -> do
             maybe [] (pure . webFetchRuntimeTool) webFetchRuntime
                 <> maybe [] (pure . lspRuntimeTool) lspRuntime
         runtimeCloseExtraTools =
-            concurrently_
-                (releaseResource lspKey)
-                (releaseResource webFetchKey)
+            releaseResource computerUseKey
+                `finally` concurrently_
+                    (releaseResource lspKey)
+                    (releaseResource webFetchKey)
         codingRuntime = CodingRuntime{..}
     mapM_
         (reportStartupWarning request.startup)
@@ -375,6 +392,17 @@ acquireLspStartup AgentToolsRequest
     | otherwise =
         newLspRuntime harnessConfig.configLsp baseToolEnv
 
+acquireComputerUseRuntime
+    :: ToolModelRuntime
+    -> IO (Maybe ComputerUse.ComputerUseRuntime)
+acquireComputerUseRuntime ToolModelRuntime
+    { toolProvider = provider
+    }
+    | provider == OpenAIProvider
+        && os `elem` ["darwin", "linux"] =
+        Just <$> ComputerUse.newComputerUseRuntime
+    | otherwise = pure Nothing
+
 prepareInitialContextPreload
     :: AgentToolsRequest windowTitleResult
     -> ToolModelRuntime
@@ -435,6 +463,7 @@ newSessionControlRuntime
     -> IO SessionControlRuntime
 newSessionControlRuntime AgentToolsRequest
     { options
+    , baseToolEnv
     , startup
     , root
     , gatewayIdentity
@@ -512,13 +541,25 @@ newSessionControlRuntime AgentToolsRequest
                                     (Right
                                         ("completed session "
                                             <> handle.sessionMeta.metaId))
-                    else
-                        launchSessionThread
+                    else do
+                        -- Capture the launching conversation's sink, rather
+                        -- than looking up whichever session is open later.
+                        hooks <- readIORef baseToolEnv.toolBackgroundTaskHooks
+                        turnKey <- Text.pack . show . hashUnique <$> newUnique
+                        launchSessionThreadNotifying
                             processRuntime.processSessionThreads
                             handle.sessionMeta.metaId
+                            (\status -> void $ hooks.backgroundTaskCompleted
+                                BackgroundTaskNotice
+                                    { noticeKey = "agent-session:" <> turnKey
+                                    , noticeBody = formatSessionCompletionNotice
+                                        handle.sessionMeta.metaId status
+                                    })
                             action
             , toolsSessionStatus =
                 sessionThreadStatus processRuntime.processSessionThreads
+            , toolsPrepareSessionWait =
+                prepareSessionThreadWait processRuntime.processSessionThreads
             }
         -- Persisted agent-session tools recursively start another native
         -- runtime, so they require an explicit collaboration capability from
@@ -574,6 +615,7 @@ assembleSessionToolsRuntime AgentToolsRequest
     } CodingRuntime
     { runtimeCoding = coding
     , runtimeExtraTools = extraTools
+    , runtimeComputerUse = computerUseRuntime
     , runtimeCloseExtraTools = closeExtraTools
     } SessionControlRuntime
     { controlSkillInvocationsRef = skillInvocationsRef
@@ -608,10 +650,8 @@ assembleSessionToolsRuntime AgentToolsRequest
         nativeToolGroups =
             maybe [] (.nativeToolGroups) startup.startupNativeHooks
         computerTools =
-            [ ComputerUse.computerUseTool
-            | provider == OpenAIProvider
-            , os == "darwin"
-            ]
+            maybe [] (pure . ComputerUse.computerUseRuntimeTool)
+                computerUseRuntime
         activeComputerTools =
             [ tool
             | resolveComputerUseEnabled options startup.startupStdinTty
@@ -632,7 +672,9 @@ assembleSessionToolsRuntime AgentToolsRequest
             ]
         surroundingToolGroupsFor selectedComputerTools =
             [ ExecutionToolGroup extraTools
-            , ExecutionToolGroup sessionMcpTools
+            -- MCP clients and their tenant credentials stay in the
+            -- orchestrator process; only execution tools cross a sandbox.
+            , HostToolGroup sessionMcpTools
             , HostToolGroup persistedSessionTools
             , HostToolGroup sessionGatewayTools
             , HostToolGroup sessionDatabaseTools
@@ -796,7 +838,7 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
         , coding
         , createSubagentWorktree
         , customGenericOptions
-        , cwd
+        , workspace = WorkspaceContext{projectRoot, cwd, home}
         , databaseAppTools
         , databaseScopes
         , initialContext
@@ -811,7 +853,6 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
         , allowedChildModels
         , resolveChildModel = resolveCollaborationChildModel
         , childModelAllowed
-        , home
         , inferredTarget
         , interrupt
         , learnedSkillAppTools
@@ -832,7 +873,6 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
         , planMode
         , policy
         , preferredOpenAiAccountRef
-        , projectRoot
         , promptRequest
         , provider
         , refreshDialectContext

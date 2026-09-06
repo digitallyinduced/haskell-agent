@@ -4,6 +4,7 @@ module Agent.CLI.Compaction.Continuation
 
 import Agent.CLI.Compaction.Projection
     ( automaticCompactionHeadroom
+    , occupancyForSubmission
     , projectRequestTokens
     , toolContinuationTooLargeError
     )
@@ -49,8 +50,10 @@ boundCompletedToolContinuations contextWindowFor getParams contextTokensRef back
                 snapshot previous inputs callbacks
             else do
                 params <- getParams
-                occupancy <- readIORef contextTokensRef
-                let history = snapshot.backendItems
+                cachedOccupancy <- readIORef contextTokensRef
+                let occupancy =
+                        occupancyForSubmission snapshot previous cachedOccupancy
+                    history = snapshot.backendItems
                     contextWindow = contextWindowFor params
                 let liveChain =
                         isJust snapshot.backendContinuation || isJust previous
@@ -58,7 +61,7 @@ boundCompletedToolContinuations contextWindowFor getParams contextTokensRef back
                         | liveChain =
                             case occupancy of
                                 Just snapshot
-                                    | snapshot.occupancyLength == length history
+                                    | occupancyMatchesHistory history snapshot
                                     , snapshot.occupancyTokens > 0
                                     , snapshot.occupancyKind == ReportedOccupancy ->
                                         snapshot.occupancyTokens

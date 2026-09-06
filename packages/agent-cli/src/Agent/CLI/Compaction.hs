@@ -32,10 +32,16 @@ module Agent.CLI.Compaction
     , runXaiBackendCompactHistoryWithContextWindow
     , runBackendCompactWithLimits
     , runBackendCompactHistoryWithLimits
+    , runClaudeBackendCompactWithLimits
+    , runClaudeBackendCompactHistoryWithLimits
     , OccupancyKind(..)
     , OccupancySnapshot(..)
     , estimatedOccupancy
     , reportedOccupancy
+    , occupancyOnTurnFinished
+    , occupancyForSubmission
+    , occupancySnapshot
+    , projectRequestTokens
     ) where
 
 import Agent.CLI.Session.Request
@@ -347,6 +353,40 @@ runBackendCompactWithLimits contextWindow inputLimit makeBackend recordUsage
         <$> runBackendCompactHistoryWithLimits
         contextWindow inputLimit makeBackend recordUsage params history focus
 
+-- | Claude Code adds framing that the portable request estimator cannot see.
+-- Its isolated summary may therefore need a smaller retry after an explicit
+-- context-limit rejection. This never runs against the live provider session.
+runClaudeBackendCompactWithLimits
+    :: Int
+    -> Int
+    -> (ResponseCreateParams -> Backend)
+    -> (TokenUsage -> IO ())
+    -> SessionRequestState
+    -> IORef [ResponseItem]
+    -> Maybe Text
+    -> IO (Either Text CompactOutcome)
+runClaudeBackendCompactWithLimits contextWindow inputLimit makeBackend recordUsage
+        paramsRef transcriptRef focus = do
+    params <- readSessionRequestParams paramsRef
+    history <- readIORef transcriptRef
+    either (Left . formatApiError) Right
+        <$> runClaudeBackendCompactHistoryWithLimits
+        contextWindow inputLimit makeBackend recordUsage params history focus
+
+runClaudeBackendCompactHistoryWithLimits
+    :: Int
+    -> Int
+    -> (ResponseCreateParams -> Backend)
+    -> (TokenUsage -> IO ())
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> Maybe Text
+    -> IO (Either ApiError CompactOutcome)
+runClaudeBackendCompactHistoryWithLimits =
+    runBackendCompactHistoryPreparedWithRetries
+        3
+        (filter isPortableLocalSummaryItem)
+
 -- | History-taking variant used by automatic compaction wrappers, where the
 -- exact checkpoint being compacted is already available.
 runBackendCompactHistoryWithContextWindow
@@ -400,17 +440,32 @@ runBackendCompactHistoryPreparedWithLimits
     -> [ResponseItem]
     -> Maybe Text
     -> IO (Either ApiError CompactOutcome)
-runBackendCompactHistoryPreparedWithLimits
+runBackendCompactHistoryPreparedWithLimits =
+    runBackendCompactHistoryPreparedWithRetries 0
+
+runBackendCompactHistoryPreparedWithRetries
+    :: Int
+    -> ([ResponseItem] -> [ResponseItem])
+    -> Int
+    -> Int
+    -> (ResponseCreateParams -> Backend)
+    -> (TokenUsage -> IO ())
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> Maybe Text
+    -> IO (Either ApiError CompactOutcome)
+runBackendCompactHistoryPreparedWithRetries retries
         prepareHistory contextWindow inputLimit makeBackend recordUsage
         params history focus = do
     attempt <- runAttemptAndRecord recordUsage $
         summarizeBackendLocalAttempt
-            prepareHistory contextWindow inputLimit makeBackend params history
+            retries prepareHistory contextWindow inputLimit makeBackend params history
                 focus
     pure attempt.compactAttemptResult
 
 summarizeBackendLocalAttempt
-    :: ([ResponseItem] -> [ResponseItem])
+    :: Int
+    -> ([ResponseItem] -> [ResponseItem])
     -> Int
     -> Int
     -> (ResponseCreateParams -> Backend)
@@ -418,7 +473,7 @@ summarizeBackendLocalAttempt
     -> [ResponseItem]
     -> Maybe Text
     -> IO (CompactAttempt ApiError)
-summarizeBackendLocalAttempt
+summarizeBackendLocalAttempt retries
         prepareHistory contextWindow inputLimit makeBackend params history focus
     | contextWindow <= 0 =
         pure $ compactApiFailure
@@ -452,7 +507,36 @@ summarizeBackendLocalAttempt
                     summaryParams
                     [promptItem]
                     summaryHistory
-            Backend submit = makeBackend summaryParams
+            submitSummary remaining currentHistory =
+                let Backend submit = makeBackend summaryParams
+                in submit
+                    (initialBackendSnapshot currentHistory)
+                    Nothing
+                    [UserMessage summaryPrompt]
+                    (const (pure ())) >>= \case
+                        Left err@(ProviderError ContextWindowExceeded _ _)
+                            | remaining > 0
+                            -- Shrink relative to the rejected request, not
+                            -- the configured limit: a short request can also
+                            -- exceed Claude's actual tokenizer/framing budget.
+                            -- Never replace useful history with an empty
+                            -- summary, or repeat an unchanged request.
+                            , let currentSize =
+                                    estimateRequestTokensWithItems summaryParams
+                                        (currentHistory <> [promptItem])
+                                  nextLimit = currentSize * 3 `div` 4
+                                  nextHistory =
+                                    trimResponseHistoryToFit nextLimit
+                                        summaryParams [promptItem] currentHistory
+                                  nextSize =
+                                    estimateRequestTokensWithItems summaryParams
+                                        (nextHistory <> [promptItem])
+                            , not (null nextHistory)
+                            , nextSize <= nextLimit
+                            , nextSize < currentSize ->
+                                submitSummary (remaining - 1) nextHistory
+                            | otherwise -> pure (Left err)
+                        other -> pure other
         if estimateRequestTokensWithItems
                 summaryParams
                 (requestHistory <> [promptItem])
@@ -460,11 +544,7 @@ summarizeBackendLocalAttempt
             then pure $ CompactAttempt emptyTokenUsage $
                 Left (requestTooLargeError "local compaction")
             else
-                submit
-                    (initialBackendSnapshot requestHistory)
-                    Nothing
-                    [UserMessage summaryPrompt]
-                    (const (pure ())) >>= \case
+                submitSummary retries requestHistory >>= \case
                         Left err ->
                             pure (CompactAttempt emptyTokenUsage (Left err))
                         Right result -> do
@@ -1392,7 +1472,9 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
         contextTokensRef
         backend =
     backendWithCallbacks \snapshot previous inputs callbacks -> do
-        contextState <- readIORef contextTokensRef
+        cachedContext <- readIORef contextTokensRef
+        let contextState =
+                occupancyForSubmission snapshot previous cachedContext
         tokenLimit <- getLimit
         let history = snapshot.backendItems
         projectedTokens <- estimateProjected contextState history inputs
@@ -1427,7 +1509,7 @@ autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
         _ -> False
 
     compactThenSubmit tokenLimit oldTokens oldSnapshot oldHistory inputs
-            callbacks@(BackendCallbacks emitLoopEvent _) = do
+            callbacks@(BackendCallbacks emitLoopEvent _ _) = do
         emitLoopEvent (ActivityUpdated "Compacting context…")
         -- Tool results complete protocol units that are already represented by
         -- calls in oldHistory. Put those results behind their calls before

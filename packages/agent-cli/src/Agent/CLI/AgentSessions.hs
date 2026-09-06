@@ -10,6 +10,8 @@ module Agent.CLI.AgentSessions
     , closeSessionThreadManager
     , closeSessionProcessManager
     , launchSessionThread
+    , launchSessionThreadNotifying
+    , formatSessionCompletionNotice
     , launchManagedTurn
     , launchManagedTurnBounded
     , launchSessionTurn
@@ -18,6 +20,7 @@ module Agent.CLI.AgentSessions
     , newSessionProcessManagerWithLifetime
     , signalManagedSessionReady
     , sessionThreadStatus
+    , prepareSessionThreadWait
     , sessionProcessStatus
     ) where
 
@@ -34,11 +37,14 @@ import Agent.CLI.AgentSessions.Process
     , signalManagedSessionReady
     )
 import Agent.CLI.AgentSessions.Render (renderAgentSession)
+import Agent.CLI.AgentSessions.WaitGraph (withSessionWaitEdge)
 import Agent.CLI.Session.Threads
     ( SessionThreadManager
     , closeSessionThreadManager
     , launchSessionThread
+    , launchSessionThreadNotifying
     , newSessionThreadManager
+    , prepareSessionThreadWait
     , sessionThreadStatus
     )
 import Agent.CLI.Session
@@ -76,6 +82,7 @@ import Agent.Tools.Types
     , jsonTool
     )
 import Data.Maybe (fromMaybe, isJust)
+import System.Timeout (timeout)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
@@ -96,14 +103,87 @@ data AgentSessionToolsEnv = AgentSessionToolsEnv
     , toolsCurrentSessionId :: !(IO (Maybe Text))
     , toolsLaunchTurn :: !(SessionHandle -> Text -> IO (Either Text Text))
     , toolsSessionStatus :: !(Text -> IO Text)
+    -- | Capture the current run now, then wait without following later runs.
+    , toolsPrepareSessionWait :: !(Text -> IO (IO Text))
     }
+
+formatSessionCompletionNotice :: Text -> Text -> Text
+formatSessionCompletionNotice sessionId status =
+    "<agent_session_notification>\n"
+        <> "The agent session turn you started has finished.\n"
+        <> "Session ID: " <> sessionId <> "\n"
+        <> "Status: " <> status <> "\n"
+        <> "Use read_agent_session with this session_id to inspect its response, "
+        <> "or send_agent_session_message to provide further input.\n"
+        <> "</agent_session_notification>"
 
 agentSessionTools :: AgentSessionToolsEnv -> [AppTool]
 agentSessionTools env =
     [ createAgentSessionTool env
     , readAgentSessionTool env
     , sendAgentSessionMessageTool env
+    , waitAgentSessionTool env
     ]
+
+data WaitAgentSessionArgs = WaitAgentSessionArgs
+    { sessionId :: Text
+    , timeoutMs :: Maybe Int
+    }
+
+waitAgentSessionTool :: AgentSessionToolsEnv -> AppTool
+waitAgentSessionTool env = jsonTool
+    "wait_agent_session"
+    "Wait for another persisted session's current turn, not the lifetime of its conversation. Returns status and latest saved output, or timed_out. Already idle sessions return immediately. Locally managed turns report completed, failed, or cancelled; external turns report idle when their activity ends (the exit reason is unknown). Recent output may include a later resume. Use this instead of polling read_agent_session. Cancelling or timing out this wait does not cancel the target."
+    [ PropertySchema "session_id" PropertyString True $ Just
+        "Persisted target session id. Self-waits and circular waits are rejected."
+    , PropertySchema "timeout_ms" PropertyInteger False $ Just
+        "Maximum wait in milliseconds, from 1 to 300000. Defaults to 30000."
+    ]
+    True
+    ParallelSafe
+    (typedTool "wait_agent_session"
+        (Hermes.object $ WaitAgentSessionArgs
+            <$> Hermes.atKey "session_id" Hermes.text
+            <*> optionalKey "timeout_ms" Hermes.int)
+        (runWaitAgentSession env))
+
+runWaitAgentSession :: AgentSessionToolsEnv -> WaitAgentSessionArgs -> IO (Either Text Text)
+runWaitAgentSession env args
+    | milliseconds < 1 || milliseconds > 300000 =
+        pure (Left "timeout_ms must be between 1 and 300000")
+    | otherwise = do
+        current <- env.toolsCurrentSessionId
+        if current == Just args.sessionId
+            then pure (Left "cannot wait for the current agent session")
+            else loadSessionMeta env.toolsPool env.toolsRoot args.sessionId >>= \case
+                Left err -> pure (Left err)
+                Right meta -> case validateToolSessionBoundary env meta of
+                    Left err -> pure (Left err)
+                    Right () -> do
+                        -- Authorization precedes all status, transcript, and
+                        -- coordination access, matching read_agent_session.
+                        result <- timeout (milliseconds * 1000) $
+                            case current of
+                                Nothing -> waitForTurn meta
+                                Just caller -> do
+                                    guarded <- withSessionWaitEdge
+                                        env.toolsRoot caller args.sessionId
+                                        (waitForTurn meta)
+                                    pure (guarded >>= id)
+                        pure $ fromMaybe
+                            (Right ("Session: " <> args.sessionId
+                                <> "\nStatus: timed_out\nThe target was not cancelled."))
+                            result
+  where
+    milliseconds = fromMaybe 30000 args.timeoutMs
+    waitForTurn meta = do
+        wait <- env.toolsPrepareSessionWait args.sessionId
+        status <- wait
+        loadRecentSessionTurns env.toolsPool env.toolsRoot args.sessionId 1 >>= \case
+            Left err -> pure (Left err)
+            Right page -> pure $ Right $
+                renderAgentSession meta status Nothing (map snd page.pageTurns)
+                    <> "\nOutput is the latest saved turn at read time; it may include a later resume."
 
 data CreateAgentSessionArgs = CreateAgentSessionArgs
     { message :: Text
@@ -123,7 +203,7 @@ createAgentSessionArgsDecoder = Hermes.object $
 createAgentSessionTool :: AgentSessionToolsEnv -> AppTool
 createAgentSessionTool env = jsonTool
     "create_agent_session"
-    "Create a persisted top-level agent session and start its first turn in the background. Returns the session id and status as readable text."
+    "Create a persisted top-level agent session and start its first turn in the background. Use only when the user explicitly requests independent/background work or a separate session; do not offload the entire current task here. For bounded subtasks, use subagents and retain responsibility for integration, verification, and the final answer. Returns the session id and status as readable text, not a completed result. The interactive parent session is notified when the background turn finishes; use read_agent_session to inspect its response or send_agent_session_message to continue it."
     [ PropertySchema "message" PropertyString True $ Just
         "Initial task or message for the new agent session."
     , PropertySchema "title" PropertyString False $ Just
@@ -328,7 +408,7 @@ sendAgentSessionMessageArgsDecoder = Hermes.object $
 sendAgentSessionMessageTool :: AgentSessionToolsEnv -> AppTool
 sendAgentSessionMessageTool env = jsonTool
     "send_agent_session_message"
-    "Send a message to a persisted agent session by starting a resumed background turn. Returns the session id and status as readable text; fails if that session is already running."
+    "Send a message to a persisted agent session by starting a resumed background turn. Use for explicitly requested independent/background work or continuation of that separate session, not to transfer responsibility for the current task. Returns the session id and status as readable text, not a completed result; fails if that session is already running. The interactive parent session is notified when this turn finishes."
     [ PropertySchema "session_id" PropertyString True $ Just
         "Persisted target session id."
     , PropertySchema "message" PropertyString True $ Just

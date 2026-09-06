@@ -11,6 +11,7 @@ import Agent.CLI.Compaction
     ( OccupancyKind(..)
     , OccupancySnapshot(..)
     )
+import Agent.CLI.Compaction.Types (occupancyMatchesHistory)
 import Agent.CLI.Request
     ( setRequestInstructions
     , setRequestInstructionsAndTools
@@ -139,4 +140,4 @@ validReportedOccupancy
 validReportedOccupancy history snapshot =
     snapshot.occupancyKind == ReportedOccupancy
         && snapshot.occupancyTokens > 0
-        && snapshot.occupancyLength == length history
+        && occupancyMatchesHistory history snapshot

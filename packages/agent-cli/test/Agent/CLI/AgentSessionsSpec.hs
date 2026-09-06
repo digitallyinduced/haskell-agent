@@ -7,8 +7,12 @@ import Agent.CLI.ManagedTurn (managedTurnRequestFromText)
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Session
 import Agent.CLI.SessionLock
+import Agent.CLI.SteeringInputs
+    ( awaitBackgroundCompletion, clearSteeringInputs, commitSteeringInputs
+    , hasBackgroundCompletionWake, newSteeringInputs
+    , prepareBackgroundCompletion, readSteeringInputs )
 import Agent.Dialect (DialectId(..))
-import Agent.Loop (defaultLoopDispatch)
+import Agent.Loop (TurnInput(..), defaultLoopDispatch)
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch
@@ -37,9 +41,12 @@ import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import Agent.Store.Types (renderStoreError)
 import Control.Concurrent (threadDelay)
+import qualified Control.Concurrent.Async as Async
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception.Safe (SomeException, bracket, finally, try)
+import Control.Concurrent.STM (atomically)
+import Control.Exception.Safe (SomeException, bracket, finally, try, throwIO)
 import Data.IORef
+import Control.Monad (void)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), secondsToDiffTime)
@@ -49,6 +56,7 @@ import qualified System.FilePath as FilePath
 import System.Posix.Temp (mkdtemp)
 import System.Posix.Process (forkProcess, getProcessID, getProcessStatus)
 import System.Posix.Signals (sigKILL, signalProcess)
+import System.Timeout (timeout)
 import Test.Hspec
 
 isReadOnly :: ApprovalRule -> Bool
@@ -61,9 +69,155 @@ fromFilePath = unsafeEncodeUtf
 toFilePath :: OsPath -> FilePath
 toFilePath path = either (error . show) id (decodeUtf path)
 
+waitPayload :: SessionHandle -> Int -> Text.Text
+waitPayload handle milliseconds =
+    "{\"session_id\":\"" <> handle.sessionMeta.metaId
+        <> "\",\"timeout_ms\":" <> Text.pack (show milliseconds) <> "}"
+
+waitTestTurn :: Text.Text -> SessionTurn
+waitTestTurn answer = SessionTurn
+    { turnAt = fixedTime
+    , turnUserText = "question"
+    , turnAssistantText = Just answer
+    , turnError = Nothing
+    , turnResponseId = Nothing
+    , turnItems = []
+    , turnDisplayItems = []
+    , turnUsage = Nothing
+    , turnEffect = TranscriptAppend
+    , turnProviderTelemetry = []
+    }
+
 spec :: Spec
 spec = describe "Agent.CLI.AgentSessions" do
-    it "registers create/read/message tools with mutating flags" $
+    it "describes background session launches as explicit work, not completed results" $
+        withTempEnv \env _ -> do
+            let launchTools = filter
+                    (\tool -> tool.appToolName `elem`
+                        ["create_agent_session", "send_agent_session_message"])
+                    (agentSessionTools env)
+            length launchTools `shouldBe` 2
+            mapM_ (\tool -> do
+                tool.appToolDescription `shouldSatisfy` Text.isInfixOf "explicitly"
+                tool.appToolDescription `shouldSatisfy` Text.isInfixOf "current task"
+                tool.appToolDescription `shouldSatisfy` Text.isInfixOf "not a completed result"
+                ) launchTools
+
+    it "waits for idle sessions immediately and includes their last response" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            _ <- appendTurn handle (waitTestTurn "done")
+            result <- runTool env "wait_agent_session" (waitPayload handle 1000)
+            result `shouldSatisfy` Text.isInfixOf "Status: idle"
+            result `shouldSatisfy` Text.isInfixOf "Assistant:\n  done"
+
+    it "labels recent output separately when the target has already resumed" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            _ <- appendTurn handle (waitTestTurn "old")
+            let waiting = env { toolsPrepareSessionWait = \_ -> pure do
+                    next <- appendTurn handle (waitTestTurn "first result")
+                    _ <- appendTurn next (waitTestTurn "later result")
+                    pure "completed" }
+            result <- runTool waiting "wait_agent_session" (waitPayload handle 1000)
+            result `shouldSatisfy` Text.isInfixOf "later result"
+            result `shouldSatisfy` Text.isInfixOf "may include a later resume"
+            result `shouldNotSatisfy` Text.isInfixOf "Assistant:\n  old"
+
+    it "rejects invalid wait deadlines and self waits before preparing a wait" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            let forbidden = env
+                    { toolsPrepareSessionWait = \_ -> error "must not prepare"
+                    , toolsCurrentSessionId = pure (Just handle.sessionMeta.metaId)
+                    }
+            mapM_ (\ms -> runTool forbidden "wait_agent_session" (waitPayload handle ms)
+                >>= (`shouldSatisfy` Text.isInfixOf "timeout_ms must be")) [0, -1, 300001]
+            result <- runTool forbidden "wait_agent_session" (waitPayload handle 1000)
+            result `shouldSatisfy` Text.isInfixOf "cannot wait for the current"
+
+    it "enforces the session boundary before preparing a wait" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            let forbidden = env
+                    { toolsConnection = organizationGatewayConnectionId
+                    , toolsGatewayIdentity = Just "different-organization"
+                    , toolsPrepareSessionWait = \_ -> error "must not prepare"
+                    }
+            result <- runTool forbidden "wait_agent_session" (waitPayload handle 1000)
+            result `shouldNotSatisfy` Text.isInfixOf "Status:"
+
+    it "times out without cancelling the captured target and permits another wait" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            bracket (newSessionThreadManager env.toolsRoot) closeSessionThreadManager \manager -> do
+                gate <- newEmptyMVar
+                _ <- launchSessionThread manager handle.sessionMeta.metaId
+                    (takeMVar gate >> pure (Right ()))
+                let waiting = env { toolsPrepareSessionWait = prepareSessionThreadWait manager }
+                result <- runTool waiting "wait_agent_session" (waitPayload handle 30)
+                result `shouldSatisfy` Text.isInfixOf "Status: timed_out"
+                sessionThreadStatus manager handle.sessionMeta.metaId `shouldReturn` "running"
+                putMVar gate ()
+                result2 <- runTool waiting "wait_agent_session" (waitPayload handle 1000)
+                result2 `shouldSatisfy` Text.isInfixOf "Status: completed"
+
+    it "keeps a captured wait attached to its run after a rapid resume" $
+        withTempEnv \env _ ->
+            bracket (newSessionThreadManager env.toolsRoot) closeSessionThreadManager \manager -> do
+                gate <- newEmptyMVar
+                _ <- launchSessionThread manager "target" (takeMVar gate >> pure (Left "original failure"))
+                original <- prepareSessionThreadWait manager "target"
+                putMVar gate ()
+                original `shouldReturn` "failed (original failure)"
+                nextGate <- newEmptyMVar
+                _ <- launchSessionThread manager "target" (takeMVar nextGate >> pure (Right ()))
+                timeout 100000 original `shouldReturn` Just "failed (original failure)"
+
+    it "cancels only the waiter, not its target" $
+        withTempEnv \env _ ->
+            bracket (newSessionThreadManager env.toolsRoot) closeSessionThreadManager \manager -> do
+                gate <- newEmptyMVar
+                _ <- launchSessionThread manager "target" (takeMVar gate >> pure (Right ()))
+                wait <- prepareSessionThreadWait manager "target"
+                Async.withAsync wait \waiter -> do
+                    Async.cancel waiter
+                    sessionThreadStatus manager "target" `shouldReturn` "running"
+                putMVar gate ()
+                wait `shouldReturn` "completed"
+
+    it "reports target cancellation to an existing waiter" $
+        withTempEnv \env _ -> do
+            manager <- newSessionThreadManager env.toolsRoot
+            gate <- newEmptyMVar
+            _ <- launchSessionThread manager "target" (takeMVar gate >> pure (Right ()))
+            wait <- prepareSessionThreadWait manager "target"
+            closeSessionThreadManager manager
+            wait `shouldReturn` "cancelled"
+
+    it "does not wait on an idle interactive session's lifetime lock" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            Right lock <- acquireSessionLock handle.sessionDir handle.sessionMeta.metaId
+            flip finally (releaseSessionLock lock) $
+                bracket (newSessionThreadManager env.toolsRoot) closeSessionThreadManager \manager -> do
+                    wait <- prepareSessionThreadWait manager handle.sessionMeta.metaId
+                    timeout 100000 wait `shouldReturn` Just "idle"
+
+    it "stops waiting when an external session rapidly starts its next turn" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
+            bracket (newSessionThreadManager env.toolsRoot) closeSessionThreadManager \manager -> do
+                Right first <- acquireSessionActivityLock handle.sessionDir handle.sessionMeta.metaId
+                wait <- prepareSessionThreadWait manager handle.sessionMeta.metaId
+                timeout 10000 wait `shouldReturn` Nothing
+                releaseSessionLock first
+                Right second <- acquireSessionActivityLock handle.sessionDir handle.sessionMeta.metaId
+                flip finally (releaseSessionLock second) $ do
+                    sessionActivityGeneration handle.sessionDir `shouldReturn` Just 2
+                    timeout 100000 wait `shouldReturn` Just "idle"
+
+    it "registers create/read/message/wait tools with mutating flags" $
         withTempEnv \env _ -> do
             map (\tool -> (tool.appToolName, isReadOnly tool.appToolApproval))
                 (agentSessionTools env)
@@ -71,6 +225,7 @@ spec = describe "Agent.CLI.AgentSessions" do
                     [ ("create_agent_session", False)
                     , ("read_agent_session", True)
                     , ("send_agent_session_message", False)
+                    , ("wait_agent_session", True)
                     ]
 
     it "creates a persisted session and launches its first turn" $
@@ -338,6 +493,119 @@ spec = describe "Agent.CLI.AgentSessions" do
             launched `shouldBe` Right "started session same-process"
             takeMVar observedPid `shouldReturn` parentPid
             waitForThreadStatus manager "same-process" "completed"
+
+    it "notifies the launching parent once per completed session turn and permits follow-up" $
+        withTempSessionThreadManager ["child"] \_ manager -> do
+            notices <- newIORef []
+            let notify status =
+                    atomicModifyIORef' notices \previous ->
+                        (previous <> [formatSessionCompletionNotice "child" status], ())
+            launchSessionThreadNotifying manager "child" notify (pure (Right ()))
+                `shouldReturn` Right "started session child"
+            waitForThreadStatus manager "child" "completed"
+            readIORef notices `shouldReturn` [formatSessionCompletionNotice "child" "completed"]
+            -- A resumed turn gets a new notification; status reads do not.
+            sessionThreadStatus manager "child" `shouldReturn` "completed"
+            launchSessionThreadNotifying manager "child" notify (pure (Left "follow-up failed"))
+                `shouldReturn` Right "started session child"
+            waitForThreadStatus manager "child" "failed (follow-up failed)"
+            readIORef notices `shouldReturn`
+                [ formatSessionCompletionNotice "child" "completed"
+                , formatSessionCompletionNotice "child" "failed (follow-up failed)"
+                ]
+
+    it "routes concurrent session turn completions only to their launching parents" $
+        withTempSessionThreadManager ["first", "second"] \_ manager -> do
+            firstNotices <- newIORef []
+            secondNotices <- newIORef []
+            let notify ref status =
+                    atomicModifyIORef' ref \previous -> (previous <> [status], ())
+            _ <- launchSessionThreadNotifying manager "first"
+                (notify firstNotices) (pure (Right ()))
+            _ <- launchSessionThreadNotifying manager "second"
+                (notify secondNotices) (pure (Left "second failed"))
+            waitForThreadStatus manager "first" "completed"
+            waitForThreadStatus manager "second" "failed (second failed)"
+            readIORef firstNotices `shouldReturn` ["completed"]
+            readIORef secondNotices `shouldReturn` ["failed (second failed)"]
+
+    it "notifies the parent when a session turn throws" $
+        withTempSessionThreadManager ["child"] \_ manager -> do
+            notice <- newEmptyMVar
+            _ <- launchSessionThreadNotifying manager "child" (putMVar notice)
+                (throwIO (userError "child exception"))
+            observed <- timeout 1000000 (takeMVar notice)
+            observed `shouldSatisfy` maybe False (Text.isInfixOf "child exception")
+            sessionThreadStatus manager "child" `shouldReturn`
+                maybe "missing notification" id observed
+
+    it "does not notify for rejected launches or shutdown cancellation" $
+        withTempSessionThreadManager ["child"] \_ manager -> do
+            notices <- newIORef []
+            gate <- newEmptyMVar
+            let notify status =
+                    atomicModifyIORef' notices \previous -> (previous <> [status], ())
+            _ <- launchSessionThreadNotifying manager "child" notify
+                (takeMVar gate >> pure (Right ()))
+            launchSessionThreadNotifying manager "child" notify (pure (Right ()))
+                `shouldReturn` Left "session child is already running"
+            closeSessionThreadManager manager
+            launchSessionThreadNotifying manager "child" notify (pure (Right ()))
+                `shouldReturn` Left "agent session manager is closed"
+            readIORef notices `shouldReturn` []
+
+    it "preserves session outcome when a completion sink fails" $
+        withTempSessionThreadManager ["child"] \_ manager -> do
+            _ <- launchSessionThreadNotifying manager "child"
+                (\_ -> throwIO (userError "notification failed"))
+                (pure (Right ()))
+            waitForThreadStatus manager "child" "completed"
+
+    it "includes the session id and inspection/follow-up tools in completion notices" $ do
+        let notice = formatSessionCompletionNotice "child-id" "completed"
+        notice `shouldSatisfy` Text.isInfixOf "Session ID: child-id"
+        notice `shouldSatisfy` Text.isInfixOf "Status: completed"
+        notice `shouldSatisfy` Text.isInfixOf "read_agent_session"
+        notice `shouldSatisfy` Text.isInfixOf "send_agent_session_message"
+
+    it "wakes an idle parent and retains child completion until the provider commits it" $
+        withTempSessionThreadManager ["child"] \_ manager -> do
+            steering <- newSteeringInputs
+            enqueue <- prepareBackgroundCompletion steering
+            let notice = UserMessage (formatSessionCompletionNotice "child" "completed")
+            _ <- launchSessionThreadNotifying manager "child"
+                (\status -> void $ enqueue "child:turn-1" $
+                    UserMessage (formatSessionCompletionNotice "child" status))
+                (pure (Right ()))
+            timeout 1000000 (atomically (awaitBackgroundCompletion steering))
+                `shouldReturn` Just ()
+            -- Consuming the idle-wake edge must not consume the model input.
+            readSteeringInputs steering `shouldReturn` [notice]
+            hasBackgroundCompletionWake steering `shouldReturn` False
+            readSteeringInputs steering `shouldReturn` [notice]
+            commitSteeringInputs steering 1
+            readSteeringInputs steering `shouldReturn` []
+
+    it "does not deliver a late child completion into a reset parent conversation" $
+        withTempSessionThreadManager ["child"] \_ manager -> do
+            steering <- newSteeringInputs
+            enqueue <- prepareBackgroundCompletion steering
+            gate <- newEmptyMVar
+            _ <- launchSessionThreadNotifying manager "child"
+                (\status -> void $ enqueue "child:turn-1" $
+                    UserMessage (formatSessionCompletionNotice "child" status))
+                (takeMVar gate >> pure (Right ()))
+            clearSteeringInputs steering
+            putMVar gate ()
+            waitForThreadStatus manager "child" "completed"
+            readSteeringInputs steering `shouldReturn` []
+            hasBackgroundCompletionWake steering `shouldReturn` False
+            -- New work belongs to the new conversation and can wake it.
+            current <- prepareBackgroundCompletion steering
+            current "child:turn-2" (UserMessage "new completion")
+                `shouldReturn` Right True
+            readSteeringInputs steering `shouldReturn` [UserMessage "new completion"]
+            hasBackgroundCompletionWake steering `shouldReturn` True
 
     it "serializes and reports in-process session turns" $
         withTempSessionThreadManager ["blocked", "failed"] \_ manager -> do
@@ -744,6 +1012,7 @@ withTempEnv action =
                 , toolsCurrentSessionId = pure Nothing
                 , toolsLaunchTurn = launch
                 , toolsSessionStatus = const (pure "running")
+                , toolsPrepareSessionWait = const (pure (pure "idle"))
                 }
         action env launched
 

@@ -105,6 +105,8 @@ toClaudeAgentOptions toolMode options = do
             , environment = Just environment
             , clientApplication = Just clientApplicationName
             , validateCapabilities = True
+            -- Final per-response usage arrives after assistant content records.
+            , includePartialMessages = True
             , promptWriteTimeoutMicros =
                 options.promptWriteTimeoutMicros
             }

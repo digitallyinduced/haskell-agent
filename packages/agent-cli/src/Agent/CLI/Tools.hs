@@ -208,7 +208,8 @@ schemaFromAppTool modelSupportsAsync dialect tool =
     fmap (setAsyncCapability supportsAsync) $
         case tool.appToolSchema of
             HostedComputerSchema ->
-                if os == "darwin" && dialectId dialect == CodexDialect
+                if os `elem` ["darwin", "linux"]
+                        && dialectId dialect == CodexDialect
                     then Just (FunctionToolValue FunctionTool
                         { name = computerFunctionName
                         , description = Just tool.appToolDescription

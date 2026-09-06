@@ -41,6 +41,7 @@ import Agent.CLI.Session.Interaction
     )
 import Agent.CLI.Session.Retry (waitAndRetryPendingTurn)
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.SteeringInputs (hasBackgroundCompletionWake)
 import Agent.CLI.Render
     ( RenderConfig(..)
@@ -162,7 +163,7 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
             (not (Text.null (Text.strip selectionId))
                 && not (Text.null (Text.strip accountId))) $
             saveProjectAccount
-                env.sessionProjectRoot
+                env.sessionWorkspace.projectRoot
                 env.sessionProvider
                 selectionId
                 accountId

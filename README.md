@@ -185,15 +185,15 @@ Start an interactive session:
 agent-cli
 ```
 
-On macOS, supported OpenAI sessions can use the local desktop by default in an
-interactive terminal. Non-interactive runs keep the tool hidden unless
-`--computer-use` is supplied explicitly. Computer-use requests require
-separate approval, including under `--yolo`; choose **Always allow this tool
-this session** to let the workflow continue without prompting for every
-action. A provider safety check still requires fresh approval.
+On Linux and macOS, supported OpenAI sessions can use the local desktop by
+default in an interactive terminal. One-shot and non-interactive runs keep the
+tool hidden unless `--computer-use` is supplied explicitly. Computer-use
+requests require separate approval, including under `--yolo`; choose **Always
+allow this tool this session** to let the workflow continue without prompting
+for every action. A provider safety check still requires fresh approval.
 `/computer-use` toggles the capability, while
 `/computer-use on` and `/computer-use off` set it explicitly. Disabling or
-re-enabling clears the workflow approval. Grant Screen Recording and
+re-enabling clears the workflow approval. On macOS, grant Screen Recording and
 Accessibility access to the terminal application in **System Settings →
 Privacy & Security** before using it. Start with
 `agent-cli --no-computer-use` to hide the tool from the model, then enable it
@@ -217,6 +217,12 @@ agent with a Nix-provided GHC when enabling it:
 ```console
 nix shell nixpkgs#ghc -c agent-cli --ghci
 ```
+
+On Linux, native X11 uses `xrandr`, `maim`, and `xdotool`. Native Wayland uses
+the standard ScreenCast and RemoteDesktop portals with PipeWire. The Nix
+package includes the required command-line and GStreamer dependencies. See the
+[computer-use guide](docs/computer-use.md) for permissions, session behavior,
+non-Nix prerequisites, and desktop-specific checks.
 
 For GHCi-only operation, disable Bash explicitly:
 
@@ -266,6 +272,83 @@ remote is selected from the current branch's configured remote, then
 `upstream`, `origin`, or the repository's sole remote. When a remote exists, a
 fetch failure aborts worktree creation rather than falling back to a stale
 commit.
+
+### Worktree recovery and cleanup
+
+New managed worktrees are enrolled in snapshot-backed cleanup. After seven
+days of inactivity, an inactive, unprotected checkout may be collected even
+when it contains uncommitted work. Before removal, recovery refs preserve its
+commits, staged changes, working-tree changes, and non-ignored untracked files.
+Conversation history is not deleted; resuming a collected session restores
+its checkout. Recovery snapshots do not automatically expire.
+
+A checkout whose exact `HEAD` is already an ancestor of the repository's
+default branch is eligible after **24 hours of inactivity**, rather than the
+normal configured interval. This means idle time, not 24 hours since merge;
+commit author/committer timestamps are not activity or merge clocks. Additional
+commits not incorporated into the default branch disqualify this fast path.
+Dirty checkouts still require the same verified recovery snapshot, and all
+ownership, active-session, protection and safety checks still apply.
+
+Maintenance resolves the selected remote's existing local symbolic
+`refs/remotes/<remote>/HEAD`, using the branch's configured remote, then
+`upstream`, `origin`, or a sole remaining remote. It does not fetch, guess
+`master`/`main`, or use the currently checked-out branch as the default.
+Missing default-branch evidence keeps the normal interval. Locally cached refs
+can be stale: this proves incorporation into the available ref, not the current
+server state, and may miss recent merges. Squash/rebase merges without exact
+ancestry proof also keep the normal interval; matching commit messages or trees
+are not merge evidence.
+
+**Ignored untracked files are not backed up.** This includes ignored `.env`
+files, build output, and local databases. Move important ignored data outside
+the checkout or protect the worktree before relying on it.
+
+Existing agent worktrees are automatically adopted only when their managed-root
+location, reciprocal linked-Git metadata, and saved-session provenance verify
+ownership. Their latest saved-session activity (including archived sessions and
+sessions in checkout subdirectories) initializes inactivity; adoption does not
+reset old worktrees to today. Missing or ambiguous ownership/activity retains
+the checkout. Database errors or incompatible session metadata defer adoption;
+stale legacy JSON and directory names/mtime are not activity fallbacks.
+Review the simulated adoption and retention reasons first:
+
+```console
+agent-cli worktree gc --dry-run
+agent-cli worktree enroll /absolute/path/to/managed/worktree
+agent-cli worktree protect /absolute/path/to/managed/worktree
+agent-cli worktree unprotect /absolute/path/to/managed/worktree
+agent-cli worktree restore /absolute/path/to/managed/worktree
+```
+
+`gc --dry-run` reports eligibility, retained reasons, and per-checkout and total
+estimated bytes without writing registry entries or snapshots or collecting
+checkouts. Estimates are gross apparent checkout bytes, excluding snapshot
+overhead and filesystem/APFS sharing, not guaranteed net reclaimed disk space.
+Adoption reads the existing session database
+without starting it, migrating it, or importing old sessions. Manual `enroll`
+remains available for a checkout whose provenance cannot be established and
+starts its inactivity clock now. `gc` runs a bounded collection pass.
+Active leases, explicit protection, unsupported Git state, incomplete snapshots,
+or detected concurrent edits prevent deletion. Restoration refuses to overwrite
+an existing directory and never resets a branch that moved after collection.
+Restored checkouts use a detached HEAD. Recovery requires the original shared
+Git repository and the registry under `~/.haskell-agent/worktrees/.registry`;
+these local snapshots are not an off-machine backup. An interrupted restore
+that leaves a directory requires manual recovery rather than overwriting it.
+External editors do not participate in agent leases: protect a checkout while
+using it outside the agent, since edits after the final verification can race
+with removal.
+Existing saved-session lifetime and turn locks are also probed without creating
+lock files; an active or unverifiable lock retains its checkout even if its last
+saved activity is old. Stop pre-upgrade agents before explicit collection:
+their locks can be observed, but an old binary starting after the final probe
+does not participate in the new worktree lease protocol.
+
+Configure a positive whole number of days with
+`"worktree": {"inactivityDays": 14}` in `~/.haskell-agent/config.json`, or use
+`worktree gc --inactivity-days 14` for one pass. Saving a conversation does not
+protect a checkout forever; use `worktree protect` for long-lived work.
 
 Use `--provider openai`, `--provider xai`, `--provider openrouter`,
 `--provider gemini`, or `--provider claude-code` to override automatic

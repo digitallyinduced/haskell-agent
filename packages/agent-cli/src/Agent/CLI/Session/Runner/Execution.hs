@@ -19,9 +19,8 @@ import Agent.CLI.Compaction
     ( AutomaticCompactionBoundary(..)
     , CompactOutcome(..)
     , CompactionInstall(CompactionInstalled)
-    , reportedOccupancy
     )
-import Agent.CLI.Compaction.Projection (reportedContextTokens)
+import Agent.CLI.Compaction.Projection (occupancyOnTurnFinished)
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
 import Agent.CLI.Context (contextUsageTokens, formatContextReport)
 import Agent.Responses.LoopBackend (turnInputsToItems)
@@ -70,6 +69,7 @@ import Agent.CLI.SessionState
 import Agent.CLI.Render
 import Agent.CLI.Session
 import Agent.CLI.Session.History
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.SessionEnv
 import Agent.CLI.SessionLock
     ( acquireSessionActivityLock
@@ -358,6 +358,22 @@ data SessionControlRuntime = SessionControlRuntime
     , controlAgentViewport :: !AgentViewportEnv
     }
 
+installBackgroundTaskSteering :: ToolEnv -> SteeringInputs -> IO ()
+installBackgroundTaskSteering toolEnv steeringInputs = do
+    enqueueCompletion <- prepareBackgroundCompletion steeringInputs
+    setBackgroundTaskHooks toolEnv BackgroundTaskHooks
+        { backgroundTaskCompleted = \notice ->
+            enqueueCompletion
+                notice.noticeKey
+                (UserMessage notice.noticeBody) >>= \case
+                    -- Completion callbacks hold a delivery gate. Keep this
+                    -- non-blocking; UI reporting can backpressure.
+                    Left _ -> pure False
+                    Right inserted -> pure inserted
+        , backgroundTaskDismissed =
+            dismissBackgroundCompletion steeringInputs
+        }
+
 newSessionControlRuntime
     :: SessionHostRuntime
     -> SessionRequest
@@ -365,20 +381,7 @@ newSessionControlRuntime
 newSessionControlRuntime host SessionRequest{..} = do
     toolRegistry <- requireToolRegistry allTools
     steeringInputs <- newSteeringInputs
-    setBackgroundTaskHooks toolEnv BackgroundTaskHooks
-        { backgroundTaskCompleted = \notice ->
-            enqueueBackgroundCompletion
-                steeringInputs
-                notice.noticeKey
-                (UserMessage notice.noticeBody) >>= \case
-                    -- Completion callbacks run while their delivery gate is
-                    -- held. Keep this hook non-blocking; UI reporting can
-                    -- backpressure on a full mailbox.
-                    Left _ -> pure False
-                    Right inserted -> pure inserted
-        , backgroundTaskDismissed =
-            dismissBackgroundCompletion steeringInputs
-        }
+    installBackgroundTaskSteering toolEnv steeringInputs
     spinnerRef <- newIORef Nothing
     renderStateRef <- newIORef emptyRenderState
     allowedToolsRef <- newIORef Set.empty
@@ -452,7 +455,7 @@ newSessionControlRuntime host SessionRequest{..} = do
         newAgentViewportRuntime AgentViewportRuntimeConfig
             { viewportConfigShowRawReasoning =
                 options.optShowRawReasoning
-            , viewportConfigWorkspace = toText cwd
+            , viewportConfigWorkspace = toText workspace.cwd
             , viewportConfigReadRootTranscript =
                 readLiveTranscript conversationRef
             , viewportConfigListChildren = listChildAgents
@@ -563,8 +566,8 @@ buildSkillContextRuntime
                         SuppressAgentsContextLoaded
                         options
                         dialect
-                        home
-                        cwd
+                        workspace.home
+                        workspace.cwd
                         []
                         Nothing
                         ((.catalogEnvironmentContext)
@@ -575,7 +578,8 @@ buildSkillContextRuntime
                             <$> codexCatalogSession)
         freshSkills <-
             if loadsHostWorkspaceContext
-                then loadSkillsCatalogQuiet options home projectRoot cwd
+                then loadSkillsCatalogQuiet
+                    options workspace.home workspace.projectRoot workspace.cwd
                 else pure (SkillCatalog [] [])
         (omitted, _) <-
             installSkills freshAgents True freshSkills
@@ -604,12 +608,14 @@ buildSkillContextRuntime
             Nothing -> pure ()
         clearPendingInputs pendingNotices
         clearSteeringInputs steeringInputs
+        installBackgroundTaskSteering toolEnv steeringInputs
         readIORef toolEnv.toolSessionTmp >>= mapM_ resetToolSessionTemp
         reloadGeneratedContext
     refreshSkills queueContext = do
         refreshed <-
             if loadsHostWorkspaceContext
-                then loadSkillsCatalogQuiet options home projectRoot cwd
+                then loadSkillsCatalogQuiet
+                    options workspace.home workspace.projectRoot workspace.cwd
                 else pure (SkillCatalog [] [])
         (omitted, _) <-
             installSkills startupContext queueContext refreshed
@@ -734,7 +740,7 @@ buildSessionLoopEventRuntime
                 && terminal.terminalNativeProgress
                 && nativeProgressAnimationEnabled options.optMotionMode
         , renderMotionMode = options.optMotionMode
-        , renderWorkspace = toText cwd
+        , renderWorkspace = toText workspace.cwd
         }
     emitLoop event = do
         recordAgentViewportEvent agentViewportRuntime event
@@ -742,11 +748,12 @@ buildSessionLoopEventRuntime
             hooks.nativeOnLoopEvent event
         managedLoopPublisher event
         case event of
-            TurnFinished turn -> do
-                history <- readLiveTranscript conversationRef
-                forM_ (reportedContextTokens turn.tokenUsage) \tokens ->
-                    writeIORef contextOccupancyRef $
-                        Just (reportedOccupancy tokens (length history))
+            TurnFinished turn ->
+                -- Keep the provider checkpoint recorded by middleware:
+                -- a host-renumbered commit may restart the live process.
+                withLiveBackendState conversationRef \snapshot ->
+                    modifyIORef' contextOccupancyRef $
+                        occupancyOnTurnFinished snapshot turn
             _ -> pure ()
         case fullscreen of
             Nothing -> renderEvent render event
@@ -829,15 +836,15 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                                             resolveColor host.hostStderrHandle
                                         promptPermission
                                             color
-                                            (toText cwd)
+                                            (toText workspace.cwd)
                                             requested)
                                 reportLineApproval
-                                (saveProjectAutoApprove projectRoot True)
+                                (saveProjectAutoApprove workspace.projectRoot True)
                         Just runtime ->
                             approve
                                 (requestFullscreenPermission
                                     runtime
-                                    (toText cwd))
+                                    (toText workspace.cwd))
                                 (\case
                                     ApprovalWarning _ -> pure ()
                                     ApprovalSuccess message ->
@@ -846,7 +853,7 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                                                 (Just
                                                     (successNotice
                                                         message))))
-                                (saveProjectAutoApprove projectRoot True)
+                                (saveProjectAutoApprove workspace.projectRoot True)
         classify = const (pure classifiedReadOnly)
         approve request report persist =
             approveToolDecisionWithReporterAndPersistenceClassified
@@ -1015,7 +1022,7 @@ buildSessionShellRuntime host controls SessionRequest{..} =
                             commitAttributionModel
                             commitAttributionEffort
                             enabledNames
-                            cwd
+                            workspace.cwd
                             sessionTmp
                             today
                             (isOneShot options)
@@ -1132,7 +1139,7 @@ buildSessionSubagentRuntime SessionRequest{..} =
         case multiCtx of
             Just ctx -> setMaxConcurrent ctx.multiRegistry next
             Nothing -> pure ()
-        saveProjectMaxConcurrentAgents projectRoot next
+        saveProjectMaxConcurrentAgents workspace.projectRoot next
         pure ("concurrent agent limit: " <> Text.pack (show next))
 
 buildSessionLoopConfig
@@ -1451,13 +1458,11 @@ buildSessionEnv
         , sessionTitleTurnCount = controls.controlTitleTurnCount
         , sessionPlanMode = planMode
         , sessionTaskPlan = taskPlan
-        , sessionProjectRoot = projectRoot
-        , sessionCwd = cwd
+        , sessionWorkspace = workspace
         , sessionProviderFallback =
             host.hostNativeCapabilities.nativeProviderFallback
         , sessionPreparedWorkspaceEnvironment =
             host.hostPreparedWorkspaceEnvironment
-        , sessionHome = home
         , sessionMcpRegistrations = mcpRegistrations
         , sessionMcpWarnings = mcpWarnings
         , sessionMcpFleet = mcpFleet
@@ -1624,7 +1629,7 @@ installSessionActions
                         copyImmediate
                             "worktree path"
                             "worktree path is unavailable"
-                            (Just (toText cwd))
+                            (Just (toText workspace.cwd))
                     ReplCopySession ->
                         currentSessionId persist >>= copyImmediate
                             "session id"
@@ -1681,7 +1686,7 @@ runSessionInteraction
                 inputs <-
                     case startup.startupNativeHooks >>= (.nativeInitialTurnInputs) of
                         Just nativeInputs -> pure nativeInputs
-                        Nothing -> managedTurnInputs cwd request
+                        Nothing -> managedTurnInputs workspace.cwd request
                 skillInputs <-
                     callbacks.runnerPreparePromptSkillInputs
                         env

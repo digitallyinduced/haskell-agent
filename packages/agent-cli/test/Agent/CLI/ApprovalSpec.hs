@@ -22,7 +22,7 @@ import Agent.ToolDispatch
     , noArgsTool
     )
 import Agent.Tools.Types
-    ( AppTool
+    ( AppTool(..)
     , ApprovalRule(..)
     , ToolRegistry
     , jsonAppTool
@@ -277,6 +277,118 @@ spec = do
             readIORef requests `shouldReturn` 1
 
     describe "approveToolDecisionWith" do
+        it "auto-approves only the marked call without changing session policy" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            persistenceCalls <- newIORef (0 :: Int)
+
+            approveToolDecisionWithReporterAndPersistence
+                (\_ -> modifyIORef' permissionRequests (+ 1)
+                    >> pure (Just PermissionAllowAll))
+                (\_ -> pure ())
+                (modifyIORef' persistenceCalls (+ 1))
+                policy allowed
+                (registry [autoApproveMutatingTool])
+                plan mutatingCall
+                `shouldReturn` Right True
+
+            readIORef permissionRequests `shouldReturn` 0
+            readIORef persistenceCalls `shouldReturn` 0
+            readIORef policy `shouldReturn` PromptMutating
+            readIORef allowed `shouldReturn` Set.empty
+
+        it "still prompts for an unmarked host tool" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+
+            approveToolDecisionWithReporter
+                (\_ -> modifyIORef' permissionRequests (+ 1)
+                    >> pure (Just PermissionDeny))
+                (\_ -> pure ())
+                policy allowed
+                (registry [mutatingTool])
+                plan mutatingCall
+                `shouldReturn` Right False
+
+            readIORef permissionRequests `shouldReturn` 1
+            readIORef policy `shouldReturn` PromptMutating
+
+        it "keeps plan mode ahead of scoped auto-approval" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            activatePlanMode plan
+            permissionRequests <- newIORef (0 :: Int)
+
+            result <- approveToolDecisionWithReporter
+                (\_ -> modifyIORef' permissionRequests (+ 1)
+                    >> pure (Just PermissionAllowOnce))
+                (\_ -> pure ())
+                policy allowed
+                (registry [autoApproveMutatingTool])
+                plan mutatingCall
+
+            result `shouldSatisfy` either
+                (Text.isInfixOf "only editable file")
+                (const False)
+            readIORef permissionRequests `shouldReturn` 0
+
+        it "keeps dangerous shell denials ahead of scoped auto-approval" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let call = functionToolCall
+                    "call-shell"
+                    "shell_command"
+                    "{\"command\":\"rm -rf /\"}"
+                shellTool = tool
+                    "shell_command"
+                    (AutoApprove AlwaysPrompt)
+
+            result <- approveToolDecisionWithReporter
+                (\_ -> modifyIORef' permissionRequests (+ 1)
+                    >> pure (Just PermissionAllowOnce))
+                (\_ -> pure ())
+                policy allowed (registry [shellTool]) plan call
+
+            result `shouldSatisfy` either
+                (Text.isInfixOf "Blocked dangerous shell command")
+                (const False)
+            readIORef permissionRequests `shouldReturn` 0
+
+        it "does not bypass computer-use consent when marked for auto-approval" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let call = ToolCall
+                    { callId = "computer-1"
+                    , name = computerToolName
+                    , arguments = "{}"
+                    , callKind = ComputerCallKind
+                    , argumentsEncrypted = False
+                    }
+                autoApproveComputer = computerUseTool
+                    { appToolApproval =
+                        AutoApprove computerUseTool.appToolApproval
+                    }
+
+            approveToolDecisionWithReporter
+                (\_ -> modifyIORef' permissionRequests (+ 1)
+                    >> pure (Just PermissionAllowOnce))
+                (\_ -> pure ())
+                policy allowed
+                (registry [autoApproveComputer])
+                plan call
+                `shouldReturn` Right True
+
+            readIORef permissionRequests `shouldReturn` 1
+
         it "does not classify, prompt, or persist a catastrophic shell call" do
             policy <- newIORef PromptMutating
             allowed <- newIORef Set.empty
@@ -756,6 +868,13 @@ spec = do
                 Left message -> "cannot prompt for approval" `Text.isInfixOf` message
                 Right _ -> False
 
+        it "honors scoped auto-approval without weakening read-only mode" do
+            let tools = registry [autoApproveMutatingTool]
+            childApprove PromptMutating tools mutatingCall
+                `shouldReturn` Right True
+            childApprove DenyMutating tools mutatingCall
+                `shouldReturn` Right False
+
         it "honors per-call read-only classifiers" do
             childApprove DenyMutating (registry [dynamicTool]) dynamicReadCall
                 `shouldReturn` Right True
@@ -783,6 +902,9 @@ readOnlyTool = tool "read" AlwaysReadOnly
 
 mutatingTool :: AppTool
 mutatingTool = tool "write" AlwaysPrompt
+
+autoApproveMutatingTool :: AppTool
+autoApproveMutatingTool = tool "write" (AutoApprove AlwaysPrompt)
 
 dynamicTool :: AppTool
 dynamicTool = tool "dynamic" (ClassifyReadOnly (\call -> pure (call == dynamicReadCall)))

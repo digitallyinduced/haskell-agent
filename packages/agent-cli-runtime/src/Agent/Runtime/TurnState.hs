@@ -424,8 +424,8 @@ inputOnlyTurnItems = turnInputsToItems . (.preparedTurnInputs)
 -- Tool calls left without a result are closed with a synthetic output that
 -- states the abort reason. After a user cancel such a call may never have
 -- started or may have been stopped mid-run, so the output says it was
--- interrupted rather than claiming it never ran; a failure before tool
--- execution reports that the call was not executed. A user-initiated cancel
+-- interrupted rather than claiming it never ran; failures without a recorded
+-- completion likewise have unknown outcomes. A user-initiated cancel
 -- also appends 'turnAbortedNote' so the next request explains the gap.
 --
 -- While nothing committed — or when the committed state no longer extends
@@ -518,8 +518,9 @@ abortedToolOutput abort call =
                     <> "It was not run, or was stopped before finishing and "
                     <> "may have partially executed."
             TurnAbortedByFailure reason ->
-                "Tool `" <> call.name <> "` was not executed: "
-                    <> reason <> "."
+                "Tool `" <> call.name <> "` was interrupted: "
+                    <> reason <> ". No completed result was recorded; "
+                    <> "its outcome is unknown and it may have partially executed."
         , callKind = call.callKind
         , toolResultMode = BlockingToolCall
         , toolResultImages = []

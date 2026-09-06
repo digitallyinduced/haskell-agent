@@ -73,6 +73,46 @@ spec = describe "decodeMessageLine" do
             renderedTextOf block `shouldBe`
                 Just "{\"type\":\"mystery\",\"value\":2}"
 
+        it "preserves typed images and surrounding text in wire order" do
+            block <- decodeToolResult
+                "[{\"type\":\"text\",\"text\":\"before\"},\
+                \{\"type\":\"image\",\"source\":{\"type\":\"base64\",\
+                \\"media_type\":\"image/png\",\"data\":\"b25l\"}},\
+                \{\"type\":\"text\",\"text\":\"between\"},\
+                \{\"type\":\"image\",\"source\":{\"type\":\"base64\",\
+                \\"media_type\":\"image/jpeg\",\"data\":\"dHdv\"}},\
+                \{\"type\":\"text\",\"text\":\"after\"}]"
+            fmap (.blocks) block.content `shouldBe` Just
+                [ ToolResultText "before"
+                , ToolResultImage "image/png" "one"
+                , ToolResultText "between"
+                , ToolResultImage "image/jpeg" "two"
+                , ToolResultText "after"
+                ]
+            renderedTextOf block `shouldBe`
+                Just "before\n[image image/png]\nbetween\n[image image/jpeg]\nafter"
+
+        it "isolates invalid image sources without exposing their payloads" do
+            mapM_ (\source -> do
+                block <- decodeToolResult $
+                    "[{\"type\":\"image\",\"source\":" <> source <> "},"
+                        <> "{\"type\":\"image\",\"source\":{\"type\":\"base64\","
+                        <> "\"media_type\":\"image/webp\",\"data\":\"b2s=\"}}]"
+                case fmap (.blocks) block.content of
+                    Just [ToolResultText label, ToolResultImage "image/webp" "ok"] ->
+                        label `shouldSatisfy` \text -> text == "[image]"
+                            || text == "[image image/png]"
+                            || text == "[image image/svg+xml]"
+                    other -> expectationFailure (show other)
+                ) [ "{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"!secret!\"}"
+                  , "{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"\"}"
+                  , "{\"type\":\"base64\",\"media_type\":\"image/svg+xml\",\"data\":\"c2VjcmV0\"}"
+                  , "{\"type\":\"url\",\"media_type\":\"image/png\",\"url\":\"https://secret.invalid\"}"
+                  , "{\"type\":\"base64\",\"media_type\":7,\"data\":\"c2VjcmV0\"}"
+                  , "null"
+                  , "[]"
+                  ]
+
         it "renders mixed arrays including scalars and nested arrays" do
             block <- decodeToolResult
                 "[\"plain\",7,true,null,[{\"type\":\"text\",\"text\":\"deep\"}]]"

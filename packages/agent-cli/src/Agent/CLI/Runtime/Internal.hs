@@ -38,6 +38,7 @@ import Agent.CLI.McpOAuth
     , loginMcpWith
     , logoutMcp
     )
+import Agent.CLI.WorktreeAdmin (runWorktreeAdmin)
 import Agent.CLI.McpStatus
     ( formatMcpModelNotice
     , formatMcpModelNoticeFor
@@ -167,6 +168,8 @@ devMainResume resumeId = do
         Right (ImportSession cwd) -> runImportSession cwd >> pure DevQuit
         Right (Storage command) ->
             runStorageAdmin command >> pure DevQuit
+        Right (Worktree command) ->
+            runWorktreeAdmin command >> pure DevQuit
         Right (RunAgent options) -> do
             result <- runAgentWithRestarts options
             case result of
@@ -193,6 +196,7 @@ run = do
         Right (WaitSession sessionId) -> runWaitSession sessionId
         Right (ImportSession cwd) -> runImportSession cwd
         Right (Storage command) -> runStorageAdmin command
+        Right (Worktree command) -> runWorktreeAdmin command
         Right (RunAgent options) -> do
             result <- runAgentWithRestarts options
             case result of

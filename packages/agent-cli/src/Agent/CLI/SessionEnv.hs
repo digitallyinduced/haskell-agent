@@ -25,6 +25,7 @@ import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (Persistence, SessionHandle)
 import Agent.CLI.Session.History (LiveConversation)
+import Agent.CLI.Session.Workspace (WorkspaceContext)
 import Agent.CLI.SessionTitle (SessionTitleManager)
 import Agent.CLI.Terminal (TerminalCapabilities)
 import Agent.CLI.SteeringInputs (SteeringInputs)
@@ -84,14 +85,12 @@ data SessionEnv = SessionEnv
     , sessionTitleTurnCount :: !(IORef Int)
     , sessionPlanMode :: !PlanModeEnv
     , sessionTaskPlan :: !(Maybe TaskPlanEnv)
-    , sessionProjectRoot :: !OsPath
-    , sessionCwd :: !OsPath
+    , sessionWorkspace :: !WorkspaceContext
     , sessionProviderFallback :: !Bool
     -- | Prepared environment facts avoid inspecting the host workspace.
     -- 'Nothing' requests ordinary local discovery.
     , sessionPreparedWorkspaceEnvironment
         :: !(Maybe PreparedWorkspaceEnvironment)
-    , sessionHome :: !OsPath
     , sessionMcpRegistrations :: ![McpToolRegistration]
     , sessionMcpWarnings :: ![Text]
     , sessionMcpFleet :: !(Maybe McpFleet)

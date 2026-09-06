@@ -49,6 +49,7 @@ library
                     , Agent.Provider.Options
                     , Agent.ReasoningEffort
                     , Agent.Loop
+                    , Agent.Loop.InputItems
                     , Agent.JsonText
                     , Agent.OsPath
                     , Agent.Http.Header
@@ -218,6 +219,36 @@ benchmark loop-events-bench
                     , aeson
                     , base >= 4.14 && < 5
                     , text
+
+benchmark display-journal-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    -- Both algorithms and their shared types are compiled with the same -O2.
+    hs-source-dirs:   benchmark, src
+    main-is:          DisplayJournal.hs
+    other-modules:    DisplayJournalBaseline
+                    , Agent.Dialect
+                    , Agent.Error
+                    , Agent.Loop.DisplayJournal
+                    , Agent.Loop.EventPump
+                    , Agent.Loop.Output
+                    , Agent.Loop.TokenUsage
+                    , Agent.Provider
+                    , Agent.Telemetry
+                    , Agent.TextBuffer
+                    , Agent.ToolDispatch
+    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-json
+                    , agent-responses-types
+                    , aeson
+                    , async
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , containers
+                    , safe-exceptions
+                    , stm
+                    , text
+                    , time
 
 benchmark concurrent-discovery-bench
     import:           common-opts

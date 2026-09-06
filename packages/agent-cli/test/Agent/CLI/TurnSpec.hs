@@ -504,7 +504,7 @@ spec = do
                         <> [ toolResultToItem
                                 (ToolCallResult
                                     "c-ok"
-                                    "Tool `read` was not executed: the response was cut off (max_output_tokens)."
+                                    "Tool `read` was interrupted: the response was cut off (max_output_tokens). No completed result was recorded; its outcome is unknown and it may have partially executed."
                                     FunctionCallKind BlockingToolCall [] Nothing)
                            ]
 

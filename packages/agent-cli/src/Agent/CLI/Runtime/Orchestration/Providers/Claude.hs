@@ -10,8 +10,8 @@ import Agent.CLI.Compaction
     , claudeAutoCompactTokenLimit
     , claudeCompactionInputLimit
     , installLiveCompactOutcome
-    , runBackendCompactHistoryWithLimits
-    , runBackendCompactWithLimits
+    , runClaudeBackendCompactHistoryWithLimits
+    , runClaudeBackendCompactWithLimits
     )
 import Agent.CLI.Runtime.Orchestration.Providers.Common
     ( decorateAutomaticCompact
@@ -109,7 +109,7 @@ withClaudeProvider ClaudeConfig{..}
                     conversationRef
                     (Just contextTokensRef)
                     (\requestedFocus ->
-                        runBackendCompactWithLimits
+                        runClaudeBackendCompactWithLimits
                             contextWindow
                             inputLimit
                             btwBackend
@@ -134,7 +134,7 @@ withClaudeProvider ClaudeConfig{..}
                         contextWindow <- claudeContextWindow
                         inputLimit <- claudeSummaryInputLimit
                         currentParams <- readSessionRequestParams paramsRef
-                        runBackendCompactHistoryWithLimits
+                        runClaudeBackendCompactHistoryWithLimits
                             contextWindow
                             inputLimit
                             btwBackend
