@@ -4,7 +4,9 @@ module Agent.CLI.Runtime.Orchestration.Tools.Mcp
     , acquireMcpRuntime
     ) where
 
-import Agent.CLI.Config (HarnessConfig(..), McpServerConfig(..), useProgressiveMcp)
+import Agent.CLI.Config
+    ( HarnessConfig(..), McpServerConfig(..)
+    , mcpServersForRuntime, useProgressiveMcp )
 import Agent.CLI.McpElicitation (cliMcpElicitation)
 import Agent.CLI.McpOAuthStore (mcpOAuthStorePath)
 import Agent.CLI.McpStatus
@@ -90,9 +92,10 @@ mcpConfiguration AgentToolsRequest
             , MCP.mcpServerProtocol = config.mcpProtocol
             }
         | (label, config) <-
-            Map.toAscList harnessConfig.configMcpServers
-        , config.mcpEnabled
-        , nativeCapabilities.nativeHostExtensions
+            mcpServersForRuntime
+                nativeCapabilities.nativeMcpTools
+                nativeCapabilities.nativeHostExtensions
+                harnessConfig
         ]
 
 acquireMcpRuntime

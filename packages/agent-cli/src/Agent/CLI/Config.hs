@@ -18,6 +18,7 @@ module Agent.CLI.Config
     , updateHarnessConfig
     , withHarnessConfigSnapshot
     , mcpServerEnabledForRuntime
+    , mcpServersForRuntime
     , useProgressiveMcp
     ) where
 
@@ -108,6 +109,20 @@ mcpServerEnabledForRuntime allowMcpTools allowHostCommands server =
     server.mcpEnabled
         && allowMcpTools
         && (allowHostCommands || isJust server.mcpUrl)
+
+-- | Select configured MCP servers for a concrete runtime in deterministic
+-- name order.
+mcpServersForRuntime
+    :: Bool
+    -- ^ MCP tools are available to this runtime.
+    -> Bool
+    -- ^ Host-side command extensions are available to this runtime.
+    -> HarnessConfig
+    -> [(Text, McpServerConfig)]
+mcpServersForRuntime allowMcpTools allowHostCommands config =
+    filter
+        (mcpServerEnabledForRuntime allowMcpTools allowHostCommands . snd)
+        (Map.toAscList config.configMcpServers)
 
 -- | Optional OAuth client settings for a remote MCP server: pre-registered
 -- credentials, a Client ID Metadata Document URL, and default scopes. The

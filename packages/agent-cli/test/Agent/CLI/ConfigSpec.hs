@@ -46,6 +46,31 @@ spec = describe "Agent.CLI.Config" do
             mcpServerEnabledForRuntime False True commandMcpServer
                 `shouldBe` False
 
+    describe "mcpServersForRuntime" do
+        it "keeps only remote HTTP MCP in an MCP-only runtime" do
+            let config =
+                    defaultHarnessConfig
+                        { configMcpServers =
+                            Map.fromList
+                                [ ("command", commandMcpServer)
+                                , ("remote", httpMcpServer)
+                                ]
+                        }
+            map fst (mcpServersForRuntime True False config)
+                `shouldBe` ["remote"]
+
+        it "rejects every configured server without MCP capability" do
+            let config =
+                    defaultHarnessConfig
+                        { configMcpServers =
+                            Map.fromList
+                                [ ("command", commandMcpServer)
+                                , ("remote", httpMcpServer)
+                                ]
+                        }
+            mcpServersForRuntime False True config
+                `shouldBe` []
+
     it "uses ~/.haskell-agent/config.json" do
         harnessConfigPath (path "/Users/test")
             `shouldBe` path "/Users/test/.haskell-agent/config.json"
