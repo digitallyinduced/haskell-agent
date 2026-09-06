@@ -3,6 +3,9 @@ module Agent.CLI.RepositoryDelivery
     , RepositoryPullRequest(..)
     , repositoryPullRequest
     , parseRepositoryPullRequest
+    , pullRequestURLs
+    , conversationPullRequestURLs
+    , pullRequestByURL
     , PushPreview(..)
     , PullRequestPreview(..)
     , DeliveryError(..)
@@ -49,6 +52,9 @@ import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
+import Data.List (nub)
+import qualified Data.Aeson.KeyMap as KeyMap
+import Text.Read (readMaybe)
 import Data.Char (isAlphaNum, isHexDigit, isSpace)
 import Data.IORef
     ( newIORef
@@ -2372,7 +2378,7 @@ parseRepositoryPullRequest repository bytes = do
     parse = Aeson.withObject "pull request" \o -> do
         number <- o .: "number"
         url <- o .: "url"
-        unless (number > 0 && url == "https://github.com/" <> repository <> "/pull/" <> Text.pack (show (number :: Int)))
+        unless (number > 0 && Text.toCaseFold url == Text.toCaseFold ("https://github.com/" <> repository <> "/pull/" <> Text.pack (show (number :: Int))))
             (fail "invalid pull request URL")
         state <- o .: "state" :: AesonTypes.Parser Text
         draft <- o .: "isDraft"
@@ -2406,3 +2412,103 @@ parseRepositoryPullRequest repository bytes = do
         | value `elem` ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"] = 4
         | value `elem` ["PENDING", "EXPECTED"] = 2
         | otherwise = 0
+
+
+-- Only canonical public GitHub PR identities are accepted. Never pass arbitrary
+-- conversation URLs to gh (or to a shell). Strip Markdown/query/fragment tails.
+pullRequestURLs :: Text -> [Text]
+pullRequestURLs = nub . go
+  where
+    go input = case Text.breakOn "https://github.com/" input of
+        (_, rest) | Text.null rest -> []
+        (prefix, rest) ->
+            let suffix = Text.drop 19 rest
+                token = Text.takeWhile (\c -> isAlphaNum c || c `elem` ("-._/" :: String)) suffix
+                remaining = Text.drop (Text.length token) suffix
+                validBoundary = Text.null prefix || not (isAlphaNum (Text.last prefix) || Text.last prefix `elem` ("/_-." :: String))
+                found = case Text.splitOn "/" token of
+                    owner : repo : "pull" : number : _
+                        | validBoundary, validName owner, validName repo
+                        , Just n <- readMaybe (Text.unpack number) :: Maybe Int
+                        , n > 0, Text.all (\c -> c >= '0' && c <= '9') number ->
+                            ["https://github.com/" <> Text.toCaseFold owner <> "/" <> Text.toCaseFold repo <> "/pull/" <> Text.pack (show n)]
+                    _ -> []
+            in found <> go remaining
+    validName name = not (Text.null name) && name /= "." && name /= ".."
+        && Text.all (\c -> c < '\128' && (isAlphaNum c || c `elem` ("-_." :: String))) name
+
+-- Evidence stays local to a paragraph. Quoted references/examples do not become
+-- associations. Tools must be paired with a PR operation; raw search output alone
+-- cannot attach every PR it happens to mention.
+conversationPullRequestURLs :: Text -> Maybe Text -> [Aeson.Value] -> [Text]
+conversationPullRequestURLs user assistant items = nub $
+    concatMap evidence (maybe [] pure assistant <> [user] <> messages) <> toolURLs
+  where
+    evidence = concatMap paragraph . Text.splitOn "\n\n"
+    paragraph content
+        | any (`Text.isInfixOf` lower) ["for reference", "example", "unrelated", "see also", "beispiel", "referenz"] = []
+        | any (`Text.isInfixOf` lower) ["created", "opened", "merged", "review", "fix", "address", "implement", "erstellt", "gemerg", "beheb", "prüf", "bearbeit"] =
+            pullRequestURLs (Text.unlines (filter (not . Text.isPrefixOf ">" . Text.stripStart) (Text.lines content)))
+        | otherwise = []
+      where lower = Text.toCaseFold (foldr (\url -> Text.replace url "") content (pullRequestURLs content))
+    messages = [Text.intercalate "\n" (strings content) | Aeson.Object o <- items
+        , KeyMap.lookup "type" o == Just (Aeson.String "message")
+        , Just (Aeson.String role) <- [KeyMap.lookup "role" o], role `elem` ["user", "assistant"]
+        , Just content <- [KeyMap.lookup "content" o]]
+    calls = [callId | Aeson.Object o <- items
+        , Just (Aeson.String kind) <- [KeyMap.lookup "type" o]
+        , kind `elem` ["function_call", "custom_tool_call"]
+        , Just (Aeson.String callId) <- [KeyMap.lookup "call_id" o]
+        , let body = Text.toCaseFold (Text.intercalate " " (strings (Aeson.Object o)))
+        , any (`Text.isInfixOf` body) ["gh pr create", "gh pr checkout", "gh pr merge", "gh pr review", "create_pull_request"]]
+    toolURLs = concat [pullRequestURLs (Text.intercalate "\n" (strings output))
+        | Aeson.Object o <- items
+        , Just (Aeson.String kind) <- [KeyMap.lookup "type" o]
+        , kind `elem` ["function_call_output", "custom_tool_call_output"]
+        , Just (Aeson.String callId) <- [KeyMap.lookup "call_id" o], callId `elem` calls
+        , Just output <- [KeyMap.lookup "output" o]]
+    strings (Aeson.String value) = [value]
+    strings (Aeson.Array values) = foldMap strings values
+    strings (Aeson.Object values) = foldMap strings values
+    strings _ = []
+
+-- A conversation association is independent of checkout branch and fork origin.
+pullRequestByURL :: FilePath -> Text -> IO (Either DeliveryError RepositoryPullRequest)
+pullRequestByURL root url = runExceptT do
+    unless (pullRequestURLs url == [url]) (throwE (DeliveryInvalidRequest "invalid PR URL"))
+    let parts = Text.splitOn "/" (Text.drop 19 url)
+    case parts of
+        [owner, repo, "pull", number] -> do
+            let repository = owner <> "/" <> repo
+            output <- liftDelivery (runGhByIdentity root
+                ["pr", "view", Text.unpack number, "--repo", githubRepoArgument repository,
+                 "--json", "number,url,state,isDraft,statusCheckRollup"])
+            -- Reuse the strict state/check parser, without branch/fork matching.
+            value <- either (throwE . DeliveryCommandFailed . Text.pack) pure (Aeson.eitherDecodeStrict' output)
+            let wrapped = case value of
+                    Aeson.Object o -> Aeson.Object (KeyMap.insert "headRepository" (Aeson.object ["name" Aeson..= repo])
+                        (KeyMap.insert "headRepositoryOwner" (Aeson.object ["login" Aeson..= owner]) o))
+                    other -> other
+            parsed <- either (throwE . DeliveryCommandFailed . Text.pack) pure
+                (parseRepositoryPullRequest repository (LBS.toStrict (Aeson.encode [wrapped])))
+            case parsed of
+                Just pr | Text.toCaseFold pr.repositoryPullRequestUrl == Text.toCaseFold url -> pure pr
+                _ -> throwE (DeliveryCommandFailed "PR identity changed")
+        _ -> throwE (DeliveryInvalidRequest "invalid PR URL")
+
+
+-- Unlike branch discovery, looking up a persisted PR does not require .git or
+-- even an existing worktree. Run gh from a private directory with the same
+-- noninteractive environment, output bounds, timeout, and process cleanup.
+runGhByIdentity :: FilePath -> [String] -> IO (Either DeliveryError BS.ByteString)
+runGhByIdentity root arguments = do
+    attempted <- trySynchronous do
+        exists <- doesDirectoryExist root
+        withPrivateTempDirectory (if exists then [root] else []) "haskell-agent-pr" \directory ->
+            runCommandWithEnvironment
+                [("TMPDIR", directory), ("TMP", directory), ("TEMP", directory)]
+                (if exists then root else directory) directory "gh" arguments BS.empty networkTimeoutMicros
+    pure case attempted of
+        Right (Right result)
+            | result.processExitCode == ExitSuccess && not result.processOutputTruncated -> Right result.processStdout
+        _ -> Left (DeliveryUnavailable "GitHub PR status was unavailable")

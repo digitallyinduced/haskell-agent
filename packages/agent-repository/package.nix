@@ -11,7 +11,7 @@ mkDerivation {
     filepath process safe-exceptions text time transformers unix
   ];
   testHaskellDepends = [
-    async base bytestring directory filepath hspec process
+    aeson async base bytestring directory filepath hspec process
     safe-exceptions text unix
   ];
   description = "Repository review and delivery operations";

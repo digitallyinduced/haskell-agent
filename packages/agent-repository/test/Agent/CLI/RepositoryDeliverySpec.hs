@@ -1,5 +1,6 @@
 module Agent.CLI.RepositoryDeliverySpec (spec) where
 
+import qualified Data.Aeson as Aeson
 import Agent.CLI.RepositoryDelivery
 import Agent.CLI.RepositoryReview
     ( RepositorySnapshot(..)
@@ -20,7 +21,7 @@ import System.Directory
     , listDirectory
     , removePathForcibly
     )
-import System.Environment (getEnv, lookupEnv, setEnv, unsetEnv)
+import System.Environment (withArgs, getEnv, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode(..))
 import System.IO (hClose, openTempFile)
 import System.Posix.Files
@@ -39,6 +40,27 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "repository delivery service" do
+    describe "conversation pull request associations" do
+        let url = "https://github.com/owner/repo/pull/42"
+            other = "https://github.com/owner/runtime/pull/43"
+        it "extracts and deduplicates Markdown URLs and strips check fragments" do
+            pullRequestURLs ("[PR](" <> url <> "#checks) " <> url <> "/files?x=1") `shouldBe` [url]
+        it "rejects non-GitHub, spoofed, malformed and non-PR URLs" do
+            pullRequestURLs "https://github.com.evil/o/r/pull/1 https://evil/https://github.com/o/r/pull/2 https://github.com/o/r/issues/1 https://github.com/o/r/pull/0 https://github.com/o/r/pull/1abc" `shouldBe` []
+        it "keeps both repositories mentioned in an assistant creation report" do
+            conversationPullRequestURLs "" (Just ("Created PRs:\n" <> url <> "\n" <> other)) [] `shouldBe` [url, other]
+        it "recognizes explicit user work on a PR" do
+            conversationPullRequestURLs ("Please review and fix " <> url) Nothing [] `shouldBe` [url]
+        it "ignores incidental links and quoted reference material" do
+            conversationPullRequestURLs ("For reference: review " <> url) (Just ("> Created " <> url)) [] `shouldBe` []
+            conversationPullRequestURLs "" (Just ("See also " <> url)) [] `shouldBe` []
+        it "associates gh creation output only when paired with the actual call" do
+            let call command = Aeson.object ["type" Aeson..= ("function_call" :: Text.Text), "call_id" Aeson..= ("c1" :: Text.Text), "arguments" Aeson..= command]
+                output = Aeson.object ["type" Aeson..= ("function_call_output" :: Text.Text), "call_id" Aeson..= ("c1" :: Text.Text), "output" Aeson..= url]
+            conversationPullRequestURLs "" Nothing [call ("gh pr create --title fix" :: Text.Text), output] `shouldBe` [url]
+            conversationPullRequestURLs "" Nothing [call ("gh search prs" :: Text.Text), output] `shouldBe` []
+            conversationPullRequestURLs "" Nothing [output] `shouldBe` []
+
     describe "sidebar pull request status" do
         let parse checks = parseRepositoryPullRequest "owner/repo" (BS8.pack
                 ("[{\"headRepository\":{\"name\":\"repo\",\"nameWithOwner\":\"\"},\"headRepositoryOwner\":{\"login\":\"owner\"},\"number\":42,\"url\":\"https://github.com/owner/repo/pull/42\",\"state\":\"OPEN\",\"isDraft\":false,\"statusCheckRollup\":" <> checks <> "}]"))

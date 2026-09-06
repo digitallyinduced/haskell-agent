@@ -65,6 +65,7 @@ test-suite agent-repository-test
     other-modules:    Agent.CLI.RepositoryDeliverySpec
                     , Agent.CLI.RepositoryReviewSpec
     build-depends:    agent-repository
+                    , aeson
                     , async
                     , base >= 4.17 && < 5
                     , bytestring

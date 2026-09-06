@@ -691,6 +691,8 @@ int ha_repository_review_abi_smoke(void) {
             NULL) != 1) {
         return 25;
     }
+    if (ha_session_pr_status(value, sizeof(value) - 1, NULL, NULL) != 1) return 42;
+    if (ha_session_pr_status(NULL, 0, repository_pr_status_callback, NULL) != 2) return 43;
     if (ha_repository_pr_status(value, sizeof(value) - 1, NULL, NULL) != 1
         || ha_repository_delivery_status(
             value, sizeof(value) - 1,

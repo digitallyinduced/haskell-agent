@@ -1620,6 +1620,21 @@ int32_t ha_repository_pr_status(
     ha_repository_pr_status_callback callback, void *context
 );
 
+/* Session-associated PRs, with branch lookup only if no conversation evidence
+ * exists. Same synchronous return codes as ha_repository_pr_status. Input is a
+ * UTF-8 session ID, copied before return. Callback is invoked serially on a
+ * worker thread: status 0 delivers an item; status 1 completes the list (possibly
+ * empty); -1 unavailable or -3 cancelled terminates it. Exactly one terminal
+ * callback follows each accepted request. Non-item callbacks have zero/null
+ * fields. Item state 0 means unavailable; its validated URL/number are retained
+ * and CI is 0. Otherwise state/CI codes and callback-scoped buffer ownership
+ * match ha_repository_pr_status. At most 20 most recently associated PRs are
+ * returned. The caller must keep context alive until the terminal callback.
+ */
+int32_t ha_session_pr_status(const uint8_t *session_id, size_t session_id_len,
+    ha_repository_pr_status_callback callback, void *context);
+
+
 int32_t ha_repository_delivery_status(
     const uint8_t *path, size_t path_length,
     const uint8_t *snapshot_id, size_t snapshot_id_length,

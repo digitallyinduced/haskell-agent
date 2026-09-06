@@ -50,7 +50,8 @@ library
                     , Agent.Store.Postgres.Skill
                     , Agent.Store.Postgres.Tenant
                     , Agent.Store.Postgres.UsageCache
-    other-modules:    Agent.Store.Custom.QueryResult
+    other-modules:    Agent.Store.Postgres.Session.PullRequests
+                    , Agent.Store.Custom.QueryResult
                     , Agent.Store.Postgres.Custom.Sql
                     , Agent.Store.Postgres.Custom.Types
                     , Agent.Store.Postgres.Skill.Types
