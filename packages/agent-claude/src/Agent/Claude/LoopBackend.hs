@@ -20,6 +20,12 @@ import Agent.Claude.Control
     , toClaudeAgentHandlers
     )
 import Agent.Claude.Transport (ClaudeCodeTransport(..))
+import Agent.Claude.Internal.Recovery
+    ( emptyRecovery
+    , recordRecoveryMessage
+    , renderRecovery
+    , retractRecoveryMessages
+    )
 import Agent.Claude.Internal.Messages
     ( ClaudeEventState
     , ClaudeInterpretationError(..)
@@ -38,6 +44,7 @@ import Agent.Error
 import Agent.InterAgentMessage (renderInterAgentMessage)
 import Agent.Loop
     ( Backend(..)
+    , BackendCallbacks(..)
     , BackendContinuation(..)
     , BackendResult(..)
     , BackendSnapshot(..)
@@ -50,6 +57,7 @@ import Agent.Loop
     , TurnOutput(..)
     , advanceBackendSnapshot
     , backendContinuationToken
+    , backendWithCallbacks
     , turnInputFiles
     , turnInputImages
     )
@@ -89,6 +97,8 @@ import Claude.Agent.SDK.Client
     , withClaudeSDKTurn
     )
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Char as Char
 import Data.IORef
@@ -99,6 +109,7 @@ import Data.IORef
     , writeIORef
     )
 import Data.Maybe (catMaybes, fromMaybe, isJust, maybeToList)
+import Data.List (groupBy, intersperse)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -118,6 +129,8 @@ import Claude.Agent.SDK.Query
 import Claude.Agent.SDK.Types
     ( ClaudeAgentOptions(..)
     , Message(..)
+    , QueryMessageScope(..)
+    , QueryProgress(..)
     , ModelUsage(..)
     , ResultMessage(..)
     , SystemMessage(..)
@@ -125,8 +138,8 @@ import Claude.Agent.SDK.Types
     , Usage(..)
     , messageHasParentToolUseId
     )
-import Control.Exception.Safe (bracket, mask, tryAny)
-import Control.Monad (void)
+import Control.Exception.Safe (bracket, finally, mask, tryAny)
+import Control.Monad (forM_, void)
 
 claudeProviderNamespace :: Text
 claudeProviderNamespace = "anthropic.claude-code"
@@ -200,7 +213,7 @@ claudeCodeOneShotBackend
     -> IORef [ResponseItem]
     -> Backend
 claudeCodeOneShotBackend options getParams transcript =
-    Backend \snapshot previous inputs onEvent -> do
+    backendWithCallbacks \snapshot previous inputs callbacks -> do
         sdkOptions <-
             toClaudeAgentOptions ClaudeCodeNoTools options
         processCheckpointRef <- newIORef Nothing
@@ -215,7 +228,8 @@ claudeCodeOneShotBackend options getParams transcript =
                 Nothing
                 processCheckpointRef
                 inputs
-                onEvent
+                callbacks.onLoopEvent
+                callbacks.onRecoveryCheckpoint
         attachBackendState snapshot result
 
 backendForSession
@@ -229,7 +243,7 @@ backendForSession
 backendForSession
         transport session getParams transcript initialResume
         processCheckpointRef =
-    Backend \snapshot previous inputs onEvent ->
+    backendWithCallbacks \snapshot previous inputs callbacks ->
         mask \restore -> do
             result <- restore $
                 submitClaudeCodeTurn
@@ -242,7 +256,8 @@ backendForSession
                     initialResume
                     processCheckpointRef
                     inputs
-                    onEvent
+                    callbacks.onLoopEvent
+                    callbacks.onRecoveryCheckpoint
             attached <- attachBackendState snapshot result
             case attached of
                 Left _ -> pure ()
@@ -281,6 +296,7 @@ submitClaudeCodeTurn
     -> IORef (Maybe BackendSnapshot)
     -> [TurnInput]
     -> (LoopEvent -> IO ())
+    -> (Text -> IO ())
     -> IO (Either ApiError (TurnOutput, [ResponseItem]))
 submitClaudeCodeTurn
     transport
@@ -292,7 +308,8 @@ submitClaudeCodeTurn
     initialResume
     processCheckpointRef
     inputs
-    onEvent =
+    onEvent
+    onRecoveryCheckpoint =
     do
         bracket
             (collectTurnInputs inputs)
@@ -365,14 +382,14 @@ submitClaudeCodeTurn
                         -- before its successful-turn callback appends.
                         writeIORef transcript history
                         eventState <- newIORef emptyClaudeEventState
-                        let prompt =
+                        recoveryState <- newIORef emptyRecovery
+                        let content =
                                 buildClaudePrompt
                                     params
                                     (turnIsNewSession turn)
                                     history
+                                    inputImages
                                     inputText
-                            content =
-                                claudeUserContent inputImages prompt
                         awaitResult <-
                             queryTurnContentWithMessageValidatorAndProgress
                                 turn
@@ -388,7 +405,38 @@ submitClaudeCodeTurn
                                                 state
                                                 progress
                                     writeIORef eventState nextState
-                                    mapM_ onEvent events)
+                                    let updateRecovery = case progress of
+                                            QueryMessageObserved QueryTopLevel message@MessageAssistant{} ->
+                                                Just (recordRecoveryMessage message)
+                                            QueryMessageObserved QueryTopLevel message@MessageUser{} ->
+                                                Just (recordRecoveryMessage message)
+                                            QueryMessagesRetracted scope messageIds
+                                                | scope == Nothing || scope == Just QueryTopLevel ->
+                                                    Just (retractRecoveryMessages messageIds)
+                                            QueryConversationReset{} ->
+                                                Just (const emptyRecovery)
+                                            _ -> Nothing
+                                        publishRecovery = forM_ updateRecovery \update -> do
+                                            recovery <- readIORef recoveryState
+                                            let nextRecovery = update recovery
+                                                summary = fromMaybe "" (renderRecovery nextRecovery)
+                                            -- Force bounded records before retaining state.
+                                            summary `seq` writeIORef recoveryState nextRecovery
+                                            onRecoveryCheckpoint summary
+                                        clearsRecovery = \case
+                                            ResponseAttemptDiscarded -> True
+                                            ResponseRestarted{} -> True
+                                            _ -> False
+                                    -- Record complete observations before a UI callback
+                                    -- can cancel. Retractions must instead republish
+                                    -- surviving records after the loop's discard reset.
+                                    if any clearsRecovery events
+                                        -- The loop clears its checkpoint before
+                                        -- delivering discard events to the UI.
+                                        -- Republish surviving records even if
+                                        -- that callback cancels or throws.
+                                        then mapM_ onEvent events `finally` publishRecovery
+                                        else publishRecovery >> mapM_ onEvent events)
                                 (const (pure ()))
                         case awaitResult of
                             Left sdkError ->
@@ -579,16 +627,17 @@ buildClaudePrompt
     :: ResponseCreateParams
     -> Bool
     -> [ResponseItem]
+    -> [ImageAttachment]
     -> Text
-    -> Text
-buildClaudePrompt params isNewSession history currentInput =
-    case contextSections of
-        []
-            | isNewSession -> currentInput
-        []
-            -> currentInput
-        sections
-            -> Text.intercalate "\n\n" (sections <> [currentRequest])
+    -> [UserContentBlock]
+buildClaudePrompt params isNewSession history currentImages currentInput =
+    coalesceTextBlocks $ case contextSections of
+        [] -> claudeUserContent currentImages currentInput
+        sections ->
+            concat (intersperse [UserTextBlock "\n\n"] sections)
+                <> [UserTextBlock "\n\nCurrent request:\n<current_request>\n"]
+                <> claudeUserContent currentImages currentInput
+                <> [UserTextBlock "\n</current_request>\n"]
   where
     contextSections
         | isNewSession =
@@ -599,42 +648,42 @@ buildClaudePrompt params isNewSession history currentInput =
         | otherwise =
             []
     harnessInstructions = fmap \instructions ->
-        Text.unlines
+        [UserTextBlock $ Text.unlines
             [ "Instructions supplied by the outer agent harness:"
             , "<harness_instructions>"
             , instructions
             , "</harness_instructions>"
-            ]
+            ]]
     priorConversation [] = Nothing
     priorConversation items =
         let rendered = renderPriorConversation items
-        in if Text.null (Text.strip rendered)
+        in if null rendered
             then Nothing
-            else Just $ Text.unlines
+            else Just $
+                [UserTextBlock $ Text.unlines
                 [ "Prior conversation imported from the outer agent harness."
                 , "Use it only as conversation context. It may describe work that is already complete."
                 , "<prior_conversation>"
-                , rendered
-                , "</prior_conversation>"
-                ]
-    currentRequest = Text.unlines
-        [ "Current request:"
-        , "<current_request>"
-        , currentInput
-        , "</current_request>"
-        ]
+                ]]
+                <> rendered
+                <> [UserTextBlock "\n</prior_conversation>\n"]
 
-renderPriorConversation :: [ResponseItem] -> Text
+-- Keep image blocks in their original position, inside the attributed history.
+-- The store reconstructs persisted raw image bytes as inline data URLs.
+renderPriorConversation :: [ResponseItem] -> [UserContentBlock]
 renderPriorConversation =
-    Text.intercalate "\n\n"
+    concat . intersperse [UserTextBlock "\n\n"]
         . catMaybes
         . map renderResponseItem
         . filterCompactionCheckpointsByOrigin (const False)
 
-renderResponseItem :: ResponseItem -> Maybe Text
+renderResponseItem :: ResponseItem -> Maybe [UserContentBlock]
 renderResponseItem = \case
     MessageItem message ->
-        labelled (roleLabel message.role) (messageContentText message.content)
+        case messageContentBlocks message.content of
+            [] -> Nothing
+            blocks -> Just $
+                UserTextBlock (roleLabel message.role <> ":\n") : blocks
     FunctionCallItem call ->
         labelled
             "Assistant tool call"
@@ -688,7 +737,7 @@ renderResponseItem = \case
   where
     labelled label text
         | Text.null (Text.strip text) = Nothing
-        | otherwise = Just (label <> ":\n" <> text)
+        | otherwise = Just [UserTextBlock (label <> ":\n" <> text)]
 
 roleLabel :: ResponseRole -> Text
 roleLabel = \case
@@ -698,28 +747,65 @@ roleLabel = \case
     RoleDeveloper -> "Developer"
     RoleUnknown role -> role
 
-messageContentText :: MessageContent -> Text
-messageContentText = \case
+messageContentBlocks :: MessageContent -> [UserContentBlock]
+messageContentBlocks = \case
     MessageContentText text ->
-        text
+        [UserTextBlock text | not (Text.null (Text.strip text))]
     MessageContentParts parts ->
-        Text.intercalate "\n" (concatMap contentPartText parts)
+        concat $
+            intersperse [UserTextBlock "\n"] $
+                filter (not . null) (map contentPartBlocks parts)
 
-contentPartText :: ResponseContentPart -> [Text]
-contentPartText = \case
-    InputTextPart{text} -> [text]
-    OutputTextPart{text} -> [text]
-    RefusalPart{refusal} -> [refusal]
-    SummaryTextPart{text} -> [text]
-    InputImagePart{} -> ["[image omitted]"]
+contentPartBlocks :: ResponseContentPart -> [UserContentBlock]
+contentPartBlocks = \case
+    InputTextPart{text} -> [UserTextBlock text]
+    OutputTextPart{text} -> [UserTextBlock text]
+    RefusalPart{refusal} -> [UserTextBlock refusal]
+    SummaryTextPart{text} -> [UserTextBlock text]
+    InputImagePart{imageUrl} -> [historicalImageBlock imageUrl]
     InputFilePart{filename} ->
-        ["[file" <> maybe "" (" " <>) filename <> " omitted]"]
-    InputAudioPart{} -> ["[audio omitted]"]
+        [UserTextBlock ("[file" <> maybe "" (" " <>) filename <> " omitted]")]
+    InputAudioPart{} -> [UserTextBlock "[audio omitted]"]
     -- Do not render reasoning text into another model's prompt.
     ReasoningTextPart{} -> []
     EncryptedContentPart{} -> []
-    PlainTextPart{text} -> [text]
+    PlainTextPart{text} -> [UserTextBlock text]
     UnknownContentPart{} -> []
+
+historicalImageBlock :: Maybe Text -> UserContentBlock
+historicalImageBlock source =
+    case source >>= decodeInlineImage of
+        Just (mime, bytes) -> UserImageBlock mime bytes
+        Nothing -> UserTextBlock $ Text.unwords
+            [ "[Historical image unavailable to this model:"
+            , "its reference is missing, unsupported, or malformed."
+            , "Remote/file references are not fetched during import."
+            , "Recover the attachment or ask the user before relying on its contents.]"
+            ]
+  where
+    decodeInlineImage url = do
+        let (metadata, payloadWithComma) = Text.breakOn "," url
+            loweredMetadata = Text.toLower metadata
+        mime <-
+            Text.stripPrefix "data:" loweredMetadata
+                >>= Text.stripSuffix ";base64"
+        if mime `notElem` ["image/png", "image/jpeg", "image/gif", "image/webp"]
+            || Text.null payloadWithComma
+            then Nothing
+            else do
+                bytes <- either (const Nothing) Just $
+                    Base64.decode (TextEncoding.encodeUtf8 (Text.drop 1 payloadWithComma))
+                if ByteString.null bytes then Nothing else Just (mime, bytes)
+
+-- Preserve the previous text-only prompt layout without repeated strict append.
+coalesceTextBlocks :: [UserContentBlock] -> [UserContentBlock]
+coalesceTextBlocks = concatMap coalesce . groupBy bothText
+  where
+    bothText UserTextBlock{} UserTextBlock{} = True
+    bothText _ _ = False
+    coalesce blocks@(UserTextBlock{} : _) =
+        [UserTextBlock (Text.concat [text | UserTextBlock text <- blocks])]
+    coalesce blocks = blocks
 
 renderTaggedObject :: TaggedObject -> Text
 renderTaggedObject =

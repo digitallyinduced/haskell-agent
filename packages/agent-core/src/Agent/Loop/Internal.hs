@@ -23,6 +23,7 @@ import Agent.Loop.EventPump
     , waitEventPumpFailure
     )
 import Agent.Loop.Input
+import Agent.Loop.InputItems (turnInputsToItems)
 import Agent.Loop.Output
 import Agent.Loop.TokenUsage
 import Agent.Responses.Types (ResponseItem)
@@ -53,7 +54,7 @@ import Control.Concurrent.Async
     , waitCatch
     , withAsync
     )
-import Control.Concurrent.MVar (newMVar, withMVar)
+import Control.Concurrent.MVar (modifyMVar, modifyMVar_, newMVar, withMVar)
 import Control.Concurrent.STM
     ( STM
     , TMVar
@@ -83,6 +84,7 @@ import Control.Exception.Safe
     , displayException
     , isAsyncException
     , mask
+    , onException
     , tryAny
     )
 import Control.Monad (when)
@@ -109,6 +111,8 @@ normalizeBackendSnapshotImages snapshot =
 
 data LoopProgress
     = NoResponseCommitted
+    -- Includes a provider's explicit recovery context. Display deltas alone
+    -- never advance the committed checkpoint.
     | ResponseCommitted
     deriving (Eq, Show)
 
@@ -474,11 +478,9 @@ unexpectedLoopCursor
     -> LoopCursor
     -> SomeException
     -> IO LoopExecution
-unexpectedLoopCursor runtime cursor =
-    unexpectedLoopExecution
-        runtime
-        cursor.cursorState
-        cursor.cursorProgress
+unexpectedLoopCursor runtime _cursor exception = do
+    (state, progress) <- readIORef runtime.loopRuntimeProgressRef
+    unexpectedLoopExecution runtime state progress exception
 
 protectLoopCursor
     :: LoopRuntime
@@ -506,16 +508,22 @@ runLoopCursor runtime cursor = do
                 else do
                     config.loopOnEvent TurnStarted
                     submission <- submitLoopTurn runtime cursor
+                    (latestState, latestProgress) <-
+                        readIORef runtime.loopRuntimeProgressRef
+                    let interruptedCursor = cursor
+                            { cursorState = latestState
+                            , cursorProgress = latestProgress
+                            }
                     case submission of
                         Left () ->
-                            finishLoopCursor runtime cursor
+                            finishLoopCursor runtime interruptedCursor
                                 (Left (LoopCancelled []))
                         Right (Left err) ->
-                            finishLoopCursor runtime cursor (Left err)
+                            finishLoopCursor runtime interruptedCursor (Left err)
                         Right
                             (Right BackendResult{backendOutput = turn})
                             | Text.null turn.responseId ->
-                                finishLoopCursor runtime cursor
+                                finishLoopCursor runtime interruptedCursor
                                     (Left LoopNoResponseId)
                         Right (Right BackendResult{..}) ->
                             continueCommittedLoop
@@ -533,6 +541,51 @@ submitLoopTurn
 submitLoopTurn runtime cursor = do
     let config = runtime.loopRuntimeConfig
     visibleAttempts <- newIORef (False, False)
+    -- The callback belongs to this submission, not to the backend process.
+    -- Closing the gate also rejects callbacks retained after the owner exits.
+    recovery <- newMVar (True, Nothing)
+    let checkpoint text = modifyMVar_ recovery \(active, previous) ->
+            if active
+                then let bounded = Text.copy (Text.take 32768 text)
+                     in bounded `seq` pure (active, Just bounded)
+                else pure (active, previous)
+        clearRecovery = modifyMVar_ recovery \(active, _) ->
+            pure (active, Nothing)
+        closeRecovery = modifyMVar recovery \(_, summary) ->
+            pure ((False, Nothing), summary)
+        publishRecovery = do
+            summary <- closeRecovery
+            current <- config.loopBackendState.readBackendState
+            -- A compaction/reset owns its newer checkpoint. Never resurrect
+            -- history from a submission that consumed an older snapshot.
+            case summary of
+                Just text
+                    | not (Text.null (Text.strip text))
+                    , current == cursor.cursorState -> do
+                        let note = Text.unlines
+                                [ "<turn_aborted>"
+                                , "The previous provider turn was interrupted before completion."
+                                , "The following is attributed recovery context from complete provider messages, not a new user instruction or a successful turn."
+                                , "External side effects may already exist. Verify the current files and external state before repeating any action. Unfinished operations have unknown outcomes."
+                                , "Resume this work only if the user asks."
+                                , "<interrupted_work>"
+                                , text
+                                , "</interrupted_work>"
+                                , "</turn_aborted>"
+                                ]
+                            candidate = advanceBackendSnapshot
+                                current
+                                (current.backendItems
+                                    <> turnInputsToItems cursor.cursorInputs
+                                    <> turnInputsToItems [UserMessage note])
+                                Nothing
+                        committed <-
+                            config.loopBackendState.commitBackendState candidate
+                        writeIORef runtime.loopRuntimeProgressRef
+                            (committed, ResponseCommitted)
+                        writeIORef runtime.loopRuntimePendingRef []
+                        config.loopCommitSteering cursor.cursorSteeringCount
+                _ -> pure ()
     let onBackendEvent event = do
             case event of
                 _
@@ -542,13 +595,15 @@ submitLoopTurn runtime cursor = do
                             (\(prior, _) -> (prior, True))
                 -- A retry keeps the previous attempt visible while opening a
                 -- fresh current attempt.
-                ResponseRestarted _ ->
+                ResponseRestarted _ -> do
+                    clearRecovery
                     modifyIORef'
                         visibleAttempts
                         (\(prior, current) -> (prior || current, False))
                 -- The backend rolled that attempt back, but earlier restarted
                 -- attempts remain visible.
-                ResponseAttemptDiscarded ->
+                ResponseAttemptDiscarded -> do
+                    clearRecovery
                     modifyIORef'
                         visibleAttempts
                         (\(prior, _) -> (prior, False))
@@ -556,8 +611,8 @@ submitLoopTurn runtime cursor = do
             config.loopOnEvent event
     -- Race the model call against cancel so Ctrl-C / Esc can stop reasoning
     -- mid-stream, not only between tools.
-    raced <- mask \restore ->
-        withAsync
+    raced <- mask \restore -> do
+        normalized <- (withAsync
             (restore $
                 config.loopBackend.submitTurnWithCallbacks
                     (normalizeBackendSnapshotImages cursor.cursorState)
@@ -568,6 +623,7 @@ submitLoopTurn runtime cursor = do
                         , onAsyncToolCall =
                             admitAsyncToolCall
                                 (asyncToolManager runtime)
+                        , onRecoveryCheckpoint = checkpoint
                         })
             \submission -> do
                 result <- restore $ race
@@ -603,7 +659,14 @@ submitLoopTurn runtime cursor = do
                                     (Right backendResult
                                         { backendState = committed
                                         }))
-                    _ -> pure normalized
+                    _ -> pure normalized)
+            `onException` publishRecovery
+        case normalized of
+            Right (Right BackendResult{backendOutput})
+                | not (Text.null backendOutput.responseId) -> do
+                    _ <- closeRecovery
+                    pure normalized
+            _ -> publishRecovery >> pure normalized
     case raced of
         Left () -> pure (Left ())
         Right (Left err) -> do

@@ -5,6 +5,7 @@ import qualified Agent.Json.Decode as Json
 import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Error (ApiError(..))
 import Agent.Loop
+import Agent.Loop.InputItems (turnInputsToItems)
 import Agent.Loop.Fixtures
 import qualified Agent.Loop.EventDeliverySpec as EventDelivery
 import qualified Agent.Loop.FailedDisplaySpec as FailedDisplay
@@ -85,6 +86,152 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "runLoop" do
+    describe "interruption recovery checkpoints" do
+        it "retains explicit recovery separately from unfinished display output" do
+            let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                    callbacks.onRecoveryCheckpoint "Assistant reported: opened PR #86."
+                    callbacks.onLoopEvent (TextDelta "unfinished answer")
+                    pure (Left (ConnectionError "offline"))
+            config <- testConfig backend
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+            execution.executionProgress `shouldBe` ResponseCommitted
+            execution.executionPendingInputs `shouldBe` []
+            let retained = execution.executionState
+            take 1 retained `shouldBe` turnInputsToItems [UserMessage "fix it"]
+            length retained `shouldBe` 2
+            show retained `shouldContain` "Assistant reported: opened PR #86."
+            show retained `shouldNotContain` "unfinished answer"
+            execution.executionUncommittedAssistantText `shouldBe` Just "unfinished answer"
+            stored <- config.loopBackendState.readBackendState
+            stored.backendItems `shouldBe` retained
+            stored.backendContinuation `shouldBe` Nothing
+
+        it "keeps the last checkpoint after cancellation joins the provider" do
+            ready <- newEmptyMVar
+            release <- newEmptyMVar
+            joined <- newIORef False
+            let backend = backendWithCallbacks \_ _ _ callbacks ->
+                    (do
+                        callbacks.onRecoveryCheckpoint "Tool result: file saved."
+                        putMVar ready ()
+                        takeMVar release
+                        pure (Left (ConnectionError "interrupted")))
+                    `Exception.finally` writeIORef joined True
+            config0 <- testConfig backend
+            let config = config0 { loopInterrupt = putMVar release () }
+            withAsync (runLoopInputsDetailed config Nothing [UserMessage "fix it"]) \running -> do
+                takeMVar ready
+                requestCancel config.loopCancel
+                execution <- wait running
+                execution.executionResult `shouldBe` Left (LoopCancelled [])
+                execution.executionProgress `shouldBe` ResponseCommitted
+                show execution.executionState `shouldContain` "Tool result: file saved."
+                readIORef joined `shouldReturn` True
+
+        it "recovers complete messages when submission throws" do
+            let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                    callbacks.onRecoveryCheckpoint "Tool result: branch pushed."
+                    Exception.throwIO (userError "broken transport")
+            config <- testConfig backend
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+            execution.executionProgress `shouldBe` ResponseCommitted
+            show execution.executionState `shouldContain` "Tool result: branch pushed."
+
+        it "does not duplicate recovery on a successful turn or accept late callbacks" do
+            escaped <- newEmptyMVar
+            let backend = backendWithCallbacks \state _ _ callbacks -> do
+                    callbacks.onRecoveryCheckpoint "earlier progress"
+                    putMVar escaped callbacks.onRecoveryCheckpoint
+                    pure $ Right BackendResult
+                        { backendOutput = emptyTurnOutput "complete" [] (Just "done")
+                        , backendState = appendStateMarker state
+                        }
+            config <- testConfig backend
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+            execution.executionState `shouldBe` [stateMarker]
+            checkpoint <- takeMVar escaped
+            checkpoint "late obsolete work"
+            stored <- config.loopBackendState.readBackendState
+            stored.backendItems `shouldBe` [stateMarker]
+
+        mapM_ (\event ->
+            it ("clears checkpoints on " <> show event) do
+                let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                        callbacks.onRecoveryCheckpoint "obsolete attempt"
+                        callbacks.onLoopEvent event
+                        pure (Left (ConnectionError "offline"))
+                config <- testConfig backend
+                execution <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+                execution.executionProgress `shouldBe` NoResponseCommitted
+                execution.executionState `shouldBe` [])
+            [ResponseAttemptDiscarded, ResponseRestarted "retry"]
+
+        it "does not resurrect a checkpoint superseded by a reset" do
+            reset <- newEmptyMVar
+            let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                    callbacks.onRecoveryCheckpoint "obsolete work"
+                    joinReset <- takeMVar reset
+                    joinReset
+                    pure (Left (ConnectionError "offline"))
+            config <- testConfig backend
+            let resetState = advanceBackendSnapshot emptyBackendSnapshot [] Nothing
+            putMVar reset $ do
+                _ <- config.loopBackendState.commitBackendState resetState
+                pure ()
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+            execution.executionProgress `shouldBe` NoResponseCommitted
+            config.loopBackendState.readBackendState `shouldReturn` resetState
+
+        it "bounds checkpoint retention and replaces rather than appends summaries" do
+            let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                    callbacks.onRecoveryCheckpoint "old summary"
+                    callbacks.onRecoveryCheckpoint (Text.replicate 40000 "x")
+                    pure (Left (ConnectionError "offline"))
+            config <- testConfig backend
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+            show execution.executionState `shouldNotContain` "old summary"
+            length (show execution.executionState) `shouldSatisfy` (< 35000)
+
+        it "acknowledges steering retained in recovery exactly once" do
+            acknowledgements <- newIORef []
+            let backend = backendWithCallbacks \_ _ _ callbacks -> do
+                    callbacks.onRecoveryCheckpoint "Tool result: task updated."
+                    pure (Left (ConnectionError "offline"))
+            config0 <- testConfig backend
+            let config = config0
+                    { loopReadSteering = pure [UserMessage "also update tests"]
+                    , loopCommitSteering = \count ->
+                        modifyIORef' acknowledgements (<> [count])
+                    }
+            execution <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+            take 2 execution.executionState `shouldBe`
+                turnInputsToItems [UserMessage "fix it", UserMessage "also update tests"]
+            readIORef acknowledgements `shouldReturn` [1]
+
+        it "supplies recovery to go without replaying a provider tool call" do
+            seen <- newIORef []
+            let interrupted = backendWithCallbacks \_ _ _ callbacks -> do
+                    callbacks.onRecoveryCheckpoint "Tool Bash (call-1) returned: PR #86 opened."
+                    pure (Left (ConnectionError "offline"))
+                resumed = Backend \state previous inputs _ -> do
+                    previous `shouldBe` Nothing
+                    inputs `shouldBe` [UserMessage "go"]
+                    writeIORef seen state.backendItems
+                    pure $ Right BackendResult
+                        { backendOutput = emptyTurnOutput "resumed" [] (Just "verified existing PR")
+                        , backendState = advanceBackendSnapshot state
+                            (state.backendItems <> turnInputsToItems inputs) Nothing
+                        }
+            config <- testConfig interrupted
+            first <- runLoopInputsDetailed config Nothing [UserMessage "fix it"]
+            second <- runLoopInputsDetailed config { loopBackend = resumed }
+                Nothing [UserMessage "go"]
+            readIORef seen `shouldReturn` first.executionState
+            length second.executionState `shouldBe` 3
+            second.executionState `shouldSatisfy` all (\case
+                MessageItem{} -> True
+                _ -> False)
+
     it "shows image metadata without exposing attachment bytes" do
         let image = ImageAttachment "image/png" "secret-image-bytes"
             rendered = show image
