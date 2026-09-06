@@ -16,6 +16,8 @@ import qualified Agent.CLI.ModelsSpec as ModelsSpec
 import qualified Agent.CLI.NativeProcessSpec as NativeProcessSpec
 import qualified Agent.CLI.SessionSpec as SessionSpec
 import qualified Agent.Runtime.RequestSpec as RuntimeRequestSpec
+import qualified Agent.Runtime.ConversationStoreSpec as ConversationStoreSpec
+import qualified Agent.Runtime.ConversationSessionSpec as ConversationSessionSpec
 import qualified Agent.Runtime.TurnEngineSpec as TurnEngineSpec
 import qualified Agent.Runtime.TurnExecutionSpec as TurnExecutionSpec
 import qualified Agent.Runtime.TurnStateSpec as TurnStateSpec
@@ -42,6 +44,8 @@ main = hspec do
     NativeProcessSpec.spec
     SessionSpec.spec
     RuntimeRequestSpec.spec
+    ConversationStoreSpec.spec
+    ConversationSessionSpec.spec
     TurnEngineSpec.spec
     TurnExecutionSpec.spec
     TurnStateSpec.spec

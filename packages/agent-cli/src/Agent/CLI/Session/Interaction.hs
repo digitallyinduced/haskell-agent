@@ -52,6 +52,7 @@ import Agent.CLI.Session
     , writeSessionMeta
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Session.History
     ( readLiveAttachments
     , readLiveTranscript
@@ -98,8 +99,8 @@ syncFullscreenPrompt env = do
         params <- readSessionRequestParams env.sessionParams
         policy <- readIORef env.sessionPolicy
         account <- (.activeAccountLabel) <$> readActiveAccount env.sessionAccount
-        usage <- readIORef env.sessionUsage
-        attachments <- readLiveAttachments env.sessionConversation
+        usage <- readIORef env.sessionState.stateUsage
+        attachments <- readLiveAttachments env.sessionState.stateConversation
         emitUiEvent runtime $ UiSetPrompt $
             buildPromptState
                 (dialectId env.sessionDialect)
@@ -118,7 +119,7 @@ syncFullscreenContext env =
     forM_ env.sessionFullscreen \runtime -> do
         occupancy <- readIORef env.sessionContextOccupancy
         params <- readSessionRequestParams env.sessionParams
-        history <- readLiveTranscript env.sessionConversation
+        history <- readLiveTranscript env.sessionState.stateConversation
         contextWindow <- env.sessionContextWindow
         emitUiEvent runtime $
             UiSetContextUsage
@@ -197,7 +198,7 @@ runBtwQuestion registerCancel env question = do
         stderrHandle = env.sessionRender.renderStderr
     color <- resolveColor stdoutHandle
     params <- readSessionRequestParams env.sessionParams
-    transcript <- readLiveTranscript env.sessionConversation
+    transcript <- readLiveTranscript env.sessionState.stateConversation
     let snapshot = sideCallSnapshot params transcript
     forM_ fullscreen \runtime ->
         emitUiEvent runtime

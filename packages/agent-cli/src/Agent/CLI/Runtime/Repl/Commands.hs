@@ -126,6 +126,7 @@ import Agent.CLI.Session.Interaction ( runBtwQuestion )
 import Agent.CLI.Session.Selection
     ( currentSessionId, pickAgentChoice )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
+import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Skills
     ( formatSkillsListing
@@ -331,7 +332,8 @@ submitReplLine handlerContext finishTurn retryPendingTurn slashCatalog skillInvo
         , handlerStdoutColor = stdoutColor
         } = handlerContext
     SessionEnv
-        { sessionConversation = conversationRef
+        { sessionState = RuntimeState.SessionState
+            { stateConversation = conversationRef }
         , sessionPersist = persist
         , sessionFullscreen = fullscreen
         } = env
@@ -756,7 +758,7 @@ showContextReport handlerContext next = do
         next
   where
     env = handlerContext.handlerSessionEnv
-    conversationRef = env.sessionConversation
+    conversationRef = env.sessionState.stateConversation
     contextOccupancyRef = env.sessionContextOccupancy
     currentContextWindow = env.sessionContextWindow
     displayInfo = displayReplInfo handlerContext
@@ -983,7 +985,7 @@ submitSkillInvocation handlerContext finishTurn invocations next color line invo
                 finishTurn False result
   where
     env = handlerContext.handlerSessionEnv
-    conversationRef = env.sessionConversation
+    conversationRef = env.sessionState.stateConversation
     fullscreen = env.sessionFullscreen
     render = env.sessionRender
     fullscreenEvent = emitReplEvent env
@@ -1030,7 +1032,7 @@ submitExpandedPrompt handlerContext finishTurn pasted next color original expand
                 finishTurn False result
   where
     env = handlerContext.handlerSessionEnv
-    conversationRef = env.sessionConversation
+    conversationRef = env.sessionState.stateConversation
     fullscreen = env.sessionFullscreen
     render = env.sessionRender
     fullscreenEvent = emitReplEvent env
@@ -1083,7 +1085,7 @@ submitPrompt handlerContext finishTurn pasted next color text = do
                         finishTurn False result
   where
     env = handlerContext.handlerSessionEnv
-    conversationRef = env.sessionConversation
+    conversationRef = env.sessionState.stateConversation
     fullscreen = env.sessionFullscreen
 
 showWorkingTreeDiff :: ReplHandlerContext -> IO RunResult -> Bool -> IO RunResult

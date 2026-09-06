@@ -54,6 +54,8 @@ library
                     , Agent.CLI.Session.Transfer
                     , Paths_agent_cli_runtime
     exposed-modules:  Agent.Runtime.Compaction
+                    , Agent.Runtime.ConversationStore
+                    , Agent.Runtime.SessionState
                     , Agent.CLI.NativeProcess
                     , Agent.Runtime.Request
                     , Agent.Runtime.TurnEngine
@@ -140,6 +142,8 @@ test-suite agent-cli-runtime-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.Runtime.RequestSpec
+                    , Agent.Runtime.ConversationStoreSpec
+                    , Agent.Runtime.ConversationSessionSpec
                     , Agent.Runtime.TurnEngineSpec
                     , Agent.Runtime.TurnExecutionSpec
                     , Agent.Runtime.TurnStateSpec

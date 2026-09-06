@@ -523,7 +523,6 @@ test-suite agent-cli-test
                     , Agent.CLI.CompactionSpec.ManualOpenAI
                     , Agent.CLI.CompactionSpec.TaskPlan
                     , Agent.CLI.ContextSpec
-                    , Agent.CLI.ConversationStoreSpec
                     , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.DialectsSpec
                     , Agent.CLI.DatabaseSpec

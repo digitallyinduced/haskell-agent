@@ -1,6 +1,6 @@
-module Agent.CLI.ConversationStoreSpec (spec) where
+module Agent.Runtime.ConversationStoreSpec (spec) where
 
-import Agent.CLI.Session.ConversationStore
+import Agent.Runtime.ConversationStore
 import Agent.Loop
     ( BackendContinuation(..)
     , BackendRevision(..)

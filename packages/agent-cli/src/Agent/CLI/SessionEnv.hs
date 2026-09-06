@@ -17,14 +17,13 @@ import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Recap (RecapRequest)
 import Agent.CLI.Command (ShellMode)
 import Agent.CLI.Compaction
-    ( AutomaticCompactionBoundary
-    , CompactOutcome
+    ( CompactOutcome
     , OccupancySnapshot
     )
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (Persistence, SessionHandle)
-import Agent.CLI.Session.History (LiveConversation)
+import Agent.Runtime.SessionState (SessionState)
 import Agent.CLI.Session.Workspace (WorkspaceContext)
 import Agent.CLI.SessionTitle (SessionTitleManager)
 import Agent.CLI.Terminal (TerminalCapabilities)
@@ -33,7 +32,7 @@ import Agent.CLI.TUI.App (FullscreenRuntime)
 import Agent.Dialect (Dialect)
 import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Runtime (GrokRuntimeControl)
-import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
+import Agent.Loop (ImageAttachment, LoopConfig)
 import Agent.MCP (McpFleet, McpToolRegistration)
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.OpenAI.Models.Types (ModelInfo)
@@ -72,9 +71,7 @@ data SessionEnv = SessionEnv
     , sessionRecordImageGenerationInputs :: !([ImageAttachment] -> IO ())
     , sessionUnavailableProviders :: !(IORef (Set Provider))
     , sessionStartupUnavailable :: !(IORef (Maybe (STM ApiError)))
-    , sessionConversation :: !(IORef LiveConversation)
-    , sessionAutomaticCompaction
-        :: !(IORef (Maybe AutomaticCompactionBoundary))
+    , sessionState :: !SessionState
     , sessionParams :: !(SessionRequestState)
     , sessionContextOccupancy :: !(IORef (Maybe OccupancySnapshot))
     , sessionContextWindow :: !(IO (Maybe Int))
@@ -97,8 +94,6 @@ data SessionEnv = SessionEnv
     , sessionSetTempDir :: !(OsPath -> IO ())
     , sessionTokenProvider :: !(Maybe TokenProvider)
     , sessionOpenAiPool :: !(Maybe OpenAI.Pool)
-    , sessionStartupContext :: !(IORef (Maybe Text))
-    , sessionGrokFirstTurnContext :: !(IORef (Maybe Text))
     , sessionSkills :: !(IORef SkillCatalog)
     , sessionSkillInvocations :: !(IORef [SkillInvocation])
     , sessionRefreshSkills :: !(Bool -> IO ())
@@ -117,12 +112,10 @@ data SessionEnv = SessionEnv
     , sessionRestartEffort :: !(IORef (Maybe Text))
     , sessionLastFailedTurn :: !(IORef (Maybe PendingTurn))
     , sessionStoreRoot :: !(IORef (Maybe OsPath))
-    , sessionUsage :: !(IORef TokenUsage)
     , sessionAccount :: !ActiveAccountRef
     , sessionAccountLabel :: !(Credential -> IO Text)
     , sessionSelectAccount
         :: !(Maybe (Text -> IO (Either ApiError Text)))
-    , sessionLastAssistant :: !(IORef (Maybe Text))
     , sessionTerminal :: !TerminalCapabilities
     , sessionFullscreen :: !(Maybe FullscreenRuntime)
     , sessionSetWindowTitle :: !(Text -> IO ())

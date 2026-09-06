@@ -59,7 +59,26 @@ cancel/join ownership, and shutdown order are preserved, not redesigned.
 
 ## Remaining: move session composition and ownership out of the CLI
 
-This extraction is a prepared-turn executor and process-resource owner, not a
+### Conversation-state ownership
+
+`Agent.Runtime.ConversationStore` now owns transcript residency, checkpoint
+hydration, attachments, and revision-fenced provider continuation. The former
+CLI module is only a compatibility reexport. Its concurrency and eviction tests
+live in the runtime package.
+
+`Agent.Runtime.SessionState` groups the conversation reference, pending startup
+and Grok context, usage, last assistant, and installed compaction boundary.
+The production host constructs it once, retaining the existing reference
+lifetimes; `SessionEnv` and turn execution share that same state. Patch commits,
+startup consumption, and consumed-context restoration now execute in the runtime,
+without terminal dependencies. Transcript writes still invalidate continuation,
+and restoration preserves concurrently refreshed context.
+
+This is a mutable conversation owner, not a scheduler or an atomic transaction
+across references. Persistence and frontend composition still belong to the host.
+
+These extractions provide turn execution, process resources, and conversation
+state, not a
 complete headless session owner. The dependency graph still includes
 `agent-server -> agent-cli -> agent-cli-runtime`. The server still calls
 `Agent.CLI.NativeRuntime.runNativeTurn`, which lowers native requests into
@@ -88,7 +107,24 @@ The next migration should:
 Keep the existing process topology and private Swift application boundary.
 Neither requires a rewrite to establish this dependency direction.
 
-## Validation
+## Conversation-state validation
+
+The focused runtime suite passes in inherited Nix GHCi: 48 examples across
+`ConversationSessionSpec`, `ConversationStoreSpec`, `TurnExecutionSpec`,
+`TurnEngineSpec`, `TurnStateSpec`, and `RequestSpec`. This includes the moved
+hydration/race tests and new state isolation, usage, context restoration,
+failed-stream commit, and exceptional compaction rollback checks.
+
+Package-aware GHCi loads runtime, CLI, and server together successfully:
+305 modules, with no failed loads or compiler errors. Package-boundary and
+whitespace checks pass. Regenerating both affected `package.nix` files produced
+no dependency changes.
+
+An additional focused CLI test attempt did not execute: GHC multi-library mode
+does not support `:add`. The runtime tests above pass, but the prior CLI test
+results below are not a rerun of this conversation-state change.
+
+## Previous executor/process validation
 
 Inherited Nix GHCi passes all 26 examples in `TurnExecutionSpec`,
 `TurnEngineSpec`, `TurnStateSpec`, and `RequestSpec` (9 new execution examples).

@@ -71,6 +71,7 @@ import Agent.CLI.Session
 import Agent.CLI.Session.History
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.SessionEnv
+import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.SessionLock
     ( acquireSessionActivityLock
     , releaseSessionLock
@@ -168,7 +169,7 @@ sessionDirectTools allTools codeModeRuntime =
 -- concern.
 data SessionHostRuntime = SessionHostRuntime
     { hostInitialPrevious :: !(Maybe Text.Text)
-    , hostGrokFirstTurnContextRef :: !(IORef (Maybe Text.Text))
+    , hostSessionState :: !RuntimeState.SessionState
     , hostIoLock :: !(MVar ())
     , hostApprovalLock :: !(MVar ())
     , hostNativeCapabilities :: !NativeRunCapabilities
@@ -189,7 +190,9 @@ data SessionHostRuntime = SessionHostRuntime
 newSessionHostRuntime :: SessionRequest -> IO SessionHostRuntime
 newSessionHostRuntime SessionRequest{..} = do
     initialPrevious <- readLivePreviousResponseId conversationRef
-    grokFirstTurnContextRef <- newIORef initialGrokContext
+    runtimeState <- RuntimeState.newSessionStateWith
+        conversationRef startupContext usageRef automaticCompactionRef
+        initialGrokContext
     ioLock <- newMVar ()
     approvalLock <- newMVar ()
     let fullscreen = startup.startupFullscreen
@@ -310,7 +313,7 @@ newSessionHostRuntime SessionRequest{..} = do
                             _ -> pure ()
     pure SessionHostRuntime
         { hostInitialPrevious = initialPrevious
-        , hostGrokFirstTurnContextRef = grokFirstTurnContextRef
+        , hostSessionState = runtimeState
         , hostIoLock = ioLock
         , hostApprovalLock = approvalLock
         , hostNativeCapabilities = nativeCapabilities
@@ -391,7 +394,7 @@ newSessionControlRuntime host SessionRequest{..} = do
                 (lookupAppTool
                     computerToolName
                     (sessionDirectTools refreshTools codeModeRuntime))
-    lastAssistantRef <- newIORef Nothing
+    let lastAssistantRef = host.hostSessionState.stateLastAssistant
     unavailableProvidersRef <- newIORef unavailableProviders
     startupUnavailableRef <- newIORef startupUnavailable
     restartEffortRef <- newIORef Nothing
@@ -601,7 +604,7 @@ buildSkillContextRuntime
         modifyIORef' renderStateRef clearRenderTokenRate
         writeIORef lastAssistantRef Nothing
         writeIORef subagentSessions Map.empty
-        writeIORef host.hostGrokFirstTurnContextRef Nothing
+        writeIORef host.hostSessionState.stateGrokFirstTurnContext Nothing
         resetAgentViewport agentViewportRuntime
         case multiCtx of
             Just ctx -> resetSubagentRegistry ctx.multiRegistry
@@ -1445,8 +1448,7 @@ buildSessionEnv
             controls.controlUnavailableProvidersRef
         , sessionStartupUnavailable =
             controls.controlStartupUnavailableRef
-        , sessionConversation = conversationRef
-        , sessionAutomaticCompaction = automaticCompactionRef
+        , sessionState = host.hostSessionState
         , sessionParams = paramsRef
         , sessionContextOccupancy = contextOccupancyRef
         , sessionContextWindow = currentContextWindow
@@ -1470,9 +1472,6 @@ buildSessionEnv
             loopRuntime.loopRuntimeShell.shellSetTempDir
         , sessionTokenProvider = tokenProvider
         , sessionOpenAiPool = openAiPool
-        , sessionStartupContext = startupContext
-        , sessionGrokFirstTurnContext =
-            host.hostGrokFirstTurnContextRef
         , sessionSkills = skillsRef
         , sessionSkillInvocations = skillInvocationsRef
         , sessionRefreshSkills = skillsRuntime.skillRefresh
@@ -1498,11 +1497,9 @@ buildSessionEnv
         , sessionRestartEffort = controls.controlRestartEffortRef
         , sessionLastFailedTurn = controls.controlLastFailedTurnRef
         , sessionStoreRoot = storeRoot
-        , sessionUsage = usageRef
         , sessionAccount = accountRef
         , sessionAccountLabel = accountLabel
         , sessionSelectAccount = selectAccount
-        , sessionLastAssistant = controls.controlLastAssistantRef
         , sessionTerminal = host.hostTerminal
         , sessionFullscreen = host.hostFullscreen
         , sessionSetWindowTitle =

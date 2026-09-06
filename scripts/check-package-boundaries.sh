@@ -99,6 +99,10 @@ for registration in \
 done
 
 required_files=(
+  packages/agent-cli-runtime/src/Agent/Runtime/ConversationStore.hs
+  packages/agent-cli-runtime/src/Agent/Runtime/SessionState.hs
+  packages/agent-cli-runtime/test/Agent/Runtime/ConversationStoreSpec.hs
+  packages/agent-cli-runtime/test/Agent/Runtime/ConversationSessionSpec.hs
   packages/agent-external-session/src/Agent/CLI/ExternalSession.hs
   packages/agent-external-session/src/Agent/CLI/ExternalSession/Content.hs
   packages/agent-external-session/src/Agent/CLI/ExternalSession/JSONL.hs

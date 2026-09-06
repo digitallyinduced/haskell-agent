@@ -32,6 +32,7 @@ import Agent.CLI.Session
     )
 import Agent.CLI.Session.Selection ( currentSessionId )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
+import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Style
     ( glyphOk, roleError, roleSuccess )
@@ -247,7 +248,10 @@ copyResponse context request =
 loadAssistantResponses
     :: SessionEnv
     -> IO (Either Text [Text])
-loadAssistantResponses env@SessionEnv{sessionLastAssistant = lastAssistantRef} =
+loadAssistantResponses env@SessionEnv
+        { sessionState = RuntimeState.SessionState
+            { stateLastAssistant = lastAssistantRef }
+        } =
     loadPersistedTranscript env >>= \case
         Left err -> pure (Left err)
         Right persisted -> do
@@ -315,7 +319,7 @@ copyCodeBlock
     -> IO ()
 copyCodeBlock context index = do
     answer <-
-        readIORef context.handlerSessionEnv.sessionLastAssistant
+        readIORef context.handlerSessionEnv.sessionState.stateLastAssistant
     let label = "code block " <> Text.pack (show index)
     copyCommand
         context
@@ -326,7 +330,7 @@ copyCodeBlock context index = do
 copyDiffBlock :: ReplHandlerContext -> IO ()
 copyDiffBlock context = do
     answer <-
-        readIORef context.handlerSessionEnv.sessionLastAssistant
+        readIORef context.handlerSessionEnv.sessionState.stateLastAssistant
     copyCommand
         context
         "diff block"

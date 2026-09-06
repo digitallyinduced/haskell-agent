@@ -66,6 +66,7 @@ import Agent.CLI.ModelPicker
     ( ModelPickerSelection(modelPickerEffort, modelPickerOption) )
 import Agent.CLI.Session.Interaction ( setSessionEffort )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
+import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Style
     ( glyphOk, glyphSession, roleError, roleMuted )
@@ -300,7 +301,8 @@ handleSelection
 handleSelection
         env@SessionEnv
             { sessionRender = render
-            , sessionConversation = conversationRef
+            , sessionState = RuntimeState.SessionState
+                { stateConversation = conversationRef }
             , sessionProvider = provider
             , sessionConnection = connectionId
             , sessionDialect = dialect
@@ -468,7 +470,8 @@ chooseModel env@SessionEnv
     , sessionParams = paramsRef
     , sessionWorkspace = WorkspaceContext{home, projectRoot}
     , sessionRender = render
-    , sessionConversation = conversationRef
+    , sessionState = RuntimeState.SessionState
+        { stateConversation = conversationRef }
     , sessionPersist = persist
     } next = do
     color <- resolveColor stderr
