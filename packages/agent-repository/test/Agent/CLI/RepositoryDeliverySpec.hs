@@ -61,6 +61,9 @@ spec = describe "repository delivery service" do
             pullRequestURLs "https://github.com.evil/o/r/pull/1 https://evil/https://github.com/o/r/pull/2 https://github.com/o/r/issues/1 https://github.com/o/r/pull/0 https://github.com/o/r/pull/1abc" `shouldBe` []
         it "keeps both repositories mentioned in an assistant creation report" do
             conversationPullRequestURLs "" (Just ("Created PRs:\n" <> url <> "\n" <> other)) [] `shouldBe` [url, other]
+        it "associates a Markdown PR list with its work-report heading" do
+            conversationPullRequestURLs "" (Just ("PRs erstellt:\n\n- [app](" <> url <> ")\n- [runtime](" <> other <> ")")) [] `shouldBe` [url, other]
+            conversationPullRequestURLs "" (Just ("PRs for reference:\n\n- " <> url)) [] `shouldBe` []
         it "accepts a PR URL supplied as the user task and canonicalizes repository casing" do
             conversationPullRequestURLs "https://github.com/Owner/Repo/pull/42" Nothing [] `shouldBe` [url]
             conversationPullRequestURLs "" (Just "https://github.com/Owner/Fixes/pull/42") [] `shouldBe` []

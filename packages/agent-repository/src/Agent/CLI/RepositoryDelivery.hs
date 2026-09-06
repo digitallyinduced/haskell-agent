@@ -1804,7 +1804,15 @@ conversationPullRequestURLs user assistant items = nub $
     directUser = case pullRequestURLs user of
         [url] | Text.toCaseFold (Text.strip user) == url -> [url]
         _ -> []
-    evidence = concatMap paragraph . Text.splitOn "\n\n"
+    evidence = paragraphs . Text.splitOn "\n\n"
+    paragraphs (header : list : rest)
+        | null (pullRequestURLs header)
+        , any (`elem` ["pr", "prs", "pull"]) (Text.words (Text.map wordCharacter (Text.toCaseFold header)))
+        , any (`Text.isPrefixOf` Text.stripStart list) ["- ", "* ", "1. "] =
+            paragraph (header <> "\n" <> list) <> paragraphs rest
+    paragraphs (content : rest) = paragraph content <> paragraphs rest
+    paragraphs [] = []
+    wordCharacter c = if isAlphaNum c then c else ' '
     paragraph content
         | any (`Text.isInfixOf` lower) ["for reference", "example", "unrelated", "see also", "beispiel", "referenz"] = []
         | any (`Text.isInfixOf` lower) ["created", "opened", "merged", "review", "fix", "address", "implement", "update", "check", "work on", "look at", "erstellt", "gemerg", "beheb", "prüf", "bearbeit"] =
