@@ -11,11 +11,22 @@
   response-chain invalidation, startup-context merging, and checkpoint rebasing.
 - `TurnEngine`: one pure finalization decision over a prepared turn and the
   existing `Agent.Loop` execution result.
+- `TurnExecution`: executes a typed `PreparedExecution` with the real
+  `Agent.Loop`, returns `ExecutedTurn`, and emits typed `ExceptionalTurn`
+  rollback state before propagating an exception. No `CliOptions`, renderer,
+  or terminal callback enters this boundary.
 
-`Agent.CLI.Turn` consumes this decision rather than independently deriving
-retention and recovery policy in each completion branch. The host still performs
-UI updates, cleanup, and persistence at the existing boundaries. Provider
-execution, approval dispatch, and exception handling have not been replaced.
+`Agent.CLI.Turn` consumes the executor and finalization decision rather than
+calling the loop or independently deriving rollback policy. The host still
+performs UI updates, auxiliary cleanup, and persistence at the existing
+boundaries. Provider execution and approval dispatch continue to use the
+unchanged loop capabilities. The exceptional-state sink is not a UI callback:
+it commits the supplied patch and restores host-owned auxiliary state.
+
+The extraction deliberately preserves the exception scope and ordering:
+execute loop with exceptional rollback; read the compaction checkpoint outside
+that handler; clear thinking and capture timing; consume the restart request;
+finalize. A failure after loop execution must not retroactively roll it back.
 
 Finalization preserves this precedence:
 
@@ -35,12 +46,31 @@ The shared policy modules must not import CLI or TUI modules.
 `scripts/check-package-boundaries.sh` checks this, as well as preventing the
 runtime library from depending on the CLI or TUI packages.
 
-## Remaining: move execution ownership out of the CLI
+## Bounded process-resource extraction
 
-This extraction is a lifecycle kernel, not a complete headless session owner.
-The server still calls the CLI's native runtime, which still lowers requests
-into `CliOptions`. `SessionEnv` still combines runtime resources with terminal
-state.
+`agent-cli-runtime` also owns `Agent.CLI.NativeProcess` and
+`Agent.CLI.Session.Threads`. These retain the legacy shared-module namespace,
+but belong to the runtime package, not `agent-cli`. They own process allocation,
+the tracked cleanup worker, session-thread registration, MCP and network
+recovery resources, and their close/restart operations. The server imports
+process-resource operations directly from this package; CLI exports remain
+compatibility facades. Existing acquisition rollback, worker unmasking,
+cancel/join ownership, and shutdown order are preserved, not redesigned.
+
+## Remaining: move session composition and ownership out of the CLI
+
+This extraction is a prepared-turn executor and process-resource owner, not a
+complete headless session owner. The dependency graph still includes
+`agent-server -> agent-cli -> agent-cli-runtime`. The server still calls
+`Agent.CLI.NativeRuntime.runNativeTurn`, which lowers native requests into
+`CliOptions`; `NativeRunHooks.nativePrepareOptions` itself accepts that type.
+Startup, tool composition, turn preparation, terminal state in `SessionEnv`,
+normal persistence, and auxiliary rollback application remain in the CLI.
+Server sandbox option restrictions remain on the existing path.
+
+Removing that edge requires extracting those capabilities together; merely
+moving `runNativeTurn` or renaming its options would hide the dependency rather
+than invert it. This step intentionally stops before that larger migration.
 
 The next migration should:
 
@@ -60,13 +90,66 @@ Neither requires a rewrite to establish this dependency direction.
 
 ## Validation
 
-The focused `Agent.Runtime.RequestSpec`, `TurnStateSpec`, and `TurnEngineSpec`
-contain 17 passing examples, including a real loop with a scripted streaming
-backend that fails after partial output. These run without terminal setup.
+Inherited Nix GHCi passes all 26 examples in `TurnExecutionSpec`,
+`TurnEngineSpec`, `TurnStateSpec`, and `RequestSpec` (9 new execution examples).
+The five `SessionThreadsSpec` examples also pass in inherited Nix GHCi:
+duplicate-running rejection, cancel/join of multiple workers, post-close
+rejection, completion/relaunch, and returned failure/retry.
+Package-boundary and whitespace checks pass; `package.nix` was regenerated
+with the inherited Nix `cabal2nix`.
 
-Package-boundary and whitespace checks pass. Independent diff review found no
-policy regression. A multi-package Cabal GHCi check of runtime, CLI, and server
-was blocked while compiling unchanged `Agent.OpenAI.Models.Types`: its
-Template Haskell input `data/prompt.md` is absent in this checkout. Consequently
-the changed downstream CLI/server integration has not yet been typechecked.
-The focused tests do not establish full frontend parity.
+`Agent.Runtime.TurnExecutionSpec` exercises the real loop against scripted
+providers without terminal setup: baseline execution/event parity, provider
+failure before and after committed tools, attempt-local display discard with
+reused call IDs, pending-approval cancellation, compaction checkpoint/retry,
+model-history resume, and exceptional rollback ordering. Resume here means
+replaying the model projection in memory with the finalized previous-response
+patch applied (including chain invalidation), not a persisted frontend round trip;
+compaction uses an installed checkpoint, not a live summarization provider.
+
+`Agent.CLI.NativeProcessSpec` covers cleanup-worker ownership and session-worker
+joining through the shared process handle: all three examples pass through
+`cabal repl --offline agent-cli-runtime:test:agent-cli-runtime-test`.
+These tests do not establish full CLI/server parity.
+
+The server's `SupervisorSpec` and `ApplicationSpec` pass through its Cabal test
+REPL: 56 examples, zero failures, covering supervisor cancellation/join,
+retry/shutdown, failure fencing, and WAI admission.
+The full runtime suite was also executed (`:main` in its test REPL):
+221 examples, 20 failures. All 20 fail during managed PostgreSQL fixture setup
+because the inherited temporary directory produces an overlong Unix-socket
+path; the other 201, including all new tests, pass.
+CLI `AgentSessionsSpec` was executed in its test REPL: 28 examples, 24 failures
+at the same PostgreSQL setup guard, four passes. These database-backed tests
+still need a rerun with an explicitly permitted shorter temporary directory.
+They are not reported as passing, and no test or production guard was weakened.
+
+Focused CLI `TurnSpec`, `NativeRuntimeSpec`, `RequestSpec`, and `CompactionSpec`
+pass together in the CLI test REPL: 120 examples, zero failures. These cover
+failed display/model separation, native lowering/resume, cancellation rollback,
+compaction-hook ordering, and provider compaction failures; they do not replace
+the blocked database-backed session tests.
+
+Package-aware multi-library GHCi also loads CLI, runtime, and server together
+successfully (288 modules). Local validation uses the inherited Nix toolchain:
+`nix develop` itself still fails with a permission error inspecting
+`~/.haskell-agent/tmp/sessions`. The initially missing pinned Hermes checkout
+was fetched by normal Cabal resolution. The ignored OpenAI prompt/model data
+files were installed using the flake shell hook's commands from the exact
+flake-pinned Nix store assets, with hashes checked against the flake.
+No access restriction was bypassed or dependency stub introduced.
+
+Reproduce the package-aware load from the repository root in the Nix toolchain:
+
+```sh
+printf ':show modules\n:quit\n' | cabal repl --offline \
+  agent-cli-runtime:lib:agent-cli-runtime \
+  agent-cli:lib:agent-cli agent-server:lib:agent-server
+```
+
+For the database-backed rerun, first provide a permitted short `TMPDIR`, then
+open `cabal repl --offline agent-cli-runtime:test:agent-cli-runtime-test`
+and run `:main`. For CLI session integration, open
+`cabal repl --offline agent-cli:test:agent-cli-test`, import
+`Test.Hspec` and `Agent.CLI.AgentSessionsSpec` qualified, and run
+`Test.Hspec.hspec Agent.CLI.AgentSessionsSpec.spec`.

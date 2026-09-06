@@ -109,19 +109,17 @@ import Agent.CLI.Timestamp
     , stripBracketedTimestamps
     )
 import Agent.CLI.TurnState
-    ( ConversationOutcome(..)
-    , ConversationPatch(..)
+    ( ConversationPatch(..)
     , FieldUpdate(..)
     , GrokContextUpdate(..)
     , PreparedTurn(..)
     , StartupUpdate(..)
-    , finishConversation
-    , rebasePreparedTurn
     , restoreStartupContext
     , turnInputsWithContext
     , turnReplacesTranscript
     )
 import Agent.Runtime.TurnEngine qualified as Engine
+import Agent.Runtime.TurnExecution qualified as Execution
 import Agent.Dialect (DialectId(..), dialectId)
 import Agent.Error (ApiError)
 import Agent.Loop
@@ -132,7 +130,6 @@ import Agent.Loop
     , TurnInput(..)
     , TurnOutput(..)
     , addTokenUsage
-    , runLoopInputsDetailed
     , turnInputImages
     )
 import Agent.Provider (Provider(..))
@@ -519,14 +516,18 @@ executeBusyTurn request preparation = do
     when (isNothing fullscreen && terminal.terminalSemanticPrompts) $
         emitTerminalSequence terminal render.renderStdout osc133CommandStart
     rootTurnId <- env.sessionBeginSubagentTurn
-    execution <-
-        runLoopInputsDetailed
-            env.sessionLoop
-            preparation.preparedPreviousResponseId
-            prepared.preparedTurnInputs
-        `onException`
-            rollbackExceptionalTurn request preparation rootTurnId
-    automaticCompaction <- readIORef env.sessionAutomaticCompaction
+    executed <-
+        Execution.executePreparedTurn
+            Execution.PreparedExecution
+                { executionConfig = env.sessionLoop
+                , executionPreviousResponseId =
+                    preparation.preparedPreviousResponseId
+                , executionPreparedTurn = prepared
+                }
+            (readIORef env.sessionAutomaticCompaction)
+            (rollbackExceptionalTurn request preparation rootTurnId)
+    let execution = executed.executedLoop
+        automaticCompaction = executed.executedCompaction
     clearThinking render
     finishedAt <- getCurrentTime
     restartEffort <-
@@ -558,17 +559,12 @@ rollbackExceptionalTurn
     :: BusyTurnRequest
     -> PreparedBusyTurn
     -> Maybe RootTurnId
+    -> Execution.ExceptionalTurn
     -> IO ()
-rollbackExceptionalTurn request preparation rootTurnId = do
+rollbackExceptionalTurn request preparation rootTurnId exceptional = do
     let env = request.busyEnv
-    boundary <- readIORef env.sessionAutomaticCompaction
-    commitConversationPatch env
-        (finishConversation
-            (rebasePreparedTurn
-                boundary
-                preparation.preparedConversationTurn)
-            ConversationInterrupted)
-    when (isNothing boundary) $
+    commitConversationPatch env exceptional.exceptionalPatch
+    when (isNothing exceptional.exceptionalCompaction) $
         forM_ preparation.preparedTaskPlanReminder \reminder ->
             forM_ env.sessionTaskPlan \taskPlan ->
                 restoreTaskPlanReminder taskPlan reminder

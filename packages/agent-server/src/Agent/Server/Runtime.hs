@@ -33,12 +33,14 @@ import Agent.CLI.NativeRuntime
     ( NativeDiscoveryContext(..)
     , NativeWorkspaceDiscovery(..)
     , NativeRunCapabilities(..)
-    , NativeProcessRuntime
     , NativeRunHooks(..)
-    , closeNativeProcessRuntime
     , fullNativeRunCapabilities
-    , newNativeProcessRuntime
     , runNativeTurn
+    )
+import Agent.CLI.NativeProcess
+    ( NativeProcessRuntime
+    , closeNativeProcessRuntime
+    , newNativeProcessRuntime
     )
 import Agent.Runtime.Request
     ( NativeInteractionMode(..)
