@@ -474,6 +474,7 @@ spec = do
                 , toolCalls = []
                 , assistantText = Just "almost"
                 , tokenUsage = emptyTokenUsage
+                , contextUsage = Nothing
                 , providerTelemetry = Nothing
                 , completion = TurnCompleted
                 })
@@ -486,6 +487,7 @@ spec = do
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
                         { outputTokens = 32768 }
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnIncomplete
                         { incompleteReason = "max_output_tokens"
@@ -734,6 +736,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Just "Complete"
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -763,6 +766,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -786,6 +790,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -817,6 +822,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -839,6 +845,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -871,6 +878,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -901,6 +909,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Nothing
                         , tokenUsage = emptyTokenUsage
+                        , contextUsage = Nothing
                         , providerTelemetry = Nothing
                         , completion = TurnCompleted
                         })
@@ -934,6 +943,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -954,6 +964,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -974,6 +985,7 @@ spec = do
                     , toolCalls = [call]
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })
@@ -989,6 +1001,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Just "see `file.txt`"
                     , tokenUsage = emptyTokenUsage
+                    , contextUsage = Nothing
                     , providerTelemetry = Nothing
                     , completion = TurnCompleted
                     })

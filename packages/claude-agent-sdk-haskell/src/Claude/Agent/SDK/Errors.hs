@@ -54,7 +54,10 @@ renderClaudeSDKError = \case
                 else "\nClaude Code stderr:\n" <> Text.takeEnd 2_000 stderr
     ResultError{subtype, apiErrorStatus, errors, result} ->
         "Claude Code "
-            <> subtype
+            -- Claude Code can emit subtype=success with is_error=true
+            -- (for example, "Prompt is too long"). ResultError already
+            -- establishes failure; do not describe it as a success.
+            <> (if subtype == "success" then "request failed" else subtype)
             <> maybe
                 ""
                 (\status -> " (HTTP " <> Text.pack (show status) <> ")")

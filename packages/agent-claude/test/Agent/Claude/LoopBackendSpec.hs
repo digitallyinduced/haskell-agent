@@ -123,6 +123,12 @@ submitBackendWithState stateRef backend previous inputs onEvent = do
 spec :: Spec
 spec = do
     describe "sdkErrorToApiError" do
+        it "classifies an oversized prompt even with a success result subtype" do
+            sdkErrorToApiError
+                (ResultError "success" Nothing [] (Just "Prompt is too long"))
+                `shouldSatisfy` \case
+                    ProviderError{errorType = ContextWindowExceeded} -> True
+                    _ -> False
         it "classifies status and subtype categories" do
             sdkErrorToApiError
                 (ResultError "rate_limit_error" (Just 429) [] Nothing)
@@ -277,7 +283,7 @@ spec = do
                     "<--input-format>\n<stream-json>"
                 arguments `shouldContain`
                     "<--output-format>\n<stream-json>"
-                arguments `shouldNotContain` "<--include-partial-messages>"
+                arguments `shouldContain` "<--include-partial-messages>"
                 arguments `shouldContain` "<--verbose>"
                 arguments `shouldNotContain` "<AskUserQuestion>"
                 arguments `shouldContain`
@@ -639,6 +645,36 @@ spec = do
                 submitted `shouldContain` "[Attached file]"
                 submitted `shouldContain` "attachment.txt"
                 submitted `shouldContain` "describe this file"
+
+        mapM_ (\(mode, expected) ->
+            it ("reports latest main-response context usage: " <> mode) $
+                withFakeClaude \fake ->
+                    withEnvironmentVariables
+                        [("FAKE_CLAUDE_CONTEXT_USAGE", Just mode)] do
+                        transcript <- newIORef []
+                        result <- timeout 5_000_000 $
+                            withClaudeCodeBackend
+                                (defaultClaudeCodeOptions
+                                    fake.executable
+                                    fake.workingDirectory)
+                                Nothing
+                                (pure defaultResponseCreateParams)
+                                transcript \backend ->
+                                    expectTurn =<< submitBackend backend
+                                        Nothing [UserMessage "context"] (const (pure ()))
+                        turn <- maybe
+                            (expectationFailure "context usage fake timed out"
+                                >> fail "unreachable")
+                            pure result
+                        turn.contextUsage `shouldBe` expected
+                        -- Billing remains the result/modelUsage delta rather
+                        -- than being overwritten by the latest model call.
+                        turn.tokenUsage `shouldBe` TokenUsage 10 7 5)
+            [ ("latest", Just (TokenUsage 200 9 80))
+            , ("missing", Nothing)
+            , ("boundary-before", Just (TokenUsage 200 9 80))
+            , ("boundary-after", Nothing)
+            ]
 
         it "converts cumulative modelUsage snapshots to per-turn deltas" $
             withFakeClaude \fake -> do
@@ -1940,7 +1976,26 @@ fakeClaudeScript promptLog startLog argumentLog =
         , "  if [ \"$FAKE_CLAUDE_RETRACT_AFTER_PROGRESS\" = 1 ]; then"
         , "    printf '{\"type\":\"system\",\"subtype\":\"model_refusal_fallback\",\"uuid\":\"retract-progress-%s\",\"session_id\":\"%s\",\"retracted_message_uuids\":[\"interim-%s\"]}\\n' \"$turn\" \"$session_id\" \"$turn\""
         , "  fi"
-        , "  printf '{\"type\":\"assistant\",\"uuid\":\"assistant-%s\",\"session_id\":\"%s\",\"message\":{\"id\":\"message-%s\",\"content\":[{\"type\":\"text\",\"text\":\"fake response\"}]}}\\n' \"$turn\" \"$session_id\" \"$turn\""
+        , "  context_usage=''"
+        , "  if [ -n \"$FAKE_CLAUDE_CONTEXT_USAGE\" ]; then"
+        , "    printf '{\"type\":\"assistant\",\"uuid\":\"prior-usage-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":150000,\"output_tokens\":1000}}}\\n' \"$turn\" \"$session_id\""
+        , "    if [ \"$FAKE_CLAUDE_CONTEXT_USAGE\" = boundary-before ]; then"
+        , "      printf '{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"uuid\":\"boundary-before-%s\",\"session_id\":\"%s\"}\\n' \"$turn\" \"$session_id\""
+        , "    fi"
+        , "    printf '{\"type\":\"stream_event\",\"uuid\":\"start-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"message-%s\",\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":80,\"output_tokens\":1}}}}\\n' \"$turn\" \"$session_id\" \"$turn\""
+        , "    context_usage=',\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":80,\"output_tokens\":1}'"
+        , "  fi"
+        , "  printf '{\"type\":\"assistant\",\"uuid\":\"assistant-%s\",\"session_id\":\"%s\",\"message\":{\"id\":\"message-%s\",\"content\":[{\"type\":\"text\",\"text\":\"fake response\"}]%s}}\\n' \"$turn\" \"$session_id\" \"$turn\" \"$context_usage\""
+        , "  if [ -n \"$FAKE_CLAUDE_CONTEXT_USAGE\" ]; then"
+        , "    if [ \"$FAKE_CLAUDE_CONTEXT_USAGE\" != missing ]; then"
+        , "      printf '{\"type\":\"stream_event\",\"uuid\":\"delta-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":100,\"output_tokens\":9}}}\\n' \"$turn\" \"$session_id\""
+        , "      printf '{\"type\":\"stream_event\",\"uuid\":\"stop-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"message_stop\"}}\\n' \"$turn\" \"$session_id\""
+        , "    fi"
+        , "    printf '{\"type\":\"assistant\",\"uuid\":\"child-usage-%s\",\"session_id\":\"%s\",\"parent_tool_use_id\":\"child\",\"message\":{\"content\":[],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":1000}}}\\n' \"$turn\" \"$session_id\""
+        , "    if [ \"$FAKE_CLAUDE_CONTEXT_USAGE\" = boundary-after ]; then"
+        , "      printf '{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"uuid\":\"boundary-after-%s\",\"session_id\":\"%s\"}\\n' \"$turn\" \"$session_id\""
+        , "    fi"
+        , "  fi"
         , "  if [ \"$FAKE_CLAUDE_EXIT_AFTER_ACTIVITY\" = 1 ]; then exit 17; fi"
         , "  result_session_id=${FAKE_CLAUDE_RESULT_SESSION_ID:-$session_id}"
         , "  if [ -n \"$FAKE_CLAUDE_RESULT_MARKER\" ]; then : > \"$FAKE_CLAUDE_RESULT_MARKER\"; fi"

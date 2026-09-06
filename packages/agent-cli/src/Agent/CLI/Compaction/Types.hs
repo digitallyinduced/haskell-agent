@@ -6,10 +6,12 @@ module Agent.CLI.Compaction.Types
     , OccupancyKind(..)
     , OccupancySnapshot(..)
     , estimatedOccupancy
+    , occupancyMatchesHistory
     , reportedOccupancy
     ) where
 
 import Agent.Error (ApiError)
+import Agent.Loop (BackendSnapshot(..))
 import Agent.Responses.Types (Response, ResponseCreateParams, ResponseItem)
 import Agent.Runtime.Compaction (AutomaticCompactionBoundary(..))
 import Data.Text (Text)
@@ -42,6 +44,10 @@ data OccupancySnapshot = OccupancySnapshot
     { occupancyTokens :: !Int
     , occupancyLength :: !Int
     , occupancyKind :: !OccupancyKind
+    -- | Bind live provider-managed context to the exact host checkpoint.
+    -- Claude can compact its private context without shrinking host history;
+    -- such counts are not valid when that history is imported afresh.
+    , occupancyCheckpoint :: !(Maybe BackendSnapshot)
     } deriving (Eq, Show)
 
 reportedOccupancy :: Int -> Int -> OccupancySnapshot
@@ -50,6 +56,7 @@ reportedOccupancy tokens historyLength =
         { occupancyTokens = tokens
         , occupancyLength = historyLength
         , occupancyKind = ReportedOccupancy
+        , occupancyCheckpoint = Nothing
         }
 
 estimatedOccupancy :: Int -> Int -> OccupancySnapshot
@@ -58,7 +65,14 @@ estimatedOccupancy tokens historyLength =
         { occupancyTokens = tokens
         , occupancyLength = historyLength
         , occupancyKind = EstimatedOccupancy
+        , occupancyCheckpoint = Nothing
         }
+
+occupancyMatchesHistory :: [ResponseItem] -> OccupancySnapshot -> Bool
+occupancyMatchesHistory history snapshot =
+    snapshot.occupancyLength == length history
+        && maybe True ((== history) . (.backendItems))
+            snapshot.occupancyCheckpoint
 
 type OpenAiCompactionSender =
     ResponseCreateParams -> IO (Either ApiError Response)

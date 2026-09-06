@@ -20,6 +20,12 @@ spec =
                     { permission = ClaudeCodeManual }
             sdk.permissionMode `shouldBe` Just PermissionManual
 
+        it "requests stream events for finalized per-response usage" do
+            sdk <- toClaudeAgentOptions
+                ClaudeCodeNoTools
+                (defaultClaudeCodeOptions "/bin/claude" "/tmp")
+            sdk.includePartialMessages `shouldBe` True
+
         it "injects only the explicit gateway provider variables" $
             withEnvironmentVariables
                 [ ("ANTHROPIC_API_KEY", Just "ambient-api-key")

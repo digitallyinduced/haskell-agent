@@ -170,6 +170,23 @@ spec = do
                 other -> expectationFailure ("expected custom output, got " <> show other)
 
     describe "responseToTurnOutput" do
+        it "preserves measured single-response usage separately from billing totals" do
+            let response = testResponseWithUsage "resp-usage" [assistantItem "done"]
+                    (Aeson.object
+                        [ "input_tokens" Aeson..= (120 :: Int)
+                        , "output_tokens" Aeson..= (30 :: Int)
+                        , "total_tokens" Aeson..= (150 :: Int)
+                        , "input_tokens_details" Aeson..= Aeson.object
+                            ["cached_tokens" Aeson..= (100 :: Int)]
+                        ])
+                turn = responseToTurnOutput response
+            turn.tokenUsage `shouldBe` TokenUsage 120 30 100
+            turn.contextUsage `shouldBe` Just (TokenUsage 120 30 100)
+
+        it "does not manufacture measured context usage when the response omits usage" do
+            let turn = responseToTurnOutput (testResponse "resp-no-usage" [])
+            turn.contextUsage `shouldBe` Nothing
+
         it "collects function and custom tool calls and assistant text" do
             let turn = responseToTurnOutput $ testResponse "resp-9"
                     [ functionCallItem "fc1" "shell_command" "{\"command\":\"ls\"}"

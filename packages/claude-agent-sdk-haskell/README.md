@@ -141,6 +141,37 @@ and cancellation frames. Writes are serialized, missing handlers fail closed,
 and initialization/control/shutdown waits are bounded by
 `ClaudeAgentHandlers`.
 
+### Context usage versus billing usage
+
+For measured context usage, prefer the latest main-conversation
+canonical `AssistantMessage.usage`, not aggregate `ResultMessage.usage` or
+`modelUsage`. Enable `includePartialMessages` to receive the final usage
+events: Claude Code emits assistant content blocks before `message_delta`
+finalizes the counters. The query accumulator reconciles those counters by
+API message ID and parent scope only after `message_stop`; it never retains
+partial text as canonical history or restores retracted blocks. Provisional
+assistant usage is cleared when no completed stream or explicitly completed
+non-streaming response establishes its finality. Low-level received messages
+and live progress observations still contain the original wire values.
+
+The SDK's normalized `Usage.inputTokens` already includes uncached input,
+cache creation, and cache reads; do not add `cachedTokens` again. Input usage
+measures the request before its response. Keep output usage separate when
+reasoning about the conversation after that response.
+
+Inspection of Claude Code 2.1.251 confirms that `getContextUsage` returns an
+`apiUsage` object (or `null`) containing the latest response's raw API usage.
+When present, its `totalTokens` is the sum of the three input components,
+excluding output. Without API usage, `totalTokens` falls back to a category
+breakdown, not an exact count of the full request. Do not interpret the raw
+control's totals as universally measured occupancy.
+
+This control also counts prompt/tool/memory categories through additional
+requests and can fall back to a small Haiku generation. Avoid polling it after
+every turn when the response already supplied usage. Neither the control nor
+the last response's usage preflights an arbitrary new prompt, such as an
+isolated summary built from imported history.
+
 ## Response semantics
 
 Claude Code emits newline-delimited JSON messages. The SDK parses them into:
