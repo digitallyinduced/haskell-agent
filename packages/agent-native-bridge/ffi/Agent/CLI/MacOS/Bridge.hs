@@ -64,7 +64,7 @@ import Agent.CLI.NativeRuntime
     )
 import Agent.CLI.McpAdmin
     ( McpAdminError
-    , McpAdminSnapshot
+    , McpAdminSnapshot (..)
     , restartMcpAdminServer
     )
 import Agent.CLI.MacOS.McpAdminBridge
