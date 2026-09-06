@@ -54,8 +54,10 @@ library
                     , Agent.CLI.Session.Transfer
                     , Paths_agent_cli_runtime
     exposed-modules:  Agent.Runtime.Compaction
+                    , Agent.CLI.NativeProcess
                     , Agent.Runtime.Request
                     , Agent.Runtime.TurnEngine
+                    , Agent.Runtime.TurnExecution
                     , Agent.Runtime.TurnState
                     , Agent.CLI.AgentSessions.Process
                     , Agent.CLI.Auth
@@ -82,16 +84,19 @@ library
                     , Agent.CLI.Session.Codec
                     , Agent.CLI.Session.StoreCodec
                     , Agent.CLI.Session.TitlePolicy
+                    , Agent.CLI.Session.Threads
                     , Agent.CLI.Session.Types
                     , Agent.CLI.Session.Activity
                     , Agent.CLI.Session.Request
                     , Agent.CLI.SessionLock
                     , Agent.CLI.Transcription
     build-depends:    agent-claude >= 0.1 && < 0.2
+                    , agent-connectivity >= 0.1 && < 0.2
                     , agent-server-client
                     , agent-core >= 0.1 && < 0.2
                     , agent-gemini >= 0.1 && < 0.2
                     , agent-json >= 0.1 && < 0.2
+                    , agent-mcp >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2
                     , agent-process >= 0.1 && < 0.2
@@ -136,6 +141,7 @@ test-suite agent-cli-runtime-test
     main-is:          Spec.hs
     other-modules:    Agent.Runtime.RequestSpec
                     , Agent.Runtime.TurnEngineSpec
+                    , Agent.Runtime.TurnExecutionSpec
                     , Agent.Runtime.TurnStateSpec
                     , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.EnvironmentSpec
@@ -146,8 +152,10 @@ test-suite agent-cli-runtime-test
                     , Agent.CLI.ManagedTurnSpec
                     , Agent.CLI.ModelConfigSpec
                     , Agent.CLI.ModelsSpec
+                    , Agent.CLI.NativeProcessSpec
                     , Agent.CLI.SessionActivitySpec
                     , Agent.CLI.SessionRequestSpec
+                    , Agent.CLI.SessionThreadsSpec
                     , Agent.CLI.SessionSpec
                     , Agent.CLI.SessionSpec.Compatibility
                     , Agent.CLI.SessionSpec.Fixtures

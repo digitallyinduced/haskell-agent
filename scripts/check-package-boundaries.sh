@@ -30,6 +30,13 @@ if rg --line-number '^import[[:space:]]+(qualified[[:space:]]+)?Agent\.(CLI|TUI)
   fail "frontend types leaked into the session lifecycle kernel"
 fi
 
+# Process resources retain legacy module names, but their implementations must
+# stay in the shared package. CLI facades may import them, not redefine them.
+for module_path in Agent/CLI/NativeProcess.hs Agent/CLI/Session/Threads.hs; do
+  [[ -f "$runtime/src/$module_path" ]] || fail "missing shared resource: $module_path"
+  [[ ! -e "$cli/src/$module_path" ]] || fail "resource implementation returned to CLI: $module_path"
+done
+
 moved_modules=(
   Agent.CLI.BrowserTools
   Agent.CLI.McpAdmin
