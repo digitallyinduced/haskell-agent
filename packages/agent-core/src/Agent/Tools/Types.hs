@@ -41,6 +41,7 @@ module Agent.Tools.Types
     , jsonToolParameters
     , appToolHandlers
     , toolAllowsWithoutPrompt
+    , toolAutoApproves
     , toolSupportsAsync
     ) where
 
@@ -113,6 +114,9 @@ data ApprovalRule
     | AlwaysAllowed
     | AlwaysPrompt
     | ClassifyReadOnly !(ToolCall -> IO Bool)
+    -- | Host-scoped auto-approval, retaining the original classification for
+    -- plan mode and explicit deny-mutating policies. Never set from tool input.
+    | AutoApprove !ApprovalRule
 
 -- | Whether a tool handler may overlap other handlers emitted in the same
 -- model turn. Approval callbacks are always evaluated serially in call order.
@@ -543,8 +547,16 @@ appToolHandlers :: [AppTool] -> [ToolHandler]
 appToolHandlers = map (.appToolHandler)
 
 toolAllowsWithoutPrompt :: AppTool -> ToolCall -> IO Bool
-toolAllowsWithoutPrompt tool call = case tool.appToolApproval of
-    AlwaysReadOnly -> pure True
-    AlwaysAllowed -> pure True
-    AlwaysPrompt -> pure False
-    ClassifyReadOnly classify -> classify call
+toolAllowsWithoutPrompt tool call = classifyRule tool.appToolApproval
+  where
+    classifyRule = \case
+        AlwaysReadOnly -> pure True
+        AlwaysAllowed -> pure True
+        AlwaysPrompt -> pure False
+        ClassifyReadOnly classify -> classify call
+        AutoApprove original -> classifyRule original
+
+toolAutoApproves :: AppTool -> Bool
+toolAutoApproves tool = case tool.appToolApproval of
+    AutoApprove _ -> True
+    _ -> False

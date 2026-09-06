@@ -19,7 +19,8 @@ import Agent.Server.Tenant
     )
 import Agent.Dialect (DialectId(CodexDialect))
 import Agent.ToolDispatch
-    ( ToolCallResult(..)
+    ( ToolCall(..)
+    , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , ToolDispatchOutcome(..)
     , dispatchToolCallDetailed
@@ -31,6 +32,8 @@ import Agent.Tools.Types
     , AppTool(..)
     , AppToolGroup(..)
     , appToolSupportsAsync
+    , toolAllowsWithoutPrompt
+    , toolAutoApproves
     , jsonAppTool
     , withAsyncToolCalls
     )
@@ -111,6 +114,39 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "tenant sandbox protocol" do
+    it "auto-approves only sandbox execution tools without reclassifying mutations" do
+        let execution = testSandboxTool { appToolApproval = AlwaysPrompt }
+            host = testHostServiceTool { appToolApproval = AlwaysPrompt }
+            tools = composeSandboxTools
+                (error "approval must not start the sandbox")
+                validSessionId
+                "/workspace"
+                CodexDialect
+                [ExecutionToolGroup [execution], HostToolGroup [host]]
+        map toolAutoApproves tools `shouldBe` [True, False]
+        mapM (\tool ->
+            toolAllowsWithoutPrompt tool
+                (functionToolCall "call-approval" tool.appToolName "{}"))
+            tools `shouldReturn` [False, False]
+        toolAutoApproves execution `shouldBe` False
+
+    it "preserves per-call classification for auto-approved sandbox tools" do
+        let execution = testSandboxTool
+                { appToolApproval = ClassifyReadOnly
+                    (\call -> pure (call.arguments == "read"))
+                }
+        proxied <- composedTool (composeSandboxTools
+            (error "classification must not start the sandbox")
+            validSessionId "/workspace" CodexDialect
+            [ExecutionToolGroup [execution]])
+        toolAutoApproves proxied `shouldBe` True
+        toolAllowsWithoutPrompt proxied
+            (functionToolCall "call-read" proxied.appToolName "read")
+            `shouldReturn` True
+        toolAllowsWithoutPrompt proxied
+            (functionToolCall "call-write" proxied.appToolName "write")
+            `shouldReturn` False
+
     it "preserves async capability on proxied execution tools" do
         case composeSandboxTools
             (error "sandbox handler is not evaluated")

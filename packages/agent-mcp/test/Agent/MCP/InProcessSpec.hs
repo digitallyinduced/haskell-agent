@@ -13,7 +13,7 @@ import Agent.ToolDispatch
     , typedTool
     )
 import Agent.Tools.Types
-    ( AppTool
+    ( AppTool(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
     , freeformApplyPatchAppToolWithExecution
@@ -63,6 +63,22 @@ spec = describe "in-process MCP server" do
                 ])
         response `shouldSatisfy` hasTextResult "echo:hello" False
         readIORef approved `shouldReturn` ["echo"]
+
+    it "does not advertise auto-approved mutations as read-only" do
+        let check original expected = do
+                server <- testServer (const (pure (Right True)))
+                    [echoTool { appToolApproval = AutoApprove original }]
+                response <- handleInProcessMcpMessage server $
+                    request 2 "tools/list" (object [])
+                case lookupPath ["result", "tools"] response of
+                    Just (Array tools)
+                        | [tool] <- toList tools ->
+                            lookupPath ["annotations", "readOnlyHint"] (Just tool)
+                                `shouldBe` Just (Bool expected)
+                    _ -> expectationFailure "expected one advertised tool"
+        check AlwaysReadOnly True
+        check AlwaysPrompt False
+        check (ClassifyReadOnly (const (pure True))) False
 
     it "does not execute a user-rejected call" do
         executions <- newIORef (0 :: Int)
