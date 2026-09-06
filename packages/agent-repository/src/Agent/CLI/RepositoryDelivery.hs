@@ -1799,15 +1799,18 @@ pullRequestURLs = nub . go
 -- cannot attach every PR it happens to mention.
 conversationPullRequestURLs :: Text -> Maybe Text -> [Aeson.Value] -> [Text]
 conversationPullRequestURLs user assistant items = nub $
-    concatMap evidence (maybe [] pure assistant <> [user] <> messages) <> toolURLs
+    directUser <> concatMap evidence (maybe [] pure assistant <> [user] <> messages) <> toolURLs
   where
+    directUser = case pullRequestURLs user of
+        [url] | Text.toCaseFold (Text.strip user) == url -> [url]
+        _ -> []
     evidence = concatMap paragraph . Text.splitOn "\n\n"
     paragraph content
         | any (`Text.isInfixOf` lower) ["for reference", "example", "unrelated", "see also", "beispiel", "referenz"] = []
-        | any (`Text.isInfixOf` lower) ["created", "opened", "merged", "review", "fix", "address", "implement", "erstellt", "gemerg", "beheb", "prüf", "bearbeit"] =
+        | any (`Text.isInfixOf` lower) ["created", "opened", "merged", "review", "fix", "address", "implement", "update", "check", "work on", "look at", "erstellt", "gemerg", "beheb", "prüf", "bearbeit"] =
             pullRequestURLs (Text.unlines (filter (not . Text.isPrefixOf ">" . Text.stripStart) (Text.lines content)))
         | otherwise = []
-      where lower = Text.toCaseFold (foldr (\url -> Text.replace url "") content (pullRequestURLs content))
+      where lower = Text.toCaseFold (Text.unwords (filter (null . pullRequestURLs) (Text.words content)))
     messages = [Text.intercalate "\n" (strings content) | Aeson.Object o <- items
         , KeyMap.lookup "type" o == Just (Aeson.String "message")
         , Just (Aeson.String role) <- [KeyMap.lookup "role" o], role `elem` ["user", "assistant"]
