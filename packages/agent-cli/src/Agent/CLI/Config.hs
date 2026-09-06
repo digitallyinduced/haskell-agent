@@ -220,6 +220,7 @@ data LspConfig = LspConfig
 -- default, while local-only repositories continue to branch from @HEAD@.
 data WorktreeConfig = WorktreeConfig
     { worktreeFetchLatestUpstream :: !Bool
+    , worktreeInactiveDays :: !Int
     }
     deriving (Eq, Show)
 
@@ -330,6 +331,7 @@ instance Aeson.ToJSON WorktreeConfig where
         Aeson.object
             [ "fetchLatestUpstream"
                 Aeson..= config.worktreeFetchLatestUpstream
+            , "inactivityDays" Aeson..= config.worktreeInactiveDays
             ]
 
 data HarnessConfig = HarnessConfig
@@ -376,6 +378,7 @@ defaultHarnessConfig = HarnessConfig
         }
     , configWorktree = WorktreeConfig
         { worktreeFetchLatestUpstream = True
+        , worktreeInactiveDays = 7
         }
     , configMaxConcurrentAgents = Nothing
     }
@@ -481,6 +484,7 @@ worktreeConfigDecoder =
     Hermes.object $
         WorktreeConfig
             <$> defaultKey True "fetchLatestUpstream" Hermes.bool
+            <*> defaultKey 7 "inactivityDays" Hermes.int
 
 harnessConfigDecoder :: Hermes.Decoder HarnessConfig
 harnessConfigDecoder =
@@ -789,6 +793,8 @@ updateHarnessConfig home update =
 
 validateHarnessConfig :: HarnessConfig -> Either Text HarnessConfig
 validateHarnessConfig config = do
+    when (config.configWorktree.worktreeInactiveDays <= 0) $
+        Left "worktree.inactivityDays must be a positive integer"
     unless (config.configVersion == harnessConfigSchemaVersion) $
         Left
             ( "Unsupported harness config version "

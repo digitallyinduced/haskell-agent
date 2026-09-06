@@ -110,6 +110,9 @@ import qualified Agent.CLI.TUITranscriptSpec as TUITranscriptSpec
 import qualified Agent.CLI.UsageSpec as UsageSpec
 import qualified Agent.CLI.WebLspSpec as WebLspSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
+import qualified Agent.CLI.WorktreeAdminSpec as WorktreeAdminSpec
+import qualified Agent.CLI.Worktree.SnapshotSpec as SnapshotSpec
+import qualified Agent.CLI.Worktree.ProvenanceSpec as ProvenanceSpec
 main :: IO ()
 main = do
     shard <- lookupEnv "AGENT_CLI_TEST_SHARD"
@@ -237,6 +240,9 @@ specs = do
     UsageSpec.spec
     WebLspSpec.spec
     WorktreeSpec.spec
+    WorktreeAdminSpec.spec
+    ProvenanceSpec.spec
+    SnapshotSpec.spec
 
 runShards :: Int -> IO ()
 runShards count = do

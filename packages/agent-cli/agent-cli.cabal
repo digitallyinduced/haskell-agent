@@ -273,6 +273,11 @@ library
                     , Agent.CLI.WebFetch
                     , Agent.CLI.WindowTitle
                     , Agent.CLI.Worktree
+                    , Agent.CLI.WorktreeAdmin
+                    , Agent.CLI.Worktree.Registry
+                    , Agent.CLI.Worktree.ReadOnlyLock
+                    , Agent.CLI.Worktree.Provenance
+                    , Agent.CLI.Worktree.Snapshot
     reexported-modules:
                       agent-external-session:Agent.CLI.ExternalSession as Agent.CLI.ExternalSession
                     , agent-cli-runtime:Agent.CLI.Auth as Agent.CLI.Auth
@@ -571,6 +576,9 @@ test-suite agent-cli-test
                     , Agent.CLI.UsageSpec
                     , Agent.CLI.WebLspSpec
                     , Agent.CLI.WorktreeSpec
+                    , Agent.CLI.WorktreeAdminSpec
+                    , Agent.CLI.Worktree.SnapshotSpec
+                    , Agent.CLI.Worktree.ProvenanceSpec
     build-depends:    agent-cli
                     , agent-cli-runtime
                     , agent-connectivity
@@ -601,6 +609,8 @@ test-suite agent-cli-test
                     , filepath
                     , haskeline >= 0.8 && < 0.9
                     , hspec >= 2.11 && < 2.12
+                    , filelock
+                    , temporary
                     , http-client
                     , http-types
                     , JuicyPixels

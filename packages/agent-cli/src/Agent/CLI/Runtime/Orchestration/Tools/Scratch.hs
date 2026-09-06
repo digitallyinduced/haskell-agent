@@ -7,6 +7,7 @@ module Agent.CLI.Runtime.Orchestration.Tools.Scratch
     ) where
 
 import Agent.CLI.Error (formatException)
+import Agent.CLI.Config (HarnessConfig(..), WorktreeConfig(..))
 import Agent.CLI.ExternalSession (defaultExternalSessionEnv, externalSessionTool)
 import Agent.CLI.ManagedTurn (ManagedTurnRequest(..))
 import Agent.CLI.Models (ModelTarget(..))
@@ -19,9 +20,9 @@ import Agent.CLI.Runtime.Orchestration.Tools.Request
 import Agent.CLI.Runtime.Orchestration.Types (AgentProcessRuntime(..), NativeRunCapabilities(..))
 import Agent.CLI.Runtime.Persistence (preparePersistence)
 import Agent.CLI.Session
-    ( Persistence, SessionMeta(..), SessionTempCleanupReport(..)
+    ( Persistence, SessionTempCleanupReport(..)
     , acquireSessionTempLease, allocateSessionTemp, cleanupPendingPersistence
-    , cleanupStaleSessionTemps, defaultSessionTempKeepCount, listSessions
+    , cleanupStaleSessionTemps, defaultSessionTempKeepCount
     , loadCurrentTaskPlan, persistenceTempDir, releaseSessionTempLease
     , removeSessionTemp, taskPlanHooksForPersistence )
 import Agent.CLI.Session.History (foldSessionItems)
@@ -31,8 +32,9 @@ import Agent.CLI.Startup.Auth (startupDie)
 import Agent.CLI.TUI.App (clearFullscreenHistorySource, setFullscreenHistorySource)
 import Agent.CLI.TUI.History (HistoryGeneration(..))
 import Agent.CLI.Worktree
-    ( WorktreeCleanupReport(..), acquireWorktreeLease, cleanupStaleWorktrees
-    , defaultWorktreeKeepCount, releaseWorktreeLease, worktreeRoot )
+    ( WorktreeCleanupReport(..), acquireWorktreeLease, gcWorktreesWithActivity
+    , releaseWorktreeLease, worktreeRoot )
+import Agent.CLI.Worktree.Provenance (loadWorktreeActivity)
 import Agent.OpenAI.ImageGeneration
     ( ImageGenerationHistory, newImageGenerationHistory, recordImageGenerationResponseItems )
 import Agent.OsPath (unsafeToFilePath)
@@ -191,35 +193,24 @@ startStaleResourceCleanup AgentToolsRequest
     -- candidate. It must never delay interactive startup.
     _ <- processRuntime.processStartCleanup do
         cleanupResult <- try @_ @SomeException do
-            (sessions, sessionWarnings) <-
-                listSessions
-                    (trustedPool startup.startupDatabaseStore)
-                    root
-            let protectedWorktrees =
-                    -- Persisted sessions must remain resumable. A worktree
-                    -- becomes collectible after its session is deleted.
-                    cwd : map (.metaCwd) sessions
             (worktreeReport, tempReport) <- concurrently
-                (if null sessionWarnings
-                    then cleanupStaleWorktrees
-                        (worktreeRoot home)
-                        defaultWorktreeKeepCount
-                        protectedWorktrees
-                    -- A partial session catalog cannot prove that an old
-                    -- checkout is unreferenced.
-                    else pure mempty)
+                (gcWorktreesWithActivity
+                    (loadWorktreeActivity (trustedPool startup.startupDatabaseStore) (worktreeRoot home))
+                    (worktreeRoot home)
+                    startup.startupHarnessConfig.configWorktree.worktreeInactiveDays
+                    False
+                    [cwd])
                 (cleanupStaleSessionTemps
                     root
                     defaultSessionTempKeepCount
                     [sessionTmp])
-            pure (sessionWarnings, worktreeReport, tempReport)
+            pure (worktreeReport, tempReport)
         case cleanupResult of
             Left exception ->
                 reportStartupWarning startup
                     ("stale resource cleanup failed: "
                         <> formatException exception)
-            Right (sessionWarnings, worktreeReport, tempReport) -> do
-                mapM_ (reportStartupWarning startup) sessionWarnings
+            Right (worktreeReport, tempReport) -> do
                 forM_ worktreeReport.cleanupFailures \(path, err) ->
                     reportStartupWarning startup
                         ("could not clean stale worktree "

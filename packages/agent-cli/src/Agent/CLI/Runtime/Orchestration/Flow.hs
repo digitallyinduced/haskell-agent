@@ -139,7 +139,8 @@ import Agent.CLI.Terminal
       resolveColor,
       TerminalCapabilities(terminalNativeProgress) )
 import Agent.CLI.Worktree
-    ( createManagedWorktreeFromConfigWithProgress, worktreeProgressMessage )
+    ( createManagedWorktreeFromConfigWithProgress, worktreeProgressMessage
+    , restoreManagedWorktree, worktreeRoot )
 import Agent.Cancel ( requestCancel )
 import Agent.OsPath ( toText )
 import Agent.Provider ( Provider(OpenAIProvider) )
@@ -763,6 +764,13 @@ prepareAgentIterationResources request = do
                     getCurrentDirectory
                     makeAbsolute
                     request.iterationRunMode.runCwdHint
+    -- Native resumes supply optCwd too. Restore the selected effective cwd,
+    -- not an unrelated historical path when the caller overrides it.
+    forM_ resumed $ \_ ->
+        restoreManagedWorktree (worktreeRoot home) source >>= \case
+            Left err -> failAgentIterationPreparation request
+                ("Could not restore session worktree: " <> err)
+            Right () -> pure ()
     pure AgentIterationResources
         { iterationStartedAt = startedAt
         , iterationStartupTimings = startupTimingsRef

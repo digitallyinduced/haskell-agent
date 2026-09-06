@@ -7,7 +7,11 @@ module Agent.CLI.Worktree
     , createManagedWorktreeFromConfigWithProgress
     , removeWorktree
     , cleanupStaleWorktrees
-    , defaultWorktreeKeepCount
+    , gcWorktrees
+    , gcWorktreesWithActivity
+    , enrollWorktree
+    , protectWorktree
+    , restoreManagedWorktree
     , WorktreeCleanupReport(..)
     , WorktreeLease
     , acquireWorktreeLease
@@ -25,6 +29,9 @@ import Agent.CLI.Config
     , loadHarnessConfig
     )
 import Agent.OsPath (unsafeToFilePath)
+import Agent.CLI.Worktree.Registry
+import Agent.CLI.Worktree.ReadOnlyLock (withExistingReadOnlyLock)
+import qualified Agent.CLI.Worktree.Snapshot as Snapshot
 import Control.Applicative ((<|>))
 import Control.Exception.Safe
     ( SomeException
@@ -33,8 +40,10 @@ import Control.Exception.Safe
     , mask
     , onException
     , tryAny
+    , catchIO
     )
-import Control.Monad (filterM, foldM, void)
+import Control.Monad (foldM, void, when, unless)
+import Data.IORef (newIORef, readIORef, modifyIORef')
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
@@ -44,25 +53,32 @@ import Control.Monad.Trans.Except
     )
 import qualified Data.ByteString as ByteString
 import Data.Char (isHexDigit)
-import Data.List (isPrefixOf, sortOn)
+import Data.List (isPrefixOf)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe)
-import Data.Ord (Down(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
 import Data.Time.Calendar (Day)
-import Data.Time.Clock (UTCTime(..), getCurrentTime, nominalDiffTimeToSeconds)
+import Data.Time.Clock (UTCTime(..), getCurrentTime, nominalDiffTimeToSeconds, diffUTCTime)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import Numeric (showHex)
+import System.IO.Error (isDoesNotExistError)
 import System.Directory.OsPath
     ( createDirectoryIfMissing
     , doesDirectoryExist
+    , doesFileExist
     , doesPathExist
     , listDirectory
     , pathIsSymbolicLink
     , removePathForcibly
     )
 import System.Entropy (getEntropy)
+import qualified System.Directory as Directory
+import qualified System.FilePath as FilePath
+import System.Timeout (timeout)
 import System.Exit (ExitCode(..))
 import qualified System.FileLock as FileLock
 import System.OsPath
@@ -96,15 +112,11 @@ worktreeProgressMessage = \case
     branchName ref =
         maybe ref id (Text.stripPrefix "refs/heads/" ref)
 
--- | Match Codex Desktop's default per-repository retention. Worktrees beyond
--- this count are only removed when they are inactive, clean, and their HEAD is
--- reachable from another branch or tag.
-defaultWorktreeKeepCount :: Int
-defaultWorktreeKeepCount = 15
-
 data WorktreeCleanupReport = WorktreeCleanupReport
     { cleanupRemoved :: ![OsPath]
     , cleanupFailures :: ![(OsPath, Text)]
+    , cleanupEligible :: ![(OsPath, Integer)]
+    , cleanupRetained :: ![(OsPath, Text)]
     }
     deriving (Eq, Show)
 
@@ -112,12 +124,14 @@ instance Semigroup WorktreeCleanupReport where
     left <> right = WorktreeCleanupReport
         { cleanupRemoved = left.cleanupRemoved <> right.cleanupRemoved
         , cleanupFailures = left.cleanupFailures <> right.cleanupFailures
+        , cleanupEligible = left.cleanupEligible <> right.cleanupEligible
+        , cleanupRetained = left.cleanupRetained <> right.cleanupRetained
         }
 
 instance Monoid WorktreeCleanupReport where
-    mempty = WorktreeCleanupReport [] []
+    mempty = WorktreeCleanupReport [] [] [] []
 
-newtype WorktreeLease = WorktreeLease FileLock.FileLock
+data WorktreeLease = WorktreeLease FileLock.FileLock (Maybe (OsPath, OsPath))
 
 -- | @~/.haskell-agent/worktrees@ given the user's home directory.
 worktreeRoot :: OsPath -> OsPath
@@ -203,12 +217,17 @@ createManagedWorktreeFromConfigWithProgress
     -> OsPath
     -> OsPath
     -> IO (Either Text OsPath)
-createManagedWorktreeFromConfigWithProgress report config home source =
-    createWorktreeWithFetchProgress
+createManagedWorktreeFromConfigWithProgress report config home source = do
+    created <- createWorktreeWithFetchProgress
         report
         config.configWorktree.worktreeFetchLatestUpstream
         source
         (worktreeRoot home)
+    case created of
+        Left err -> pure (Left err)
+        Right path -> enrollWorktree (worktreeRoot home) path >>= \case
+            Left err -> pure (Left ("Created checkout but enrollment failed; retained safely: " <> err))
+            Right () -> pure (Right path)
 
 -- | Remove a managed worktree and the branch created for it.
 removeWorktree :: OsPath -> OsPath -> IO (Either Text ())
@@ -227,289 +246,344 @@ acquireWorktreeLease
     :: OsPath
     -> OsPath
     -> IO (Either Text (Maybe WorktreeLease))
-acquireWorktreeLease root path =
+acquireWorktreeLease root path = mask $ \restore ->
     case managedWorktreePath root path of
         Nothing -> pure (Right Nothing)
         Just managed -> do
             let lockPath = worktreeLeasePath root managed
             result <- tryAny do
+                linked <- pathIsSymbolicLink root
+                when linked (ioError (userError "symlinked managed worktree root"))
                 createDirectoryIfMissing True (takeDirectory lockPath)
                 FileLock.tryLockFile
                     (unsafeToFilePath lockPath)
                     FileLock.Shared
-            pure case result of
+            case result of
                 Left exception ->
-                    Left
+                    pure $ Left
                         ("failed to lease managed worktree "
                             <> pathText managed
                             <> ": "
                             <> Text.pack (displayException exception))
                 Right Nothing ->
-                    Left
+                    pure $ Left
                         ("managed worktree is being cleaned up: "
                             <> pathText managed)
-                Right (Just lock) -> Right (Just (WorktreeLease lock))
+                Right (Just lock) -> do
+                    activity <- restore (touchWorktree root managed)
+                        `onException` FileLock.unlockFile lock
+                    case activity of
+                        Left err -> FileLock.unlockFile lock >> pure (Left err)
+                        Right () -> pure (Right (Just (WorktreeLease lock (Just (root, managed)))))
 
 releaseWorktreeLease :: WorktreeLease -> IO ()
-releaseWorktreeLease (WorktreeLease lock) = do
-    _ <- tryAny (FileLock.unlockFile lock)
-    pure ()
+releaseWorktreeLease (WorktreeLease lock activity) =
+    (case activity of
+        Nothing -> pure ()
+        Just (root, path) -> void (touchWorktree root path))
+    `finally` FileLock.unlockFile lock
 
--- | Remove old managed worktrees without risking unique Git work.
---
--- Retention is applied per repository directory. A candidate must use our
--- generated path and branch name, be a linked worktree with no tracked or
--- untracked changes, have no active lease, and have a HEAD reachable from
--- another local branch, remote-tracking branch, or tag. Removal deliberately
--- omits @--force@. The generated branch is then deleted with @-d@, leaving it
--- intact without treating that data-safe fallback as a cleanup failure
--- whenever Git's own merged-branch check is stricter than ours.
--- Worktrees created on the current UTC day are never considered stale; this
--- also closes the interval between checkout creation and lease acquisition.
+-- | Updating activity never enrolls legacy checkouts.
+touchWorktree :: OsPath -> OsPath -> IO (Either Text ())
+touchWorktree root path = readRecord root path >>= \case
+    Left err -> pure (Left err)
+    Right Nothing -> pure (Right ())
+    Right (Just _) -> do
+        now <- getCurrentTime
+        modifyRecord root path (Right . fmap (\r -> r { recordLastActivity = now }))
+
+-- | Explicit consent to the ignored-file exclusion and inactivity policy.
+-- Enrollment starts the inactivity clock now, not at the old checkout date.
+enrollWorktree :: OsPath -> OsPath -> IO (Either Text ())
+enrollWorktree root path = catchingWorktree $ withExclusiveManaged root path $ runExceptT do
+    common <- inspectManagedIdentity root path
+    now <- lift getCurrentTime
+    ExceptT $ modifyRecord root path $ \case
+        Just record
+            | record.recordCommonDir == unsafeToFilePath common ->
+                Right (Just record)
+            | otherwise -> Left "enrolled repository identity changed"
+        Nothing -> Right (Just WorktreeRecord
+            { recordVersion = 1
+            , recordCheckout = unsafeToFilePath path
+            , recordCommonDir = unsafeToFilePath common
+            , recordLastActivity = now
+            , recordProtected = False
+            , recordState = "present"
+            , recordSnapshot = Nothing
+            })
+
+protectWorktree :: OsPath -> OsPath -> Bool -> IO (Either Text ())
+protectWorktree root path protected = catchingWorktree $
+    withExclusiveManaged root path $
+        modifyRecord root path $ \case
+            Nothing -> Left "worktree is not enrolled; enroll explicitly first"
+            Just record -> Right (Just record { recordProtected = protected })
+
+-- | Resume only restores absent enrolled checkouts. It never overwrites a path
+-- or rewinds the old branch; snapshot restoration uses a detached HEAD.
+restoreManagedWorktree :: OsPath -> OsPath -> IO (Either Text ())
+restoreManagedWorktree root requested =
+    case managedWorktreePath root requested of
+        Nothing -> pure (Right ())
+        Just path -> catchingWorktree do
+            exists <- doesPathExist path
+            if exists then mask $ \restore ->
+                acquireWorktreeLease root path >>= \case
+                    Left err -> pure (Left err)
+                    Right Nothing -> pure (Left "managed checkout identity changed during resume")
+                    Right (Just lease) ->
+                        restore (do
+                            stillExists <- doesPathExist path
+                            if not stillExists
+                                then pure (Left "checkout was collected during resume; retry to restore")
+                                else readRecord root path >>= \case
+                                    Left err -> pure (Left err)
+                                    Right (Just record) | record.recordState /= "present" ->
+                                        pure (Left ("checkout exists in interrupted maintenance state "
+                                            <> record.recordState <> "; refusing to overwrite it"))
+                                    _ -> pure (Right ()))
+                        `finally` releaseWorktreeLease lease
+            else
+                withExclusiveManaged root path $ runExceptT do
+                    record <- ExceptT (readRecord root path) >>= maybe
+                        (throwE "missing worktree has no enrolled recovery record") pure
+                    unless (record.recordState `elem` ["collecting", "collected", "restoring"])
+                        (throwE "checkout disappeared outside collection; refusing a potentially stale snapshot")
+                    snapshot <- maybe
+                        (throwE "missing worktree has no verified recovery snapshot")
+                        pure record.recordSnapshot
+                    let common = unsafeEncodeUtf record.recordCommonDir
+                    ExceptT $ withGitWorktreeLockAt common $ runExceptT do
+                        links <- lift $ mapM pathIsSymbolicLink [root, takeDirectory path]
+                        when (or links) (throwE "symlinked restoration parent")
+                        -- Persist before restoration. Interrupted restore leaves
+                        -- a directory that future resumes will not overwrite.
+                        ExceptT $ writeRecord root path record { recordState = "restoring" }
+                        ExceptT $ Snapshot.restoreSnapshot common path snapshot
+                        now <- lift getCurrentTime
+                        ExceptT $ writeRecord root path record
+                            { recordState = "present", recordLastActivity = now }
+
+withExclusiveManaged :: OsPath -> OsPath -> IO (Either Text a) -> IO (Either Text a)
+withExclusiveManaged root path action = mask $ \restore ->
+    if managedWorktreePath root path /= Just path
+        || any (== unsafeEncodeUtf "..") (splitDirectories path)
+        then pure (Left "expected a managed checkout root, not a subdirectory or traversal")
+        else tryExclusiveWorktreeLease root path >>= \case
+            Left err -> pure (Left err)
+            Right Nothing -> pure (Left "worktree is active or another maintenance operation holds its lease")
+            Right (Just lease) -> restore action `finally` releaseWorktreeLease lease
+
+inspectManagedIdentity :: OsPath -> OsPath -> ExceptT Text IO OsPath
+inspectManagedIdentity root path = do
+    unless (managedWorktreePath root path == Just path)
+        (throwE "not a managed checkout root")
+    links <- lift $ mapM pathIsSymbolicLink [root, takeDirectory path, path]
+    when (or links) (throwE "symlinked managed checkout or repository directory")
+    top <- gitToplevel path
+    unless (equalFilePath (normalise top) (normalise path))
+        (throwE "checkout does not own its Git working directory")
+    common <- gitCommonDir path
+    gitDir <- Text.strip <$> ExceptT
+        (git path ["rev-parse", "--path-format=absolute", "--git-dir"])
+    when (gitDir == pathText common) (throwE "primary checkout cannot be collected")
+    let admin = unsafeEncodeUtf (Text.unpack gitDir)
+        dotGit = path </> unsafeEncodeUtf ".git"
+        backpointer = admin </> unsafeEncodeUtf "gitdir"
+    unless (equalFilePath (takeDirectory admin) (common </> unsafeEncodeUtf "worktrees"))
+        (throwE "linked Git administration is outside the repository worktree registry")
+    metadataLinks <- lift $ mapM pathIsSymbolicLink
+        [dotGit, common, takeDirectory admin, admin, backpointer]
+    when (or metadataLinks) (throwE "symlinked linked Git metadata")
+    regular <- lift $ mapM doesFileExist [dotGit, backpointer]
+    unless (and regular) (throwE "missing linked Git metadata")
+    reciprocal <- Text.strip <$> lift (Text.readFile (unsafeToFilePath backpointer))
+    unless (equalFilePath (normalise (unsafeEncodeUtf (Text.unpack reciprocal))) (normalise dotGit))
+        (throwE "linked Git metadata points at another checkout")
+    pure common
+
+-- The dry-run must not create even maintenance lock files. Existing lock
+-- files use the same OS advisory locks as filelock; closing the read-only
+-- handle releases the probe. An absent lock is only an observational result:
+-- a real pass always acquires the normal lease and checks everything again.
+withReadOnlyLock :: OsPath -> IO (Either Text a) -> IO (Either Text a)
+withReadOnlyLock path action = do
+    linked <- isLinkIfPresent path
+    parentLinked <- isLinkIfPresent (takeDirectory path)
+    if linked || parentLinked then pure (Left "symlinked maintenance lock")
+        else withExistingReadOnlyLock path action >>= pure . either Left id
+  where
+    isLinkIfPresent file = pathIsSymbolicLink file `catchIO` \err ->
+        if isDoesNotExistError err then pure False else ioError err
+
+catchingWorktree :: IO (Either Text a) -> IO (Either Text a)
+catchingWorktree action = tryAny action >>= \case
+    Left err -> pure (Left (exceptionText err))
+    Right result -> pure result
+
+-- | Snapshot-backed GC. Actual passes are bounded to eight eligible checkouts
+-- and sixty seconds; each snapshot/removal has a thirty-second deadline.
+-- Dry runs do not create snapshots, registry entries, or recovery refs.
+-- This compatibility entry point has no legacy provenance; production callers
+-- supply the saved-session reader through 'gcWorktreesWithActivity'.
+gcWorktrees :: OsPath -> Int -> Bool -> [OsPath] -> IO WorktreeCleanupReport
+gcWorktrees root = gcWorktreesWithActivity (pure (Right Map.empty)) root
+
+-- | The injected reader is also re-run immediately before collection, under
+-- the checkout lease, so newly saved session activity cannot be overwritten
+-- by the pass's discovery snapshot.
+gcWorktreesWithActivity
+    :: IO (Either Text (Map OsPath (Either Text UTCTime)))
+    -> OsPath -> Int -> Bool -> [OsPath] -> IO WorktreeCleanupReport
+gcWorktreesWithActivity loadActivity root days dryRun protected = do
+    exists <- doesDirectoryExist root
+    if not exists then pure mempty else do
+        result <- tryAny do
+            linked <- pathIsSymbolicLink root
+            when linked (ioError (userError "symlinked managed worktree root"))
+            started <- getCurrentTime
+            discovered <- timeout (30 * 1000000) (discoverManagedPaths root)
+            candidates <- maybe
+                (ioError (userError "worktree discovery deadline exceeded; no checkouts collected"))
+                pure discovered
+            activity <- timeout (30 * 1000000) loadActivity
+            attempts <- newIORef (0 :: Int)
+            foldM (visit started attempts (maybe (Left "session activity discovery deadline exceeded") id activity))
+                mempty candidates
+        pure $ either (cleanupFailure root) id result
+  where
+    retained path reason = mempty { cleanupRetained = [(path, reason)] }
+    visit started attempts activity report path = do
+        now <- getCurrentTime
+        attempted <- readIORef attempts
+        let exhausted = not dryRun &&
+                (attempted >= 8 || diffUTCTime now started >= 60)
+        if exhausted then pure (report <> retained path "pass budget exhausted") else do
+            result <- timeout (30 * 1000000) $ catchingWorktree $
+                checkoutLock path $ runExceptT do
+                    when (any (isUnderWorktreeRoot path . normalise) protected)
+                        (throwE "current session")
+                    existing <- ExceptT (readRecord root path)
+                    -- Persistent protection and recovery states take priority
+                    -- over missing provenance and never get silently replaced.
+                    case existing of
+                        Just record | record.recordProtected -> throwE "protected"
+                        Just record | record.recordState /= "present" ->
+                            throwE ("state: " <> record.recordState)
+                        _ -> pure ()
+                    record <- resolveRecord path activity existing
+                    if recent now record then pure (retained path "recent activity") else do
+                        lift $ modifyIORef' attempts (+ 1)
+                        common <- inspectManagedIdentity root path
+                        unless (unsafeToFilePath common == record.recordCommonDir)
+                            (throwE "enrolled repository identity changed")
+                        ExceptT $ repositoryLock common $ runExceptT do
+                            ExceptT $ Snapshot.checkSnapshotSupported path
+                            if dryRun then do
+                                bytes <- lift (estimateCheckoutBytes path)
+                                pure mempty { cleanupEligible = [(path, bytes)] }
+                            else do
+                                latest <- lift loadActivity
+                                refreshed <- resolveRecord path latest existing
+                                recheckedAt <- lift getCurrentTime
+                                when (recent recheckedAt refreshed)
+                                    (throwE "recent activity")
+                                unless (refreshed.recordCommonDir == record.recordCommonDir)
+                                    (throwE "repository identity changed during adoption")
+                                snapshot <- ExceptT $ Snapshot.createSnapshot path
+                                finalActivity <- lift loadActivity
+                                finalRecord <- resolveRecord path finalActivity existing
+                                finalAt <- lift getCurrentTime
+                                when (recent finalAt finalRecord)
+                                    (throwE "recent activity")
+                                finalCommon <- inspectManagedIdentity root path
+                                unless (finalCommon == common && finalRecord.recordCommonDir == record.recordCommonDir)
+                                    (throwE "repository identity changed during snapshot")
+                                -- Adoption is persisted with the original saved
+                                -- activity, never an artificial 'now' timestamp.
+                                let saved = finalRecord { recordSnapshot = Just snapshot, recordState = "collecting" }
+                                ExceptT $ writeRecord root path saved
+                                verified <- lift $ Snapshot.verifySnapshotUnchanged path snapshot
+                                case verified of
+                                    Right () -> pure ()
+                                    Left err -> do
+                                        ExceptT $ writeRecord root path saved { recordState = "present" }
+                                        throwE err
+                                void $ ExceptT $ git common ["worktree", "remove", "--force", unsafeToFilePath path]
+                                ExceptT $ writeRecord root path saved { recordState = "collected" }
+                                pure mempty { cleanupRemoved = [path] }
+            pure $ report <> case result of
+                Nothing -> retained path "maintenance deadline exceeded; recovery record retained"
+                Just (Left err) -> retained path err
+                Just (Right one) -> one
+    recent now record = diffUTCTime now record.recordLastActivity < fromIntegral (max 0 days) * 86400
+    checkoutLock path
+        | dryRun = withReadOnlyLock (worktreeLeasePath root path)
+        | otherwise = withExclusiveManaged root path
+    repositoryLock common
+        | dryRun = withReadOnlyLock (common </> unsafeEncodeUtf "haskell-agent-worktree.lock")
+        | otherwise = withGitWorktreeLockAt common
+    resolveRecord path activity existing = do
+        evidence <- either throwE pure activity
+        case (existing, Map.lookup path evidence) of
+            (_, Just (Left err)) -> throwE err
+            (Just record, savedActivity) -> pure record
+                { recordLastActivity = maybe record.recordLastActivity
+                    (either (const record.recordLastActivity) (max record.recordLastActivity))
+                    savedActivity }
+            (Nothing, Nothing) -> throwE "uncertain ownership: no saved-session provenance"
+            (Nothing, Just (Right lastActivity)) -> do
+                common <- inspectManagedIdentity root path
+                repository <- gitRepositoryName path
+                unless (repository == takeFileName (takeDirectory path))
+                    (throwE "uncertain ownership: managed repository directory does not match Git identity")
+                pure WorktreeRecord
+                    { recordVersion = 1
+                    , recordCheckout = unsafeToFilePath path
+                    , recordCommonDir = unsafeToFilePath common
+                    , recordLastActivity = lastActivity
+                    , recordProtected = False
+                    , recordState = "present"
+                    , recordSnapshot = Nothing
+                    }
+
+discoverManagedPaths :: OsPath -> IO [OsPath]
+discoverManagedPaths root = do
+    entries <- listDirectory root
+    fmap concat $ mapM discover entries
+  where
+    discover entry
+        | "." `isPrefixOf` unsafeToFilePath entry = pure []
+        | otherwise = do
+            let repo = root </> entry
+            linked <- pathIsSymbolicLink repo
+            directory <- doesDirectoryExist repo
+            if linked || not directory then pure [] else do
+                children <- listDirectory repo
+                pure [repo </> child | child <- children, isManagedWorktreeName child]
+
+-- Apparent bytes, including ignored cache data, without following symlinks.
+-- This is an estimate rather than filesystem-block accounting.
+estimateCheckoutBytes :: OsPath -> IO Integer
+estimateCheckoutBytes path = walk (unsafeToFilePath path)
+  where
+    walk file = do
+        linked <- Directory.pathIsSymbolicLink file
+        if linked then pure 0 else do
+            directory <- Directory.doesDirectoryExist file
+            if directory then do
+                children <- Directory.listDirectory file
+                sum <$> mapM (walk . (file FilePath.</>)) children
+            else Directory.getFileSize file
+
+-- | Bounded snapshot-backed cleanup. The second argument is inactivity days.
 cleanupStaleWorktrees
     :: OsPath
     -> Int
     -> [OsPath]
     -> IO WorktreeCleanupReport
-cleanupStaleWorktrees root requestedKeep protected = do
-    exists <- doesDirectoryExist root
-    if not exists
-        then pure mempty
-        else do
-            today <- utctDay <$> getCurrentTime
-            let cleanupLockPath =
-                    root </> unsafeEncodeUtf ".cleanup.lock"
-            lockResult <- tryAny $
-                FileLock.tryLockFile
-                    (unsafeToFilePath cleanupLockPath)
-                    FileLock.Exclusive
-            case lockResult of
-                Left exception ->
-                    pure $ cleanupFailure root exception
-                Right Nothing ->
-                    -- Another process is already doing the same best-effort GC.
-                    pure mempty
-                Right (Just lock) ->
-                    runCleanup today `finally` FileLock.unlockFile lock
-  where
-    keep = max 1 requestedKeep
-    protectedManaged =
-        [ normalise path
-        | path <- protected
-        ]
-
-    runCleanup today = do
-        discovered <- discoverStaleCandidates root keep today
-        case discovered of
-            Left failures ->
-                pure mempty { cleanupFailures = failures }
-            Right (candidates, discoveryFailures) -> do
-                cleaned <- foldM cleanupOne mempty candidates
-                pure $
-                    cleaned
-                        <> mempty { cleanupFailures = discoveryFailures }
-
-    cleanupOne report candidate
-        | any (isUnderWorktreeRoot candidate) protectedManaged =
-            pure report
-        | otherwise = do
-            result <- tryAny (cleanupCandidate root candidate)
-            pure $ report <> case result of
-                Left exception -> cleanupFailure candidate exception
-                Right candidateReport -> candidateReport
-
-discoverStaleCandidates
-    :: OsPath
-    -> Int
-    -> Day
-    -> IO (Either [(OsPath, Text)] ([OsPath], [(OsPath, Text)]))
-discoverStaleCandidates root keep today = do
-    listed <- tryAny (listDirectory root)
-    case listed of
-        Left exception ->
-            pure (Left [(root, exceptionText exception)])
-        Right entries ->
-            Right <$> foldM discoverRepository ([], []) entries
-  where
-    discoverRepository (candidates, failures) entry = do
-        let repository = root </> entry
-        isDirectory <- doesDirectoryExist repository
-        if not isDirectory
-            then pure (candidates, failures)
-            else do
-                listed <- tryAny (listDirectory repository)
-                case listed of
-                    Left exception ->
-                        pure
-                            ( candidates
-                            , failures <> [(repository, exceptionText exception)]
-                            )
-                    Right children -> do
-                        directories <- filterM
-                            (doesDirectoryExist . (repository </>))
-                            children
-                        let managed =
-                                sortOn
-                                    ( Down
-                                        . unsafeToFilePath
-                                        . takeFileName
-                                        . fst
-                                    )
-                                    [ (repository </> child, day)
-                                    | child <- directories
-                                    , Just day <- [managedWorktreeDay child]
-                                    ]
-                            stale =
-                                [ path
-                                | (path, day) <- drop keep managed
-                                , day < today
-                                ]
-                        pure (candidates <> stale, failures)
-
-cleanupCandidate :: OsPath -> OsPath -> IO WorktreeCleanupReport
-cleanupCandidate root candidate = do
-    leaseResult <- tryExclusiveWorktreeLease root candidate
-    case leaseResult of
-        Left err ->
-            pure mempty
-                { cleanupFailures = [(candidate, err)]
-                }
-        Right Nothing ->
-            pure mempty
-        Right (Just lease) ->
-            cleanupWithLease `finally` releaseWorktreeLease lease
-  where
-    cleanupWithLease = do
-        hasGitMetadata <-
-            doesPathExist (candidate </> unsafeEncodeUtf ".git")
-        -- A generated-looking directory can survive an interrupted
-        -- @git worktree remove@ after its .git marker is gone. Without
-        -- that ownership marker, preserve it rather than warning on
-        -- @git rev-parse@ or recursively deleting arbitrary files.
-        if hasGitMetadata
-            then cleanupGitWorktree
-            else pure mempty
-
-    cleanupGitWorktree =
-        inspectCleanupCandidate candidate >>= \case
-            Left err ->
-                pure mempty
-                    { cleanupFailures = [(candidate, err)]
-                    }
-            Right Nothing ->
-                pure mempty
-            Right (Just (commonDir, branch)) ->
-                withGitWorktreeLockAt commonDir $
-                    git commonDir
-                        [ "worktree"
-                        , "remove"
-                        , unsafeToFilePath candidate
-                        ] >>= \case
-                            Left err ->
-                                pure mempty
-                                    { cleanupFailures = [(candidate, err)]
-                                    }
-                            Right _ -> do
-                                -- The worktree is the resource governed by the
-                                -- retention policy. Branch deletion is best
-                                -- effort: @-d@ can reject a branch that is known
-                                -- to be reachable from another ref but is not
-                                -- merged into the repository's current branch.
-                                -- Retaining it is safe and should not surface as
-                                -- a startup warning.
-                                _ <- git commonDir
-                                    [ "branch"
-                                    , "-d"
-                                    , "--"
-                                    , Text.unpack branch
-                                    ]
-                                pure WorktreeCleanupReport
-                                    { cleanupRemoved = [candidate]
-                                    , cleanupFailures = []
-                                    }
-
-inspectCleanupCandidate
-    :: OsPath
-    -> IO (Either Text (Maybe (OsPath, Text)))
-inspectCleanupCandidate candidate = runExceptT do
-    candidateLink <- lift (pathIsSymbolicLink candidate)
-    repositoryLink <- lift (pathIsSymbolicLink (takeDirectory candidate))
-    if candidateLink || repositoryLink
-        then pure Nothing
-        else do
-            topLevel <- Text.strip <$> ExceptT
-                (git candidate
-                    [ "rev-parse"
-                    , "--path-format=absolute"
-                    , "--show-toplevel"
-                    ])
-            let topLevelPath = unsafeEncodeUtf (Text.unpack topLevel)
-            if not
-                (equalFilePath
-                    (normalise candidate)
-                    (normalise topLevelPath))
-                then pure Nothing
-                else do
-                    gitDir <- Text.strip <$> ExceptT
-                        (git candidate
-                            [ "rev-parse"
-                            , "--path-format=absolute"
-                            , "--git-dir"
-                            ])
-                    commonDirText <- Text.strip <$> ExceptT
-                        (git candidate
-                            [ "rev-parse"
-                            , "--path-format=absolute"
-                            , "--git-common-dir"
-                            ])
-                    if gitDir == commonDirText
-                        then pure Nothing
-                        else do
-                            branch <- Text.strip <$> ExceptT
-                                (git candidate
-                                    ["branch", "--show-current"])
-                            let expected = Text.pack
-                                    (unsafeToFilePath
-                                        (takeFileName candidate))
-                            if Text.null branch || branch /= expected
-                                then pure Nothing
-                                else do
-                                    status <- ExceptT $
-                                        git candidate
-                                            [ "status"
-                                            , "--porcelain=v1"
-                                            , "--untracked-files=all"
-                                            , "--ignore-submodules=none"
-                                            ]
-                                    if not (Text.null status)
-                                        then pure Nothing
-                                        else do
-                                            refs <- ExceptT $
-                                                git candidate
-                                                    [ "for-each-ref"
-                                                    , "--format=%(refname)"
-                                                    , "--contains=HEAD"
-                                                    , "refs/heads"
-                                                    , "refs/remotes"
-                                                    , "refs/tags"
-                                                    ]
-                                            let ownRef =
-                                                    "refs/heads/" <> branch
-                                                otherRefs =
-                                                    filter
-                                                        (\ref ->
-                                                            not (Text.null ref)
-                                                                && ref /= ownRef)
-                                                        (Text.lines refs)
-                                            pure $
-                                                if null otherRefs
-                                                    then Nothing
-                                                    else Just
-                                                        ( unsafeEncodeUtf
-                                                            (Text.unpack
-                                                                commonDirText)
-                                                        , branch
-                                                        )
+cleanupStaleWorktrees root days protected = gcWorktrees root days False protected
 
 tryExclusiveWorktreeLease
     :: OsPath
@@ -518,6 +592,8 @@ tryExclusiveWorktreeLease
 tryExclusiveWorktreeLease root candidate = do
     let lockPath = worktreeLeasePath root candidate
     result <- tryAny do
+        linked <- pathIsSymbolicLink root
+        when linked (ioError (userError "symlinked managed worktree root"))
         createDirectoryIfMissing True (takeDirectory lockPath)
         FileLock.tryLockFile
             (unsafeToFilePath lockPath)
@@ -528,7 +604,7 @@ tryExclusiveWorktreeLease root candidate = do
                 ("failed to lock stale worktree: "
                     <> exceptionText exception)
         Right Nothing -> Right Nothing
-        Right (Just lock) -> Right (Just (WorktreeLease lock))
+        Right (Just lock) -> Right (Just (WorktreeLease lock Nothing))
 
 managedWorktreePath :: OsPath -> OsPath -> Maybe OsPath
 managedWorktreePath rawRoot rawPath =
