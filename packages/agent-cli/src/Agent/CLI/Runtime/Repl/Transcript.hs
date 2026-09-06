@@ -32,6 +32,7 @@ import Agent.CLI.Session
     )
 import Agent.CLI.Session.Selection ( currentSessionId )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Style
     ( glyphOk, roleError, roleSuccess )
 import Agent.CLI.Terminal ( copyTerminalClipboard, resolveColor )
@@ -146,7 +147,7 @@ loadActiveTranscript
 loadActiveTranscript
         SessionEnv
             { sessionDatabasePool = databasePool
-            , sessionHome = home
+            , sessionWorkspace = WorkspaceContext{home}
             , sessionPersist = persist
             } =
     case persist of
@@ -180,7 +181,7 @@ saveTranscriptExport
     -> IO ()
 saveTranscriptExport context markdown rawPath =
     resolveExportPath
-        context.handlerSessionEnv.sessionCwd
+        context.handlerSessionEnv.sessionWorkspace.cwd
         rawPath >>= \case
             Left err ->
                 displayReplError context err $
@@ -282,7 +283,7 @@ copyAssistantResponse context request answer = do
                 (Just answer)
         Just rawPath ->
             resolveExportPath
-                context.handlerSessionEnv.sessionCwd
+                context.handlerSessionEnv.sessionWorkspace.cwd
                 rawPath >>= \case
                     Left err ->
                         displayReplError context err do
@@ -338,7 +339,7 @@ copyWorktreePath context =
         context
         "worktree path"
         "worktree path is unavailable"
-        (Just (toText context.handlerSessionEnv.sessionCwd))
+        (Just (toText context.handlerSessionEnv.sessionWorkspace.cwd))
 
 copySessionId :: ReplHandlerContext -> IO ()
 copySessionId context = do
@@ -461,7 +462,7 @@ loadPersistedTranscript
 loadPersistedTranscript
         SessionEnv
             { sessionDatabasePool = databasePool
-            , sessionHome = home
+            , sessionWorkspace = WorkspaceContext{home}
             , sessionPersist = persist
             } =
     case persist of

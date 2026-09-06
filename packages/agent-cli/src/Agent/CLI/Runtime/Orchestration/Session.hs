@@ -151,7 +151,7 @@ import Agent.CLI.Session.Runtime.Types
                      initialContextPreload, initialGrokContext, persist,
                      contextOccupancyRef, currentContextWindow,
                      startupWindowTitle, automaticCompactionRef,
-                     projectRoot, home, cwd, tokenProvider, openAiPool, startupContext,
+                     workspace, tokenProvider, openAiPool, startupContext,
                      automaticCompactionHookRef, skillsRef, skillInvocationsRef,
                      stdinControl, interrupt, multiCtx, rootTurnRef, subagentSessions,
                      pendingNotices, storeRoot, agentTypes, legacyTarget, usageRef,
@@ -161,6 +161,7 @@ import Agent.CLI.Session.Runtime.Types
                      startupNetworkRecovery, startupSessionState,
                      startupNativeHooks) )
 import Agent.CLI.Session.Selection ( reservedSessionId )
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.SessionState ( SessionState(sessionConversation) )
 import Agent.CLI.Startup.Auth ( markStartupStage, startupDie )
 import Agent.CLI.StartupContext
@@ -276,7 +277,7 @@ data AgentSessionRequest closeResult windowTitleResult = AgentSessionRequest
     , createSubagentWorktree
         :: OsPath -> IO (Either Text SubagentWorktree)
     , customGenericOptions :: Maybe GenericClientOptions
-    , cwd :: OsPath
+    , workspace :: !WorkspaceContext
     , databaseAppTools :: [AppTool]
     , databaseScopes :: DatabaseScopes
     , initialContext :: SessionInitialContext
@@ -292,7 +293,6 @@ data AgentSessionRequest closeResult windowTitleResult = AgentSessionRequest
     , resolveChildModel
         :: Maybe (Text -> IO (Maybe CollaborationModelTarget))
     , childModelAllowed :: Maybe (Text -> IO Bool)
-    , home :: OsPath
     , inferredTarget :: ModelTarget
     , interrupt :: InterruptState
     , learnedSkillAppTools :: [AppTool]
@@ -313,7 +313,6 @@ data AgentSessionRequest closeResult windowTitleResult = AgentSessionRequest
     , planMode :: PlanModeEnv
     , policy :: ApprovalPolicy
     , preferredOpenAiAccountRef :: IORef (Maybe Text)
-    , projectRoot :: OsPath
     , promptRequest :: Maybe ManagedTurnRequest
     , provider :: Provider
     , refreshDialectContext :: Bool
@@ -443,7 +442,7 @@ prepareSessionCodeRuntime AgentSessionRequest
     , codeModeCloseRef
     , allTools
     , effortText
-    , cwd
+    , workspace = WorkspaceContext{cwd}
     , sessionTmp
     , persist
     , mcpInstructions
@@ -576,7 +575,7 @@ prepareSessionPromptRuntime AgentSessionRequest
     { provider
     , inferredTarget
     , dialect
-    , cwd
+    , workspace = WorkspaceContext{cwd}
     , resumed
     , initialContext
     , policy
@@ -796,7 +795,7 @@ sessionWindowTitle
 sessionWindowTitle AgentSessionRequest
     { resumed
     , promptRequest
-    , cwd
+    , workspace = WorkspaceContext{cwd}
     } =
     cliWindowTitle cwd titleHint
   where
@@ -819,8 +818,7 @@ loadSessionStartupContext AgentSessionRequest
     , fullscreen
     , options
     , dialect
-    , home
-    , cwd
+    , workspace = WorkspaceContext{home, cwd}
     , initialContextPreload
     , refreshDialectContext
     } promptRuntime =
@@ -1020,9 +1018,7 @@ buildProviderSessionRequest
             , persist = request.persist
             , startupWindowTitle =
                 liveRuntime.sessionStartupWindowTitle
-            , projectRoot = request.projectRoot
-            , home = request.home
-            , cwd = request.cwd
+            , workspace = request.workspace
             , tokenProvider = sessionTokenProvider
             , openAiPool = sessionOpenAiPool
             , startupContext = liveRuntime.sessionStartupContext
@@ -1164,7 +1160,10 @@ launchProvider request promptRuntime liveRuntime shouldProbeAtStartup startupUna
             activeBackend <- prepareTransitionBackend
                 (if request.startup.startupBackground
                     then SessionLocalSwitch else TopLevelSwitch)
-                request.home request.projectRoot request.transition request.persist
+                request.workspace.home
+                request.workspace.projectRoot
+                request.transition
+                request.persist
                 noticingBackend
             runSession
                 (buildProviderSessionRequest request promptRuntime liveRuntime
@@ -1227,7 +1226,7 @@ prepareProviderConfig request promptRuntime nativeCapabilities = case request.pr
         pure $ ClaudeProviderConfig ClaudeConfig
             { withAuth = withSelectedClaudeAuth request.connectedGateway request.loaded
                 (startupDie request.startup)
-            , cwd = request.cwd
+            , cwd = request.workspace.cwd
             , initialPrevious = promptRuntime.sessionInitialPrevious
             , transportModel = request.transportModel
             , hostHandlers = defaultClaudeCodeHostHandlers
@@ -1297,7 +1296,9 @@ handleOpenAiStartupResult request nativeCapabilities shouldProbeAtStartup = \cas
               , isProviderUnavailable err ->
                 chooseStartupProviderTransition
                     nativeCapabilities.nativeProviderFallback
-                    request.catalog request.projectRoot request.fullscreen
+                    request.catalog
+                    request.workspace.projectRoot
+                    request.fullscreen
                     (tokenProviderBillingMode request.tokenProvider)
                     request.provider request.model request.unavailableProviders
                     Nothing err >>= \case

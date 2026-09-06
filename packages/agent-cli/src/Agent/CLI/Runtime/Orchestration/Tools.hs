@@ -63,6 +63,7 @@ import Agent.CLI.Resume
         )
     , resolveSessionInitialContext
     )
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Runtime.Orchestration.Session ( AgentSessionRequest(..)
     , runAgentSession
     )
@@ -796,7 +797,7 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
         , coding
         , createSubagentWorktree
         , customGenericOptions
-        , cwd
+        , workspace = WorkspaceContext{projectRoot, cwd, home}
         , databaseAppTools
         , databaseScopes
         , initialContext
@@ -811,7 +812,6 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
         , allowedChildModels
         , resolveChildModel = resolveCollaborationChildModel
         , childModelAllowed
-        , home
         , inferredTarget
         , interrupt
         , learnedSkillAppTools
@@ -832,7 +832,6 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
         , planMode
         , policy
         , preferredOpenAiAccountRef
-        , projectRoot
         , promptRequest
         , provider
         , refreshDialectContext

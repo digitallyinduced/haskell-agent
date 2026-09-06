@@ -69,6 +69,7 @@ import Agent.CLI.Session
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
     )
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.SessionEnv
     ( PreparedWorkspaceEnvironment(..)
     , SessionEnv(..)
@@ -370,7 +371,7 @@ prepareBusyTurn request = do
                                 grokFirstTurnContext
                                 (loadGrokFirstTurnPrefix
                                     env.sessionPreparedWorkspaceEnvironment
-                                    env.sessionCwd)
+                                    env.sessionWorkspace.cwd)
                         pure (UserMessage prefix : framed, Just prefix)
                     else pure (framed, Nothing)
             else pure (stampedInputs, Nothing)
@@ -434,7 +435,7 @@ persistTurnPromptSnapshot request sentStartupContext pendingGrokContext =
                 , promptSnapshotConnection = env.sessionConnection
                 , promptSnapshotModel = modelName
                 , promptSnapshotDialect = dialectId env.sessionDialect
-                , promptSnapshotCwd = env.sessionCwd
+                , promptSnapshotCwd = env.sessionWorkspace.cwd
                 , promptSnapshotInstructions = instructionText
                 , promptSnapshotTools = toolSchemas
                 , promptSnapshotGeneratedContext = sentStartupContext
@@ -998,7 +999,7 @@ evictDurableConversation env handle = do
         checkpoint =
             durableTranscriptCheckpoint
                 env.sessionDatabasePool
-                (sessionsRoot env.sessionHome)
+                (sessionsRoot env.sessionWorkspace.home)
                 sessionId
     evicted <-
         evictLiveTranscript
