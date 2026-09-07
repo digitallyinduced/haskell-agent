@@ -5,7 +5,7 @@ import Agent.CLI.Clipboard
     , readClipboard
     , readClipboardImages
     , readClipboardImagesForPaste
-    , readClipboardImagesImageFirst
+    , readClipboardImagesImageFirstWith
     )
 import Agent.Loop (ImageAttachment(..))
 import Control.Exception.Safe (bracket)
@@ -100,7 +100,10 @@ oldImagePaste =
 
 newImagePaste :: IO Int
 newImagePaste =
-    imageResultChecksum <$> readClipboardImagesImageFirst
+    -- This workload supplies a bitmap through fake osascript, so its metadata
+    -- must also be controlled rather than inspecting the user's clipboard.
+    -- Native metadata latency is measured by ClipboardTypesLatency.c.
+    imageResultChecksum <$> readClipboardImagesImageFirstWith (pure True)
 
 imageResultChecksum :: Either Text.Text [ImageAttachment] -> Int
 imageResultChecksum = \case

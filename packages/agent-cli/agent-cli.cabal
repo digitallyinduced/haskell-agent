@@ -366,6 +366,9 @@ library
                     , vty-crossplatform >= 0.4 && < 0.5
                     , wai
                     , warp
+    if os(darwin)
+        c-sources:    cbits/ClipboardTypes.c
+        frameworks:   ApplicationServices CoreServices
 executable agent-cli
     import:           common-options
     hs-source-dirs:   app

@@ -6,12 +6,18 @@ import Control.Exception.Safe (bracket)
 import qualified Data.ByteString as BS
 import qualified Data.Text as Text
 import System.Directory
-    ( createDirectory
+    ( Permissions(executable)
+    , createDirectory
+    , doesFileExist
+    , getPermissions
     , getTemporaryDirectory
     , removeDirectory
     , removeFile
+    , removePathForcibly
+    , setPermissions
     )
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.FilePath ((</>), searchPathSeparator)
 import System.Info (os)
 import System.IO (hClose, openBinaryTempFile)
 import Test.Hspec
@@ -54,6 +60,24 @@ spec = do
                             \install wl-clipboard (Wayland) or xclip (X11). On a \
                             \remote server, upload the image and paste its \
                             \server-side path instead."
+
+    describe "readClipboardImagesImageFirstWith" do
+        it "skips every external image probe for a text-only clipboard" do
+            if os /= "darwin"
+                then pendingWith "macOS clipboard subprocess fixture"
+                else withClipboardImageFixture \probeLog -> do
+                    readClipboardImagesImageFirstWith (pure False)
+                        `shouldReturn` Left "no image found on the clipboard"
+                    doesFileExist probeLog `shouldReturn` False
+
+        it "retains the bitmap-first reader for image candidates" do
+            if os /= "darwin"
+                then pendingWith "macOS clipboard subprocess fixture"
+                else withClipboardImageFixture \probeLog -> do
+                    readClipboardImagesImageFirstWith (pure True)
+                        `shouldReturn`
+                            Right [ImageAttachment "image/png" "fixture-png"]
+                    readFile probeLog `shouldReturn` "png\n"
 
     describe "nonEmptyClipboardImages" do
         it "keeps only successful non-empty image reads" do
@@ -146,6 +170,46 @@ spec = do
                 \path -> do
                     result <- loadImagesFromPastedText (Text.pack path)
                     result `shouldBe` Nothing
+
+-- Keep fake subprocesses separate from the real clipboard. The script records
+-- every call, and only the PNG reader may succeed.
+withClipboardImageFixture :: (FilePath -> IO a) -> IO a
+withClipboardImageFixture action = do
+    temporary <- getTemporaryDirectory
+    bracket
+        (do
+            (directory, handle) <-
+                openBinaryTempFile temporary "agent-clipboard-fixture-"
+            hClose handle
+            removeFile directory
+            createDirectory directory
+            pure directory)
+        removePathForcibly
+        \directory -> do
+            let executablePath = directory </> "osascript"
+                probeLog = directory </> "probes"
+            writeFile executablePath
+                "#!/bin/sh\n\
+                \case \"$2\" in\n\
+                \  *\"class PNGf\"*)\n\
+                \    printf 'png\\n' >> \"${0%/*}/probes\"\n\
+                \    path=$(printf '%s\\n' \"$2\" | /usr/bin/sed -n \
+                \'s/.*open for access POSIX file \"\\([^\"]*\\)\".*/\\1/p')\n\
+                \    printf 'fixture-png' > \"$path\"\n\
+                \    exit 0 ;;\n\
+                \  *) printf 'unexpected\\n' >> \"${0%/*}/probes\"; exit 1 ;;\n\
+                \esac\n"
+            permissions <- getPermissions executablePath
+            setPermissions executablePath permissions { executable = True }
+            bracket
+                (do
+                    original <- lookupEnv "PATH"
+                    setEnv "PATH"
+                        (directory <> [searchPathSeparator]
+                            <> maybe "" id original)
+                    pure original)
+                (maybe (unsetEnv "PATH") (setEnv "PATH"))
+                (const (action probeLog))
 
 withEmptyPath :: IO a -> IO a
 withEmptyPath action = do
