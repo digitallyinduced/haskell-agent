@@ -1,6 +1,8 @@
--- | Discover, parse, select, and format filesystem-backed Agent Skills.
+-- | Discover, parse, select, and format filesystem and remote Agent Skills.
 module Agent.Skills
     ( Skill(..)
+    , SkillSource(..)
+    , SkillContent(..)
     , SkillCatalog(..)
     , SkillDiscoverOptions(..)
     , SkillInvocation(..)
@@ -11,6 +13,9 @@ module Agent.Skills
     , defaultSkillCatalogMaxChars
     , discoverSkills
     , loadSkillFile
+    , loadMcpSkillMetadata
+    , loadMcpSkillDocument
+    , filesystemSkillContent
     , buildSkillInvocations
     , modelVisibleSkills
     , formatSkillCatalogContext
@@ -41,7 +46,7 @@ import Data.Aeson
     , (.!=)
     )
 import System.OsPath (OsPath, unsafeEncodeUtf)
-import Data.Aeson.Types (Parser)
+import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString as BS
 import Data.Char (isAlphaNum)
 import Data.List (sort, sortOn)
@@ -105,12 +110,31 @@ data Skill = Skill
     , skillLicense :: !(Maybe Text)
     , skillCompatibility :: !(Maybe Text)
     , skillMetadata :: !(Map Text Text)
-    , skillPath :: !OsPath
-    , skillDirectory :: !OsPath
-    , skillBody :: !Text
-    , skillFileText :: !Text
-    , skillScope :: !SkillScope
-    , skillOrigin :: !SkillOrigin
+    , skillSource :: !SkillSource
+    } deriving (Eq, Show)
+
+data SkillSource
+    = FilesystemSkillSource
+        { skillPath :: !OsPath
+        , skillDirectory :: !OsPath
+        , skillBody :: !Text
+        , skillFileText :: !Text
+        , skillScope :: !SkillScope
+        , skillOrigin :: !SkillOrigin
+        }
+    | McpSkillSource
+        { skillMcpServer :: !Text
+        , skillMcpUri :: !Text
+        , skillMcpResourceUris :: ![Text]
+        }
+    deriving (Eq, Show)
+
+data SkillContent = SkillContent
+    { skillContentBody :: !Text
+    , skillContentFileText :: !Text
+    , skillContentFile :: !Text
+    , skillContentDirectory :: !(Maybe Text)
+    , skillContentResourceUris :: ![Text]
     } deriving (Eq, Show)
 
 data SkillWarning = SkillWarning
@@ -426,37 +450,130 @@ loadSkillFile scope origin path = do
                                                     not frontmatter.fmDisableModelInvocation
                                                         && fromMaybe True
                                                             (openAi >>= (.openAiAllowImplicit))
-                                            pure $ Right Skill
-                                                { skillName = frontmatter.fmName
-                                                , skillDescription = frontmatter.fmDescription
-                                                , skillDisplayName =
-                                                    openAi >>= (.openAiDisplayName)
-                                                , skillShortDescription =
-                                                    (openAi >>= (.openAiShortDescription))
-                                                        <|> Map.lookup "short-description"
-                                                            frontmatter.fmMetadata
-                                                , skillDefaultPrompt =
-                                                    openAi >>= (.openAiDefaultPrompt)
-                                                , skillWhenToUse = frontmatter.fmWhenToUse
-                                                , skillContextMode = frontmatter.fmContextMode
-                                                , skillArgumentHint = argumentHint
-                                                , skillUserInvocable = frontmatter.fmUserInvocable
-                                                , skillModelInvocable = modelInvocable
-                                                , skillAllowedTools = frontmatter.fmAllowedTools
-                                                , skillModelOverride = frontmatter.fmModel
-                                                , skillEffortOverride = frontmatter.fmEffort
-                                                , skillLicense = frontmatter.fmLicense
-                                                , skillCompatibility = frontmatter.fmCompatibility
-                                                , skillMetadata = frontmatter.fmMetadata
-                                                , skillPath = unsafeEncodeUtf path
-                                                , skillDirectory = unsafeEncodeUtf (takeDirectory path)
-                                                , skillBody = Text.strip body
-                                                , skillFileText = fileText
-                                                , skillScope = scope
-                                                , skillOrigin = origin
-                                                }
+                                            pure $ Right
+                                                (skillFromFrontmatter
+                                                    (FilesystemSkillSource
+                                                        { skillPath = unsafeEncodeUtf path
+                                                        , skillDirectory =
+                                                            unsafeEncodeUtf
+                                                                (takeDirectory path)
+                                                        , skillBody = Text.strip body
+                                                        , skillFileText = fileText
+                                                        , skillScope = scope
+                                                        , skillOrigin = origin
+                                                        })
+                                                    frontmatter)
+                                                    { skillDisplayName =
+                                                        openAi >>= (.openAiDisplayName)
+                                                    , skillShortDescription =
+                                                        (openAi >>= (.openAiShortDescription))
+                                                            <|> Map.lookup "short-description"
+                                                                frontmatter.fmMetadata
+                                                    , skillDefaultPrompt =
+                                                        openAi >>= (.openAiDefaultPrompt)
+                                                    , skillArgumentHint = argumentHint
+                                                    , skillModelInvocable = modelInvocable
+                                                    }
   where
     warning message = SkillWarning (unsafeEncodeUtf path) message
+
+-- | Build a lightweight, untrusted MCP catalog entry from the frontmatter
+-- advertised by @skills/list@. The complete document must still be loaded and
+-- checked with 'loadMcpSkillDocument' before its instructions are used.
+loadMcpSkillMetadata
+    :: Text
+    -- ^ Configured MCP server name.
+    -> Text
+    -- ^ Skill document URI.
+    -> [Text]
+    -- ^ Advertised resource URIs.
+    -> Value
+    -> Either Text Skill
+loadMcpSkillMetadata server uri resourceUris value = do
+    frontmatter <-
+        firstText (parseEither parseJSON value)
+    validateMcpFrontmatter frontmatter
+    pure $
+        skillFromFrontmatter
+            (McpSkillSource server uri resourceUris)
+            frontmatter
+
+-- | Parse a fetched MCP SKILL.md and require its advertised identity to remain
+-- stable. Transport-level manifest verification belongs to the MCP adapter.
+loadMcpSkillDocument :: Skill -> Text -> Either Text SkillContent
+loadMcpSkillDocument advertised fileText =
+    case advertised.skillSource of
+        FilesystemSkillSource{} ->
+            Left "expected an MCP-backed skill"
+        McpSkillSource _server uri resourceUris -> do
+            (yamlText, body) <- splitFrontmatter fileText
+            frontmatter <-
+                either
+                    (Left . Text.pack . prettyPrintParseException)
+                    Right
+                    (decodeEither' (Text.encodeUtf8 yamlText))
+            validateMcpFrontmatter frontmatter
+            let fetched = skillFromFrontmatter advertised.skillSource frontmatter
+            if fetched /= advertised
+                then Left "fetched MCP skill frontmatter does not match its catalog entry"
+                else
+                    Right SkillContent
+                        { skillContentBody = Text.strip body
+                        , skillContentFileText = fileText
+                        , skillContentFile = uri
+                        , skillContentDirectory = Nothing
+                        , skillContentResourceUris = resourceUris
+                        }
+
+filesystemSkillContent :: Skill -> Maybe SkillContent
+filesystemSkillContent skill =
+    case skill.skillSource of
+        FilesystemSkillSource path directory body fileText _ _ ->
+            Just SkillContent
+                { skillContentBody = body
+                , skillContentFileText = fileText
+                , skillContentFile = toText path
+                , skillContentDirectory = Just (toText directory)
+                , skillContentResourceUris = []
+                }
+        McpSkillSource{} -> Nothing
+
+skillFromFrontmatter :: SkillSource -> Frontmatter -> Skill
+skillFromFrontmatter source frontmatter =
+    Skill
+        { skillName = frontmatter.fmName
+        , skillDescription = frontmatter.fmDescription
+        , skillDisplayName = Nothing
+        , skillShortDescription =
+            Map.lookup "short-description" frontmatter.fmMetadata
+        , skillDefaultPrompt = Nothing
+        , skillWhenToUse = frontmatter.fmWhenToUse
+        , skillContextMode = frontmatter.fmContextMode
+        , skillArgumentHint = frontmatter.fmArgumentHint
+        , skillUserInvocable = frontmatter.fmUserInvocable
+        , skillModelInvocable = not frontmatter.fmDisableModelInvocation
+        , skillAllowedTools = frontmatter.fmAllowedTools
+        , skillModelOverride = frontmatter.fmModel
+        , skillEffortOverride = frontmatter.fmEffort
+        , skillLicense = frontmatter.fmLicense
+        , skillCompatibility = frontmatter.fmCompatibility
+        , skillMetadata = frontmatter.fmMetadata
+        , skillSource = source
+        }
+
+validateMcpFrontmatter :: Frontmatter -> Either Text ()
+validateMcpFrontmatter frontmatter
+    | not (validSkillName frontmatter.fmName) =
+        Left "skill name must be 1-64 lowercase letters, digits, or hyphens without edge/consecutive hyphens"
+    | Text.length frontmatter.fmDescription < 1
+        || Text.length frontmatter.fmDescription > 1024 =
+        Left "skill description must be 1-1024 characters"
+    | frontmatter.fmContextMode == SkillContextAlways =
+        Left "activation `always` is reserved for trusted built-in skills"
+    | otherwise = Right ()
+
+firstText :: Either String a -> Either Text a
+firstText = either (Left . Text.pack) Right
 
 loadOpenAiMetadata :: FilePath -> IO (Either Text (Maybe OpenAiMetadata))
 loadOpenAiMetadata dir = do
@@ -519,17 +636,21 @@ skillSortKey skill =
     , Down depth
     , Down originRank
     , skill.skillName
-    , toText skill.skillPath
+    , skillSourceIdentity skill
     )
   where
-    (scopeRank, depth) = case skill.skillScope of
-        BuiltinSkill -> (-1, 0)
-        UserSkill -> (0, 0)
-        RepositorySkill d _ -> (1, d)
-    originRank = case skill.skillOrigin of
-        AgentSkills -> 3
-        GrokSkills -> 2
-        CodexSkills -> 1
+    (scopeRank, depth, originRank) = case skill.skillSource of
+        McpSkillSource{} -> (-2, 0, 0)
+        FilesystemSkillSource _ _ _ _ scope origin ->
+            let (rank, sourceDepth) = case scope of
+                    BuiltinSkill -> (-1, 0)
+                    UserSkill -> (0, 0)
+                    RepositorySkill d _ -> (1, d)
+                sourceOriginRank = case origin of
+                    AgentSkills -> 3
+                    GrokSkills -> 2
+                    CodexSkills -> 1
+            in (rank, sourceDepth, sourceOriginRank)
 
 modelVisibleSkills :: SkillCatalog -> [Skill]
 modelVisibleSkills catalog =
@@ -571,7 +692,9 @@ buildSkillInvocations reserved catalog =
                 , Text.toLower name `Set.notMember` reservedSet
                 ]
             needsQualified =
-                length ordered > 1 || Text.toLower name `Set.member` reservedSet
+                length ordered > 1
+                    || Text.toLower name `Set.member` reservedSet
+                    || any isMcpSkill ordered
             qualified =
                 if needsQualified
                     then zipWith (qualifiedInvocation name ordered) [0 :: Int ..] ordered
@@ -600,30 +723,55 @@ qualifiedInvocation name siblings index skill =
             [ sibling
             | sibling <- take index siblings
             , scopeQualifier sibling == base
-            , sibling.skillOrigin == skill.skillOrigin
+            , sourceSlug sibling == sourceSlug skill
             ]
     uniqueQualifier
         | length sameScope == 1 = base
         | otherwise =
             base
                 <> "-"
-                <> originSlug skill.skillOrigin
+                <> sourceSlug skill
                 <> if sameOriginBefore == 0
                     then ""
                     else "-" <> Text.pack (show (sameOriginBefore + 1))
 
 scopeQualifier :: Skill -> Text
-scopeQualifier skill = case skill.skillScope of
-    BuiltinSkill -> "builtin"
-    UserSkill -> "user"
-    RepositorySkill _ True -> "local"
-    RepositorySkill _ False -> "repo"
+scopeQualifier skill = case skill.skillSource of
+    McpSkillSource server _ _ -> "mcp-" <> qualifierSlug server
+    FilesystemSkillSource _ _ _ _ scope _ -> case scope of
+        BuiltinSkill -> "builtin"
+        UserSkill -> "user"
+        RepositorySkill _ True -> "local"
+        RepositorySkill _ False -> "repo"
 
 originSlug :: SkillOrigin -> Text
 originSlug = \case
     AgentSkills -> "agents"
     GrokSkills -> "grok"
     CodexSkills -> "codex"
+
+sourceSlug :: Skill -> Text
+sourceSlug skill = case skill.skillSource of
+    McpSkillSource server _ _ -> qualifierSlug server
+    FilesystemSkillSource _ _ _ _ _ origin -> originSlug origin
+
+qualifierSlug :: Text -> Text
+qualifierSlug =
+    Text.dropAround (== '-')
+        . Text.intercalate "-"
+        . filter (not . Text.null)
+        . Text.split (== '-')
+        . Text.map
+            (\c ->
+                if isAlphaNum c
+                    then c
+                    else '-')
+        . Text.toLower
+
+isMcpSkill :: Skill -> Bool
+isMcpSkill skill = case skill.skillSource of
+    McpSkillSource{} -> True
+    FilesystemSkillSource{} -> False
 
 resolveSkillInvocation
     :: [SkillInvocation]
@@ -681,12 +829,19 @@ skillMentionNames text =
 dedupe :: [SkillInvocation] -> [SkillInvocation]
 dedupe = go Set.empty
   where
-    go :: Set OsPath -> [SkillInvocation] -> [SkillInvocation]
+    go :: Set Text -> [SkillInvocation] -> [SkillInvocation]
     go _ [] = []
     go seen (item:rest)
-        | item.invocationSkill.skillPath `Set.member` seen = go seen rest
+        | skillSourceIdentity item.invocationSkill `Set.member` seen = go seen rest
         | otherwise =
-            item : go (Set.insert item.invocationSkill.skillPath seen) rest
+            item : go
+                (Set.insert (skillSourceIdentity item.invocationSkill) seen)
+                rest
+
+skillSourceIdentity :: Skill -> Text
+skillSourceIdentity skill = case skill.skillSource of
+    FilesystemSkillSource path _ _ _ _ _ -> "file:" <> toText path
+    McpSkillSource server uri _ -> "mcp:" <> server <> ":" <> uri
 
 availableSuffix :: [SkillInvocation] -> Text
 availableSuffix invocations =
@@ -722,11 +877,14 @@ renderSkillLine :: Skill -> Text
 renderSkillLine skill =
     case skill.skillContextMode of
         SkillContextAlways ->
-            Text.unlines
-                [ "### Always-active skill: " <> skill.skillName
-                , "SKILL.md: " <> toText skill.skillPath
-                , neutralizeSkillTags skill.skillBody
-                ]
+            case filesystemSkillContent skill of
+                Nothing -> ""
+                Just content ->
+                    Text.unlines
+                        [ "### Always-active skill: " <> skill.skillName
+                        , "SKILL.md: " <> content.skillContentFile
+                        , neutralizeSkillTags content.skillContentBody
+                        ]
         SkillContextOnDemand ->
             "- $"
                 <> skill.skillName
@@ -766,24 +924,47 @@ renderShortenedSkillLine remaining skill =
                             (Text.replace "\n" " " skill.skillDescription)
                         <> "…"
 
-formatSkillActivation :: SkillInvocation -> Text -> Text
-formatSkillActivation invocation arguments =
+formatSkillActivation :: SkillInvocation -> SkillContent -> Text -> Text
+formatSkillActivation invocation content arguments =
     Text.concat
         [ "# Skill instructions: "
         , invocation.invocationSkill.skillName
         , "\n\n"
         , "SKILL.md: "
-        , toText invocation.invocationSkill.skillPath
-        , "\nSkill directory: "
-        , toText invocation.invocationSkill.skillDirectory
+        , singleLine content.skillContentFile
+        , maybe
+            ""
+            ("\nSkill directory: " <>)
+            content.skillContentDirectory
+        , case invocation.invocationSkill.skillSource of
+            McpSkillSource server _ _ ->
+                "\nMCP server: " <> singleLine server
+                    <> renderResourceUris content.skillContentResourceUris
+            FilesystemSkillSource{} -> ""
         , "\nInvocation arguments: "
         , if Text.null (Text.strip arguments) then "(none)" else arguments
         , "\n\n<SKILL_INSTRUCTIONS>\n"
-        , neutralizeSkillTags invocation.invocationSkill.skillFileText
+        , neutralizeSkillTags content.skillContentFileText
         , "\n</SKILL_INSTRUCTIONS>\n\n"
-        , "Follow these instructions for this turn. Resolve relative resource paths from the skill directory above. "
+        , case invocation.invocationSkill.skillSource of
+            McpSkillSource{} ->
+                "Follow these instructions for this turn. Read listed resources with mcp_read_resource when needed. "
+            FilesystemSkillSource{} ->
+                "Follow these instructions for this turn. Resolve relative resource paths from the skill directory above. "
         , "Normal tool approval, sandboxing, and plan-mode restrictions still apply."
         ]
+
+renderResourceUris :: [Text] -> Text
+renderResourceUris [] = ""
+renderResourceUris uris =
+    "\nMCP skill resources:\n"
+        <> Text.unlines (map (("- " <>) . singleLine) uris)
+
+singleLine :: Text -> Text
+singleLine =
+    neutralizeSkillTags
+        . Text.replace "\n" "\\n"
+        . Text.replace "\r" "\\r"
 
 neutralizeSkillTags :: Text -> Text
 neutralizeSkillTags =

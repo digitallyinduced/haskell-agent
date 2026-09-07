@@ -2,7 +2,10 @@ module Agent.MCPSpec (spec) where
 
 import Agent.Loop (defaultLoopDispatch)
 import Agent.MCP
-import Agent.MCP.Fleet (spawnFleetWorker)
+import Agent.MCP.Fleet
+    ( mcpFleetWaitForSkillRegistrations
+    , spawnFleetWorker
+    )
 import Agent.MCP.Supervisor (acquireMcpFleetWith)
 import Agent.MCP.Client
     ( ProbeOutcome(..)
@@ -347,6 +350,21 @@ spec = describe "Agent.MCP" do
                                     ]
                     other -> expectationFailure
                         ("unexpected skill registrations: " <> show other)
+
+    it "notifies progressive callers when the skill catalog changes" $
+        withSkillsFakeServer \script -> do
+            fleet <- startMcpFleetProgressive
+                (const (pure ()))
+                [baseConfig "skills" script]
+            bracket (pure fleet) closeMcpFleet \_ -> do
+                changed <- timeout 5000000 $
+                    mcpFleetWaitForSkillRegistrations fleet []
+                case changed of
+                    Just [McpSkillRegistration "skills" entry] ->
+                        entry.mcpSkillUri
+                            `shouldBe` "skill://demo/SKILL.md"
+                    other -> expectationFailure
+                        ("unexpected skill catalog update: " <> show other)
 
     it "keeps discovered tools when optional Skills discovery fails" $
         withBodyServer "agent-mcp-skills-warning.sh" skillsWarningServer \script -> do
