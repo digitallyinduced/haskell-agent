@@ -4,6 +4,9 @@ import Agent.Loop (defaultLoopDispatch)
 import Agent.MCP
 import Agent.MCP.Fleet
     ( mcpFleetWaitForSkillRegistrations
+    , renderMcpSearch
+    , renderMcpResourceServer
+    , renderGrokSearch
     , spawnFleetWorker
     )
 import Agent.MCP.Supervisor (acquireMcpFleetWith)
@@ -141,6 +144,52 @@ testPendingRequest = do
 
 spec :: Spec
 spec = describe "Agent.MCP" do
+    describe "readable discovery results" do
+        it "labels an empty catalog without a JSON envelope" do
+            renderMcpSearch [] []
+                `shouldBe` "Servers: (none)\n\n(no matching MCP tools)"
+            renderGrokSearch False 0
+                (Just "No MCP tools are available in this session.") []
+                `shouldBe` "Status: ready\nTotal hidden tools: 0\nNote: No MCP tools are available in this session."
+
+        it "retains pending and failed server states" do
+            renderMcpSearch
+                [ McpServerStatus "connecting" McpInitializing 0
+                , McpServerStatus "unavailable" (McpFailed "offline") 0
+                , McpServerStatus "available" McpReady 1
+                ] []
+                `shouldBe` "Servers:\n  connecting: initializing (0 tools)\n  unavailable: failed (0 tools)\n  available: ready (1 tool)\n\n(no matching MCP tools)"
+
+        it "retains every resource and template metadata field" do
+            renderMcpResourceServer "documentation"
+                (Right [McpResource "file:///guide" "guide" (Just "Guide")
+                    (Just "Documentation") (Just "text/plain") (Just 42)])
+                (Right [McpResourceTemplate "file:///{name}" "document"
+                    (Just "Document") (Just "Named document") (Just "text/plain")])
+                `shouldBe` Text.intercalate "\n"
+                    [ "documentation"
+                    , "  Resources:"
+                    , "    guide"
+                    , "      URI: file:///guide"
+                    , "      Title: Guide"
+                    , "      Description: Documentation"
+                    , "      MIME type: text/plain"
+                    , "      Size: 42"
+                    , "  Resource templates:"
+                    , "    document"
+                    , "      URI template: file:///{name}"
+                    , "      Title: Document"
+                    , "      Description: Named document"
+                    , "      MIME type: text/plain"
+                    ]
+
+        it "distinguishes empty resource lists from listing failures" do
+            renderMcpResourceServer "empty" (Right []) (Right [])
+                `shouldBe` "empty\n  Resources: (none)\n  Resource templates: (none)"
+            renderMcpResourceServer "unavailable"
+                (Left "resources unavailable") (Left "templates unavailable")
+                `shouldBe` "unavailable\n  Error: resources unavailable\n  Resources: (none)\n  Resource templates error: templates unavailable"
+
     it "redacts configured environment values from Show" do
         let rendered = show McpServerConfig
                 { mcpServerName = "private"
@@ -626,8 +675,17 @@ spec = describe "Agent.MCP" do
                 waitUntilReady fleet
                 searched <- dispatch "search" "mcp_search"
                     "{\"query\":\"delayed\"}"
-                searched.output `shouldSatisfy`
-                    Text.isInfixOf "slow__delayed_read"
+                searched.output `shouldBe` Text.intercalate "\n"
+                    [ "Servers:"
+                    , "  slow: ready (1 tool)"
+                    , ""
+                    , "slow__delayed_read"
+                    , "  Server: slow"
+                    , "  Description: Delayed read."
+                    , "  Read-only: true"
+                    , "  Input schema:"
+                    , "    {\"type\":\"object\"}"
+                    ]
                 called <- dispatch "call" "mcp_call"
                     "{\"name\":\"slow__delayed_read\",\"arguments\":{}}"
                 called.output `shouldBe` "delayed response"
@@ -741,17 +799,17 @@ spec = describe "Agent.MCP" do
                 searched <- dispatch "search-grok" "search_tool"
                     "{\"query\":\"delayed\",\"limit\":5}"
                 searched.output `shouldSatisfy`
-                    Text.isInfixOf "\"tool_name\":\"grok__delayed_read\""
+                    Text.isInfixOf "grok__delayed_read"
                 searched.output `shouldSatisfy`
-                    Text.isInfixOf "\"status\":\"ready\""
+                    Text.isInfixOf "Status: ready"
                 searched.output `shouldSatisfy`
-                    Text.isInfixOf "\"total_hidden_tools\":1"
+                    Text.isInfixOf "Total hidden tools: 1"
                 searched.output `shouldSatisfy`
-                    Text.isInfixOf "\"score\":"
+                    Text.isInfixOf "Score:"
                 natural <- dispatch "search-natural" "search_tool"
                     "{\"query\":\"grok delayed read\"}"
                 natural.output `shouldSatisfy`
-                    Text.isInfixOf "\"tool_name\":\"grok__delayed_read\""
+                    Text.isInfixOf "grok__delayed_read"
                 invalidLimit <- dispatch "search-limit" "search_tool"
                     "{\"query\":\"delayed\",\"limit\":\"many\"}"
                 invalidLimit.output `shouldSatisfy`

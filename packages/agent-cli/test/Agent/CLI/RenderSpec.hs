@@ -295,8 +295,14 @@ spec = do
             formatToolOutput spawn
                 "{\"nickname\":null,\"task_name\":\"/root/reviewer\"}"
                 `shouldBe` "Agent: /root/reviewer"
+            formatToolOutput spawn
+                "Agent: /root/reviewer"
+                `shouldBe` "Agent: /root/reviewer"
             formatToolOutput wait
                 "{\"message\":\"agent updates: reviewer=completed\",\"timed_out\":false}"
+                `shouldBe` "agent updates: reviewer=completed"
+            formatToolOutput wait
+                "agent updates: reviewer=completed"
                 `shouldBe` "agent updates: reviewer=completed"
             formatToolOutput agents
                 "{\"agents\":[{\"agent_name\":\"/root/reviewer\",\

@@ -67,8 +67,6 @@ import Control.Concurrent.MVar
     )
 import Control.Exception.Safe (tryAny)
 import Control.Monad (void)
-import Data.Aeson (Value, object, (.=))
-import qualified Data.Aeson.Text as Aeson
 import Data.Char (isDigit)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
@@ -76,7 +74,6 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Lazy as LazyText
 import Data.Time
     ( UTCTime
     , addUTCTime
@@ -489,15 +486,12 @@ runSchedulerDelete runtime args = do
                     }
             in pure (updated, existed)
     writeChan runtime.schedulerSignal SchedulerWake
-    pure $ Right $ jsonText $ object
-        [ "success" .= removed
-        , "message" .=
-            if removed
-                then "Scheduled task " <> taskId <> " cancelled."
-                else
-                    "No scheduled task with ID " <> taskId
-                        <> " found. Use scheduler_list to see active tasks."
-        ]
+    pure $ Right $
+        if removed
+            then "Scheduled task " <> taskId <> " cancelled."
+            else
+                "No scheduled task with ID " <> taskId
+                    <> " found. Use scheduler_list to see active tasks."
 
 data SchedulerListArgs = SchedulerListArgs
 
@@ -508,7 +502,7 @@ schedulerListTool :: SchedulerRuntime -> AppTool
 schedulerListTool runtime =
     jsonTool
         "scheduler_list"
-        "List all active scheduled tasks with their IDs, prompts, intervals, and next fire times."
+        "List all active scheduled tasks with their IDs, prompts, intervals, and next fire times. Returns readable labeled text."
         []
         True
         TurnSequential
@@ -529,30 +523,27 @@ listScheduledTasks runtime = do
 
 schedulerCreateOutput :: Bool -> ScheduledTask -> Text
 schedulerCreateOutput updated task =
-    jsonText $ object
-        [ "id" .= task.scheduledId
-        , "humanSchedule" .=
-            intervalToHuman task.scheduledIntervalSeconds
-        , "updated" .= updated
+    Text.intercalate "\n"
+        [ (if updated then "Updated" else "Created")
+            <> " scheduled task "
+            <> task.scheduledId
+        , "  Interval: " <> intervalToHuman task.scheduledIntervalSeconds
         ]
 
 schedulerListOutput :: [ScheduledTaskSnapshot] -> Text
-schedulerListOutput tasks =
-    jsonText $ object
-        [ "tasks" .=
-            [ object
-                [ "id" .= task.scheduledTaskId
-                , "prompt" .= truncatePrompt task.scheduledTaskPrompt
-                , "intervalHuman" .=
-                    intervalToHuman task.scheduledTaskIntervalSeconds
-                , "nextFireAt" .=
-                    formatTimestamp task.scheduledTaskNextFireAt
-                , "createdAt" .=
-                    formatTimestamp task.scheduledTaskCreatedAt
-                , "recurring" .= True
-                ]
-            | task <- tasks
-            ]
+schedulerListOutput = \case
+    [] -> "(no scheduled tasks)"
+    tasks -> Text.intercalate "\n\n" (map renderScheduledTask tasks)
+
+renderScheduledTask :: ScheduledTaskSnapshot -> Text
+renderScheduledTask task =
+    Text.intercalate "\n"
+        [ "Task: " <> task.scheduledTaskId
+        , "  Prompt: " <> truncatePrompt task.scheduledTaskPrompt
+        , "  Interval: " <> intervalToHuman task.scheduledTaskIntervalSeconds
+        , "  Next fire: " <> formatTimestamp task.scheduledTaskNextFireAt
+        , "  Created: " <> formatTimestamp task.scheduledTaskCreatedAt
+        , "  Recurring: yes"
         ]
 
 taskSnapshot :: ScheduledTask -> ScheduledTaskSnapshot
@@ -799,6 +790,3 @@ nonBlank = (>>= keep)
     keep value =
         let stripped = Text.strip value
         in if Text.null stripped then Nothing else Just stripped
-
-jsonText :: Value -> Text
-jsonText = LazyText.toStrict . Aeson.encodeToLazyText

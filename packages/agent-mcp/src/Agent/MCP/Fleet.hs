@@ -63,7 +63,7 @@ import Control.Exception.Safe
     )
 import Control.Monad (forM, forM_, unless, void, when)
 import Data.Aeson
-    ( Value(..)
+    ( Value
     , object
     , (.=)
     )
@@ -789,7 +789,8 @@ mcpSearchTool :: McpFleet -> AppTool
 mcpSearchTool fleet = AppTool
     { appToolName = "mcp_search"
     , appToolDescription =
-        "Search currently available MCP tools. Servers may still be connecting."
+        "Search currently available MCP tools. Servers may still be connecting. \
+        \Returns readable labeled text."
     , appToolSchema = RawJsonFunctionSchema $ object
         [ "type" .= ("object" :: Text)
         , "properties" .= object
@@ -821,25 +822,7 @@ mcpSearchTool fleet = AppTool
                         (== entry.catalogClient.clientConfig.mcpServerName)
                         server
             found = take limit (filter matches (Map.toAscList entries))
-            payload = object
-                [ "tools" .=
-                    [ object $
-                        [ "name" .= name
-                        , "server" .=
-                            entry.catalogClient.clientConfig.mcpServerName
-                        , "description" .= describeTool entry.catalogTool
-                        , "inputSchema" .=
-                            entry.catalogTool.discoveredInputSchema
-                        , "readOnly" .= entry.catalogTool.discoveredReadOnly
-                        ]
-                        <> [ "outputSchema" .= schema
-                           | Just schema <- [entry.catalogTool.discoveredOutputSchema]
-                           ]
-                    | (name, entry) <- found
-                    ]
-                , "servers" .= map statusJson statuses
-                ]
-        pure (Right (compactJson payload))
+        pure (Right (renderMcpSearch statuses found))
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
@@ -850,7 +833,8 @@ grokSearchTool :: McpFleet -> AppTool
 grokSearchTool fleet = AppTool
     { appToolName = "search_tool"
     , appToolDescription =
-        "Search for MCP tools by keyword and retrieve their input schemas.\n\n\
+        "Search for MCP tools by keyword and retrieve their input schemas as \
+        \readable labeled text.\n\n\
         \If status is \"partial\", some servers may still be connecting."
     , appToolSchema = RawJsonFunctionSchema $ object
         [ "type" .= ("object" :: Text)
@@ -917,51 +901,42 @@ grokSearchTool fleet = AppTool
                             (\current pair@(name, entry) ->
                                 let server =
                                         entry.catalogClient.clientConfig.mcpServerName
-                                    toolJson = object
-                                        [ "tool_name" .= name
-                                        , "description" .=
+                                    toolMetadata = GrokSearchTool
+                                        { grokSearchToolName = name
+                                        , grokSearchToolDescription =
                                             truncateMcpDescription
                                                 (describeTool entry.catalogTool)
-                                        , "score" .= scoreEntry pair
-                                        , "input_schema" .=
+                                        , grokSearchToolScore = scoreEntry pair
+                                        , grokSearchToolSchema =
                                             entry.catalogTool.discoveredInputSchema
-                                        ]
+                                        }
                                     (before, rest) =
                                         break ((== server) . fst) current
                                 in case rest of
                                     [] ->
-                                        current <> [(server, [toolJson])]
+                                        current <> [(server, [toolMetadata])]
                                     (matchedServer, tools) : after ->
                                         before
                                             <> [ ( matchedServer
-                                                 , tools <> [toolJson]
+                                                 , tools <> [toolMetadata]
                                                  )
                                                ]
                                             <> after)
                             []
                             found
                     connecting = any isConnecting statuses
-                    payload = object
-                        [ "results" .=
-                            [ object
-                                [ "server" .= server
-                                , "tools" .= tools
-                                ]
-                            | (server, tools) <- grouped
-                            ]
-                        , "total_hidden_tools" .= Map.size entries
-                        , "status" .=
-                            (if connecting then ("partial" :: Text) else "ready")
-                        , "note" .=
-                            if connecting
-                                then Just
-                                    ("Some MCP servers are still connecting. Results may be incomplete." :: Text)
-                                else if Map.null entries
-                                    then Just
-                                        "No MCP tools are available in this session."
-                                    else Nothing
-                        ]
-                pure (Right (compactJson payload))
+                    note
+                        | connecting =
+                            Just
+                                ("Some MCP servers are still connecting. Results may be incomplete." :: Text)
+                        | Map.null entries =
+                            Just "No MCP tools are available in this session."
+                        | otherwise = Nothing
+                pure $ Right $ renderGrokSearch
+                    connecting
+                    (Map.size entries)
+                    note
+                    grouped
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
@@ -1303,7 +1278,8 @@ mcpListResourcesTool fleet = AppTool
     { appToolName = "mcp_list_resources"
     , appToolDescription =
         "List the resources and resource templates an MCP server exposes. \
-        \Omit `server` to query every connected server."
+        \Omit `server` to query every connected server. Returns readable \
+        \labeled text."
     , appToolSchema = RawJsonFunctionSchema $ object
         [ "type" .= ("object" :: Text)
         , "properties" .= object
@@ -1324,37 +1300,15 @@ mcpListResourcesTool fleet = AppTool
             listings <- forM selected \name -> do
                 resources <- mcpFleetListResources fleet name
                 templates <- mcpFleetListResourceTemplates fleet name
-                pure $ object
-                    [ "server" .= name
-                    , "resources" .= either (const []) (map resourceJson) resources
-                    , "resourceTemplates" .=
-                        either (const []) (map templateJson) templates
-                    , "error" .= either Just (const Nothing) resources
-                    ]
-            pure (Right (compactJson (object ["servers" .= listings])))
+                pure (renderMcpResourceServer name resources templates)
+            pure $ Right $ case listings of
+                [] -> "(no MCP resource servers)"
+                _ -> Text.intercalate "\n\n" listings
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
     }
-  where
-    resourceJson :: McpResource -> Value
-    resourceJson resource = object
-        [ "uri" .= resource.resourceUri
-        , "name" .= resource.resourceName
-        , "title" .= resource.resourceTitle
-        , "description" .= resource.resourceDescription
-        , "mimeType" .= resource.resourceMimeType
-        , "size" .= resource.resourceSize
-        ]
-    templateJson :: McpResourceTemplate -> Value
-    templateJson template = object
-        [ "uriTemplate" .= template.templateUri
-        , "name" .= template.templateName
-        , "title" .= template.templateTitle
-        , "description" .= template.templateDescription
-        , "mimeType" .= template.templateMimeType
-        ]
 
 mcpReadResourceTool :: McpFleet -> AppTool
 mcpReadResourceTool fleet = AppTool
@@ -1531,17 +1485,139 @@ grokCallArgumentsDecoder = Json.object do
 emptyObject :: RawJson
 emptyObject = rawJsonFromEncoding (Aeson.toEncoding (object []))
 
-statusJson :: McpServerStatus -> Value
-statusJson status = object
-    [ "name" .= status.mcpStatusName
-    , "status" .= case status.mcpStatusState of
-        McpPending -> ("pending" :: Text)
-        McpInitializing -> "initializing"
-        McpReady -> "ready"
-        McpFailed _ -> "failed"
-        McpClosed -> "closed"
-    , "toolCount" .= status.mcpStatusToolCount
+data GrokSearchTool = GrokSearchTool
+    { grokSearchToolName :: !Text
+    , grokSearchToolDescription :: !Text
+    , grokSearchToolScore :: !Int
+    , grokSearchToolSchema :: !RawJson
+    }
+
+renderMcpSearch :: [McpServerStatus] -> [(Text, McpCatalogEntry)] -> Text
+renderMcpSearch statuses found =
+    Text.intercalate "\n\n" $
+        renderMcpServerStatuses statuses
+            : case found of
+                [] -> ["(no matching MCP tools)"]
+                _ -> map renderMcpSearchTool found
+
+renderMcpSearchTool :: (Text, McpCatalogEntry) -> Text
+renderMcpSearchTool (name, entry) =
+    Text.intercalate "\n" $
+        [ name
+        , "  Server: " <> entry.catalogClient.clientConfig.mcpServerName
+        , "  Description: " <> describeTool entry.catalogTool
+        , "  Read-only: "
+            <> if entry.catalogTool.discoveredReadOnly then "true" else "false"
+        , "  Input schema:"
+        ]
+            <> indentBlock (rawJsonText entry.catalogTool.discoveredInputSchema)
+            <> maybe
+                []
+                (\schema -> "  Output schema:" : indentBlock (rawJsonText schema))
+                entry.catalogTool.discoveredOutputSchema
+
+renderGrokSearch
+    :: Bool
+    -> Int
+    -> Maybe Text
+    -> [(Text, [GrokSearchTool])]
+    -> Text
+renderGrokSearch connecting hidden note grouped =
+    Text.intercalate "\n" $
+        [ "Status: " <> if connecting then "partial" else "ready"
+        , "Total hidden tools: " <> Text.pack (show hidden)
+        ]
+            <> maybe [] (\text -> ["Note: " <> text]) note
+            <> case grouped of
+                [] -> []
+                _ -> "" : Text.lines (Text.intercalate "\n\n" (map renderGrokServer grouped))
+
+renderGrokServer :: (Text, [GrokSearchTool]) -> Text
+renderGrokServer (server, tools) =
+    Text.intercalate "\n" $
+        server : concatMap renderGrokSearchMatch tools
+
+renderGrokSearchMatch :: GrokSearchTool -> [Text]
+renderGrokSearchMatch tool =
+    [ "  " <> tool.grokSearchToolName
+    , "    Score: " <> Text.pack (show tool.grokSearchToolScore)
+    , "    Description: " <> tool.grokSearchToolDescription
+    , "    Input schema:"
     ]
+        <> map ("      " <>) (Text.lines (rawJsonText tool.grokSearchToolSchema))
+
+renderMcpServerStatuses :: [McpServerStatus] -> Text
+renderMcpServerStatuses = \case
+    [] -> "Servers: (none)"
+    statuses ->
+        Text.intercalate "\n" $
+            "Servers:" : map renderMcpServerStatus statuses
+
+renderMcpServerStatus :: McpServerStatus -> Text
+renderMcpServerStatus status =
+    "  "
+        <> status.mcpStatusName
+        <> ": "
+        <> mcpStateLabel status.mcpStatusState
+        <> " ("
+        <> Text.pack (show status.mcpStatusToolCount)
+        <> if status.mcpStatusToolCount == 1 then " tool)" else " tools)"
+
+mcpStateLabel :: McpInitState -> Text
+mcpStateLabel = \case
+    McpPending -> "pending"
+    McpInitializing -> "initializing"
+    McpReady -> "ready"
+    McpFailed _ -> "failed"
+    McpClosed -> "closed"
+
+renderMcpResourceServer
+    :: Text
+    -> Either Text [McpResource]
+    -> Either Text [McpResourceTemplate]
+    -> Text
+renderMcpResourceServer name resources templates =
+    Text.intercalate "\n" $
+        [name]
+            <> case resources of
+                Left err ->
+                    ["  Error: " <> err, "  Resources: (none)"]
+                Right [] ->
+                    ["  Resources: (none)"]
+                Right items ->
+                    "  Resources:" : concatMap renderMcpResource items
+            <> case templates of
+                Left err -> ["  Resource templates error: " <> err]
+                Right [] -> ["  Resource templates: (none)"]
+                Right items ->
+                    "  Resource templates:" : concatMap renderMcpTemplate items
+
+renderMcpResource :: McpResource -> [Text]
+renderMcpResource resource =
+    ("    " <> resource.resourceName)
+        : ("      URI: " <> resource.resourceUri)
+        : catMaybes
+            [ ("      Title: " <>) <$> resource.resourceTitle
+            , ("      Description: " <>) <$> resource.resourceDescription
+            , ("      MIME type: " <>) <$> resource.resourceMimeType
+            , ("      Size: " <>) . Text.pack . show <$> resource.resourceSize
+            ]
+
+renderMcpTemplate :: McpResourceTemplate -> [Text]
+renderMcpTemplate template =
+    ("    " <> template.templateName)
+        : ("      URI template: " <> template.templateUri)
+        : catMaybes
+            [ ("      Title: " <>) <$> template.templateTitle
+            , ("      Description: " <>) <$> template.templateDescription
+            , ("      MIME type: " <>) <$> template.templateMimeType
+            ]
+
+rawJsonText :: RawJson -> Text
+rawJsonText = TextEncoding.decodeUtf8 . rawJsonBytes
+
+indentBlock :: Text -> [Text]
+indentBlock = map ("    " <>) . Text.lines
 
 isConnecting :: McpServerStatus -> Bool
 isConnecting status = case status.mcpStatusState of

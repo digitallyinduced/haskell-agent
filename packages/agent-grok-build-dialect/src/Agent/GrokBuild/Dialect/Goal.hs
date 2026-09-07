@@ -30,12 +30,9 @@ import Control.Concurrent.MVar
     , newMVar
     , readMVar
     )
-import Data.Aeson (object, (.=))
-import qualified Data.Aeson.Text as Aeson
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Lazy as LazyText
 
 data GoalStatus
     = GoalActive
@@ -217,7 +214,7 @@ runUpdateGoal (GoalRuntime state) args =
                     summary =
                         "Goal paused as blocked: " <> reason
                             <> maybe "" ("\nProgress: " <>) (nonBlank args.message)
-                pure (Just updated, Right (successOutput summary))
+                pure (Just updated, Right summary)
             | args.completed == Just True -> do
                 let updated = goal
                         { goalStatus = GoalComplete
@@ -228,13 +225,13 @@ runUpdateGoal (GoalRuntime state) args =
                     summary =
                         "Goal marked complete (automatic classifier verification is disabled in this host)."
                             <> maybe "" ("\nSummary: " <>) (nonBlank args.message)
-                pure (Just updated, Right (successOutput summary))
+                pure (Just updated, Right summary)
             | Just note <- nonBlank args.message -> do
                 let updated = goal
                         { goalProgress = goal.goalProgress <> [note] }
                 pure
                     ( Just updated
-                    , Right (successOutput ("Progress recorded: " <> note))
+                    , Right ("Progress recorded: " <> note)
                     )
             | otherwise ->
                 pure
@@ -253,13 +250,6 @@ nonBlank = (>>= keep)
     keep value =
         let stripped = Text.strip value
         in if Text.null stripped then Nothing else Just stripped
-
-successOutput :: Text -> Text
-successOutput summary =
-    LazyText.toStrict $ Aeson.encodeToLazyText $ object
-        [ "success" .= True
-        , "summary" .= summary
-        ]
 
 goalStatusName :: GoalStatus -> Text
 goalStatusName = \case

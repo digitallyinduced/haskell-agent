@@ -103,7 +103,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             (Just "gpt-5.6-luna")
             (Just "high")
             (Just "none")
-        result `shouldSatisfy` isRightResult
+        result `shouldBe` Right "Agent: /root/artifact_analysis"
         (agentId, options) <- atomically (takeTMVar prepared)
         path <- getTaskPath registry agentId
         taskPathText <$> path
@@ -506,7 +506,8 @@ spec = describe "Agent.Tools.MultiAgents" do
                 }
         result <- dispatchToolCall defaultLoopDispatch
             (appToolHandlers (multiAgentTools context)) call
-        result.output `shouldSatisfy` Text.isInfixOf "/tmp/worktree"
+        result.output `shouldBe`
+            "Agent: /root/worker\nWorktree: /tmp/worktree"
         atomically (takeTMVar childCwd) `shouldReturn` worktreePath
         readIORef cleaned `shouldReturn` False
         closeSubagentRegistry registry
@@ -604,6 +605,43 @@ spec = describe "Agent.Tools.MultiAgents" do
         result.output `shouldSatisfy` Text.isInfixOf child.unSubagentId
         result.output `shouldNotSatisfy` Text.isInfixOf parent.unSubagentId
         atomically (writeTVar parentGate True)
+        closeSubagentRegistry registry
+
+    it "returns text for targeted waits and preserves completed output on interruption" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure (resultWithText "review done"))
+            (\_ _ -> pure ())
+        Right (agentId, _) <-
+            spawnSubagentAt registry Nothing taskPathRoot 0 "reviewer"
+                (plainInterAgentContent "review") Nothing
+        _ <- waitSubagents registry [agentId] 15000
+        let handlers =
+                appToolHandlers (multiAgentTools (rootContext registry Nothing))
+        waited <- dispatchToolCall defaultLoopDispatch handlers
+            (ToolCall "wait-target" "collaboration.wait_agent"
+                "{\"targets\":[\"reviewer\"],\"timeout_ms\":1}"
+                FunctionCallKind False)
+        waited.output `shouldSatisfy` Text.isInfixOf
+            (agentId.unSubagentId <> "\n  Status: completed\n  Final: review done")
+        waited.output `shouldNotSatisfy` Text.isPrefixOf "{"
+        interrupted <- dispatchToolCall defaultLoopDispatch handlers
+            (ToolCall "interrupt-target" "collaboration.interrupt_agent"
+                "{\"target\":\"reviewer\"}" FunctionCallKind False)
+        interrupted.output `shouldBe`
+            "Previous status: completed\n  Final: review done"
+        closeSubagentRegistry registry
+
+    it "returns a plain timeout notice while an agent remains active" do
+        gate <- newEmptyTMVarIO
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> atomically (takeTMVar gate) >> pure (resultWithText "done"))
+            (\_ _ -> pure ())
+        Right _ <- spawnSubagentAt registry Nothing taskPathRoot 0 "reviewer"
+            (plainInterAgentContent "review") Nothing
+        result <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (multiAgentTools (rootContext registry Nothing)))
+            (waitCall { arguments = "{\"timeout_ms\":1}" })
+        result.output `shouldBe` "timed out waiting for agent updates"
         closeSubagentRegistry registry
 
     it "returns labeled text for live agents instead of JSON" do

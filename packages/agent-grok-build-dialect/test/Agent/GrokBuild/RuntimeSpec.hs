@@ -120,8 +120,8 @@ spec = do
                         "scheduler_create"
                         "{\"interval\":\"30s\",\"prompt\":\"check deploy\",\
                         \\"fire_immediately\":true}"
-                    created.output `shouldSatisfy`
-                        Text.isInfixOf "\"humanSchedule\":\"every 1 minute\""
+                    created.output `shouldBe`
+                        "Created scheduled task sched-1\n  Interval: every 1 minute"
                     timeout 1000000 (takeMVar fired)
                         `shouldReturn` Just
                             (ScheduledFire
@@ -137,18 +137,39 @@ spec = do
                         [schedulerListTool runtime]
                         "scheduler_list"
                         "{}"
-                    listed.output `shouldSatisfy`
-                        Text.isInfixOf "\"intervalHuman\":\"every 1 minute\""
-                    listed.output `shouldSatisfy`
-                        Text.isInfixOf
-                            "\"createdAt\":\"2026-08-24T00:00:00Z\""
+                    listed.output `shouldBe` Text.intercalate "\n"
+                        [ "Task: sched-1"
+                        , "  Prompt: check deploy"
+                        , "  Interval: every 1 minute"
+                        , "  Next fire: 2026-08-24T00:01:00Z"
+                        , "  Created: 2026-08-24T00:00:00Z"
+                        , "  Recurring: yes"
+                        ]
                     deleted <- call
                         [schedulerDeleteTool runtime]
                         "scheduler_delete"
                         "{\"id\":\"sched-1\"}"
                     deleted.output `shouldSatisfy`
-                        Text.isInfixOf "\"success\":true"
+                        Text.isInfixOf "Scheduled task sched-1 cancelled."
                     listScheduledTasks runtime `shouldReturn` []
+
+        it "renders empty lists, updates, and missing deletions as text" do
+            bracket
+                (testScheduler (pure fixedTime) (\_ -> pure (Right testAgent)))
+                closeSchedulerRuntime
+                \runtime -> do
+                    empty <- call [schedulerListTool runtime] "scheduler_list" "{}"
+                    empty.output `shouldBe` "(no scheduled tasks)"
+                    _ <- call [schedulerCreateTool runtime] "scheduler_create"
+                        "{\"interval\":\"5m\",\"prompt\":\"check\"}"
+                    updated <- call [schedulerCreateTool runtime] "scheduler_create"
+                        "{\"task_id\":\"sched-1\",\"interval\":\"2h\"}"
+                    updated.output `shouldBe`
+                        "Updated scheduled task sched-1\n  Interval: every 2 hours"
+                    missing <- call [schedulerDeleteTool runtime] "scheduler_delete"
+                        "{\"id\":\"sched-2\"}"
+                    missing.output `shouldBe`
+                        "No scheduled task with ID sched-2 found. Use scheduler_list to see active tasks."
 
         it "rejects unsupported durable and foreground scheduling" do
             bracket
@@ -220,7 +241,7 @@ spec = do
                                 <> Text.pack (show index)
                                 <> "\"}")
                         result.output `shouldSatisfy`
-                            Text.isInfixOf "\"updated\":false"
+                            Text.isInfixOf "Created scheduled task"
                     writeIORef clock (addUTCTime 60 fixedTime)
                     _ <- call
                         [schedulerCreateTool runtime]
@@ -252,7 +273,7 @@ spec = do
                             "scheduler_create"
                             "{\"interval\":\"5m\",\"prompt\":\"check\"}"
                         result.output `shouldSatisfy`
-                            Text.isInfixOf "\"updated\":false"
+                            Text.isInfixOf "Created scheduled task"
                     overflow <- call
                         [schedulerCreateTool runtime]
                         "scheduler_create"
@@ -268,7 +289,7 @@ spec = do
                         "scheduler_create"
                         "{\"interval\":\"5m\",\"prompt\":\"replacement\"}"
                     replacement.output `shouldSatisfy`
-                        Text.isInfixOf "\"id\":\"sched-51\""
+                        Text.isInfixOf "Created scheduled task sched-51"
 
     describe "goal runtime" do
         it "tracks progress, blocking, resumption, and honest completion" do
@@ -285,13 +306,12 @@ spec = do
                 [updateGoalTool goals]
                 "update_goal"
                 "{\"message\":\"implemented core\"}"
-            progress.output `shouldSatisfy`
-                Text.isInfixOf "Progress recorded"
+            progress.output `shouldBe` "Progress recorded: implemented core"
             blocked <- call
                 [updateGoalTool goals]
                 "update_goal"
                 "{\"blocked_reason\":\"CI unavailable\"}"
-            blocked.output `shouldSatisfy` Text.isInfixOf "blocked"
+            blocked.output `shouldBe` "Goal paused as blocked: CI unavailable"
             fmap (.goalStatus) <$> readGoal goals
                 `shouldReturn` Just GoalBlocked
             _ <- resumeGoal goals
@@ -299,8 +319,8 @@ spec = do
                 [updateGoalTool goals]
                 "update_goal"
                 "{\"completed\":true,\"message\":\"verified locally\"}"
-            completed.output `shouldSatisfy`
-                Text.isInfixOf "classifier verification is disabled"
+            completed.output `shouldBe`
+                "Goal marked complete (automatic classifier verification is disabled in this host).\nSummary: verified locally"
             fmap (.goalStatus) <$> readGoal goals
                 `shouldReturn` Just GoalComplete
             clearGoal goals `shouldReturn` True
@@ -331,20 +351,35 @@ spec = do
                     "{\"name\":\"deep-research\",\
                     \\"args\":{\"query\":\"Haskell effects\"}}"
                 first.output `shouldSatisfy`
-                    Text.isInfixOf "\"name\":\"deep-research\""
+                    Text.isInfixOf "Name: deep-research"
+                first.output `shouldSatisfy`
+                    Text.isInfixOf "\n  Run ID: wf_1\n  Task ID: wf_1"
                 second <- call
                     [workflowTool runtime]
                     "workflow"
                     "{\"name\":\"deep-research\",\
                     \\"args\":\"GHC optimization\"}"
                 second.output `shouldSatisfy`
-                    Text.isInfixOf "\"name\":\"deep-research-2\""
+                    Text.isInfixOf "Name: deep-research-2"
                 runs <- workflowRunSnapshots runtime
                 map (.workflowRunName) runs
                     `shouldMatchList`
                         ["deep-research", "deep-research-2"]
                 map (.workflowRunId) runs
                     `shouldMatchList` ["wf_1", "wf_2"]
+
+        it "reports validation without a launch or a fabricated run identifier" do
+            withTempDir \dir -> withRegistry \registry -> do
+                specs <- newIORef Map.empty
+                runtime <- newWorkflowRuntime
+                    (unsafeEncodeUtf dir)
+                    (rootContext registry)
+                    specs
+                result <- call [workflowTool runtime] "workflow"
+                    "{\"name\":\"deep-research\",\"args\":\"Haskell effects\",\"validate_only\":true}"
+                result.output `shouldBe`
+                    "Smoke check passed for workflow 'deep-research'. This did not launch the workflow or exercise live dependencies.\n  Name: deep-research"
+                workflowRunSnapshots runtime `shouldReturn` []
 
         it "probes workflow run statuses concurrently and preserves run order" do
             withRegistry \registry -> do

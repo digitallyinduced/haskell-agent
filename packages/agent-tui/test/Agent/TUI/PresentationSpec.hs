@@ -659,6 +659,9 @@ spec = describe "tool presentation" do
         formatToolOutput worktreeSpawn
             "{\"task_name\":\"/root/worker\",\"worktree\":\"/tmp/worker\"}"
             `shouldBe` "Agent: /root/worker"
+        formatToolOutput worktreeSpawn
+            "Agent: /root/worker\nWorktree: /tmp/worker"
+            `shouldBe` "Agent: /root/worker\nWorktree: /tmp/worker"
 
     it "summarizes conversation search calls while preserving text output" do
         let call = functionToolCall
