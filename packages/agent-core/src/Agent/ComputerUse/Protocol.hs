@@ -4,7 +4,14 @@
 -- callback boundary encodes them again, using one canonical fixed envelope
 -- with an independent protocol version.
 module Agent.ComputerUse.Protocol
-    ( SemanticComputerAction(..)
+    ( ComputerUseEffect(..)
+    , ComputerUseVerdict(..)
+    , ComputerUseVerdictDecision(..)
+    , computerUseVerdictField
+    , observationComputerUseVerdict
+    , suspectedNoopComputerUseVerdict
+    , unverifiedComputerUseVerdict
+    , SemanticComputerAction(..)
     , SemanticComputerOperation(..)
     , SemanticComputerRequest(..)
     , SemanticComputerScalar(..)
@@ -22,6 +29,7 @@ module Agent.ComputerUse.Protocol
 import Control.Monad (unless, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.List.NonEmpty (NonEmpty)
@@ -31,6 +39,138 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Agent.Json.Decode as Json
+
+-- | What the computer backend can honestly establish about a completed
+-- request. Transport success is deliberately distinct from proof that the
+-- intended UI state changed.
+data ComputerUseEffect
+    = ComputerUseObservation
+    | ComputerUseUnverifiable
+    | ComputerUseSuspectedNoop
+    deriving (Eq, Show)
+
+data ComputerUseVerdictDecision
+    = ComputerUseDone
+    | ComputerUseInspectFreshState
+    | ComputerUseVerifyFreshState
+    deriving (Eq, Show)
+
+data ComputerUseVerdict = ComputerUseVerdict
+    { computerUseVerdictEffect :: !ComputerUseEffect
+    , computerUseVerdictDecision :: !ComputerUseVerdictDecision
+    , computerUseVerdictFreshObservation :: !Bool
+    , computerUseVerdictHint :: !Text
+    } deriving (Eq, Show)
+
+instance Aeson.ToJSON ComputerUseEffect where
+    toJSON = Aeson.String . \case
+        ComputerUseObservation -> "observation"
+        ComputerUseUnverifiable -> "unverifiable"
+        ComputerUseSuspectedNoop -> "suspected_noop"
+
+instance Aeson.FromJSON ComputerUseEffect where
+    parseJSON = Aeson.withText "ComputerUseEffect" \case
+        "observation" -> pure ComputerUseObservation
+        "unverifiable" -> pure ComputerUseUnverifiable
+        "suspected_noop" -> pure ComputerUseSuspectedNoop
+        _ -> fail "unsupported computer use effect"
+
+instance Aeson.ToJSON ComputerUseVerdictDecision where
+    toJSON = Aeson.String . \case
+        ComputerUseDone -> "done"
+        ComputerUseInspectFreshState -> "inspect_fresh_state"
+        ComputerUseVerifyFreshState -> "verify_fresh_state"
+
+instance Aeson.FromJSON ComputerUseVerdictDecision where
+    parseJSON = Aeson.withText "ComputerUseVerdictDecision" \case
+        "done" -> pure ComputerUseDone
+        "inspect_fresh_state" -> pure ComputerUseInspectFreshState
+        "verify_fresh_state" -> pure ComputerUseVerifyFreshState
+        _ -> fail "unsupported computer use verdict decision"
+
+instance Aeson.ToJSON ComputerUseVerdict where
+    toJSON verdict = Aeson.object
+        [ "effect" Aeson..= verdict.computerUseVerdictEffect
+        , "decision" Aeson..= verdict.computerUseVerdictDecision
+        , "fresh_observation"
+            Aeson..= verdict.computerUseVerdictFreshObservation
+        , "hint" Aeson..= verdict.computerUseVerdictHint
+        ]
+
+instance Aeson.FromJSON ComputerUseVerdict where
+    parseJSON = Aeson.withObject "ComputerUseVerdict" \object -> do
+        verdict <- ComputerUseVerdict
+            <$> object Aeson..: "effect"
+            <*> object Aeson..: "decision"
+            <*> object Aeson..: "fresh_observation"
+            <*> object Aeson..: "hint"
+        unless (validComputerUseVerdict verdict) $
+            fail "inconsistent computer use verdict"
+        pure verdict
+
+validComputerUseVerdict :: ComputerUseVerdict -> Bool
+validComputerUseVerdict verdict =
+    case
+        ( verdict.computerUseVerdictEffect
+        , verdict.computerUseVerdictDecision
+        , verdict.computerUseVerdictFreshObservation
+        ) of
+        (ComputerUseObservation, ComputerUseDone, True) -> True
+        (ComputerUseUnverifiable, ComputerUseInspectFreshState, True) -> True
+        (ComputerUseUnverifiable, ComputerUseVerifyFreshState, False) -> True
+        (ComputerUseSuspectedNoop, ComputerUseInspectFreshState, True) -> True
+        (ComputerUseSuspectedNoop, ComputerUseVerifyFreshState, False) -> True
+        _ -> False
+
+computerUseVerdictField :: Text
+computerUseVerdictField = "verdict"
+
+observationComputerUseVerdict :: ComputerUseVerdict
+observationComputerUseVerdict = ComputerUseVerdict
+    { computerUseVerdictEffect = ComputerUseObservation
+    , computerUseVerdictDecision = ComputerUseDone
+    , computerUseVerdictFreshObservation = True
+    , computerUseVerdictHint =
+        "A fresh computer observation was returned."
+    }
+
+unverifiedComputerUseVerdict :: Bool -> ComputerUseVerdict
+unverifiedComputerUseVerdict freshObservation = ComputerUseVerdict
+    { computerUseVerdictEffect = ComputerUseUnverifiable
+    , computerUseVerdictDecision =
+        if freshObservation
+            then ComputerUseInspectFreshState
+            else ComputerUseVerifyFreshState
+    , computerUseVerdictFreshObservation = freshObservation
+    , computerUseVerdictHint =
+        if freshObservation
+            then
+                "Input delivery does not prove the intended UI effect. "
+                    <> "Inspect the fresh state before retrying."
+            else
+                "Input delivery does not prove the intended UI effect. "
+                    <> "Re-observe the target before retrying; do not repeat "
+                    <> "the input blindly."
+    }
+
+suspectedNoopComputerUseVerdict :: Bool -> ComputerUseVerdict
+suspectedNoopComputerUseVerdict freshObservation = ComputerUseVerdict
+    { computerUseVerdictEffect = ComputerUseSuspectedNoop
+    , computerUseVerdictDecision =
+        if freshObservation
+            then ComputerUseInspectFreshState
+            else ComputerUseVerifyFreshState
+    , computerUseVerdictFreshObservation = freshObservation
+    , computerUseVerdictHint =
+        if freshObservation
+            then
+                "The target reported that the input may not have taken effect. "
+                    <> "Inspect the fresh state; do not repeat it blindly."
+            else
+                "The target reported that the input may not have taken effect. "
+                    <> "Re-observe the target before retrying; do not repeat "
+                    <> "the input blindly."
+    }
 
 data SemanticComputerRequest
     = ListComputerTargets
@@ -432,13 +572,27 @@ semanticComputerRequestSchema = strictObject
         [ "type" Aeson..= ("string" :: Text)
         , "enum" Aeson..=
             (["list_targets", "bind", "observe", "act"] :: [Text])
+        , "description" Aeson..=
+            ( "Use list_targets, bind one returned target_id, observe the "
+            <> "bound target, then act on element_id values from the fresh "
+            <> "accessibility state."
+            :: Text
+            )
         ])
-    , ("target_id", nullableStringParameter 1024)
+    , ("target_id", describeParameter
+        "Required only for bind; use an exact ID returned by list_targets."
+        (nullableStringParameter 1024))
     , ("actions", Aeson.object
         [ "type" Aeson..= (["array", "null"] :: [Text])
         , "minItems" Aeson..= (1 :: Int)
         , "maxItems" Aeson..= (64 :: Int)
         , "items" Aeson..= semanticActionParameters
+        , "description" Aeson..=
+            ( "Required only for act. Use element IDs from the latest "
+            <> "observation and inspect the returned fresh state before "
+            <> "retrying."
+            :: Text
+            )
         ])
     , ("include_screenshot", screenshotParameter)
     ]
@@ -450,15 +604,25 @@ semanticActionParameters = strictObject
         [ "type" Aeson..= ("string" :: Text)
         , "enum" Aeson..=
             (["perform", "set_value", "replace_selected_text"] :: [Text])
+        , "description" Aeson..=
+            ("Accessibility operation to apply." :: Text)
         ])
-    , ("element_id", boundedStringParameter False 1024)
-    , ("action", nullableStringParameter 1024)
+    , ("element_id", describeParameter
+        "Exact stable element ID from the current bound target observation."
+        (boundedStringParameter False 1024))
+    , ("action", describeParameter
+        "Accessibility action name for perform; otherwise null."
+        (nullableStringParameter 1024))
     , ("value", Aeson.object
         [ "type" Aeson..=
             (["string", "number", "boolean", "null"] :: [Text])
         , "maxLength" Aeson..= (65536 :: Int)
+        , "description" Aeson..=
+            ("Scalar value for set_value; otherwise null." :: Text)
         ])
-    , ("text", nullableStringParameter 65536)
+    , ("text", describeParameter
+        "Replacement for replace_selected_text; otherwise null."
+        (nullableStringParameter 65536))
     ]
     ["type", "element_id", "action", "value", "text"]
 
@@ -470,6 +634,13 @@ strictObject properties requiredFields = Aeson.object
         [ Key.fromText name Aeson..= schema | (name, schema) <- properties ]
     , "required" Aeson..= requiredFields
     ]
+
+describeParameter :: Text -> Aeson.Value -> Aeson.Value
+describeParameter description = \case
+    Aeson.Object object ->
+        Aeson.Object
+            (KeyMap.insert "description" (Aeson.String description) object)
+    value -> value
 
 nullableStringParameter :: Int -> Aeson.Value
 nullableStringParameter maximumLength = Aeson.object

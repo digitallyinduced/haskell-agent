@@ -1,11 +1,15 @@
 module Agent.ComputerUse.ProtocolSpec (spec) where
 
 import Agent.ComputerUse.Protocol
+import Agent.Loop.InputItems (computerFunctionTextOutput)
 import Control.Monad (forM_)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.List.NonEmpty as NonEmpty
 import Data.Text (Text)
+import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Paths_agent_core (getDataFileName)
 import Test.Hspec
@@ -48,6 +52,62 @@ spec = describe "semantic computer protocol" do
             `shouldBe` ObserveOrActOnComputerTargetOperation
         semanticComputerRequestWantsScreenshot
             (ObserveComputerTarget True) `shouldBe` True
+
+    it "round-trips evidence-aware action verdicts" do
+        let verdicts =
+                [ observationComputerUseVerdict
+                , unverifiedComputerUseVerdict True
+                , unverifiedComputerUseVerdict False
+                , suspectedNoopComputerUseVerdict True
+                , suspectedNoopComputerUseVerdict False
+                ]
+        forM_ verdicts \verdict ->
+            Aeson.eitherDecode (Aeson.encode verdict)
+                `shouldBe` Right verdict
+        Aeson.toJSON (unverifiedComputerUseVerdict True)
+            `shouldBe` Aeson.object
+                [ "effect" Aeson..= ("unverifiable" :: Text)
+                , "decision" Aeson..= ("inspect_fresh_state" :: Text)
+                , "fresh_observation" Aeson..= True
+                , "hint" Aeson..=
+                    ( "Input delivery does not prove the intended UI effect. "
+                    <> "Inspect the fresh state before retrying."
+                    :: Text
+                    )
+                ]
+        ( Aeson.eitherDecode
+            "{\"effect\":\"observation\",\"decision\":\"verify_fresh_state\",\"fresh_observation\":false,\"hint\":\"contradictory\"}"
+            :: Either String ComputerUseVerdict
+            )
+            `shouldSatisfy` isLeft
+
+    it "renders verdict guidance while preserving legacy output" do
+        let accessibility = Aeson.object
+                [ "kind" Aeson..= ("full" :: Text)
+                , "revision" Aeson..= (1 :: Int)
+                , "snapshot" Aeson..= Aeson.object []
+                ]
+            rendered verdict = computerFunctionTextOutput
+                (TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $
+                    Aeson.object
+                        [ "ok" Aeson..= True
+                        , Key.fromText computerUseVerdictField Aeson..= verdict
+                        , "accessibility_state" Aeson..= accessibility
+                        ])
+            legacy = computerFunctionTextOutput
+                (TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $
+                    Aeson.object
+                        [ "ok" Aeson..= True
+                        , "accessibility_state" Aeson..= accessibility
+                        ])
+        rendered (unverifiedComputerUseVerdict True)
+            `shouldSatisfy`
+                ("do not repeat the input blindly" `Text.isInfixOf`)
+        rendered (suspectedNoopComputerUseVerdict False)
+            `shouldSatisfy`
+                ("Re-observe or rebind before retrying" `Text.isInfixOf`)
+        legacy `shouldSatisfy`
+            ("Computer action completed." `Text.isPrefixOf`)
 
     it "rejects shape drift before approval or execution" do
         decode

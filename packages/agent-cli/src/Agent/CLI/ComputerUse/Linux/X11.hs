@@ -173,6 +173,7 @@ parseMonitor line = do
                     , computerDisplayHeight = height
                     , computerDisplayFrameWidth = width
                     , computerDisplayFrameHeight = height
+                    , computerDisplayRotationDegrees = 0
                     }
                 )
 

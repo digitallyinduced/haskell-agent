@@ -4,6 +4,7 @@ module Agent.Loop.InputItems
     ( turnInputsToItems
     , toolResultToItem
     , computerScreenshotObservationWith
+    , computerFunctionTextOutput
     ) where
 
 import Agent.InterAgentMessage
@@ -11,6 +12,12 @@ import Agent.InterAgentMessage
     , InterAgentMessageContent(..)
     , renderInterAgentMessage
     , renderInterAgentMessageHeader
+    )
+import Agent.ComputerUse.Protocol
+    ( ComputerUseEffect(..)
+    , ComputerUseVerdict(..)
+    , ComputerUseVerdictDecision(..)
+    , computerUseVerdictField
     )
 import Agent.Json (RawJson, rawJsonFromEncoding)
 import Agent.Loop.Input
@@ -26,6 +33,7 @@ import Agent.ToolDispatch
     , toolCallResultMode
     )
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Agent.Json.Decode as Json
 import Data.ByteString (ByteString)
@@ -205,9 +213,8 @@ computerFunctionTextOutput :: Text -> Text
 computerFunctionTextOutput rawOutput =
     case Json.decodeEither computerCallOutputDecoder (Text.encodeUtf8 rawOutput) of
         Right output ->
-            maybe
-                "Computer action completed."
-                renderComputerAccessibility
+            renderComputerOutput
+                (verdictFromObject output.computerOutputExtra)
                 ( KeyMap.lookup
                     "accessibility_state"
                     output.computerOutputExtra
@@ -218,8 +225,62 @@ computerFunctionTextOutput rawOutput =
                     nativeComputerAccessibilityDecoder
                     (Text.encodeUtf8 rawOutput) of
                 Right accessibility ->
-                    renderComputerAccessibility accessibility
+                    renderComputerOutput
+                        (verdictFromRawOutput rawOutput)
+                        (Just accessibility)
                 Left _ -> rawOutput
+
+renderComputerOutput
+    :: Maybe ComputerUseVerdict
+    -> Maybe ComputerAccessibility
+    -> Text
+renderComputerOutput verdict accessibility =
+    verdictText verdict
+        <> maybe "" ("\n\n" <>) (renderComputerAccessibility <$> accessibility)
+
+verdictText :: Maybe ComputerUseVerdict -> Text
+verdictText Nothing = "Computer action completed."
+verdictText (Just verdict) =
+    case
+        ( verdict.computerUseVerdictEffect
+        , verdict.computerUseVerdictDecision
+        ) of
+        (ComputerUseObservation, ComputerUseDone) ->
+            "Computer observation completed."
+        (ComputerUseUnverifiable, ComputerUseInspectFreshState) ->
+            "Computer input was delivered, but its intended UI effect is "
+                <> "unverified. Inspect the fresh observation before "
+                <> "retrying; do not repeat the input blindly."
+        (ComputerUseUnverifiable, ComputerUseVerifyFreshState) ->
+            "Computer input was delivered, but its intended UI effect is "
+                <> "unverified. Capture fresh state before retrying; do not "
+                <> "repeat the input blindly."
+        (ComputerUseSuspectedNoop, ComputerUseInspectFreshState) ->
+            "The computer host reported that the input may not have taken "
+                <> "effect. Inspect the fresh observation before retrying; "
+                <> "do not repeat the input blindly."
+        (ComputerUseSuspectedNoop, ComputerUseVerifyFreshState) ->
+            "The computer host reported that the input may not have taken "
+                <> "effect. Re-observe or rebind before retrying; do not "
+                <> "repeat the input blindly."
+        _ -> verdict.computerUseVerdictHint
+
+verdictFromObject :: Aeson.Object -> Maybe ComputerUseVerdict
+verdictFromObject object =
+    KeyMap.lookup (Key.fromText computerUseVerdictField) object
+        >>= decodeVerdict
+
+verdictFromRawOutput :: Text -> Maybe ComputerUseVerdict
+verdictFromRawOutput raw =
+    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 raw) of
+        Right (Aeson.Object object) -> verdictFromObject object
+        _ -> Nothing
+
+decodeVerdict :: Aeson.Value -> Maybe ComputerUseVerdict
+decodeVerdict value =
+    case Aeson.fromJSON value of
+        Aeson.Success verdict -> Just verdict
+        Aeson.Error _ -> Nothing
 
 data ComputerAccessibility
     = TextComputerAccessibility !Text
@@ -227,14 +288,13 @@ data ComputerAccessibility
 
 renderComputerAccessibility :: ComputerAccessibility -> Text
 renderComputerAccessibility accessibility =
-    "Computer action completed.\n\n"
-        <> case accessibility of
-            TextComputerAccessibility state ->
-                "Current macOS accessibility state:\n" <> state
-            StructuredComputerAccessibility fields ->
-                accessibilityStateHeading fields
-                    <> "\n"
-                    <> jsonValueText (Aeson.Object fields)
+    case accessibility of
+        TextComputerAccessibility state ->
+            "Current macOS accessibility state:\n" <> state
+        StructuredComputerAccessibility fields ->
+            accessibilityStateHeading fields
+                <> "\n"
+                <> jsonValueText (Aeson.Object fields)
 
 computerAccessibilityFromValue
     :: Aeson.Value
