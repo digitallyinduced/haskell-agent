@@ -28,4 +28,7 @@ gatewayIntegrationMcpConfig credential = McpServerConfig
     , mcpServerStartupTimeoutSeconds = 15
     , mcpServerRequestTimeoutSeconds = 60
     , mcpServerProtocol = McpProtocolLegacy
+    , mcpServerRootsEnabled = False
+    , mcpServerSamplingEnabled = False
+    , mcpServerLogLevel = Nothing
     }

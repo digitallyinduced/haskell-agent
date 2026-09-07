@@ -109,4 +109,7 @@ remoteConfig = McpServerConfig
     , mcpServerStartupTimeoutSeconds = 1
     , mcpServerRequestTimeoutSeconds = 1
     , mcpServerProtocol = McpProtocolLegacy
+    , mcpServerRootsEnabled = False
+    , mcpServerSamplingEnabled = False
+    , mcpServerLogLevel = Nothing
     }
