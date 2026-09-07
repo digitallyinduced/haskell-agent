@@ -27,8 +27,9 @@ import Agent.CLI.Request (requestPromptParts)
 import Agent.CLI.TUI.App
     ( commitFullscreenHistoryTurn
     , emitUiEvent
+    , setFullscreenPullRequestURL
     )
-import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
+import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn, sessionTurnPullRequestURL)
 import Agent.CLI.TUI.Types (HistoryCommit(..))
 import Agent.TUI.Model
     ( BlockState(..)
@@ -586,11 +587,13 @@ persistIncompleteTurn
                 appendTurnWithMetaUpdateIndexed handle turn \meta ->
                     meta { metaLastResponseId = Nothing }
             writeIORef slotRef (PersistenceActive handle')
-            forM_ env.sessionFullscreen \runtime ->
+            forM_ env.sessionFullscreen \runtime -> do
                 commitFullscreenHistoryTurn
                     runtime
                     (sessionHistoryTurn turnIndex turn)
                     HistoryCommitAppend
+                forM_ (sessionTurnPullRequestURL turn) $
+                    setFullscreenPullRequestURL runtime . Just
             evictDurableConversation env handle'
   where
     request = executed.executedRequest
@@ -914,7 +917,7 @@ persistSuccessfulTurn
             writeIORef env.sessionTitleTurnCount titleTurns
             let countedMeta = countedHandle.sessionMeta
             writeIORef slotRef (PersistenceActive countedHandle)
-            forM_ env.sessionFullscreen \runtime ->
+            forM_ env.sessionFullscreen \runtime -> do
                 commitFullscreenHistoryTurn
                     runtime
                     (sessionHistoryTurn turnIndex turn)
@@ -924,6 +927,8 @@ persistSuccessfulTurn
                         -- transcript. Keep earlier turns scrollable.
                         TranscriptReplace -> HistoryCommitAppend
                         TranscriptReset -> HistoryCommitReset)
+                forM_ (sessionTurnPullRequestURL turn) $
+                    setFullscreenPullRequestURL runtime . Just
             evictDurableConversation env countedHandle
             when
                 ( not countedMeta.metaTitleIsManual

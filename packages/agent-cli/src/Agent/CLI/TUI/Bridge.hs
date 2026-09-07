@@ -10,6 +10,7 @@ module Agent.CLI.TUI.Bridge
     , pushHistory
     , reconcileAgentSelection
     , trimHistory
+    , pullRequestForUiEvent
     ) where
 
 import Agent.CLI.AgentViewport
@@ -18,9 +19,50 @@ import Agent.CLI.AgentViewport
     , lookupAgentEntry
     )
 import Agent.TUI.Model (UiEvent(..), UiState(..))
-import Agent.Loop (LoopEvent(..))
+import Agent.Loop (LoopEvent(..), TurnOutput(..))
+import Agent.CLI.RepositoryDelivery (conversationPullRequestURLs)
+import Agent.ToolDispatch (ToolCallResult(..))
+import Control.Applicative ((<|>))
+import qualified Data.Aeson as Aeson
+import Data.Aeson ((.=))
+import qualified Data.Map.Strict as Map
+import Data.Maybe (listToMaybe)
 import Data.Text (Text)
 import qualified Graphics.Vty as V
+
+-- | Use the same evidence rules as persisted conversation associations.
+-- Inspect complete outputs/messages only, never partially streamed URLs.
+pullRequestForUiEvent :: UiEvent -> UiState -> Maybe Text -> Maybe Text
+pullRequestForUiEvent event state previous =
+    case event of
+        UiConversationCleared -> Nothing
+        UiUserSubmitted text ->
+            firstURL text Nothing [] <|> previous
+        UiAssistantHistory text ->
+            firstURL "" (Just text) [] <|> previous
+        UiLoop (ToolFinished result) ->
+            case Map.lookup result.callId state.uiToolCalls of
+                Nothing -> previous
+                Just (_, call) ->
+                    firstURL "" Nothing
+                        [ Aeson.object
+                            [ "type" .= ("function_call" :: Text)
+                            , "call_id" .= call.callId
+                            , "name" .= call.name
+                            , "arguments" .= call.arguments
+                            ]
+                        , Aeson.object
+                            [ "type" .= ("function_call_output" :: Text)
+                            , "call_id" .= result.callId
+                            , "output" .= result.output
+                            ]
+                        ] <|> previous
+        UiLoop (TurnFinished output) ->
+            firstURL "" output.assistantText [] <|> previous
+        _ -> previous
+  where
+    firstURL user assistant items =
+        listToMaybe (conversationPullRequestURLs user assistant items)
 
 -- | Keep enough prompt recall for normal interactive use without retaining an
 -- unbounded copy of the persistent Haskeline history in the fullscreen state.

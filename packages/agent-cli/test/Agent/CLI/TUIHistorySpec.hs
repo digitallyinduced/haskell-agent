@@ -14,7 +14,7 @@ import Agent.CLI.Session
 import Agent.CLI.TUI.History
 import Agent.Json (rawJsonFromEncoding)
 import Agent.CLI.TUI.Composer (composerScrollbackAvailable)
-import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
+import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn, sessionTurnPullRequestURL)
 import Agent.Responses.LoopBackend (toolResultToItem)
 import Agent.Responses.Types
 import Agent.ToolDispatch
@@ -955,6 +955,60 @@ spec = describe "bounded fullscreen history window" do
         map (.blockKind) blocks `shouldBe` [BlockUser, BlockAssistant]
         map (.blockBody) blocks
             `shouldBe` ["current prompt", "current answer"]
+
+    describe "current pull request precedence" do
+        let oldURL = "https://github.com/owner/repository/pull/41"
+            newURL = "https://github.com/owner/repository/pull/42"
+            finalURL = "https://github.com/owner/repository/pull/43"
+            creationCall = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = "image-call"
+                , name = "shell_command"
+                , namespace = Nothing
+                , provider = Nothing
+                , arguments = "{\"command\":\"gh pr create\"}"
+                , encryptedFunctionArgs = Nothing
+                , status = Nothing
+                , async = Nothing
+                }
+            createdTurn = sessionTurn TranscriptAppend oldURL
+                [ assistantMessage ("Reviewed " <> oldURL)
+                , creationCall
+                , toolOutputItem [Aeson.String newURL]
+                , assistantMessage "Done"
+                ]
+        it "prefers a newly created PR over the user prompt and earlier messages" do
+            sessionTurnPullRequestURL createdTurn `shouldBe` Just newURL
+        it "prefers the final assistant association over preceding tool output" do
+            sessionTurnPullRequestURL
+                (createdTurn { turnAssistantText = Just ("Opened " <> finalURL) })
+                `shouldBe` Just finalURL
+        it "uses the latest message association when no final assistant text was stored" do
+            sessionTurnPullRequestURL
+                (createdTurn
+                    { turnDisplayItems = [assistantMessage ("Created " <> finalURL)] })
+                `shouldBe` Just finalURL
+        it "falls back to an explicit user PR when there is no later association" do
+            sessionTurnPullRequestURL
+                (sessionTurn TranscriptAppend oldURL [assistantMessage "Done"])
+                `shouldBe` Just oldURL
+
+    it "restores pull request associations from persisted messages and failed display items" do
+        let url = "https://github.com/owner/repository/pull/42"
+            completed = sessionTurn TranscriptAppend "create the PR"
+                [assistantMessage ("Created " <> url)]
+            incomplete = (sessionTurn TranscriptAppend "create the PR" [])
+                { turnError = Just "provider disconnected"
+                , turnDisplayItems = [assistantMessage ("Opened " <> url)]
+                }
+        sessionTurnPullRequestURL completed `shouldBe` Just url
+        sessionTurnPullRequestURL incomplete `shouldBe` Just url
+
+    it "does not restore a pull request from an unrelated persisted reference" do
+        sessionTurnPullRequestURL
+            (sessionTurn TranscriptAppend "inspect the code"
+                [assistantMessage "For reference: https://github.com/owner/repository/pull/42"])
+            `shouldBe` Nothing
 
     it "keeps mid-turn steering in durable history" do
         let projected =

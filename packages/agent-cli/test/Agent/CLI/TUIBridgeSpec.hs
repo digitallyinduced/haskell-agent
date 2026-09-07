@@ -40,7 +40,7 @@ import Agent.TUI.Presentation
 import Agent.Loop (ImageAttachment(..), LoopEvent(..), emptyTurnOutput)
 import Agent.Provider (Provider(XAIProvider))
 import Agent.Subagents (SubagentId(..))
-import Agent.ToolDispatch (ToolCall(..), functionToolCall)
+import Agent.ToolDispatch (ToolCall(..), ToolCallResult(..), ToolCallKind(..), ToolCallMode(..), functionToolCall)
 import Agent.TUI.Motion (MotionMode(..))
 import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.STM (atomically, readTVarIO)
@@ -57,6 +57,44 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "fullscreen TUI bridge" do
+    describe "pull request associations" do
+        let url = "https://github.com/owner/repository/pull/42"
+            previous = Just "https://github.com/owner/repository/pull/41"
+            call command = functionToolCall "create-pr" "shell_command" command
+            result = ToolCallResult "create-pr" url FunctionCallKind BlockingToolCall [] Nothing
+            completed = UiLoop (ToolFinished result)
+        it "detects the PR as soon as its creation tool completes" do
+            let state = reduceUi (UiLoop (ToolStarted (call "gh pr create --title change"))) initialUiState
+            pullRequestForUiEvent completed state previous `shouldBe` Just url
+        it "keeps a newly created PR when the final response contains no PR" do
+            let oldHistory = reduceUi
+                    (UiAssistantHistory "Created https://github.com/owner/repository/pull/41")
+                    initialUiState
+                state = reduceUi (UiLoop (ToolStarted (call "gh pr create"))) oldHistory
+                associated = pullRequestForUiEvent completed state previous
+                finished = UiLoop (TurnFinished (emptyTurnOutput "response" [] (Just "Done")))
+            pullRequestForUiEvent finished (reduceUi completed state) associated `shouldBe` Just url
+        it "does not associate raw PR search results or unmatched outputs" do
+            let state = reduceUi (UiLoop (ToolStarted (call "gh search prs"))) initialUiState
+            pullRequestForUiEvent completed state previous `shouldBe` previous
+            pullRequestForUiEvent completed initialUiState previous `shouldBe` previous
+        it "waits for complete assistant output and retains the PR on unrelated turns" do
+            pullRequestForUiEvent (UiLoop (TextDelta ("Created " <> url))) initialUiState previous
+                `shouldBe` previous
+            pullRequestForUiEvent
+                (UiLoop (TurnFinished (emptyTurnOutput "response" [] (Just ("Created " <> url)))))
+                initialUiState previous `shouldBe` Just url
+            pullRequestForUiEvent
+                (UiLoop (TurnFinished (emptyTurnOutput "response" [] (Just "Done"))))
+                initialUiState previous `shouldBe` previous
+        it "accepts explicit user PR tasks but ignores quoted references" do
+            pullRequestForUiEvent (UiUserSubmitted ("Please review " <> url)) initialUiState Nothing
+                `shouldBe` Just url
+            pullRequestForUiEvent (UiAssistantHistory ("> Created " <> url)) initialUiState previous
+                `shouldBe` previous
+        it "clears the association when the conversation is cleared" do
+            pullRequestForUiEvent UiConversationCleared initialUiState previous `shouldBe` Nothing
+
     it "follows retained output events but not draft-only events" do
         eventFollows (UiSystemMessage "copied") `shouldBe` True
         eventFollows (UiErrorMessage "failed") `shouldBe` True

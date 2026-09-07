@@ -51,10 +51,10 @@ import Agent.CLI.TUI.Types
     ( AgentHover(agentHoverTarget, agentHoverPaneUpperLeft,
                  agentHoverPaneWidth, agentHoverUpperLeft),
       AppState(appAgentHover, appRuntime, appMotionElapsedMillis, appUi,
-               appAgentSelected, appHistoryWindow, appAgentEntries),
+               appAgentSelected, appHistoryWindow, appAgentEntries, appPullRequestURL),
       FullscreenRuntime(runtimeMotionMode),
       Name(AgentPopover, ConversationViewportExtent,
-           ConversationViewport, AgentRow, AgentPane) )
+           ConversationViewport, AgentRow, AgentPane, MarkdownLink) )
 import Agent.CLI.Terminal ()
 import Agent.CLI.Timestamp ()
 import Agent.Loop ()
@@ -117,7 +117,7 @@ import Data.Foldable ()
 import Data.IORef ()
 import Data.List ( findIndex, intersperse, sortOn )
 import Data.List.NonEmpty ()
-import Data.Maybe ( fromMaybe )
+import Data.Maybe ( fromMaybe, isJust )
 import Data.Sequence ()
 import Data.Text ( Text )
 import Data.Time.Clock ()
@@ -139,7 +139,7 @@ import qualified Agent.CLI.TUI.Scroll as Scroll ()
 import qualified Data.Sequence as Seq ( null )
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text
-    ( pack )
+    ( pack, takeWhileEnd, stripPrefix, breakOn )
 import qualified Data.Text.Encoding as TextEncoding ()
 import qualified Agent.TUI.Theme as Theme
     ( assistantAttr,
@@ -147,6 +147,7 @@ import qualified Agent.TUI.Theme as Theme
       borderActiveAttr,
       borderAttr,
       controlLinkHoverAttr,
+      controlLinkAttr,
       errorAttr,
       headingAttr,
       mutedAttr,
@@ -163,29 +164,66 @@ drawWorkspace :: AppState -> Widget Name
 drawWorkspace state =
     Widget Greedy Greedy do
         context <- getContext
+        let showAgents = length state.appAgentEntries > 1
+                && context.availHeight >= 8 + pullRequestHeight
         render $
             padTop (Pad 1) $
                 hBox $
                     [drawConversationPane state]
                         <> if not
-                            (agentPaneVisible
+                            (workspaceSidePaneVisible
                                 context.availWidth
                                 context.availHeight
-                                state.appAgentEntries)
+                                state.appAgentEntries
+                                state.appPullRequestURL)
                             then []
                             else
                                 [ hLimitPercent 40 $
                                     hLimit agentPaneWidth $
                                         padLeft (Pad 1) $
-                                            drawAgentPane
-                                                state
-                                                (agentPaneEntryLimit
-                                                    context.availHeight)
-                                                state.appAgentSelected
-                                                ((.agentHoverTarget)
-                                                    <$> state.appAgentHover)
-                                                state.appAgentEntries
+                                            vBox $
+                                                [ drawAgentPane
+                                                    state
+                                                    (agentPaneEntryLimit
+                                                        (context.availHeight - pullRequestHeight))
+                                                    state.appAgentSelected
+                                                    ((.agentHoverTarget)
+                                                        <$> state.appAgentHover)
+                                                    state.appAgentEntries
+                                                | showAgents
+                                                ]
+                                                <> [ (if showAgents
+                                                        then padTop (Pad 1)
+                                                        else id) (drawPullRequestPane url)
+                                                   | Just url <- [state.appPullRequestURL]
+                                                   ]
                                 ]
+  where
+    pullRequestHeight = if isJust state.appPullRequestURL then 5 else 0
+
+-- The PR remains accessible when the last subagent has finished.
+workspaceSidePaneVisible :: Int -> Int -> [AgentEntry] -> Maybe Text -> Bool
+workspaceSidePaneVisible width height entries pullRequest =
+    width >= agentPaneMinScreenWidth
+        && height >= agentPaneMinAvailableHeight
+        && (length entries > 1 || isJust pullRequest)
+
+drawPullRequestPane :: Text -> Widget Name
+drawPullRequestPane url =
+    withAttr Theme.borderAttr $
+        withBorderStyle unicodeRounded $
+            borderWithLabel (txt " Pull request ") $
+                padLeftRight 1 $
+                    vBox
+                        [ clickable (MarkdownLink url) $
+                            withAttr Theme.controlLinkAttr $
+                                terminalTxt ("PR #" <> Text.takeWhileEnd (/= '/') url <> " ↗")
+                        , withAttr Theme.mutedAttr $
+                            terminalTxt repository
+                        ]
+  where
+    repository = fst $ Text.breakOn "/pull/" $
+        fromMaybe url (Text.stripPrefix "https://github.com/" url)
 
 drawConversationPane :: AppState -> Widget Name
 drawConversationPane state =

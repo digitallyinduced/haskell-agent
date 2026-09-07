@@ -190,6 +190,7 @@ data AppEvent
     | AppDictationFinished !(Either Text Text)
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
+    | AppSetPullRequestURL !HistoryGeneration !(Maybe Text)
     | AppSyntaxHighlighterChanged
     | AppHistoryReset !HistoryPage
     | AppHistoryLoaded
@@ -514,6 +515,7 @@ data AppState = AppState
     , appSubmittedImagePreviews :: !(Map.Map BlockId [TuiImagePreview])
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]
+    , appPullRequestURL :: !(Maybe Text)
     , appAgentHover :: !(Maybe AgentHover)
     , appMarkdownLinkHovered :: !Bool
     , appHoveredControl :: !(Maybe Name)
