@@ -23,6 +23,7 @@ module Agent.CLI.TUI.App
     , drawBlock
     , drawConversationBlocks
     , drawTranscript
+    , drawTranscriptChunks
     , elapsedMillisSince
     , appEventLogicalBytes
     , emitUiEvent
@@ -117,6 +118,7 @@ import Agent.CLI.TUI.Render.Blocks (drawBlock)
 import Agent.CLI.TUI.Render.Transcript
     ( drawConversationBlocks
     , drawTranscript
+    , drawTranscriptChunks
     )
 import Agent.CLI.TUI.LambdaArt
 import Agent.CLI.TUI.App.Runtime
