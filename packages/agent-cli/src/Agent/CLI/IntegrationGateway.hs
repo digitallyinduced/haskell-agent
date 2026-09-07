@@ -2,11 +2,13 @@
 module Agent.CLI.IntegrationGateway
     ( gatewayIntegrationAuthority
     , gatewayIntegrationMcpConfig
+    , availableIntegrationServerName
     ) where
 
 import Agent.CLI.GatewayClient (GatewayCredential(..))
 import Agent.Integration.API (IntegrationAuthority(..))
 import Agent.MCP (McpServerConfig(..), McpProtocolPreference(..))
+import qualified Data.Set as Set
 import qualified Data.Text as Text
 
 gatewayIntegrationAuthority :: Maybe GatewayCredential -> IntegrationAuthority
@@ -32,3 +34,16 @@ gatewayIntegrationMcpConfig credential = McpServerConfig
     , mcpServerSamplingEnabled = False
     , mcpServerLogLevel = Nothing
     }
+
+availableIntegrationServerName :: [Text.Text] -> Text.Text
+availableIntegrationServerName configuredNames =
+    choose 1
+  where
+    configured = Set.fromList configuredNames
+    choose index
+        | Set.member candidate configured = choose (index + 1)
+        | otherwise = candidate
+      where
+        candidate
+            | index == 1 = "integrations"
+            | otherwise = "integrations-" <> Text.pack (show index)

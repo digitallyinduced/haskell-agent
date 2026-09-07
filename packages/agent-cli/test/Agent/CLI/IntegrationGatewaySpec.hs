@@ -1,7 +1,8 @@
 module Agent.CLI.IntegrationGatewaySpec (spec) where
 
 import Agent.CLI.GatewayClient (GatewayCredential(..))
-import Agent.CLI.IntegrationGateway (gatewayIntegrationMcpConfig)
+import Agent.CLI.IntegrationGateway
+    (availableIntegrationServerName, gatewayIntegrationMcpConfig)
 import Agent.MCP (McpServerConfig(..))
 import Test.Hspec
 
@@ -18,3 +19,8 @@ spec = describe "generic gateway integrations" do
         config.mcpServerEnv `shouldBe` [("MCP_ACCESS_TOKEN", "private-test-token")]
         show config `shouldNotContain` "private-test-token"
         config.mcpServerCommand `shouldBe` ""
+
+    it "keeps the built-in endpoint when configured server names collide" do
+        availableIntegrationServerName
+            ["integrations", "integrations-2", "another-server"]
+            `shouldBe` "integrations-3"

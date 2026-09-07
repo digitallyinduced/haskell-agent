@@ -8,6 +8,7 @@ import Agent.CLI.Config
     ( HarnessConfig(..), McpServerConfig(..)
     , mcpServersForRuntime, useProgressiveMcp )
 import Agent.CLI.FileUri (fileUri)
+import Agent.CLI.IntegrationGateway (availableIntegrationServerName)
 import Agent.CLI.McpElicitation (cliMcpElicitation)
 import Agent.CLI.McpOAuthStore (mcpOAuthStorePath)
 import Agent.CLI.McpStatus
@@ -132,11 +133,19 @@ acquireMcpRuntime request@AgentToolsRequest
     } integrationRuntime = do
     let (configuredServers, configuredProgressive) =
             mcpConfiguration request toolStartup
+        integrationServerName =
+            availableIntegrationServerName
+                [ serverName
+                | MCP.McpServerConfig
+                    { MCP.mcpServerName = serverName
+                    } <- configuredServers
+                ]
         remoteServers =
-            [config | runtime <- maybeToList integrationRuntime
+            [ config { MCP.mcpServerName = integrationServerName }
+            | runtime <- maybeToList integrationRuntime
             , RemoteIntegrationEndpoint config <- [integrationRuntimeEndpoint runtime]]
         inMemoryServers =
-            [(integrationsMcpConfig, server)
+            [(integrationsMcpConfig integrationServerName, server)
             | runtime <- maybeToList integrationRuntime
             , LocalIntegrationEndpoint server <- [integrationRuntimeEndpoint runtime]]
         -- Include the in-memory name in the reported configuration too: callers
@@ -287,9 +296,9 @@ acquireMcpRuntime request@AgentToolsRequest
             finishRuntime fleet
                 (MCP.closeMcpFleet fleet `finally` clearMcpHostHooks)
 
-integrationsMcpConfig :: MCP.McpServerConfig
-integrationsMcpConfig = MCP.McpServerConfig
-    { MCP.mcpServerName = "integrations"
+integrationsMcpConfig :: Text -> MCP.McpServerConfig
+integrationsMcpConfig serverName = MCP.McpServerConfig
+    { MCP.mcpServerName = serverName
     , MCP.mcpServerUrl = Nothing
     , MCP.mcpServerCommand = ""
     , MCP.mcpServerArgs = []
