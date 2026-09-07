@@ -45,6 +45,8 @@ import System.OsPath
     , unsafeEncodeUtf
     , (</>)
     )
+import System.Posix.Files (deviceID, fileID, getFileStatus)
+import System.Posix.Types (DeviceID, FileID)
 
 -- | One loaded instruction file and its absolute path.
 data InstructionFile = InstructionFile
@@ -95,8 +97,9 @@ data DiscoverOptions = DiscoverOptions
       -- ^ Soft budget across all loaded files. Content past the budget is
       -- truncated. Use @0@ to disable discovery.
     , discoverGlobalDir :: !(Maybe OsPath)
-      -- ^ Optional home-scope directory (e.g. @~/.codex@, @~/.grok@, or
-      -- @~/.claude@).
+      -- ^ Optional home-scope directory (e.g. @~/.codex@, @~/.grok@,
+      -- @~/.claude@, or @~/.haskell-agent@). A sibling @.haskell-agent@
+      -- directory is still loaded when another compatibility home is selected.
     , discoverRootMarkers :: ![OsPath]
       -- ^ Path segments that mark the project root. Default: @[".git"]@.
     } deriving (Eq, Show)
@@ -118,7 +121,8 @@ defaultDiscoverOptions = DiscoverOptions
 --
 -- A @.codex@ global directory selects Codex's narrow discovery contract.
 -- Other homes (including @.grok@, @.claude@, and @.haskell-agent@), and calls
--- without a global directory, use Grok-compatible discovery.
+-- without a global directory, use Grok-compatible discovery. Vendor
+-- compatibility homes also load a sibling @.haskell-agent@ directory.
 discoverProjectInstructions :: DiscoverOptions -> OsPath -> IO LoadedAgentsMd
 discoverProjectInstructions options cwd
     | options.discoverMaxBytes <= 0 =
@@ -130,7 +134,7 @@ discoverProjectInstructions options cwd
             if usesCodexDiscovery options
                 then do
                     (global, projectFiles) <- concurrently
-                        (maybe (pure mempty) readPreferredAgentsMd
+                        (maybe (pure mempty) readCodexHomeInstructions
                             options.discoverGlobalDir)
                         (mapConcurrentlyBounded instructionDirectoryConcurrency
                             readPreferredAgentsMd
@@ -150,13 +154,20 @@ emptyLoadedAgentsMd =
 
 loadedAgentsFromPreferred :: InstructionLoad -> InstructionLoad -> LoadedAgentsMd
 loadedAgentsFromPreferred global project =
-    LoadedAgentsMd
-        { loadedGlobal = case global.loadFiles of
-            file : _ -> Just file
-            [] -> Nothing
-        , loadedProject = project.loadFiles
-        , loadedWarnings = global.loadWarnings <> project.loadWarnings
-        }
+    let warnings = global.loadWarnings <> project.loadWarnings
+    in case global.loadFiles of
+        [] ->
+            LoadedAgentsMd
+                { loadedGlobal = Nothing
+                , loadedProject = project.loadFiles
+                , loadedWarnings = warnings
+                }
+        file : rest ->
+            LoadedAgentsMd
+                { loadedGlobal = Just file
+                , loadedProject = rest <> project.loadFiles
+                , loadedWarnings = warnings
+                }
 
 usesCodexDiscovery :: DiscoverOptions -> Bool
 usesCodexDiscovery options =
@@ -198,8 +209,9 @@ discoverGrokInstructions options dirs = do
                 }
 
 -- | Grok Build reads its own home first, followed by compatible Claude and
--- Cursor homes. For custom harness homes, only that explicit directory is
--- inspected.
+-- Cursor homes, then the haskell-agent harness home. When the selected home
+-- is already @.haskell-agent@, only that directory is inspected. Other
+-- explicit homes still pick up a sibling @.haskell-agent@ directory.
 readGrokHomeInstructions :: OsPath -> IO InstructionLoad
 readGrokHomeInstructions globalDir =
     mconcat
@@ -207,13 +219,32 @@ readGrokHomeInstructions globalDir =
             readGrokHomeRoot
             roots
   where
+    home = takeDirectory globalDir
     roots
         | takeFileName globalDir == unsafeEncodeUtf ".grok" =
             [ globalDir
-            , takeDirectory globalDir </> unsafeEncodeUtf ".claude"
-            , takeDirectory globalDir </> unsafeEncodeUtf ".cursor"
+            , home </> unsafeEncodeUtf ".claude"
+            , home </> unsafeEncodeUtf ".cursor"
             ]
-        | otherwise = [globalDir]
+            <> additionalHarnessHome globalDir
+        | otherwise = globalDir : additionalHarnessHome globalDir
+
+-- | Codex keeps one @AGENTS.md@ per directory, but still reads the harness
+-- home in addition to @~/.codex@.
+readCodexHomeInstructions :: OsPath -> IO InstructionLoad
+readCodexHomeInstructions globalDir =
+    mconcat
+        <$> mapConcurrentlyBounded instructionDirectoryConcurrency
+            readPreferredAgentsMd
+            (globalDir : additionalHarnessHome globalDir)
+
+-- | @~/.haskell-agent@, derived as a sibling of the dialect compatibility
+-- home. Empty when that home is already the harness directory.
+additionalHarnessHome :: OsPath -> [OsPath]
+additionalHarnessHome globalDir
+    | takeFileName globalDir == unsafeEncodeUtf ".haskell-agent" = []
+    | otherwise =
+        [takeDirectory globalDir </> unsafeEncodeUtf ".haskell-agent"]
 
 readGrokHomeRoot :: OsPath -> IO InstructionLoad
 readGrokHomeRoot dir = do
@@ -316,25 +347,38 @@ readRulesDirectory dir = do
 -- | Case-insensitive filesystems can resolve several compatibility spellings
 -- to the same file. Symlinked rule files can do the same. Keep the first
 -- occurrence so order and precedence stay deterministic.
+--
+-- Path canonicalization does not fold APFS case, so identity is the device
+-- and inode when those are available.
 dedupeInstructionFiles :: [InstructionFile] -> IO [InstructionFile]
 dedupeInstructionFiles files = do
-    canonicals <-
-        mapConcurrentlyBounded instructionFileConcurrency canonical files
-    pure (reverse (snd (foldl step (Set.empty, []) (zip canonicals files))))
+    identities <-
+        mapConcurrentlyBounded instructionFileConcurrency identity files
+    pure (reverse (snd (foldl step (Set.empty, []) (zip identities files))))
   where
-    canonical :: InstructionFile -> IO OsPath
-    canonical file =
-        tryAny (canonicalizePath file.instructionPath) >>= \case
-            Left _ -> pure file.instructionPath
-            Right path -> pure path
+    identity :: InstructionFile -> IO InstructionIdentity
+    identity file = do
+        let path = file.instructionPath
+        tryAny (getFileStatus (unsafeToFilePath path)) >>= \case
+            Right status ->
+                pure (InodeIdentity (deviceID status) (fileID status))
+            Left _ ->
+                tryAny (canonicalizePath path) >>= \case
+                    Left _ -> pure (PathIdentity path)
+                    Right canonical -> pure (PathIdentity canonical)
 
     step
-        :: (Set.Set OsPath, [InstructionFile])
-        -> (OsPath, InstructionFile)
-        -> (Set.Set OsPath, [InstructionFile])
-    step (seen, kept) (canonical, file)
-        | Set.member canonical seen = (seen, kept)
-        | otherwise = (Set.insert canonical seen, file : kept)
+        :: (Set.Set InstructionIdentity, [InstructionFile])
+        -> (InstructionIdentity, InstructionFile)
+        -> (Set.Set InstructionIdentity, [InstructionFile])
+    step (seen, kept) (ident, file)
+        | Set.member ident seen = (seen, kept)
+        | otherwise = (Set.insert ident seen, file : kept)
+
+data InstructionIdentity
+    = InodeIdentity !DeviceID !FileID
+    | PathIdentity !OsPath
+    deriving (Eq, Ord)
 
 findProjectRoot :: [OsPath] -> OsPath -> IO OsPath
 findProjectRoot markers start = go start
