@@ -48,7 +48,8 @@ import Agent.Runtime.Request
     , NativeShellMode(..)
     , NativeTurnRequest(..)
     )
-import Agent.CLI.Options (CliOptions(..))
+import Agent.Runtime.StartupPolicy
+    ( hostNativeStartupPolicy, restrictedNativeStartupPolicy )
 import Agent.CLI.Project (defaultProjectSettings)
 import Agent.CLI.Permission.Types (PermissionChoice(..))
 import Agent.CLI.Runtime.Options (defaultEffortFor)
@@ -1383,26 +1384,11 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
                 , nativeCollaboration = False
                 , nativeProviderNativeTools = False
                 }
-    , nativePrepareOptions =
+    , nativeStartupPolicy =
         case environment.environmentSandbox of
-            Nothing -> Right
-            Just _ -> Right . restrictSandboxOptions cwd
+            Nothing -> hostNativeStartupPolicy
+            Just _ -> restrictedNativeStartupPolicy
     }
-
-restrictSandboxOptions :: FilePath -> CliOptions -> CliOptions
-restrictSandboxOptions cwd options =
-    options
-        { optCwd = Just (unsafeEncodeUtf cwd)
-        , optWorktree = False
-        , optYolo = False
-        , optNoYolo = True
-        , optPromptFile = Nothing
-        , optManagedTurnFile = Nothing
-        , optAgentsMd = False
-        , optSkills = False
-        , optComputerUse = False
-        , optCodeMode = False
-        }
 
 tenantShellMode :: RuntimeEnvironment -> NativeShellMode
 tenantShellMode environment =
