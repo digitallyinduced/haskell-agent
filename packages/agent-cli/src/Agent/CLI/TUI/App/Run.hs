@@ -481,6 +481,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appSubmittedImagePreviews = Map.empty
         , appAgentSelected = initialAgent
         , appAgentEntries = initialAgents
+        , appPullRequestURL = Nothing
         , appAgentHover = Nothing
         , appMarkdownLinkHovered = False
         , appHoveredControl = Nothing

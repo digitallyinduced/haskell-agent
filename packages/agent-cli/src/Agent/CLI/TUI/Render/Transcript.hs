@@ -50,7 +50,7 @@ import Agent.CLI.TUI.LambdaArt ( lambdaArtWidget )
 import Agent.TUI.Accent ()
 import Agent.CLI.TUI.Types
     ( AppState(appConversationAnchor, appHoveredControl, appHistorySelectedBlock,
-               appAgentEntries, appSlashCatalog, appHistoryWindow, appUi,
+               appAgentEntries, appPullRequestURL, appSlashCatalog, appHistoryWindow, appUi,
                appAgentSelected),
       Name(QuickStartModel, CodeCopy, ConversationChunkCache,
            ConversationReserve, QuickStartWorktree, QuickStartResume,
@@ -355,7 +355,8 @@ stickyPromptLayers state =
         _ -> []
   where
     conversationWidth =
-        if length state.appAgentEntries <= 1 then 100 else 68
+        if length state.appAgentEntries <= 1 && state.appPullRequestURL == Nothing
+            then 100 else 68
 
 stickyPromptPreview :: Text -> Text
 stickyPromptPreview text =

@@ -205,6 +205,7 @@ resetHistoryPage page state =
             either (const empty) id (applyHistoryPage remapped empty)
     in state
         { appUi = reduceUi UiConversationCleared state.appUi
+        , appPullRequestURL = Nothing
         , appHistoryWindow = window
         , appHistorySelectedBlock = Nothing
         , appHistoryLiveStart = Nothing

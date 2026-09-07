@@ -88,6 +88,7 @@ module Agent.CLI.TUI.App
     , clearFullscreenHistorySource
     , reloadFullscreenHistorySource
     , setFullscreenHistorySource
+    , setFullscreenPullRequestURL
     , setFullscreenSessionActions
     , fullscreenBounds
     , fullscreenVtyConfig

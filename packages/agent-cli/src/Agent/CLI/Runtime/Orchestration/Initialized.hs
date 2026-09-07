@@ -83,7 +83,7 @@ import Agent.CLI.ProviderTransition
     , TransitionCause(AutomaticFallback) )
 import Agent.CLI.Resume ( publishResumeHistoryAfterBoundary )
 import Agent.CLI.Runtime.HistorySource
-    ( loadFullscreenHistoryPage, sessionUiPageSize )
+    ( loadFullscreenHistoryPage, sessionUiPageSize, restoreFullscreenPullRequest )
 import Agent.CLI.Runtime.Orchestration.Startup
     ( setStartupRepository )
 import Agent.CLI.Runtime.Orchestration.Tools ( AgentToolsRequest(..)
@@ -518,7 +518,7 @@ resolveInitializedTargets request workspace = do
                         sessionUiPageSize >>= \case
                             Left err ->
                                 startupDie startup err
-                            Right page ->
+                            Right page -> do
                                 setFullscreenHistorySource
                                     runtime
                                     meta.metaId
@@ -531,6 +531,11 @@ resolveInitializedTargets request workspace = do
                                         (HistoryGeneration 0)
                                         HistoryNewer
                                         page)
+                                restoreFullscreenPullRequest
+                                    runtime
+                                    (trustedPool startup.startupDatabaseStore)
+                                    request.initializedRoot
+                                    meta.metaId
     either (startupDie startup) pure resumedHistoryResult
     resumedTarget <-
         either (startupDie startup) pure resumedTargetResult

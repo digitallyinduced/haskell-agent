@@ -339,6 +339,8 @@ applyUiEvent uiEvent state =
         nextState0 =
             state
                 { appUi = nextUi
+                , appPullRequestURL =
+                    Bridge.pullRequestForUiEvent uiEvent previousUi state.appPullRequestURL
                 , appAutoRecapShownThisAway =
                     case uiEvent of
                         UiRecapReady _ -> True

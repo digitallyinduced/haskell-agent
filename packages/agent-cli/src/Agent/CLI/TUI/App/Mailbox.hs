@@ -754,6 +754,8 @@ appEventLogicalBytes = \case
             (logicalTextBytes callId)
             (imagePreviewLogicalBytes preview)
     AppSyntaxHighlighterChanged -> 256
+    AppSetPullRequestURL _ url ->
+        saturatingAdd 256 (maybe 0 logicalTextBytes url)
     AppHistoryReset page ->
         saturatingAdd 256 (historyPageLogicalBytes page)
     AppHistoryLoaded _ result ->

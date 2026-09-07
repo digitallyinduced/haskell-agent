@@ -427,6 +427,11 @@ setFullscreenSessionActions
             , sessionAgentSelect = agentSelect
             }
 
+setFullscreenPullRequestURL :: FullscreenRuntime -> Maybe Text -> IO ()
+setFullscreenPullRequestURL runtime url = do
+    generation <- HistoryGeneration <$> readIORef runtime.runtimeHistoryGeneration
+    enqueueAppEvent runtime (AppSetPullRequestURL generation url)
+
 setFullscreenHistorySource
     :: FullscreenRuntime
     -> Text

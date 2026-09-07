@@ -194,6 +194,52 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "pull request event state" do
+        let url = "https://github.com/owner/repository/pull/42"
+            association generation =
+                FullscreenScriptApp (AppSetPullRequestURL (HistoryGeneration generation) (Just url))
+        it "accepts the active session generation and rejects a different generation" do
+            runtime <- newScriptRuntime initialUiState
+            let initialState = initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, associated) <- runFullscreenScriptWithState initialState
+                [association 0, FullscreenScriptHalt]
+            associated.appPullRequestURL `shouldBe` Just url
+            (_, unchanged) <- runFullscreenScriptWithState associated
+                [ FullscreenScriptApp (AppSetPullRequestURL (HistoryGeneration 1) Nothing)
+                , FullscreenScriptHalt
+                ]
+            unchanged.appPullRequestURL `shouldBe` Just url
+        it "clears a previous session association and rejects its delayed result" do
+            runtime <- newScriptRuntime initialUiState
+            let initialState = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    { appPullRequestURL = Just url }
+                page = HistoryPage
+                    { historyPageGeneration = HistoryGeneration 1
+                    , historyPageDirection = HistoryNewer
+                    , historyPageTurns = Seq.empty
+                    , historyPageGenerationStart = HistoryCursor 0
+                    , historyPageTotalTurns = 0
+                    , historyPageHasOlder = False
+                    , historyPageHasNewer = False
+                    }
+            (_, cleared) <- runFullscreenScriptWithState initialState
+                [ FullscreenScriptApp (AppHistoryReset page)
+                , association 0
+                , FullscreenScriptHalt
+                ]
+            cleared.appPullRequestURL `shouldBe` Nothing
+        it "reflows a cached transcript when the pull request pane appears" do
+            let body = Text.unwords (replicate 18 "transcript")
+                bounds = (160, 24)
+            initialState <- cachedHistoryState [markerBlock (BlockId (-1)) body]
+            (_, frames, finalState) <- runFullscreenScriptDetailedAt bounds initialState
+                [association 0, FullscreenScriptHalt]
+            finalState.appPullRequestURL `shouldBe` Just url
+            frames `shouldSatisfy` (not . null)
+            let finalText = renderedPictureTextAt bounds (last frames)
+            finalText `shouldSatisfy` Text.isInfixOf "PR #42"
+            finalText `shouldBe` renderedAppText bounds finalState
+
     describe "fullscreen worker ownership" do
         it "closes input and preserves a cooperative worker result" do
             closed <- newEmptyMVar
@@ -1695,6 +1741,36 @@ spec = do
                 `shouldBe` [9]
 
     describe "Agents pane layout" do
+        it "shows the current pull request below agents and without children" do
+            runtime <- newScriptRuntime initialUiState
+            let state entries =
+                    (initialFullscreenAppState runtime [] AgentRoot entries 0)
+                        { appPullRequestURL =
+                            Just "https://github.com/owner/repository/pull/42"
+                        }
+                withAgents = renderedAppText (120, 35)
+                    (state [rootEntry, childEntry 1])
+                withoutAgents = renderedAppText (120, 35) (state [rootEntry])
+                rowOf text = length . takeWhile (not . Text.isInfixOf text) . Text.lines
+            withAgents `shouldSatisfy` Text.isInfixOf "PR #42"
+            withAgents `shouldSatisfy` Text.isInfixOf "owner/repository"
+            rowOf "PR #42" withAgents `shouldSatisfy`
+                (> rowOf "Agents" withAgents)
+            withoutAgents `shouldSatisfy` Text.isInfixOf "PR #42"
+            withoutAgents `shouldSatisfy` (not . Text.isInfixOf "Agents ·")
+
+        it "hides the pull request in narrow terminals and when absent" do
+            runtime <- newScriptRuntime initialUiState
+            let state = initialFullscreenAppState runtime [] AgentRoot [rootEntry] 0
+                withPullRequest = state
+                    { appPullRequestURL =
+                        Just "https://github.com/owner/repository/pull/42"
+                    }
+            renderedAppText (71, 35) withPullRequest `shouldSatisfy`
+                (not . Text.isInfixOf "PR #42")
+            renderedAppText (120, 35) state `shouldSatisfy`
+                (not . Text.isInfixOf "Pull request")
+
         it "hides below the responsive breakpoint and without children" do
             agentPaneVisible 71 20 [rootEntry, childEntry 1]
                 `shouldBe` False
@@ -2677,7 +2753,14 @@ runFullscreenScriptDetailed
     :: AppState
     -> [FullscreenScriptEvent]
     -> IO (ByteString.ByteString, [V.Picture], AppState)
-runFullscreenScriptDetailed initialState script = do
+runFullscreenScriptDetailed = runFullscreenScriptDetailedAt (80, 24)
+
+runFullscreenScriptDetailedAt
+    :: (Int, Int)
+    -> AppState
+    -> [FullscreenScriptEvent]
+    -> IO (ByteString.ByteString, [V.Picture], AppState)
+runFullscreenScriptDetailedAt bounds initialState script = do
     let scriptedApp = App
             { appDraw = fullscreenApp.appDraw
             , appChooseCursor = fullscreenApp.appChooseCursor
@@ -2704,7 +2787,6 @@ runFullscreenScriptDetailed initialState script = do
             }
     events <- newBChan (max 1 (length script))
     mapM_ (writeBChan events) script
-    let bounds = (80, 24)
     (_, mockOutput) <- VMock.mockTerminal bounds
     outputBytes <- newIORef ByteString.empty
     renderedFrames <- newIORef []

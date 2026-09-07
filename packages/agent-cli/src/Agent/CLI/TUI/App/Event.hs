@@ -216,6 +216,11 @@ handleEvent event = do
         resolveConversationFollow
     when (isMotionTick event) refreshNativeProgressKeepalive
     handleEventInner event
+    stateAfterEvent <- get
+    when (isJust stateBeforeEvent.appPullRequestURL
+        /= isJust stateAfterEvent.appPullRequestURL) do
+        invalidateCache
+        queueConversationReflow
     when (eventMayExposeSyntax event) requestVisibleSyntaxLanguages
     state <- get
     let visible =
@@ -285,6 +290,7 @@ handleEvent event = do
         AppDictationPartial{} -> True
         AppAgentSnapshot{} -> True
         AppSetWindowTitle{} -> True
+        AppSetPullRequestURL{} -> True
         AppSyntaxHighlighterChanged -> True
         AppHistoryLiveStarted -> True
         AppConversationReflow -> True
@@ -315,6 +321,7 @@ handleEvent event = do
 
     agentStructureRequiresUnfocusedRedraw previous next =
         previous.appAgentSelected /= next.appAgentSelected
+            || previous.appPullRequestURL /= next.appPullRequestURL
             || agentChromeSignature previous.appAgentEntries
                 /= agentChromeSignature next.appAgentEntries
 
@@ -425,6 +432,10 @@ handleAppEvent = \case
         handleSetWindowTitleEvent title
     AppSyntaxHighlighterChanged ->
         handleSyntaxHighlighterChangedEvent
+    AppSetPullRequestURL generation url -> do
+        state <- get
+        when (generation == state.appHistoryWindow.historyWindowGeneration) $
+            modify' \current -> current { appPullRequestURL = url }
     AppHistoryReset page ->
         handleHistoryResetEvent page
     AppHistoryLoaded request result ->
