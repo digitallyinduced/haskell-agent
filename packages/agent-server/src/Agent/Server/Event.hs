@@ -27,6 +27,7 @@ import Agent.ToolDispatch
     , toolCallResultMode
     , toolCallResultImages
     )
+import Agent.Tools.DisplayMap (decodeMapResult)
 import Data.Aeson (Value, object, (.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
@@ -352,11 +353,15 @@ toolResultValue result = object
     [ "callId" .= publicText result.callId
     , "kind" .= toolCallKindText result.callKind
     , "async" .= (toolCallResultMode result == AsyncToolCall)
-    , "output" .= fst (boundedPublicText result.output)
-    , "truncated" .= snd (boundedPublicText result.output)
+    , "output" .= fst visibleOutput
+    , "truncated" .= snd visibleOutput
     -- Deliberately do not serialize image URLs/data URLs into SSE.
     , "imageCount" .= length (toolCallResultImages result)
     ]
+  where
+    visibleOutput = case decodeMapResult result.output of
+        Just _ -> (result.output, False)
+        Nothing -> boundedPublicText result.output
 
 usageValue :: TokenUsage -> Value
 usageValue usage = object

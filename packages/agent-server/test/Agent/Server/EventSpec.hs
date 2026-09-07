@@ -3,6 +3,7 @@ module Agent.Server.EventSpec (spec) where
 import Agent.Loop
     ( LoopEvent(..) )
 import Agent.Server.Event
+import Agent.Tools.DisplayMap (MapResult(..), MapLocation(..), renderMapResult)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
@@ -22,6 +23,36 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "public loop-event projection" do
+    it "preserves complete bounded map documents in SSE" do
+        let result = MapResult "Places"
+                [MapLocation (Text.pack (show index)) (Text.replicate 100 "x") 0 0 Nothing Nothing
+                | index <- [1..100 :: Int]]
+        case renderMapResult result of
+            Left err -> expectationFailure (Text.unpack err)
+            Right output -> do
+                Text.length output `shouldSatisfy` (> 16 * 1024)
+                let (eventType, value) = projectLoopEvent
+                        (ToolFinished (ToolCallResult
+                            "map-1" output FunctionCallKind BlockingToolCall [] Nothing))
+                eventType `shouldBe` "tool.finished"
+                value `shouldBe` object
+                    [ "callId" .= ("map-1" :: Text.Text)
+                    , "kind" .= ("function" :: Text.Text)
+                    , "async" .= False
+                    , "output" .= output
+                    , "truncated" .= False
+                    , "imageCount" .= (0 :: Int)
+                    ]
+
+    it "still truncates malformed or unsupported map output" do
+        let output = "{\"type\":\"map\",\"version\":2,\"padding\":\""
+                <> Text.replicate (20 * 1024) "x" <> "\"}"
+            (_, value) = projectLoopEvent
+                (ToolFinished (ToolCallResult
+                    "map-invalid" output FunctionCallKind BlockingToolCall [] Nothing))
+        LBS8.unpack (encode value) `shouldContain` "\"truncated\":true"
+        LBS8.length (encode value) `shouldSatisfy` (< 18 * 1024)
+
     it "never serializes encrypted tool arguments" do
         let (_, value) = projectLoopEvent
                 (ToolStarted ToolCall

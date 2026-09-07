@@ -43,7 +43,7 @@ The document is an intentionally versioned cross-client presentation protocol.
 It travels in the existing persisted function-tool output and versioned native
 loop event output field. No new in-process JSON request API is introduced.
 Validated documents retain their complete content through native event framing,
-session JSON hydration, and oversized-output finalization. Clients must
+public SSE `tool.finished` events, session JSON hydration, and oversized-output finalization. Clients must
 preserve them when compacting display rows, rather than truncating arguments
 and attempting to reconstruct a map from those arguments.
 
