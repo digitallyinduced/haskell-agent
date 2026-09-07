@@ -36,6 +36,7 @@ common common-opts
 library
     import:           common-opts
     exposed-modules:  Agent.MCP
+                    , Agent.MCP.Artifact
                     , Agent.MCP.Client
                     , Agent.MCP.Elicitation
                     , Agent.MCP.Fleet
@@ -81,6 +82,7 @@ test-suite agent-mcp-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.MCPSpec
+                    , Agent.MCP.ArtifactSpec
                     , Agent.MCP.InProcessSpec
                     , Agent.MCP.OAuthSpec
     build-depends:    base >= 4.14 && < 5

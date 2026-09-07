@@ -252,6 +252,9 @@ data McpHostHooks = McpHostHooks
     -- 'Nothing' means sampling must not be advertised to the server.
     , mcpHostClientName :: !Text
     , mcpHostClientVersion :: !Text
+    , mcpHostArtifactDirectory :: !(Maybe FilePath)
+    -- ^ Caller-owned private process directory. Nothing disables automatic
+    -- materialization of explicitly tagged MCP artifact resources.
     }
 
 defaultMcpHostHooks :: McpHostHooks
@@ -261,6 +264,7 @@ defaultMcpHostHooks = McpHostHooks
     , mcpHostSample = pure Nothing
     , mcpHostClientName = "haskell-agent"
     , mcpHostClientVersion = "0.1.0"
+    , mcpHostArtifactDirectory = Nothing
     }
 
 -- | A server's request for user input, delivered either as a legacy

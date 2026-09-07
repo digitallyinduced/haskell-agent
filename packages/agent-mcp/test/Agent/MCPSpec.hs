@@ -1180,6 +1180,21 @@ spec = describe "Agent.MCP" do
                 contents `shouldContain` "Method not found: sampling/createMessage"
                 contents `shouldNotContain` "set-level:"
 
+    it "materializes tagged MCP artifacts using the originating fleet client" $
+        withDistinctWorkingDirectories \directory _ ->
+            withCountingServer artifactFakeServer \script log -> do
+                setFileMode directory 0o700
+                let hooks = defaultMcpHostHooks { mcpHostArtifactDirectory = Just directory }
+                bracket
+                    (startMcpFleetWithProgressHooks hooks (const (pure ()))
+                        [(baseConfig "artifacts" script) { mcpServerArgs = [log] }])
+                    closeMcpFleet \fleet -> do
+                        result <- callFleetTool fleet "artifacts__download" "{}"
+                        result.output `shouldSatisfy` Text.isInfixOf "[artifact] "
+                        files <- listDirectory directory
+                        length files `shouldBe` 1
+                        countLogEntries log "read" `shouldReturn` 1
+
     it "drives a modern server through discovery, elicitation, subscriptions, and tasks" $
         withCountingServer modernFakeServer \script log -> do
             elicited <- newIORef []
@@ -2128,6 +2143,23 @@ fakeServer =
     \      fi\n\
     \      ;;\n\
     \  esac\n\
+    \done\n"
+
+artifactFakeServer :: LBS.ByteString
+artifactFakeServer =
+    "#!/bin/sh\n\
+    \log=\"$1\"\n\
+    \while IFS= read -r line; do\n\
+    \ id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p')\n\
+    \ case \"$line\" in\n\
+    \ *'\"method\":\"server/discover\"'*) result='{\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}';;\n\
+    \ *'\"method\":\"initialize\"'*) result='{\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"tools\":{},\"resources\":{}},\"serverInfo\":{\"name\":\"artifacts\",\"version\":\"1\"}}}';;\n\
+    \ *'\"method\":\"tools/list\"'*) result='{\"result\":{\"tools\":[{\"name\":\"download\",\"description\":\"Download\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":true}}]}}';;\n\
+    \ *'\"method\":\"tools/call\"'*) result='{\"result\":{\"content\":[{\"type\":\"resource_link\",\"uri\":\"opaque:attachment\",\"name\":\"note.txt\",\"size\":3,\"_meta\":{\"dev.haskell-agent/artifact\":true}}]}}';;\n\
+    \ *'\"method\":\"resources/read\"'*) printf 'read\\n' >> \"$log\"; result='{\"result\":{\"contents\":[{\"uri\":\"opaque:attachment\",\"blob\":\"YWJj\"}]}}';;\n\
+    \ *) continue;;\n\
+    \ esac\n\
+    \ printf '{\"jsonrpc\":\"2.0\",\"id\":%s,%s\\n' \"$id\" \"${result#\\{}\"\n\
     \done\n"
 
 paginationCycleServer :: LBS.ByteString

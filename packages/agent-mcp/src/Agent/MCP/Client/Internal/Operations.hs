@@ -1,5 +1,7 @@
 module Agent.MCP.Client.Internal.Operations where
 
+import Agent.MCP.Artifact (materializeArtifacts)
+import Agent.MCP.Types (McpHostHooks(mcpHostArtifactDirectory))
 import Agent.MCP.Types (McpToolServer(..), McpCallToolRequest(..), McpCallToolResult(..))
 import Agent.Json
     ( rawJsonBytes, rawJsonDecoder, rawJsonEncoding, rawJsonFromEncoding, RawJson )
@@ -35,7 +37,7 @@ import Agent.MCP.Types
       McpSkillEntry,
       McpSkillsCapability,
       McpClient(clientConfig, clientDiscoveredSkills, clientTransport,
-                clientServerInfo, clientLifecycle,
+                clientServerInfo, clientLifecycle, clientHooks,
                 clientResourceSubscriptionsRequested,
                 clientResourceSubscriptionsAccepted),
       McpClientLifecycle(ClientReady, ClientClosed),
@@ -646,7 +648,13 @@ callDiscoveredToolWith client tool arguments onProgress = do
             }
         >>= \case
         Left err -> pure (Left (renderMcpError err))
-        Right result -> pure (normalizeMcpToolResult result)
+        Right result -> case normalizeMcpToolResult result of
+            Left err -> pure (Left err)
+            Right rendered -> case client.clientHooks.mcpHostArtifactDirectory of
+                Nothing -> pure (Right rendered)
+                Just directory ->
+                    materializeArtifacts directory (readMcpResource client) result
+                        >>= pure . fmap (\paths -> Text.intercalate "\n" (rendered : paths))
 
 toolAllowsAutomaticReissue :: McpTool -> Bool
 toolAllowsAutomaticReissue =
