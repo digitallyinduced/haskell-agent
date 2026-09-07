@@ -14,6 +14,7 @@ module Agent.CLI.NativeRuntime
     , StartupFailure(..)
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
+    , newNativeProcessRuntimeWithIntegrations
     , nativeProcessIntegrationSupervisor
     , nativeTurnOptions
     , applyNativeStartupPolicy
@@ -23,10 +24,13 @@ module Agent.CLI.NativeRuntime
     ) where
 
 import qualified Agent.CLI.NativeProcess as NativeProcess
-import Agent.Integrations
+import Agent.Integration.API
     ( IntegrationSupervisor
     , closeIntegrationSupervisor
     , newIntegrationSupervisor
+    , IntegrationProvider
+    , emptyIntegrationProvider
+    , integrationSupervisorArtifactDirectory
     )
 import Agent.Runtime.StartupPolicy
     ( NativeStartupPolicy(..)
@@ -67,6 +71,7 @@ import Agent.Runtime.Request
     )
 import Agent.TUI.Motion (MotionMode(..))
 import Agent.Tools.Types (defaultToolEnv)
+import qualified Agent.MCP as MCP
 import Control.Exception.Safe (finally, mask, onException)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -82,12 +87,19 @@ data NativeProcessRuntime = NativeProcessRuntime
     }
 
 newNativeProcessRuntime :: OsPath -> IO NativeProcessRuntime
-newNativeProcessRuntime root = mask \restore -> do
-    core <- restore (NativeProcess.newNativeProcessRuntime root)
+newNativeProcessRuntime = newNativeProcessRuntimeWithIntegrations emptyIntegrationProvider
+
+newNativeProcessRuntimeWithIntegrations
+    :: IntegrationProvider -> OsPath -> IO NativeProcessRuntime
+newNativeProcessRuntimeWithIntegrations provider root = mask \restore -> do
     integrationToolEnv <- restore (defaultToolEnv root)
     integrations <-
-        restore (newIntegrationSupervisor integrationToolEnv)
-            `onException` NativeProcess.closeNativeProcessRuntime core
+        restore (newIntegrationSupervisor provider integrationToolEnv)
+    core <- restore (NativeProcess.newNativeProcessRuntimeWithMcpHooks
+        MCP.defaultMcpHostHooks
+            { MCP.mcpHostArtifactDirectory =
+                Just (integrationSupervisorArtifactDirectory integrations) }
+        root) `onException` closeIntegrationSupervisor integrations
     pure NativeProcessRuntime
         { nativeProcessCore = core
         , nativeIntegrationSupervisor = integrations

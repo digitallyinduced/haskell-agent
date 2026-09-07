@@ -11,6 +11,7 @@ module Agent.CLI.NativeProcess
         , nativeMcpSampling
         )
     , newNativeProcessRuntime
+    , newNativeProcessRuntimeWithMcpHooks
     , closeNativeProcessRuntime
     , restartNativeMcpRuntime
     ) where
@@ -52,7 +53,13 @@ data NativeProcessRuntime = NativeProcessRuntime
     }
 
 newNativeProcessRuntime :: OsPath -> IO NativeProcessRuntime
-newNativeProcessRuntime root = mask \restore -> do
+newNativeProcessRuntime = newNativeProcessRuntimeWithMcpHooks MCP.defaultMcpHostHooks
+
+-- | Embedders may supply generic MCP host services. Elicitation remains owned
+-- by this process and is replaced when its frontend interaction target changes.
+newNativeProcessRuntimeWithMcpHooks
+    :: MCP.McpHostHooks -> OsPath -> IO NativeProcessRuntime
+newNativeProcessRuntimeWithMcpHooks hostHooks root = mask \restore -> do
     elicitationRef <- newIORef Nothing
     rootsRef <- newIORef Nothing
     samplingRef <- newIORef Nothing
@@ -74,7 +81,7 @@ newNativeProcessRuntime root = mask \restore -> do
     mcpSupervisor <-
         restore
             (MCP.newMcpSupervisorWith
-                MCP.defaultMcpHostHooks
+                hostHooks
                     { MCP.mcpHostElicit = readIORef elicitationRef
                     , MCP.mcpHostRoots = readIORef rootsRef
                     , MCP.mcpHostSample = readIORef samplingRef

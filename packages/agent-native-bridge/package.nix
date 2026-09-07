@@ -1,5 +1,5 @@
 { mkDerivation, aeson, agent-cli, agent-cli-runtime, agent-core
-, agent-integrations, agent-json, agent-mcp, agent-openai
+, agent-integration-api, agent-json, agent-mcp, agent-openai
 , agent-openrouter, agent-repository, agent-responses-types
 , agent-runtime-daemon, agent-store, agent-xai, async, base
 , base64-bytestring, bytestring, containers, directory, filelock
@@ -15,7 +15,7 @@ mkDerivation {
     bytestring containers filepath network-uri text time transformers
   ];
   testHaskellDepends = [
-    aeson agent-cli agent-cli-runtime agent-core agent-integrations
+    aeson agent-cli agent-cli-runtime agent-core agent-integration-api
     agent-json agent-mcp agent-openai agent-openrouter agent-repository
     agent-responses-types agent-runtime-daemon agent-store agent-xai
     async base base64-bytestring bytestring containers directory

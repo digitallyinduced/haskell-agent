@@ -29,3 +29,24 @@ Provider-neutral infrastructure shared by the harness transports:
   into its successor.
 
 This package does not contain OpenAI, ChatGPT, xAI, or OpenRouter transport logic.
+
+# Automatic artifact resources
+
+Hosts can set `mcpHostArtifactDirectory` to a process-owned private directory.
+The caller owns its cleanup and authorizes the directory for consuming sessions.
+A tool result can request bounded materialization with:
+
+```json
+{"type":"resource_link","uri":"opaque:reference","name":"report.pdf","size":123,
+ "_meta":{"dev.haskell-agent/artifact":true}}
+```
+
+The client reads this URI using `resources/read` on the same MCP connection
+(including its authentication), never as a URL. The response must contain exactly
+one matching resource with a base64 `blob`, no text, and the exact declared byte
+length. Files are uniquely named, owner-only, and atomically published. Failed
+batches remove files already produced. At most eight artifacts and 20 MiB decoded
+bytes are accepted per tool response. Only reads of explicitly tagged artifacts
+allow 32 MiB of JSON or SSE framing to fit base64 blobs; ordinary responses,
+including untagged resource reads, retain their 16 MiB limit. Untagged links are
+not fetched automatically. No artifacts are fetched from failed tool results.

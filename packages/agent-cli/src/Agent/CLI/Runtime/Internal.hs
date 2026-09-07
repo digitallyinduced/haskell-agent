@@ -45,9 +45,11 @@ import Agent.CLI.McpStatus
     , formatMcpProgress
     )
 import Agent.Connectivity.NetworkPath (withNetworkRecovery)
-import Agent.Integrations
+import Agent.Integration.API
     ( closeIntegrationSupervisor
     , newIntegrationSupervisor
+    , emptyIntegrationProvider
+    , integrationSupervisorArtifactDirectory
     )
 import Agent.CLI.Options
     ( CliOptions
@@ -234,18 +236,21 @@ runAgentWithRestarts options =
                 -- session-scoped: provider restarts must not rescan every
                 -- worktree. 'withAsync' owns and joins the worker on shutdown.
                 withAsync (takeMVar cleanupRequest >>= id) \_ -> do
+                    integrationToolEnv <- defaultToolEnv root
+                    integrationSupervisor <-
+                        newIntegrationSupervisor emptyIntegrationProvider integrationToolEnv
                     mcpSupervisor <-
                         MCP.newMcpSupervisorWith
                             MCP.defaultMcpHostHooks
                                 { MCP.mcpHostElicit = readIORef elicitationRef
                                 , MCP.mcpHostRoots = readIORef rootsRef
                                 , MCP.mcpHostSample = readIORef samplingRef
+                                , MCP.mcpHostArtifactDirectory = Just
+                                    (integrationSupervisorArtifactDirectory
+                                        integrationSupervisor)
                                 }
-                    integrationToolEnv <- defaultToolEnv root
-                    integrationSupervisor <-
-                        newIntegrationSupervisor integrationToolEnv
                             `onException`
-                                MCP.closeMcpSupervisor mcpSupervisor
+                                closeIntegrationSupervisor integrationSupervisor
                     sessionThreads <-
                         newSessionThreadManager root
                             `onException`
@@ -276,11 +281,11 @@ runAgentWithRestarts options =
                         `finally`
                             (closeSessionThreadManager sessionThreads
                                 `finally`
-                                    (closeIntegrationSupervisor
-                                        integrationSupervisor
+                                    (MCP.closeMcpSupervisor
+                                        mcpSupervisor
                                         `finally`
-                                            MCP.closeMcpSupervisor
-                                                mcpSupervisor)))
+                                            closeIntegrationSupervisor
+                                                integrationSupervisor)))
         (pure DevQuit)
 
 loginMcpWithScopes :: [Text] -> Text -> IO ()

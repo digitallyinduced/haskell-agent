@@ -1,6 +1,5 @@
 module Main (main) where
 
-import Agent.Mail.Contract
 import Agent.Mail.Imap
 import Agent.Mail.Mime
 import Agent.Mail.OAuth
@@ -20,55 +19,7 @@ import Test.Hspec
 
 main :: IO ()
 main = hspec do
-    describe "email MCP contract" do
-        it "keeps the canonical model-facing tool names" do
-            map (.mailMcpToolName) mailMcpTools `shouldBe`
-                [ "email_list_accounts"
-                , "email_list_mailboxes"
-                , "email_search"
-                , "email_get"
-                , "email_download_attachment"
-                , "email_create_draft"
-                , "email_update_draft"
-                , "email_reply_draft"
-                , "email_send"
-                ]
-
-        it "requires fresh approval for every mailbox mutation" do
-            map (.mailMcpToolName)
-                (filter (.mailMcpToolRequiresFreshApproval) mailMcpTools)
-                `shouldBe` mailMutationToolNames
-
-        it "round trips structured results only for the exact contract" do
-            let accounts =
-                    [ MailAccountSummary
-                        "account-ref"
-                        "gmail"
-                        "person@example.com"
-                        Nothing
-                        True
-                        True
-                    ]
-            decodeMailMcpResult (mailMcpSuccess accounts)
-                `shouldBe` Right accounts
-            let incompatible = object
-                    [ "structuredContent" .= object
-                        [ "contract" .= ("other" :: Text)
-                        , "version" .= mailContractVersion
-                        , "data" .= accounts
-                        ]
-                    , "isError" .= False
-                    ]
-            (decodeMailMcpResult incompatible
-                :: Either Text [MailAccountSummary])
-                `shouldBe` Left "Error in $: incompatible email MCP contract"
-
-        it "publishes closed object schemas" do
-            mailMcpToolDefinitions `shouldSatisfy` all closedSchema
-
-        it "publishes an exact output envelope for every tool" do
-            mailMcpToolDefinitions `shouldSatisfy` all hasOutputSchema
-
+    describe "email domain types" do
         it "requires fail-closed account status flags" do
             let partial = object
                     [ "account_id" .= ("account-ref" :: Text)
@@ -113,56 +64,28 @@ main = hspec do
                     KeyMap.member "has_attachments" value `shouldBe` False
                 _ -> expectationFailure "expected a search object"
 
-        it "does not expose gateway-supplied error text" do
-            let result =
-                    decodeMailMcpResult
-                        (mailMcpFailure
-                            "mailbox-controlled instructions and secret text")
-                        :: Either Text [MailAccountSummary]
-            result `shouldBe` Left "Error in $: email operation failed"
-
-        it "rejects non-canonical gateway error payloads before normalizing them" do
-            let oversized = object
-                    [ "structuredContent" .= object
-                        [ "contract" .= mailContractId
-                        , "version" .= mailContractVersion
-                        , "error" .= Text.replicate (16 * 1024 * 1024) " "
-                        ]
-                    , "isError" .= True
-                    ]
-            (decodeMailMcpResult oversized
-                :: Either Text [MailAccountSummary])
-                `shouldBe` Left
-                    "Error in $: incompatible email MCP contract"
-
         it "rejects any draft result that claims an email was sent" do
             let unsafeResult = object
-                    [ "content" .= ([] :: [Value])
-                    , "structuredContent" .= object
-                        [ "contract" .= mailContractId
-                        , "version" .= mailContractVersion
-                        , "data" .= object
-                            [ "draft_id" .= ("draft-ref" :: Text)
-                            , "message_id" .= (Nothing :: Maybe Text)
-                            , "thread_id" .= (Nothing :: Maybe Text)
-                            , "warning" .= (Nothing :: Maybe Text)
-                            , "saved" .= True
-                            , "sent" .= True
-                            ]
-                        ]
-                    , "isError" .= False
+                    [ "draft_id" .= ("draft-ref" :: Text)
+                    , "message_id" .= (Nothing :: Maybe Text)
+                    , "thread_id" .= (Nothing :: Maybe Text)
+                    , "warning" .= (Nothing :: Maybe Text)
+                    , "saved" .= True
+                    , "sent" .= True
                     ]
-            (decodeMailMcpResult unsafeResult :: Either Text MailDraft)
+            (Aeson.fromJSON unsafeResult :: Result MailDraft)
                 `shouldSatisfy` \case
-                    Left _ -> True
-                    Right _ -> False
+                    Error _ -> True
+                    Success _ -> False
 
         it "accepts only an affirmative send result" do
-            decodeMailMcpResult (mailMcpSuccess MailSendResult)
-                `shouldBe` Right MailSendResult
-            let unconfirmed = mailMcpSuccess (object ["sent" .= False])
-            (decodeMailMcpResult unconfirmed :: Either Text MailSendResult)
-                `shouldSatisfy` isFailure
+            Aeson.fromJSON (Aeson.toJSON MailSendResult)
+                `shouldBe` Success MailSendResult
+            let unconfirmed = object ["sent" .= False]
+            (Aeson.fromJSON unconfirmed :: Result MailSendResult)
+                `shouldSatisfy` \case
+                    Error _ -> True
+                    Success _ -> False
 
     describe "OAuth PKCE" do
         it "matches the RFC 7636 S256 example" do
@@ -491,21 +414,6 @@ main = hspec do
             result `shouldBe`
                 (Left "The email account credential is invalid."
                     :: Either Text [MailboxSummary])
-
-closedSchema :: Value -> Bool
-closedSchema (Object tool) =
-    case KeyMap.lookup "inputSchema" tool of
-        Just (Object input) ->
-            KeyMap.lookup "additionalProperties" input == Just (Bool False)
-        _ -> False
-closedSchema _ = False
-
-hasOutputSchema :: Value -> Bool
-hasOutputSchema (Object tool) =
-    case KeyMap.lookup "outputSchema" tool of
-        Just (Object output) -> KeyMap.member "oneOf" output
-        _ -> False
-hasOutputSchema _ = False
 
 gmailMessageWithPayload :: Value -> Value
 gmailMessageWithPayload payload = object

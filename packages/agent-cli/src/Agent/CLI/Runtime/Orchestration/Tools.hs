@@ -42,9 +42,9 @@ import Agent.CLI.LearnedSkills.Store
     )
 import Agent.CLI.Lsp
     ( LspStartup(..), closeLspRuntime, lspRuntimeTool, newLspRuntime )
-import Agent.Integrations
-    ( IntegrationAuthority(..)
-    , IntegrationRuntime
+import Agent.CLI.IntegrationGateway (gatewayIntegrationAuthority)
+import Agent.Integration.API
+    ( IntegrationRuntime
     , acquireIntegrationRuntime
     , prepareIntegrationSupervisorForSession
     )
@@ -335,10 +335,7 @@ acquireSessionIntegrationRuntime request =
             pure Nothing
         Right runtime -> pure (Just runtime)
   where
-    authority = maybe
-        LocalIntegrationAuthority
-        OrganizationIntegrationAuthority
-        request.connectedGateway
+    authority = gatewayIntegrationAuthority request.connectedGateway
 
 acquireLocalToolRuntime
     :: AgentToolsRequest windowTitleResult

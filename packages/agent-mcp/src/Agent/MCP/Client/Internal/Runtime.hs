@@ -359,6 +359,9 @@ data McpRequest = McpRequest
     -- ^ Whether the exact request may automatically be sent again (for
     -- input-required continuation or OAuth refresh). Sensitive tools whose
     -- approval is explicitly one-shot disable this.
+    , requestArtifactResource :: !Bool
+    -- ^ A resources/read request for validated, explicitly tagged artifacts.
+    -- Only this path may consume the larger base64 response envelope.
     }
 
 clientRequest :: McpClient -> Text -> Series -> McpRequest
@@ -373,6 +376,7 @@ clientRequest client method parameters = McpRequest
     , requestMeta = True
     , requestOnProgress = Nothing
     , requestAllowReissue = True
+    , requestArtifactResource = False
     }
 
 -- | Compatibility entry point: one request, rendered error.
@@ -1401,11 +1405,12 @@ httpExchange client transport era request pending message = do
                         else if isEventStream headers
                             then readSseStream client (responseBody response) pending request
                             else do
-                                readBounded (responseBody response) >>= \case
+                                readBoundedWithLimit (requestBodyLimit request)
+                                    (responseBody response) >>= \case
                                     Left _ ->
                                         pure (HttpFailed (McpTransportError
                                             ("MCP HTTP response exceeded "
-                                                <> Text.pack (show mcpBodyLimit) <> " bytes")))
+                                                <> Text.pack (show (requestBodyLimit request)) <> " bytes")))
                                     Right bytes ->
                                         if BS.null (BS8.strip bytes)
                                             then pure HttpDelivered
@@ -1478,18 +1483,32 @@ retryUnauthorizedOnce allowReissue path refresh replay
 -- reported before retaining any further bytes, so an unexpectedly large
 -- diagnostic/JSON body cannot become a process-sized allocation.
 readBounded :: HC.BodyReader -> IO (Either Int BS.ByteString)
-readBounded reader = go [] 0
+readBounded = readBoundedWithLimit mcpBodyLimit
+
+readBoundedWithLimit :: Int -> HC.BodyReader -> IO (Either Int BS.ByteString)
+readBoundedWithLimit requestedLimit reader = go [] 0
   where
+    limit = max 0 requestedLimit
     go chunks total = do
         chunk <- brRead reader
         if BS.null chunk
             then pure (Right (BS.concat (reverse chunks)))
-            else if BS.length chunk > mcpBodyLimit - total
-                then pure (Left mcpBodyLimit)
+            else if BS.length chunk > limit - total
+                then pure (Left limit)
                 else go (chunk : chunks) (total + BS.length chunk)
 
 mcpBodyLimit :: Int
 mcpBodyLimit = 16 * 1024 * 1024
+
+requestBodyLimit :: McpRequest -> Int
+requestBodyLimit request =
+    responseBodyLimitFor request.requestMethod request.requestArtifactResource
+
+responseBodyLimitFor :: Text -> Bool -> Int
+responseBodyLimitFor method artifact
+    | method == "resources/read" && artifact =
+        32 * 1024 * 1024
+    | otherwise = mcpBodyLimit
 
 isEventStream :: [Header] -> Bool
 isEventStream headers =
@@ -1586,7 +1605,7 @@ readSseStream client reader pending request = do
                             -- concatenating.  A peer can otherwise force an
                             -- arbitrarily large retained buffer by omitting
                             -- newlines.
-                            case splitSseChunk buffer bytes of
+                            case splitSseChunkWithLimit (requestBodyLimit request) buffer bytes of
                                 Left err -> pure (HttpFailed err)
                                 Right (complete, rest) ->
                                     foldLines dataLines dataBytes complete >>= \case
@@ -1602,7 +1621,7 @@ readSseStream client reader pending request = do
         | Just payload <- BS.stripPrefix "data:" line =
             let value = fromMaybe payload (BS.stripPrefix " " payload)
                 valueBytes = BS.length value + 1
-            in if valueBytes > mcpSseEventLimit - dataBytes
+            in if valueBytes > requestBodyLimit request - dataBytes
                 then pure (Left (McpTransportError
                     "MCP SSE event exceeded the size limit"))
                 else
@@ -1630,8 +1649,14 @@ splitSseChunk
     :: BS.ByteString
     -> BS.ByteString
     -> Either McpError ([BS.ByteString], BS.ByteString)
-splitSseChunk initial chunk = go initial chunk []
+splitSseChunk = splitSseChunkWithLimit mcpSseLineLimit
+
+splitSseChunkWithLimit
+    :: Int -> BS.ByteString -> BS.ByteString
+    -> Either McpError ([BS.ByteString], BS.ByteString)
+splitSseChunkWithLimit requestedLimit initial chunk = go initial chunk []
   where
+    limit = max 0 requestedLimit
     go partial rest reversedLines =
         case BS.elemIndex 10 rest of
             Nothing
@@ -1652,7 +1677,7 @@ splitSseChunk initial chunk = go initial chunk []
                         in go BS.empty remainder (line : reversedLines)
 
     exceedsLineLimit left right =
-        BS.length right > mcpSseLineLimit - BS.length left
+        BS.length right > limit - BS.length left
 
 stripCarriage :: BS.ByteString -> BS.ByteString
 stripCarriage line = fromMaybe line (BS.stripSuffix "\r" line)

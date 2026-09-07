@@ -1,9 +1,9 @@
 cabal-version:      3.0
 name:               agent-mail
 version:            0.1.0.0
-synopsis:           Provider-neutral email contract for Haskell Agent
+synopsis:           Low-level email types and provider transports
 description:
-    Shared email domain types, Model Context Protocol schemas, and bounded
+    Shared email domain types, protocol codecs, and bounded
     provider transports used by standalone agents and organization gateways.
 license:            MIT
 license-file:       LICENSE
@@ -39,7 +39,6 @@ library
     import:          common-options
     hs-source-dirs:  src
     exposed-modules:
-        Agent.Mail.Contract
         Agent.Mail.Imap
         Agent.Mail.Mime
         Agent.Mail.OAuth

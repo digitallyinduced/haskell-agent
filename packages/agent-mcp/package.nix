@@ -16,8 +16,9 @@ mkDerivation {
     safe-exceptions scientific stm text time transformers unix vector
   ];
   testHaskellDepends = [
-    aeson agent-core agent-json async base bytestring containers
-    directory filepath hspec network QuickCheck safe-exceptions stm
+    aeson agent-core agent-json async base base64-bytestring bytestring
+    containers directory filepath hspec network QuickCheck
+    safe-exceptions stm
     text time unix
   ];
   benchmarkHaskellDepends = [

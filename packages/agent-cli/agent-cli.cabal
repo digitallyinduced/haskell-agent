@@ -157,6 +157,7 @@ library
                     , Agent.CLI.TUI.Render.Workspace
                     , Paths_agent_cli
     exposed-modules:  Agent.CLI
+                    , Agent.CLI.IntegrationGateway
                     , Agent.CLI.ActiveAccount
                     , Agent.CLI.AccountPicker
                     , Agent.CLI.AccountSelection
@@ -303,7 +304,7 @@ library
                     , agent-cli-runtime:Agent.CLI.SessionLock as Agent.CLI.SessionLock
     build-depends:    agent-cli-runtime >= 0.1 && < 0.2
                     , agent-external-session >= 0.1 && < 0.2
-                    , agent-integrations >= 0.1 && < 0.2
+                    , agent-integration-api >= 0.1 && < 0.2
                     , agent-connectivity >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
                     , agent-mcp >= 0.1 && < 0.2
@@ -540,6 +541,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ExternalProgramSpec
                     , Agent.CLI.FileUriSpec
                     , Agent.CLI.GatewayModelsSpec
+                    , Agent.CLI.IntegrationGatewaySpec
                     , Agent.CLI.GitDiffSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec

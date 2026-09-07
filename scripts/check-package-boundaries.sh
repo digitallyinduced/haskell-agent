@@ -7,6 +7,7 @@ external_session="$root/packages/agent-external-session"
 repository="$root/packages/agent-repository"
 bridge="$root/packages/agent-native-bridge"
 runtime="$root/packages/agent-cli-runtime"
+integration_api="$root/packages/agent-integration-api"
 
 fail() {
   echo "package boundary check failed: $*" >&2
@@ -16,6 +17,24 @@ fail() {
 for package in "$cli" "$external_session" "$repository" "$bridge" "$runtime"; do
   [[ -d "$package" ]] || fail "missing package directory: $package"
 done
+
+# Public builds must remain usable without any proprietary integration source.
+[[ ! -e "$root/packages/agent-integrations" ]] \
+  || fail "concrete integrations returned to the public tree"
+[[ ! -e "$root/packages/agent-mail/src/Agent/Mail/Contract.hs" ]] \
+  || fail "product integration catalog returned to the low-level mail library"
+if rg --line-number '^import[[:space:]]+(qualified[[:space:]]+)?Agent\.Integrations(\.|[[:space:]])' \
+    "$root/packages" --glob '*.hs'; then
+  fail "public source imports a private integration implementation"
+fi
+if rg --line-number '\bagent-integrations\b' "$root/cabal.project" \
+    "$root/flake.nix" "$root/packages" --glob '*.cabal' --glob 'package.nix'; then
+  fail "public build graph depends on private integrations"
+fi
+if rg --line-number 'Agent\.(CLI|Mail|Integrations)(\.|[[:space:]])' \
+    "$integration_api/src"; then
+  fail "integration API gained product or frontend dependencies"
+fi
 
 # The session lifecycle kernel is frontend-independent, even while the legacy
 # composition root is being incrementally migrated out of agent-cli.

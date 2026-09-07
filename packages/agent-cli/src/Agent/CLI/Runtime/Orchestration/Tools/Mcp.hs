@@ -25,7 +25,8 @@ import Agent.CLI.Runtime.Orchestration.Types (AgentProcessRuntime(..), NativeRun
 import Agent.CLI.Session.Runtime.Types (StartupRuntime(..))
 import Agent.CLI.Startup.Auth (setStartupNotice, startupDie)
 import Agent.CLI.TUI.App (emitUiEvent)
-import Agent.Integrations (IntegrationRuntime, integrationRuntimeMcpServer)
+import Agent.Integration.API
+    (IntegrationRuntime(..), IntegrationEndpoint(..), integrationSupervisorArtifactDirectory)
 import Agent.Loop (TurnInput(..))
 import qualified Agent.MCP as MCP
 import Agent.OsPath (unsafeToFilePath)
@@ -36,6 +37,7 @@ import Control.Exception.Safe
 import Control.Monad (forM_, unless, when)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -128,12 +130,21 @@ acquireMcpRuntime request@AgentToolsRequest
     } ScratchRuntime
     { scratchSessionTmp = sessionTmp
     } integrationRuntime = do
-    let (runtimeMcpServerConfigs, runtimeProgressiveMcp) =
+    let (configuredServers, configuredProgressive) =
             mcpConfiguration request toolStartup
-        inMemoryServers = maybe [] (\runtime ->
-            let config = integrationsMcpConfig
-            in [(config, integrationRuntimeMcpServer runtime)])
-            integrationRuntime
+        remoteServers =
+            [config | runtime <- maybeToList integrationRuntime
+            , RemoteIntegrationEndpoint config <- [integrationRuntimeEndpoint runtime]]
+        inMemoryServers =
+            [(integrationsMcpConfig, server)
+            | runtime <- maybeToList integrationRuntime
+            , LocalIntegrationEndpoint server <- [integrationRuntimeEndpoint runtime]]
+        -- Include the in-memory name in the reported configuration too: callers
+        -- use this list to decide whether MCP tools exist at all.
+        runtimeMcpServerConfigs = configuredServers <> remoteServers
+            <> map fst inMemoryServers
+        transportServers = configuredServers <> remoteServers
+        runtimeProgressiveMcp = configuredProgressive && null inMemoryServers
     startStaleResourceCleanup request sessionTmp
     mcpStatusPhaseRef <- newIORef (Nothing :: Maybe Bool)
     mcpFleetRef <- newIORef (Nothing :: Maybe MCP.McpFleet)
@@ -252,6 +263,9 @@ acquireMcpRuntime request@AgentToolsRequest
                                 readIORef processRuntime.processMcpRoots
                             , MCP.mcpHostSample =
                                 readIORef processRuntime.processMcpSampling
+                            , MCP.mcpHostArtifactDirectory = Just
+                                (integrationSupervisorArtifactDirectory
+                                    processRuntime.processIntegrationSupervisor)
                             }
                         (\names ->
                             setStartupNotice startup.startupFullscreen
@@ -261,7 +275,7 @@ acquireMcpRuntime request@AgentToolsRequest
                                         "Loading tools: "
                                             <> Text.intercalate ", " names
                                             <> "…"))
-                        runtimeMcpServerConfigs
+                        transportServers
                         inMemoryServers)
                     >>= \case
                         Left exception ->
