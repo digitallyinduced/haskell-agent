@@ -1,6 +1,6 @@
-module Agent.CLI.MailStoreSpec (spec) where
+module Agent.Integrations.Email.StoreSpec (spec) where
 
-import Agent.CLI.Mail.Store
+import Agent.Integrations.Email.Store
 import Agent.Mail.SecretCodec (mailSecretStorageValue)
 import Agent.OsPath (unsafeToFilePath)
 import Control.Concurrent.Async (concurrently)

@@ -100,6 +100,17 @@
                     ];
                 };
 
+                agentIntegrationsSource = nix-filter.lib {
+                    root = ./packages/agent-integrations;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-integrations.cabal"
+                        "package.nix"
+                        "LICENSE"
+                    ];
+                };
+
                 agentServerClientSource = nix-filter.lib {
                     root = ./packages/agent-server-client;
                     include = [
@@ -624,6 +635,11 @@
                             {
                                 src = agentMailSource;
                             });
+                        agent-integrations = localPackage (pkgs.haskell.lib.overrideSrc
+                            (final.callPackage ./packages/agent-integrations/package.nix { })
+                            {
+                                src = agentIntegrationsSource;
+                            });
                         agent-process = localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-process/package.nix { })
                             {
@@ -871,6 +887,8 @@
                 agentCorePackage = productionHaskellPackages.agent-core;
                 agentMcpPackage = productionHaskellPackages.agent-mcp;
                 agentMailPackage = productionHaskellPackages.agent-mail;
+                agentIntegrationsPackage =
+                    productionHaskellPackages.agent-integrations;
                 agentJsonPackage = productionHaskellPackages.agent-json;
                 agentProcessPackage = productionHaskellPackages.agent-process;
                 agentConnectivityPackage =
@@ -1355,6 +1373,7 @@
                 packages.agent-core = agentCorePackage;
                 packages.agent-mcp = agentMcpPackage;
                 packages.agent-mail = agentMailPackage;
+                packages.agent-integrations = agentIntegrationsPackage;
                 packages.agent-json = agentJsonPackage;
                 packages.agent-process = agentProcessPackage;
                 packages.agent-connectivity = agentConnectivityPackage;
@@ -1414,6 +1433,7 @@
                         packages.agent-core
                         packages.agent-mcp
                         packages.agent-mail
+                        packages.agent-integrations
                         packages.agent-json
                         packages.agent-process
                         packages.agent-connectivity

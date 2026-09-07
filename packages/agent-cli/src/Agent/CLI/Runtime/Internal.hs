@@ -45,6 +45,10 @@ import Agent.CLI.McpStatus
     , formatMcpProgress
     )
 import Agent.Connectivity.NetworkPath (withNetworkRecovery)
+import Agent.Integrations
+    ( closeIntegrationSupervisor
+    , newIntegrationSupervisor
+    )
 import Agent.CLI.Options
     ( CliOptions
     , Command(..)
@@ -86,6 +90,7 @@ import Agent.CLI.Status
     )
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Worktree ( isUnderWorktreeRoot, worktreeRoot )
+import Agent.Tools.Types (defaultToolEnv)
 import Control.Concurrent.Async ( withAsync )
 import Control.Concurrent.MVar ( newEmptyMVar, putMVar, takeMVar )
 import Control.Exception.Safe ( finally, mask_, onException )
@@ -225,9 +230,17 @@ runAgentWithRestarts options =
                         MCP.newMcpSupervisorWith
                             MCP.defaultMcpHostHooks
                                 { MCP.mcpHostElicit = readIORef elicitationRef }
+                    integrationToolEnv <- defaultToolEnv root
+                    integrationSupervisor <-
+                        newIntegrationSupervisor integrationToolEnv
+                            `onException`
+                                MCP.closeMcpSupervisor mcpSupervisor
                     sessionThreads <-
                         newSessionThreadManager root
-                            `onException` MCP.closeMcpSupervisor mcpSupervisor
+                            `onException`
+                                (closeIntegrationSupervisor integrationSupervisor
+                                    `finally`
+                                        MCP.closeMcpSupervisor mcpSupervisor)
                     let startCleanup action = mask_ do
                             shouldStart <- atomicModifyIORef'
                                 cleanupStarted
@@ -237,6 +250,8 @@ runAgentWithRestarts options =
                                 else pure ()
                         processRuntime = AgentProcessRuntime
                             { processMcpSupervisor = mcpSupervisor
+                            , processIntegrationSupervisor =
+                                integrationSupervisor
                             , processSessionThreads = sessionThreads
                             , processStartCleanup = startCleanup
                             , processMcpElicitation = elicitationRef
@@ -248,7 +263,11 @@ runAgentWithRestarts options =
                         `finally`
                             (closeSessionThreadManager sessionThreads
                                 `finally`
-                                    MCP.closeMcpSupervisor mcpSupervisor))
+                                    (closeIntegrationSupervisor
+                                        integrationSupervisor
+                                        `finally`
+                                            MCP.closeMcpSupervisor
+                                                mcpSupervisor)))
         (pure DevQuit)
 
 loginMcpWithScopes :: [Text] -> Text -> IO ()

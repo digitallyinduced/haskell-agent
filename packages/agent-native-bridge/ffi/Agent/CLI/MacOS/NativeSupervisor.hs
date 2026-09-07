@@ -7,7 +7,11 @@ import Agent.CLI.MacOS.AgentSnapshot (activeAgentSnapshot)
 import Agent.CLI.MacOS.BrowserBridge (BrowserHost, browserToolsWhenEnabled)
 import Agent.CLI.MacOS.ComputerBridge
     ( ComputerHost, computerToolSessionWhenEnabled )
-import Agent.CLI.MacOS.EngineCallbacks (invokeTaskSnapshotCallback)
+import Agent.CLI.MacOS.EngineCallbacks
+    ( IntegrationResultCallback
+    , invokeIntegrationResultCallback
+    , invokeTaskSnapshotCallback
+    )
 import Agent.CLI.MacOS.EngineEvents
 import Agent.CLI.MacOS.EngineMailbox
     ( EngineMailbox, acceptEngineCommand, readEngineCommand )
@@ -31,7 +35,19 @@ import Agent.CLI.GatewayClient
     ( withGatewayCredentialLease, withGatewayCredentialTurnLease )
 import Agent.CLI.McpAdmin
     ( McpAdminError, McpAdminSnapshot(..), restartMcpAdminServer )
-import Agent.CLI.NativeRuntime (NativeProcessRuntime, restartNativeMcpRuntime)
+import Agent.CLI.NativeRuntime
+    ( NativeProcessRuntime
+    , nativeProcessIntegrationSupervisor
+    , restartNativeMcpRuntime
+    )
+import Agent.Integrations
+    ( IntegrationAuthority(LocalIntegrationAuthority)
+    , IntegrationError(..)
+    , acquireIntegrationRuntime
+    , callIntegrationRuntimeAdmin
+    , integrationRuntimeAdminDefinitions
+    )
+import Agent.Json (RawJson, rawJsonBytes)
 import Agent.Loop (ImageAttachment, emptyTokenUsage)
 import Agent.Runtime.Daemon.TaskScheduler (TaskIdentity(..), selectRunnableTasks)
 import Agent.Store.Postgres (ManagedPostgresConfig, Store)
@@ -140,6 +156,39 @@ supervisorLoop
                     withText "cannot restart MCP while tasks are active" $
                         invokeMcpResultCallback resultCallback resultContext
                             (-1) expected
+            go supervisor
+        EngineIntegrationAdminList resultCallback resultContext -> do
+            acquireIntegrationRuntime
+                (nativeProcessIntegrationSupervisor processRuntime)
+                LocalIntegrationAuthority >>= \case
+                    Left err ->
+                        sendIntegrationFailure
+                            resultCallback resultContext err
+                    Right runtime ->
+                        sendIntegrationResult
+                            resultCallback
+                            resultContext
+                            (integrationRuntimeAdminDefinitions runtime)
+            go supervisor
+        EngineIntegrationAdminCall
+                name arguments resultCallback resultContext -> do
+            acquireIntegrationRuntime
+                (nativeProcessIntegrationSupervisor processRuntime)
+                LocalIntegrationAuthority >>= \case
+                    Left err ->
+                        sendIntegrationFailure
+                            resultCallback resultContext err
+                    Right runtime ->
+                        callIntegrationRuntimeAdmin
+                            runtime name arguments >>= \case
+                                Left err ->
+                                    sendIntegrationFailure
+                                        resultCallback
+                                        resultContext
+                                        (renderIntegrationError err)
+                                Right result ->
+                                    sendIntegrationResult
+                                        resultCallback resultContext result
             go supervisor
         EngineCancelTask taskId -> do
             next <- cancelTaskById supervisor taskId
@@ -605,6 +654,36 @@ shutdownRunningTurns workerRegistry = do
     forM_ running (cancelTurn . (.runningTurnControl))
     mapM_ (cancel . (.runningTurnWorker)) running
     mapM_ (waitCatch . (.runningTurnWorker)) running
+
+sendIntegrationResult
+    :: FunPtr IntegrationResultCallback
+    -> Ptr ()
+    -> RawJson
+    -> IO ()
+sendIntegrationResult callback context result =
+    BS.useAsCStringLen (rawJsonBytes result) \(pointer, length) ->
+        invokeIntegrationResultCallback
+            callback context 0
+            pointer (fromIntegral length)
+            nullPtr 0
+
+sendIntegrationFailure
+    :: FunPtr IntegrationResultCallback
+    -> Ptr ()
+    -> Text
+    -> IO ()
+sendIntegrationFailure callback context message =
+    withText message \pointer length ->
+        invokeIntegrationResultCallback
+            callback context (-1)
+            nullPtr 0
+            pointer length
+
+renderIntegrationError :: IntegrationError -> Text
+renderIntegrationError = \case
+    IntegrationInvalidInput message -> message
+    IntegrationUnavailable message -> message
+    IntegrationOperationFailed message -> message
 
 withTextBytes :: Text -> (Ptr Word8 -> CSize -> IO a) -> IO a
 withTextBytes value action =

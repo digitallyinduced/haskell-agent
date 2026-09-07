@@ -910,66 +910,15 @@ typedef void (*ha_account_oauth_start_callback)(
 );
 
 /*
- * Email account-management callbacks never expose passwords, OAuth codes,
- * verifiers, or tokens. All UTF-8 buffers are valid only for the duration of
- * the callback and must be copied by the caller.
- *
- * Account-list status is 0 for an item, 1 for end-of-list, and -1 for error.
- * Providers are "gmail", "microsoft", or "imap"; states are "connected",
- * "needs_reauth", or "connection_error".
+ * Generic integration administration returns one complete JSON result.
+ * Status is 0 for success and -1 for failure. Buffers are valid only during
+ * the callback and never contain stored credentials. Operation definitions
+ * identify sensitive input fields so native hosts can keep them out of logs.
  */
-typedef void (*ha_mail_account_list_callback)(
+typedef void (*ha_integration_result_callback)(
     void *context,
     int32_t status,
-    const uint8_t *account_id, size_t account_id_length,
-    const uint8_t *provider, size_t provider_length,
-    const uint8_t *email, size_t email_length,
-    const uint8_t *label, size_t label_length,
-    int32_t enabled,
-    const uint8_t *state, size_t state_length,
-    const uint8_t *error, size_t error_length
-);
-
-/*
- * Browser OAuth uses authorization-code + PKCE with a runtime-owned loopback
- * listener. The callback returns only the public authorization URL and an
- * opaque short-lived flow id. Status is 0 for a challenge or -1 for error.
- */
-typedef void (*ha_mail_oauth_start_callback)(
-    void *context,
-    int32_t status,
-    const uint8_t *authorization_url, size_t authorization_url_length,
-    const uint8_t *flow_id, size_t flow_id_length,
-    int32_t expires_in_seconds,
-    const uint8_t *error, size_t error_length
-);
-
-/*
- * Generic mail results use status 0 for success, status 1 only when an OAuth
- * poll is still pending, and -1 for error. account_id is required after a
- * successful connection or completed OAuth poll and absent for mutations and
- * pending polls.
- */
-typedef void (*ha_mail_result_callback)(
-    void *context,
-    int32_t status,
-    const uint8_t *account_id, size_t account_id_length,
-    const uint8_t *error, size_t error_length
-);
-
-/*
- * Discovery identifies Gmail/Microsoft OAuth or returns editable IMAP
- * defaults. IMAP tls_mode is strictly "tls" or "starttls"; plaintext and
- * certificate-bypass modes do not exist in this ABI.
- */
-typedef void (*ha_mail_discovery_callback)(
-    void *context,
-    int32_t status,
-    const uint8_t *provider, size_t provider_length,
-    const uint8_t *imap_host, size_t imap_host_length,
-    int32_t imap_port,
-    const uint8_t *tls_mode, size_t tls_mode_length,
-    const uint8_t *username, size_t username_length,
+    const uint8_t *json, size_t json_length,
     const uint8_t *error, size_t error_length
 );
 
@@ -1839,64 +1788,21 @@ int32_t ha_account_delete(
 );
 
 /*
- * Mail account operations are process-global. Required inputs are copied and
- * validated as UTF-8 before return. A return of 0 means a worker was accepted;
- * -1 means synchronous rejection and no callback will follow. Every accepted
- * operation invokes exactly one callback, except that an account list emits
- * zero or more items followed by one terminal callback. OAuth status 1
- * completes that poll request; callers issue another poll to continue.
- * Callbacks may run on a runtime worker thread. The caller must keep context
- * alive until the terminal callback; after synchronous rejection, no callback
- * follows and context may be released immediately.
- *
- * OAuth client_id is a public native-app identifier and is persisted for
- * token refresh. No confidential OAuth client secret is accepted.
+ * Integration administration is scoped to an engine and shares its in-memory
+ * integration runtime with agent turns. A return of 0 means the command was
+ * accepted and exactly one callback will follow. Other return values reject
+ * synchronously and do not invoke the callback.
  */
-int32_t ha_mail_accounts_list(
-    ha_mail_account_list_callback callback,
+int32_t ha_engine_integration_admin_list(
+    void *engine,
+    ha_integration_result_callback callback,
     void *context
 );
-int32_t ha_mail_oauth_start(
-    const uint8_t *provider, size_t provider_length,
-    const uint8_t *client_id, size_t client_id_length,
-    ha_mail_oauth_start_callback callback,
-    void *context
-);
-int32_t ha_mail_oauth_poll(
-    const uint8_t *flow_id, size_t flow_id_length,
-    ha_mail_result_callback callback,
-    void *context
-);
-int32_t ha_mail_oauth_cancel(
-    const uint8_t *flow_id, size_t flow_id_length,
-    ha_mail_result_callback callback,
-    void *context
-);
-int32_t ha_mail_discover(
-    const uint8_t *email, size_t email_length,
-    ha_mail_discovery_callback callback,
-    void *context
-);
-int32_t ha_mail_imap_connect(
-    const uint8_t *email, size_t email_length,
-    const uint8_t *label, size_t label_length,
-    const uint8_t *host, size_t host_length,
-    int32_t port,
-    const uint8_t *tls_mode, size_t tls_mode_length,
-    const uint8_t *username, size_t username_length,
-    const uint8_t *password, size_t password_length,
-    ha_mail_result_callback callback,
-    void *context
-);
-int32_t ha_mail_account_set_enabled(
-    const uint8_t *account_id, size_t account_id_length,
-    int32_t enabled,
-    ha_mail_result_callback callback,
-    void *context
-);
-int32_t ha_mail_account_delete(
-    const uint8_t *account_id, size_t account_id_length,
-    ha_mail_result_callback callback,
+int32_t ha_engine_integration_admin_call(
+    void *engine,
+    const uint8_t *name, size_t name_length,
+    const uint8_t *arguments_json, size_t arguments_json_length,
+    ha_integration_result_callback callback,
     void *context
 );
 

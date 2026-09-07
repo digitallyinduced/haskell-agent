@@ -1,11 +1,11 @@
 -- | Local custom-IMAP account connection backed by the standalone store.
-module Agent.CLI.Mail.Imap
+module Agent.Integrations.Email.Imap
     ( connectMailImapAccount
     , verifyMailImapCredentials
     , withMailImapConnection
     ) where
 
-import Agent.CLI.Mail.Store
+import Agent.Integrations.Email.Store
 import Agent.Mail.Imap
     ( verifyMailImapCredentials
     , withMailImapConnection

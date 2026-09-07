@@ -1,16 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Agent.CLI.MailTransportSpec (spec) where
+module Agent.Integrations.Email.TransportSpec (spec) where
 
-import Agent.CLI.Mail.Mime (renderMailDraftMime)
-import Agent.CLI.Mail.Tools
+import Agent.Integrations.Email.Mime (renderMailDraftMime)
+import Agent.Integrations.Email.Tools
     ( MailAttachment(..)
     , MailDraft(..)
     , MailDraftContent(..)
     , MailboxSummary(..)
     , MailMessage(..)
     )
-import Agent.CLI.Mail.Transport
+import Agent.Integrations.Email.Transport
     ( decodeImapDraftId
     , decodeImapMessageId
     , decodeGmailAttachmentRef

@@ -1,6 +1,6 @@
-module Agent.CLI.MailGatewaySpec (spec) where
+module Agent.Integrations.Email.GatewaySpec (spec) where
 
-import Agent.CLI.Mail.Gateway
+import Agent.Integrations.Email.Gateway
 import Agent.Mail.Contract
 import Agent.Mail.Types
 import Agent.OsPath (fromText)

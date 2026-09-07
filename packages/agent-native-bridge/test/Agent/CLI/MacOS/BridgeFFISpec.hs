@@ -12,7 +12,7 @@ import Agent.CLI.MacOS.Bridge
     , cancelPendingInteractions
     , discardStagedTurn
     , discardStagedTurnById
-    , mailABISynchronousValidationSmoke
+    , integrationABISynchronousValidationSmoke
     , resolvePendingInteraction
     , turnStartCleanupId
     )
@@ -78,9 +78,9 @@ spec = describe "native bridge FFI" do
         pendingWith "the native bridge smoke test only links on macOS"
 #endif
 
-    it "rejects invalid mail ABI calls before launching workers" do
+    it "rejects invalid integration ABI calls before launching workers" do
 #ifdef darwin_HOST_OS
-        mailABISynchronousValidationSmoke `shouldReturn` True
+        integrationABISynchronousValidationSmoke `shouldReturn` True
 #else
         pendingWith "the native bridge smoke test only links on macOS"
 #endif

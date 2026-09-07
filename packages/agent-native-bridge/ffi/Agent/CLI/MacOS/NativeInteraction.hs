@@ -281,16 +281,16 @@ requestApprovalFromClient callback context control call = do
 boundedApprovalArguments :: ToolCall -> (Text, Bool)
 boundedApprovalArguments call
     | call.argumentsEncrypted = ("", False)
-    | call.name == "email_send" =
-        boundedText maximumEmailSendApprovalCharacters call.arguments
+    | call.name == "mcp_call" =
+        boundedText maximumMcpApprovalCharacters call.arguments
     | otherwise = boundedEventText call.arguments
   where
     boundedText maximum value =
         let (visible, remainder) = Text.splitAt maximum value
         in (visible, not (Text.null remainder))
 
-maximumEmailSendApprovalCharacters :: Int
-maximumEmailSendApprovalCharacters = 1024 * 1024
+maximumMcpApprovalCharacters :: Int
+maximumMcpApprovalCharacters = 1024 * 1024
 
 requestRootAccessFromClient
     :: FunPtr EventCallback

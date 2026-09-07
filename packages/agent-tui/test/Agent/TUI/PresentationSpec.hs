@@ -190,7 +190,8 @@ spec = describe "tool presentation" do
         toolCallTitle call
             `shouldBe` "seo-mcp: search_performance"
         permissionToolCallPrompt call
-            `shouldBe` "Allow seo-mcp: search_performance?"
+            `shouldBe`
+                "Allow seo-mcp: search_performance?\n\n{\n    \"days\": 90\n}"
         summarizeToolCall
             (functionToolCall
                 "mcp"
@@ -359,59 +360,41 @@ spec = describe "tool presentation" do
             `shouldBe`
                 "Run this shell command?\n\nprintf '␛]0;owned␇'"
 
-    it "shows the bounded content and no-send guarantee for draft approval" do
-        permissionToolCallPrompt
-            (functionToolCall
-                "draft"
-                "email_create_draft"
-                "{\"account_id\":\"mail-1\",\
-                \\"to\":[\"person@example.com\"],\
-                \\"bcc\":[\"archive@example.com\"],\
-                \\"subject\":\"Quarterly update\",\
-                \\"body\":\"Hello,\\n\\nHere is the update.\"}")
-            `shouldBe`
-                "Save this email draft? It will not be sent.\n\n\
-                \Account: mail-1\n\
-                \To: person@example.com\n\
-                \Bcc: archive@example.com\n\
-                \Subject: Quarterly update\n\
-                \Body:\nHello,\n\nHere is the update."
+    it "shows complete nested arguments for integration approval" do
+        let prompt = permissionToolCallPrompt
+                (functionToolCall
+                    "send"
+                    "mcp_call"
+                    "{\"name\":\"integrations__email_send\",\"arguments\":\
+                    \{\"account_id\":\"mail-1\",\"draft_id\":\"draft-1\",\
+                    \\"to\":[\"person@example.com\"],\
+                    \\"subject\":\"Quarterly update\",\
+                    \\"body\":\"Send this now.\"}}")
+        prompt `shouldSatisfy` Text.isPrefixOf
+            "Allow integrations: email_send?"
+        prompt `shouldSatisfy` Text.isInfixOf "\"account_id\": \"mail-1\""
+        prompt `shouldSatisfy` Text.isInfixOf "\"draft_id\": \"draft-1\""
+        prompt `shouldSatisfy` Text.isInfixOf "\"body\": \"Send this now.\""
 
-    it "shows the complete outgoing content for send approval" do
-        permissionToolCallPrompt
-            (functionToolCall
-                "send"
-                "email_send"
-                "{\"account_id\":\"mail-1\",\"draft_id\":\"draft-1\",\
-                \\"to\":[\"person@example.com\"],\
-                \\"subject\":\"Quarterly update\",\
-                \\"body\":\"Send this now.\"}")
-            `shouldBe`
-                "Send this email now? The source draft will remain in Drafts.\n\n\
-                \Account: mail-1\n\
-                \Draft: draft-1\n\
-                \To: person@example.com\n\
-                \Subject: Quarterly update\n\
-                \Body:\nSend this now."
-
-    it "does not truncate send recipients or body text" do
+    it "does not truncate integration mutation arguments" do
         let recipients =
                 [ "person" <> Text.pack (show number) <> "@example.com"
                 | number <- [1 .. 11 :: Int]
                 ]
             body = Text.replicate 2001 "x" <> "visible-tail"
             arguments =
-                "{\"account_id\":\"mail-1\",\"draft_id\":\"draft-1\",\"to\":[\""
+                "{\"name\":\"integrations__email_send\",\"arguments\":\
+                \{\"account_id\":\"mail-1\",\"draft_id\":\"draft-1\",\"to\":[\""
                     <> Text.intercalate "\",\"" recipients
                     <> "\"],\"body\":\""
                     <> body
-                    <> "\\rcontrol-visible\"}"
+                    <> "\\rcontrol-visible\"}}"
             prompt = permissionToolCallPrompt
-                (functionToolCall "send" "email_send" arguments)
+                (functionToolCall "send" "mcp_call" arguments)
         prompt `shouldSatisfy`
             Text.isInfixOf "person11@example.com"
         prompt `shouldSatisfy` Text.isInfixOf "visible-tail"
-        prompt `shouldSatisfy` Text.isInfixOf "↵control-visible"
+        prompt `shouldSatisfy` Text.isInfixOf "\\rcontrol-visible"
         prompt `shouldNotSatisfy` Text.isInfixOf "\r"
 
     it "falls back to the safe prompt text for ask_secret detail" do

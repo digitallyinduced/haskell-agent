@@ -2,6 +2,7 @@ packages:
     packages/agent-connectivity
     packages/agent-process
     packages/agent-mail
+    packages/agent-integrations
     packages/agent-cli-runtime
     packages/agent-external-session
     packages/agent-cli

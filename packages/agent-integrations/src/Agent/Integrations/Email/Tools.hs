@@ -4,7 +4,7 @@
 -- credentials, provider APIs, and IMAP wire handling live behind
 -- 'MailToolsEnv', which keeps this surface deterministic to test and prevents
 -- account secrets from ever becoming tool arguments or tool results.
-module Agent.CLI.Mail.Tools
+module Agent.Integrations.Email.Tools
     ( MailToolLimits(..)
     , defaultMailToolLimits
     , MailAccountSummary(..)
@@ -23,11 +23,22 @@ module Agent.CLI.Mail.Tools
     , MailDraft(..)
     , MailSendRequest(..)
     , MailSendResult(..)
+    , MailAttachmentFile(..)
     , MailToolsEnv(..)
     , MailTransport(..)
+    , mailToolsEnvForStore
     , mailTools
     , mailToolsForStore
     , mailToolsForConnectedAccounts
+    , runListAccounts
+    , runListMailboxes
+    , runSearch
+    , runGetMessage
+    , runDownloadAttachment
+    , runCreateDraft
+    , runUpdateDraft
+    , runReplyDraft
+    , runSend
     , validateMailSearchRequest
     , validateMailDraftContent
     , validateOpaqueMailReference
@@ -60,7 +71,7 @@ import Agent.Mail.Types
     , validateMailSearchRequest, validateOpaqueMailReference
     )
 import Agent.OsPath (unsafeToFilePath)
-import qualified Agent.CLI.Mail.Store as Store
+import qualified Agent.Integrations.Email.Store as Store
 import qualified Agent.Json.Decode as Hermes
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (noArgsTool, typedTool)
@@ -77,7 +88,8 @@ import Control.Monad (unless, void)
 import Crypto.Hash (SHA256)
 import Crypto.MAC.HMAC (HMAC, hmac)
 import Data.Aeson
-    ( Value
+    ( ToJSON(..)
+    , Value
     , object
     , (.=)
     )
@@ -129,16 +141,41 @@ data MailToolsEnv = MailToolsEnv
         :: !(MailSendRequest -> IO (Either Text MailSendResult))
     }
 
+data MailAttachmentFile = MailAttachmentFile
+    { mailAttachmentFilePath :: !FilePath
+    , mailAttachmentFileName :: !(Maybe Text)
+    , mailAttachmentFileContentType :: !(Maybe Text)
+    , mailAttachmentFileSizeBytes :: !Int
+    }
+    deriving (Eq, Show)
+
+instance ToJSON MailAttachmentFile where
+    toJSON attachment = object
+        [ "path" .= attachment.mailAttachmentFilePath
+        , "filename" .= attachment.mailAttachmentFileName
+        , "content_type" .= attachment.mailAttachmentFileContentType
+        , "size_bytes" .= attachment.mailAttachmentFileSizeBytes
+        ]
+
 -- | Construct the first-party mail tools from the canonical mail store.
 -- Registration takes a snapshot, while every invocation rechecks the account
 -- in the store through 'withStoredCredential'.  Thus disabling or deleting an
 -- account immediately revokes its tool access even in a live conversation.
 mailToolsForStore :: ToolEnv -> MailTransport -> IO [AppTool]
 mailToolsForStore toolEnv transport =
-    tryAny (Entropy.getEntropy mailReferenceKeyBytes) >>= \case
+    mailToolsEnvForStore toolEnv transport >>= \case
         Left _ -> pure []
+        Right env -> mailTools env
+
+mailToolsEnvForStore
+    :: ToolEnv
+    -> MailTransport
+    -> IO (Either Text MailToolsEnv)
+mailToolsEnvForStore toolEnv transport =
+    tryAny (Entropy.getEntropy mailReferenceKeyBytes) >>= \case
+        Left _ -> pure (Left "Email tools could not initialize securely.")
         Right referenceKey ->
-            mailTools $ MailToolsEnv
+            pure . Right $ MailToolsEnv
                 { mailToolsToolEnv = toolEnv
         , mailToolsLimits = defaultMailToolLimits
         , mailToolsListAccounts = listStoredAccounts
@@ -561,6 +598,239 @@ credentialCanSend credential =
   where
     hasOAuthScope expected =
         any ((== Text.toCaseFold expected) . Text.toCaseFold)
+
+runListAccounts
+    :: MailToolsEnv
+    -> ()
+    -> IO (Either Text [MailAccountSummary])
+runListAccounts env () =
+    fmap
+        (fmap
+            (map boundedAccount
+                . take maximumAccountResults))
+        (runMailRequest env env.mailToolsListAccounts)
+
+runListMailboxes
+    :: MailToolsEnv
+    -> Text
+    -> IO (Either Text [MailboxSummary])
+runListMailboxes env rawAccountId =
+    case validateOpaqueMailReference "account_id" rawAccountId of
+        Left err -> pure (Left err)
+        Right accountId ->
+            ensureConnectedAccount env accountId >>= \case
+                Left err -> pure (Left err)
+                Right () ->
+                    fmap
+                        (fmap
+                            (map boundedMailbox
+                                . take
+                                    env.mailToolsLimits.mailMaximumMailboxes))
+                        (runMailRequest env $
+                            env.mailToolsListMailboxes
+                                accountId
+                                env.mailToolsLimits.mailMaximumMailboxes)
+
+runSearch
+    :: MailToolsEnv
+    -> MailSearchRequest
+    -> IO (Either Text [MailMessageSummary])
+runSearch env rawRequest =
+    case validateMailSearchRequest env.mailToolsLimits rawRequest of
+        Left err -> pure (Left err)
+        Right request ->
+            ensureConnectedAccount env request.mailSearchAccountId >>= \case
+                Left err -> pure (Left err)
+                Right () ->
+                    fmap
+                        (fmap
+                            (map boundedMessageSummary
+                                . take request.mailSearchLimit))
+                        (runMailRequest env (env.mailToolsSearch request))
+
+runGetMessage
+    :: MailToolsEnv
+    -> MailGetRequest
+    -> IO (Either Text MailMessage)
+runGetMessage env rawRequest =
+    case validateMailGetRequest rawRequest of
+        Left err -> pure (Left err)
+        Right request ->
+            ensureConnectedAccount env request.mailGetAccountId >>= \case
+                Left err -> pure (Left err)
+                Right () ->
+                    fmap
+                        (fmap
+                            (boundedMessage
+                                env.mailToolsLimits))
+                        (runMailRequest env $
+                            env.mailToolsGetMessage
+                                request
+                                env.mailToolsLimits.mailMaximumBodyBytes)
+
+runDownloadAttachment
+    :: MailToolsEnv
+    -> MailAttachmentRequest
+    -> IO (Either Text MailAttachmentFile)
+runDownloadAttachment env rawRequest =
+    case validateMailAttachmentRequest rawRequest of
+        Left err -> pure (Left err)
+        Right request ->
+            ensureConnectedAccount env request.mailAttachmentAccountId >>= \case
+                Left err -> pure (Left err)
+                Right () ->
+                    runMailRequest env
+                        (env.mailToolsDownloadAttachment
+                            request
+                            env.mailToolsLimits.mailMaximumAttachmentBytes)
+                        >>= \case
+                            Left err -> pure (Left err)
+                            Right downloaded ->
+                                let size =
+                                        BS.length
+                                            downloaded.mailDownloadedAttachmentBytes
+                                in if
+                                    size
+                                        > env.mailToolsLimits.mailMaximumAttachmentBytes
+                                    then
+                                        pure
+                                            (Left
+                                                "The attachment exceeded the configured download limit.")
+                                    else
+                                        saveDownloadedAttachment env downloaded >>= \case
+                                            Left err -> pure (Left err)
+                                            Right path ->
+                                                pure . Right $ MailAttachmentFile
+                                                    { mailAttachmentFilePath = path
+                                                    , mailAttachmentFileName =
+                                                        downloaded.mailDownloadedAttachmentFilename
+                                                    , mailAttachmentFileContentType =
+                                                        downloaded.mailDownloadedAttachmentContentType
+                                                    , mailAttachmentFileSizeBytes = size
+                                                    }
+
+runCreateDraft
+    :: MailToolsEnv
+    -> MailCreateDraftRequest
+    -> IO (Either Text MailDraft)
+runCreateDraft env rawRequest =
+    case validateCreateDraft rawRequest of
+        Left err -> pure (Left err)
+        Right request ->
+            ensureConnectedAccount env request.mailCreateDraftAccountId >>= \case
+                Left err -> pure (Left err)
+                Right () ->
+                    fmap (fmap hideDraftThread)
+                        (runMailRequest env
+                            (env.mailToolsCreateDraft request))
+  where
+    validateCreateDraft request =
+        MailCreateDraftRequest
+            <$> validateOpaqueMailReference
+                "account_id"
+                request.mailCreateDraftAccountId
+            <*> validateMailDraftContent
+                env.mailToolsLimits
+                request.mailCreateDraftContent
+
+runUpdateDraft
+    :: MailToolsEnv
+    -> MailUpdateDraftRequest
+    -> IO (Either Text MailDraft)
+runUpdateDraft env rawRequest =
+    case validateUpdateDraft rawRequest of
+        Left err -> pure (Left err)
+        Right request ->
+            ensureConnectedAccount env request.mailUpdateDraftAccountId >>= \case
+                Left err -> pure (Left err)
+                Right () ->
+                    fmap (fmap hideDraftThread)
+                        (runMailRequest env
+                            (env.mailToolsUpdateDraft request))
+  where
+    validateUpdateDraft request =
+        MailUpdateDraftRequest
+            <$> validateOpaqueMailReference
+                "account_id"
+                request.mailUpdateDraftAccountId
+            <*> validateOpaqueMailReference
+                "draft_id"
+                request.mailUpdateDraftId
+            <*> validateMailDraftContent
+                env.mailToolsLimits
+                request.mailUpdateDraftContent
+
+runReplyDraft
+    :: MailToolsEnv
+    -> MailReplyDraftRequest
+    -> IO (Either Text MailDraft)
+runReplyDraft env rawRequest =
+    case validateReplyDraft rawRequest of
+        Left err -> pure (Left err)
+        Right request ->
+            ensureConnectedAccount env request.mailReplyDraftAccountId >>= \case
+                Left err -> pure (Left err)
+                Right () ->
+                    fmap (fmap hideDraftThread)
+                        (runMailRequest env
+                            (env.mailToolsReplyDraft request))
+  where
+    validateReplyDraft request = do
+        accountId <- validateOpaqueMailReference
+            "account_id"
+            request.mailReplyDraftAccountId
+        messageId <- validateOpaqueMailReference
+            "message_id"
+            request.mailReplyDraftMessageId
+        content <- validateMailDraftContent env.mailToolsLimits MailDraftContent
+            { mailDraftTo = request.mailReplyDraftTo
+            , mailDraftCc = []
+            , mailDraftBcc = []
+            , mailDraftSubject = ""
+            , mailDraftBody = request.mailReplyDraftBody
+            }
+        if length content.mailDraftTo == 1
+            then Right MailReplyDraftRequest
+                { mailReplyDraftAccountId = accountId
+                , mailReplyDraftMessageId = messageId
+                , mailReplyDraftTo = content.mailDraftTo
+                , mailReplyDraftBody = content.mailDraftBody
+                }
+            else Left "a reply draft requires exactly one to recipient"
+
+runSend
+    :: MailToolsEnv
+    -> MailSendRequest
+    -> IO (Either Text MailSendResult)
+runSend env rawRequest =
+    case validateSend rawRequest of
+        Left err -> pure (Left err)
+        Right request ->
+            ensureConnectedAccount env request.mailSendAccountId >>= \case
+                Left err -> pure (Left err)
+                Right () ->
+                    runMailSendRequest env (env.mailToolsSend request)
+  where
+    validateSend request = do
+        accountId <- validateOpaqueMailReference
+            "account_id"
+            request.mailSendAccountId
+        draftId <- validateOpaqueMailReference
+            "draft_id"
+            request.mailSendDraftId
+        content <- validateMailDraftContent
+            env.mailToolsLimits
+            request.mailSendContent
+        if null content.mailDraftTo
+            then Left "an email requires at least one to recipient"
+            else Right MailSendRequest
+                { mailSendAccountId = accountId
+                , mailSendDraftId = draftId
+                , mailSendContent = content
+                }
+
+hideDraftThread :: MailDraft -> MailDraft
+hideDraftThread draft = draft { mailDraftThreadId = Nothing }
 
 -- | Register email tools only when at least one connected account is both
 -- enabled and verified.  This prevents an unconfigured email surface from
@@ -1287,6 +1557,31 @@ boundedMessageSummary message = message
     , mailMessageSummarySnippet =
         fmap (truncateUtf8 maximumSnippetBytes) message.mailMessageSummarySnippet
     }
+
+boundedMessage :: MailToolLimits -> MailMessage -> MailMessage
+boundedMessage limits message = message
+    { mailMessageId = boundedOpaque message.mailMessageId
+    , mailMessageThreadId = fmap boundedOpaque message.mailMessageThreadId
+    , mailMessageSubject = fmap boundedShortText message.mailMessageSubject
+    , mailMessageFrom = fmap boundedShortText message.mailMessageFrom
+    , mailMessageReplyTo = fmap boundedShortText message.mailMessageReplyTo
+    , mailMessageTo = fmap boundedShortText message.mailMessageTo
+    , mailMessageCc = fmap boundedShortText message.mailMessageCc
+    , mailMessageReceivedAt =
+        fmap boundedShortText message.mailMessageReceivedAt
+    , mailMessageSentAt = fmap boundedShortText message.mailMessageSentAt
+    , mailMessageBody = boundedBody
+    , mailMessageBodyTruncated =
+        message.mailMessageBodyTruncated
+            || boundedBody /= message.mailMessageBody
+    , mailMessageAttachments =
+        map boundedAttachment message.mailMessageAttachments
+    }
+  where
+    boundedBody =
+        fmap
+            (truncateUtf8 limits.mailMaximumBodyBytes)
+            message.mailMessageBody
 
 boundedAttachment :: MailAttachment -> MailAttachment
 boundedAttachment attachment = attachment

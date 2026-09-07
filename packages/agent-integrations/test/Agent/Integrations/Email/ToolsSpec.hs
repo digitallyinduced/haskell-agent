@@ -1,6 +1,6 @@
-module Agent.CLI.MailToolsSpec (spec) where
+module Agent.Integrations.Email.ToolsSpec (spec) where
 
-import Agent.CLI.Mail.Tools
+import Agent.Integrations.Email.Tools
 import Agent.OsPath (fromText)
 import Agent.ToolDispatch
     ( ToolCallResult(..)

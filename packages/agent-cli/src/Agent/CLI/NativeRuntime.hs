@@ -14,6 +14,7 @@ module Agent.CLI.NativeRuntime
     , StartupFailure(..)
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
+    , nativeProcessIntegrationSupervisor
     , nativeTurnOptions
     , applyNativeStartupPolicy
     , restartNativeMcpRuntime
@@ -21,17 +22,11 @@ module Agent.CLI.NativeRuntime
     , runNativeTurn
     ) where
 
-import Agent.CLI.NativeProcess
-    ( NativeProcessRuntime
-        ( nativeMcpSupervisor
-        , nativeSessionThreads
-        , nativeNetworkRecovery
-        , nativeStartCleanup
-        , nativeMcpElicitation
-        )
-    , closeNativeProcessRuntime
-    , newNativeProcessRuntime
-    , restartNativeMcpRuntime
+import qualified Agent.CLI.NativeProcess as NativeProcess
+import Agent.Integrations
+    ( IntegrationSupervisor
+    , closeIntegrationSupervisor
+    , newIntegrationSupervisor
     )
 import Agent.Runtime.StartupPolicy
     ( NativeStartupPolicy(..)
@@ -71,10 +66,47 @@ import Agent.Runtime.Request
     , validateNativeTurnRequest
     )
 import Agent.TUI.Motion (MotionMode(..))
+import Agent.Tools.Types (defaultToolEnv)
+import Control.Exception.Safe (finally, mask, onException)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.IO (Handle)
 import System.OsPath (OsPath)
+
+-- | Native process resources, including the shared in-memory integrations
+-- host. The core runtime remains in @agent-cli-runtime@; integration ownership
+-- lives here to keep that lower layer independent of integration packages.
+data NativeProcessRuntime = NativeProcessRuntime
+    { nativeProcessCore :: !NativeProcess.NativeProcessRuntime
+    , nativeIntegrationSupervisor :: !IntegrationSupervisor
+    }
+
+newNativeProcessRuntime :: OsPath -> IO NativeProcessRuntime
+newNativeProcessRuntime root = mask \restore -> do
+    core <- restore (NativeProcess.newNativeProcessRuntime root)
+    integrationToolEnv <- restore (defaultToolEnv root)
+    integrations <-
+        restore (newIntegrationSupervisor integrationToolEnv)
+            `onException` NativeProcess.closeNativeProcessRuntime core
+    pure NativeProcessRuntime
+        { nativeProcessCore = core
+        , nativeIntegrationSupervisor = integrations
+        }
+
+closeNativeProcessRuntime :: NativeProcessRuntime -> IO ()
+closeNativeProcessRuntime runtime =
+    NativeProcess.closeNativeProcessRuntime runtime.nativeProcessCore
+        `finally`
+            closeIntegrationSupervisor runtime.nativeIntegrationSupervisor
+
+restartNativeMcpRuntime :: NativeProcessRuntime -> IO ()
+restartNativeMcpRuntime =
+    NativeProcess.restartNativeMcpRuntime . (.nativeProcessCore)
+
+nativeProcessIntegrationSupervisor
+    :: NativeProcessRuntime
+    -> IntegrationSupervisor
+nativeProcessIntegrationSupervisor = (.nativeIntegrationSupervisor)
 
 -- | Execute one typed native turn without reconstructing command-line
 -- arguments.
@@ -169,12 +201,18 @@ runNativeOptions
 runNativeOptions runtime output cwd hooks options =
     runAgentWithRuntime
         AgentProcessRuntime
-            { processMcpSupervisor = runtime.nativeMcpSupervisor
-            , processSessionThreads = runtime.nativeSessionThreads
-            , processStartCleanup = runtime.nativeStartCleanup
-            , processMcpElicitation = runtime.nativeMcpElicitation
+            { processMcpSupervisor =
+                runtime.nativeProcessCore.nativeMcpSupervisor
+            , processIntegrationSupervisor =
+                runtime.nativeIntegrationSupervisor
+            , processSessionThreads =
+                runtime.nativeProcessCore.nativeSessionThreads
+            , processStartCleanup =
+                runtime.nativeProcessCore.nativeStartCleanup
+            , processMcpElicitation =
+                runtime.nativeProcessCore.nativeMcpElicitation
             , processNetworkRecovery =
-                networkRecovery runtime.nativeNetworkRecovery
+                networkRecovery runtime.nativeProcessCore.nativeNetworkRecovery
             }
         (nativeRunMode output cwd hooks)
         (applyNativeStartupPolicy hooks.nativeStartupPolicy cwd

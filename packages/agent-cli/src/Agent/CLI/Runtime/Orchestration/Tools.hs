@@ -42,9 +42,12 @@ import Agent.CLI.LearnedSkills.Store
     )
 import Agent.CLI.Lsp
     ( LspStartup(..), closeLspRuntime, lspRuntimeTool, newLspRuntime )
-import Agent.CLI.Mail.Gateway (GatewayMailRuntime(..), gatewayMailTools)
-import Agent.CLI.Mail.Tools (mailToolsForStore)
-import Agent.CLI.Mail.Transport (productionMailTransport)
+import Agent.Integrations
+    ( IntegrationAuthority(..)
+    , IntegrationRuntime
+    , acquireIntegrationRuntime
+    , prepareIntegrationSupervisorForSession
+    )
 import Agent.CLI.ModelConfig (builtinConnectionId)
 import Agent.CLI.Models (ModelTarget(targetConnectionId, targetWireModelId))
 import Agent.CLI.Options
@@ -200,8 +203,7 @@ runAgentTools request = withResourceScope \resourceScope -> do
     let scratchRuntime =
             acquiredScratchRuntime
                 { scratchCleanup = releaseResource scratchKey }
-    (mailKey, (mailAppTools, _)) <-
-        allocateResource resourceScope (acquireMailRuntime request) snd
+    integrationRuntime <- acquireSessionIntegrationRuntime request
     ( (acquiredResources, (computerUseKey, runtimeComputerUse))
       , (initialContext, initialContextPreload)
       ) <-
@@ -214,7 +216,8 @@ runAgentTools request = withResourceScope \resourceScope -> do
                         toolStartup
                         toolModelRuntime
                         collaborationRuntime
-                        scratchRuntime)
+                        scratchRuntime
+                        integrationRuntime)
                     (.runtimeCloseMcp)
                     (acquireLocalToolRuntime
                         request
@@ -248,7 +251,9 @@ runAgentTools request = withResourceScope \resourceScope -> do
           ) = acquiredResources
         mcpRuntime =
             acquiredMcpRuntime
-                { runtimeCloseMcp = releaseResource mcpKey }
+                { runtimeCloseMcp =
+                    releaseResource mcpKey
+                }
         localToolRuntime =
             acquiredLocalToolRuntime
                 { localCoding =
@@ -258,16 +263,13 @@ runAgentTools request = withResourceScope \resourceScope -> do
         lspRuntime = lspStartup.lspStartupRuntime
         runtimeCoding = localToolRuntime.localCoding
         runtimeExtraTools =
-            mailAppTools
-                <> maybe [] (pure . webFetchRuntimeTool) webFetchRuntime
+            maybe [] (pure . webFetchRuntimeTool) webFetchRuntime
                 <> maybe [] (pure . lspRuntimeTool) lspRuntime
         runtimeCloseExtraTools =
-            releaseResource mailKey
-                `finally`
-                    (releaseResource computerUseKey
-                        `finally` concurrently_
-                            (releaseResource lspKey)
-                            (releaseResource webFetchKey))
+            releaseResource computerUseKey
+                `finally` concurrently_
+                    (releaseResource lspKey)
+                    (releaseResource webFetchKey)
         codingRuntime = CodingRuntime{..}
     mapM_
         (reportStartupWarning request.startup)
@@ -305,26 +307,27 @@ runAgentTools request = withResourceScope \resourceScope -> do
         sessionControlRuntime
         sessionToolsRuntime
 
--- The connected gateway is authoritative: an unavailable gateway mail
--- backend leaves mail disabled rather than loading local account credentials.
-acquireMailRuntime
+-- The connected gateway is authoritative: an unavailable organization
+-- integration does not fall back to local account data.
+acquireSessionIntegrationRuntime
     :: AgentToolsRequest windowTitleResult
-    -> IO ([AppTool], IO ())
-acquireMailRuntime request =
-    case request.connectedGateway of
-        Nothing -> do
-            tools <- mailToolsForStore request.baseToolEnv productionMailTransport
-            pure (tools, pure ())
-        Just credential ->
-            gatewayMailTools request.baseToolEnv credential >>= \case
-                Left err -> do
-                    reportStartupWarning request.startup err
-                    pure ([], pure ())
-                Right runtime ->
-                    pure
-                        ( runtime.gatewayMailRuntimeTools
-                        , runtime.gatewayMailRuntimeClose
-                        )
+    -> IO (Maybe IntegrationRuntime)
+acquireSessionIntegrationRuntime request =
+    prepareIntegrationSupervisorForSession
+        request.processRuntime.processIntegrationSupervisor
+        request.baseToolEnv
+        >> acquireIntegrationRuntime
+            request.processRuntime.processIntegrationSupervisor
+            authority >>= \case
+        Left err -> do
+            reportStartupWarning request.startup err
+            pure Nothing
+        Right runtime -> pure (Just runtime)
+  where
+    authority = maybe
+        LocalIntegrationAuthority
+        OrganizationIntegrationAuthority
+        request.connectedGateway
 
 acquireLocalToolRuntime
     :: AgentToolsRequest windowTitleResult

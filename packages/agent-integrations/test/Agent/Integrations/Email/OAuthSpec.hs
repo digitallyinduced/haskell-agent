@@ -1,7 +1,7 @@
-module Agent.CLI.MailOAuthSpec (spec) where
+module Agent.Integrations.Email.OAuthSpec (spec) where
 
-import Agent.CLI.Mail.OAuth
-import Agent.CLI.Mail.Store (MailProvider(GmailProvider, MicrosoftProvider))
+import Agent.Integrations.Email.OAuth
+import Agent.Integrations.Email.Store (MailProvider(GmailProvider, MicrosoftProvider))
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (bracket, finally)
 import qualified Data.ByteString as BS
@@ -27,12 +27,23 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "mail OAuth loopback callback" do
-    it "requests Gmail compose/read and the Graph send scope" $ do
-        gmail <- requireChallenge GmailProvider "test-client.apps.googleusercontent.com"
-        microsoft <- requireChallenge MicrosoftProvider "00000000-0000-0000-0000-000000000000"
+    it "does not start workers after its owner closes" do
+        runtime <- newMailOAuthRuntime
+        closeMailOAuthRuntime runtime
+        startMailOAuth
+            runtime
+            GmailProvider
+            "test-client.apps.googleusercontent.com"
+            `shouldReturn`
+                Left "The mail OAuth runtime is already closed."
+
+    it "requests Gmail compose/read and the Graph send scope" $
+      withOAuthRuntime \runtime -> do
+        gmail <- requireChallenge runtime GmailProvider "test-client.apps.googleusercontent.com"
+        microsoft <- requireChallenge runtime MicrosoftProvider "00000000-0000-0000-0000-000000000000"
         let cleanup = do
-                _ <- cancelMailOAuth gmail.mailOAuthFlowId
-                _ <- cancelMailOAuth microsoft.mailOAuthFlowId
+                _ <- cancelMailOAuth runtime gmail.mailOAuthFlowId
+                _ <- cancelMailOAuth runtime microsoft.mailOAuthFlowId
                 pure ()
         (do
             gmailScope <- requireQueryValue "scope" gmail.mailOAuthAuthorizationUrl
@@ -49,15 +60,16 @@ spec = describe "mail OAuth loopback callback" do
             microsoftScope `shouldSatisfy` Text.isInfixOf "Mail.Send"
          ) `finally` cleanup
 
-    it "ignores a preconnection and accepts a fragmented matching callback" do
-        started <- startMailOAuth
+    it "ignores a preconnection and accepts a fragmented matching callback" $
+      withOAuthRuntime \runtime -> do
+        started <- startMailOAuth runtime
             GmailProvider
             "test-client.apps.googleusercontent.com"
         challenge <- case started of
             Left err -> expectationFailure (Text.unpack err) >> fail "OAuth did not start"
             Right value -> pure value
         let cleanup = do
-                _ <- cancelMailOAuth challenge.mailOAuthFlowId
+                _ <- cancelMailOAuth runtime challenge.mailOAuthFlowId
                 pure ()
         (do
             state <- requireQueryValue
@@ -86,28 +98,32 @@ spec = describe "mail OAuth loopback callback" do
                 response `shouldSatisfy` maybe False
                     ("HTTP/1.1 200 OK" `BS.isPrefixOf`)
 
-            result <- waitForOAuthResult 100 challenge.mailOAuthFlowId
+            result <- waitForOAuthResult runtime 100 challenge.mailOAuthFlowId
             result `shouldSatisfy` \case
                 Right (MailOAuthFailed message) ->
                     "access_denied" `Text.isInfixOf` message
                 _ -> False
          ) `finally` cleanup
 
-requireChallenge :: MailProvider -> Text -> IO MailOAuthChallenge
-requireChallenge provider clientId =
-    startMailOAuth provider clientId >>= \case
+requireChallenge :: MailOAuthRuntime -> MailProvider -> Text -> IO MailOAuthChallenge
+requireChallenge runtime provider clientId =
+    startMailOAuth runtime provider clientId >>= \case
         Left err -> expectationFailure (Text.unpack err) >> fail "OAuth did not start"
         Right challenge -> pure challenge
 
-waitForOAuthResult :: Int -> Text -> IO (Either Text MailOAuthPoll)
-waitForOAuthResult remaining flowId
+waitForOAuthResult :: MailOAuthRuntime -> Int -> Text -> IO (Either Text MailOAuthPoll)
+waitForOAuthResult runtime remaining flowId
     | remaining <= 0 = pure (Left "OAuth callback test timed out")
     | otherwise =
-        pollMailOAuth flowId >>= \case
+        pollMailOAuth runtime flowId >>= \case
             Right MailOAuthPending -> do
                 threadDelay 10_000
-                waitForOAuthResult (remaining - 1) flowId
+                waitForOAuthResult runtime (remaining - 1) flowId
             result -> pure result
+
+withOAuthRuntime :: (MailOAuthRuntime -> IO value) -> IO value
+withOAuthRuntime =
+    bracket newMailOAuthRuntime closeMailOAuthRuntime
 
 withLoopbackClient :: Int -> (Socket -> IO value) -> IO value
 withLoopbackClient port action = do

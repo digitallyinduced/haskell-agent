@@ -48,12 +48,6 @@ import qualified Agent.CLI.ConfigSpec as ConfigSpec
 import qualified Agent.CLI.CompactionSpec as CompactionSpec
 import qualified Agent.CLI.ContextSpec as ContextSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
-import qualified Agent.CLI.MailStoreSpec as MailStoreSpec
-import qualified Agent.CLI.MailMimeSpec as MailMimeSpec
-import qualified Agent.CLI.MailGatewaySpec as MailGatewaySpec
-import qualified Agent.CLI.MailOAuthSpec as MailOAuthSpec
-import qualified Agent.CLI.MailToolsSpec as MailToolsSpec
-import qualified Agent.CLI.MailTransportSpec as MailTransportSpec
 import qualified Agent.CLI.DialectsSpec as DialectsSpec
 import qualified Agent.CLI.DatabaseSpec as DatabaseSpec
 import qualified Agent.CLI.DesktopSpec as DesktopSpec
@@ -186,12 +180,6 @@ specs = do
     CompactionSpec.spec
     ContextSpec.spec
     ConnectivitySpec.spec
-    MailStoreSpec.spec
-    MailMimeSpec.spec
-    MailGatewaySpec.spec
-    MailOAuthSpec.spec
-    MailToolsSpec.spec
-    MailTransportSpec.spec
     DialectsSpec.spec
     DatabaseSpec.spec
     DesktopSpec.spec

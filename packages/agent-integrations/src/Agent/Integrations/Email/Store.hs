@@ -4,7 +4,7 @@
 -- tokens and IMAP passwords live only in an owner-only atomic snapshot and
 -- are never returned by the C ABI. A separate metadata-only mirror contains
 -- no secrets. Mutations are protected across threads and processes.
-module Agent.CLI.Mail.Store
+module Agent.Integrations.Email.Store
     ( MailProvider(..)
     , mailProviderSlug
     , parseMailProvider

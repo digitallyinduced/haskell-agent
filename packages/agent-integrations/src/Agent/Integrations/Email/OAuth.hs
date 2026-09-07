@@ -6,8 +6,11 @@
 -- verifiers, callback codes, and tokens remain in the Haskell runtime.  The
 -- callback listener is bound exclusively to IPv4 loopback and each flow is
 -- tracked until it is polled or cancelled.
-module Agent.CLI.Mail.OAuth
-    ( MailOAuthChallenge(..)
+module Agent.Integrations.Email.OAuth
+    ( MailOAuthRuntime
+    , newMailOAuthRuntime
+    , closeMailOAuthRuntime
+    , MailOAuthChallenge(..)
     , MailOAuthPoll(..)
     , startMailOAuth
     , pollMailOAuth
@@ -15,7 +18,7 @@ module Agent.CLI.Mail.OAuth
     , refreshMailOAuthCredential
     ) where
 
-import Agent.CLI.Mail.Store
+import Agent.Integrations.Email.Store
 import qualified Agent.Mail.OAuth as SharedOAuth
 import Control.Applicative ((<|>))
 import Control.Concurrent (ThreadId, forkFinally, killThread)
@@ -25,6 +28,7 @@ import Control.Concurrent.MVar
     , modifyMVar_
     , newEmptyMVar
     , newMVar
+    , putMVar
     , readMVar
     , tryPutMVar
     , tryReadMVar
@@ -70,7 +74,6 @@ import Network.Socket
     )
 import qualified Network.Socket.ByteString as Socket
 import System.Entropy (getEntropy)
-import System.IO.Unsafe (unsafePerformIO)
 import System.Timeout (timeout)
 
 data MailOAuthChallenge = MailOAuthChallenge
@@ -109,36 +112,55 @@ data OAuthFlow = OAuthFlow
     , flowResult :: !(MVar MailOAuthPoll)
     , flowExpiresAt :: !UTCTime
     , flowWorker :: !ThreadId
+    , flowFinished :: !(MVar ())
     }
 
-{-# NOINLINE activeFlows #-}
-activeFlows :: MVar (Map.Map Text OAuthFlow)
-activeFlows = unsafePerformIO (newMVar Map.empty)
+data MailOAuthRuntime = MailOAuthRuntime
+    { oauthActiveFlows :: !(MVar (Map.Map Text OAuthFlow))
+    , oauthStartLock :: !(MVar ())
+    , oauthClosed :: !(MVar Bool)
+    }
 
-{-# NOINLINE oauthStartLock #-}
-oauthStartLock :: MVar ()
-oauthStartLock = unsafePerformIO (newMVar ())
+newMailOAuthRuntime :: IO MailOAuthRuntime
+newMailOAuthRuntime = do
+    oauthActiveFlows <- newMVar Map.empty
+    oauthStartLock <- newMVar ()
+    oauthClosed <- newMVar False
+    pure MailOAuthRuntime{..}
+
+closeMailOAuthRuntime :: MailOAuthRuntime -> IO ()
+closeMailOAuthRuntime runtime =
+    withMVar runtime.oauthStartLock \_ -> do
+        modifyMVar_ runtime.oauthClosed (const (pure True))
+        flows <- modifyMVar runtime.oauthActiveFlows \active ->
+            pure (Map.empty, Map.elems active)
+        mapM_ cancelFlow flows
 
 -- | Starts a public-client authorization-code flow. OAuth client secrets are
 -- deliberately not accepted anywhere in this API.
 startMailOAuth
-    :: MailProvider
+    :: MailOAuthRuntime
+    -> MailProvider
     -> Text
     -> IO (Either Text MailOAuthChallenge)
-startMailOAuth provider rawClientId
+startMailOAuth runtime provider rawClientId
     | provider == ImapProvider =
         pure (Left "Custom IMAP accounts use password authentication, not OAuth.")
     | Left err <- validateMailOAuthClientId provider clientId =
         pure (Left err)
-    | otherwise = withMVar oauthStartLock \_ -> do
-        pruneExpiredFlows
-        activeCount <- Map.size <$> readMVar activeFlows
-        if activeCount >= maximumActiveOAuthFlows
-            then pure (Left
-                "Too many email authorization windows are already open.")
-            else tryAny begin >>= \case
-                Left exception -> pure (Left (sanitizeException exception))
-                Right challenge -> pure (Right challenge)
+    | otherwise = withMVar runtime.oauthStartLock \_ -> do
+        closed <- readMVar runtime.oauthClosed
+        if closed
+            then pure (Left "The mail OAuth runtime is already closed.")
+            else do
+                pruneExpiredFlows runtime
+                activeCount <- Map.size <$> readMVar runtime.oauthActiveFlows
+                if activeCount >= maximumActiveOAuthFlows
+                    then pure (Left
+                        "Too many email authorization windows are already open.")
+                    else tryAny begin >>= \case
+                        Left exception -> pure (Left (sanitizeException exception))
+                        Right challenge -> pure (Right challenge)
   where
     clientId = Text.strip rawClientId
     begin = do
@@ -150,6 +172,7 @@ startMailOAuth provider rawClientId
             flowId <- randomUrlText 24
             now <- getCurrentTime
             result <- newEmptyMVar
+            finished <- newEmptyMVar
             let redirectUri =
                     "http://" <> redirectHost provider <> ":"
                         <> Text.pack (show port) <> "/mail/callback"
@@ -166,45 +189,50 @@ startMailOAuth provider rawClientId
                     }
             worker <- forkFinally
                 (runOAuthFlow provider clientId verifier state redirectUri listener)
-                (\settled ->
+                (\settled -> do
                     void (tryPutMVar result
-                        (either (MailOAuthFailed . sanitizeException) id settled)))
-            modifyMVar_ activeFlows (pure . Map.insert flowId OAuthFlow
+                        (either (MailOAuthFailed . sanitizeException) id settled))
+                    putMVar finished ())
+            modifyMVar_ runtime.oauthActiveFlows (pure . Map.insert flowId OAuthFlow
                 { flowListener = listener
                 , flowResult = result
                 , flowExpiresAt =
                     addUTCTime (fromIntegral oauthFlowLifetimeSeconds) now
                 , flowWorker = worker
+                , flowFinished = finished
                 })
             pure challenge)
             `onException` closeQuietly listener
 
-pollMailOAuth :: Text -> IO (Either Text MailOAuthPoll)
-pollMailOAuth rawFlowId
+pollMailOAuth :: MailOAuthRuntime -> Text -> IO (Either Text MailOAuthPoll)
+pollMailOAuth runtime rawFlowId
     | Text.null flowId = pure (Left "Mail OAuth flow id is required.")
     | otherwise = do
         now <- getCurrentTime
-        maybeFlow <- Map.lookup flowId <$> readMVar activeFlows
+        maybeFlow <- Map.lookup flowId <$> readMVar runtime.oauthActiveFlows
         case maybeFlow of
             Nothing -> pure (Left "Mail OAuth flow was not found or has expired.")
             Just flow
                 | now > flow.flowExpiresAt -> do
                     cancelFlow flow
-                    removeFlow flowId
+                    removeFlow runtime flowId
                     pure (Right MailOAuthCancelled)
                 | otherwise -> do
                     result <- fromMaybe MailOAuthPending <$> tryReadMVar flow.flowResult
                     case result of
                         MailOAuthPending -> pure (Right result)
-                        _ -> removeFlow flowId >> pure (Right result)
+                        _ -> do
+                            waitForFlow flow
+                            removeFlow runtime flowId
+                            pure (Right result)
   where
     flowId = Text.strip rawFlowId
 
-cancelMailOAuth :: Text -> IO (Either Text ())
-cancelMailOAuth rawFlowId
+cancelMailOAuth :: MailOAuthRuntime -> Text -> IO (Either Text ())
+cancelMailOAuth runtime rawFlowId
     | Text.null flowId = pure (Left "Mail OAuth flow id is required.")
     | otherwise =
-        modifyMVar activeFlows \flows ->
+        modifyMVar runtime.oauthActiveFlows \flows ->
             case Map.lookup flowId flows of
                 Nothing -> pure (flows, Left "Mail OAuth flow was not found.")
                 Just flow -> do
@@ -650,10 +678,10 @@ randomUrlText :: Int -> IO Text
 randomUrlText bytes =
     TextEncoding.decodeUtf8 . Base64URL.encodeUnpadded <$> getEntropy bytes
 
-pruneExpiredFlows :: IO ()
-pruneExpiredFlows = do
+pruneExpiredFlows :: MailOAuthRuntime -> IO ()
+pruneExpiredFlows runtime = do
     now <- getCurrentTime
-    expired <- modifyMVar activeFlows \flows -> do
+    expired <- modifyMVar runtime.oauthActiveFlows \flows -> do
         let (stale, current) =
                 Map.partition (\flow -> flow.flowExpiresAt < now) flows
         pure (current, Map.elems stale)
@@ -664,10 +692,15 @@ cancelFlow flow = do
     void (tryPutMVar flow.flowResult MailOAuthCancelled)
     closeQuietly flow.flowListener
     void (tryAny (killThread flow.flowWorker) :: IO (Either SomeException ()))
+    waitForFlow flow
 
-removeFlow :: Text -> IO ()
-removeFlow flowId =
-    modifyMVar_ activeFlows (pure . Map.delete flowId)
+waitForFlow :: OAuthFlow -> IO ()
+waitForFlow flow =
+    readMVar flow.flowFinished
+
+removeFlow :: MailOAuthRuntime -> Text -> IO ()
+removeFlow runtime flowId =
+    modifyMVar_ runtime.oauthActiveFlows (pure . Map.delete flowId)
 
 closeQuietly :: Socket -> IO ()
 closeQuietly socketToClose =

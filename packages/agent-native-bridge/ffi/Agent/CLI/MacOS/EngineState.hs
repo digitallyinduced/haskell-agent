@@ -8,13 +8,18 @@ module Agent.CLI.MacOS.EngineState
 import Agent.CLI.MacOS.BrowserBridge (BrowserHost)
 import Agent.CLI.MacOS.ComputerBridge (ComputerHost)
 import Agent.CLI.MacOS.EngineCallbacks
-    ( SearchCallback, SessionResultCallback, TaskSnapshotCallback )
+    ( IntegrationResultCallback
+    , SearchCallback
+    , SessionResultCallback
+    , TaskSnapshotCallback
+    )
 import Agent.CLI.MacOS.EngineMailbox (EngineMailbox)
 import Agent.CLI.MacOS.InteractionState (InteractionRuntime)
 import Agent.CLI.MacOS.McpAdminBridge (McpResultCallback)
 import Agent.CLI.MacOS.NativeRequest (BridgeRequest)
 import Agent.CLI.MacOS.TurnState (NativeTurnOptions, TaskResult)
 import Agent.Loop (ImageAttachment)
+import Agent.Json (RawJson)
 import Control.Concurrent.Async (Async)
 import Control.Concurrent.STM (TVar)
 import Data.Map.Strict (Map)
@@ -28,6 +33,10 @@ data EngineCommand
     | EngineSessionMutation
         !SessionMutation !(FunPtr SessionResultCallback) !(Ptr ())
     | EngineMcpRestart !Word64 !Text !(FunPtr McpResultCallback) !(Ptr ())
+    | EngineIntegrationAdminList
+        !(FunPtr IntegrationResultCallback) !(Ptr ())
+    | EngineIntegrationAdminCall
+        !Text !RawJson !(FunPtr IntegrationResultCallback) !(Ptr ())
     | EngineCancelTask !Text
     | EngineTaskSnapshot !(FunPtr TaskSnapshotCallback) !(Ptr ())
     | EngineSetTaskLimit !Int

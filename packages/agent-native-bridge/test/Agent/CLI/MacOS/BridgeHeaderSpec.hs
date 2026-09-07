@@ -26,8 +26,8 @@ foreign import ccall "ha_interaction_option_abi_smoke"
 foreign import ccall "ha_data_browser_abi_smoke"
     dataBrowserAbiSmoke :: IO CInt
 
-foreign import ccall "ha_mail_abi_smoke"
-    mailAbiSmoke :: IO CInt
+foreign import ccall "ha_integration_abi_smoke"
+    integrationAbiSmoke :: IO CInt
 
 spec :: Spec
 spec = do
@@ -44,8 +44,8 @@ spec = do
             interactionOptionAbiSmoke `shouldReturn` 0
         it "preserves typed data-browser callbacks and synchronous validation" do
             dataBrowserAbiSmoke `shouldReturn` 0
-        it "preserves typed mail callbacks and rejects invalid inputs" do
-            mailAbiSmoke `shouldReturn` 0
+        it "preserves generic integration callbacks and rejects invalid inputs" do
+            integrationAbiSmoke `shouldReturn` 0
     describe "native session continuity ABI" do
         it "matches callback signatures and rejects invalid UTF-8 safely" do
             sessionContinuityAbiSmoke `shouldReturn` 0

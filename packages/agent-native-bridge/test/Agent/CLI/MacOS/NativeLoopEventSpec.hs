@@ -103,17 +103,17 @@ spec = describe "native loop event binary encoding" do
             Nothing -> expectationFailure "native tool event failed to encode"
             Just encoded -> BS.take 8 encoded `shouldBe` header 5 2
 
-    it "keeps complete bounded email send arguments for native approval" do
+    it "keeps complete bounded integration arguments for native approval" do
         let arguments = Text.replicate 100000 "x"
-            sendCall = ToolCall
-                { callId = "send-1"
-                , name = "email_send"
+            integrationCall = ToolCall
+                { callId = "integration-1"
+                , name = "mcp_call"
                 , arguments
                 , callKind = FunctionCallKind
                 , argumentsEncrypted = False
                 }
-            ordinaryCall = sendCall { name = "other_tool" }
-        boundedApprovalArguments sendCall `shouldBe` (arguments, False)
+            ordinaryCall = integrationCall { name = "other_tool" }
+        boundedApprovalArguments integrationCall `shouldBe` (arguments, False)
         boundedApprovalArguments ordinaryCall
             `shouldBe` (Text.take 8192 arguments, True)
 

@@ -1,6 +1,6 @@
-module Agent.CLI.MailMimeSpec (spec) where
+module Agent.Integrations.Email.MimeSpec (spec) where
 
-import Agent.CLI.Mail.Mime
+import Agent.Integrations.Email.Mime
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import Data.Either (isLeft)

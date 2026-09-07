@@ -100,7 +100,6 @@ foreign-library haskell-agent-bridge
                     , Agent.CLI.MacOS.McpAdminBridge
                     , Agent.CLI.MacOS.DatabaseBrowseBridge
                     , Agent.CLI.MacOS.LearnedSkillsBridge
-                    , Agent.CLI.MacOS.MailBridge
                     , Agent.CLI.MacOS.RepositoryInput
                     , Agent.CLI.MacOS.ResourceAdmin
                     , Agent.CLI.MacOS.SessionTransferBridge
@@ -113,6 +112,8 @@ foreign-library haskell-agent-bridge
                     , agent-repository >= 0.1 && < 0.2
                     , agent-cli >= 0.1 && < 0.2
                     , agent-cli-runtime >= 0.1 && < 0.2
+                    , agent-integrations >= 0.1 && < 0.2
+                    , agent-json >= 0.1 && < 0.2
                     , agent-runtime-daemon >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
@@ -155,7 +156,9 @@ test-suite agent-native-bridge-test
                     , Agent.CLI.ResourceAdminSpec
     build-depends:    agent-native-bridge
                     , agent-cli
+                    , agent-integrations
                     , agent-core
+                    , agent-json
                     , agent-mcp
                     , agent-runtime-daemon
                     , agent-store
@@ -176,7 +179,7 @@ test-suite agent-native-bridge-test
         c-sources:    test/cbits/HaskellAgentBridgeBrowserSmoke.c
                     , test/cbits/HaskellAgentBridgeComputerSmoke.c
                     , test/cbits/HaskellAgentBridgeImageSmoke.c
-                    , test/cbits/HaskellAgentBridgeMailSmoke.c
+                    , test/cbits/HaskellAgentBridgeIntegrationSmoke.c
                     , test/cbits/HaskellAgentBridgeTaskSmoke.c
                     , cbits/HaskellAgentBridgeRuntime.c
         include-dirs: include
@@ -218,7 +221,6 @@ test-suite agent-native-bridge-test
                      , Agent.CLI.MacOS.McpAdminBridge
                      , Agent.CLI.MacOS.DatabaseBrowseBridge
                      , Agent.CLI.MacOS.LearnedSkillsBridge
-                     , Agent.CLI.MacOS.MailBridge
                     , Agent.CLI.MacOS.ResourceAdmin
                      , Agent.CLI.MacOS.BrowserBridgeFFISpec
                      , Agent.CLI.MacOS.ComputerBridgeSpec

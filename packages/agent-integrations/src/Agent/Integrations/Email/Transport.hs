@@ -1,11 +1,11 @@
 -- | Standalone provider transport using the local credential store.
-module Agent.CLI.Mail.Transport
+module Agent.Integrations.Email.Transport
     ( productionMailTransport
     , module Agent.Mail.Transport
     ) where
 
-import Agent.CLI.Mail.OAuth (refreshMailOAuthCredential)
-import qualified Agent.CLI.Mail.Store as Store
+import Agent.Integrations.Email.OAuth (refreshMailOAuthCredential)
+import qualified Agent.Integrations.Email.Store as Store
 import Agent.Mail.Transport
 import Agent.Mail.Types
     ( MailTransport

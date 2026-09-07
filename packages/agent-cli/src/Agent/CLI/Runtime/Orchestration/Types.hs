@@ -20,6 +20,7 @@ import Agent.CLI.AgentSessions ( SessionThreadManager )
 import Agent.CLI.AgentViewport ( AgentEntry )
 import Agent.CLI.Project ( ProjectSettings )
 import Agent.Connectivity.NetworkPath ( NetworkRecovery )
+import Agent.Integrations ( IntegrationSupervisor )
 import Agent.CLI.Permission ( PermissionChoice )
 import Agent.Loop ( LoopEvent, TurnInput )
 import Agent.Provider ( Credential, TokenProvider )
@@ -45,6 +46,7 @@ data ActiveHttpAuth = ActiveHttpAuth
 
 data AgentProcessRuntime = AgentProcessRuntime
     { processMcpSupervisor :: !MCP.McpSupervisor
+    , processIntegrationSupervisor :: !IntegrationSupervisor
     , processSessionThreads :: !SessionThreadManager
     -- | Starts the process-scoped stale-resource cleanup exactly once. Its
     -- owner joins it when the process runtime closes.

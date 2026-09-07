@@ -13,7 +13,7 @@ module Agent.CLI.MacOS.Bridge
     , browserToolsWhenEnabled
     , composeNativeTools
     , invokeBrowserCommand
-    , mailABISynchronousValidationSmoke
+    , integrationABISynchronousValidationSmoke
     , RepositoryCheckHandle(..)
     , ha_repository_check_destroy
     , TurnStart(..)
@@ -43,7 +43,8 @@ import Agent.CLI.MacOS.EngineSubmission ()
 import Agent.CLI.MacOS.GatewayBridge (invokeGatewayCallbackOnce)
 import Agent.CLI.MacOS.InteractionState
 import Agent.CLI.MacOS.LearnedSkillsBridge ()
-import Agent.CLI.MacOS.MailBridge (mailABISynchronousValidationSmoke)
+import Agent.CLI.MacOS.EngineSubmission
+    (integrationABISynchronousValidationSmoke)
 import Agent.CLI.MacOS.NativeGatewayBoundary
 import Agent.CLI.MacOS.NativeRequest
 import Agent.CLI.MacOS.NativeRequestHandler (nativeRequestRequiresGatewayLock)

@@ -4,10 +4,11 @@
 -- The gateway MCP catalog is consumed internally instead of being registered
 -- with the generic MCP fleet.  This preserves the canonical @email_*@ names
 -- and the host's non-bypassable 'AlwaysConfirm' policy for mailbox writes.
-module Agent.CLI.Mail.Gateway
+module Agent.Integrations.Email.Gateway
     ( GatewayMailRuntime(..)
     , gatewayMailTools
     , gatewayMailToolsWith
+    , gatewayMailEnvironmentWith
     , GatewayMailRequest(..)
     ) where
 
@@ -15,9 +16,9 @@ import Agent.CLI.GatewayClient
     ( GatewayCredential(..)
     , validateGatewayCredential
     )
-import Agent.CLI.Mail.Tools
+import Agent.Integrations.Email.Tools
     ( MailToolsEnv(..)
-    , mailToolsForConnectedAccounts
+    , mailTools
     )
 import Agent.Json (rawJsonBytes)
 import Agent.Mail.Contract
@@ -90,6 +91,7 @@ instance Show GatewayMailRequest where
 
 data GatewayMailRuntime = GatewayMailRuntime
     { gatewayMailRuntimeTools :: ![AppTool]
+    , gatewayMailRuntimeEnvironment :: !MailToolsEnv
     , gatewayMailRuntimeClose :: !(IO ())
     }
 
@@ -131,7 +133,7 @@ gatewayMailTools toolEnv credential =
                                             manager client gatewayUnavailable
                                     Right (Right _) -> do
                                         built <- tryAny . restore $
-                                            gatewayMailToolsWith
+                                            gatewayMailEnvironmentWith
                                                 toolEnv
                                                 (performGatewayMailRequest client)
                                                 (downloadGatewayAttachment
@@ -144,15 +146,17 @@ gatewayMailTools toolEnv credential =
                                                     gatewayUnavailable
                                             Right (Left err) ->
                                                 closeFailed manager client err
-                                            Right (Right registered) ->
-                                                pure . Right $
-                                                    GatewayMailRuntime
-                                                        { gatewayMailRuntimeTools =
-                                                            registered
-                                                        , gatewayMailRuntimeClose =
-                                                            closeResources
-                                                                manager client
-                                                        })
+                                            Right (Right env) -> do
+                                                registered <- mailTools env
+                                                pure . Right $ GatewayMailRuntime
+                                                    { gatewayMailRuntimeTools =
+                                                        registered
+                                                    , gatewayMailRuntimeEnvironment =
+                                                        env
+                                                    , gatewayMailRuntimeClose =
+                                                        closeResources
+                                                            manager client
+                                                    })
                                 `onException` closeResources manager client
   where
     closeManagerOnly manager = do
@@ -177,6 +181,17 @@ gatewayMailToolsWith
         -> IO (Either Text MailAttachmentContent))
     -> IO (Either Text [AppTool])
 gatewayMailToolsWith toolEnv call download = do
+    gatewayMailEnvironmentWith toolEnv call download >>= \case
+        Left err -> pure (Left err)
+        Right env -> Right <$> mailTools env
+
+gatewayMailEnvironmentWith
+    :: ToolEnv
+    -> (GatewayMailRequest -> IO (Either Text Value))
+    -> (MailAttachmentDownload -> Int
+        -> IO (Either Text MailAttachmentContent))
+    -> IO (Either Text MailToolsEnv)
+gatewayMailEnvironmentWith toolEnv call download = do
     verifyGatewayMailContract call >>= \case
         Left err -> pure (Left err)
         Right () -> gatewayMailToolsVerified toolEnv call download
@@ -186,7 +201,7 @@ gatewayMailToolsVerified
     -> (GatewayMailRequest -> IO (Either Text Value))
     -> (MailAttachmentDownload -> Int
         -> IO (Either Text MailAttachmentContent))
-    -> IO (Either Text [AppTool])
+    -> IO (Either Text MailToolsEnv)
 gatewayMailToolsVerified toolEnv call download = do
     let invoke
             :: (FromJSON value)
@@ -264,10 +279,7 @@ gatewayMailToolsVerified toolEnv call download = do
             }
     listAccounts >>= \case
         Left err -> pure (Left err)
-        Right accounts ->
-            pure
-                (Right
-                    (mailToolsForConnectedAccounts env accounts))
+        Right _ -> pure (Right env)
 
 verifyGatewayMailContract
     :: (GatewayMailRequest -> IO (Either Text Value))
