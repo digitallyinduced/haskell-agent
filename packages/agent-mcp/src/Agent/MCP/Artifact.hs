@@ -14,7 +14,7 @@ import Data.Bits ((.&.))
 import Data.IORef (newIORef, readIORef, modifyIORef')
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
+import qualified Data.Text.Encoding as TextEncoding
 import System.Directory (removeFile, renameFile)
 import System.IO (openBinaryTempFile, hClose)
 import System.Posix.Files (setFileMode, getSymbolicLinkStatus, isDirectory, fileMode, fileOwner)
@@ -51,7 +51,7 @@ materializeArtifacts directory readResource raw =
                         , Nothing <- resource.mcpResourceText
                         , Just blob <- resource.mcpResourceBlob
                         , Text.length blob <= 4 * ((size + 2) `div` 3) ->
-                            case Base64.decode (Text.encodeUtf8 blob) of
+                            case Base64.decode (TextEncoding.encodeUtf8 blob) of
                                 Right value | BS.length value == size -> pure value
                                 _ -> fail "invalid artifact bytes"
                     _ -> fail "invalid artifact resource"
@@ -103,7 +103,7 @@ descriptor = Json.object do
             name <- Json.atKey "name" Json.text
             unless (not (Text.null uri) && Text.length uri <= 4096
                 && not (Text.any isControl uri)) (fail "artifact uri")
-            unless (not (Text.null name) && BS.length (Text.encodeUtf8 name) <= 128
+            unless (not (Text.null name) && BS.length (TextEncoding.encodeUtf8 name) <= 128
                 && name /= "." && name /= ".."
                 && not (Text.any (\c -> c == '/' || c == '\\' || isControl c) name)) $
                 fail "artifact filename"
