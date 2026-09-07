@@ -7,6 +7,7 @@
 - **Secret requests** now notify the terminal when the agent needs sensitive input.
 - **Plan questions** now accept custom replies in addition to predefined choices.
 - **Cross-tool resume** can continue recent Codex, Claude Code, Cursor, and Grok Build sessions with `/resume-codex`, `/resume-claude`, `/resume-cursor`, and `/resume-grok`.
+- **Skill installer** copies Agent Skills into `~/.haskell-agent/skills` or the project's `.haskell-agent/skills` directory. The harness discovers those product-home trees in addition to `.agents/skills`.
 
 ## Bug Fixes
 

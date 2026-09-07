@@ -108,6 +108,24 @@ spec = describe "Agent.CLI.Skills" do
                 "Apply after a push or pull-request update when CI checks are running, queued, or expected and the task depends on their result."
             ]
 
+    it "loads the packaged skill-installer skill" do
+        catalog <- loadSkillsCatalog
+            defaultCliOptions
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            False
+        let matching =
+                filter ((== "skill-installer") . (.skillName))
+                    catalog.catalogSkills
+        map skillScopeOf matching `shouldBe` [BuiltinSkill]
+        map (.skillModelInvocable) matching `shouldBe` [True]
+        map (.skillUserInvocable) matching `shouldBe` [True]
+        map (.skillWhenToUse) matching `shouldBe`
+            [ Just
+                "Use when the user asks to install a skill, add a SKILL.md from GitHub or a gist, list installable skills, or copy a skill into the local skills directory."
+            ]
+
     it "loads the packaged learn-about-user skill" do
         catalog <- loadSkillsCatalog
             defaultCliOptions
