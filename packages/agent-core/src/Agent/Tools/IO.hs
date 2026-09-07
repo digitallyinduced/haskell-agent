@@ -25,6 +25,7 @@ module Agent.Tools.IO
     , configuredProcess
     , configuredProcessEnv
     , sessionTempProcessEnv
+    , sessionSandboxProfile
     , writeShellCommandInput
     , interruptShellCommand
     , stopShellCommand
@@ -103,12 +104,14 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode(..))
-#if defined(darwin_HOST_OS)
-import qualified System.Directory as Directory
 import System.FilePath
     ( takeDirectory
     , takeFileName
+    , (</>)
     )
+#if defined(darwin_HOST_OS)
+import qualified System.Directory as Directory
+import System.Posix.User (getRealUserID)
 #endif
 import System.IO (Handle, hClose, hFlush)
 import System.Posix.Signals
@@ -454,8 +457,8 @@ startShellCommandWithStdin keepStdin env workdir command onComplete = do
         Right running -> pure (Right running)
 
 -- | Apply the session-private environment and, on macOS, a Seatbelt profile
--- that denies the shared temp namespace. Managed session layouts also hide
--- sibling scratch directories while allowing the current one.
+-- that denies shared temp contents. Managed session layouts hide sibling
+-- scratch files while leaving the parent directory itself inspectable.
 configuredProcess :: ToolEnv -> CreateProcess -> IO CreateProcess
 configuredProcess env spec = do
     sessionTmp <- readIORef env.toolSessionTmp
@@ -477,7 +480,9 @@ configuredCommandSpec sessionTmp command =
             let sandboxExecutable = "/usr/bin/sandbox-exec"
             canonicalTemp <-
                 Directory.canonicalizePath (unsafeToFilePath temp)
-            let profile = sessionSandboxProfile canonicalTemp
+            rawUid <- getRealUserID
+            let uid = fromIntegral rawUid :: Int
+                profile = sessionSandboxProfile canonicalTemp uid
                 wrapped = case command of
                     RawCommand executable arguments ->
                         executable : arguments
@@ -490,9 +495,13 @@ configuredCommandSpec sessionTmp command =
 configuredCommandSpec _ command = pure command
 #endif
 
-#if defined(darwin_HOST_OS)
-sessionSandboxProfile :: FilePath -> String
-sessionSandboxProfile temp =
+-- | Deny shared temp contents and sibling session scratch without denying the
+-- parent directories that Darwin @realpath@ and Nix @posix_stat@ inspect.
+-- Restore the current session directory and the calling user's tmux sockets.
+-- Darwin shells apply this via @sandbox-exec@; other platforms keep the
+-- builder so tests can check the deny list without macOS.
+sessionSandboxProfile :: FilePath -> Int -> String
+sessionSandboxProfile temp uid =
     unwords $
         [ "(version 1)"
         , "(allow default)"
@@ -500,19 +509,39 @@ sessionSandboxProfile temp =
         , "  (subpath \"/tmp\")"
         , "  (subpath \"/private/tmp\")"
         ]
-        <> managedParentRule
+        <> managedDescendantRule
         <> [")"]
         <> [ "(allow file-read* file-write*"
            , "  (subpath " <> sandboxString temp <> "))"
+           , "(allow file-read-metadata"
+           , "  (literal \"/tmp\")"
+           , "  (literal \"/private/tmp\"))"
+           , "(allow file-read-data"
+           , "  (literal \"/tmp\"))"
+           , "(allow file-read* file-write*"
+           , "  (subpath " <> sandboxString ("/private/tmp" </> tmuxDir) <> ")"
+           , "  (subpath " <> sandboxString ("/tmp" </> tmuxDir) <> "))"
            ]
   where
     parent = takeDirectory temp
     grandparent = takeDirectory parent
-    managedParentRule
+    tmuxDir = "tmux-" <> show uid
+    managedDescendantRule
         | takeFileName parent == "sessions"
         , takeFileName grandparent == "tmp" =
-            ["  (subpath " <> sandboxString parent <> ")"]
+            [ "  (regex "
+                <> sandboxString
+                    ("^" <> sandboxRegexLiteral parent <> "/.+")
+                <> ")"
+            ]
         | otherwise = []
+
+sandboxRegexLiteral :: String -> String
+sandboxRegexLiteral = concatMap escapeRegex
+  where
+    escapeRegex char
+        | char `elem` ("\\^$.|?*+()[]{}" :: String) = ['\\', char]
+        | otherwise = [char]
 
 sandboxString :: String -> String
 sandboxString value =
@@ -524,7 +553,6 @@ sandboxString value =
     escape '\r' = "\\r"
     escape '\t' = "\\t"
     escape char = [char]
-#endif
 
 configuredProcessEnv :: ToolEnv -> IO (Maybe [(String, String)])
 configuredProcessEnv env =

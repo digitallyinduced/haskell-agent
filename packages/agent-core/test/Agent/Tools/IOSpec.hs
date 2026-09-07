@@ -26,6 +26,7 @@ import Agent.Tools.IO
     , runShellCommandStreaming
     , runningLiveOutput
     , sessionTempProcessEnv
+    , sessionSandboxProfile
     , startShellCommand
     , startShellCommandWithInput
     , stopShellCommand
@@ -49,7 +50,7 @@ import Control.Monad (replicateM)
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.Either (isLeft, isRight)
 import Data.IORef
-import Data.List (sort)
+import Data.List (isInfixOf, sort)
 import qualified Data.Text as Text
 import System.Directory
     ( canonicalizePath
@@ -547,6 +548,51 @@ spec = describe "Agent.Tools.IO" do
                 result.commandExitCode `shouldNotBe` Just 0
                 result.commandStdout `shouldNotBe` "sibling-secret"
 
+    it "denies sibling session scratch without denying the parent directory" do
+        let profile =
+                sessionSandboxProfile
+                    "/Users/x/.haskell-agent/tmp/sessions/current"
+                    501
+        profile `shouldNotSatisfy`
+            isInfixOf "(subpath \"/Users/x/.haskell-agent/tmp/sessions\")"
+        profile `shouldSatisfy`
+            isInfixOf
+                "(regex \"^/Users/x/\\\\.haskell-agent/tmp/sessions/.+\")"
+        profile `shouldSatisfy` isInfixOf "(literal \"/tmp\")"
+        profile `shouldSatisfy` isInfixOf "/private/tmp/tmux-501"
+
+    it "lets tools canonicalize a managed session temp directory" do
+        if os /= "darwin"
+            then pendingWith "the process-level Seatbelt boundary is macOS-only"
+            else withTempDir \dir -> do
+                requireProcessSandbox
+                let workspace = dir </> "workspace"
+                    sessions =
+                        dir </> ".haskell-agent" </> "tmp" </> "sessions"
+                    scratch = sessions </> "current"
+                    sibling = sessions </> "other"
+                    secret = sibling </> "secret"
+                mapM_ (createDirectoryIfMissing True)
+                    [workspace, scratch, sibling]
+                writeFile secret "sibling-secret"
+                env <- defaultToolEnv (fromFilePath workspace)
+                setToolSessionTmp env (Just (fromFilePath scratch))
+                realpathResult <- runShellCommand env (fromFilePath workspace)
+                    libcRealpathOfTmpdirCommand
+                    5000
+                realpathResult.commandExitCode `shouldBe` Just 0
+                parentResult <- runShellCommand env (fromFilePath workspace)
+                    "python3 -c \"import os; os.stat(os.path.dirname(os.environ['TMPDIR'])); print('parent-ok')\""
+                    5000
+                parentResult.commandExitCode `shouldBe` Just 0
+                parentResult.commandStdout `shouldSatisfy`
+                    Text.isInfixOf "parent-ok"
+                siblingResult <- runShellCommand env (fromFilePath workspace)
+                    "cat \"$TMPDIR/../other/secret\""
+                    5000
+                siblingResult.commandExitCode `shouldNotBe` Just 0
+                siblingResult.commandStdout `shouldNotBe` "sibling-secret"
+
     it "replaces inherited temp variables without exposing host temp" do
         let scratch = fromFilePath "/session/private"
         sessionTempProcessEnv scratch
@@ -751,6 +797,20 @@ checkBackgroundOutputCap dir = do
     result <- readMVar running.runningResult
     Text.length result.commandStdout `shouldSatisfy` (< 128)
     result.commandStdout `shouldSatisfy` Text.isInfixOf "[truncated"
+
+libcRealpathOfTmpdirCommand :: Text.Text
+libcRealpathOfTmpdirCommand =
+    Text.concat
+        [ "python3 -c '"
+        , "import ctypes, ctypes.util, os; "
+        , "libc = ctypes.CDLL(ctypes.util.find_library(\"c\"), use_errno=True); "
+        , "fn = libc.realpath; "
+        , "fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p]; "
+        , "fn.restype = ctypes.c_char_p; "
+        , "buf = ctypes.create_string_buffer(1024); "
+        , "raise SystemExit(0 if fn(os.environ[\"TMPDIR\"].encode(), buf) else 1)"
+        , "'"
+        ]
 
 requireProcessSandbox :: IO ()
 requireProcessSandbox
