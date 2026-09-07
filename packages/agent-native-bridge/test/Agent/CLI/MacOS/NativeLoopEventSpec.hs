@@ -5,6 +5,10 @@ import Agent.CLI.MacOS.NativeLoopEvent
     , encodeNativeUsageEvent
     )
 import Agent.CLI.MacOS.NativeInteraction (boundedApprovalArguments)
+import Agent.CLI.SessionAdmin (sessionToolEvent)
+import Agent.Json (rawJsonFromEncoding)
+import Agent.Responses.Types (FunctionCallOutput(..), ResponseItem(..))
+import Agent.Tools.DisplayMap (MapResult(..), MapLocation(..), renderMapResult)
 import Agent.Loop
     ( LoopEvent(..)
     , TokenUsage(..)
@@ -19,6 +23,7 @@ import Agent.ToolDispatch
     , withToolCallMode
     )
 import qualified Data.ByteString as BS
+import qualified Data.Aeson as Aeson
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Word (Word8, Word32)
@@ -89,6 +94,44 @@ spec = describe "native loop event binary encoding" do
         case encodeNativeLoopEvent "turn" (ToolFinished result) of
             Nothing -> expectationFailure "native tool event failed to encode"
             Just encoded -> BS.take 8 encoded `shouldBe` header 5 4
+
+    it "preserves complete versioned map documents beyond the ordinary preview limit" do
+        let mapResult = MapResult "Places"
+                [MapLocation (Text.pack (show index)) "Place" 0 0 Nothing Nothing
+                | index <- [1..100 :: Int]]
+        case renderMapResult mapResult of
+            Left err -> expectationFailure (Text.unpack err)
+            Right output -> do
+                Text.length output `shouldSatisfy` (>8192)
+                let result = ToolCallResult
+                        { callId = "map-1"
+                        , toolResultMode = BlockingToolCall
+                        , toolResultImages = []
+                        , toolResultOutcome = Nothing
+                        , output
+                        , callKind = FunctionCallKind
+                        }
+                encodeNativeLoopEvent "turn" (ToolFinished result)
+                    `shouldBe` Just (frame 5 0 ["turn", "map-1", output])
+                let persisted = FunctionCallOutput
+                        { localOutcome = Nothing
+                        , itemId = Nothing
+                        , callId = "map-1"
+                        , name = Nothing
+                        , namespace = Nothing
+                        , output = rawJsonFromEncoding (Aeson.toEncoding output)
+                        , provider = Nothing
+                        , status = Nothing
+                        , async = Nothing
+                        }
+                sessionToolEvent (FunctionCallOutputItem persisted)
+                    `shouldBe` Just (Aeson.object
+                        [ "type" Aeson..= ("tool_finished" :: Text.Text)
+                        , "callId" Aeson..= ("map-1" :: Text.Text)
+                        , "output" Aeson..= output
+                        , "async" Aeson..= False
+                        , "truncated" Aeson..= False
+                        ])
 
     it "encodes truncated tool output with its flag" do
         let result = ToolCallResult

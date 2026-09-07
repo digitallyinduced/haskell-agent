@@ -95,6 +95,7 @@ library
                     , Agent.Tools.Secret
                     , Agent.Tools.Scheduling
                     , Agent.Tools.ShowImage
+                    , Agent.Tools.DisplayMap
                     , Agent.Tools.ShellReadOnly
                     , Agent.Tools.Types
                     , Agent.Tools.ViewImage
@@ -319,6 +320,7 @@ test-suite agent-core-test
                     , Agent.Tools.TaskPlanSpec
                     , Agent.Tools.SecretSpec
                     , Agent.Tools.ShowImageSpec
+                    , Agent.Tools.DisplayMapSpec
                     , Agent.Tools.ViewImageSpec
                     , Agent.ToolDSLSpec
                     , Agent.Transport.WebSocketSpec

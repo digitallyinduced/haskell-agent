@@ -6,6 +6,7 @@ module Agent.CLI.MacOS.NativeLoopEvent
     ) where
 
 import Agent.CLI.Render (summarizeToolCall)
+import Agent.Tools.DisplayMap (decodeMapResult)
 import Agent.Loop (LoopEvent(..), TokenUsage(..), TurnOutput(..))
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -55,7 +56,9 @@ encodeNativeLoopEvent turnId event =
                 | isComputerToolCallKind result.callKind =
                     redactComputerScreenshot result.output
                 | otherwise = result.output
-            (output, truncated) = boundedEventText eventOutput
+            (output, truncated) = case decodeMapResult eventOutput of
+                Just _ -> (eventOutput, False)
+                Nothing -> boundedEventText eventOutput
             flags =
                 (if truncated then 2 else 0)
                     + (if toolCallResultMode result == AsyncToolCall

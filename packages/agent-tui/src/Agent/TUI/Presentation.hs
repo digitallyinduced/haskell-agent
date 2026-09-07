@@ -53,6 +53,7 @@ import Agent.JsonText
 import qualified Agent.Json.Decode as Hermes
 import Agent.OsPath (fromText, relativeDisplayPath)
 import Agent.TUI.TextWidth (displayTerminalText)
+import Agent.Tools.DisplayMap (decodeMapResult, mapResultText)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , canonicalToolName
@@ -588,6 +589,7 @@ searchReplaceLineStart output =
 
 formatToolOutput :: ToolCall -> Text -> Text
 formatToolOutput call output = case canonicalToolName call.name of
+    "display_map" -> maybe output mapResultText (decodeMapResult output)
     "computer" -> "Screenshot captured"
     "exec" -> completedExecOutput output
     "mcp_call" -> formatMcpOutput output

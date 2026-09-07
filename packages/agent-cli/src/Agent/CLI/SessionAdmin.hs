@@ -79,6 +79,7 @@ import Agent.Store.Postgres
     )
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Types (renderStoreError)
+import Agent.Tools.DisplayMap (decodeMapResult)
 import Control.Concurrent (threadDelay)
 import Control.Monad
     ( unless
@@ -412,7 +413,9 @@ toolStartedJSON callId name arguments isAsync =
 
 toolFinishedJSON :: Text -> Text -> Bool -> Aeson.Value
 toolFinishedJSON callId output isAsync =
-    let (visible, truncated) = boundedSessionToolText output
+    let (visible, truncated) = case decodeMapResult output of
+            Just _ -> (output, False)
+            Nothing -> boundedSessionToolText output
     in Aeson.object
         [ "type" Aeson..= ("tool_finished" :: Text)
         , "callId" Aeson..= callId

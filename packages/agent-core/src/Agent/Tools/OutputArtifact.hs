@@ -21,6 +21,7 @@ module Agent.Tools.OutputArtifact
     ) where
 
 import Agent.Json.Decode (Decoder)
+import Agent.Tools.DisplayMap (decodeMapResult)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optBool, optInt, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
@@ -457,6 +458,9 @@ artifactLinePreviewBytes = 32 * 1024
 -- | Replace an oversized provider-facing result with a compact artifact marker.
 finalizeToolOutput :: ToolEnv -> ToolCall -> Text -> IO Text
 finalizeToolOutput env call output
+    -- Presentation documents have their own validated hard bound and must
+    -- remain intact in the persisted transcript, not become artifact notices.
+    | call.name == "display_map", Just _ <- decodeMapResult output = pure output
     | BS.length encoded <= max 0 env.toolOutputInlineCap = pure output
     | otherwise =
         writeOutputArtifactDetailed env encoded >>= \case

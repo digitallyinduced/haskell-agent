@@ -1,6 +1,7 @@
 module Agent.TUI.PresentationSpec (spec) where
 
 import Agent.TUI.Presentation
+import Agent.Tools.DisplayMap (MapResult(..), MapLocation(..), renderMapResult, mapResultText)
 import Agent.ToolDispatch
     ( customToolCall
     , functionToolCall
@@ -10,6 +11,18 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "tool presentation" do
+    it "renders a map as a readable place list without a native map component" do
+        let result = MapResult "Berlin"
+                [MapLocation "gate" "Brandenburg Gate" 52.516275 13.377704 Nothing Nothing]
+            call = functionToolCall "map-1" "display_map" "{}"
+        case renderMapResult result of
+            Left err -> expectationFailure (Text.unpack err)
+            Right output -> do
+                formatToolOutput call output `shouldBe` mapResultText result
+                formatToolOutput
+                    (functionToolCall "other" "read_file" "{}") output
+                    `shouldNotBe` mapResultText result
+
     it "separates only real filesystem paths from tool actions" do
         let readFile =
                 functionToolCall

@@ -182,11 +182,11 @@ spec = describe "Agent.CLI.Dialects" do
             context `shouldBe` Nothing
             warnings `shouldBe` ""
 
-    it "allocates only the AskUserQuestion MCP fallback for Claude Code" do
+    it "allocates the AskUserQuestion fallback and map presentation for Claude Code" do
         env <- defaultToolEnv (unsafeEncodeUtf "/tmp")
         coding <- codingToolsFor claudeCodeDialect env Nothing Nothing Nothing Nothing
         map (.appToolName) coding.codingAppTools
-            `shouldBe` ["ask_user_question"]
+            `shouldBe` ["ask_user_question", "display_map"]
         coding.codingClose
 
     it "registers ask_secret only when root prompt hooks are supplied" do
@@ -205,6 +205,14 @@ spec = describe "Agent.CLI.Dialects" do
                 (map (.appToolName) withSecret.codingAppTools
                     `shouldContain` ["ask_secret"])
                     `finally` withSecret.codingClose
+
+    it "registers map presentation without requiring native host hooks" do
+        withTempToolEnv \env ->
+            forM_ [codexDialect, grokBuildDialect, claudeCodeDialect] \dialect -> do
+                coding <- codingToolsFor dialect env Nothing Nothing Nothing Nothing
+                (map (.appToolName) coding.codingAppTools
+                    `shouldContain` ["display_map"])
+                    `finally` coding.codingClose
 
     it "registers show_image only when image display hooks are supplied" do
         withTempToolEnv \env ->

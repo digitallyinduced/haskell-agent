@@ -59,6 +59,7 @@ import Agent.Tools.Secret
     , newSecretStore
     )
 import Agent.Tools.ShowImage (ImageDisplayHooks, showImageTool)
+import Agent.Tools.DisplayMap (displayMapTool)
 import Agent.Tools.Types
     ( AppTool(..)
     , AppToolGroup(..)
@@ -157,7 +158,7 @@ codingToolsForWithTypes
                                 (if includeArtifacts
                                     then artifactTools env analysisSpawner
                                     else [])
-                           , HostToolGroup (secretTools <> imageTools)
+                           , HostToolGroup (secretTools <> imageTools <> [displayMapTool])
                            ]
             in CodingTools
                 { codingAppTools = appToolsFromGroups groups
