@@ -87,6 +87,9 @@ data SessionOutputFormat
 data McpCommand
     = McpLogin Text [Text]
     | McpLogout Text
+    | McpList SessionOutputFormat
+    | McpEnable Text
+    | McpDisable Text
     deriving (Eq, Show)
 
 -- | Administrative commands for the harness-managed PostgreSQL server.
@@ -329,7 +332,7 @@ commandParser =
                     (Options.progDesc "Administer persisted sessions"))
             <> Options.command "mcp"
                 (Options.info mcpParser
-                    (Options.progDesc "Authorize remote MCP servers"))
+                    (Options.progDesc "Manage MCP servers"))
             <> Options.command "storage"
                 (Options.info storageParser
                     (Options.progDesc "Administer managed PostgreSQL storage"))
@@ -440,7 +443,19 @@ storageParser =
 
 mcpParser :: Options.Parser Command
 mcpParser = Mcp <$> Options.hsubparser
-    ( Options.command "login"
+    ( Options.command "list"
+        (Options.info
+            (McpList <$> sessionOutputFormatParser)
+            (Options.progDesc "List configured MCP servers"))
+    <> Options.command "enable"
+        (Options.info
+            (McpEnable <$> mcpNameArgument)
+            (Options.progDesc "Enable a configured MCP server"))
+    <> Options.command "disable"
+        (Options.info
+            (McpDisable <$> mcpNameArgument)
+            (Options.progDesc "Disable a configured MCP server"))
+    <> Options.command "login"
         (Options.info
             (McpLogin
                 <$> (Text.pack <$> Options.argument Options.str (Options.metavar "URL"))
@@ -456,6 +471,10 @@ mcpParser = Mcp <$> Options.hsubparser
             (McpLogout . Text.pack <$> Options.argument Options.str (Options.metavar "URL"))
             (Options.progDesc "Remove saved MCP OAuth credentials"))
     )
+
+mcpNameArgument :: Options.Parser Text
+mcpNameArgument =
+    Text.pack <$> Options.argument Options.str (Options.metavar "NAME")
 
 type OptionUpdate = CliOptions -> CliOptions
 
@@ -712,6 +731,9 @@ usage = unlines
     , "       agent-cli gateway <status|disconnect>"
     , "       agent-cli sessions [list]"
     , "       agent-cli sessions show <session-id>"
+    , "       agent-cli mcp list [--json]"
+    , "       agent-cli mcp enable <name>"
+    , "       agent-cli mcp disable <name>"
     , "       agent-cli mcp login <url> [--scope SCOPE]..."
     , "       agent-cli mcp logout <url>"
     , "       agent-cli storage <status|start|stop|migrate|doctor>"

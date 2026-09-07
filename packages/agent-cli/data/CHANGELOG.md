@@ -2,6 +2,7 @@
 
 ## Features
 
+- **MCP catalog commands** list, enable, and disable configured servers with `agent-cli mcp list`, `enable`, and `disable`.
 - **Release notes** are now available from `/changelog` and the start screen.
 - **Secret requests** now notify the terminal when the agent needs sensitive input.
 - **Plan questions** now accept custom replies in addition to predefined choices.

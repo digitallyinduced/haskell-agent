@@ -484,7 +484,8 @@ for details.
 ### Local MCP servers
 
 Use `/mcp` to manage local stdio MCP servers, or configure them in
-`~/.haskell-agent/config.json`. See the [MCP guide](docs/mcp.md) for the
+`~/.haskell-agent/config.json`. `agent-cli mcp list`, `enable`, and `disable`
+toggle that catalog from the command line. See the [MCP guide](docs/mcp.md) for the
 configuration schema, startup strategies, and tool exposure rules.
 
 ### Meta Console

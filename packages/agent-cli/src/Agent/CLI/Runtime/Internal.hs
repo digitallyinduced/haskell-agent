@@ -32,12 +32,7 @@ import Agent.CLI.AgentSessions
 import Agent.CLI.GatewayClient (runGatewayCommand)
 import Agent.CLI.Interrupt ( catchUserInterrupt )
 import Agent.CLI.Login ( runLoginManager )
-import Agent.CLI.McpOAuth
-    ( LoginOptions(..)
-    , defaultLoginOptions
-    , loginMcpWith
-    , logoutMcp
-    )
+import Agent.CLI.McpCatalog (runMcpCommand)
 import Agent.CLI.WorktreeAdmin (runWorktreeAdmin)
 import Agent.CLI.McpStatus
     ( formatMcpModelNotice
@@ -53,7 +48,6 @@ import Agent.Integration.API
 import Agent.CLI.Options
     ( CliOptions
     , Command(..)
-    , McpCommand(..)
     , parseArgs
     , usage
     )
@@ -165,8 +159,7 @@ devMainResume resumeId = do
             runLoginManager color
             pure DevQuit
         Right (Gateway command) -> runGatewayCommand command >> pure DevQuit
-        Right (Mcp (McpLogin url scopes)) -> loginMcpWithScopes scopes url >> pure DevQuit
-        Right (Mcp (McpLogout url)) -> logoutMcp url >> pure DevQuit
+        Right (Mcp command) -> runMcpCommand command >> pure DevQuit
         Right (ListSessions outputFormat) ->
             runListSessions outputFormat >> pure DevQuit
         Right (ShowSession sessionId outputFormat pageRequest) ->
@@ -196,8 +189,7 @@ run = do
             color <- resolveColor stderr
             runLoginManager color
         Right (Gateway command) -> runGatewayCommand command
-        Right (Mcp (McpLogin url scopes)) -> loginMcpWithScopes scopes url
-        Right (Mcp (McpLogout url)) -> logoutMcp url
+        Right (Mcp command) -> runMcpCommand command
         Right (ListSessions outputFormat) -> runListSessions outputFormat
         Right (ShowSession sessionId outputFormat pageRequest) ->
             runShowSession sessionId outputFormat pageRequest
@@ -284,6 +276,3 @@ runAgentWithRestarts options =
                                                 integrationSupervisor)))
         (pure DevQuit)
 
-loginMcpWithScopes :: [Text] -> Text -> IO ()
-loginMcpWithScopes scopes =
-    loginMcpWith defaultLoginOptions { loginAdditionalScopes = scopes }

@@ -249,6 +249,22 @@ spec = do
             parseArgs ["login"] `shouldBe` Right Login
             parseArgs ["login", "openai"] `shouldSatisfy` isLeft
 
+        it "parses MCP catalog commands" do
+            parseArgs ["mcp", "list"]
+                `shouldBe` Right (Mcp (McpList SessionHuman))
+            parseArgs ["mcp", "list", "--json"]
+                `shouldBe` Right (Mcp (McpList SessionJSON))
+            parseArgs ["mcp", "enable", "github"]
+                `shouldBe` Right (Mcp (McpEnable "github"))
+            parseArgs ["mcp", "disable", "github"]
+                `shouldBe` Right (Mcp (McpDisable "github"))
+            parseArgs ["mcp", "login", "https://example.com/mcp"]
+                `shouldBe` Right (Mcp (McpLogin "https://example.com/mcp" []))
+            parseArgs ["mcp", "enable"] `shouldSatisfy` isLeft
+            parseArgs ["mcp", "disable"] `shouldSatisfy` isLeft
+            usage `shouldContain` "agent-cli mcp list [--json]"
+            usage `shouldContain` "agent-cli mcp enable <name>"
+            usage `shouldContain` "agent-cli mcp disable <name>"
 
         it "parses session administration commands" do
             parseArgs ["sessions"]
