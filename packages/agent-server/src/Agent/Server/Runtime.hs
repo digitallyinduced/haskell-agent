@@ -1277,7 +1277,8 @@ runTurn environment control spec =
                                                     , nativeTurnEffort =
                                                         Just effort
                                                     , nativeTurnInteractionMode =
-                                                        NativeAsk
+                                                        serverInteractionMode
+                                                            environment
                                                     , nativeTurnShellMode =
                                                         tenantShellMode environment
                                                     }
@@ -1344,7 +1345,7 @@ nativeHooks environment control sessionId cwd dialect = NativeRunHooks
             Just sandbox ->
                 composeSandboxTools sandbox sessionId cwd dialect
     , nativePlanHooks = planHooks control
-    , nativeInteractionMode = NativeAsk
+    , nativeInteractionMode = serverInteractionMode environment
     , nativeShellMode = tenantShellMode environment
     , nativeHome =
         case environment.environmentSandbox of
@@ -1393,6 +1394,11 @@ tenantShellMode environment =
     case environment.environmentSandbox of
         Nothing -> NativeShellBoth
         Just _ -> NativeShellBash
+
+serverInteractionMode :: RuntimeEnvironment -> NativeInteractionMode
+serverInteractionMode environment
+    | environment.environmentConfig.resolvedYolo = NativeYolo
+    | otherwise = NativeAsk
 
 requestToolApproval
     :: TurnControl

@@ -79,7 +79,7 @@ spec = describe "nativeTurnOptions" do
 
     forM_ [hostNativeStartupPolicy, restrictedNativeStartupPolicy] \policy ->
         forM_ [NativeNewSession, NativeResumeSession "existing"] \session ->
-            forM_ [NativeAsk, NativePlan] \interaction ->
+            forM_ [NativeAsk, NativePlan, NativeYolo] \interaction ->
                 forM_ [NativeShellNone, NativeShellGhci, NativeShellBash, NativeShellBoth] \shell ->
                     it ("preserves typed turn fields under " <> show (policy, session, interaction, shell)) do
                         let request = baseRequest
@@ -148,21 +148,23 @@ spec = describe "nativeTurnOptions" do
             )
             `shouldBe` Left "native resume session id must not be empty"
 
-    it "does not expose auto-approval through typed turns" do
-        nativeTurnOptions
-            (baseRequest
-                { nativeTurnInteractionMode = NativeYolo }
-            )
-            `shouldBe` Left "typed native turns do not support auto-approval"
+    it "accepts explicit auto-approval without leaking it into CLI flags" do
+        options <- shouldReturnRight $
+            nativeTurnOptions
+                (baseRequest
+                    { nativeTurnInteractionMode = NativeYolo }
+                )
+        options.optYolo `shouldBe` False
+        options.optNoYolo `shouldBe` True
 
-    it "keeps approval validation ahead of resume validation under either policy" do
+    it "rejects an invalid resume in auto-approval mode under either policy" do
         forM_ [hostNativeStartupPolicy, restrictedNativeStartupPolicy] \policy -> do
             let request = baseRequest
                     { nativeTurnInteractionMode = NativeYolo
                     , nativeTurnSession = NativeResumeSession " "
                     }
             (applyNativeStartupPolicy policy request.nativeTurnCwd <$> nativeTurnOptions request)
-                `shouldBe` Left "typed native turns do not support auto-approval"
+                `shouldBe` Left "native resume session id must not be empty"
 
     it "requires prepared discovery whenever host discovery is disabled" do
         let root = unsafeEncodeUtf "/prepared/root"

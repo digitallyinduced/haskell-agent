@@ -28,6 +28,7 @@ import System.Environment
     ( lookupEnv
     , setEnv
     , unsetEnv
+    , withArgs
     )
 import System.FilePath ((</>))
 import System.IO
@@ -40,6 +41,24 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "server configuration" do
+    it "keeps approval prompting enabled by default" do
+        defaultServerConfig.serverYolo `shouldBe` False
+
+    it "parses --yolo as explicit auto-approval" do
+        config <- withArgs ["--yolo"] parseServerConfig
+        config.serverYolo `shouldBe` True
+
+    it "preserves explicit auto-approval during resolution" do
+        withTokenEnvironmentUnset do
+            resolved <-
+                resolveServerConfig
+                    defaultServerConfig { serverYolo = True }
+            case resolved of
+                Left err ->
+                    expectationFailure (Text.unpack err)
+                Right config ->
+                    config.resolvedYolo `shouldBe` True
+
     it "reads a newline-terminated private token file through EOF" do
         withTokenEnvironmentUnset $
             withPrivateTokenFile "correct-token\n" \path -> do

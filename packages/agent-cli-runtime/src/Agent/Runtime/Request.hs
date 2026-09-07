@@ -24,8 +24,7 @@ data NativeInteractionMode
     | NativePlan
     -- ^ Begin this turn with plan mode active.
     | NativeYolo
-    -- ^ Auto-approve mutating tools. Typed native turns reject this mode;
-    -- legacy embedding hooks still use the shared interaction vocabulary.
+    -- ^ Auto-approve mutating tools.
     deriving (Eq, Show)
 
 data NativeShellMode
@@ -43,8 +42,8 @@ data NativeSessionTarget
     deriving (Eq, Show)
 
 -- | Native turns exclude CLI-only capabilities such as worktree creation,
--- computer use, prompt files, and implicit non-interactive auto-approval.
--- The executing adapter must supply interactive approval and plan callbacks.
+-- computer use, and prompt files. The executing adapter supplies approval
+-- and plan callbacks for the selected interaction mode.
 data NativeTurnRequest = NativeTurnRequest
     { nativeTurnPrompt :: !Text
     , nativeTurnImages :: ![ImageAttachment]
@@ -62,8 +61,6 @@ data NativeTurnRequest = NativeTurnRequest
 -- Workspace, provider, and session resolution remain execution-time concerns.
 validateNativeTurnRequest :: NativeTurnRequest -> Either Text ()
 validateNativeTurnRequest request
-    | request.nativeTurnInteractionMode == NativeYolo =
-        Left "typed native turns do not support auto-approval"
     | NativeResumeSession sessionId <- request.nativeTurnSession
     , Text.null (Text.strip sessionId) =
         Left "native resume session id must not be empty"
