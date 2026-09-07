@@ -89,7 +89,7 @@ terminalDescription :: Text
 terminalDescription =
     "Run a bash command and return its output.\n\
     \- Always set a timeout for commands that may hang.\n\
-    \- Use `$TMPDIR` for temporary files; literal `/tmp` and `/private/tmp` paths are rejected.\n\
+    \- Use `$TMPDIR` as the only temporary-file root. Put task-specific subdirectories there; do not create alternate scratch directories in the home directory or workspace. Literal `/tmp` and `/private/tmp` paths are rejected.\n\
     \- Prefer dedicated tools (read_file, grep, list_dir, search_replace) over shell equivalents when they exist."
 
 runTerminal

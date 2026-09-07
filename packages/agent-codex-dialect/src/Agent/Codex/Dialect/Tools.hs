@@ -205,7 +205,7 @@ shellDescription :: Text
 shellDescription =
     "Runs a shell command and returns its output.\n\
     \- `workdir` is optional; omit it to use the turn cwd. Do not use `cd` unless absolutely necessary.\n\
-    \- Use `$TMPDIR` for temporary files; literal `/tmp` and `/private/tmp` paths are rejected.\n\
+    \- Use `$TMPDIR` as the only temporary-file root. Put task-specific subdirectories there; do not create alternate scratch directories in the home directory or workspace. Literal `/tmp` and `/private/tmp` paths are rejected.\n\
     \- By default, a command that is still running after 10000 ms is retained and returned with a session_id. Completion is reported automatically; do not poll or run sleep commands while waiting.\n\
     \- Set `timeout_ms` only when the command should be stopped after a fixed runtime, or `yield_time_ms` to change the initial wait.\n\
     \- Use `write_stdin` only to send input, interrupt, inspect a current snapshot, or perform one bounded wait."
