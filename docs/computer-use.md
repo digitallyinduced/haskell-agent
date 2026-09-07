@@ -6,7 +6,7 @@ One-shot and non-interactive runs require an explicit `--computer-use`;
 `--no-computer-use` disables the capability. Every call still goes through the
 computer-use approval policy.
 
-Linux and macOS are supported. This guide describes the Linux backends.
+Linux and macOS are supported.
 
 ## Security and lifecycle
 
@@ -16,17 +16,60 @@ Linux and macOS are supported. This guide describes the Linux backends.
 - A successful screenshot establishes the exact display lease for later
   actions. Input is rejected before the first observation, and a changed
   display requires another successful screenshot.
-- The selected display and the active, unlocked logind session are checked
-  before every action. A changed monitor, resolution, scale, portal stream, or
-  session state aborts the batch without retrying it.
+- The selected display and active, unlocked desktop session are checked before
+  every action. On Linux, session ownership and activity are verified through
+  logind. A changed monitor, resolution, scale, portal stream, or session state
+  aborts the batch without retrying it.
 - Calls are serialized. A drag or modified input operation releases held
   buttons and modifiers when it fails.
+- Session-destructive shortcuts that lock, log out of, or destructively alter
+  the active desktop are rejected before approval and again before execution.
+- Successful input delivery is not reported as proof of the intended UI
+  effect. The result identifies it as unverified and tells the model to inspect
+  the fresh screenshot or accessibility state before continuing or retrying.
 - Portal and D-Bus connections belong to the `agent-cli` process and are closed
   when that process exits.
+
+Every capture remains subject to the computer-use approval policy. A screenshot
+can disclose private information, so merely enabling the tool does not make
+observation approval-free.
 
 The model receives logical display coordinates with origin `(0, 0)`. Linux
 multi-monitor sessions control one selected monitor; they are not combined
 into a virtual desktop.
+
+## macOS
+
+The standalone CLI captures and controls only the CoreGraphics main display.
+Its display lease includes the display ID, logical origin and size, and
+physical frame dimensions, plus normalized CoreGraphics rotation. This detects
+a changed main display, resolution, rotation, or backing scale even when some
+logical dimensions remain equal.
+
+The exact leased identity is checked before each action, inside the JXA event
+injection script, and after the final capture. Input is rejected until a
+successful screenshot establishes the lease. Starting an input transaction
+invalidates the old lease until its post-action screenshot succeeds, including
+when execution fails or is cancelled.
+
+Session readiness requires an active on-console login and a boolean
+`IOConsoleLocked` state. Missing or malformed session state fails closed.
+
+The native macOS app uses the separate accessibility-first protocol. It lists
+and binds windows, returns bounded revisioned AX snapshots, and acts on stable
+element IDs. Screenshots are optional there. An action result still represents
+delivery rather than semantic proof: inspect its fresh AX state or requested
+screenshot before retrying.
+
+Both paths tell the model to treat screen and accessibility text as untrusted
+data rather than instructions. They must not enter secrets or approve
+authentication, permission, payment, or destructive interfaces without an
+explicit user request.
+
+Required permissions:
+
+- Screen Recording for screenshots
+- Accessibility for keyboard and pointer input
 
 ## X11
 

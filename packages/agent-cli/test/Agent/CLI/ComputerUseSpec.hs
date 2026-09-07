@@ -9,6 +9,7 @@ import Agent.CLI.ComputerUse
     , ScreenshotEncoding(..)
     , advanceAccessibilityObservation
     , applyAccessibilityPatch
+    , blockedComputerKeyCombination
     , closeComputerUseRuntime
     , computerApprovalPrompt
     , decodeAccessibilitySnapshot
@@ -17,11 +18,14 @@ import Agent.CLI.ComputerUse
     , executeComputerCallWithRuntime
     , initialAccessibilityDeltaState
     , keyCombinationScript
+    , keyCombinationScriptForDisplay
     , newLeasedDesktopComputerUseBackend
     , newComputerUseRuntimeWithBackend
     , parseDisplaySize
+    , parseMacOSDisplayIdentity
     , parseSessionLocked
     , pointerScript
+    , pointerScriptForDisplay
     , summarizeComputerCall
     , summarizeComputerToolCall
     , validateComputerCall
@@ -417,6 +421,36 @@ spec = do
                 exampleCall
                 `shouldReturn` Left
                     "The selected display changed during computer use; take a fresh screenshot before continuing."
+
+        it "rechecks session readiness after capturing an observation" do
+            readinessChecks <- newIORef (0 :: Int)
+            captureCount <- newIORef (0 :: Int)
+            let ensureReady = do
+                    check <- atomicModifyIORef' readinessChecks \current ->
+                        let next = current + 1 in (next, next)
+                    pure $
+                        if check == 3
+                            then Left "session locked after capture"
+                            else Right ()
+                backend =
+                    (testBackend x11Display)
+                        { computerBackendEnsureReady = ensureReady
+                        , computerBackendCaptureDisplay = \_ -> do
+                            modifyIORef' captureCount (+ 1)
+                            pure (Right CapturedDisplay
+                                { capturedComputerDisplay = x11Display
+                                , capturedComputerImage = emptyImage
+                                })
+                        }
+                screenshotCall =
+                    exampleCall { computerActions = [ScreenshotAction] }
+            executeComputerCallWithDesktopBackend
+                backend
+                ScreenshotPng
+                screenshotCall
+                `shouldReturn` Left "session locked after capture"
+            readIORef readinessChecks `shouldReturn` 3
+            readIORef captureCount `shouldReturn` 1
 
         it "requires an observation before a leased desktop action" do
             backendCalls <- newIORef ([] :: [Text.Text])
@@ -2345,23 +2379,145 @@ spec = do
                             && not ("System Events" `Text.isInfixOf` script))
 
         it "fails closed when macOS GUI session state is unavailable" do
+            let guarded script =
+                    "kCGSSessionOnConsoleKey!==true" `Text.isInfixOf` script
+                        && "IOConsoleLocked" `Text.isInfixOf` script
+                        && "typeof locked!=='boolean'"
+                            `Text.isInfixOf` script
             pointerScript (ClickAction 12 34 "left" [])
                 `shouldSatisfy` either
                     (const False)
-                    (\script ->
-                        "if(!d||typeof d.CGSSessionScreenIsLocked!=='boolean')"
-                            `Text.isInfixOf` script)
+                    guarded
             keyCombinationScript ["enter"]
                 `shouldSatisfy` either
                     (const False)
+                    guarded
+
+        it "binds macOS event injection to the leased display identity" do
+            let display = ComputerDisplay
+                    { computerDisplayId = "123"
+                    , computerDisplayOriginX = 0
+                    , computerDisplayOriginY = -900
+                    , computerDisplayWidth = 1728
+                    , computerDisplayHeight = 1117
+                    , computerDisplayFrameWidth = 3456
+                    , computerDisplayFrameHeight = 2234
+                    , computerDisplayRotationDegrees = 180
+                    }
+                guarded script =
+                    "String(Number(displayID))!==\"123\""
+                        `Text.isInfixOf` script
+                        && "bounds.origin.y))!==-900"
+                            `Text.isInfixOf` script
+                        && "CGDisplayPixelsWide(displayID))!==3456"
+                            `Text.isInfixOf` script
+                        && "displayRotation(displayID)!==180"
+                            `Text.isInfixOf` script
+            pointerScriptForDisplay
+                (Just display)
+                (DragAction
+                    [ComputerPoint 12 34, ComputerPoint 56 78]
+                    [])
+                `shouldSatisfy` either
+                    (const False)
                     (\script ->
-                        "if(!d||typeof d.CGSSessionScreenIsLocked!=='boolean')"
-                            `Text.isInfixOf` script)
+                        guarded script
+                            && "const position=point(x,y)"
+                                `Text.isInfixOf` script
+                            && "up(f){post($.kCGEventLeftMouseUp,lastX,lastY"
+                                `Text.isInfixOf` script)
+            keyCombinationScriptForDisplay
+                (Just display)
+                ["cmd", "a"]
+                `shouldSatisfy` either (const False) guarded
 
         it "validates logical main-display dimensions" do
             parseDisplaySize "2056,1329\n" `shouldBe` Just (2056, 1329)
             parseDisplaySize "4112,-1" `shouldBe` Nothing
             parseDisplaySize "screen" `shouldBe` Nothing
+            parseDisplaySize "999999999999999999999999,1329"
+                `shouldBe` Nothing
+
+        it "parses the complete macOS display identity fail-closed" do
+            parseMacOSDisplayIdentity
+                "123,0,-900,1728,1117,3456,2234,180\n"
+                `shouldBe` Just ComputerDisplay
+                    { computerDisplayId = "123"
+                    , computerDisplayOriginX = 0
+                    , computerDisplayOriginY = -900
+                    , computerDisplayWidth = 1728
+                    , computerDisplayHeight = 1117
+                    , computerDisplayFrameWidth = 3456
+                    , computerDisplayFrameHeight = 2234
+                    , computerDisplayRotationDegrees = 180
+                    }
+            parseMacOSDisplayIdentity
+                "123,0,0,1728,1117,0,2234,0"
+                `shouldBe` Nothing
+            parseMacOSDisplayIdentity
+                "0,0,0,1728,1117,3456,2234,0"
+                `shouldBe` Nothing
+            parseMacOSDisplayIdentity
+                "123,0,0,1728.0,1117,3456,2234,0"
+                `shouldBe` Nothing
+            parseMacOSDisplayIdentity
+                "999999999999999999999999,0,0,1728,1117,3456,2234,0"
+                `shouldBe` Nothing
+            parseMacOSDisplayIdentity
+                "123,0,0,1728,1117,3456,2234,45"
+                `shouldBe` Nothing
+
+        it "hard-blocks destructive shortcuts without rejecting safe ones" do
+            keyCombinationScript ["control", "alt", "delete"]
+                `shouldSatisfy` either
+                    (Text.isInfixOf "blocked")
+                    (const False)
+            validateComputerCall
+                exampleCall
+                    { computerActions =
+                        [KeypressAction ["control", "alt", "delete"]]
+                    }
+                `shouldSatisfy` either
+                    (Text.isInfixOf "blocked")
+                    (const False)
+            blockedComputerKeyCombination
+                "darwin"
+                ["shift", "command", "option", "q"]
+                `shouldSatisfy` maybe False
+                    (Text.isInfixOf "blocked")
+            blockedComputerKeyCombination
+                "darwin"
+                ["COMMAND", "shift", "backspace"]
+                `shouldSatisfy` maybe False
+                    (Text.isInfixOf "blocked")
+            blockedComputerKeyCombination
+                "linux"
+                ["ctrl", "shift", "alt", "delete"]
+                `shouldSatisfy` maybe False
+                    (Text.isInfixOf "blocked")
+            blockedComputerKeyCombination
+                "linux"
+                ["meta", "l"]
+                `shouldSatisfy` maybe False
+                    (Text.isInfixOf "blocked")
+            blockedComputerKeyCombination
+                "linux"
+                ["control", "alt", "l"]
+                `shouldSatisfy` maybe False
+                    (Text.isInfixOf "blocked")
+            blockedComputerKeyCombination
+                "linux"
+                ["control", "alt", "backspace"]
+                `shouldSatisfy` maybe False
+                    (Text.isInfixOf "blocked")
+            blockedComputerKeyCombination
+                "darwin"
+                ["command", "l"]
+                `shouldBe` Nothing
+            blockedComputerKeyCombination
+                "linux"
+                ["ctrl", "c"]
+                `shouldBe` Nothing
 
         it "preserves printable key case and Unicode" do
             keyCombinationScript ["A"] `shouldSatisfy`
@@ -2378,6 +2534,14 @@ spec = do
                     (\script ->
                         "value.slice(i,end)" `Text.isInfixOf` script
                             && "charCodeAt(end-1)" `Text.isInfixOf` script)
+            keyCombinationScript ["🙂"] `shouldSatisfy`
+                either (const False)
+                    (\script ->
+                        "NSUTF16LittleEndianStringEncoding"
+                            `Text.isInfixOf` script
+                            && "data.bytes" `Text.isInfixOf` script
+                            && "['void *','size_t','void *']"
+                                `Text.isInfixOf` script)
 
         it "normalizes provider special-key names to macOS virtual keys" do
             keyCombinationScript ["ARROWLEFT"] `shouldSatisfy`
@@ -2482,8 +2646,13 @@ spec = do
                 ]
             result `shouldSatisfy` either
                 (const False)
-                ("data:image/jpeg;base64,ZnJlc2gtaW1hZ2U="
-                    `Text.isInfixOf`)
+                (\output ->
+                    "data:image/jpeg;base64,ZnJlc2gtaW1hZ2U="
+                        `Text.isInfixOf` output
+                        && "\"effect\":\"unverifiable\""
+                            `Text.isInfixOf` output
+                        && "\"decision\":\"inspect_fresh_state\""
+                            `Text.isInfixOf` output)
 
         it "captures a screenshot-only call without forwarding a fake action" do
             observedActions <- newIORef Nothing
@@ -2507,7 +2676,9 @@ spec = do
                 backend
                 ScreenshotPng
                 exampleCall { computerActions = [ScreenshotAction] }
-            result `shouldSatisfy` either (const False) (const True)
+            result `shouldSatisfy` either
+                (const False)
+                ("\"effect\":\"observation\"" `Text.isInfixOf`)
             readIORef observedActions `shouldReturn` Just []
 
         it "does not invoke a backend for an invalid batch" do
@@ -2847,6 +3018,7 @@ x11Display = ComputerDisplay
     , computerDisplayHeight = 900
     , computerDisplayFrameWidth = 1440
     , computerDisplayFrameHeight = 900
+    , computerDisplayRotationDegrees = 0
     }
 
 testBackend :: ComputerDisplay -> ComputerBackend
