@@ -49,7 +49,6 @@ import Agent.Integration.API
     ( closeIntegrationSupervisor
     , newIntegrationSupervisor
     , emptyIntegrationProvider
-    , integrationSupervisorArtifactDirectory
     )
 import Agent.CLI.Options
     ( CliOptions
@@ -245,9 +244,6 @@ runAgentWithRestarts options =
                                 { MCP.mcpHostElicit = readIORef elicitationRef
                                 , MCP.mcpHostRoots = readIORef rootsRef
                                 , MCP.mcpHostSample = readIORef samplingRef
-                                , MCP.mcpHostArtifactDirectory = Just
-                                    (integrationSupervisorArtifactDirectory
-                                        integrationSupervisor)
                                 }
                             `onException`
                                 closeIntegrationSupervisor integrationSupervisor

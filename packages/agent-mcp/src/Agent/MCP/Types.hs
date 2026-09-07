@@ -31,6 +31,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
+import GHC.StableName (StableName)
 import System.IO (Handle)
 import System.Posix.Types (ProcessGroupID)
 import System.Process (ProcessHandle)
@@ -301,6 +302,8 @@ encodeElicitResult result = rawJsonFromEncoding . Aeson.toEncoding $ case result
 data McpToolRegistration = McpToolRegistration
     { mcpRegistrationServer :: !Text
     , mcpRegistrationTool :: !AppTool
+    , mcpRegistrationToolForArtifactDirectory
+        :: !(Maybe FilePath -> AppTool)
     }
 
 data McpCatalogEntry = McpCatalogEntry
@@ -658,6 +661,8 @@ data McpSupervisorEntry = McpSupervisorEntry
     { supervisorEntryId :: !Int
     , supervisorEntryProgressive :: !Bool
     , supervisorEntryConfigs :: ![McpServerConfig]
+    , supervisorEntryInMemoryIdentities
+        :: ![StableName McpToolServer]
     , supervisorEntryFleet :: !McpFleet
     , supervisorEntryLeases :: !Int
     }
@@ -666,6 +671,8 @@ data McpSupervisorPending = McpSupervisorPending
     { supervisorPendingId :: !Int
     , supervisorPendingProgressive :: !Bool
     , supervisorPendingConfigs :: ![McpServerConfig]
+    , supervisorPendingInMemoryIdentities
+        :: ![StableName McpToolServer]
     , supervisorPendingResult :: !(TMVar (Either Text McpFleet))
     , supervisorPendingWorker ::
         !(TMVar (Async (Either Text McpFleet)))
@@ -723,6 +730,9 @@ data McpCallToolRequest = McpCallToolRequest
     { callToolName :: !Text
     , callToolArguments :: !RawJson
     , callToolRequestId :: !(Maybe Text)
+    -- | Trusted host-only destination for artifacts produced by this call.
+    -- This context is never serialized to an external MCP server.
+    , callToolArtifactDirectory :: !(Maybe FilePath)
     }
 
 data McpCallToolResult = McpCallToolResult

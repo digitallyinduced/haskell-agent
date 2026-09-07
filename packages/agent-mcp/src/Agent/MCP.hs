@@ -61,6 +61,8 @@ module Agent.MCP
     , acquireMcpFleet
     , acquireMcpFleetWithProgress
     , acquireMcpFleetProgressive
+    , acquireMcpFleetWithInMemory
+    , acquireMcpFleetProgressiveWithInMemory
     , releaseMcpFleetLease
     , closeMcpSupervisor
     , restartMcpSupervisor
@@ -68,6 +70,7 @@ module Agent.MCP
     , startMcpFleetWithProgress
     , startMcpFleetWithProgressHooks
     , startMcpFleetWithInMemory
+    , startMcpFleetProgressiveWithInMemoryHooks
     , McpToolServer(..)
     , McpTool(..)
     , emptyServerCapabilities
@@ -77,8 +80,12 @@ module Agent.MCP
     , startMcpFleetProgressiveHooks
     , closeMcpFleet
     , mcpFleetTools
+    , mcpFleetToolsForArtifactDirectory
+    , mcpFleetRegistrationsForArtifactDirectory
     , mcpFleetMetaTools
+    , mcpFleetMetaToolsForArtifactDirectory
     , mcpFleetGrokMetaTools
+    , mcpFleetGrokMetaToolsForArtifactDirectory
     , mcpFleetResourceTools
     , mcpFleetStatuses
     , mcpFleetServerInfos
@@ -124,22 +131,27 @@ import Agent.MCP.InProcess
     )
 import Agent.MCP.Fleet
     ( startMcpFleetWithInMemory
+    , startMcpFleetProgressiveWithInMemoryHooks
     , closeMcpFleet
     , mcpFleetComplete
     , mcpFleetGetPrompt
     , mcpFleetGetSkill
     , mcpFleetGrokMetaTools
+    , mcpFleetGrokMetaToolsForArtifactDirectory
     , mcpFleetInstructions
     , mcpFleetListPrompts
     , mcpFleetListResourceTemplates
     , mcpFleetListResources
     , mcpFleetMetaTools
+    , mcpFleetMetaToolsForArtifactDirectory
     , mcpFleetReadResource
     , mcpFleetResourceTools
     , mcpFleetServerInfos
     , mcpFleetSkillRegistrations
     , mcpFleetStatuses
+    , mcpFleetRegistrationsForArtifactDirectory
     , mcpFleetTools
+    , mcpFleetToolsForArtifactDirectory
     , startMcpFleet
     , startMcpFleetProgressive
     , startMcpFleetProgressiveHooks
@@ -149,6 +161,8 @@ import Agent.MCP.Fleet
 import Agent.MCP.Supervisor
     ( acquireMcpFleet
     , acquireMcpFleetProgressive
+    , acquireMcpFleetProgressiveWithInMemory
+    , acquireMcpFleetWithInMemory
     , acquireMcpFleetWithProgress
     , closeMcpSupervisor
     , newMcpSupervisor

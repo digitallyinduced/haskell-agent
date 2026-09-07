@@ -106,6 +106,28 @@ sameServerConfigs left right =
 mcpFleetTools :: McpFleet -> [AppTool]
 mcpFleetTools = map (.mcpRegistrationTool) . (.mcpFleetRegistrations)
 
+mcpFleetToolsForArtifactDirectory
+    :: Maybe FilePath
+    -> McpFleet
+    -> [AppTool]
+mcpFleetToolsForArtifactDirectory artifactDirectory =
+    map (.mcpRegistrationTool)
+        . mcpFleetRegistrationsForArtifactDirectory artifactDirectory
+
+mcpFleetRegistrationsForArtifactDirectory
+    :: Maybe FilePath
+    -> McpFleet
+    -> [McpToolRegistration]
+mcpFleetRegistrationsForArtifactDirectory artifactDirectory =
+    map
+        (\registration ->
+            registration
+                { mcpRegistrationTool =
+                    registration.mcpRegistrationToolForArtifactDirectory
+                        artifactDirectory
+                })
+        . (.mcpFleetRegistrations)
+
 -- | Snapshot the metadata advertised by every Skills-over-MCP server.  The
 -- server name is deliberately retained alongside each URI: URIs are only
 -- unique within an MCP server.
@@ -404,6 +426,9 @@ startMcpFleetWithInMemory hooks reportActive external inMemory = mask \restore -
     registrationFor client tool = McpToolRegistration
         { mcpRegistrationServer = client.clientConfig.mcpServerName
         , mcpRegistrationTool = appToolFor client tool
+        , mcpRegistrationToolForArtifactDirectory =
+            \directory ->
+                appToolForArtifactDirectory directory client tool
         }
 
     startupWarningFromText :: McpServerConfig -> Text -> Text
@@ -459,7 +484,20 @@ startMcpFleetProgressiveHooks
     -> ([McpServerStatus] -> IO ())
     -> [McpServerConfig]
     -> IO McpFleet
-startMcpFleetProgressiveHooks hooks reportStatuses configs = mask \restore -> do
+startMcpFleetProgressiveHooks hooks reportStatuses configs =
+    startMcpFleetProgressiveWithInMemoryHooks
+        hooks reportStatuses configs []
+
+-- | Progressive startup for external and trusted host-owned servers. The
+-- returned fleet owns both kinds of client under one lifecycle.
+startMcpFleetProgressiveWithInMemoryHooks
+    :: McpHostHooks
+    -> ([McpServerStatus] -> IO ())
+    -> [McpServerConfig]
+    -> [(McpServerConfig, McpToolServer)]
+    -> IO McpFleet
+startMcpFleetProgressiveWithInMemoryHooks
+    hooks reportStatuses external inMemory = mask \restore -> do
     validateServerNames configs
     closed <- newMVar False
     workers <- newMVar []
@@ -558,12 +596,22 @@ startMcpFleetProgressiveHooks hooks reportStatuses configs = mask \restore -> do
     pure fleet
         `onException` closeMcpFleet fleet
   where
+    configs = external <> map fst inMemory
+
+    startClient config =
+        case lookup config.mcpServerName
+            [ (entry.mcpServerName, server)
+            | (entry, server) <- inMemory
+            ] of
+            Just server -> startInMemoryMcpClient hooks config server
+            Nothing -> startMcpClientWith hooks Nothing config
+
     startClientTracked ownedClients semaphore config = mask \restore -> do
         attempt <-
             bracket_
                 (waitQSem semaphore)
                 (signalQSem semaphore)
-                (tryAny (restore (startMcpClientWith hooks Nothing config)))
+                (tryAny (restore (startClient config)))
         case attempt of
             Left exception -> pure (Left exception)
             Right client -> do
@@ -766,14 +814,32 @@ refreshServerTools fleet client expectedRevision =
 -- catalog. These schemas do not change as servers become ready.
 mcpFleetMetaTools :: McpFleet -> [AppTool]
 mcpFleetMetaTools fleet =
+    mcpFleetMetaToolsForArtifactDirectory
+        fleet.mcpFleetHooks.mcpHostArtifactDirectory
+        fleet
+
+mcpFleetMetaToolsForArtifactDirectory
+    :: Maybe FilePath
+    -> McpFleet
+    -> [AppTool]
+mcpFleetMetaToolsForArtifactDirectory artifactDirectory fleet =
     [ mcpSearchTool fleet
-    , mcpCallTool fleet
+    , mcpCallTool artifactDirectory fleet
     ]
 
 mcpFleetGrokMetaTools :: McpFleet -> [AppTool]
 mcpFleetGrokMetaTools fleet =
+    mcpFleetGrokMetaToolsForArtifactDirectory
+        fleet.mcpFleetHooks.mcpHostArtifactDirectory
+        fleet
+
+mcpFleetGrokMetaToolsForArtifactDirectory
+    :: Maybe FilePath
+    -> McpFleet
+    -> [AppTool]
+mcpFleetGrokMetaToolsForArtifactDirectory artifactDirectory fleet =
     [ grokSearchTool fleet
-    , grokUseTool fleet
+    , grokUseTool artifactDirectory fleet
     ]
 
 -- | Read-only tools for browsing and reading server resources. They are
@@ -944,16 +1010,22 @@ grokSearchTool fleet = AppTool
     }
 
 callCatalogEntryWithReconnect
-    :: McpFleet
+    :: Maybe FilePath
+    -> McpFleet
     -> Text
     -> McpCatalogEntry
     -> RawJson
     -> IO (Either Text Text)
-callCatalogEntryWithReconnect fleet qualifiedName entry arguments =
+callCatalogEntryWithReconnect artifactDirectory fleet qualifiedName entry arguments =
     catalogEntryIsLive entry >>= \case
         False -> pure (Left changedCatalogEntryMessage)
         True ->
-            callDiscoveredTool entry.catalogClient entry.catalogTool arguments
+            callDiscoveredToolWith
+                artifactDirectory
+                entry.catalogClient
+                entry.catalogTool
+                arguments
+                Nothing
                 >>= \case
                     Right result -> pure (Right result)
                     Left originalError
@@ -992,10 +1064,12 @@ callCatalogEntryWithReconnect fleet qualifiedName entry arguments =
                                                             (Left
                                                                 changedCatalogEntryMessage)
                                                     else
-                                                        callDiscoveredTool
+                                                        callDiscoveredToolWith
+                                                            artifactDirectory
                                                             replacement.catalogClient
                                                             replacement.catalogTool
                                                             arguments
+                                                            Nothing
 
 catalogEntryIsLive :: McpCatalogEntry -> IO Bool
 catalogEntryIsLive entry = do
@@ -1008,12 +1082,13 @@ catalogEntryIsLive entry = do
 -- A generation change is allowed only when every advertised tool property
 -- still matches the snapshot that the parent approved.
 callApprovedCatalogTool
-    :: McpFleet
+    :: Maybe FilePath
+    -> McpFleet
     -> ToolCall
     -> Text
     -> RawJson
     -> IO (Either Text Text)
-callApprovedCatalogTool fleet call name toolArguments = do
+callApprovedCatalogTool artifactDirectory fleet call name toolArguments = do
     approved <- atomically do
         approvals <- readTVar fleet.mcpFleetApprovedCalls
         writeTVar fleet.mcpFleetApprovedCalls
@@ -1042,6 +1117,7 @@ callApprovedCatalogTool fleet call name toolArguments = do
                             then pure (Left changedCatalogEntryMessage)
                             else
                                 callCatalogEntryWithReconnect
+                                    artifactDirectory
                                     fleet
                                     name
                                     selected
@@ -1217,8 +1293,8 @@ reconnectCatalogEntry fleet qualifiedName failedEntry =
                                     Just replacement ->
                                         pure (Right replacement)
 
-mcpCallTool :: McpFleet -> AppTool
-mcpCallTool fleet = AppTool
+mcpCallTool :: Maybe FilePath -> McpFleet -> AppTool
+mcpCallTool artifactDirectory fleet = AppTool
     { appToolName = "mcp_call"
     , appToolDescription =
         "Call a currently available MCP tool by its qualified server__tool name. Mutating tools require user approval."
@@ -1233,7 +1309,8 @@ mcpCallTool fleet = AppTool
         ]
     , appToolHandler = typedToolWithCall "mcp_call" callArgumentsDecoder
         \call (name, toolArguments) ->
-            callApprovedCatalogTool fleet call name toolArguments
+            callApprovedCatalogTool
+                artifactDirectory fleet call name toolArguments
     , appToolApproval =
         ClassifyApproval
             (catalogCallApproval fleet callArgumentsDecoder)
@@ -1242,8 +1319,8 @@ mcpCallTool fleet = AppTool
     , appToolAsyncCapability = BlockingOnly
     }
 
-grokUseTool :: McpFleet -> AppTool
-grokUseTool fleet = AppTool
+grokUseTool :: Maybe FilePath -> McpFleet -> AppTool
+grokUseTool artifactDirectory fleet = AppTool
     { appToolName = "use_tool"
     , appToolDescription =
         "Call an MCP integration tool.\n\n\
@@ -1264,7 +1341,8 @@ grokUseTool fleet = AppTool
         ]
     , appToolHandler = typedToolWithCall "use_tool" grokCallArgumentsDecoder
         \call (name, toolArguments) ->
-            callApprovedCatalogTool fleet call name toolArguments
+            callApprovedCatalogTool
+                artifactDirectory fleet call name toolArguments
     , appToolApproval =
         ClassifyApproval
             (catalogCallApproval fleet grokCallArgumentsDecoder)

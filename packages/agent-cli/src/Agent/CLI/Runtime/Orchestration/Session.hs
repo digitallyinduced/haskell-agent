@@ -307,6 +307,7 @@ data AgentSessionRequest closeResult windowTitleResult = AgentSessionRequest
     , learnedSkillAppTools :: [AppTool]
     , legacySubagentTarget :: Maybe LegacySubagentTarget
     , mcpFleet :: MCP.McpFleet
+    , mcpRegistrations :: [MCP.McpToolRegistration]
     , mcpInstructions :: [(Text, Text)]
     , mcpTools :: [AppTool]
     , mcpSamplingRef
@@ -418,7 +419,7 @@ validateSessionMcpTools AgentSessionRequest
     , gatewayTools
     , databaseAppTools
     , learnedSkillAppTools
-    , mcpFleet
+    , mcpRegistrations
     , startup
     } =
     case
@@ -430,7 +431,7 @@ validateSessionMcpTools AgentSessionRequest
                     ++ databaseAppTools
                     ++ learnedSkillAppTools
                 )
-                mcpFleet.mcpFleetRegistrations
+                mcpRegistrations
         of
             Just err ->
                 startupDie startup
@@ -992,7 +993,7 @@ buildProviderSessionRequest
                 request.coding.codingResetSessionTemp
             , grokRuntime = request.coding.codingGrokRuntime
             , mcpRegistrations =
-                request.mcpFleet.mcpFleetRegistrations
+                request.mcpRegistrations
             , mcpWarnings = request.mcpFleet.mcpFleetWarnings
             , mcpInstructions = request.mcpInstructions
             , mcpFleet = Just request.mcpFleet

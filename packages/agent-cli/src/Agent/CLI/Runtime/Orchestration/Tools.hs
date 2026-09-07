@@ -46,8 +46,8 @@ import Agent.CLI.IntegrationGateway (gatewayIntegrationAuthority)
 import Agent.Integration.API
     ( IntegrationRuntime
     , acquireIntegrationRuntime
-    , prepareIntegrationSupervisorForSession
     )
+import Agent.OsPath (unsafeToFilePath)
 import Agent.CLI.ModelConfig (builtinConnectionId)
 import Agent.CLI.Models (ModelTarget(targetConnectionId, targetWireModelId))
 import Agent.CLI.Options
@@ -143,10 +143,11 @@ import Data.Unique (newUnique, hashUnique)
 import System.Info (os)
 import System.OsPath (OsPath)
 import qualified Agent.MCP as MCP
-    ( mcpFleetGrokMetaTools,
-      mcpFleetMetaTools,
+    ( mcpFleetGrokMetaToolsForArtifactDirectory,
+      mcpFleetMetaToolsForArtifactDirectory,
+      mcpFleetRegistrationsForArtifactDirectory,
       mcpFleetResourceTools,
-      mcpFleetTools )
+      mcpFleetToolsForArtifactDirectory )
 import qualified Data.Text as Text (unpack, pack)
 
 data LocalToolRuntime = LocalToolRuntime
@@ -324,12 +325,9 @@ acquireSessionIntegrationRuntime
     :: AgentToolsRequest windowTitleResult
     -> IO (Maybe IntegrationRuntime)
 acquireSessionIntegrationRuntime request =
-    prepareIntegrationSupervisorForSession
+    acquireIntegrationRuntime
         request.processRuntime.processIntegrationSupervisor
-        request.baseToolEnv
-        >> acquireIntegrationRuntime
-            request.processRuntime.processIntegrationSupervisor
-            authority >>= \case
+        authority >>= \case
         Left err -> do
             reportStartupWarning request.startup err
             pure Nothing
@@ -646,6 +644,7 @@ assembleSessionToolsRuntime AgentToolsRequest
     { scratchPromptRequest = promptRequest
     , scratchImageGenerationHistory = imageGenerationHistory
     , scratchExternalSessionTools = externalSessionAppTools
+    , scratchSessionTmp = sessionTmp
     , scratchCleanup = cleanupScratch
     } McpRuntime
     { runtimeMcpServerConfigs = mcpServerConfigs
@@ -662,15 +661,25 @@ assembleSessionToolsRuntime AgentToolsRequest
     , controlCodeModeCloseRef = codeModeCloseRef
     , controlSessionTools = persistedSessionTools
     } = do
-    let sessionMcpTools =
+    let artifactDirectory = Just (unsafeToFilePath sessionTmp)
+        sessionMcpTools =
             if null mcpServerConfigs
                 then []
                 else
                     (if dialectId == GrokBuildDialect
-                        then MCP.mcpFleetGrokMetaTools mcpFleet
+                        then
+                            MCP.mcpFleetGrokMetaToolsForArtifactDirectory
+                                artifactDirectory
+                                mcpFleet
                         else if progressiveMcp
-                            then MCP.mcpFleetMetaTools mcpFleet
-                            else MCP.mcpFleetTools mcpFleet)
+                            then
+                                MCP.mcpFleetMetaToolsForArtifactDirectory
+                                    artifactDirectory
+                                    mcpFleet
+                            else
+                                MCP.mcpFleetToolsForArtifactDirectory
+                                    artifactDirectory
+                                    mcpFleet)
                         <> MCP.mcpFleetResourceTools mcpFleet
         databaseToolsEnv =
             databaseToolsEnvForStore
@@ -858,6 +867,10 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
     forM_ startup.startupNativeHooks \hooks ->
         when (hooks.nativeInteractionMode == NativePlan) $
             writeIORef planMode.planStateRef PlanPending
+    let mcpRegistrations =
+            MCP.mcpFleetRegistrationsForArtifactDirectory
+                (Just (unsafeToFilePath sessionTmp))
+                mcpFleet
     runAgentSession AgentSessionRequest
         { loaded
         , connectedGateway
@@ -901,6 +914,7 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
         , learnedSkillAppTools
         , legacySubagentTarget
         , mcpFleet
+        , mcpRegistrations
         , mcpInstructions
         , mcpTools
         , mcpSamplingRef = processRuntime.processMcpSampling

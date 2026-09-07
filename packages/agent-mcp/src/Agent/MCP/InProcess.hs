@@ -205,7 +205,8 @@ handleRequest server requestId method parameters =
                             (Just (case requestId of
                                 String ident -> ident
                                 _ -> TextEncoding.decodeUtf8
-                                    (rawJsonBytes (rawJsonFromEncoding (Aeson.toEncoding requestId))))))
+                                    (rawJsonBytes (rawJsonFromEncoding (Aeson.toEncoding requestId)))))
+                            Nothing)
                     pure $ either (encodeError requestId)
                         (\result -> rpcSuccess requestId $ object $
                             [ "content" .= [object ["type" .= ("text" :: Text), "text" .= text]
