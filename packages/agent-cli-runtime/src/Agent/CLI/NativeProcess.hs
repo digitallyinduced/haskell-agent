@@ -7,6 +7,8 @@ module Agent.CLI.NativeProcess
         , nativeNetworkRecovery
         , nativeStartCleanup
         , nativeMcpElicitation
+        , nativeMcpRoots
+        , nativeMcpSampling
         )
     , newNativeProcessRuntime
     , closeNativeProcessRuntime
@@ -25,6 +27,7 @@ import Control.Concurrent.Async (Async, asyncWithUnmask, cancel)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception.Safe (finally, mask, mask_, onException)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.Text (Text)
 import System.OsPath (OsPath)
 
 -- | Allocated by 'newNativeProcessRuntime'; the owning host must close this
@@ -38,12 +41,21 @@ data NativeProcessRuntime = NativeProcessRuntime
     , nativeMcpElicitation
         :: !(IORef (Maybe
             (MCP.McpElicitRequest -> IO MCP.McpElicitResult)))
+    , nativeMcpRoots
+        :: !(IORef (Maybe (Text -> IO [MCP.McpRoot])))
+    , nativeMcpSampling
+        :: !(IORef (Maybe
+            (MCP.McpSamplingRequest
+                -> IO (Either Text MCP.McpSamplingResult))))
+    -- The active session installs this only for explicitly enabled servers.
     , nativeCleanupWorker :: !(Async ())
     }
 
 newNativeProcessRuntime :: OsPath -> IO NativeProcessRuntime
 newNativeProcessRuntime root = mask \restore -> do
     elicitationRef <- newIORef Nothing
+    rootsRef <- newIORef Nothing
+    samplingRef <- newIORef Nothing
     cleanupStarted <- newIORef False
     cleanupRequest <- newEmptyMVar
     cleanupWorker <- asyncWithUnmask \unmask ->
@@ -63,7 +75,10 @@ newNativeProcessRuntime root = mask \restore -> do
         restore
             (MCP.newMcpSupervisorWith
                 MCP.defaultMcpHostHooks
-                    { MCP.mcpHostElicit = readIORef elicitationRef })
+                    { MCP.mcpHostElicit = readIORef elicitationRef
+                    , MCP.mcpHostRoots = readIORef rootsRef
+                    , MCP.mcpHostSample = readIORef samplingRef
+                    })
             `onException`
                 (closeNetworkRecoveryMonitor networkMonitor
                     `finally` closeCleanupWorker)
@@ -80,6 +95,8 @@ newNativeProcessRuntime root = mask \restore -> do
         , nativeNetworkRecovery = networkMonitor
         , nativeStartCleanup = startCleanup
         , nativeMcpElicitation = elicitationRef
+        , nativeMcpRoots = rootsRef
+        , nativeMcpSampling = samplingRef
         , nativeCleanupWorker = cleanupWorker
         }
 

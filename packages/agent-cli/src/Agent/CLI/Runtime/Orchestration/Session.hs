@@ -16,6 +16,7 @@ import Agent.CLI.ActiveAccount
     , writeActiveAccount
     )
 import Agent.CLI.CancelWatch (StdinControl)
+import Agent.CLI.McpSampling (mcpSamplingHandler)
 import Agent.CLI.Auth
     ( LoadedAuth(loadedTokenProvider, loadedOpenAiPool)
     , isGatewayLoadedAuth
@@ -300,6 +301,10 @@ data AgentSessionRequest closeResult windowTitleResult = AgentSessionRequest
     , mcpFleet :: MCP.McpFleet
     , mcpInstructions :: [(Text, Text)]
     , mcpTools :: [AppTool]
+    , mcpSamplingRef
+        :: IORef (Maybe
+            (MCP.McpSamplingRequest
+                -> IO (Either Text MCP.McpSamplingResult)))
     , model :: Text
     , multiCtx :: Maybe MultiAgentContext
     , noteSessionDir :: OsPath -> IO ()
@@ -1157,18 +1162,29 @@ launchProvider request promptRuntime liveRuntime shouldProbeAtStartup startupUna
                 noticingBackend = case request.provider of
                     ClaudeCodeProvider -> sessionBackend.backend
                     _ -> withPendingInputs request.pendingNotices sessionBackend.backend
-            activeBackend <- prepareTransitionBackend
-                (if request.startup.startupBackground
-                    then SessionLocalSwitch else TopLevelSwitch)
-                request.workspace.home
-                request.workspace.projectRoot
-                request.transition
-                request.persist
-                noticingBackend
-            runSession
-                (buildProviderSessionRequest request promptRuntime liveRuntime
-                    startupUnavailable runtime)
-                sessionBackend{backend = activeBackend}
+            previousSampling <- readIORef request.mcpSamplingRef
+            let installSampling = case previousSampling of
+                    Nothing -> pure ()
+                    Just _ ->
+                        writeIORef request.mcpSamplingRef $
+                            Just (mcpSamplingHandler request.model sessionBackend.btwBackend)
+                restoreSampling =
+                    writeIORef request.mcpSamplingRef previousSampling
+            installSampling
+            (do
+                activeBackend <- prepareTransitionBackend
+                    (if request.startup.startupBackground
+                        then SessionLocalSwitch else TopLevelSwitch)
+                    request.workspace.home
+                    request.workspace.projectRoot
+                    request.transition
+                    request.persist
+                    noticingBackend
+                runSession
+                    (buildProviderSessionRequest request promptRuntime liveRuntime
+                        startupUnavailable runtime)
+                    sessionBackend{backend = activeBackend})
+                `finally` restoreSampling
     config <- prepareProviderConfig request promptRuntime nativeCapabilities
     case request.provider of
         OpenAIProvider ->

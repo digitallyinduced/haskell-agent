@@ -147,6 +147,9 @@ applyMetaConfigAction secrets config = \case
                     proposed.metaMcpRequestTimeoutSeconds
                 , mcpOAuth = oauth
                 , mcpProtocol = proposed.metaMcpProtocol
+                , mcpRoots = maybe False (.mcpRoots) existing
+                , mcpSampling = maybe False (.mcpSampling) existing
+                , mcpLogLevel = existing >>= (.mcpLogLevel)
                 }
         Right config
             { configMcpServers =

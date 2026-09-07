@@ -211,6 +211,10 @@ runNativeOptions runtime output cwd hooks options =
                 runtime.nativeProcessCore.nativeStartCleanup
             , processMcpElicitation =
                 runtime.nativeProcessCore.nativeMcpElicitation
+            , processMcpRoots =
+                runtime.nativeProcessCore.nativeMcpRoots
+            , processMcpSampling =
+                runtime.nativeProcessCore.nativeMcpSampling
             , processNetworkRecovery =
                 networkRecovery runtime.nativeProcessCore.nativeNetworkRecovery
             }

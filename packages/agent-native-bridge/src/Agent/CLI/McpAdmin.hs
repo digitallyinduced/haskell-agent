@@ -300,4 +300,7 @@ inputServer enabled input = McpServerConfig
         input.mcpAdminInputRequestTimeoutSeconds
     , mcpOAuth = Nothing
     , mcpProtocol = McpProtocolAuto
+    , mcpRoots = False
+    , mcpSampling = False
+    , mcpLogLevel = Nothing
     }

@@ -17,7 +17,10 @@ The harness is an MCP client for the current specification revision
       },
       "startupTimeoutSeconds": 120,
       "requestTimeoutSeconds": 60,
-      "protocol": "auto"
+      "protocol": "auto",
+      "roots": false,
+      "sampling": false,
+      "logLevel": "warning"
     }
   }
 }
@@ -64,15 +67,35 @@ invalid annotations are dropped with a warning), and treats an
 version. Legacy HTTP servers keep their `Mcp-Session-Id`, which is terminated
 with `DELETE` on shutdown.
 
+### Optional client capabilities
+
+Roots and sampling are disabled by default because they let a server learn
+workspace locations or ask the user's configured model to generate content.
+Enable roots per server with `"roots": true`; the CLI limits the response to
+the active session workspace. Enable sampling per server with
+`"sampling": true`; the CLI uses an isolated one-shot completion from the
+active provider, disables tools and provider-side storage, and does not share
+continuation state with the main turn. Capabilities are advertised only when
+both the setting and the matching host handler are available; otherwise
+requests receive method-not-found.
+
+Set `logLevel` to `debug`, `info`, `notice`, `warning`, `error`, `critical`,
+`alert`, or `emergency` to opt in to server logging at that threshold. For
+legacy servers the client sends `logging/setLevel` after initialization.
+Modern requests also carry the selected level in protocol metadata. An absent
+`logLevel` leaves the server's default unchanged.
+
 ## Requests, progress, and cancellation
 
 Tool calls, prompt resolution, and resource reads follow the multi round-trip
 pattern: an `input_required` result is answered with the requested input and
 retried with the server's opaque `requestState`, for up to eight rounds. Task
-results (`resultType: "task"`, extension `io.modelcontextprotocol/tasks`) are
-polled with `tasks/get` at the server's suggested interval; `input_required`
-tasks are answered through `tasks/update`, and the task is cancelled when the
-call gives up.
+results (`resultType: "task"`, extension `io.modelcontextprotocol/tasks`) wait
+on status notifications, with `tasks/get` polling at the server's suggested
+interval as a fallback. `input_required` tasks are answered through
+`tasks/update`, and the task is cancelled when the call gives up. The MCP
+library also exposes task list/get/cancel/update operations and emits
+status-change events, including server requests for additional task input.
 
 `requestTimeoutSeconds` is an idle timeout. Progress notifications
 (`notifications/progress`) extend it, up to ten times the configured value,
@@ -100,6 +123,12 @@ re-lists the server's tools and updates the catalog used by `mcp_search`,
 `mcp_call`, and the `/mcp` manager. Statically registered `server__tool`
 handlers keep working as long as the server still offers the tool.
 
+Resource URIs can be subscribed and unsubscribed explicitly when the server
+advertises support. Legacy servers use `resources/subscribe` and
+`resources/unsubscribe`; modern servers include requested URIs in the
+subscription stream and track the server's acknowledgement. Resource update
+notifications are exposed as MCP events.
+
 ## Server instructions, prompts, and resources
 
 Instructions advertised by a server are appended to the system prompt under an
@@ -109,6 +138,11 @@ system reminder once the servers settle.
 `/mcp prompt <server> <name> [key=value ...]` resolves a server prompt
 template and submits its messages as the next turn. Resources are available to
 the model through `mcp_list_resources` and `mcp_read_resource`.
+
+Server, tool, prompt, resource, and resource-template icon metadata is decoded
+and retained for clients that want to render it. Skills advertised through the
+MCP skills extension are indexed alongside filesystem and learned skills,
+then fetched and integrity-checked only when used.
 
 ## Remote Streamable HTTP servers
 
@@ -157,10 +191,7 @@ the authorization flow.
 
 ## Not implemented
 
-- Sampling, roots, and logging (`logging/setLevel`) are deprecated in
-  `2026-07-28` and are not offered; a server that requests them receives a
-  method-not-found error.
 - Image and audio content blocks are described to the model but their bytes
   are not forwarded.
 - Task identifiers are not persisted across restarts.
-- Skills-over-MCP metadata is discovered but not yet activated by the CLI.
+- Icon metadata is retained but the terminal UI does not currently render it.

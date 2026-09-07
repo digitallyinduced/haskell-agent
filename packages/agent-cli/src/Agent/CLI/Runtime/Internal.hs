@@ -226,6 +226,8 @@ runAgentWithRestarts options =
             let root = sessionsRoot home
             withNetworkRecovery \networkRecovery -> do
                 elicitationRef <- newIORef Nothing
+                rootsRef <- newIORef Nothing
+                samplingRef <- newIORef Nothing
                 cleanupStarted <- newIORef False
                 cleanupRequest <- newEmptyMVar
                 -- Cleanup is intentionally process-scoped rather than
@@ -235,7 +237,10 @@ runAgentWithRestarts options =
                     mcpSupervisor <-
                         MCP.newMcpSupervisorWith
                             MCP.defaultMcpHostHooks
-                                { MCP.mcpHostElicit = readIORef elicitationRef }
+                                { MCP.mcpHostElicit = readIORef elicitationRef
+                                , MCP.mcpHostRoots = readIORef rootsRef
+                                , MCP.mcpHostSample = readIORef samplingRef
+                                }
                     integrationToolEnv <- defaultToolEnv root
                     integrationSupervisor <-
                         newIntegrationSupervisor integrationToolEnv
@@ -261,6 +266,8 @@ runAgentWithRestarts options =
                             , processSessionThreads = sessionThreads
                             , processStartCleanup = startCleanup
                             , processMcpElicitation = elicitationRef
+                            , processMcpRoots = rootsRef
+                            , processMcpSampling = samplingRef
                             , processNetworkRecovery = networkRecovery
                             }
                     withRestoredCurrentDirectory

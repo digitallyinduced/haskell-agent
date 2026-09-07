@@ -471,6 +471,9 @@ gatewayMailMcpConfig credential = McpServerConfig
     , mcpServerStartupTimeoutSeconds = 15
     , mcpServerRequestTimeoutSeconds = 15
     , mcpServerProtocol = McpProtocolLegacy
+    , mcpServerRootsEnabled = False
+    , mcpServerSamplingEnabled = False
+    , mcpServerLogLevel = Nothing
     }
 
 validateGatewayAccount

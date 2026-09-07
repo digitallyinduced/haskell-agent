@@ -14,11 +14,17 @@ import Agent.MCP.Client
     ( ProbeOutcome(..)
     , annotateHeaderParams
     , boundedTaskPollDelayMicros
+    , cancelMcpTask
     , closeMcpClient
     , classifyProbe
     , encodeHeaderValue
     , ensureMcpClientReady
+    , emptyRequestRegistry
+    , getMcpTask
+    , getMcpTaskResult
     , headerParamValues
+    , listMcpTasks
+    , mcpResourceSubscriptions
     , readBounded
     , remainingHardDeadlineMicros
     , retryUnauthorizedOnce
@@ -29,6 +35,9 @@ import Agent.MCP.Client
     , splitLines
     , startMcpClient
     , toolAllowsAutomaticReissue
+    , subscribeMcpResource
+    , unsubscribeMcpResource
+    , updateMcpTask
     )
 import Agent.MCP.Types
     ( McpClient(..)
@@ -36,12 +45,20 @@ import Agent.MCP.Types
     , McpClientTransport(..)
     , McpHeaderParam(..)
     , McpHttpTransport(..)
+    , McpIcon(..)
+    , McpPrompt(..)
+    , McpResource(..)
+    , McpResourceTemplate(..)
     , McpStdioTransport(..)
     , McpTool(..)
     , mcpToolDecoder
     , mcpToolRetrySafe
     , PendingRequest(..)
     , RequestRegistry(..)
+    , mcpPromptDecoder
+    , mcpResourceDecoder
+    , mcpResourceTemplateDecoder
+    , mcpToolDecoder
     )
 import Agent.Json (RawJson, rawJsonBytes, rawJsonDecoder, rawJsonFromEncoding)
 import qualified Agent.Json.Decode as Json
@@ -163,9 +180,9 @@ spec = describe "Agent.MCP" do
         it "retains every resource and template metadata field" do
             renderMcpResourceServer "documentation"
                 (Right [McpResource "file:///guide" "guide" (Just "Guide")
-                    (Just "Documentation") (Just "text/plain") (Just 42)])
+                    (Just "Documentation") (Just "text/plain") (Just 42) []])
                 (Right [McpResourceTemplate "file:///{name}" "document"
-                    (Just "Document") (Just "Named document") (Just "text/plain")])
+                    (Just "Document") (Just "Named document") (Just "text/plain") []])
                 `shouldBe` Text.intercalate "\n"
                     [ "documentation"
                     , "  Resources:"
@@ -201,10 +218,50 @@ spec = describe "Agent.MCP" do
                 , mcpServerStartupTimeoutSeconds = 5
                 , mcpServerRequestTimeoutSeconds = 5
                 , mcpServerProtocol = McpProtocolAuto
+                , mcpServerRootsEnabled = False
+                , mcpServerSamplingEnabled = False
+                , mcpServerLogLevel = Nothing
                 }
         rendered `shouldContain` "API_TOKEN"
         rendered `shouldContain` "<redacted>"
         rendered `shouldNotContain` "super-secret"
+
+    describe "icon metadata" do
+        let expected =
+                [ McpIcon
+                    { iconSrc = "https://example.com/icon.svg"
+                    , iconMimeType = Just "image/svg+xml"
+                    , iconSizes = ["any", "48x48"]
+                    }
+                ]
+            icons =
+                "\"icons\":[{\"src\":\"https://example.com/icon.svg\",\
+                \\"mimeType\":\"image/svg+xml\",\"sizes\":[\"any\",\"48x48\"]}]"
+            decode decoder bytes =
+                Json.decodeEither decoder (BS8.pack bytes)
+        it "decodes tool icons" do
+            case decode mcpToolDecoder
+                ("{\"name\":\"run\",\"inputSchema\":{\"type\":\"object\"},"
+                    <> icons <> "}") of
+                Left err -> expectationFailure (show err)
+                Right tool -> tool.discoveredIcons `shouldBe` expected
+        it "decodes prompt icons" do
+            case decode mcpPromptDecoder
+                ("{\"name\":\"review\"," <> icons <> "}") of
+                Left err -> expectationFailure (show err)
+                Right prompt -> prompt.promptIcons `shouldBe` expected
+        it "decodes resource icons" do
+            case decode mcpResourceDecoder
+                ("{\"uri\":\"file:///notes\",\"name\":\"notes\","
+                    <> icons <> "}") of
+                Left err -> expectationFailure (show err)
+                Right resource -> resource.resourceIcons `shouldBe` expected
+        it "decodes resource-template icons" do
+            case decode mcpResourceTemplateDecoder
+                ("{\"uriTemplate\":\"file:///{path}\",\"name\":\"files\","
+                    <> icons <> "}") of
+                Left err -> expectationFailure (show err)
+                Right template -> template.templateIcons `shouldBe` expected
 
     describe "request registry" do
         it "allocates sequential ids while installing each waiter" do
@@ -468,6 +525,9 @@ spec = describe "Agent.MCP" do
                     , mcpServerStartupTimeoutSeconds = 5
                     , mcpServerRequestTimeoutSeconds = 5
                     , mcpServerProtocol = McpProtocolAuto
+                    , mcpServerRootsEnabled = True
+                    , mcpServerSamplingEnabled = True
+                    , mcpServerLogLevel = Nothing
                     }
                 ]
             bracket (pure fleet) closeMcpFleet \_ -> do
@@ -982,6 +1042,82 @@ spec = describe "Agent.MCP" do
             `shouldBe`
                 Right "[resource_link] file:///a.rs (a.rs) [text/x-rust]\n[image image/png, 4 base64 bytes; binary content is not shown]"
 
+    it "advertises and dispatches roots, sampling, and legacy log-level hooks" $
+        withCountingServer hostRequestsServer \script log -> do
+            rootServers <- newIORef []
+            samples <- newIORef []
+            let hooks = defaultMcpHostHooks
+                    { mcpHostRoots = pure $ Just \serverName -> do
+                        modifyIORef' rootServers (<> [serverName])
+                        pure [McpRoot "file:///workspace" (Just "Workspace")]
+                    , mcpHostSample = pure $ Just \request -> do
+                        modifyIORef' samples (<> [request])
+                        pure $ Right McpSamplingResult
+                            { samplingResultRole = "assistant"
+                            , samplingResultContent =
+                                raw "{\"type\":\"text\",\"text\":\"sampled\"}"
+                            , samplingResultModel = "test-model"
+                            , samplingResultStopReason = Just "endTurn"
+                            }
+                    }
+                config = (baseConfig "host-hooks" script)
+                    { mcpServerArgs = [log]
+                    , mcpServerProtocol = McpProtocolLegacy
+                    , mcpServerLogLevel = Just McpLogWarning
+                    }
+            fleet <- startMcpFleetWithProgressHooks hooks (const (pure ())) [config]
+            bracket (pure fleet) closeMcpFleet \_ -> do
+                waitForLog log "sample-response"
+                readIORef rootServers `shouldReturn` ["host-hooks"]
+                requests <- readIORef samples
+                map (.samplingServerName) requests `shouldBe` ["host-hooks"]
+                map (.samplingSystemPrompt) requests `shouldBe` [Just "Be concise."]
+                map (.samplingMaxTokens) requests `shouldBe` [42]
+                contents <- readFile log
+                contents `shouldContain` "init-capabilities"
+                contents `shouldContain` "\"roots\""
+                contents `shouldContain` "\"sampling\""
+                contents `shouldContain` "root-response:"
+                contents `shouldContain` "\"uri\":\"file:///workspace\""
+                contents `shouldContain` "\"name\":\"Workspace\""
+                contents `shouldContain` "\"model\":\"test-model\""
+                contents `shouldContain` "set-level:warning"
+
+    it "configuration-gates roots, sampling, and legacy logging" $
+        withCountingServer hostRequestsServer \script log -> do
+            rootsCalled <- newIORef False
+            samplingCalled <- newIORef False
+            let hooks = defaultMcpHostHooks
+                    { mcpHostRoots = pure $ Just \_ -> do
+                        modifyIORef' rootsCalled (const True)
+                        pure []
+                    , mcpHostSample = pure $ Just \_ -> do
+                        modifyIORef' samplingCalled (const True)
+                        pure $ Left "unexpected"
+                    }
+                config = (baseConfig "gated-hooks" script)
+                    { mcpServerArgs = [log]
+                    , mcpServerProtocol = McpProtocolLegacy
+                    , mcpServerRootsEnabled = False
+                    , mcpServerSamplingEnabled = False
+                    , mcpServerLogLevel = Nothing
+                    }
+            fleet <- startMcpFleetWithProgressHooks hooks (const (pure ())) [config]
+            bracket (pure fleet) closeMcpFleet \_ -> do
+                waitForLog log "sample-response"
+                readIORef rootsCalled `shouldReturn` False
+                readIORef samplingCalled `shouldReturn` False
+                contents <- readFile log
+                initLine <- case filter ("init-capabilities:" `isInfixOf`) (lines contents) of
+                    [line] -> pure line
+                    other -> expectationFailure ("expected one initialize line, got " <> show other)
+                        >> error "unreachable"
+                initLine `shouldNotContain` "\"roots\""
+                initLine `shouldNotContain` "\"sampling\""
+                contents `shouldContain` "Method not found: roots/list"
+                contents `shouldContain` "Method not found: sampling/createMessage"
+                contents `shouldNotContain` "set-level:"
+
     it "drives a modern server through discovery, elicitation, subscriptions, and tasks" $
         withCountingServer modernFakeServer \script log -> do
             elicited <- newIORef []
@@ -1010,6 +1146,28 @@ spec = describe "Agent.MCP" do
                 task <- callFleetTool fleet "modern__slow_task" "{}"
                 task.output `shouldBe` "task done"
                 waitForLog log "listen"
+                logContents <- readFile log
+                logContents `shouldNotContain` "task-poll"
+
+                clients <- readTVarIO fleet.mcpFleetClients
+                client <- maybe
+                    (expectationFailure "missing modern client" >> error "unreachable")
+                    pure
+                    (Map.lookup "modern" clients)
+                subscribeMcpResource client "file:///watched.txt"
+                    `shouldReturn` Right ()
+                accepted <- timeout 3000000 $ let
+                    wait = do
+                        state <- mcpResourceSubscriptions client
+                        if state == (["file:///watched.txt"], ["file:///watched.txt"])
+                            then pure state
+                            else threadDelay 10000 >> wait
+                    in wait
+                accepted `shouldBe`
+                    Just (["file:///watched.txt"], ["file:///watched.txt"])
+                unsubscribeMcpResource client "file:///watched.txt"
+                    `shouldReturn` Right ()
+                mcpResourceSubscriptions client `shouldReturn` ([], [])
 
     it "does not reissue a fresh direct tool after input_required" $
         withCountingServer freshInputServer \script callLog -> do
@@ -1070,6 +1228,47 @@ spec = describe "Agent.MCP" do
             accepted.output `shouldBe` "task updated"
             rejected <- run "reject"
             rejected.output `shouldBe` "task updated"
+
+    it "exposes paginated task operations and legacy resource subscriptions" $
+        withBodyServer "agent-mcp-task-operations.sh" taskOperationsServer \script ->
+            bracket
+                (startMcpClient (baseConfig "task-operations" script))
+                closeMcpClient
+                \client -> do
+                    first <- listMcpTasks client Nothing
+                    case first of
+                        Left err -> expectationFailure (show err)
+                        Right page -> do
+                            map (.taskId) page.taskListTasks `shouldBe` ["task-1"]
+                            fmap rawJsonBytes page.taskListNextCursor
+                                `shouldBe` Just "\"next\""
+                    second <- listMcpTasks client (Just (raw "\"next\""))
+                    case second of
+                        Left err -> expectationFailure (show err)
+                        Right page -> do
+                            map (.taskId) page.taskListTasks `shouldBe` ["task-2"]
+                            page.taskListNextCursor `shouldBe` Nothing
+
+                    fetched <- getMcpTask client "task-1"
+                    fmap (.taskStatus) fetched `shouldBe` Right McpTaskWorking
+                    result <- getMcpTaskResult client "task-1"
+                    fmap rawJsonBytes result
+                        `shouldBe` Right "{\"answer\":42}"
+                    cancelled <- cancelMcpTask client "task-1"
+                    fmap (.taskStatus) cancelled
+                        `shouldBe` Right McpTaskCancelled
+                    updateMcpTask client "task-1"
+                        [("approval", raw "{\"accepted\":true}")]
+                        `shouldReturn` Right ()
+
+                    subscribeMcpResource client "file:///legacy.txt"
+                        `shouldReturn` Right ()
+                    mcpResourceSubscriptions client
+                        `shouldReturn`
+                            (["file:///legacy.txt"], ["file:///legacy.txt"])
+                    unsubscribeMcpResource client "file:///legacy.txt"
+                        `shouldReturn` Right ()
+                    mcpResourceSubscriptions client `shouldReturn` ([], [])
 
     it "answers pings, extends timeouts on progress, refreshes changed tool lists, and cancels timeouts" $
         withCountingServer legacyEventsServer \script log -> do
@@ -1456,6 +1655,7 @@ schemaTool properties = McpTool
             , "properties" .= object properties
             ]
     , discoveredOutputSchema = Nothing
+    , discoveredIcons = []
     , discoveredReadOnly = False
     , discoveredRequiresFreshApproval = False
     , discoveredDestructive = True
@@ -1716,6 +1916,9 @@ concurrentConfig script barrier name = McpServerConfig
     , mcpServerStartupTimeoutSeconds = 2
     , mcpServerRequestTimeoutSeconds = 2
     , mcpServerProtocol = McpProtocolAuto
+    , mcpServerRootsEnabled = True
+    , mcpServerSamplingEnabled = True
+    , mcpServerLogLevel = Nothing
     }
 
 data WorkerLifecycleOperation
@@ -1765,6 +1968,9 @@ baseConfig name command = McpServerConfig
     , mcpServerStartupTimeoutSeconds = 2
     , mcpServerRequestTimeoutSeconds = 2
     , mcpServerProtocol = McpProtocolAuto
+    , mcpServerRootsEnabled = True
+    , mcpServerSamplingEnabled = True
+    , mcpServerLogLevel = Nothing
     }
 
 withConcurrentFakeServer :: (FilePath -> FilePath -> IO a) -> IO a
@@ -1926,6 +2132,39 @@ skillsWarningServer =
     \  esac\n\
     \done\n"
 
+taskOperationsServer :: LBS.ByteString
+taskOperationsServer =
+    "#!/bin/sh\n\
+    \while IFS= read -r line; do\n\
+    \  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p')\n\
+    \  case \"$line\" in\n\
+    \    *'\"method\":\"tasks/list\"'*'\"cursor\":\"next\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"tasks\":[{\"taskId\":\"task-2\",\"status\":\"completed\",\"createdAt\":\"2026-09-07T12:00:00Z\",\"lastUpdatedAt\":\"2026-09-07T12:00:01Z\",\"ttlMs\":1000,\"pollIntervalMs\":25}]}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"tasks/list\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"tasks\":[{\"taskId\":\"task-1\",\"status\":\"working\",\"statusMessage\":\"running\",\"ttl\":2000,\"pollInterval\":50}],\"nextCursor\":\"next\"}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"tasks/get\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"taskId\":\"task-1\",\"status\":\"working\",\"pollIntervalMs\":50}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"tasks/result\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"answer\":42}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"tasks/cancel\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"taskId\":\"task-1\",\"status\":\"cancelled\"}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"tasks/update\"'*'\"approval\":{\"accepted\":true}'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"acknowledged\":true}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"resources/subscribe\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"resources/unsubscribe\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{}}'\n\
+    \      ;;\n\
+    \  esac\n\
+    \done\n"
+
 taskUpdateServer :: LBS.ByteString
 taskUpdateServer =
     "#!/bin/sh\n\
@@ -1944,6 +2183,7 @@ taskUpdateServer =
     \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"resultType\":\"task\",\"taskId\":\"input-1\",\"status\":\"working\",\"pollIntervalMs\":1}}'\n\
     \      ;;\n\
     \    *'\"method\":\"tasks/get\"'*)\n\
+    \      printf 'task-poll\\n' >> \"$log\"\n\
     \      polls=$((polls+1))\n\
     \      if [ \"$polls\" -eq 1 ]; then\n\
     \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"taskId\":\"input-1\",\"status\":\"input_required\",\"pollIntervalMs\":1,\"inputRequests\":{\"answer\":{\"method\":\"elicitation/create\",\"params\":{\"message\":\"Continue?\"}}}}}'\n\
@@ -2310,6 +2550,38 @@ concurrentFakeServer =
     \  esac\n\
     \done\n"
 
+hostRequestsServer :: LBS.ByteString
+hostRequestsServer =
+    "#!/bin/sh\n\
+    \log=\"$1\"\n\
+    \while IFS= read -r line; do\n\
+    \  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p')\n\
+    \  case \"$line\" in\n\
+    \    *'\"method\":\"initialize\"'*)\n\
+    \      printf 'init-capabilities:%s\\n' \"$line\" >> \"$log\"\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"logging\":{}},\"serverInfo\":{\"name\":\"host-requests\",\"version\":\"1\"}}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"notifications/initialized\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":\"roots\",\"method\":\"roots/list\"}'\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":\"sample\",\"method\":\"sampling/createMessage\",\"params\":{\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"Hello\"}}],\"systemPrompt\":\"Be concise.\",\"maxTokens\":42}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"logging/setLevel\"'*)\n\
+    \      level=$(printf '%s' \"$line\" | sed -n 's/.*\"level\":\"\\([^\"]*\\)\".*/\\1/p')\n\
+    \      printf 'set-level:%s\\n' \"$level\" >> \"$log\"\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"tools/list\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"tools\":[]}}'\n\
+    \      ;;\n\
+    \    *'\"id\":\"roots\"'*)\n\
+    \      printf 'root-response:%s\\n' \"$line\" >> \"$log\"\n\
+    \      ;;\n\
+    \    *'\"id\":\"sample\"'*)\n\
+    \      printf 'sample-response:%s\\n' \"$line\" >> \"$log\"\n\
+    \      ;;\n\
+    \  esac\n\
+    \done\n"
+
 modernFakeServer :: LBS.ByteString
 modernFakeServer =
     "#!/bin/sh\n\
@@ -2355,6 +2627,8 @@ modernFakeServer =
     \          ;;\n\
     \        *'\"name\":\"slow_task\"'*)\n\
     \          printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"resultType\":\"task\",\"taskId\":\"task-1\",\"status\":\"working\",\"ttlMs\":60000,\"pollIntervalMs\":50}}'\n\
+    \          sleep 0.01\n\
+    \          printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tasks/status\",\"params\":{\"taskId\":\"task-1\",\"status\":\"completed\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"task done\"}]}}}'\n\
     \          ;;\n\
     \      esac\n\
     \      ;;\n\
@@ -2368,7 +2642,14 @@ modernFakeServer =
     \      ;;\n\
     \    *'\"method\":\"subscriptions/listen\"'*)\n\
     \      printf 'listen\\n' >> \"$log\"\n\
-    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":'\"$id\"'},\"notifications\":{\"toolsListChanged\":true}}}'\n\
+    \      case \"$line\" in\n\
+    \        *'file:///watched.txt'*)\n\
+    \          printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":'\"$id\"'},\"notifications\":{\"toolsListChanged\":true,\"resourceSubscriptions\":[\"file:///watched.txt\"]}}}'\n\
+    \          ;;\n\
+    \        *)\n\
+    \          printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/subscriptions/acknowledged\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/subscriptionId\":'\"$id\"'},\"notifications\":{\"toolsListChanged\":true}}}'\n\
+    \          ;;\n\
+    \      esac\n\
     \      ;;\n\
     \  esac\n\
     \done\n"

@@ -3,7 +3,7 @@ module Agent.CLI.ConfigSpec (spec) where
 import Agent.CLI.Config
 import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception.Safe (bracket)
-import Agent.MCP (McpProtocolPreference(..))
+import Agent.MCP (McpLogLevel(..), McpProtocolPreference(..))
 import qualified Data.ByteString.Lazy as LBS
 import Data.Either (isRight)
 import qualified Data.Map.Strict as Map
@@ -105,6 +105,9 @@ spec = describe "Agent.CLI.Config" do
                                 , mcpRequestTimeoutSeconds = 60
                                 , mcpOAuth = Nothing
                                 , mcpProtocol = McpProtocolAuto
+                                , mcpRoots = False
+                                , mcpSampling = False
+                                , mcpLogLevel = Nothing
                                 }
                         }
             saveHarnessConfig home original `shouldReturn` Right ()
@@ -140,6 +143,9 @@ spec = describe "Agent.CLI.Config" do
                             , mcpRequestTimeoutSeconds = 34
                             , mcpOAuth = Nothing
                             , mcpProtocol = McpProtocolAuto
+                            , mcpRoots = False
+                            , mcpSampling = False
+                            , mcpLogLevel = Nothing
                             }
                     Map.lookup "zeta" config.configMcpServers
                         `shouldBe` Just McpServerConfig
@@ -153,7 +159,37 @@ spec = describe "Agent.CLI.Config" do
                             , mcpRequestTimeoutSeconds = 60
                             , mcpOAuth = Nothing
                             , mcpProtocol = McpProtocolAuto
+                            , mcpRoots = False
+                            , mcpSampling = False
+                            , mcpLogLevel = Nothing
                             }
+
+    it "loads opt-in roots, sampling, and server log level settings" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"mcpServers\":{\"local\":{\"command\":\"srv\",\"roots\":true,\"sampling\":true,\"logLevel\":\"warning\"}}}"
+            result <- loadHarnessConfig home
+            case result of
+                Left err -> expectationFailure (Text.unpack err)
+                Right config ->
+                    case Map.lookup "local" config.configMcpServers of
+                        Nothing -> expectationFailure "missing MCP server"
+                        Just server -> do
+                            server.mcpRoots `shouldBe` True
+                            server.mcpSampling `shouldBe` True
+                            server.mcpLogLevel `shouldBe` Just McpLogWarning
+                            saveHarnessConfig home config `shouldReturn` Right ()
+                            loadHarnessConfig home `shouldReturn` Right config
+
+    it "rejects unknown MCP log levels" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"mcpServers\":{\"local\":{\"command\":\"srv\",\"logLevel\":\"verbose\"}}}"
+            result <- loadHarnessConfig home
+            result `shouldSatisfy` \case
+                    Left err ->
+                        "unknown MCP log level: verbose" `Text.isInfixOf` err
+                    Right _ -> False
 
     it "loads remote MCP servers by URL" $
         withTempDir "agent-config-" \home -> do
@@ -379,6 +415,9 @@ spec = describe "Agent.CLI.Config" do
                     , mcpRequestTimeoutSeconds = 45
                     , mcpOAuth = Nothing
                     , mcpProtocol = McpProtocolAuto
+                    , mcpRoots = True
+                    , mcpSampling = True
+                    , mcpLogLevel = Just McpLogNotice
                     }
                 config = defaultHarnessConfig
                     { configMcpServers = Map.singleton "seo-mcp" server
@@ -408,6 +447,9 @@ spec = describe "Agent.CLI.Config" do
                             , mcpRequestTimeoutSeconds = 60
                             , mcpOAuth = Nothing
                             , mcpProtocol = McpProtocolAuto
+                            , mcpRoots = False
+                            , mcpSampling = False
+                            , mcpLogLevel = Nothing
                             }
                     }
             replaceConfig home broken
@@ -532,4 +574,7 @@ testMcpServer =
         , mcpRequestTimeoutSeconds = 60
         , mcpOAuth = Nothing
         , mcpProtocol = McpProtocolAuto
+        , mcpRoots = False
+        , mcpSampling = False
+        , mcpLogLevel = Nothing
         }

@@ -99,6 +99,7 @@ inProcessMcpToolServer server = McpToolServer
         , serverInfoName = Just server.serverName
         , serverInfoVersion = Just server.serverVersion
         , serverInfoTitle = Nothing
+        , serverInfoIcons = []
         , serverInfoInstructions = Nothing
         , serverInfoCapabilities = emptyServerCapabilities
             { capabilityTools = Just (McpListCapability False) }
@@ -107,6 +108,7 @@ inProcessMcpToolServer server = McpToolServer
         [ McpTool
             { discoveredName = tool.appToolName
             , discoveredTitle = Nothing
+            , discoveredIcons = []
             , discoveredDescription = tool.appToolDescription
             , discoveredInputSchema = rawJsonFromEncoding
                 (Aeson.toEncoding (schemaValue tool.appToolSchema))

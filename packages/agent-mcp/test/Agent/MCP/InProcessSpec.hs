@@ -271,6 +271,9 @@ memoryConfig = McpServerConfig
     , mcpServerStartupTimeoutSeconds = 2
     , mcpServerRequestTimeoutSeconds = 2
     , mcpServerProtocol = McpProtocolAuto
+    , mcpServerRootsEnabled = False
+    , mcpServerSamplingEnabled = False
+    , mcpServerLogLevel = Nothing
     }
 
 echoTool :: AppTool

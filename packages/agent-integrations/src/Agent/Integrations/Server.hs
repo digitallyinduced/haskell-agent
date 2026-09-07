@@ -45,6 +45,7 @@ integrationMcpServer host = MCP.McpToolServer
             , MCP.serverInfoName = Just "integrations"
             , MCP.serverInfoVersion = Just "1"
             , MCP.serverInfoTitle = Just "Haskell Agent Integrations"
+            , MCP.serverInfoIcons = []
             , MCP.serverInfoInstructions =
                 nonEmpty
                     (integrationRegistryInstructions host.hostRegistry)
@@ -118,6 +119,7 @@ toMcpTool (SomeIntegrationTool tool) = MCP.McpTool
     { MCP.discoveredName =
         integrationToolNameText tool.integrationToolNameValue
     , MCP.discoveredTitle = Nothing
+    , MCP.discoveredIcons = []
     , MCP.discoveredDescription = tool.integrationToolDescription
     , MCP.discoveredInputSchema =
         tool.integrationToolInput.inputContractSchema
