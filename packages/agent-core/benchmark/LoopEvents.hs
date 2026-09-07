@@ -351,6 +351,7 @@ forceStreamingFailure execution =
 eventWeight :: LoopEvent -> Int
 eventWeight = \case
     TextDelta text -> Text.length text
+    PlanDelta text -> Text.length text
     ReasoningDelta text -> Text.length text
     ActivityUpdated text -> Text.length text
     ProviderLimitUpdated

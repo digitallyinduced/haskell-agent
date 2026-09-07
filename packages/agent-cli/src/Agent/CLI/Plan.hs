@@ -11,6 +11,12 @@ module Agent.CLI.Plan
     , initialPlanExitState
     , renderPlanEnterFrame
     , renderPlanExitFrame
+    , ProposedPlanSegment(..)
+    , ProposedPlanStream
+    , initialProposedPlanStream
+    , feedProposedPlanStream
+    , finishProposedPlanStream
+    , proposedPlanVisibleText
     , extractProposedPlan
     , resumedPlanNeedsApproval
     , stripProposedPlan
@@ -390,20 +396,145 @@ resumedPlanNeedsApproval assistantTexts =
         lastText : _ -> isJust (extractProposedPlan lastText)
         _ -> False
 
--- | Remove proposed_plan tags for display after the approval UI shows the body.
+-- | Typed pieces produced by the Codex plan protocol stream.
+data ProposedPlanSegment
+    = AssistantText !Text
+    | ProposedPlanStart
+    | ProposedPlanDelta !Text
+    | ProposedPlanEnd
+    deriving (Eq, Show)
+
+-- | Incremental parser state. A possibly incomplete line is held until the
+-- parser can decide whether it is protocol markup. This mirrors Codex's
+-- tagged-line protocol: tags only have control meaning when alone on a line.
+data ProposedPlanStream = ProposedPlanStream
+    { proposedPlanInside :: !Bool
+    , proposedPlanPendingLine :: !Text
+    , proposedPlanPassingLine :: !Bool
+    } deriving (Eq, Show)
+
+initialProposedPlanStream :: ProposedPlanStream
+initialProposedPlanStream = ProposedPlanStream False "" False
+
+feedProposedPlanStream
+    :: ProposedPlanStream
+    -> Text
+    -> (ProposedPlanStream, [ProposedPlanSegment])
+feedProposedPlanStream state chunk =
+    consumeStream
+        state.proposedPlanInside
+        state.proposedPlanPassingLine
+        (state.proposedPlanPendingLine <> chunk)
+
+finishProposedPlanStream :: ProposedPlanStream -> [ProposedPlanSegment]
+finishProposedPlanStream state =
+    segments <> [ProposedPlanEnd | inside]
+  where
+    (inside, segments)
+        | state.proposedPlanPassingLine =
+            ( state.proposedPlanInside
+            , textSegment
+                state.proposedPlanInside
+                state.proposedPlanPendingLine
+            )
+        | otherwise =
+            consumeLine
+                state.proposedPlanInside
+                state.proposedPlanPendingLine
+
+proposedPlanVisibleText :: [ProposedPlanSegment] -> Text
+proposedPlanVisibleText = Text.concat . foldr collect []
+  where
+    collect (AssistantText text) rest = text : rest
+    collect _ rest = rest
+
+consumeStream
+    :: Bool
+    -> Bool
+    -> Text
+    -> (ProposedPlanStream, [ProposedPlanSegment])
+consumeStream inside passing input
+    | passing =
+        case Text.breakOn "\n" input of
+            (line, rest)
+                | Text.null rest ->
+                    ( ProposedPlanStream inside "" True
+                    , textSegment inside line
+                    )
+                | otherwise ->
+                    let completeLine = line <> "\n"
+                        remaining = Text.drop 1 rest
+                        (nextState, following) =
+                            consumeStream inside False remaining
+                    in ( nextState
+                       , textSegment inside completeLine <> following
+                       )
+    | otherwise =
+    case Text.breakOn "\n" input of
+        (_, rest)
+            | Text.null rest && couldBecomeControlLine inside input ->
+                (ProposedPlanStream inside input False, [])
+            | Text.null rest ->
+                ( ProposedPlanStream inside "" True
+                , textSegment inside input
+                )
+        (line, rest) ->
+            let completeLine = line <> "\n"
+                remaining = Text.drop 1 rest
+                (nextInside, segments) = consumeLine inside completeLine
+                (nextState, following) =
+                    consumeStream nextInside False remaining
+            in (nextState, segments <> following)
+
+couldBecomeControlLine :: Bool -> Text -> Bool
+couldBecomeControlLine inside line =
+    couldBecomeTag expected (Text.dropWhile isHorizontalSpace line)
+  where
+    expected = if inside then closeTag else openTag
+
+couldBecomeTag :: Text -> Text -> Bool
+couldBecomeTag tag candidate =
+    candidate `Text.isPrefixOf` tag
+        || ( tag `Text.isPrefixOf` candidate
+            && Text.all isHorizontalSpace
+                (Text.drop (Text.length tag) candidate)
+           )
+
+isHorizontalSpace :: Char -> Bool
+isHorizontalSpace character =
+    character == ' ' || character == '\t' || character == '\r'
+
+consumeLine :: Bool -> Text -> (Bool, [ProposedPlanSegment])
+consumeLine inside line
+    | stripped == openTag && not inside =
+        (True, [ProposedPlanStart])
+    | stripped == closeTag && inside =
+        (False, [ProposedPlanEnd])
+    | otherwise =
+        (inside, textSegment inside line)
+  where
+    stripped = Text.strip line
+
+textSegment :: Bool -> Text -> [ProposedPlanSegment]
+textSegment _ text | Text.null text = []
+textSegment True text = [ProposedPlanDelta text]
+textSegment False text = [AssistantText text]
+
+openTag :: Text
+openTag = "<proposed_plan>"
+
+closeTag :: Text
+closeTag = "</proposed_plan>"
+
+-- | Remove Codex plan protocol blocks from assistant presentation. The plan
+-- body is presented through the typed plan approval hook instead.
 stripProposedPlan :: Text -> Text
 stripProposedPlan text =
-    case Text.breakOn "<proposed_plan>" text of
-        (before, afterOpen)
-            | Text.null afterOpen -> text
-            | otherwise ->
-                let rest = Text.drop (Text.length "<proposed_plan>") afterOpen
-                    (_, afterClose) = Text.breakOn "</proposed_plan>" rest
-                    after =
-                        if Text.null afterClose
-                            then ""
-                            else Text.drop (Text.length "</proposed_plan>") afterClose
-                in Text.strip (before <> after)
+    proposedPlanVisibleText
+        (segments <> finishProposedPlanStream state)
+  where
+    (state, segments) =
+        feedProposedPlanStream initialProposedPlanStream text
 
 putTextLn :: Handle -> Text -> IO ()
 putTextLn handle text = do

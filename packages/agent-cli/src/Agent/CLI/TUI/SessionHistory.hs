@@ -14,6 +14,13 @@ import Agent.CLI.Session
     )
 import Agent.CLI.Session.Types (TranscriptEffect(..))
 import Agent.CLI.Render (renderToolOutputValue)
+import Agent.CLI.Plan
+    ( ProposedPlanSegment(..)
+    , feedProposedPlanStream
+    , finishProposedPlanStream
+    , initialProposedPlanStream
+    , stripProposedPlan
+    )
 import Agent.CLI.TurnState
     ( isDisplayAttemptBoundary
     , isTurnAbortedNote
@@ -111,11 +118,12 @@ addResetTurn :: UiState -> SessionTurn -> UiState
 addResetTurn state turn =
     case turn.turnAssistantText of
         Nothing -> state
-        Just text -> reduceUi (UiHistory text) state
+        Just text -> projectAssistantText False UiHistory text state
 
 addRegularTurn :: [ResponseItem] -> UiState -> SessionTurn -> UiState
 addRegularTurn items state turn =
-    let withUser =
+    let projectPlanProtocol = turnUsesProposedPlanProtocol turn
+        withUser =
             if Text.null (Text.strip turn.turnUserText)
                 then state
                 else reduceUi
@@ -127,13 +135,19 @@ addRegularTurn items state turn =
         -- visible after the live turn is replaced by durable history.
         withItems =
             completeProjectedStreams
-                (foldl' projectItem withUser (dropWhile isUserMessage items))
+                (foldl'
+                    (projectItem projectPlanProtocol)
+                    withUser
+                    (dropWhile isUserMessage items))
         -- The failed provider attempt is intentionally separate from
         -- canonical context. Project it as live activity so the terminal turn
         -- state can mark unfinished text/tools failed while keeping completed
         -- tool results complete.
         withDisplayItems =
-            foldl' projectDisplayItem withItems turn.turnDisplayItems
+            foldl'
+                (projectDisplayItem projectPlanProtocol)
+                withItems
+                turn.turnDisplayItems
         -- A successful turn stores its final assistant text, which its items
         -- already project. An interrupted turn stores the text of the sample
         -- that never committed, which its retained items cannot contain; an
@@ -150,7 +164,11 @@ addRegularTurn items state turn =
                 | hasAssistantBlockText text withDisplayItems ->
                     withDisplayItems
                 | otherwise ->
-                    reduceUi (UiAssistantHistory text) withDisplayItems
+                    projectAssistantText
+                        False
+                        UiAssistantHistory
+                        text
+                        withDisplayItems
         terminalState =
             if turn.turnError == Nothing
                 then BlockComplete
@@ -183,11 +201,15 @@ lastMatchingUserIndex prompt =
         Nothing
         . zip [0 ..]
 
-projectItem :: UiState -> ResponseItem -> UiState
-projectItem state = \case
+projectItem :: Bool -> UiState -> ResponseItem -> UiState
+projectItem projectPlanProtocol state = \case
     MessageItem message
         | message.role == RoleAssistant ->
-            appendText (UiLoop . TextDelta) (messageText message.content) state
+            projectAssistantText
+                projectPlanProtocol
+                (UiLoop . TextDelta)
+                (messageText message.content)
+                state
         | message.role == RoleUser
         , not (isGeneratedUserText (messageText message.content)) ->
             appendText UiInputSteered (messageText message.content) state
@@ -251,8 +273,8 @@ projectItem state = \case
             state
     _ -> state
 
-projectDisplayItem :: UiState -> ResponseItem -> UiState
-projectDisplayItem state item
+projectDisplayItem :: Bool -> UiState -> ResponseItem -> UiState
+projectDisplayItem projectPlanProtocol state item
     | isDisplayAttemptBoundary item =
         reduceUi
             (UiLoop (ResponseRestarted "Retrying response…"))
@@ -275,7 +297,7 @@ projectDisplayItem state item
                                 output.callId
                                 (renderToolOutputValue output.output)))
                         state
-            _ -> projectItem state item
+            _ -> projectItem projectPlanProtocol state item
 
 isUserMessage :: ResponseItem -> Bool
 isUserMessage = \case
@@ -291,6 +313,55 @@ appendText :: (Text.Text -> UiEvent) -> Text.Text -> UiState -> UiState
 appendText event text state
     | Text.null (Text.strip text) = state
     | otherwise = reduceUi (event text) state
+
+projectAssistantText
+    :: Bool
+    -> (Text.Text -> UiEvent)
+    -> Text.Text
+    -> UiState
+    -> UiState
+projectAssistantText projectPlanProtocol ordinaryEvent text state
+    | not projectPlanProtocol =
+        appendText ordinaryEvent text state
+    | any isPlanBoundary segments =
+        foldl' projectSegment state segments
+    | otherwise =
+        appendText ordinaryEvent text state
+  where
+    (stream, streamed) =
+        feedProposedPlanStream initialProposedPlanStream text
+    segments = streamed <> finishProposedPlanStream stream
+
+    projectSegment current = \case
+        AssistantText body -> appendText ordinaryEvent body current
+        ProposedPlanDelta body ->
+            appendText (UiLoop . PlanDelta) body current
+        ProposedPlanStart -> current
+        ProposedPlanEnd -> current
+
+    isPlanBoundary ProposedPlanStart = True
+    isPlanBoundary ProposedPlanEnd = True
+    isPlanBoundary _ = False
+
+-- The durable turn keeps raw canonical response items, while TurnFinished
+-- stores the already-presented assistant text. Their difference is a
+-- provenance signal that this response passed through the Codex plan
+-- protocol. It avoids interpreting literal tag examples from other dialects.
+turnUsesProposedPlanProtocol :: SessionTurn -> Bool
+turnUsesProposedPlanProtocol turn =
+    case turn.turnAssistantText of
+        Nothing -> False
+        Just presented ->
+            any (matchesPresentedText presented) $
+                turn.turnItems <> turn.turnDisplayItems
+  where
+    matchesPresentedText presented = \case
+        MessageItem message
+            | message.role == RoleAssistant ->
+                let raw = messageText message.content
+                    stripped = stripProposedPlan raw
+                in stripped /= raw && stripped == presented
+        _ -> False
 
 hasAssistantBlock :: UiState -> Bool
 hasAssistantBlock =

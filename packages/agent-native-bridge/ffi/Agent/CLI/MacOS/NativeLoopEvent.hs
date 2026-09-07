@@ -41,6 +41,7 @@ encodeNativeLoopEvent turnId event =
     case event of
         ReasoningDelta text -> textEvent 1 turnId text
         TextDelta text -> textEvent 2 turnId text
+        PlanDelta text -> textEvent 2 turnId text
         ActivityUpdated status -> textEvent 3 turnId status
         WarningRaised warning -> textEvent 3 turnId warning
         ResponseRestarted message -> textEvent 3 turnId message

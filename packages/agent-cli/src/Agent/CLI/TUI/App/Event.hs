@@ -304,6 +304,7 @@ handleEvent event = do
 
     loopEventMaySkipUnfocusedRedraw = \case
         TextDelta{} -> True
+        PlanDelta{} -> True
         ReasoningDelta{} -> True
         ActivityUpdated{} -> True
         ToolUpdated{} -> True
