@@ -226,7 +226,18 @@ startMcpFleetWithProgressHooks
     -> ([Text] -> IO ())
     -> [McpServerConfig]
     -> IO McpFleet
-startMcpFleetWithProgressHooks hooks reportActive configs = mask \restore -> do
+startMcpFleetWithProgressHooks hooks reportActive configs =
+    startMcpFleetWithInMemory hooks reportActive configs []
+
+-- | Start external and typed host-owned servers in one fleet. Host endpoints
+-- are supplied by the embedding application, never by model configuration.
+startMcpFleetWithInMemory
+    :: McpHostHooks
+    -> ([Text] -> IO ())
+    -> [McpServerConfig]
+    -> [(McpServerConfig, McpToolServer)]
+    -> IO McpFleet
+startMcpFleetWithInMemory hooks reportActive external inMemory = mask \restore -> do
     validateServerNames configs
     closed <- newMVar False
     ownedClients <- newIORef []
@@ -291,6 +302,11 @@ startMcpFleetWithProgressHooks hooks reportActive configs = mask \restore -> do
     forM_ clients (attachFleetEvents fleet)
     pure fleet
   where
+    configs = external <> map fst inMemory
+    startClient config = case lookup config.mcpServerName
+            [(entry.mcpServerName, server) | (entry, server) <- inMemory] of
+        Just server -> startInMemoryMcpClient hooks config server
+        Nothing -> startMcpClientWith hooks Nothing config
     startServerTracked
         ownedClients
         activeServers
@@ -363,7 +379,7 @@ startMcpFleetWithProgressHooks hooks reportActive configs = mask \restore -> do
                 )
 
     startServer config = mask \restore -> do
-        client <- startMcpClientWith hooks Nothing config
+        client <- startClient config
         flip onException (closeMcpClient client) $ restore do
             ensureMcpClientReady client >>= \case
                 Left err -> throwIO (userError (Text.unpack err))

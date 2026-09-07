@@ -177,7 +177,7 @@ spec = describe "Agent.MCP" do
                     McpClientHttp transport -> do
                         transport.httpUrl `shouldBe` "http://127.0.0.1:1/mcp"
                         readIORef transport.httpSession `shouldReturn` Nothing
-                    McpClientStdio _ ->
+                    _ ->
                         expectationFailure "expected an HTTP transport"
 
         it "stores only process state for a stdio client" $
@@ -197,7 +197,7 @@ spec = describe "Agent.MCP" do
                                 Nothing ->
                                     expectationFailure
                                         "stdio stderr reader was not started"
-                        McpClientHttp _ ->
+                        _ ->
                             expectationFailure "expected a stdio transport"
 
     describe "client worker lifecycle" do

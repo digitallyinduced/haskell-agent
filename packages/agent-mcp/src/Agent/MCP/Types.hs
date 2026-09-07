@@ -433,6 +433,29 @@ data McpHttpTransport = McpHttpTransport
 data McpClientTransport
     = McpClientStdio !McpStdioTransport
     | McpClientHttp !McpHttpTransport
+    | McpClientInMemory !McpToolServer !(IORef (IO ()))
+
+-- | Typed host-owned MCP operations. JSON is retained only for the dynamic
+-- tool payload, not for protocol envelopes or control operations.
+data McpToolServer = McpToolServer
+    { toolServerInitialize :: IO McpServerInfo
+    , toolServerListTools :: IO (Either McpError [McpTool])
+    , toolServerCallTool :: McpCallToolRequest -> IO (Either McpError McpCallToolResult)
+    , toolServerSubscribe :: IO () -> IO (IO ())
+    -- ^ Register invalidation, returning an idempotent unsubscribe action.
+    }
+
+data McpCallToolRequest = McpCallToolRequest
+    { callToolName :: !Text
+    , callToolArguments :: !RawJson
+    , callToolRequestId :: !(Maybe Text)
+    }
+
+data McpCallToolResult = McpCallToolResult
+    { callToolIsError :: !Bool
+    , callToolText :: ![Text]
+    , callToolStructuredContent :: !(Maybe RawJson)
+    }
 
 -- | One connection to an MCP server over stdio or Streamable HTTP.
 data McpClient = McpClient

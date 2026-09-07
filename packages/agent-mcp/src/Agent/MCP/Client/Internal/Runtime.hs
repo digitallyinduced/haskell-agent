@@ -13,7 +13,7 @@ import Agent.MCP.Types
                 clientRequestRegistry, clientFailure, clientLifecycle,
                 clientWorkers, clientTransport, clientServerInfo, clientConfig,
                 clientToolsRevision, clientReadyToolsRevision),
-      McpClientTransport(McpClientHttp, McpClientStdio),
+      McpClientTransport(McpClientHttp, McpClientStdio, McpClientInMemory),
       McpHttpTransport(httpUrl, httpSession),
       McpStdioTransport(stdioStderrReader, stdioWriteLock, stdioInput,
                         stdioGroupId, stdioProcess, stdioReader),
@@ -405,6 +405,10 @@ requestMcpFull client request = do
                 message = requestEnvelope (Just requestId) request.requestMethod
                     (request.requestParams <> meta)
             case client.clientTransport of
+                McpClientInMemory _ _ ->
+                    pure (Left (McpRpcError errorCodeMethodNotFound
+                        "Operation is unavailable on this typed tool server" Nothing))
+                        `finally` unregister requestId
                 McpClientHttp transport ->
                     httpExchange client transport era request
                         (Just (requestId, pending)) message
@@ -860,6 +864,7 @@ decodeRpcError raw =
 -- | Open a @subscriptions/listen@ stream for the list-change notifications
 -- the server can emit. Legacy servers deliver list changes unsolicited.
 startSubscriptions :: McpClient -> IO ()
+startSubscriptions client | McpClientInMemory _ _ <- client.clientTransport = pure ()
 startSubscriptions client = do
     info <- readTVarIO client.clientServerInfo
     case info of
@@ -907,6 +912,7 @@ sendNotification
     -> IO (Either McpError ())
 sendNotification client method parameters =
     case client.clientTransport of
+        McpClientInMemory _ _ -> pure (Right ())
         McpClientHttp transport -> do
             era <- mcpClientEra client
             void <$> httpExchange client transport era
@@ -1038,6 +1044,7 @@ handleServerRequest client requestId method params =
 sendResponse :: McpClient -> Aeson.Encoding -> IO (Either McpError ())
 sendResponse client message =
     case client.clientTransport of
+        McpClientInMemory _ _ -> pure (Left (McpTransportError "In-memory servers use typed responses"))
         McpClientHttp transport -> do
             era <- mcpClientEra client
             void <$> httpExchange client transport era
@@ -1624,6 +1631,7 @@ closeMcpClient client =
                         readIORef transport.stdioStderrReader >>= mapM_ stopWorker
                     McpClientHttp transport ->
                         closeHttpSession client transport
+                    McpClientInMemory _ release -> readIORef release >>= id
                 failClient client.clientRequestRegistry client.clientFailure
                     "MCP server closed"
                 pure True

@@ -1,7 +1,8 @@
 module Agent.MCP.Client.Internal.Operations where
 
+import Agent.MCP.Types (McpToolServer(..), McpCallToolRequest(..), McpCallToolResult(..))
 import Agent.Json
-    ( rawJsonBytes, rawJsonDecoder, rawJsonEncoding, RawJson )
+    ( rawJsonBytes, rawJsonDecoder, rawJsonEncoding, rawJsonFromEncoding, RawJson )
 import Agent.MCP.Client.Internal.Runtime
     ( McpRequest(requestName, requestHeaderParams, requestOnProgress,
                  requestAllowReissue),
@@ -31,8 +32,8 @@ import Agent.MCP.Types
       McpSkillsCapability,
       McpClient(clientConfig, clientDiscoveredSkills, clientTransport,
                 clientServerInfo, clientLifecycle),
-      McpClientLifecycle(ClientReady),
-      McpClientTransport(McpClientStdio, McpClientHttp),
+      McpClientLifecycle(ClientReady, ClientClosed),
+      McpClientTransport(McpClientStdio, McpClientHttp, McpClientInMemory),
       McpProgress(progressMessage, progressValue, progressTotal),
       McpError(..),
       McpServerCapabilities(capabilitySkills),
@@ -61,7 +62,7 @@ import Control.Concurrent.Async ()
 import Control.Concurrent.MVar ()
 import Control.Concurrent.STM
     ( atomically, readTVarIO, modifyTVar' )
-import Control.Exception.Safe ()
+import Control.Exception.Safe (tryAny)
 import Control.Monad ( forM )
 import Control.Monad.Trans.Class ()
 import Control.Monad.Trans.Except ( runExceptT )
@@ -89,7 +90,7 @@ import System.IO ()
 import System.IO.Unsafe ()
 import System.Process ()
 import System.Timeout ()
-import qualified Data.Aeson as Aeson ( decodeStrict )
+import qualified Data.Aeson as Aeson ( decodeStrict, pairs )
 import qualified Data.Aeson.Encoding as AesonEncoding ( pair )
 import qualified Data.Aeson.Encoding.Internal as AesonEncodingInternal
     ()
@@ -132,11 +133,14 @@ import qualified Data.Text.Encoding as TextEncoding ()
 
 discoverMcpTools :: McpClient -> IO ([McpTool], [Text])
 discoverMcpTools client = do
-    tools <- paginate client "tools/list" "tools" mcpToolDecoder
+    tools <- (case client.clientTransport of
+        McpClientInMemory server _ -> server.toolServerListTools
+        _ -> paginate client "tools/list" "tools" mcpToolDecoder)
         >>= either (ioError . userError . Text.unpack . renderMcpError) pure
     let isHttp = case client.clientTransport of
             McpClientHttp _ -> True
             McpClientStdio _ -> False
+            McpClientInMemory _ _ -> False
         annotated =
             [ (tool.discoveredName, annotateHeaderParams isHttp tool)
             | tool <- tools
@@ -482,6 +486,17 @@ callDiscoveredToolWith
     -> RawJson
     -> Maybe (McpProgress -> IO ())
     -> IO (Either Text Text)
+callDiscoveredToolWith client tool arguments _
+    | McpClientInMemory server _ <- client.clientTransport = do
+        state <- readTVarIO client.clientLifecycle
+        case state of
+            ClientClosed -> pure (Left "MCP server closed")
+            _ -> do
+                outcome <- tryAny $
+                    server.toolServerCallTool (McpCallToolRequest tool.discoveredName arguments Nothing)
+                pure $ case outcome of
+                    Left _ -> Left "Internal MCP tool error"
+                    Right result -> either (Left . renderMcpError) renderInMemoryToolResult result
 callDiscoveredToolWith client tool arguments onProgress = do
     let parameters =
             "name" .= tool.discoveredName
@@ -502,6 +517,20 @@ toolAllowsAutomaticReissue =
     not . (.discoveredRequiresFreshApproval)
 
 -- | Render a @CallToolResult@ for the model.
+renderInMemoryToolResult :: McpCallToolResult -> Either Text Text
+renderInMemoryToolResult result =
+    let output = case result.callToolStructuredContent of
+            Just value | not (null result.callToolText) ->
+                compactRawJson $ rawJsonFromEncoding $ Aeson.pairs $
+                    "isError" .= result.callToolIsError
+                    <> "content" .=
+                        [object ["type" .= ("text" :: Text), "text" .= text]
+                        | text <- result.callToolText]
+                    <> AesonEncoding.pair "structuredContent" (rawJsonEncoding value)
+            Just value -> compactRawJson value
+            Nothing -> Text.intercalate "\n" result.callToolText
+    in if result.callToolIsError then Left output else Right output
+
 normalizeMcpToolResult :: RawJson -> Either Text Text
 normalizeMcpToolResult result =
     case Json.decodeEither mcpToolResultDecoder (rawJsonBytes result) of

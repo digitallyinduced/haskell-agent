@@ -20,6 +20,7 @@ import Agent.MCP.Client.Internal.Runtime
       stderrLoop,
       capturedStderrText,
       closeMcpClient,
+      handleNotification,
       closeOptionalHandles,
       mergedEnvironment,
       secondsToMicros,
@@ -31,6 +32,7 @@ import Agent.MCP.Types
                          ClientInitializing, ClientFailed),
       McpClient(..),
       McpClientTransport(..),
+      McpToolServer(..),
       McpHttpTransport(McpHttpTransport),
       McpStdioTransport(stdioReader, McpStdioTransport, stdioInput,
                         stdioProcess, stdioGroupId, stdioWriteLock, stdioStderr,
@@ -139,6 +141,16 @@ import qualified Data.Text.Encoding as TextEncoding ()
 
 startMcpClient :: McpServerConfig -> IO McpClient
 startMcpClient = startMcpClientWith defaultMcpHostHooks Nothing
+
+-- | Connect directly to a typed server. There are no sockets or worker threads.
+startInMemoryMcpClient :: McpHostHooks -> McpServerConfig -> McpToolServer -> IO McpClient
+startInMemoryMcpClient hooks config server = mask \_ -> do
+    unsubscribe <- newIORef (pure ())
+    client <- newClientRecord hooks Nothing config (McpClientInMemory server unsubscribe)
+    release <- server.toolServerSubscribe
+        (handleNotification client "notifications/tools/list_changed" Nothing)
+    writeIORef unsubscribe release
+    pure client
 
 startMcpClientWith
     :: McpHostHooks
@@ -417,6 +429,9 @@ mcpClientStatus client = do
 -- | Decide which protocol era the server speaks and complete the handshake
 -- that era requires.
 negotiateProtocol :: McpClient -> IO ()
+negotiateProtocol client | McpClientInMemory server _ <- client.clientTransport = do
+    info <- server.toolServerInitialize
+    atomically $ writeTVar client.clientServerInfo (Just info)
 negotiateProtocol client =
     case (client.clientConfig.mcpServerProtocol, client.clientEraHint) of
         (McpProtocolLegacy, _) -> legacyInitialize client preferredLegacyVersion
@@ -598,6 +613,8 @@ startupFailure client err = do
         McpClientStdio transport ->
             capturedStderrText <$> readIORef transport.stdioStderr
         McpClientHttp _ ->
+            pure ""
+        McpClientInMemory _ _ ->
             pure ""
     ioError . userError . Text.unpack $
         redactConfiguredValues client.clientConfig
