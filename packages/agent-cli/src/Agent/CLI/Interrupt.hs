@@ -1,5 +1,5 @@
 -- | Double Ctrl-C: first press soft-cancels a turn (or warns at the idle
--- prompt); a second press forces process exit with the usual --resume hint.
+-- prompt); a second press requests session exit with the usual --resume hint.
 module Agent.CLI.Interrupt
     ( InterruptState
     , CtrlCContext(..)
@@ -18,9 +18,7 @@ module Agent.CLI.Interrupt
     ) where
 
 import Agent.Cancel (CancelFlag, isCancelled, requestCancel)
-import Control.Concurrent (ThreadId, myThreadId, threadDelay, throwTo)
-import Control.Concurrent.Async (withAsync)
-import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, tryPutMVar)
+import Control.Concurrent (ThreadId, myThreadId, throwTo)
 import Control.Exception
     ( AsyncException(UserInterrupt)
     , fromException
@@ -38,11 +36,9 @@ import Control.Exception.Safe
     , throwIO
     )
 import Control.Monad (void)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
-import System.Exit (ExitCode(ExitFailure))
-import System.Posix.Process (exitImmediately)
 import System.Posix.Signals
     ( Handler(..)
     , installHandler
@@ -86,16 +82,10 @@ decideCtrlC (TurnActive alreadyCancelled) _
     | otherwise = SoftCancel
 decideCtrlC Exiting _ = ForceExit
 
--- | How long a confirmed quit may spend in teardown before the process is
--- killed. Uninterruptible MCP/store joins must not outlive this window.
-exitWatchdogMicros :: Int
-exitWatchdogMicros = 5_000_000
-
 data InterruptState = InterruptState
     { interruptActiveCancel :: !(IORef (Maybe CancelFlag))
     , interruptLastWarn :: !(IORef (Maybe UTCTime))
     , interruptExiting :: !(IORef Bool)
-    , interruptKillRequest :: !(MVar ())
     , interruptOnMessage :: !(Text -> IO ())
     }
 
@@ -105,20 +95,18 @@ newInterruptState onMessage = do
     active <- newIORef Nothing
     lastWarn <- newIORef Nothing
     exiting <- newIORef False
-    killRequest <- newEmptyMVar
     pure InterruptState
         { interruptActiveCancel = active
         , interruptLastWarn = lastWarn
         , interruptExiting = exiting
-        , interruptKillRequest = killRequest
         , interruptOnMessage = onMessage
         }
 
 -- | Install SIGINT/SIGHUP/SIGTERM handlers for the dynamic extent of @action@.
 -- Restores the previous handlers afterward. Force-exit rethrows
--- 'UserInterrupt' on the thread that entered this wrapper. A second force-exit
--- (or a hung teardown after the watchdog) terminates the process so Ctrl-C
--- cannot leave an orphaned agent session.
+-- 'UserInterrupt' on the thread that entered this wrapper. This session-level
+-- handler must never terminate its host process: the owner may be GHCi or an
+-- embedded runtime, and remains responsible for releasing session resources.
 --
 -- The inline editor reads Ctrl-C directly while a prompt is active; use
 -- 'noteIdleCtrlC' from that path instead. Fullscreen raw mode uses
@@ -128,24 +116,17 @@ withCtrlCHandler state action = do
     mainTid <- myThreadId
     let sigint = Catch (onSigInt mainTid state)
         hangup = Catch (onHangup mainTid state)
-    bracket
-        (do
-            previousInt <- installHandler sigINT sigint Nothing
-            previousHup <- installHandler sigHUP hangup Nothing
-            previousTerm <- installHandler sigTERM hangup Nothing
-            pure (previousInt, previousHup, previousTerm))
-        (\(previousInt, previousHup, previousTerm) -> do
-            void (installHandler sigINT previousInt Nothing)
-            void (installHandler sigHUP previousHup Nothing)
-            void (installHandler sigTERM previousTerm Nothing))
-        (\_ ->
-            -- The watchdog is blocked on the kill latch until force-exit.
-            -- Cancelling it on the normal path is interruptible.
-            withAsync
-                (takeMVar state.interruptKillRequest
-                    >> threadDelay exitWatchdogMicros
-                    >> exitImmediately (ExitFailure 130))
-                (\_ -> action))
+    withHandler sigINT sigint $
+        withHandler sigHUP hangup $
+            withHandler sigTERM hangup action
+  where
+    -- Nest acquisition so a later installation failure also restores every
+    -- handler already installed.
+    withHandler signal handler continuation =
+        bracket
+            (installHandler signal handler Nothing)
+            (\previous -> void (installHandler signal previous Nothing))
+            (const continuation)
 
 -- | Mark @cancel@ as the in-flight turn target for soft Ctrl-C.
 withTurnCancel :: InterruptState -> CancelFlag -> IO a -> IO a
@@ -232,16 +213,11 @@ armForceExit :: InterruptState -> IO ()
 armForceExit state = do
     writeIORef state.interruptExiting True
     writeIORef state.interruptLastWarn Nothing
-    void $ tryPutMVar state.interruptKillRequest ()
 
 requestForceExit :: ThreadId -> InterruptState -> IO ()
 requestForceExit mainTid state = do
-    already <- atomicModifyIORef' state.interruptExiting \was -> (True, was)
-    writeIORef state.interruptLastWarn Nothing
-    void $ tryPutMVar state.interruptKillRequest ()
-    if already
-        then exitImmediately (ExitFailure 130)
-        else throwTo mainTid UserInterrupt
+    armForceExit state
+    throwTo mainTid UserInterrupt
 
 isWithinWarnWindow :: InterruptState -> UTCTime -> IO Bool
 isWithinWarnWindow state now = do

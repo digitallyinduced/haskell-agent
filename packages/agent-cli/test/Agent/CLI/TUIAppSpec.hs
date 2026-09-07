@@ -9,7 +9,7 @@ import Agent.CLI.AgentViewport
     , AgentTarget(..)
     )
 import Agent.CLI.Input (ReplLine(..), terminalTextWidth)
-import Agent.CLI.Interrupt (CtrlCDecision(..))
+import Agent.CLI.Interrupt (CtrlCDecision(..), catchUserInterrupt)
 import Agent.CLI.Command
     ( SlashCatalog(..)
     , defaultSlashCatalog
@@ -20,6 +20,8 @@ import Agent.CLI.Resume
     )
 import Agent.CLI.TUI.App
     ( applyStoredFullscreenWindowTitle
+    , closeFullscreenChannels
+    , withFullscreenWorker
     , applyMetaConsoleEdit
     , applyTextPromptEdit
     , adjustChoiceValue
@@ -152,7 +154,11 @@ import Agent.TUI.Presentation
     , TodoDisplayStatus(..)
     )
 import Agent.TUI.Motion
-import Control.Concurrent (newEmptyMVar)
+import Control.Concurrent (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.Async (waitCatch)
+import Control.Exception.Safe (bracket_)
+import Control.Exception (AsyncException(UserInterrupt))
+import qualified Control.Exception as Exception
 import Control.Concurrent.STM
     ( atomically
     , newEmptyTMVarIO
@@ -160,7 +166,7 @@ import Control.Concurrent.STM
     , retry
     , tryReadTMVar
     )
-import Control.Monad (replicateM_)
+import Control.Monad (replicateM_, void)
 import qualified Data.ByteString as ByteString
 import Data.Foldable (find, toList)
 import Data.IORef
@@ -188,6 +194,119 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "fullscreen worker ownership" do
+        it "closes input and preserves a cooperative worker result" do
+            closed <- newEmptyMVar
+            timeout 1_000_000
+                (withFullscreenWorker
+                    (const (putMVar closed ()))
+                    (takeMVar closed >> pure (42 :: Int))
+                    (const (pure ())))
+                `shouldReturn` Just 42
+
+        it "closes input and joins the worker when the UI fails" do
+            started <- newEmptyMVar
+            blocked <- newEmptyMVar
+            closed <- newIORef False
+            stopped <- newIORef False
+            let worker =
+                    bracket_
+                        (putMVar started ())
+                        (writeIORef stopped True)
+                        (takeMVar blocked :: IO ())
+            timeout 1_000_000
+                (withFullscreenWorker
+                    (const (writeIORef closed True))
+                    worker
+                    (\_ -> takeMVar started >> ioError (userError "UI failure")))
+                `shouldThrow` anyIOException
+            readIORef closed `shouldReturn` True
+            readIORef stopped `shouldReturn` True
+
+        it "closes input and joins the worker when the UI is interrupted" do
+            started <- newEmptyMVar
+            blocked <- newEmptyMVar
+            closed <- newIORef False
+            stopped <- newIORef False
+            let worker =
+                    bracket_
+                        (putMVar started ())
+                        (writeIORef stopped True)
+                        (takeMVar blocked :: IO ())
+            timeout 1_000_000
+                (catchUserInterrupt
+                    (withFullscreenWorker
+                        (const (writeIORef closed True))
+                        worker
+                        -- Preserve the asynchronous exception classification;
+                        -- safe-exceptions' throwIO would wrap UserInterrupt.
+                        (\_ -> takeMVar started >> Exception.throwIO UserInterrupt)
+                        >> pure False)
+                    (pure True))
+                `shouldReturn` Just True
+            readIORef closed `shouldReturn` True
+            readIORef stopped `shouldReturn` True
+
+        it "cancels and joins an interruptible worker after the grace interval" do
+            started <- newEmptyMVar
+            blocked <- newEmptyMVar
+            closed <- newIORef False
+            stopped <- newIORef False
+            let worker =
+                    bracket_
+                        (putMVar started ())
+                        (writeIORef stopped True)
+                        (takeMVar blocked :: IO ())
+            timeout 5_000_000
+                (catchUserInterrupt
+                    (withFullscreenWorker
+                        (const (writeIORef closed True))
+                        worker
+                        (\_ -> takeMVar started)
+                        >> pure False)
+                    (pure True))
+                `shouldReturn` Just True
+            readIORef closed `shouldReturn` True
+            readIORef stopped `shouldReturn` True
+
+        it "closes input and preserves worker failures" do
+            closed <- newIORef False
+            withFullscreenWorker
+                (const (writeIORef closed True))
+                (ioError (userError "Worker failure") :: IO ())
+                (void . waitCatch)
+                `shouldThrow` anyIOException
+            readIORef closed `shouldReturn` True
+
+        it "preserves queued and future input when the worker completes a transition" do
+            runtime <- newScriptRuntime initialUiState
+            let input = FullscreenInput
+                    { fullscreenInputLine = ReplText "queued prompt"
+                    , fullscreenInputQueued = True
+                    , fullscreenInputDisplay = Just "queued prompt"
+                    }
+            atomically (Composer.appendFullscreenInput runtime.runtimeInput input)
+                `shouldReturn` Right ()
+            withFullscreenWorker
+                (closeFullscreenChannels runtime)
+                (pure (42 :: Int))
+                (void . waitCatch)
+                `shouldReturn` 42
+            queued <- atomically (Composer.readFullscreenInputs runtime.runtimeInput)
+            fmap (.fullscreenInputLine) (toList queued)
+                `shouldBe` [ReplText "queued prompt"]
+            atomically (Composer.appendFullscreenInput runtime.runtimeInput input)
+                `shouldReturn` Right ()
+
+        it "closes input when the UI exits before the worker completes" do
+            runtime <- newScriptRuntime initialUiState
+            result <- timeout 1_000_000 $
+                withFullscreenWorker
+                    (closeFullscreenChannels runtime)
+                    (atomically (Composer.takeFullscreenInput runtime.runtimeInput))
+                    (const (pure ()))
+            fmap (.fullscreenInputLine) result `shouldBe` Just ReplEof
+
     describe "dictation readiness" do
         it "does not erase a transcript that arrives before the ready event" do
             stop <- newEmptyMVar

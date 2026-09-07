@@ -269,18 +269,18 @@ continueAfterTurn
 continueAfterTurn continuation env
     | env.sessionBackground = pure RunQuit
     | otherwise = do
-    queued <- case env.sessionFullscreen of
-        Nothing -> pure False
-        Just runtime -> hasQueuedFullscreenInput runtime
-    backgroundCompletion <-
-        hasBackgroundCompletionWake env.sessionSteeringInputs
-    failedTurn <- readIORef env.sessionLastFailedTurn
-    let willWake = case env.sessionFullscreen of
-            Just _ -> backgroundCompletion && isNothing failedTurn
-            Nothing -> False
-    when (not queued && not willWake && not env.sessionBackground) $
-        notifyAttention env.sessionRender.renderStderr InputRequested
-    continuation.resumeSession env
+        queued <- case env.sessionFullscreen of
+            Nothing -> pure False
+            Just runtime -> hasQueuedFullscreenInput runtime
+        backgroundCompletion <-
+            hasBackgroundCompletionWake env.sessionSteeringInputs
+        failedTurn <- readIORef env.sessionLastFailedTurn
+        let willWake = case env.sessionFullscreen of
+                Just _ -> backgroundCompletion && isNothing failedTurn
+                Nothing -> False
+        when (not queued && not willWake) $
+            notifyAttention env.sessionRender.renderStderr InputRequested
+        continuation.resumeSession env
 
 putTrailingNewline :: RenderConfig -> IO ()
 putTrailingNewline render = do

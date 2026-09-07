@@ -3,8 +3,10 @@ module Agent.CLI.InterruptSpec (spec) where
 import Agent.CLI.Interrupt
 import qualified Control.Exception as Base
 import Control.Exception (AsyncException(ThreadKilled, UserInterrupt))
-import Control.Exception.Safe (finally, throwIO, toSyncException)
+import Control.Exception.Safe (bracket, finally, throwIO, toSyncException)
+import Control.Monad (forM_, void)
 import Data.IORef
+import System.Posix.Signals (Handler(..), Signal, installHandler, sigHUP, sigINT, sigTERM)
 import Test.Hspec
 
 spec :: Spec
@@ -40,6 +42,43 @@ spec = do
             noteFullscreenCtrlC state `shouldReturn` WarnExit
             noteFullscreenCtrlC state `shouldReturn` ForceExit
             noteFullscreenCtrlC state `shouldReturn` ForceExit
+
+    describe "withCtrlCHandler" do
+        it "keeps repeated confirmed interrupts within the session boundary" do
+            state <- newInterruptState (const (pure ()))
+            withCtrlCHandler state do
+                noteIdleCtrlC state `shouldReturn` ContinuePrompt
+                noteIdleCtrlC state `shouldReturn` QuitProcess
+                forM_ [1 :: Int, 2] \_ ->
+                    catchUserInterrupt
+                        (invokeInstalledHandler sigINT >> pure False)
+                        (pure True)
+                        `shouldReturn` True
+
+        it "treats hangup and termination as confirmed session quit" do
+            forM_ [sigHUP, sigTERM] \signal -> do
+                state <- newInterruptState (const (pure ()))
+                catchUserInterrupt
+                    (withCtrlCHandler state
+                        (invokeInstalledHandler signal >> pure False))
+                    (pure True)
+                    `shouldReturn` True
+                noteIdleCtrlC state `shouldReturn` QuitProcess
+
+        it "restores previous signal handlers after an exceptional session exit" do
+            forM_ [sigINT, sigHUP, sigTERM] \signal -> do
+                restored <- newIORef False
+                bracket
+                    (installHandler signal
+                        (Catch (writeIORef restored True)) Nothing)
+                    (\previous -> void (installHandler signal previous Nothing))
+                    \_ -> do
+                        state <- newInterruptState (const (pure ()))
+                        catchUserInterrupt
+                            (withCtrlCHandler state (Base.throwIO UserInterrupt))
+                            (pure ())
+                        invokeInstalledHandler signal
+                        readIORef restored `shouldReturn` True
 
     describe "isWrappedUserInterrupt" do
         it "recognizes a synchronously wrapped UserInterrupt" do
@@ -96,3 +135,15 @@ spec = do
                     >> Base.throwIO UserInterrupt)
                 `shouldThrow` (== UserInterrupt)
             readIORef attempts `shouldReturn` 2
+
+-- Invoke the installed callback directly rather than deliver a process-wide
+-- signal to the test runner or GHCi. The callback still targets the session's
+-- owning thread, exercising the same exception path as the signal dispatcher.
+invokeInstalledHandler :: Signal -> IO ()
+invokeInstalledHandler signal =
+    bracket
+        (installHandler signal Ignore Nothing)
+        (\previous -> void (installHandler signal previous Nothing))
+        \case
+            Catch handler -> handler
+            _ -> expectationFailure "Expected a session signal handler"

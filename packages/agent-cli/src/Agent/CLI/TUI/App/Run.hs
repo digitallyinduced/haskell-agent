@@ -24,11 +24,7 @@ import Agent.CLI.AgentViewport ( AgentEntry(..)
     , agentStatusGlyph
     , lookupAgentEntry
     )
-import Agent.CLI.Interrupt
-    ( CtrlCDecision(..)
-    , catchUserInterrupt
-    , isWrappedUserInterrupt
-    )
+import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.ImagePreview ( ImagePreviewProtocol(..)
     , detectImagePreviewProtocol
     , kittyDeleteImageSequence
@@ -143,24 +139,20 @@ import Codec.Picture (pixelAt)
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async
     ( Async
-    , AsyncCancelled(..)
-    , asyncThreadId
-    , asyncWithUnmask
+    , poll
+    , wait
     , waitCatch
     , withAsync
+    , withAsyncWithUnmask
     )
-import Control.Concurrent (threadDelay, throwTo)
+import Control.Concurrent (threadDelay)
 import Control.Monad (forever, unless, void, when, (>=>))
 import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Control.Exception.Safe (SomeException, finally, mask, onException, throwIO, tryAny)
-import Control.Exception
-    ( AsyncException(UserInterrupt)
-    , fromException
-    , toException
-    )
+import Control.Exception.Safe (finally, onException, throwIO, tryAny)
+import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
 import Data.IORef ( atomicModifyIORef' , modifyIORef' , newIORef , readIORef , writeIORef )
@@ -191,6 +183,32 @@ import Agent.CLI.TUI.App.Runtime
 import Agent.CLI.TUI.App.Mailbox
 import Agent.CLI.TUI.App.History
 import Agent.CLI.TUI.App.Event
+
+-- | The UI owns the session worker until it has terminated, including when
+-- the UI fails. Closing input is a nonblocking, idempotent operation, not an
+-- EOF insertion into the bounded prompt queue.
+--
+-- The grace interval bounds cooperative shutdown only. If it expires, scope
+-- exit cancels and joins the worker; we never abandon it or kill the host
+-- process. Resource finalizers must themselves provide interruptible cleanup.
+withFullscreenWorker :: (Async a -> IO ()) -> IO a -> (Async a -> IO ()) -> IO a
+withFullscreenWorker closeChannels workerAction runUi =
+    withAsyncWithUnmask (\unmask -> unmask workerAction) \worker -> do
+        runUi worker `finally` closeChannels worker
+        timeout 2_000_000 (wait worker) >>= \case
+            Just result -> pure result
+            Nothing -> throwIO UserInterrupt
+
+closeFullscreenChannels :: FullscreenRuntime -> Async a -> IO ()
+closeFullscreenChannels runtime worker = do
+    workerResult <- poll worker
+    atomically do
+        closeAppEventMailbox runtime.runtimeMailbox
+        -- Completed workers may return a session/provider transition. The
+        -- outer flow reuses their input buffer, including queued prompts.
+        case workerResult of
+            Nothing -> Composer.closeFullscreenInputBuffer runtime.runtimeInput
+            Just _ -> pure ()
 
 runFullscreen :: FullscreenRuntime -> IO a -> IO a
 runFullscreen runtime workerAction = do
@@ -245,29 +263,18 @@ runFullscreen runtime workerAction = do
             writeTVar
                 runtime.runtimeMotionSchedule
                 (initialDemand, initialDelay, 0)
-        -- Own the worker explicitly: withAsync's exception path waits
-        -- unbounded for cancellation, which is how Ctrl-C left GHCi sessions
-        -- stuck after the TUI had already died.
-        mask \restore -> do
-            worker <- asyncWithUnmask \unmask -> unmask workerAction
-            interrupted <- restore $
-                catchUserInterrupt
-                    (runFullscreenUi
-                        runtime
-                        worker
-                        initialVty
-                        buildVty
-                        initialState
-                        initialAgent
-                        initialAgents
-                        >> pure False)
-                    (pure True)
-            shutdownFullscreenWorker runtime worker >>= \case
-                Right value -> pure value
-                Left err
-                    | interrupted || isFullscreenQuitException err ->
-                        throwIO UserInterrupt
-                    | otherwise -> throwIO err
+        withFullscreenWorker
+            (closeFullscreenChannels runtime)
+            workerAction
+            \worker ->
+                runFullscreenUi
+                    runtime
+                    worker
+                    initialVty
+                    buildVty
+                    initialState
+                    initialAgent
+                    initialAgents
   where
     runFullscreenUi
             runtime worker initialVty buildVty initialState
@@ -297,45 +304,11 @@ runFullscreen runtime workerAction = do
                                                     fullscreenApp
                                                     initialState
                                                 `finally`
-                                                    runtime.runtimeNativeProgress False
+                                                    (closeFullscreenChannels runtime worker
+                                                        >> runtime.runtimeNativeProgress False)
                                             mapM_
                                                 (`Composer.requestDictationStop` True)
                                                 finalState.appDictation
-                                            when (not finalState.appWorkerStopped) $
-                                                enqueueFullscreenEof runtime
-
-    enqueueFullscreenEof currentRuntime =
-        void $ atomically $
-            Composer.appendFullscreenInput
-                currentRuntime.runtimeInput
-                FullscreenInput
-                    { fullscreenInputLine = ReplEof
-                    , fullscreenInputQueued = False
-                    , fullscreenInputDisplay = Nothing
-                    }
-
-    shutdownFullscreenWorker currentRuntime worker = do
-        enqueueFullscreenEof currentRuntime
-        waitCatchWithTimeout worker >>= \case
-            Just result -> pure result
-            Nothing -> do
-                throwTo (asyncThreadId worker) AsyncCancelled
-                waitCatchWithTimeout worker >>= \case
-                    Just result -> pure result
-                    Nothing ->
-                        pure (Left (toException UserInterrupt))
-
-    waitCatchWithTimeout worker =
-        timeout fullscreenWorkerJoinMicros (waitCatch worker)
-
-    fullscreenWorkerJoinMicros = 2_000_000
-
-    isFullscreenQuitException err =
-        isJust (fromException err :: Maybe AsyncCancelled)
-            || case fromException err of
-                Just UserInterrupt -> True
-                _ -> isWrappedUserInterrupt err
-
     recapTicker _runtime = forever do
         threadDelay 20_000_000
         enqueueAppEvent runtime AppRecapPoll

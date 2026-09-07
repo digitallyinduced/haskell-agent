@@ -217,7 +217,8 @@ data PendingUiEvent
     | PendingReasoningDeltas !(Seq Text)
 
 data AppEventMailboxState = AppEventMailboxState
-    { mailboxPendingEvents :: !(Seq PendingAppEvent)
+    { mailboxClosed :: !Bool
+    , mailboxPendingEvents :: !(Seq PendingAppEvent)
     , mailboxPendingCount :: !Int
     , mailboxPendingBytes :: !Int
     , mailboxHighWaterCount :: !Int
@@ -248,6 +249,7 @@ data FullscreenInputBuffer =
     FullscreenInputBuffer
         !(TVar (Seq FullscreenInput))
         !(TVar Int)
+        !(TVar Bool)
 
 data FullscreenHistorySource = FullscreenHistorySource
     { historySourceKey :: !Text
