@@ -362,23 +362,29 @@ spec = do
                             expectationFailure
                                 "expected an invalid gateway to block local auth"
 
-        it "does not let an explicit non-OpenAI provider bypass the gateway" $
+        it "uses native xAI gateway credentials instead of direct xAI credentials" $
             withTempHome \home ->
                 withCleanGrokEnv $
                 withEnv "GROK_ACCESS_TOKEN" (Just "xai-token") do
                     saveTestGateway home
                     loadAuth (Just XAIProvider) >>= \case
-                        Left err ->
-                            err `shouldSatisfy`
-                                Text.isInfixOf
-                                    "organization gateway is active"
-                        Right _ ->
-                            expectationFailure
-                                "expected the gateway to block direct xAI auth"
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded -> do
+                            loaded.loadedProvider `shouldBe` XAIProvider
+                            loaded.loadedSelectionId
+                                `shouldBe` Just gatewayAuthSelectionId
+                            credential <-
+                                getNextToken loaded.loadedTokenProvider Nothing
+                                    >>= expectRightResult
+                            credential.provider `shouldBe` XAIProvider
+                            credential.accessToken
+                                `shouldBe` testGatewayCredential.gatewayAccessToken
+                            credential.accountId
+                                `shouldBe` testGatewayCredential.gatewayBaseUrl
 
-        it "rejects an explicit provider against an exact gateway snapshot" do
+        it "rejects unsupported providers against an exact gateway snapshot" do
             case gatewayLoadedAuthForProvider
-                    (Just XAIProvider)
+                    (Just GeminiProvider)
                     testGatewayCredential of
                 Left err ->
                     err `shouldSatisfy`
@@ -386,7 +392,7 @@ spec = do
                             "organization gateway is active"
                 Right _ ->
                     expectationFailure
-                        "expected exact gateway auth to block direct xAI"
+                        "expected exact gateway auth to block direct Gemini"
             case gatewayLoadedAuthForProvider
                     (Just ClaudeCodeProvider)
                     testGatewayCredential of
@@ -395,6 +401,29 @@ spec = do
                 Left err ->
                     expectationFailure
                         ("expected gateway Claude auth, got " <> Text.unpack err)
+
+        it "binds native xAI credentials to the exact gateway snapshot" do
+            loaded <- expectRightResult $
+                gatewayLoadedAuthForProvider (Just XAIProvider) testGatewayCredential
+            credential <- getNextToken loaded.loadedTokenProvider Nothing
+                >>= expectRightResult
+            let guardCredential candidate =
+                    getNextToken
+                        (gatewayTokenProviderForProvider
+                            XAIProvider
+                            testGatewayCredential
+                            (staticCredentialProvider SubscriptionBilled candidate))
+                        Nothing
+            guardCredential credential `shouldReturn` Right credential
+            mapM_
+                (\candidate ->
+                    guardCredential candidate >>= \case
+                        Left CredentialError{} -> pure ()
+                        _ -> expectationFailure "expected gateway credential mismatch")
+                [ (credential :: Credential) { accessToken = "direct-xai-token" }
+                , (credential :: Credential) { accountId = "https://different-gateway.example" }
+                , (credential :: Credential) { provider = OpenAIProvider }
+                ]
 
     describe "loadOpenAiDictationAuth" do
         it "loads ChatGPT OAuth as subscription-billed OpenAI auth" $

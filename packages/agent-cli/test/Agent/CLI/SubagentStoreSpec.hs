@@ -22,6 +22,7 @@ import Agent.CLI.Subagents.Runtime
     , grokSpawnedChildIdentity
     , restoreAgentFromDisk
     , resolveChildModelAndEffort
+    , resolveGatewaySubagentTarget
     , unpinSubagentSession
     , usesOpenAiChildTransport
     , validatePersistedSubagentTarget
@@ -66,6 +67,61 @@ toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = describe "Agent.CLI.SubagentStore" do
+    describe "gateway subagent transport selection" do
+        let target provider model dialect = CollaborationModelTarget
+                { collaborationTargetProvider = provider
+                , collaborationTargetConnection = organizationGatewayConnectionId
+                , collaborationTargetEffectiveModel = model
+                , collaborationTargetDialect = dialect
+                }
+            openaiTarget = target OpenAIProvider "company-code" CodexDialect
+            xaiTarget = target XAIProvider "company-analysis" GrokBuildDialect
+            resolve model = pure $ Map.lookup model $ Map.fromList
+                [ ("company-code", openaiTarget)
+                , ("company-analysis", xaiTarget)
+                ]
+        it "routes an explicit xAI child independently of its OpenAI parent" do
+            resolveGatewaySubagentTarget resolve
+                (Just "company-analysis") Nothing (Just "company-code") "company-code"
+                `shouldReturn` Right xaiTarget
+        it "routes an explicit OpenAI child independently of its xAI parent" do
+            resolveGatewaySubagentTarget resolve
+                (Just "company-code") Nothing (Just "company-analysis") "company-analysis"
+                `shouldReturn` Right openaiTarget
+        it "retains the child's own provider for follow-ups" do
+            resolveGatewaySubagentTarget resolve
+                Nothing (Just "company-code") (Just "company-analysis") "company-analysis"
+                `shouldReturn` Right openaiTarget
+        it "inherits the immediate parent's alias rather than the root's alias" do
+            resolveGatewaySubagentTarget resolve
+                Nothing Nothing (Just "company-analysis") "company-code"
+                `shouldReturn` Right xaiTarget
+        it "inherits the root alias when no child or parent session exists" do
+            resolveGatewaySubagentTarget resolve
+                Nothing Nothing Nothing "company-code"
+                `shouldReturn` Right openaiTarget
+        it "fails closed for an unavailable explicit alias instead of inheriting" do
+            resolveGatewaySubagentTarget resolve
+                (Just "unavailable") Nothing (Just "company-analysis") "company-code"
+                `shouldReturn` Left "The child model is not allowed by this organization."
+        it "rejects a catalog resolver that supplies a direct-provider connection" do
+            resolveGatewaySubagentTarget
+                (const (pure (Just openaiTarget
+                    { collaborationTargetConnection = "openai" })))
+                (Just "company-code") Nothing Nothing "company-code"
+                `shouldReturn` Left "The child model does not use the organization gateway."
+        it "rejects a provider-dialect mismatch before acquiring a transport" do
+            resolveGatewaySubagentTarget
+                (const (pure (Just xaiTarget
+                    { collaborationTargetDialect = CodexDialect })))
+                (Just "company-analysis") Nothing Nothing "company-code"
+                `shouldReturn` Left "The child model has an incompatible provider dialect."
+        it "does not use legacy OpenAI-Grok decode compatibility for live routing" do
+            resolveGatewaySubagentTarget
+                (const (pure (Just openaiTarget
+                    { collaborationTargetDialect = GrokBuildDialect })))
+                (Just "company-code") Nothing Nothing "company-code"
+                `shouldReturn` Left "The child model has an incompatible provider dialect."
     describe "nested subagent model inheritance" do
         it "inherits the immediate parent's model and effort for full-history forks" do
             sessionsRef <- newIORef Map.empty

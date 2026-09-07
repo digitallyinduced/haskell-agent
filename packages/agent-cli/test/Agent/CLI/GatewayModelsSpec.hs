@@ -4,13 +4,15 @@ import Agent.CLI.GatewayModels
 import Agent.CLI.GatewayClient
     ( GatewayModel(..)
     , GatewayModelProtocol(..)
+    , GatewayModelProvider(..)
     )
 import Agent.CLI.ModelConfig
 import Agent.CLI.Models (ModelOption(..), ModelTarget(..))
 import Agent.Dialect (DialectId(..))
-import Agent.Provider (Provider(ClaudeCodeProvider, OpenAIProvider))
+import Agent.Provider (Provider(ClaudeCodeProvider, GeminiProvider, OpenAIProvider, XAIProvider))
 import Data.Aeson qualified as Aeson
 import Data.Aeson ((.=))
+import Data.Either (isLeft)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Test.Hspec
@@ -21,7 +23,11 @@ spec = describe "Agent.CLI.GatewayModels" do
         let options =
                 modelOptionsForGatewayState
                     testCatalog
-                    (Just ["company-b", "company-a", "company-b"])
+                    (Just
+                        [ GatewayModel "company-b" GatewayResponsesProtocol GatewayOpenAIProvider
+                        , GatewayModel "company-a" GatewayResponsesProtocol GatewayXAIProvider
+                        , GatewayModel "company-b" GatewayResponsesProtocol GatewayOpenAIProvider
+                        ])
         map (.modelTarget.targetModelId) options
             `shouldBe` ["company-b", "company-a"]
         map (.modelTarget.targetConnectionId) options
@@ -29,7 +35,7 @@ spec = describe "Agent.CLI.GatewayModels" do
         map (.modelTarget.targetWireModelId) options
             `shouldBe` ["company-b", "company-a"]
         map (.modelTarget.targetDialect) options
-            `shouldBe` [CodexDialect, GenericResponsesDialect]
+            `shouldBe` [CodexDialect, GrokBuildDialect]
         map (.modelLabel) options
             `shouldBe` [Nothing, Just "Company A"]
 
@@ -40,40 +46,98 @@ spec = describe "Agent.CLI.GatewayModels" do
         map (.modelTarget.targetConnectionId) options
             `shouldBe` ["openai", "xai", "gemini", "openrouter", "claude-code"]
 
-    it "maps the unified catalog to Responses and Claude transports" do
+    it "maps shared Responses models to their distinct native transports" do
         let options =
                 modelOptionsForGatewayModels
                     testCatalog
-                    [ GatewayModel "company-a" GatewayResponsesProtocol
-                    , GatewayModel "sonnet" GatewayAnthropicProtocol
-                    , GatewayModel "router-default" GatewayResponsesProtocol
+                    [ GatewayModel "company-a" GatewayResponsesProtocol GatewayOpenAIProvider
+                    , GatewayModel "company-grok" GatewayResponsesProtocol GatewayXAIProvider
+                    , GatewayModel "sonnet" GatewayAnthropicProtocol GatewayAnthropicProvider
+                    , GatewayModel "router-default" GatewayResponsesProtocol GatewayOpenAIProvider
                     ]
         map (.modelTarget.targetProvider) options
-            `shouldBe` [OpenAIProvider, ClaudeCodeProvider]
+            `shouldBe` [OpenAIProvider, XAIProvider, ClaudeCodeProvider]
         map (.modelTarget.targetModelId) options
-            `shouldBe` ["company-a", "sonnet"]
+            `shouldBe` ["company-a", "company-grok", "sonnet"]
         map (.modelTarget.targetConnectionId) options
-            `shouldBe` replicate 2 organizationGatewayConnectionId
+            `shouldBe` replicate 3 organizationGatewayConnectionId
         map (.modelTarget.targetDialect) options
-            `shouldBe` [GenericResponsesDialect, ClaudeCodeDialect]
+            `shouldBe` [CodexDialect, GrokBuildDialect, ClaudeCodeDialect]
 
-    it "aligns gateway auth with a resumed Claude model target" do
-        let options =
-                modelOptionsForGatewayModels
-                    testCatalog
-                    [GatewayModel "sonnet" GatewayAnthropicProtocol]
-        case options of
-            [option] ->
-                gatewayProviderForStartup
-                    (Just option.modelTarget)
-                    Nothing
-                    (Just OpenAIProvider)
-                    `shouldBe` ClaudeCodeProvider
-            _ -> expectationFailure "expected one Claude gateway model"
+    it "uses provider metadata rather than model names or local dialect overrides" do
+        let options = modelOptionsForGatewayModels testCatalog
+                [ GatewayModel "gpt-company" GatewayResponsesProtocol GatewayXAIProvider
+                , GatewayModel "grok-company" GatewayResponsesProtocol GatewayOpenAIProvider
+                , GatewayModel "company-a" GatewayResponsesProtocol GatewayXAIProvider
+                ]
+        map (.modelTarget.targetProvider) options
+            `shouldBe` [XAIProvider, OpenAIProvider, XAIProvider]
+        map (.modelTarget.targetDialect) options
+            `shouldBe` [GrokBuildDialect, CodexDialect, GrokBuildDialect]
+        map (.modelTarget.targetWireModelId) options
+            `shouldBe` ["gpt-company", "grok-company", "company-a"]
+        map (.modelLabel) options
+            `shouldBe` [Nothing, Nothing, Just "Company A"]
 
-    it "defaults gateway auth to OpenAI without a target or provider hint" $
-        gatewayProviderForStartup Nothing Nothing Nothing
-            `shouldBe` OpenAIProvider
+    describe "selectGatewayModelOption" do
+        let options = modelOptionsForGatewayModels testCatalog
+                [ GatewayModel "company-openai" GatewayResponsesProtocol GatewayOpenAIProvider
+                , GatewayModel "company-xai" GatewayResponsesProtocol GatewayXAIProvider
+                , GatewayModel "company-claude" GatewayAnthropicProtocol GatewayAnthropicProvider
+                ]
+            savedTarget provider model =
+                ModelTarget provider organizationGatewayConnectionId model model CodexDialect
+            selectedProvider model provider hints =
+                (.modelTarget.targetProvider)
+                    <$> selectGatewayModelOption options model provider hints
+
+        it "selects an explicit alias using its advertised provider" $
+            selectedProvider (Just "company-xai") Nothing []
+                `shouldBe` Right XAIProvider
+
+        it "rejects an explicit alias absent from the authorized catalog" $
+            selectGatewayModelOption options (Just "unlisted") Nothing []
+                `shouldSatisfy` isLeft
+
+        it "rejects an explicit provider that conflicts with the explicit alias" $
+            selectGatewayModelOption options
+                (Just "company-xai") (Just OpenAIProvider) []
+                `shouldSatisfy` isLeft
+
+        it "accepts an explicit provider matching the explicit alias" $
+            selectedProvider (Just "company-xai") (Just XAIProvider) []
+                `shouldBe` Right XAIProvider
+
+        it "resolves a saved Grok alias without trusting its old OpenAI provider" $
+            selectedProvider Nothing Nothing
+                [savedTarget OpenAIProvider "company-xai"]
+                `shouldBe` Right XAIProvider
+
+        it "uses the first available saved alias preference" $
+            selectedProvider Nothing Nothing
+                [ savedTarget OpenAIProvider "removed-alias"
+                , savedTarget OpenAIProvider "company-xai"
+                , savedTarget ClaudeCodeProvider "company-claude"
+                ]
+                `shouldBe` Right XAIProvider
+
+        it "filters saved alias preferences and defaults by explicit provider" $
+            selectedProvider Nothing (Just XAIProvider)
+                [savedTarget OpenAIProvider "company-openai"]
+                `shouldBe` Right XAIProvider
+
+        it "defaults to the first authorized model when no preference resolves" $
+            selectedProvider Nothing Nothing
+                [savedTarget OpenAIProvider "removed-alias"]
+                `shouldBe` Right OpenAIProvider
+
+        it "rejects a provider with no authorized models" $
+            selectGatewayModelOption options Nothing (Just GeminiProvider) []
+                `shouldSatisfy` isLeft
+
+        it "rejects an empty authorized catalog" $
+            selectGatewayModelOption [] Nothing Nothing []
+                `shouldSatisfy` isLeft
 
 -- Exercise the same validated construction boundary as production. A catalog
 -- now always includes a default for each builtin provider.

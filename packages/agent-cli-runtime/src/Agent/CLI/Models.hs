@@ -42,7 +42,6 @@ import Agent.CLI.ModelConfig
     , catalogDefaultForProvider
     , catalogGatewayModelById
     , catalogModelById
-    , connectionSupportsDialect
     )
 import Agent.Dialect
     ( DialectId(..)
@@ -227,8 +226,8 @@ rawModelOption provider model =
         }
 
 -- | Convert the exact aliases advertised by an organization gateway into
--- model options.  Catalog entries may contribute presentation metadata and
--- dialect identity, but never transport identity: every option remains pinned
+-- model options. Catalog entries may contribute presentation metadata, but
+-- never provider or dialect identity: every option remains pinned
 -- to the active gateway connection and sends the advertised alias verbatim.
 gatewayModelOptions
     :: ModelCatalog
@@ -246,10 +245,6 @@ gatewayModelOptions catalog provider =
                 catalogGatewayModelById catalog modelId >>= \model ->
                     if model.catalogModelConnectionId
                             == organizationGatewayConnectionId
-                        && connectionSupportsDialect
-                            organizationGatewayConnectionId
-                            provider
-                            model.catalogModelDialect
                     then Just model
                     else Nothing
         in ModelOption
@@ -258,11 +253,7 @@ gatewayModelOptions catalog provider =
                 , targetConnectionId = organizationGatewayConnectionId
                 , targetModelId = modelId
                 , targetWireModelId = modelId
-                , targetDialect =
-                    maybe
-                        (dialectIdForModel provider modelId)
-                        (.catalogModelDialect)
-                        configured
+                , targetDialect = dialectIdForModel provider modelId
                 }
             , modelContextWindow =
                 configured >>= (.catalogModelContextWindow)

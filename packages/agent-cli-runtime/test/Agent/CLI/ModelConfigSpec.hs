@@ -191,6 +191,16 @@ spec = describe "Agent.CLI.ModelConfig" do
             `shouldBe` True
         connectionSupportsDialect
             organizationGatewayConnectionId
+            OpenAIProvider
+            GrokBuildDialect
+            `shouldBe` True
+        connectionSupportsDialect
+            organizationGatewayConnectionId
+            XAIProvider
+            GrokBuildDialect
+            `shouldBe` True
+        connectionSupportsDialect
+            organizationGatewayConnectionId
             ClaudeCodeProvider
             ClaudeCodeDialect
             `shouldBe` True

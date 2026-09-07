@@ -15,6 +15,7 @@ import Agent.CLI.Session.Request
     ( SessionRequestState
     )
 import Agent.CLI.Compaction (CompactOutcome, CompactionInstall, OccupancySnapshot)
+import Agent.CLI.GatewayClient (GatewayCredential)
 import Agent.CLI.Session.History (LiveConversation)
 import Agent.CLI.Session.Runtime.Types (SessionBackend)
 import Agent.Claude (ClaudeCodeAuth)
@@ -35,7 +36,7 @@ import qualified Agent.Responses.GenericClient as GenericResponses
 -- | Only the selected provider's configuration crosses the provider boundary.
 data ProviderConfig
     = OpenAiProviderConfig OpenAiConfig
-    | XaiProviderConfig TokenProvider Bool
+    | XaiProviderConfig TokenProvider Bool (Maybe GatewayCredential)
     | GeminiProviderConfig TokenProvider
     | OpenRouterProviderConfig OpenRouterConfig
     | ClaudeProviderConfig ClaudeConfig

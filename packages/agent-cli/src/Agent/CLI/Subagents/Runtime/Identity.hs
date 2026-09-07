@@ -6,6 +6,7 @@ module Agent.CLI.Subagents.Runtime.Identity
     ) where
 
 import Agent.CLI.Subagents.Runtime.Types (SubagentRuntime(..))
+import Agent.CLI.ModelConfig (organizationGatewayConnectionId)
 import Agent.Dialect
     ( DialectId
     , codexDialect
@@ -53,6 +54,9 @@ grokSpawnedChildIdentity
             )
 
 inheritedGrokChildModel :: SubagentRuntime -> Text -> Text
+inheritedGrokChildModel runtime parentModel
+    | runtime.subagentConnection == organizationGatewayConnectionId =
+        parentModel
 inheritedGrokChildModel runtime parentModel =
     case runtime.subagentAllowedChildModels of
         Nothing -> parentModel

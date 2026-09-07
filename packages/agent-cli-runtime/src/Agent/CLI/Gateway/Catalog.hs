@@ -3,6 +3,7 @@ module Agent.CLI.Gateway.Catalog
     ( GatewayModel(..)
     , GatewayModelCatalogResponse(..)
     , GatewayModelProtocol(..)
+    , GatewayModelProvider(..)
     , GatewayModelAccess
     , newGatewayModelAccess
     , newGatewayModelAccessWith
@@ -48,9 +49,17 @@ data GatewayModelProtocol
     | GatewayAnthropicProtocol
     deriving (Eq, Show)
 
+-- | Provider identity is independent of the shared Responses wire protocol.
+data GatewayModelProvider
+    = GatewayOpenAIProvider
+    | GatewayXAIProvider
+    | GatewayAnthropicProvider
+    deriving (Eq, Show)
+
 data GatewayModel = GatewayModel
     { gatewayModelId :: !Text
     , gatewayModelProtocol :: !GatewayModelProtocol
+    , gatewayModelProvider :: !GatewayModelProvider
     }
     deriving (Eq, Show)
 
@@ -68,10 +77,28 @@ instance Aeson.FromJSON GatewayModelCatalogResponse where
 
 instance Aeson.FromJSON GatewayModel where
     parseJSON =
-        Aeson.withObject "GatewayModel" \object ->
-            GatewayModel
-                <$> object .: "id"
-                <*> object .: "protocol"
+        Aeson.withObject "GatewayModel" \object -> do
+            modelId <- object .: "id"
+            protocol <- object .: "protocol"
+            provider <- object .: "provider"
+            if compatibleGatewayProtocol provider protocol
+                then pure (GatewayModel modelId protocol provider)
+                else fail "Gateway model provider and protocol are incompatible."
+
+instance Aeson.FromJSON GatewayModelProvider where
+    parseJSON =
+        Aeson.withText "GatewayModelProvider" \case
+            "openai" -> pure GatewayOpenAIProvider
+            "xai" -> pure GatewayXAIProvider
+            "anthropic" -> pure GatewayAnthropicProvider
+            _ -> fail "Gateway model provider is invalid."
+
+compatibleGatewayProtocol :: GatewayModelProvider -> GatewayModelProtocol -> Bool
+compatibleGatewayProtocol provider protocol =
+    protocol == case provider of
+        GatewayOpenAIProvider -> GatewayResponsesProtocol
+        GatewayXAIProvider -> GatewayResponsesProtocol
+        GatewayAnthropicProvider -> GatewayAnthropicProtocol
 
 instance Aeson.FromJSON GatewayModelProtocol where
     parseJSON =

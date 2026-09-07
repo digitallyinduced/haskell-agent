@@ -1,17 +1,17 @@
 -- | Load the authoritative model options exposed by a connected organization
 -- gateway for native clients that do not own a long-running CLI session.
 module Agent.CLI.GatewayModels
-    ( gatewayProviderForStartup
-    , loadGatewayModelOptionsAt
+    ( loadGatewayModelOptionsAt
     , loadGatewayModelOptionsWithCredentialAt
     , modelOptionsForGatewayModels
     , modelOptionsForGatewayState
+    , selectGatewayModelOption
     ) where
 
 import Agent.CLI.GatewayClient
     ( GatewayCredential
     , GatewayModel(..)
-    , GatewayModelProtocol(..)
+    , GatewayModelProvider(..)
     , loadGatewayCredentialAt
     , newGatewayModelAccess
     , refreshGatewayModels
@@ -21,29 +21,59 @@ import Agent.CLI.ModelConfig
     , loadModelCatalogAt
     )
 import Agent.CLI.Models
-    ( ModelOption
-    , ModelTarget(targetProvider)
+    ( ModelOption(modelTarget)
+    , ModelTarget(targetProvider, targetModelId)
     , gatewayModelOptions
     , modelCatalog
+    , resolveModelOptionById
     )
 import Agent.Provider
-    ( Provider (ClaudeCodeProvider, OpenAIProvider) )
-import Control.Applicative ((<|>))
-import Data.Maybe (fromMaybe)
+    ( Provider (ClaudeCodeProvider, OpenAIProvider, XAIProvider) )
+import Data.List (find, nubBy)
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import System.OsPath (OsPath)
 
-gatewayProviderForStartup
-    :: Maybe ModelTarget
+-- | Select from the authoritative gateway catalog before authentication.
+-- Saved targets supply an alias preference, never provider identity: older
+-- gateway sessions recorded Grok aliases as OpenAI targets.
+selectGatewayModelOption
+    :: [ModelOption]
+    -> Maybe Text
     -> Maybe Provider
-    -> Maybe Provider
-    -> Provider
-gatewayProviderForStartup targetHint requestedProvider resumedProvider =
-    fromMaybe OpenAIProvider $
-        (.targetProvider) <$> targetHint
-            <|> requestedProvider
-            <|> resumedProvider
+    -> [ModelTarget]
+    -> Either Text ModelOption
+selectGatewayModelOption options requestedModel requestedProvider targetHints =
+    case requestedModel of
+        Just modelId ->
+            case resolveModelOptionById options modelId of
+                Nothing ->
+                    Left
+                        ("Model " <> modelId
+                            <> " is not offered by the organization gateway.")
+                Just option
+                    | matchesProvider option -> Right option
+                    | otherwise ->
+                        Left
+                            "The selected gateway model does not use the requested provider."
+        Nothing ->
+            case find matchesProvider (preferredOptions <> options) of
+                Just option -> Right option
+                Nothing ->
+                    Left
+                        (case requestedProvider of
+                            Just _ ->
+                                "The organization gateway does not offer any models for the requested provider."
+                            Nothing ->
+                                "The organization gateway does not offer any models.")
+  where
+    preferredOptions =
+        mapMaybe
+            (resolveModelOptionById options . (.targetModelId))
+            targetHints
+    matchesProvider option =
+        maybe True (== option.modelTarget.targetProvider) requestedProvider
 
 loadGatewayModelOptionsAt
     :: OsPath
@@ -91,31 +121,26 @@ modelOptionsForGatewayModels
     -> [GatewayModel]
     -> [ModelOption]
 modelOptionsForGatewayModels catalog models =
-    gatewayModelOptions catalog OpenAIProvider responseIds
-        <> gatewayModelOptions catalog ClaudeCodeProvider anthropicIds
+    concatMap modelOptions $
+        nubBy (\first second -> first.gatewayModelId == second.gatewayModelId)
+            (filter (publicAlias . (.gatewayModelId)) models)
   where
-    responseIds =
-        [ model.gatewayModelId
-        | model <- models
-        , model.gatewayModelProtocol == GatewayResponsesProtocol
-        , publicAlias model.gatewayModelId
-        ]
-    anthropicIds =
-        [ model.gatewayModelId
-        | model <- models
-        , model.gatewayModelProtocol == GatewayAnthropicProtocol
-        , publicAlias model.gatewayModelId
-        , model.gatewayModelId `notElem` responseIds
-        ]
+    modelOptions model =
+        gatewayModelOptions catalog
+            (case model.gatewayModelProvider of
+                GatewayOpenAIProvider -> OpenAIProvider
+                GatewayXAIProvider -> XAIProvider
+                GatewayAnthropicProvider -> ClaudeCodeProvider)
+            [model.gatewayModelId]
     publicAlias modelId =
         not ("router-" `Text.isPrefixOf` modelId)
             && modelId /= "traumimmo-translation"
 
 modelOptionsForGatewayState
     :: ModelCatalog
-    -> Maybe [Text]
+    -> Maybe [GatewayModel]
     -> [ModelOption]
 modelOptionsForGatewayState catalog = \case
     Nothing -> modelCatalog catalog
-    Just modelIds ->
-        gatewayModelOptions catalog OpenAIProvider modelIds
+    Just models ->
+        modelOptionsForGatewayModels catalog models

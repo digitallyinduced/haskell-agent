@@ -16,6 +16,7 @@ module Agent.CLI.Auth
     , gatewayAuthSelectionId
     , gatewayLoadedAuthForProvider
     , gatewayRouterTokenProvider
+    , gatewayTokenProviderForProvider
     , isGatewayLoadedAuth
     , geminiAuthStateFromJson
     , geminiAuthStateToJson
@@ -96,6 +97,7 @@ import Agent.CLI.Environment (lookupNonEmpty)
 import Agent.CLI.GatewayClient
     ( GatewayCredential (..)
     , loadGatewayCredential
+    , validateGatewayCredential
     )
 import Agent.Error (ApiError(..))
 import Agent.OpenAI.WebSocketClient
@@ -210,14 +212,38 @@ gatewayLoadedAuthForProvider
     :: Maybe Provider
     -> GatewayCredential
     -> Either Text LoadedAuth
-gatewayLoadedAuthForProvider requestedProvider gateway =
+gatewayLoadedAuthForProvider requestedProvider gateway = do
+    validateGatewayCredential gateway
     case requestedProvider of
         Nothing -> gatewayLoadedAuth gateway
         Just OpenAIProvider -> gatewayLoadedAuth gateway
+        Just XAIProvider -> Right (gatewayXaiLoadedAuth gateway)
         Just ClaudeCodeProvider -> Right (gatewayClaudeLoadedAuth gateway)
         Just _ ->
             Left
                 "organization gateway is active; disconnect it before selecting another provider"
+
+gatewayXaiLoadedAuth :: GatewayCredential -> LoadedAuth
+gatewayXaiLoadedAuth gateway =
+    LoadedAuth
+        { loadedProvider = XAIProvider
+        , loadedTokenProvider =
+            staticCredentialProvider SubscriptionBilled
+                (gatewayXaiCredential gateway)
+        , loadedAccountLabel =
+            const (pure ("xAI via " <> gateway.gatewayBaseUrl))
+        , loadedSelectionId = Just gatewayAuthSelectionId
+        , loadedOpenAiPool = Nothing
+        }
+
+gatewayXaiCredential :: GatewayCredential -> Credential
+gatewayXaiCredential gateway =
+    Credential
+        { accessToken = gateway.gatewayAccessToken
+        , accountId = gateway.gatewayBaseUrl
+        , leaseId = Nothing
+        , provider = XAIProvider
+        }
 
 gatewayClaudeLoadedAuth :: GatewayCredential -> LoadedAuth
 gatewayClaudeLoadedAuth gateway =
@@ -261,6 +287,30 @@ gatewayRouterTokenProvider provider =
                         \send an organization model with direct OpenAI credentials"
             Left err -> pure (Left err)
 
+-- | Bind a native provider token source to the immutable gateway credential
+-- snapshot. Account rotation must never introduce a direct-provider token or
+-- credentials belonging to a different organization connection.
+gatewayTokenProviderForProvider
+    :: Provider
+    -> GatewayCredential
+    -> TokenProvider
+    -> TokenProvider
+gatewayTokenProviderForProvider selectedProvider gateway tokenProvider =
+    tokenProviderWithNextToken tokenProvider \failed ->
+        getNextToken tokenProvider failed >>= \case
+            Right credential
+                | selectedProvider == OpenAIProvider
+                , credential == credentialForGateway gateway ->
+                    pure (Right credential)
+                | selectedProvider == XAIProvider
+                , credential == gatewayXaiCredential gateway ->
+                    pure (Right credential)
+                | otherwise ->
+                    pure $ Left $ CredentialError
+                        "the connected gateway credential does not match the \
+                        \selected provider and organization connection"
+            Left err -> pure (Left err)
+
 -- | Load one specific account for providers whose HTTP backends can swap
 -- token sources without reconnecting a long-lived transport.
 --
@@ -273,9 +323,8 @@ loadAuthForAccount provider selectionId =
         Left err ->
             pure (Left ("cannot load gateway credential: " <> err))
         Right (Just gateway)
-            | provider == OpenAIProvider
-            , selectionId == gatewayAuthSelectionId ->
-                pure (gatewayLoadedAuth gateway)
+            | selectionId == gatewayAuthSelectionId ->
+                pure (gatewayLoadedAuthForProvider (Just provider) gateway)
             | otherwise ->
                 pure
                     (Left

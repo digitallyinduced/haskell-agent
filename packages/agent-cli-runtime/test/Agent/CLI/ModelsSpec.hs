@@ -218,12 +218,12 @@ spec = do
                 `shouldBe` True
 
         it "uses Grok capabilities for the gateway Grok model" do
-            gatewayModelOptions catalog OpenAIProvider ["grok-4.6"]
+            gatewayModelOptions catalog XAIProvider ["grok-4.6"]
                 `shouldBe`
                     [ ModelOption
                         { modelTarget =
                             ModelTarget
-                                OpenAIProvider
+                                XAIProvider
                                 organizationGatewayConnectionId
                                 "grok-4.6"
                                 "grok-4.6"
@@ -363,7 +363,7 @@ spec = do
                                 organizationGatewayConnectionId
                                 "gpt-5.6-sol"
                                 "gpt-5.6-sol"
-                                GenericResponsesDialect
+                                CodexDialect
                         , modelContextWindow = Just 777_777
                         , modelLabel = Just "company standard alias"
                         , modelFallbackPriority = Nothing
@@ -383,7 +383,7 @@ spec = do
                                 organizationGatewayConnectionId
                                 "company-known"
                                 "company-known"
-                                GenericResponsesDialect
+                                CodexDialect
                     active.modelLabel `shouldBe` Just "company label"
                     active.modelFallbackPriority `shouldBe` Just 9
                     foreignOption.modelTarget

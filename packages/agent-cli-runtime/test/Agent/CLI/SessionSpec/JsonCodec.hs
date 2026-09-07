@@ -111,6 +111,32 @@ spec = do
                 (LBS.toStrict (Aeson.encode legacyJson))
                 `shouldBe` Right (meta { metaGatewayIdentity = Nothing })
 
+        it "round-trips native xAI gateway provider identity" do
+            let prompt =
+                    (testPromptSnapshot "gateway-xai-session")
+                        { promptSnapshotProvider = XAIProvider
+                        , promptSnapshotConnection = organizationGatewayConnectionId
+                        , promptSnapshotModel = "company-coder"
+                        , promptSnapshotDialect = GrokBuildDialect
+                        }
+                meta =
+                    (testMeta "gateway-xai-session")
+                        { metaProvider = XAIProvider
+                        , metaConnection = organizationGatewayConnectionId
+                        , metaGatewayIdentity = Just "gateway-sha256:test-tenant"
+                        , metaModel = "company-coder"
+                        , metaTransportModel = Just "company-coder"
+                        , metaDialect = GrokBuildDialect
+                        , metaPromptSnapshot = Just prompt
+                        }
+            Hermes.decodeEither sessionMetaDecoder
+                (LBS.toStrict (Aeson.encode meta))
+                `shouldBe` Right meta
+            fromStoredMetadata (toStoredMetadata meta)
+                `shouldBe` Right (meta { metaPromptSnapshot = Nothing })
+            fromStoredPromptSnapshot (toStoredPromptSnapshot prompt)
+                `shouldBe` Right prompt
+
         it "infers transcript effects when importing legacy JSON turns" do
             let legacy userText items = Aeson.object
                     [ "at" Aeson..= fixedTime

@@ -31,7 +31,6 @@ import Agent.CLI.Models
     ( ModelOption(..)
     , ModelTarget(..)
     , PickerState(..)
-    , gatewayModelOptions
     , initialPickerStateForOptions
     , initialPickerStateResolvedWith
     , rawModelOption
@@ -156,7 +155,7 @@ modelChoiceWithEffort
                                 "organization gateway"
                                 options
                                 gatewayConnectionId
-                                OpenAIProvider
+                                provider
                                 current
                                 currentDialect
                         usage <- loadGatewayModelUsage access options

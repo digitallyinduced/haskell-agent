@@ -7,6 +7,7 @@ module Agent.CLI.GatewayClient
     , GatewayModel(..)
     , GatewayModelCatalogResponse(..)
     , GatewayModelProtocol(..)
+    , GatewayModelProvider(..)
     , GatewayModelAccess
     , GatewayAuthorization(..)
     , GatewayAuthorizationCodeResponse(..)

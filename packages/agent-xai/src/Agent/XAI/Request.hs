@@ -32,12 +32,14 @@ import qualified Data.Text as Text
 -- | Apply an exact model override, preserve an existing Grok model name, or
 -- use the configured default.
 mapModel :: ClientOptions -> Text -> Text
-mapModel options model =
-    selectConfiguredModel
-        options.modelOverrides
-        (Text.isPrefixOf "grok")
-        options.defaultModel
-        (Just model)
+mapModel options model
+    | options.preserveModelNames = model
+    | otherwise =
+        selectConfiguredModel
+            options.modelOverrides
+            (Text.isPrefixOf "grok")
+            options.defaultModel
+            (Just model)
 
 -- | Build the typed Responses request sent to xAI.
 --
@@ -54,11 +56,7 @@ buildRequest options request =
             mapResponseTools xaiTool $
                 forceStatelessStreaming defaultResponseCreateParams
                     { model = Just $
-                        selectConfiguredModel
-                            options.modelOverrides
-                            (Text.isPrefixOf "grok")
-                            options.defaultModel
-                            request.model
+                        maybe options.defaultModel (mapModel options) request.model
                     , input = Just
                         (ResponseInputItems
                             (systemItems <> requestInputItems projectedHistory))

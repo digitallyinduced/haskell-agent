@@ -5,6 +5,8 @@ module Agent.CLI.Runtime.Orchestration.Providers.XAI
 import Agent.CLI.Session.Request
     ( readSessionRequestParams
     )
+import Agent.CLI.Auth (gatewayTokenProviderForProvider)
+import Agent.CLI.GatewayClient (GatewayCredential(..))
 import Agent.CLI.Compaction
     ( autoCompactBackendWith
     , boundCompletedToolContinuations
@@ -25,11 +27,12 @@ import Agent.CLI.Session.History (readLiveTranscript)
 import Agent.CLI.Session.Runtime.Types
     ( SessionBackend(..)
     )
-import Agent.Provider (TokenProvider, runWithTokenProvider)
+import Agent.Provider (Provider(XAIProvider), TokenProvider, runWithTokenProvider)
 import Agent.Responses.Types (ResponseCreateParams(model))
 import Agent.XAI.LoopBackend (xaiBackendWithClientOptions)
 import Data.IORef (newIORef)
 import Data.Maybe (fromMaybe)
+import qualified Data.Text as Text
 import qualified Agent.XAI.Client as XAIClient
 import qualified Agent.XAI.Options as XAI
 import qualified Agent.XAI.Request as XAIRequest
@@ -37,13 +40,24 @@ import qualified Agent.XAI.Request as XAIRequest
 withXaiProvider
     :: TokenProvider
     -> Bool
+    -> Maybe GatewayCredential
     -> ProviderHost
     -> (ProviderRuntime -> IO a)
     -> IO a
-withXaiProvider tokenProvider hostedTools
+withXaiProvider unguardedTokenProvider hostedTools gateway
         ProviderHost{compaction = ProviderCompaction{..}, networkRecovery} use = do
-    xaiOptions0 <- XAI.clientOptionsFromEnv
-    let xaiOptions =
+    xaiOptions0 <- case gateway of
+        Nothing -> XAI.clientOptionsFromEnv
+        Just credential ->
+            pure (XAI.gatewayClientOptions
+                (Text.unpack credential.gatewayBaseUrl))
+    let tokenProvider =
+            maybe unguardedTokenProvider
+                (\credential ->
+                    gatewayTokenProviderForProvider
+                        XAIProvider credential unguardedTokenProvider)
+                gateway
+        xaiOptions =
             xaiOptions0
                 { XAI.hostedXSearchEnabled =
                     hostedTools

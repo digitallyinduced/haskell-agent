@@ -20,6 +20,8 @@ import Agent.CLI.McpSampling (mcpSamplingHandler)
 import Agent.CLI.Auth
     ( LoadedAuth(loadedTokenProvider, loadedOpenAiPool)
     , isGatewayLoadedAuth
+    , gatewayLoadedAuthForProvider
+    , gatewayTokenProviderForProvider
     )
 import Agent.CLI.Claude
     ( approveClaudeRegisteredTool
@@ -44,7 +46,7 @@ import Agent.CLI.Database.Store (DatabaseScopes)
 import Agent.CLI.Dialects (CodingTools(..))
 import Agent.CLI.Error (formatApiErrorAt)
 import Agent.CLI.GatewayClient
-    ( GatewayCredential
+    ( GatewayCredential(gatewayBaseUrl)
     , GatewayModelAccess
     , gatewayCredentialIdentity
     )
@@ -59,6 +61,7 @@ import Agent.CLI.ModelConfig
     ( ModelCatalog
     , catalogContextWindowForTransport
     , catalogSupportsAsyncToolCallsForTransport
+    , organizationGatewayConnectionId
     )
 import Agent.CLI.Models (ModelTarget(targetConnectionId))
 import Agent.CLI.Options
@@ -170,6 +173,7 @@ import Agent.CLI.StartupContext
 import Agent.CLI.Style ( cliWindowTitle, roleMuted, glyphWarn, roleWarn )
 import Agent.CLI.Subagents.Runtime
     ( runCodexSubagent, runHttpSubagent, runXaiParentSubagent
+    , runGatewaySubagent, runXaiSubagent
     , SubagentRuntime(subagentOpenAiChild, SubagentRuntime,
                       subagentOptions, subagentNetworkRecovery,
                       subagentGhciEnabled, subagentBashEnabled,
@@ -198,11 +202,12 @@ import Agent.Claude
 import Agent.Claude.Control
     ( ClaudeCodeHostHandlers(..), ClaudeCodeMcpRequest(..), defaultClaudeCodeHostHandlers )
 import Agent.CLI.ClaudeGatewayProxy (withClaudeGatewayProxy)
-import Agent.Dialect (Dialect, dialectId)
+import Agent.Dialect (Dialect, dialectId, dialectForId)
 import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Loop
     ( ImageAttachment
+    , LoopError(LoopUnexpected)
     , TokenUsage
     , TurnInput
     , addTokenUsage
@@ -224,7 +229,9 @@ import Agent.Subagents (SubagentRegistry, setSubagentRunner)
 import Agent.Subagents.Types (RootTurnId, SubagentId)
 import Agent.TUI.Model (UiEvent(UiSystemMessage))
 import Agent.Tools.MultiAgents
-    (CollaborationModelTarget, MultiAgentContext(..), SubagentWorktree)
+    (CollaborationModelTarget(..), MultiAgentContext(..), SubagentWorktree)
+import Agent.XAI.LoopBackend (xaiBackendWithClientOptions)
+import qualified Agent.XAI.Options as XAI
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks)
 import Agent.ToolDispatch (canonicalToolName, ToolDispatchConfig(..))
 import Agent.Tools.Types
@@ -248,6 +255,7 @@ import Data.Map.Strict (Map)
 import Data.Maybe ( isJust, isNothing, fromMaybe )
 import Data.Set (Set)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Clock ( getCurrentTime, utctDay )
 import System.Environment ( getProgName )
 import System.IO (Handle, stderr)
@@ -741,7 +749,8 @@ buildSessionSubagentRuntime AgentSessionRequest
         , subagentCreateWorktree = Just createSubagentWorktree
         , subagentSessionTmp = toolEnv.toolSessionTmp
         , subagentSpawnModelGuidance =
-            if provider == OpenAIProvider && isJust allowedChildModels
+            if inferredTarget.targetConnectionId == organizationGatewayConnectionId
+                || (provider == OpenAIProvider && isJust allowedChildModels)
                 then Nothing
                 else
                     subscriptionSubagentModelGuidance
@@ -1219,6 +1228,7 @@ prepareProviderConfig request promptRuntime nativeCapabilities = case request.pr
         }
     XAIProvider -> pure $ XaiProviderConfig request.tokenProvider
         nativeCapabilities.nativeProviderHostedTools
+        request.connectedGateway
     GeminiProvider -> pure $ GeminiProviderConfig request.tokenProvider
     OpenRouterProvider -> pure $ OpenRouterProviderConfig OpenRouterConfig
         { tokenProvider = request.tokenProvider
@@ -1282,6 +1292,9 @@ installProviderSubagents request liveRuntime capabilities =
                 install = setSubagentRunner ctx.multiRegistry
             case capabilities of
                 NoProviderSubagents -> pure ()
+                _ | Just credential <- request.connectedGateway ->
+                    install $ runGatewaySubagent runtime
+                        (gatewayRunner credential ctx.multiSendToRoot)
                 CodexSubagents gatewayOnly -> install $
                     runCodexSubagent gatewayOnly runtime request.selectableTokenProvider
                         ctx.multiSendToRoot
@@ -1291,6 +1304,57 @@ installProviderSubagents request liveRuntime capabilities =
                 XaiSubagents contextWindow threshold makeBackend -> install $
                     runXaiParentSubagent runtime request.dialect ctx.multiSendToRoot
                         contextWindow threshold makeBackend
+  where
+    gatewayRunner credential sendToRoot target runtime env previous prompt onEvent =
+        case gatewayLoadedAuthForProvider
+                (Just target.collaborationTargetProvider) credential of
+            Left err -> pure (Left (LoopUnexpected err))
+            Right loaded ->
+                let tokens = gatewayTokenProviderForProvider
+                        target.collaborationTargetProvider credential
+                        loaded.loadedTokenProvider
+                in case target.collaborationTargetProvider of
+                    OpenAIProvider ->
+                        runCodexSubagent True runtime tokens sendToRoot
+                            env previous prompt onEvent
+                    XAIProvider ->
+                        let nativeCapabilities =
+                                maybe fullNativeRunCapabilities (.nativeCapabilities)
+                                    request.startup.startupNativeHooks
+                            options = (XAI.gatewayClientOptions
+                                (Text.unpack credential.gatewayBaseUrl))
+                                    { XAI.hostedXSearchEnabled =
+                                        nativeCapabilities.nativeProviderHostedTools
+                                    }
+                            contextWindow params =
+                                let childModel = fromMaybe
+                                        target.collaborationTargetEffectiveModel
+                                        params.model
+                                in fromMaybe XAI.grokDefaultContextWindow $
+                                    catalogContextWindowForTransport
+                                        request.catalog
+                                        target.collaborationTargetConnection
+                                        childModel
+                                        childModel
+                            threshold params =
+                                let window = contextWindow params
+                                in max 1 $ min window $
+                                    fromMaybe
+                                        (XAI.grokAutoCompactTokenLimit
+                                            (fromMaybe options.defaultModel params.model)
+                                            window)
+                                        request.options.optCompactThreshold
+                            optionsFor params =
+                                options
+                                    { XAI.autoCompactTokenLimit = Just (threshold params) }
+                            makeBackend params =
+                                xaiBackendWithClientOptions optionsFor tokens (pure params)
+                        in runXaiSubagent runtime
+                            (dialectForId target.collaborationTargetDialect)
+                            sendToRoot contextWindow threshold makeBackend
+                            env previous prompt onEvent
+                    _ -> pure (Left (LoopUnexpected
+                        "This provider requires a separate child session; it cannot run as an in-process gateway subagent."))
 
 handleOpenAiStartupResult
     :: AgentSessionRequest closeResult windowTitleResult
