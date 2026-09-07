@@ -481,6 +481,157 @@ spec = do
             observedEvents <- readIORef events
             reverse observedEvents `shouldBe` [TextDelta "partial"]
 
+        it "resubmits after overload behind a restart boundary" do
+            attempts <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            events <- newIORef []
+            let overload = ProviderError OverloadedError
+                    "Our servers are currently overloaded. Please try again later. (code: server_is_overloaded)"
+                    Nothing
+                send _request _previous onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    attempt <- readIORef attempts
+                    if attempt == 1
+                        then do
+                            onEvent (deltaEvent EventOutputTextDelta "partial")
+                            pure (Left overload)
+                        else do
+                            onEvent (deltaEvent EventOutputTextDelta "complete")
+                            pure (Right
+                                (testResponse "resp-replayed"
+                                    [assistantItem "complete"]))
+                backend = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    send
+                    (pure baseParams)
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            result `shouldBe`
+                Right (emptyTurnOutput "resp-replayed" [] (Just "complete"))
+            readIORef attempts `shouldReturn` 2
+            reverse <$> readIORef events `shouldReturn`
+                [ TextDelta "partial"
+                , ActivityUpdated
+                    "Codex is overloaded; retrying in 0s (attempt 1)…"
+                , ResponseRestarted
+                    "Provider interrupted the response; restarting automatically. The new attempt may repeat partial output shown above."
+                , ActivityUpdated "Retrying Codex request (attempt 1)…"
+                , TextDelta "complete"
+                ]
+
+        it "discards hidden model output before retrying an overload" do
+            attempts <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            events <- newIORef []
+            let overload = ProviderError OverloadedError "busy" Nothing
+                send _request _previous onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    attempt <- readIORef attempts
+                    if attempt == 1
+                        then do
+                            onEvent ResponseOutputItemAddedEvent
+                                { item = assistantItem "partial"
+                                , outputIndex = Just 0
+                                , sequenceNumber = Nothing
+                                }
+                            pure (Left overload)
+                        else do
+                            onEvent (deltaEvent EventOutputTextDelta "complete")
+                            pure (Right
+                                (testResponse "resp-replayed"
+                                    [assistantItem "complete"]))
+                backend = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    send
+                    (pure baseParams)
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            result `shouldBe`
+                Right (emptyTurnOutput "resp-replayed" [] (Just "complete"))
+            readIORef attempts `shouldReturn` 2
+            reverse <$> readIORef events `shouldReturn`
+                [ ActivityUpdated
+                    "Codex is overloaded; retrying in 0s (attempt 1)…"
+                , ResponseAttemptDiscarded
+                , ActivityUpdated "Retrying Codex request (attempt 1)…"
+                , TextDelta "complete"
+                ]
+
+        it "returns the overload once the retry policy is exhausted" do
+            attempts <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            events <- newIORef []
+            let overload = ProviderError OverloadedError
+                    "Our servers are currently overloaded"
+                    Nothing
+                send _request _previous onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    onEvent ResponseOutputItemAddedEvent
+                        { item = assistantItem "partial"
+                        , outputIndex = Just 0
+                        , sequenceNumber = Nothing
+                        }
+                    pure (Left overload)
+                backend = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 2)
+                    send
+                    (pure baseParams)
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            -- Leave the typed overload unwrapped so an outer recovery layer
+            -- can still wait and retry instead of treating it as replay-unsafe.
+            result `shouldBe` Left overload
+            readIORef attempts `shouldReturn` 3
+            recorded <- reverse <$> readIORef events
+            recorded `shouldBe`
+                [ ActivityUpdated
+                    "Codex is overloaded; retrying in 0s (attempt 1)…"
+                , ResponseAttemptDiscarded
+                , ActivityUpdated "Retrying Codex request (attempt 1)…"
+                , ActivityUpdated
+                    "Codex is overloaded; retrying in 0s (attempt 2)…"
+                , ResponseAttemptDiscarded
+                , ActivityUpdated "Retrying Codex request (attempt 2)…"
+                ]
+
+        it "resubmits after unavailability behind a restart boundary" do
+            attempts <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            events <- newIORef []
+            let unavailable = ProviderError ServiceUnavailableError
+                    "service unavailable"
+                    Nothing
+                send _request _previous onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    attempt <- readIORef attempts
+                    if attempt == 1
+                        then do
+                            onEvent (deltaEvent EventOutputTextDelta "partial")
+                            pure (Left unavailable)
+                        else do
+                            onEvent (deltaEvent EventOutputTextDelta "complete")
+                            pure (Right
+                                (testResponse "resp-replayed"
+                                    [assistantItem "complete"]))
+                backend = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    send
+                    (pure baseParams)
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            result `shouldBe`
+                Right (emptyTurnOutput "resp-replayed" [] (Just "complete"))
+            readIORef attempts `shouldReturn` 2
+            reverse <$> readIORef events `shouldReturn`
+                [ TextDelta "partial"
+                , ActivityUpdated
+                    "Codex is unavailable; retrying in 0s (attempt 1)…"
+                , ResponseRestarted
+                    "Provider interrupted the response; restarting automatically. The new attempt may repeat partial output shown above."
+                , ActivityUpdated "Retrying Codex request (attempt 1)…"
+                , TextDelta "complete"
+                ]
+
         it "blocks credential failover after a tool call was streamed" do
             transcript <- newIORef []
             events <- newIORef []
@@ -546,6 +697,54 @@ spec = do
                 , ActivityUpdated "Reconnecting to Codex (attempt 1)…"
                 , TextDelta "complete"
                 ]
+
+        it "does not replay an overload after admitting a completed async tool call" do
+            attempts <- newIORef (0 :: Int)
+            admitted <- newIORef []
+            let overload = ProviderError OverloadedError "busy" Nothing
+                asyncCall =
+                    FunctionCallItem FunctionCall
+                        { itemId = Nothing
+                        , callId = "fc-async"
+                        , name = "shell"
+                        , namespace = Nothing
+                        , provider = Nothing
+                        , arguments = "{}"
+                        , encryptedFunctionArgs = Nothing
+                        , status = Just ItemCompleted
+                        , async = Just True
+                        }
+                send _request _previous onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    onEvent ResponseOutputItemDoneEvent
+                        { item = asyncCall
+                        , outputIndex = Just 0
+                        , sequenceNumber = Nothing
+                        }
+                    pure (Left overload)
+                backend = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    send
+                    (pure baseParams)
+            result <- backend.submitTurnWithCallbacks
+                emptyBackendSnapshot
+                Nothing
+                [UserMessage "one"]
+                BackendCallbacks
+                    { onLoopEvent = const (pure ())
+                    , onRecoveryCheckpoint = const (pure ())
+                    , onAsyncToolCall =
+                        \call -> modifyIORef' admitted (call.callId :)
+                    }
+            result `shouldBe` Left (ProviderError
+                (UnknownErrorType "replay_unsafe")
+                ( "provider failed after asynchronous tool call; "
+                    <> "refusing to replay: "
+                    <> Text.pack (show overload)
+                )
+                Nothing)
+            readIORef attempts `shouldReturn` 1
+            readIORef admitted `shouldReturn` ["fc-async"]
 
         it "does not replay after admitting a completed async tool call" do
             attempts <- newIORef (0 :: Int)
