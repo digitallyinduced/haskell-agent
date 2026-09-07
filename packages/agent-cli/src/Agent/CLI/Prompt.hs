@@ -286,6 +286,7 @@ sessionTempGuidance = \case
         Text.unlines
             [ "Session temporary directory: " <> toText path
             , "Use this private directory for clones, downloads, extracted files, generated assets, and other scratch work."
+            , "This is the only scratch root for the session. Do not create alternate temporary directories in the home directory, the workspace, or elsewhere under ~/.haskell-agent; create task-specific subdirectories under $TMPDIR instead."
             , "Filesystem tools may access both the workspace and this directory; relative paths still resolve against the workspace."
             , "Filesystem-tool paths under /tmp or /private/tmp are redirected into this directory."
             , "HASKELL_AGENT_TMPDIR and TMPDIR point to this directory for shell commands; use $TMPDIR instead of a literal /tmp or /private/tmp path."

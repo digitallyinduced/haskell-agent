@@ -516,6 +516,12 @@ spec = describe "systemPrompt" do
             "/Users/test/.haskell-agent/tmp/sessions/2026-08-19-abcd1234"
         rootPrompt `shouldSatisfy` Text.isInfixOf
             "clones, downloads, extracted files, generated assets"
+        rootPrompt `shouldSatisfy` Text.isInfixOf
+            "only scratch root for the session"
+        childPrompt `shouldSatisfy` Text.isInfixOf
+            "Do not create alternate temporary directories"
+        childPrompt `shouldSatisfy` Text.isInfixOf
+            "task-specific subdirectories under $TMPDIR"
         childPrompt `shouldSatisfy` Text.isInfixOf
             "relative paths still resolve against the workspace"
         rootPrompt `shouldSatisfy` Text.isInfixOf
