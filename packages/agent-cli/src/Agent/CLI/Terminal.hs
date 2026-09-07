@@ -27,6 +27,7 @@ module Agent.CLI.Terminal
     , kittySuperCsiBodies
     , kittySuperVCsiBodies
     , shiftEnterCsiBodies
+    , shiftTabCsiBodies
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPush
     , kittyKeyboardPop
@@ -244,6 +245,19 @@ shiftEnterCsiBodies :: [String]
 shiftEnterCsiBodies =
     [ "27;2;13~"
     , "13;2u"
+    ]
+
+-- | CSI bodies used by enhanced-keyboard protocols for Shift+Tab.
+--
+-- Xterm's modifyOtherKeys protocol uses @CSI 27;2;9~@, while Kitty's
+-- keyboard protocol uses @CSI 9;2u@. Event type 1 is an explicit key
+-- press; terminals may omit it. Unmapped bodies leak into the composer
+-- as literal text (observed as @[9;2u@).
+shiftTabCsiBodies :: [String]
+shiftTabCsiBodies =
+    [ "27;2;9~"
+    , "9;2u"
+    , "9;2:1u"
     ]
 
 -- | CSI bodies emitted by Kitty's keyboard protocol for Ctrl+letter chords.

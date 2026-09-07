@@ -12,6 +12,7 @@ import Agent.CLI.Input
     , isClipboardPasteCsiBody
     , isClipboardPasteKey
     , isShiftEnterCsiBody
+    , isShiftTabCsiBody
     , parseChoiceKey
     , replHistoryPath
     , submissionPromptText
@@ -239,6 +240,20 @@ spec = do
             isShiftEnterCsiBody "27;2;13~" `shouldBe` True
             isShiftEnterCsiBody "13;2u" `shouldBe` True
             isShiftEnterCsiBody "13u" `shouldBe` False
+
+    describe "Shift+Tab" do
+        it "recognizes xterm modifyOtherKeys and Kitty CSI-u encodings" do
+            isShiftTabCsiBody "27;2;9~" `shouldBe` True
+            isShiftTabCsiBody "9;2u" `shouldBe` True
+            isShiftTabCsiBody "9;2:1u" `shouldBe` True
+            isShiftTabCsiBody "9u" `shouldBe` False
+            isShiftTabCsiBody "13;2u" `shouldBe` False
+
+        it "decodes Kitty press events as mode cycle and ignores releases" do
+            decodeKittyEditorKey "9;2u" `shouldBe` Just EditorCycleMode
+            decodeKittyEditorKey "9;2:1u" `shouldBe` Just EditorCycleMode
+            decodeKittyEditorKey "9;2:3u" `shouldBe` Just EditorIgnore
+            decodeKittyEditorKey "9u" `shouldBe` Just EditorIgnore
 
     describe "inline editor reducer" do
         it "reduces common editing keys without performing IO" do
