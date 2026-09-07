@@ -13,6 +13,8 @@ import Agent.MCP.Client.Internal.Runtime
       encodeHeaderValue,
       clientRequest,
       requestMcpFull,
+      mcpClientEra,
+      restartModernSubscriptions,
       invokeWithInputRounds,
       invokeWithInputRoundsT )
 import Agent.MCP.Types
@@ -28,12 +30,17 @@ import Agent.MCP.Types
       McpResource,
       McpResourceContent(mcpResourceMimeType, mcpResourceText,
                          mcpResourceBlob, mcpResourceUri),
+      McpTask,
+      McpTaskList,
       McpSkillEntry,
       McpSkillsCapability,
       McpClient(clientConfig, clientDiscoveredSkills, clientTransport,
-                clientServerInfo, clientLifecycle),
+                clientServerInfo, clientLifecycle,
+                clientResourceSubscriptionsRequested,
+                clientResourceSubscriptionsAccepted),
       McpClientLifecycle(ClientReady, ClientClosed),
       McpClientTransport(McpClientStdio, McpClientHttp, McpClientInMemory),
+      McpProtocolEra(..),
       McpProgress(progressMessage, progressValue, progressTotal),
       McpError(..),
       McpServerCapabilities(capabilitySkills),
@@ -47,6 +54,8 @@ import Agent.MCP.Types
       mcpPromptDecoder,
       mcpPromptResultDecoder,
       mcpCompletionDecoder,
+      mcpTaskDecoder,
+      mcpTaskListDecoder,
       mcpToolDecoder,
       projectRawOr )
 import Agent.ToolDispatch ( typedStreamingTool )
@@ -117,6 +126,7 @@ import qualified Data.Aeson.KeyMap as KeyMap
     ( delete, elems, lookup, member, toList )
 import qualified Data.ByteString.Lazy as LBS ()
 import qualified Data.Map.Strict as Map ()
+import qualified Data.Set as Set
 import qualified Agent.MCP.OAuth as OAuth ()
 import qualified Data.Text as Text
     ( pack,
@@ -279,6 +289,67 @@ clientSkillsCapability client =
     (>>= (.serverInfoCapabilities.capabilitySkills))
         <$> readTVarIO client.clientServerInfo
 
+-- | Subscribe to updates for a resource URI. Legacy servers use the standard
+-- request directly; modern servers replace their long-lived listener and
+-- acknowledge the accepted URI set asynchronously.
+subscribeMcpResource :: McpClient -> Text -> IO (Either McpError ())
+subscribeMcpResource client uri =
+    mcpClientEra client >>= \case
+        Just McpEraModern -> do
+            atomically $ modifyTVar'
+                client.clientResourceSubscriptionsRequested
+                (Set.insert uri)
+            restartModernSubscriptions client
+            pure (Right ())
+        _ -> do
+            atomically $ modifyTVar'
+                client.clientResourceSubscriptionsRequested
+                (Set.insert uri)
+            requestMcpFull client
+                (clientRequest client "resources/subscribe" ("uri" .= uri))
+                >>= \case
+                    Left err -> pure (Left err)
+                    Right _ -> do
+                        atomically $ modifyTVar'
+                            client.clientResourceSubscriptionsAccepted
+                            (Set.insert uri)
+                        pure (Right ())
+
+-- | Stop receiving updates for a resource URI.
+unsubscribeMcpResource :: McpClient -> Text -> IO (Either McpError ())
+unsubscribeMcpResource client uri =
+    mcpClientEra client >>= \case
+        Just McpEraModern -> do
+            atomically do
+                modifyTVar' client.clientResourceSubscriptionsRequested
+                    (Set.delete uri)
+                modifyTVar' client.clientResourceSubscriptionsAccepted
+                    (Set.delete uri)
+            restartModernSubscriptions client
+            pure (Right ())
+        _ -> do
+            atomically $ modifyTVar'
+                client.clientResourceSubscriptionsRequested
+                (Set.delete uri)
+            requestMcpFull client
+                (clientRequest client "resources/unsubscribe" ("uri" .= uri))
+                >>= \case
+                    Left err -> pure (Left err)
+                    Right _ -> do
+                        atomically $ modifyTVar'
+                            client.clientResourceSubscriptionsAccepted
+                            (Set.delete uri)
+                        pure (Right ())
+
+-- | Return the requested and server-acknowledged resource URI sets.
+mcpResourceSubscriptions :: McpClient -> IO ([Text], [Text])
+mcpResourceSubscriptions client =
+    (,)
+        <$> (Set.toAscList
+            <$> readTVarIO client.clientResourceSubscriptionsRequested)
+        <*> (Set.toAscList
+            <$> readTVarIO client.clientResourceSubscriptionsAccepted)
+
 -- | Retrieve one skill manifest by URI.  Unlike 'skills/list', this also
 -- supports servers whose catalog is not enumerable.
 getMcpSkill :: McpClient -> Text -> IO (Either Text McpSkillEntry)
@@ -320,6 +391,71 @@ listMcpResourceTemplates :: McpClient -> IO (Either McpError [McpResourceTemplat
 listMcpResourceTemplates client =
     paginate client "resources/templates/list" "resourceTemplates"
         mcpResourceTemplateDecoder
+
+-- * Tasks
+
+-- | Fetch one page from the server's task catalog. The cursor is deliberately
+-- kept as opaque JSON because MCP servers may use either strings or structured
+-- continuation tokens.
+listMcpTasks
+    :: McpClient
+    -> Maybe RawJson
+    -> IO (Either McpError McpTaskList)
+listMcpTasks client cursor =
+    runExceptT $
+        requestAndDecode client
+            (clientRequest client "tasks/list"
+                (maybe mempty
+                    (AesonEncoding.pair "cursor" . rawJsonEncoding)
+                    cursor))
+            "tasks/list response"
+            mcpTaskListDecoder
+
+-- | Read the current snapshot of a task.
+getMcpTask :: McpClient -> Text -> IO (Either McpError McpTask)
+getMcpTask client taskId =
+    runExceptT $
+        requestAndDecode client
+            (clientRequest client "tasks/get" ("taskId" .= taskId))
+            "tasks/get response"
+            mcpTaskDecoder
+
+-- | Fetch the result produced by a completed task. The result has the same
+-- shape as the request that created the task, so it remains opaque here.
+getMcpTaskResult :: McpClient -> Text -> IO (Either McpError RawJson)
+getMcpTaskResult client taskId =
+    requestMcpFull client
+        (clientRequest client "tasks/result" ("taskId" .= taskId))
+
+-- | Ask the server to cancel a task and return its resulting snapshot.
+cancelMcpTask :: McpClient -> Text -> IO (Either McpError McpTask)
+cancelMcpTask client taskId =
+    runExceptT $
+        requestAndDecode client
+            (clientRequest client "tasks/cancel" ("taskId" .= taskId))
+            "tasks/cancel response"
+            mcpTaskDecoder
+
+-- | Supply responses requested by an @input_required@ task. A successful
+-- response is only an acknowledgement; callers can use 'getMcpTask' (or task
+-- status notifications) to observe the canonical next snapshot.
+updateMcpTask
+    :: McpClient
+    -> Text
+    -> [(Text, RawJson)]
+    -> IO (Either McpError ())
+updateMcpTask client taskId responses =
+    fmap (() <$) $
+        requestMcpFull client $
+            clientRequest client "tasks/update"
+                ("taskId" .= taskId
+                    <> AesonEncoding.pair "inputResponses"
+                        (Aeson.pairs (mconcat
+                            [ AesonEncoding.pair
+                                (Key.fromText key)
+                                (rawJsonEncoding value)
+                            | (key, value) <- responses
+                            ])))
 
 listMcpPrompts :: McpClient -> IO (Either McpError [McpPrompt])
 listMcpPrompts client =

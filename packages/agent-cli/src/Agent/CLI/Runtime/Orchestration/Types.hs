@@ -55,6 +55,15 @@ data AgentProcessRuntime = AgentProcessRuntime
         :: !(IORef (Maybe (MCP.McpElicitRequest -> IO MCP.McpElicitResult)))
     -- ^ Interactive elicitation UI installed by the active session, shared by
     -- every MCP fleet the supervisor starts.
+    , processMcpRoots
+        :: !(IORef (Maybe (Text -> IO [MCP.McpRoot])))
+    -- ^ Workspace roots installed by the active session. The server name is
+    -- supplied so hosts can apply server-specific root policies.
+    , processMcpSampling
+        :: !(IORef (Maybe
+            (MCP.McpSamplingRequest
+                -> IO (Either Text MCP.McpSamplingResult))))
+    -- ^ Session-scoped provider completion used by opted-in MCP servers.
     , processNetworkRecovery :: !(Maybe NetworkRecovery)
     }
 

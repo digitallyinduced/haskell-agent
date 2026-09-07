@@ -906,6 +906,7 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
         , mcpFleet
         , mcpInstructions
         , mcpTools
+        , mcpSamplingRef = processRuntime.processMcpSampling
         , model
         , multiCtx
         , noteSessionDir

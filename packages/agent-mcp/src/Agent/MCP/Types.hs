@@ -26,6 +26,7 @@ import qualified Data.ByteString as BS
 import Data.IORef (IORef)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -43,6 +44,159 @@ data McpProtocolPreference
     | McpProtocolLegacy
     deriving (Eq, Show)
 
+-- | RFC 9110 log levels used by MCP, ordered from most to least verbose.
+data McpLogLevel
+    = McpLogDebug
+    | McpLogInfo
+    | McpLogNotice
+    | McpLogWarning
+    | McpLogError
+    | McpLogCritical
+    | McpLogAlert
+    | McpLogEmergency
+    deriving (Eq, Ord, Show, Enum, Bounded)
+
+mcpLogLevelText :: McpLogLevel -> Text
+mcpLogLevelText = \case
+    McpLogDebug -> "debug"
+    McpLogInfo -> "info"
+    McpLogNotice -> "notice"
+    McpLogWarning -> "warning"
+    McpLogError -> "error"
+    McpLogCritical -> "critical"
+    McpLogAlert -> "alert"
+    McpLogEmergency -> "emergency"
+
+mcpLogLevelDecoder :: Json.Decoder McpLogLevel
+mcpLogLevelDecoder = Json.text >>= \case
+    "debug" -> pure McpLogDebug
+    "info" -> pure McpLogInfo
+    "notice" -> pure McpLogNotice
+    "warning" -> pure McpLogWarning
+    "error" -> pure McpLogError
+    "critical" -> pure McpLogCritical
+    "alert" -> pure McpLogAlert
+    "emergency" -> pure McpLogEmergency
+    level -> fail ("unknown MCP log level: " <> Text.unpack level)
+
+-- | Image metadata attached to MCP tools, prompts, resources, and
+-- implementations. Sizes use the specification's CSS-like values (for
+-- example @"48x48"@ or @"any"@).
+data McpIcon = McpIcon
+    { iconSrc :: !Text
+    , iconMimeType :: !(Maybe Text)
+    , iconSizes :: ![Text]
+    } deriving (Eq, Show)
+
+mcpIconDecoder :: Json.Decoder McpIcon
+mcpIconDecoder = Json.object do
+    iconSrc <- Json.atKey "src" Json.text
+    iconMimeType <- Json.optionalKey "mimeType" Json.text
+    iconSizes <- Json.defaultKey [] "sizes" (Json.list Json.text)
+    pure McpIcon{..}
+
+-- | A filesystem root offered by the host to an MCP server.
+data McpRoot = McpRoot
+    { rootUri :: !Text
+    , rootName :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+encodeMcpRoots :: [McpRoot] -> RawJson
+encodeMcpRoots roots =
+    rawJsonFromEncoding . Aeson.toEncoding $ object
+        [ "roots" .= map encodeRoot roots ]
+  where
+    encodeRoot :: McpRoot -> Aeson.Value
+    encodeRoot root =
+        object $
+            ["uri" .= root.rootUri]
+                <> maybe [] (\name -> ["name" .= name]) root.rootName
+
+-- | One conversation message supplied to an MCP sampling request. Content is
+-- intentionally opaque so newly introduced content-block variants survive.
+data McpSamplingMessage = McpSamplingMessage
+    { samplingMessageRole :: !Text
+    , samplingMessageContent :: !RawJson
+    } deriving (Eq, Show)
+
+data McpModelHint = McpModelHint
+    { modelHintName :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+data McpModelPreferences = McpModelPreferences
+    { modelPreferenceHints :: ![McpModelHint]
+    , modelPreferenceCostPriority :: !(Maybe Double)
+    , modelPreferenceSpeedPriority :: !(Maybe Double)
+    , modelPreferenceIntelligencePriority :: !(Maybe Double)
+    } deriving (Eq, Show)
+
+-- | A server's request for an isolated model completion.
+data McpSamplingRequest = McpSamplingRequest
+    { samplingServerName :: !Text
+    , samplingMessages :: ![McpSamplingMessage]
+    , samplingModelPreferences :: !(Maybe McpModelPreferences)
+    , samplingSystemPrompt :: !(Maybe Text)
+    , samplingIncludeContext :: !(Maybe Text)
+    , samplingTemperature :: !(Maybe Double)
+    , samplingMaxTokens :: !Int
+    , samplingStopSequences :: ![Text]
+    , samplingMetadata :: !(Maybe RawJson)
+    , samplingTools :: !(Maybe RawJson)
+    , samplingToolChoice :: !(Maybe RawJson)
+    } deriving (Eq, Show)
+
+mcpSamplingRequestDecoder :: Text -> Json.Decoder McpSamplingRequest
+mcpSamplingRequestDecoder samplingServerName = Json.object do
+    samplingMessages <-
+        Json.defaultKey [] "messages" (Json.list messageDecoder)
+    samplingModelPreferences <-
+        Json.optionalKey "modelPreferences" modelPreferencesDecoder
+    samplingSystemPrompt <- Json.optionalKey "systemPrompt" Json.text
+    samplingIncludeContext <- Json.optionalKey "includeContext" Json.text
+    samplingTemperature <- Json.optionalKey "temperature" Json.double
+    samplingMaxTokens <- Json.atKey "maxTokens" Json.int
+    samplingStopSequences <-
+        Json.defaultKey [] "stopSequences" (Json.list Json.text)
+    samplingMetadata <- Json.optionalKey "metadata" rawJsonDecoder
+    samplingTools <- Json.optionalKey "tools" rawJsonDecoder
+    samplingToolChoice <- Json.optionalKey "toolChoice" rawJsonDecoder
+    pure McpSamplingRequest{..}
+  where
+    messageDecoder = Json.object do
+        samplingMessageRole <- Json.atKey "role" Json.text
+        samplingMessageContent <- Json.atKey "content" rawJsonDecoder
+        pure McpSamplingMessage{..}
+    modelPreferencesDecoder = Json.object do
+        modelPreferenceHints <-
+            Json.defaultKey [] "hints" (Json.list hintDecoder)
+        modelPreferenceCostPriority <-
+            Json.optionalKey "costPriority" Json.double
+        modelPreferenceSpeedPriority <-
+            Json.optionalKey "speedPriority" Json.double
+        modelPreferenceIntelligencePriority <-
+            Json.optionalKey "intelligencePriority" Json.double
+        pure McpModelPreferences{..}
+    hintDecoder =
+        Json.object (McpModelHint <$> Json.optionalKey "name" Json.text)
+
+data McpSamplingResult = McpSamplingResult
+    { samplingResultRole :: !Text
+    , samplingResultContent :: !RawJson
+    , samplingResultModel :: !Text
+    , samplingResultStopReason :: !(Maybe Text)
+    } deriving (Eq, Show)
+
+encodeMcpSamplingResult :: McpSamplingResult -> RawJson
+encodeMcpSamplingResult result =
+    rawJsonFromEncoding . Aeson.toEncoding $ object $
+        [ "role" .= result.samplingResultRole
+        , "content" .= result.samplingResultContent
+        , "model" .= result.samplingResultModel
+        ]
+            <> maybe []
+                (\reason -> ["stopReason" .= reason])
+                result.samplingResultStopReason
+
 data McpServerConfig = McpServerConfig
     { mcpServerName :: !Text
     , mcpServerUrl :: !(Maybe Text)
@@ -53,6 +207,9 @@ data McpServerConfig = McpServerConfig
     , mcpServerStartupTimeoutSeconds :: !Int
     , mcpServerRequestTimeoutSeconds :: !Int
     , mcpServerProtocol :: !McpProtocolPreference
+    , mcpServerRootsEnabled :: !Bool
+    , mcpServerSamplingEnabled :: !Bool
+    , mcpServerLogLevel :: !(Maybe McpLogLevel)
     } deriving (Eq)
 
 instance Show McpServerConfig where
@@ -71,6 +228,12 @@ instance Show McpServerConfig where
             <> show config.mcpServerRequestTimeoutSeconds
             <> ", mcpServerProtocol = "
             <> show config.mcpServerProtocol
+            <> ", mcpServerRootsEnabled = "
+            <> show config.mcpServerRootsEnabled
+            <> ", mcpServerSamplingEnabled = "
+            <> show config.mcpServerSamplingEnabled
+            <> ", mcpServerLogLevel = "
+            <> show config.mcpServerLogLevel
             <> " }"
 
 -- | Host-provided integration points shared by every server in a fleet.
@@ -80,6 +243,13 @@ data McpHostHooks = McpHostHooks
     -- can install or remove their UI over the life of a process. 'Nothing'
     -- means the host cannot ask the user for input, so the @elicitation@
     -- capability is not declared and any request for input is cancelled.
+    , mcpHostRoots :: !(IO (Maybe (Text -> IO [McpRoot])))
+    -- ^ Roots visible to a server, resolved at request time. The server name
+    -- is passed to the handler so a host can apply server-specific policy.
+    , mcpHostSample ::
+        !(IO (Maybe (McpSamplingRequest -> IO (Either Text McpSamplingResult))))
+    -- ^ A deliberately one-shot sampling handler, resolved at request time.
+    -- 'Nothing' means sampling must not be advertised to the server.
     , mcpHostClientName :: !Text
     , mcpHostClientVersion :: !Text
     }
@@ -87,6 +257,8 @@ data McpHostHooks = McpHostHooks
 defaultMcpHostHooks :: McpHostHooks
 defaultMcpHostHooks = McpHostHooks
     { mcpHostElicit = pure Nothing
+    , mcpHostRoots = pure Nothing
+    , mcpHostSample = pure Nothing
     , mcpHostClientName = "haskell-agent"
     , mcpHostClientVersion = "0.1.0"
     }
@@ -169,6 +341,7 @@ data McpServerInfo = McpServerInfo
     , serverInfoName :: !(Maybe Text)
     , serverInfoVersion :: !(Maybe Text)
     , serverInfoTitle :: !(Maybe Text)
+    , serverInfoIcons :: ![McpIcon]
     , serverInfoInstructions :: !(Maybe Text)
     , serverInfoCapabilities :: !McpServerCapabilities
     } deriving (Eq, Show)
@@ -292,7 +465,104 @@ data McpServerEvent
     | McpResourceUpdated !Text
     | McpLogMessage !Text !(Maybe Text) !RawJson
     -- ^ Level, logger, and data of a @notifications/message@.
+    | McpTaskStatusChanged !McpTask
+    -- ^ A task snapshot from @notifications/tasks/status@.
+    | McpSubscriptionsAcknowledged ![Text]
+    -- ^ Resource URIs accepted by a modern subscription listener.
     deriving (Eq, Show)
+
+-- | Lifecycle states defined by the MCP tasks extension.
+data McpTaskStatus
+    = McpTaskWorking
+    | McpTaskInputRequired
+    | McpTaskCompleted
+    | McpTaskFailed
+    | McpTaskCancelled
+    | McpTaskStatusUnknown !Text
+    deriving (Eq, Show)
+
+mcpTaskStatusText :: McpTaskStatus -> Text
+mcpTaskStatusText = \case
+    McpTaskWorking -> "working"
+    McpTaskInputRequired -> "input_required"
+    McpTaskCompleted -> "completed"
+    McpTaskFailed -> "failed"
+    McpTaskCancelled -> "cancelled"
+    McpTaskStatusUnknown status -> status
+
+mcpTaskStatusDecoder :: Json.Decoder McpTaskStatus
+mcpTaskStatusDecoder = Json.text >>= \case
+    "working" -> pure McpTaskWorking
+    "input_required" -> pure McpTaskInputRequired
+    "completed" -> pure McpTaskCompleted
+    "failed" -> pure McpTaskFailed
+    "cancelled" -> pure McpTaskCancelled
+    status -> pure (McpTaskStatusUnknown status)
+
+data McpTaskInputRequest = McpTaskInputRequest
+    { taskInputMethod :: !Text
+    , taskInputParams :: !(Maybe RawJson)
+    } deriving (Eq, Show)
+
+-- | A task snapshot returned by the MCP tasks extension. Both the modern
+-- millisecond fields and legacy names are normalized to milliseconds.
+data McpTask = McpTask
+    { taskId :: !Text
+    , taskStatus :: !McpTaskStatus
+    , taskStatusMessage :: !(Maybe Text)
+    , taskCreatedAt :: !(Maybe Text)
+    , taskLastUpdatedAt :: !(Maybe Text)
+    , taskTtlMs :: !(Maybe Int)
+    , taskPollIntervalMs :: !Int
+    , taskResult :: !(Maybe RawJson)
+    , taskError :: !(Maybe RawJson)
+    , taskInputRequests :: !(Map.Map Text McpTaskInputRequest)
+    } deriving (Eq, Show)
+
+mcpTaskDecoder :: Json.Decoder McpTask
+mcpTaskDecoder = Json.object do
+    taskId <- Json.atKey "taskId" Json.text
+    taskStatus <- Json.defaultKey McpTaskWorking "status" mcpTaskStatusDecoder
+    taskStatusMessage <- Json.optionalKey "statusMessage" Json.text
+    taskCreatedAt <- Json.optionalKey "createdAt" Json.text
+    taskLastUpdatedAt <- Json.optionalKey "lastUpdatedAt" Json.text
+    ttlMs <- Json.optionalKey "ttlMs" Json.int
+    ttlLegacy <- Json.optionalKey "ttl" Json.int
+    pollMs <- Json.optionalKey "pollIntervalMs" Json.int
+    pollLegacy <- Json.optionalKey "pollInterval" Json.int
+    taskResult <- Json.optionalKey "result" rawJsonDecoder
+    taskError <- Json.optionalKey "error" rawJsonDecoder
+    requests <-
+        Json.optionalKey "inputRequests"
+            (Json.objectAsMap pure inputRequestDecoder)
+    pure McpTask
+        { taskId
+        , taskStatus
+        , taskStatusMessage
+        , taskCreatedAt
+        , taskLastUpdatedAt
+        , taskTtlMs = maybe ttlLegacy Just ttlMs
+        , taskPollIntervalMs = maybe 1000 id (maybe pollLegacy Just pollMs)
+        , taskResult
+        , taskError
+        , taskInputRequests = maybe Map.empty id requests
+        }
+  where
+    inputRequestDecoder = Json.object do
+        taskInputMethod <- Json.defaultKey "" "method" Json.text
+        taskInputParams <- Json.optionalKey "params" rawJsonDecoder
+        pure McpTaskInputRequest{..}
+
+data McpTaskList = McpTaskList
+    { taskListTasks :: ![McpTask]
+    , taskListNextCursor :: !(Maybe RawJson)
+    } deriving (Eq, Show)
+
+mcpTaskListDecoder :: Json.Decoder McpTaskList
+mcpTaskListDecoder = Json.object do
+    taskListTasks <- Json.defaultKey [] "tasks" (Json.list mcpTaskDecoder)
+    taskListNextCursor <- Json.optionalKey "nextCursor" rawJsonDecoder
+    pure McpTaskList{..}
 
 data PendingRequest = PendingRequest
     { pendingResponse :: !(TMVar (Either McpError RawJson))
@@ -480,6 +750,14 @@ data McpClient = McpClient
     -- ^ Revision represented by 'ClientReady'. 'Nothing' is a buffered
     -- invalidation which a subsequently attached fleet handler must replay.
     , clientEventHandler :: !(IORef (McpServerEvent -> IO ()))
+    , clientResourceSubscriptionsRequested :: !(TVar (Set.Set Text))
+    -- ^ Resource URIs requested by the host. Modern servers acknowledge an
+    -- accepted subset; legacy servers accept each URI request individually.
+    , clientResourceSubscriptionsAccepted :: !(TVar (Set.Set Text))
+    , clientTaskStatuses :: !(TVar (Map.Map Text McpTask))
+    -- ^ Latest notification or polling result for each observed task.
+    , clientSubscriptionWorker :: !(MVar (Maybe (Async ())))
+    -- ^ The one replaceable modern @subscriptions/listen@ worker.
     , clientEraHint :: !(Maybe McpProtocolEra)
     -- ^ Era observed by a previous connection to the same server. Skips the
     -- discovery probe after a reconnect.
@@ -526,6 +804,7 @@ data McpResource = McpResource
     , resourceDescription :: !(Maybe Text)
     , resourceMimeType :: !(Maybe Text)
     , resourceSize :: !(Maybe Int)
+    , resourceIcons :: ![McpIcon]
     } deriving (Eq, Show)
 
 mcpResourceDecoder :: Json.Decoder McpResource
@@ -536,6 +815,7 @@ mcpResourceDecoder = Json.object do
     resourceDescription <- Json.optionalKey "description" Json.text
     resourceMimeType <- Json.optionalKey "mimeType" Json.text
     resourceSize <- Json.optionalKey "size" Json.int
+    resourceIcons <- Json.defaultKey [] "icons" (Json.list mcpIconDecoder)
     pure McpResource{..}
 
 -- | A parameterized resource advertised by @resources/templates/list@.
@@ -545,6 +825,7 @@ data McpResourceTemplate = McpResourceTemplate
     , templateTitle :: !(Maybe Text)
     , templateDescription :: !(Maybe Text)
     , templateMimeType :: !(Maybe Text)
+    , templateIcons :: ![McpIcon]
     } deriving (Eq, Show)
 
 mcpResourceTemplateDecoder :: Json.Decoder McpResourceTemplate
@@ -554,6 +835,7 @@ mcpResourceTemplateDecoder = Json.object do
     templateTitle <- Json.optionalKey "title" Json.text
     templateDescription <- Json.optionalKey "description" Json.text
     templateMimeType <- Json.optionalKey "mimeType" Json.text
+    templateIcons <- Json.defaultKey [] "icons" (Json.list mcpIconDecoder)
     pure McpResourceTemplate{..}
 
 -- | A prompt template advertised by @prompts/list@.
@@ -562,6 +844,7 @@ data McpPrompt = McpPrompt
     , promptTitle :: !(Maybe Text)
     , promptDescription :: !(Maybe Text)
     , promptArguments :: ![McpPromptArgument]
+    , promptIcons :: ![McpIcon]
     } deriving (Eq, Show)
 
 data McpPromptArgument = McpPromptArgument
@@ -576,6 +859,7 @@ mcpPromptDecoder = Json.object do
     promptTitle <- Json.optionalKey "title" Json.text
     promptDescription <- Json.optionalKey "description" Json.text
     promptArguments <- Json.defaultKey [] "arguments" (Json.list argumentDecoder)
+    promptIcons <- Json.defaultKey [] "icons" (Json.list mcpIconDecoder)
     pure McpPrompt{..}
   where
     argumentDecoder = Json.object do
@@ -660,6 +944,7 @@ data McpTool = McpTool
     , discoveredIdempotent :: !Bool
     , discoveredOpenWorld :: !Bool
     , discoveredHeaderParams :: ![McpHeaderParam]
+    , discoveredIcons :: ![McpIcon]
     } deriving (Eq)
 
 -- | Whether a failed call may be retried without risking a duplicated side
@@ -696,6 +981,7 @@ mcpToolDecoder = Json.object do
                 (projectRawOr True freshApprovalDecoder)
                 rawMeta
         discoveredHeaderParams = []
+    discoveredIcons <- Json.defaultKey [] "icons" (Json.list mcpIconDecoder)
     pure McpTool{..}
   where
     -- Specification defaults: destructive and open-world unless stated.

@@ -12,7 +12,10 @@ import Agent.MCP.Types
       McpClient(clientHooks, clientEventHandler, clientClosed,
                 clientRequestRegistry, clientFailure, clientLifecycle,
                 clientWorkers, clientTransport, clientServerInfo, clientConfig,
-                clientToolsRevision, clientReadyToolsRevision),
+                clientToolsRevision, clientReadyToolsRevision,
+                clientResourceSubscriptionsRequested,
+                clientResourceSubscriptionsAccepted, clientTaskStatuses,
+                clientSubscriptionWorker),
       McpClientTransport(McpClientHttp, McpClientStdio, McpClientInMemory),
       McpHttpTransport(httpUrl, httpSession),
       McpStdioTransport(stdioStderrReader, stdioWriteLock, stdioInput,
@@ -21,7 +24,13 @@ import Agent.MCP.Types
       PendingRequest(..),
       McpServerEvent(McpLogMessage, McpToolsListChanged,
                      McpPromptsListChanged, McpResourcesListChanged,
-                     McpResourceUpdated),
+                     McpResourceUpdated, McpTaskStatusChanged,
+                     McpSubscriptionsAcknowledged),
+      McpTask(..),
+      McpTaskStatus(..),
+      McpTaskInputRequest(..),
+      mcpTaskDecoder,
+      mcpTaskStatusText,
       McpProgress(..),
       McpError(..),
       McpResourcesCapability(resourcesListChanged),
@@ -34,13 +43,19 @@ import Agent.MCP.Types
       McpElicitResult(McpElicitCancel),
       McpElicitMode(McpElicitForm, McpElicitUrl),
       McpElicitRequest(..),
-      McpHostHooks(mcpHostElicit, mcpHostClientName,
+      McpHostHooks(mcpHostElicit, mcpHostRoots, mcpHostSample, mcpHostClientName,
                    mcpHostClientVersion),
       McpServerConfig(mcpServerEnv, mcpServerName,
-                      mcpServerRequestTimeoutSeconds),
+                      mcpServerRequestTimeoutSeconds, mcpServerRootsEnabled,
+                      mcpServerSamplingEnabled, mcpServerLogLevel),
+      mcpSamplingRequestDecoder,
+      encodeMcpRoots,
+      encodeMcpSamplingResult,
+      mcpLogLevelText,
       encodeElicitResult,
       renderMcpError,
       errorCodeMethodNotFound,
+      errorCodeInvalidParams,
       errorCodeInternal,
       stderrLimit,
       projectRawOr,
@@ -54,7 +69,7 @@ import Agent.Process
 import Agent.Tools.Types ()
 import Control.Concurrent ( threadDelay )
 import Control.Concurrent.Async
-    ( Async, asyncWithUnmask, cancel, poll, waitCatch )
+    ( Async, async, asyncWithUnmask, cancel, poll, waitCatch )
 import Control.Concurrent.MVar ( modifyMVar_, withMVar, readMVar )
 import Control.Concurrent.STM
     ( atomically,
@@ -68,7 +83,8 @@ import Control.Concurrent.STM
       takeTMVar,
       tryPutTMVar,
       tryReadTMVar,
-      modifyTVar' )
+      modifyTVar',
+      retry )
 import Control.Exception.Safe
     ( SomeException,
       Exception(displayException),
@@ -147,6 +163,7 @@ import qualified Agent.Json.Decode as Json
       double,
       getType,
       int,
+      list,
       object,
       objectAsMap,
       text,
@@ -156,7 +173,8 @@ import qualified Data.Aeson.Key as Key ( fromText )
 import qualified Data.Aeson.KeyMap as KeyMap ()
 import qualified Data.ByteString.Lazy as LBS ( hPutStr, toStrict )
 import qualified Data.Map.Strict as Map
-    ( fromList, insert, toList )
+import qualified Data.Set as Set
+    ( empty, fromList, insert, null, toAscList )
 import qualified Agent.MCP.OAuth as OAuth
     ( WwwAuthenticateChallenge(challengeError,
                                challengeErrorDescription),
@@ -230,11 +248,13 @@ clientInfoValue hooks = object
     ]
 
 -- | Capabilities declared to modern servers on every request.
-clientCapabilitiesValue :: Bool -> Value
-clientCapabilitiesValue elicitEnabled = object $
+clientCapabilitiesValue :: Bool -> Bool -> Bool -> Value
+clientCapabilitiesValue elicitEnabled rootsEnabled samplingEnabled = object $
     [ "elicitation" .= object ["form" .= object [], "url" .= object []]
     | elicitEnabled
     ]
+    <> ["roots" .= object ["listChanged" .= False] | rootsEnabled]
+    <> ["sampling" .= object [] | samplingEnabled]
     <> [ "extensions" .= object
             [ "io.modelcontextprotocol/tasks" .= object []
             , "io.modelcontextprotocol/skills" .= object []
@@ -242,11 +262,13 @@ clientCapabilitiesValue elicitEnabled = object $
        ]
 
 -- | Capabilities declared to legacy servers during @initialize@.
-legacyClientCapabilities :: Bool -> Value
-legacyClientCapabilities elicitEnabled = object $
+legacyClientCapabilities :: Bool -> Bool -> Bool -> Value
+legacyClientCapabilities elicitEnabled rootsEnabled samplingEnabled = object $
     [ "elicitation" .= object ["form" .= object [], "url" .= object []]
     | elicitEnabled
     ]
+    <> ["roots" .= object ["listChanged" .= False] | rootsEnabled]
+    <> ["sampling" .= object [] | samplingEnabled]
 
 -- | Private error effect used to keep request/decode pipelines linear. Public
 -- entry points continue to return their existing @Either@ types.
@@ -401,11 +423,12 @@ requestMcpFull client request = do
     case registration of
         Left err -> pure (Left (McpTransportError err))
         Right requestId -> do
-            elicitEnabled <-
+            (elicitEnabled, rootsEnabled, samplingEnabled) <-
                 if request.requestMeta && era == Just McpEraModern
-                    then isJust <$> client.clientHooks.mcpHostElicit
-                    else pure False
-            let meta = metaSeries client era request requestId elicitEnabled
+                    then clientCapabilityFlags client
+                    else pure (False, False, False)
+            let meta = metaSeries client era request requestId
+                    elicitEnabled rootsEnabled samplingEnabled
                 message = requestEnvelope (Just requestId) request.requestMethod
                     (request.requestParams <> meta)
             case client.clientTransport of
@@ -478,8 +501,10 @@ requestEnvelope requestId method parameters =
 
 -- | Per-request metadata. Modern servers require the protocol version and
 -- client capabilities on every request; every era accepts a progress token.
-metaSeries :: McpClient -> Maybe McpProtocolEra -> McpRequest -> Int -> Bool -> Series
-metaSeries client era request requestId elicitEnabled
+metaSeries
+    :: McpClient -> Maybe McpProtocolEra -> McpRequest -> Int
+    -> Bool -> Bool -> Bool -> Series
+metaSeries client era request requestId elicitEnabled rootsEnabled samplingEnabled
     | not request.requestMeta = mempty
     | otherwise = "_meta" .= object (progress <> modern)
   where
@@ -489,9 +514,23 @@ metaSeries client era request requestId elicitEnabled
             [ "io.modelcontextprotocol/protocolVersion" .= modernProtocolVersion
             , "io.modelcontextprotocol/clientInfo" .= clientInfoValue client.clientHooks
             , "io.modelcontextprotocol/clientCapabilities"
-                .= clientCapabilitiesValue elicitEnabled
+                .= clientCapabilitiesValue elicitEnabled rootsEnabled samplingEnabled
             ]
+            <> [ "io.modelcontextprotocol/logLevel" .= mcpLogLevelText level
+               | Just level <- [client.clientConfig.mcpServerLogLevel]
+               ]
         _ -> []
+
+clientCapabilityFlags :: McpClient -> IO (Bool, Bool, Bool)
+clientCapabilityFlags client = do
+    elicitation <- isJust <$> client.clientHooks.mcpHostElicit
+    roots <- isJust <$> client.clientHooks.mcpHostRoots
+    sampling <- isJust <$> client.clientHooks.mcpHostSample
+    pure
+        ( elicitation
+        , client.clientConfig.mcpServerRootsEnabled && roots
+        , client.clientConfig.mcpServerSamplingEnabled && sampling
+        )
 
 -- | Wait for a stdio response. Progress notifications extend the wait up to
 -- a hard limit; a timeout cancels the request.
@@ -706,30 +745,31 @@ awaitTask client request raw = runExceptT (awaitTaskT client request raw)
 
 awaitTaskT :: McpClient -> McpRequest -> RawJson -> McpCall RawJson
 awaitTaskT client request raw = do
-    task <- decodeMcpPayload "task result" taskDecoder raw
+    task <- decodeMcpPayload "task result" mcpTaskDecoder raw
     start <- lift getMonotonicTimeNSec
+    lift (rememberTask client task)
     lift (report 0 task)
-    poll' start (1 :: Int) task.taskPollIntervalMs
+    settle start (1 :: Int) task
   where
     slice = max 1 request.requestTimeoutMicros
-    report :: Int -> TaskState -> IO ()
+    report :: Int -> McpTask -> IO ()
     report count task =
         forM_ request.requestOnProgress \onProgress ->
             onProgress McpProgress
                 { progressValue = fromIntegral (count :: Int)
                 , progressTotal = Nothing
                 , progressMessage =
-                    Just ("task " <> task.taskStatus
+                    Just ("task " <> mcpTaskStatusText task.taskStatus
                         <> maybe "" (": " <>) task.taskStatusMessage)
                 }
-    poll' start count intervalMs = do
-        beforeSleep <- lift getMonotonicTimeNSec
+    settle start count previous = do
+        before <- lift getMonotonicTimeNSec
         let remaining
                 | request.requestTimeoutMicros > 0 =
                     Just
                         (remainingHardDeadlineMicros
                             start
-                            beforeSleep
+                            before
                             slice)
                 | otherwise = Nothing
         if maybe False (<= 0) remaining
@@ -740,9 +780,7 @@ awaitTaskT client request raw = do
                     (clientRequest client "tasks/cancel" ("taskId" .= taskIdOf))
                 throwE (timeoutError (request.requestMethod <> " task") slice)
             else do
-                lift
-                    (threadDelay
-                        (boundedTaskPollDelayMicros intervalMs remaining))
+                task <- lift (waitForTaskChange client previous remaining)
                 now <- lift getMonotonicTimeNSec
                 if request.requestTimeoutMicros > 0
                         && pastHardDeadline start now slice
@@ -757,27 +795,29 @@ awaitTaskT client request raw = do
                                 (request.requestMethod <> " task")
                                 slice)
                     else do
-                        task <- requestAndDecode client
-                            (clientRequest
-                                client
-                                "tasks/get"
-                                ("taskId" .= taskIdOf))
-                            "tasks/get result"
-                            taskDecoder
-                        lift (report count task)
-                        case task.taskStatus of
-                            "completed" -> case task.taskResult of
+                        current <- case task of
+                            Just changed -> pure changed
+                            Nothing -> do
+                                polled <- requestAndDecode client
+                                    (clientRequest client "tasks/get"
+                                        ("taskId" .= taskIdOf))
+                                    "tasks/get result"
+                                    mcpTaskDecoder
+                                lift (rememberPolledTask client previous polled)
+                        lift (report count current)
+                        case current.taskStatus of
+                            McpTaskCompleted -> case current.taskResult of
                                 Just result -> pure result
                                 Nothing -> legacyTaskResult
-                            "failed" ->
+                            McpTaskFailed ->
                                 throwE $ fromMaybe
                                     (McpTransportError "MCP task failed")
-                                    (task.taskError >>= decodeRpcError)
-                            "cancelled" ->
+                                    (current.taskError >>= decodeRpcError)
+                            McpTaskCancelled ->
                                 throwE
                                     (McpTransportError
                                         "MCP task was cancelled")
-                            "input_required"
+                            McpTaskInputRequired
                                 | not request.requestAllowReissue ->
                                     throwE
                                         (McpTransportError
@@ -785,28 +825,24 @@ awaitTaskT client request raw = do
                                 | otherwise -> do
                                     responses <-
                                         ExceptT
-                                            (fulfilInputRequests
-                                                client
-                                                task.taskInputRequests)
-                                    -- tasks/update is best-effort: its
-                                    -- response is only an acknowledgement,
-                                    -- and the next tasks/get is canonical.
-                                    -- Do not replay this mutation on OAuth
-                                    -- refresh even for an otherwise retryable
-                                    -- tool call.
+                                            (fulfilInputRequests client
+                                                [ (key, item.taskInputMethod,
+                                                    item.taskInputParams)
+                                                | (key, item) <-
+                                                    Map.toList
+                                                        current.taskInputRequests
+                                                ])
+                                    -- tasks/update is best-effort. Do not
+                                    -- replay this mutation on OAuth refresh.
                                     _ <- lift $ requestMcpFull client
-                                        ( (clientRequest
-                                            client
-                                            "tasks/update"
+                                        ( (clientRequest client "tasks/update"
                                             ("taskId" .= taskIdOf
                                                 <> inputResponsesSeries
                                                     responses))
                                             { requestAllowReissue = False }
                                         )
-                                    poll' start (count + 1)
-                                        task.taskPollIntervalMs
-                            _ -> poll' start (count + 1)
-                                task.taskPollIntervalMs
+                                    settle start (count + 1) current
+                            _ -> settle start (count + 1) current
       where
         taskIdOf = initialTaskId
     initialTaskId =
@@ -815,42 +851,38 @@ awaitTaskT client request raw = do
         requestMcpT client
             (clientRequest client "tasks/result" ("taskId" .= initialTaskId))
 
-data TaskState = TaskState
-    { taskStatus :: !Text
-    , taskStatusMessage :: !(Maybe Text)
-    , taskPollIntervalMs :: !Int
-    , taskResult :: !(Maybe RawJson)
-    , taskError :: !(Maybe RawJson)
-    , taskInputRequests :: ![(Text, Text, Maybe RawJson)]
-    }
+rememberTask :: McpClient -> McpTask -> IO ()
+rememberTask client task =
+    atomically $ modifyTVar' client.clientTaskStatuses
+        (Map.insert task.taskId task)
 
-taskDecoder :: Json.Decoder TaskState
-taskDecoder = Json.object do
-    taskStatus <- Json.defaultKey "working" "status" Json.text
-    taskStatusMessage <- Json.optionalKey "statusMessage" Json.text
-    pollMs <- Json.optionalKey "pollIntervalMs" Json.int
-    pollLegacy <- Json.optionalKey "pollInterval" Json.int
-    taskResult <- Json.optionalKey "result" rawJsonDecoder
-    taskError <- Json.optionalKey "error" rawJsonDecoder
-    requests <-
-        Json.optionalKey "inputRequests"
-            (Json.objectAsMap pure inputRequestDecoder)
-    pure TaskState
-        { taskStatus
-        , taskStatusMessage
-        , taskPollIntervalMs = fromMaybe 1000 (maybe pollLegacy Just pollMs)
-        , taskResult
-        , taskError
-        , taskInputRequests =
-            [ (key, method, params)
-            | (key, (method, params)) <- maybe [] Map.toList requests
-            ]
-        }
-  where
-    inputRequestDecoder = Json.object do
-        method <- Json.defaultKey "" "method" Json.text
-        params <- Json.optionalKey "params" rawJsonDecoder
-        pure (method, params)
+-- A status notification can arrive while a tasks/get request is in flight.
+-- Keep that newer notification instead of overwriting it with the stale poll.
+rememberPolledTask :: McpClient -> McpTask -> McpTask -> IO McpTask
+rememberPolledTask client previous polled =
+    atomically do
+        tasks <- readTVar client.clientTaskStatuses
+        case Map.lookup previous.taskId tasks of
+            Just current | current /= previous -> pure current
+            _ -> do
+                modifyTVar' client.clientTaskStatuses
+                    (Map.insert polled.taskId polled)
+                pure polled
+
+waitForTaskChange
+    :: McpClient
+    -> McpTask
+    -> Maybe Int
+    -> IO (Maybe McpTask)
+waitForTaskChange client previous remaining =
+    timeout (boundedTaskPollDelayMicros
+        previous.taskPollIntervalMs
+        remaining) $
+        atomically do
+            tasks <- readTVar client.clientTaskStatuses
+            case Map.lookup previous.taskId tasks of
+                Just current | current /= previous -> pure current
+                _ -> retry
 
 decodeRpcError :: RawJson -> Maybe McpError
 decodeRpcError raw =
@@ -872,6 +904,29 @@ startSubscriptions client | McpClientInMemory _ _ <- client.clientTransport = pu
 startSubscriptions client = do
     info <- readTVarIO client.clientServerInfo
     case info of
+        Just McpServerInfo{serverInfoEra = McpEraModern} ->
+            restartModernSubscriptions client
+        Just McpServerInfo{serverInfoEra = McpEraLegacy} -> do
+            requested <- readTVarIO client.clientResourceSubscriptionsRequested
+            atomically $
+                writeTVar client.clientResourceSubscriptionsAccepted Set.empty
+            forM_ (Set.toAscList requested) \uri ->
+                requestMcpFull client
+                    (clientRequest client "resources/subscribe" ("uri" .= uri))
+                    >>= \case
+                        Right _ ->
+                            atomically $ modifyTVar'
+                                client.clientResourceSubscriptionsAccepted
+                                (Set.insert uri)
+                        Left _ -> pure ()
+        Nothing -> pure ()
+
+restartModernSubscriptions :: McpClient -> IO ()
+restartModernSubscriptions client = do
+    info <- readTVarIO client.clientServerInfo
+    requested <- readTVarIO client.clientResourceSubscriptionsRequested
+    atomically $ writeTVar client.clientResourceSubscriptionsAccepted Set.empty
+    case info of
         Just McpServerInfo{serverInfoEra = McpEraModern, serverInfoCapabilities = capabilities} -> do
             let wanted =
                     [ "toolsListChanged" .= True
@@ -883,9 +938,23 @@ startSubscriptions client = do
                     <> [ "resourcesListChanged" .= True
                        | maybe False (.resourcesListChanged) capabilities.capabilityResources
                        ]
-            unless (null wanted) $
-                spawnClientWorker client (subscriptionLoop client (mconcat wanted))
-        _ -> pure ()
+                    <> [ "resourceSubscriptions" .= Set.toAscList requested
+                       | not (Set.null requested)
+                       ]
+            replaceSubscriptionWorker client $
+                if null wanted
+                    then Nothing
+                    else Just (subscriptionLoop client (mconcat wanted))
+        _ -> replaceSubscriptionWorker client Nothing
+
+replaceSubscriptionWorker :: McpClient -> Maybe (IO ()) -> IO ()
+replaceSubscriptionWorker client next =
+    withMVar client.clientClosed \closed ->
+        modifyMVar_ client.clientSubscriptionWorker \current -> do
+            mapM_ stopWorker current
+            if closed
+                then pure Nothing
+                else traverse (async . void . tryAny) next
 
 subscriptionLoop :: McpClient -> Series -> IO ()
 subscriptionLoop client filterSeries = go (1 :: Int)
@@ -1019,8 +1088,8 @@ decodeIntId :: RawJson -> Maybe Int
 decodeIntId value =
     either (const Nothing) Just (Json.decodeEither Json.int (rawJsonBytes value))
 
--- | Answer a server-initiated request. Only @ping@ and legacy
--- @elicitation/create@ are supported; everything else is unknown.
+-- | Answer a server-initiated request. Potentially sensitive host
+-- capabilities are both configuration-gated and resolved at request time.
 handleServerRequest :: McpClient -> RawJson -> Text -> Maybe RawJson -> IO ()
 handleServerRequest client requestId method params =
     case method of
@@ -1029,15 +1098,64 @@ handleServerRequest client requestId method params =
             spawnClientWorker client do
                 result <- runElicitation client params
                 respondResult (rawJsonEncoding (encodeElicitResult result))
+        "roots/list"
+            | client.clientConfig.mcpServerRootsEnabled ->
+                spawnClientWorker client do
+                    client.clientHooks.mcpHostRoots >>= \case
+                        Nothing ->
+                            respondError errorCodeMethodNotFound
+                                "Roots are not available"
+                        Just hook ->
+                            tryAny (hook client.clientConfig.mcpServerName) >>= \case
+                                Left _ ->
+                                    respondError errorCodeInternal
+                                        "The host failed to enumerate roots"
+                                Right roots ->
+                                    respondResult
+                                        (rawJsonEncoding (encodeMcpRoots roots))
+        "sampling/createMessage"
+            | client.clientConfig.mcpServerSamplingEnabled ->
+                spawnClientWorker client do
+                    case params of
+                        Nothing ->
+                            respondError errorCodeInvalidParams
+                                "sampling/createMessage requires params"
+                        Just rawParams ->
+                            case Json.decodeEither
+                                    (mcpSamplingRequestDecoder
+                                        client.clientConfig.mcpServerName)
+                                    (rawJsonBytes rawParams) of
+                                Left err ->
+                                    respondError errorCodeInvalidParams
+                                        ("Invalid sampling request: "
+                                            <> err.jsonErrorMessage)
+                                Right request ->
+                                    client.clientHooks.mcpHostSample >>= \case
+                                        Nothing ->
+                                            respondError errorCodeMethodNotFound
+                                                "Sampling is not available"
+                                        Just hook ->
+                                            tryAny (hook request) >>= \case
+                                                Left _ ->
+                                                    respondError errorCodeInternal
+                                                        "The host sampling request failed"
+                                                Right (Left message) ->
+                                                    respondError errorCodeInternal message
+                                                Right (Right result) ->
+                                                    respondResult
+                                                        (rawJsonEncoding
+                                                            (encodeMcpSamplingResult result))
         _ ->
             respondError errorCodeMethodNotFound ("Method not found: " <> method)
   where
+    respondResult :: Aeson.Encoding -> IO ()
     respondResult result =
         void $ sendResponse client $
             Aeson.pairs $
                 "jsonrpc" .= ("2.0" :: Text)
                     <> AesonEncoding.pair "id" (rawJsonEncoding requestId)
                     <> AesonEncoding.pair "result" result
+    respondError :: Int -> Text -> IO ()
     respondError code message =
         void $ sendResponse client $
             Aeson.pairs $
@@ -1090,6 +1208,16 @@ handleNotification client method params =
         "notifications/message" ->
             forM_ (params >>= decodeLogMessage) \(level, logger, payload) ->
                 emit (McpLogMessage level logger payload)
+        "notifications/tasks/status" ->
+            forM_ (params >>= decodeTaskStatus) \task -> do
+                rememberTask client task
+                emit (McpTaskStatusChanged task)
+        "notifications/subscriptions/acknowledged" ->
+            forM_ (params >>= decodeSubscriptionAck) \uris -> do
+                atomically $
+                    writeTVar client.clientResourceSubscriptionsAccepted
+                        (Set.fromList uris)
+                emit (McpSubscriptionsAcknowledged uris)
         _ -> pure ()
   where
     emit event = do
@@ -1106,6 +1234,30 @@ handleNotification client method params =
                     payload <- Json.defaultKey emptyObjectJson "data" rawJsonDecoder
                     pure (level, logger, payload))
                 (rawJsonBytes raw)
+    decodeTaskStatus raw =
+        either (const nested) Just
+            (Json.decodeEither mcpTaskDecoder (rawJsonBytes raw))
+      where
+        nested =
+            either (const Nothing) Just $
+                Json.decodeEither
+                    (Json.object (Json.atKey "task" mcpTaskDecoder))
+                    (rawJsonBytes raw)
+    decodeSubscriptionAck raw =
+        either (const Nothing) Just $
+            Json.decodeEither
+                (Json.object do
+                    notifications <- Json.optionalKey "notifications" rawJsonDecoder
+                    case notifications of
+                        Just value ->
+                            pure $ projectRawOr [] resourceUrisDecoder value
+                        Nothing ->
+                            Json.defaultKey [] "resourceSubscriptions"
+                                (Json.list Json.text))
+                (rawJsonBytes raw)
+    resourceUrisDecoder =
+        Json.object $
+            Json.defaultKey [] "resourceSubscriptions" (Json.list Json.text)
 
 emptyObjectJson :: RawJson
 emptyObjectJson = rawJsonFromEncoding (Aeson.toEncoding (object []))
@@ -1625,6 +1777,9 @@ closeMcpClient client =
                     writeTVar client.clientWorkers []
                     pure current
                 mapM_ stopWorker workers
+                modifyMVar_ client.clientSubscriptionWorker \worker -> do
+                    mapM_ stopWorker worker
+                    pure Nothing
                 case client.clientTransport of
                     McpClientStdio transport -> do
                         void $ tryAny (hClose transport.stdioInput)

@@ -109,6 +109,9 @@ spec = describe "Agent.CLI.McpAdmin" do
                     , mcpRequestTimeoutSeconds = 60
                     , mcpOAuth = Nothing
                     , mcpProtocol = McpProtocolModern
+                    , mcpRoots = False
+                    , mcpSampling = False
+                    , mcpLogLevel = Nothing
                     }
             saveHarnessConfig home
                 defaultHarnessConfig

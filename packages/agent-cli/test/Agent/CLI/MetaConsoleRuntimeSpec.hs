@@ -17,7 +17,7 @@ import Agent.CLI.Runtime.MetaConsole
     ( MetaSecretValue(..)
     , applyMetaConfigActions
     )
-import Agent.MCP (McpProtocolPreference(..))
+import Agent.MCP (McpLogLevel(..), McpProtocolPreference(..))
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import Test.Hspec
@@ -47,6 +47,9 @@ spec = describe "Meta Console host executor" do
                     , mcpOAuthScopes = ["old"]
                     }
                 , mcpProtocol = McpProtocolAuto
+                , mcpRoots = True
+                , mcpSampling = True
+                , mcpLogLevel = Just McpLogWarning
                 }
             config = defaultHarnessConfig
                 { configMcpServers = Map.singleton "docs" existing
@@ -81,6 +84,9 @@ spec = describe "Meta Console host executor" do
                                         }
                                 && server.mcpUrl
                                     == Just "https://new.example/mcp"
+                                && server.mcpRoots
+                                && server.mcpSampling
+                                && server.mcpLogLevel == Just McpLogWarning
                                 && not server.mcpEnabled
 
     it "injects trusted secret input without putting a value in the action" do
@@ -95,6 +101,9 @@ spec = describe "Meta Console host executor" do
                 , mcpRequestTimeoutSeconds = 60
                 , mcpOAuth = Nothing
                 , mcpProtocol = McpProtocolAuto
+                , mcpRoots = False
+                , mcpSampling = False
+                , mcpLogLevel = Nothing
                 }
             config = defaultHarnessConfig
                 { configMcpServers = Map.singleton "docs" server
@@ -126,6 +135,9 @@ spec = describe "Meta Console host executor" do
                 , mcpRequestTimeoutSeconds = 60
                 , mcpOAuth = Nothing
                 , mcpProtocol = McpProtocolAuto
+                , mcpRoots = False
+                , mcpSampling = False
+                , mcpLogLevel = Nothing
                 }
             config = defaultHarnessConfig
                 { configMcpServers = Map.singleton "docs" existing

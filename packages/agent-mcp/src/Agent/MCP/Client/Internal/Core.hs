@@ -28,6 +28,7 @@ import Agent.MCP.Client.Internal.Runtime
       redactConfiguredValues )
 import Agent.MCP.Types
     ( McpTool,
+      McpIcon,
       McpClientLifecycle(ClientReady, ClientClosed, ClientPending,
                          ClientInitializing, ClientFailed),
       McpClient(..),
@@ -41,21 +42,25 @@ import Agent.MCP.Types
       McpError(..),
       McpServerInfo(serverInfoCapabilities, McpServerInfo, serverInfoEra,
                     serverInfoProtocolVersion, serverInfoName, serverInfoVersion,
-                    serverInfoTitle, serverInfoInstructions),
+                    serverInfoTitle, serverInfoIcons, serverInfoInstructions),
+      McpServerCapabilities(capabilityLogging),
       McpProtocolEra(..),
       McpServerStatus(..),
       McpInitState(McpFailed, McpClosed, McpPending, McpInitializing,
                    McpReady),
-      McpHostHooks(mcpHostElicit),
+      McpHostHooks(mcpHostElicit, mcpHostRoots, mcpHostSample),
       McpServerConfig(mcpServerEnv, mcpServerCwd, mcpServerCommand,
                       mcpServerArgs, mcpServerStartupTimeoutSeconds, mcpServerProtocol,
-                      mcpServerName, mcpServerUrl),
+                      mcpServerName, mcpServerUrl, mcpServerRootsEnabled,
+                      mcpServerSamplingEnabled, mcpServerLogLevel),
       McpProtocolPreference(McpProtocolModern, McpProtocolLegacy,
                             McpProtocolAuto),
       defaultMcpHostHooks,
       emptyServerCapabilities,
       serverCapabilitiesDecoder,
       renderMcpError,
+      mcpLogLevelText,
+      mcpIconDecoder,
       errorCodeHeaderMismatch,
       errorCodeMissingClientCapability,
       errorCodeUnsupportedProtocolVersion,
@@ -133,7 +138,8 @@ import qualified Agent.Json.Decode as Json
 import qualified Data.Aeson.Key as Key ()
 import qualified Data.Aeson.KeyMap as KeyMap ()
 import qualified Data.ByteString.Lazy as LBS ()
-import qualified Data.Map.Strict as Map ()
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Agent.MCP.OAuth as OAuth ()
 import qualified Data.Text as Text
     ( pack, unpack, intercalate, null )
@@ -241,6 +247,10 @@ newClientRecord hooks eraHint config transport = do
     discoveredSkills <- newTVarIO []
     toolsRevision <- newTVarIO 0
     readyToolsRevision <- newTVarIO Nothing
+    resourceSubscriptionsRequested <- newTVarIO Set.empty
+    resourceSubscriptionsAccepted <- newTVarIO Set.empty
+    taskStatuses <- newTVarIO Map.empty
+    subscriptionWorker <- newMVar Nothing
     workers <- newTVarIO []
     eventHandler <- newIORef (const (pure ()))
     pure McpClient
@@ -256,6 +266,10 @@ newClientRecord hooks eraHint config transport = do
         , clientDiscoveredSkills = discoveredSkills
         , clientToolsRevision = toolsRevision
         , clientReadyToolsRevision = readyToolsRevision
+        , clientResourceSubscriptionsRequested = resourceSubscriptionsRequested
+        , clientResourceSubscriptionsAccepted = resourceSubscriptionsAccepted
+        , clientTaskStatuses = taskStatuses
+        , clientSubscriptionWorker = subscriptionWorker
         , clientEventHandler = eventHandler
         , clientEraHint = eraHint
         }
@@ -326,9 +340,12 @@ ensureMcpClientReadyWith publishReady client = mask \restore -> do
                     closeMcpClient client
                 initialize = do
                     negotiateProtocol client
+                    loggingWarnings <- configureLegacyLogging client
                     skillWarnings <- discoverMcpSkills client
                     startSubscriptions client
-                    discoverStableTools skillWarnings 0
+                    discoverStableTools
+                        (skillWarnings <> loggingWarnings)
+                        0
                 discoverStableTools skillWarnings attempt = do
                     revision <- readTVarIO client.clientToolsRevision
                     (tools, warnings) <- discoverMcpTools client
@@ -501,13 +518,14 @@ applyDiscoverResult client raw =
                 ("invalid server/discover response: " <> err.jsonErrorMessage)
         Right (supported, capabilities, instructions, identity)
             | null supported || modernProtocolVersion `elem` supported -> do
-                let (name, version, title) = identity
+                let (name, version, title, icons) = identity
                 atomically $ writeTVar client.clientServerInfo $ Just McpServerInfo
                     { serverInfoEra = McpEraModern
                     , serverInfoProtocolVersion = modernProtocolVersion
                     , serverInfoName = name
                     , serverInfoVersion = version
                     , serverInfoTitle = title
+                    , serverInfoIcons = icons
                     , serverInfoInstructions = instructions
                     , serverInfoCapabilities = capabilities
                     }
@@ -521,22 +539,23 @@ applyDiscoverResult client raw =
         instructions <- Json.optionalKey "instructions" Json.text
         meta <- Json.optionalKey "_meta" rawJsonDecoder
         let identity =
-                maybe (Nothing, Nothing, Nothing)
-                    (projectRawOr (Nothing, Nothing, Nothing) metaServerInfoDecoder)
+                maybe (Nothing, Nothing, Nothing, [])
+                    (projectRawOr (Nothing, Nothing, Nothing, []) metaServerInfoDecoder)
                     meta
         pure (supported, capabilities, instructions, identity)
     metaServerInfoDecoder = Json.object do
         info <-
             Json.optionalKey "io.modelcontextprotocol/serverInfo"
                 implementationDecoder
-        pure (fromMaybe (Nothing, Nothing, Nothing) info)
+        pure (fromMaybe (Nothing, Nothing, Nothing, []) info)
 
-implementationDecoder :: Json.Decoder (Maybe Text, Maybe Text, Maybe Text)
+implementationDecoder :: Json.Decoder (Maybe Text, Maybe Text, Maybe Text, [McpIcon])
 implementationDecoder = Json.object do
     name <- Json.optionalKey "name" Json.text
     version <- Json.optionalKey "version" Json.text
     title <- Json.optionalKey "title" Json.text
-    pure (name, version, title)
+    icons <- Json.defaultKey [] "icons" (Json.list mcpIconDecoder)
+    pure (name, version, title, icons)
 
 -- | Pick a mutually supported version from a server's advertised list.
 selectFromVersions :: McpClient -> [Text] -> IO ()
@@ -560,9 +579,16 @@ selectFromVersions client supported
 legacyInitialize :: McpClient -> Text -> IO ()
 legacyInitialize client requestedVersion = do
     elicitEnabled <- isJust <$> client.clientHooks.mcpHostElicit
+    rootsHandler <- isJust <$> client.clientHooks.mcpHostRoots
+    samplingHandler <- isJust <$> client.clientHooks.mcpHostSample
+    let rootsEnabled =
+            client.clientConfig.mcpServerRootsEnabled && rootsHandler
+        samplingEnabled =
+            client.clientConfig.mcpServerSamplingEnabled && samplingHandler
     let parameters =
             "protocolVersion" .= requestedVersion
-                <> "capabilities" .= legacyClientCapabilities elicitEnabled
+                <> "capabilities" .= legacyClientCapabilities
+                    elicitEnabled rootsEnabled samplingEnabled
                 <> "clientInfo" .= clientInfoValue client.clientHooks
     result <-
         requestMcpFull client
@@ -579,7 +605,7 @@ legacyInitialize client requestedVersion = do
                 Left err ->
                     startupFailure client
                         ("invalid initialize response: " <> err.jsonErrorMessage)
-                Right (version, capabilities, instructions, (name, serverVersion, title))
+                Right (version, capabilities, instructions, (name, serverVersion, title, icons))
                     | version `notElem` supportedLegacyVersions ->
                         startupFailure client
                             ("server negotiated unsupported protocol version " <> version)
@@ -590,6 +616,7 @@ legacyInitialize client requestedVersion = do
                             , serverInfoName = name
                             , serverInfoVersion = serverVersion
                             , serverInfoTitle = title
+                            , serverInfoIcons = icons
                             , serverInfoInstructions = instructions
                             , serverInfoCapabilities = capabilities
                             }
@@ -603,9 +630,30 @@ legacyInitialize client requestedVersion = do
                 <$> Json.optionalKey "capabilities" serverCapabilitiesDecoder
         instructions <- Json.optionalKey "instructions" Json.text
         identity <-
-            fromMaybe (Nothing, Nothing, Nothing)
+            fromMaybe (Nothing, Nothing, Nothing, [])
                 <$> Json.optionalKey "serverInfo" implementationDecoder
         pure (version, capabilities, instructions, identity)
+
+configureLegacyLogging :: McpClient -> IO [Text]
+configureLegacyLogging client = do
+    serverInfo <- readTVarIO client.clientServerInfo
+    case (serverInfo, client.clientConfig.mcpServerLogLevel) of
+        ( Just info
+          , Just level
+          )
+            | info.serverInfoEra == McpEraLegacy
+            , info.serverInfoCapabilities.capabilityLogging -> do
+                requestMcpFull client
+                    (clientRequest client "logging/setLevel"
+                        ("level" .= mcpLogLevelText level))
+                    >>= \case
+                        Right _ -> pure []
+                        Left err ->
+                            pure
+                                [ "MCP logging level request was rejected: "
+                                    <> renderMcpError err
+                                ]
+        _ -> pure []
 
 startupFailure :: McpClient -> Text -> IO a
 startupFailure client err = do

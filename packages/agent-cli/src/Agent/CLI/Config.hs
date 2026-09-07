@@ -24,7 +24,11 @@ module Agent.CLI.Config
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.CLI.Json (decodeLazy)
-import Agent.MCP (McpProtocolPreference(..))
+import Agent.MCP
+    ( McpLogLevel(..)
+    , McpProtocolPreference(..)
+    , mcpLogLevelText
+    )
 import Agent.MCP.OAuth (validateClientIdMetadataUrl)
 import Agent.Json (RawJson, rawJsonDecoder)
 import Agent.Json.Decode (defaultKey, optionalKey)
@@ -92,6 +96,12 @@ data McpServerConfig = McpServerConfig
     , mcpProtocol :: !McpProtocolPreference
     -- ^ @auto@ probes for the 2026-07-28 protocol and falls back to the
     -- legacy @initialize@ handshake; @modern@ and @legacy@ skip the probe.
+    , mcpRoots :: !Bool
+    -- ^ Whether the server may request the current workspace root.
+    , mcpSampling :: !Bool
+    -- ^ Whether the server may make model sampling requests.
+    , mcpLogLevel :: !(Maybe McpLogLevel)
+    -- ^ Optional minimum server log level configured with @logging/setLevel@.
     }
     deriving (Eq)
 
@@ -272,6 +282,12 @@ instance Show McpServerConfig where
             <> show server.mcpOAuth
             <> ", mcpProtocol = "
             <> show server.mcpProtocol
+            <> ", mcpRoots = "
+            <> show server.mcpRoots
+            <> ", mcpSampling = "
+            <> show server.mcpSampling
+            <> ", mcpLogLevel = "
+            <> show server.mcpLogLevel
             <> " }"
 
 instance Aeson.ToJSON McpServerConfig where
@@ -289,6 +305,9 @@ instance Aeson.ToJSON McpServerConfig where
                 Aeson..= server.mcpRequestTimeoutSeconds
             , "oauth" Aeson..= server.mcpOAuth
             , "protocol" Aeson..= protocolPreferenceText server.mcpProtocol
+            , "roots" Aeson..= server.mcpRoots
+            , "sampling" Aeson..= server.mcpSampling
+            , "logLevel" Aeson..= fmap mcpLogLevelText server.mcpLogLevel
             ]
 
 instance Aeson.ToJSON WebFetchConfig where
@@ -399,6 +418,9 @@ mcpServerConfigDecoder =
                 "requestTimeoutSeconds" Hermes.int
             <*> optionalKey "oauth" mcpOAuthConfigDecoder
             <*> defaultKey McpProtocolAuto "protocol" protocolPreferenceDecoder
+            <*> defaultKey False "roots" Hermes.bool
+            <*> defaultKey False "sampling" Hermes.bool
+            <*> optionalKey "logLevel" mcpLogLevelDecoder
 
 protocolPreferenceDecoder :: Hermes.Decoder McpProtocolPreference
 protocolPreferenceDecoder =
@@ -418,6 +440,24 @@ protocolPreferenceText = \case
     McpProtocolAuto -> "auto"
     McpProtocolModern -> "modern"
     McpProtocolLegacy -> "legacy"
+
+mcpLogLevelDecoder :: Hermes.Decoder McpLogLevel
+mcpLogLevelDecoder =
+    Hermes.text >>= \case
+        "debug" -> pure McpLogDebug
+        "info" -> pure McpLogInfo
+        "notice" -> pure McpLogNotice
+        "warning" -> pure McpLogWarning
+        "error" -> pure McpLogError
+        "critical" -> pure McpLogCritical
+        "alert" -> pure McpLogAlert
+        "emergency" -> pure McpLogEmergency
+        other ->
+            fail
+                (Text.unpack
+                    ("unknown MCP log level: "
+                        <> other
+                        <> " (expected debug, info, notice, warning, error, critical, alert, or emergency)"))
 
 mcpOAuthConfigDecoder :: Hermes.Decoder McpOAuthConfig
 mcpOAuthConfigDecoder =

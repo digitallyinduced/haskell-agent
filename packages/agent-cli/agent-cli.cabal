@@ -216,6 +216,7 @@ library
                     , Agent.CLI.MetaConsole
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.McpElicitation
+                    , Agent.CLI.McpSampling
                     , Agent.CLI.McpManager
                     , Agent.CLI.NativeAgents
                     , Agent.CLI.Notification
@@ -547,6 +548,7 @@ test-suite agent-cli-test
                     , Agent.CLI.LearnedSkillsSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.McpManagerSpec
+                    , Agent.CLI.McpSamplingSpec
                     , Agent.CLI.MetaConsoleSpec
                     , Agent.CLI.MetaConsoleRuntimeSpec
                     , Agent.CLI.ModelPickerSpec

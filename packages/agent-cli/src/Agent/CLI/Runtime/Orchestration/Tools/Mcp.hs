@@ -7,6 +7,7 @@ module Agent.CLI.Runtime.Orchestration.Tools.Mcp
 import Agent.CLI.Config
     ( HarnessConfig(..), McpServerConfig(..)
     , mcpServersForRuntime, useProgressiveMcp )
+import Agent.CLI.FileUri (fileUri)
 import Agent.CLI.McpElicitation (cliMcpElicitation)
 import Agent.CLI.McpOAuthStore (mcpOAuthStorePath)
 import Agent.CLI.McpStatus
@@ -30,7 +31,8 @@ import qualified Agent.MCP as MCP
 import Agent.OsPath (unsafeToFilePath)
 import Agent.TUI.Model (UiEvent(..))
 import Agent.Tools.Types (withToolHumanInputWait)
-import Control.Exception.Safe (SomeException, bracketOnError, try)
+import Control.Exception.Safe
+    ( SomeException, bracketOnError, finally, onException, try )
 import Control.Monad (forM_, unless, when)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
@@ -91,6 +93,9 @@ mcpConfiguration AgentToolsRequest
             , MCP.mcpServerRequestTimeoutSeconds =
                 config.mcpRequestTimeoutSeconds
             , MCP.mcpServerProtocol = config.mcpProtocol
+            , MCP.mcpServerRootsEnabled = config.mcpRoots
+            , MCP.mcpServerSamplingEnabled = config.mcpSampling
+            , MCP.mcpServerLogLevel = config.mcpLogLevel
             }
         | (label, config) <-
             mcpServersForRuntime
@@ -138,6 +143,27 @@ acquireMcpRuntime request@AgentToolsRequest
             else Just \elicitation ->
                 withToolHumanInputWait baseToolEnv $
                     cliMcpElicitation stdinControl uiRuntimeRef elicitation)
+    writeIORef processRuntime.processMcpRoots $
+        Just \_serverName ->
+            pure
+                [ MCP.McpRoot
+                    { MCP.rootUri = fileUri (unsafeToFilePath request.cwd)
+                    , MCP.rootName = Nothing
+                    }
+                ]
+    writeIORef processRuntime.processMcpSampling $
+        if any
+            (\MCP.McpServerConfig
+                { MCP.mcpServerSamplingEnabled = samplingEnabled
+                } -> samplingEnabled)
+            runtimeMcpServerConfigs
+            then Just \_ ->
+                pure (Left "MCP sampling is unavailable until the model session is ready")
+            else Nothing
+    let clearMcpHostHooks = do
+            writeIORef processRuntime.processMcpElicitation Nothing
+            writeIORef processRuntime.processMcpRoots Nothing
+            writeIORef processRuntime.processMcpSampling Nothing
     let enqueueMcpSnapshot statuses =
             unless (null statuses) do
                 instructions <-
@@ -208,17 +234,24 @@ acquireMcpRuntime request@AgentToolsRequest
                                         <> Text.pack (show exception))
                             Right lease -> pure lease
             bracketOnError
-                acquireMcpLease
-                MCP.releaseMcpFleetLease
+                (acquireMcpLease `onException` clearMcpHostHooks)
+                (\lease ->
+                    MCP.releaseMcpFleetLease lease
+                        `finally` clearMcpHostHooks)
                 \runtimeMcpLease -> finishRuntime runtimeMcpLease.mcpLeaseFleet
-                    (MCP.releaseMcpFleetLease runtimeMcpLease)
+                    (MCP.releaseMcpFleetLease runtimeMcpLease
+                        `finally` clearMcpHostHooks)
         else do
             fleet <-
-                try @_ @SomeException
+                ( try @_ @SomeException
                     (MCP.startMcpFleetWithInMemory
                         MCP.defaultMcpHostHooks
                             { MCP.mcpHostElicit =
                                 readIORef processRuntime.processMcpElicitation
+                            , MCP.mcpHostRoots =
+                                readIORef processRuntime.processMcpRoots
+                            , MCP.mcpHostSample =
+                                readIORef processRuntime.processMcpSampling
                             }
                         (\names ->
                             setStartupNotice startup.startupFullscreen
@@ -236,7 +269,9 @@ acquireMcpRuntime request@AgentToolsRequest
                                 ("Failed to initialize MCP tools: "
                                     <> Text.pack (show exception))
                         Right value -> pure value
-            finishRuntime fleet (MCP.closeMcpFleet fleet)
+                ) `onException` clearMcpHostHooks
+            finishRuntime fleet
+                (MCP.closeMcpFleet fleet `finally` clearMcpHostHooks)
 
 integrationsMcpConfig :: MCP.McpServerConfig
 integrationsMcpConfig = MCP.McpServerConfig
@@ -249,4 +284,7 @@ integrationsMcpConfig = MCP.McpServerConfig
     , MCP.mcpServerStartupTimeoutSeconds = 10
     , MCP.mcpServerRequestTimeoutSeconds = 60
     , MCP.mcpServerProtocol = MCP.McpProtocolModern
+    , MCP.mcpServerRootsEnabled = False
+    , MCP.mcpServerSamplingEnabled = False
+    , MCP.mcpServerLogLevel = Nothing
     }

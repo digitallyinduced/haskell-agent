@@ -1343,6 +1343,9 @@ fakeMcpConfig executable project delayMillis index = McpServerConfig
     -- Keep the fixture on one deterministic initialize/tools-list handshake;
     -- Auto starts with the separate modern server/discover probe.
     , mcpServerProtocol = McpProtocolLegacy
+    , mcpServerRootsEnabled = False
+    , mcpServerSamplingEnabled = False
+    , mcpServerLogLevel = Nothing
     }
 
 runFakeMcpServer :: Int -> Int -> IO ()

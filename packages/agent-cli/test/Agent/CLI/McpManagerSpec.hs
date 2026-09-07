@@ -117,4 +117,7 @@ server enabled command = McpServerConfig
     , mcpRequestTimeoutSeconds = 60
     , mcpOAuth = Nothing
     , mcpProtocol = McpProtocolAuto
+    , mcpRoots = False
+    , mcpSampling = False
+    , mcpLogLevel = Nothing
     }

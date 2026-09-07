@@ -331,6 +331,9 @@ promptNewServer config =
                                         , mcpRequestTimeoutSeconds = 60
                                         , mcpOAuth = Nothing
                                         , mcpProtocol = McpProtocolAuto
+                                        , mcpRoots = False
+                                        , mcpSampling = False
+                                        , mcpLogLevel = Nothing
                                         }
                                     )
 
