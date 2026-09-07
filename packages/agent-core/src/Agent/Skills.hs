@@ -73,10 +73,12 @@ import System.FilePath
     , (</>)
     )
 
+-- | Filesystem skill tree owned by this harness.
+-- Other coding harnesses keep skills under vendor directories such as
+-- @.codex/skills@, @.grok/skills@, and @.claude/skills@; those are not
+-- discovered.
 data SkillOrigin
     = AgentSkills
-    | GrokSkills
-    | CodexSkills
     deriving (Eq, Ord, Show)
 
 data SkillScope
@@ -314,31 +316,21 @@ skillRoots options = do
                 directoryChain (unsafeEncodeUtf projectRoot) (unsafeEncodeUtf cwd)
         projectRoots =
             [ ( RepositorySkill depth (dir == cwd)
-              , origin
-              , dir </> relativeRoot origin
+              , AgentSkills
+              , dir </> agentSkillsRelativeRoot
               )
             | (depth, dir) <- zip [0..] dirs
-            , origin <- origins
             ]
         userRoots =
-            [ (UserSkill, origin, home </> userRoot origin)
-            | origin <- origins
-            ]
+            [(UserSkill, AgentSkills, home </> agentSkillsRelativeRoot)]
         builtinRoots =
             [ (BuiltinSkill, origin, unsafeToFilePath root)
             | (origin, root) <- options.skillsBuiltinRoots
             ]
     pure (projectRoots <> userRoots <> builtinRoots)
-  where
-    origins = [AgentSkills, GrokSkills, CodexSkills]
-    relativeRoot = \case
-        AgentSkills -> ".agents" </> "skills"
-        GrokSkills -> ".grok" </> "skills"
-        CodexSkills -> ".codex" </> "skills"
-    userRoot = \case
-        AgentSkills -> ".agents" </> "skills"
-        GrokSkills -> ".grok" </> "skills"
-        CodexSkills -> ".codex" </> "skills"
+
+agentSkillsRelativeRoot :: FilePath
+agentSkillsRelativeRoot = ".agents" </> "skills"
 
 findSkillFiles :: Int -> FilePath -> IO ([FilePath], [SkillWarning])
 findSkillFiles maxDepth root = do
@@ -647,9 +639,7 @@ skillSortKey skill =
                     UserSkill -> (0, 0)
                     RepositorySkill d _ -> (1, d)
                 sourceOriginRank = case origin of
-                    AgentSkills -> 3
-                    GrokSkills -> 2
-                    CodexSkills -> 1
+                    AgentSkills -> 1
             in (rank, sourceDepth, sourceOriginRank)
 
 modelVisibleSkills :: SkillCatalog -> [Skill]
@@ -747,8 +737,6 @@ scopeQualifier skill = case skill.skillSource of
 originSlug :: SkillOrigin -> Text
 originSlug = \case
     AgentSkills -> "agents"
-    GrokSkills -> "grok"
-    CodexSkills -> "codex"
 
 sourceSlug :: Skill -> Text
 sourceSlug skill = case skill.skillSource of

@@ -39,6 +39,28 @@ spec = describe "Agent.Skills" do
             map (.skillDescription) catalog.catalogSkills
                 `shouldBe` ["local commit", "root review", "user commit"]
 
+    it "does not discover skills from other harness directories" do
+        withTempDir \dir -> do
+            let home = dir </> "home"
+                repo = dir </> "repo"
+            writeSkill (home </> ".codex" </> "skills" </> "codex-home")
+                "codex-home" "codex home skill" []
+            writeSkill (home </> ".grok" </> "skills" </> "grok-home")
+                "grok-home" "grok home skill" []
+            writeSkill (home </> ".claude" </> "skills" </> "claude-home")
+                "claude-home" "claude home skill" []
+            writeSkill (repo </> ".codex" </> "skills" </> "codex-repo")
+                "codex-repo" "codex repo skill" []
+            writeSkill (repo </> ".grok" </> "skills" </> "grok-repo")
+                "grok-repo" "grok repo skill" []
+            writeSkill (repo </> ".claude" </> "skills" </> "claude-repo")
+                "claude-repo" "claude repo skill" []
+            writeSkill (repo </> ".agents" </> "skills" </> "ours")
+                "ours" "harness skill" []
+            catalog <- discoverSkills (options home repo repo)
+            map (.skillName) catalog.catalogSkills `shouldBe` ["ours"]
+            catalog.catalogWarnings `shouldBe` []
+
     it "parses Grok fields and Codex invocation policy" do
         withTempDir \dir -> do
             let home = dir </> "home"
@@ -164,7 +186,7 @@ spec = describe "Agent.Skills" do
 
     it "builds bare and qualified names while reserving built-ins" do
         let rootSkill = fakeSkill "review" "root" (RepositorySkill 0 False) AgentSkills
-            userSkill = fakeSkill "review" "user" UserSkill GrokSkills
+            userSkill = fakeSkill "review" "user" UserSkill AgentSkills
             uniqueSkill = fakeSkill "deploy" "deploy" UserSkill AgentSkills
             catalog = SkillCatalog [rootSkill, userSkill, uniqueSkill] []
             invocations = buildSkillInvocations ["review"] catalog

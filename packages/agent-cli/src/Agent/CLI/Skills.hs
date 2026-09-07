@@ -460,8 +460,6 @@ skillSourceLabel skill =
         RepositorySkill _ False -> "repo"
     originLabel = \case
         AgentSkills -> "agents"
-        GrokSkills -> "grok"
-        CodexSkills -> "codex"
 
 formatSkillsListing
     :: Bool
