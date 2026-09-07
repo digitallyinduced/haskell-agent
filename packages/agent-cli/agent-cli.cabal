@@ -186,6 +186,7 @@ library
                     , Agent.CLI.ComputerUse.Linux.X11
                     , Agent.CLI.ComputerUse.Accessibility
                     , Agent.CLI.Config
+                    , Agent.CLI.McpCatalog
                     , Agent.CLI.McpOAuthStore
                     , Agent.CLI.McpOAuth
                     , Agent.CLI.Database
@@ -549,6 +550,7 @@ test-suite agent-cli-test
                     , Agent.CLI.LoginSpec
                     , Agent.CLI.LearnedSkillsSpec
                     , Agent.CLI.MarkdownSpec
+                    , Agent.CLI.McpCatalogSpec
                     , Agent.CLI.McpManagerSpec
                     , Agent.CLI.McpSamplingSpec
                     , Agent.CLI.MetaConsoleSpec

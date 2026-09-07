@@ -26,6 +26,21 @@ The harness is an MCP client for the current specification revision
 }
 ```
 
+Manage configured servers from the command line without starting a session:
+
+```
+agent-cli mcp list
+agent-cli mcp list --json
+agent-cli mcp enable github
+agent-cli mcp disable github
+```
+
+`list` prints every server in `~/.haskell-agent/config.json`, marking disabled
+ones and never showing environment values. `enable` / `disable` persist
+`enabled` on that named entry; they are idempotent and exit 1 when the name
+is not configured. The next session (or `/mcp` `r` in a running one) picks up
+the change.
+
 In an interactive session, `/mcp` opens the server manager. Use the arrow
 keys or `j`/`k` to navigate, Enter to inspect tools, `a` to add a server,
 Space to enable or disable it, `x` to remove it, and `r` to restart the MCP
