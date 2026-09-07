@@ -72,6 +72,7 @@ import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception.Safe (mask, onException)
 import Control.Monad (void)
 import Data.Aeson (Value(..), object, (.=))
+import Data.List (sortOn)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -732,20 +733,50 @@ listAgentsTool ctx = jsonTool "list_agents" listAgentsDescription
 listAgentsDescription :: Text
 listAgentsDescription =
     "List live agents in the current root thread tree. Optionally filter by \
-    \task-path prefix."
+    \task-path prefix. Returns readable labeled text, not JSON."
 
 runListAgents :: MultiAgentContext -> ListAgentsArgs -> IO (Either Text Text)
 runListAgents ctx args = do
     agents <- listAgents ctx.multiRegistry args.pathPrefix
-    let payload =
-            [ object
-                [ "agent_name" .= taskPathText path
-                , "agent_id" .= agentId.unSubagentId
-                , "agent_status" .= encodeStatus status
-                ]
-            | (path, agentId, status) <- agents
-            ]
-    pure $ Right $ encodeJson $ object [ "agents" .= payload ]
+    pure $ Right $ renderAgentList agents
+
+renderAgentList :: [(TaskPath, SubagentId, SubagentStatus)] -> Text
+renderAgentList agents =
+    case sortOn (\(path, _, _) -> taskPathText path) agents of
+        [] -> "(no live agents)"
+        sorted -> Text.intercalate "\n\n" (map renderAgentListEntry sorted)
+
+renderAgentListEntry :: (TaskPath, SubagentId, SubagentStatus) -> Text
+renderAgentListEntry (path, agentId, status) =
+    Text.intercalate "\n" $
+        [ "Agent: " <> taskPathText path
+        , "  ID: " <> agentId.unSubagentId
+        , "  Status: " <> agentListStatus status
+        ]
+            <> agentListDetails status
+
+agentListStatus :: SubagentStatus -> Text
+agentListStatus = \case
+    Pending -> "pending_init"
+    Running -> "running"
+    Completed _ -> "completed"
+    Errored _ -> "errored"
+    Interrupted -> "interrupted"
+    Closed -> "shutdown"
+    NotFound -> "not_found"
+
+agentListDetails :: SubagentStatus -> [Text]
+agentListDetails = \case
+    Completed (Just text) -> labeledField "Final" text
+    Errored err -> labeledField "Error" err
+    _ -> []
+
+labeledField :: Text -> Text -> [Text]
+labeledField label value =
+    case Text.lines (Text.strip value) of
+        [] -> []
+        first : rest ->
+            ("  " <> label <> ": " <> first) : map ("    " <>) rest
 
 --------------------------------------------------------------------------------
 -- interrupt_agent

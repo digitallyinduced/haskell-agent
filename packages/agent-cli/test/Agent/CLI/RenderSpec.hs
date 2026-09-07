@@ -302,6 +302,10 @@ spec = do
                 "{\"agents\":[{\"agent_name\":\"/root/reviewer\",\
                 \\"agent_id\":\"agent-1\",\"agent_status\":\"running\"}]}"
                 `shouldBe` "/root/reviewer · running"
+            formatToolOutput agents
+                "Agent: /root/reviewer\n  ID: agent-1\n  Status: running"
+                `shouldBe`
+                    "Agent: /root/reviewer\n  ID: agent-1\n  Status: running"
 
         it "falls back to the original output when JSON is malformed" do
             let call = functionToolCall "c1" "collaboration.spawn_agent" "{}"
