@@ -8,9 +8,18 @@ module Agent.CLI.Session.Interaction
     , syncFullscreenPrompt
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    , modifySessionRequestOptions
+    )
+import Agent.CLI.ActiveAccount
+    ( ActiveAccount(..)
+    , readActiveAccount
+    )
 import Agent.CLI.Btw
     ( formatBtwError
     , runBtwWithCancel
+    , sideCallSnapshot
     )
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Command
@@ -43,6 +52,7 @@ import Agent.CLI.Session
     , writeSessionMeta
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Session.History
     ( readLiveAttachments
     , readLiveTranscript
@@ -72,9 +82,7 @@ import Agent.TUI.Model
     )
 import Control.Monad (forM_)
 import Data.IORef
-    ( modifyIORef'
-    , newIORef
-    , readIORef
+    ( readIORef
     , writeIORef
     )
 import Data.Maybe (isJust)
@@ -88,11 +96,11 @@ syncFullscreenPrompt env = do
     syncFullscreenContext env
     forM_ env.sessionFullscreen \runtime -> do
         planState <- readIORef env.sessionPlanMode.planStateRef
-        params <- readIORef env.sessionParams
+        params <- readSessionRequestParams env.sessionParams
         policy <- readIORef env.sessionPolicy
-        account <- readIORef env.sessionAccount
-        usage <- readIORef env.sessionUsage
-        attachments <- readLiveAttachments env.sessionConversation
+        account <- (.activeAccountLabel) <$> readActiveAccount env.sessionAccount
+        usage <- readIORef env.sessionState.stateUsage
+        attachments <- readLiveAttachments env.sessionState.stateConversation
         emitUiEvent runtime $ UiSetPrompt $
             buildPromptState
                 (dialectId env.sessionDialect)
@@ -110,8 +118,8 @@ syncFullscreenContext :: SessionEnv -> IO ()
 syncFullscreenContext env =
     forM_ env.sessionFullscreen \runtime -> do
         occupancy <- readIORef env.sessionContextOccupancy
-        params <- readIORef env.sessionParams
-        history <- readLiveTranscript env.sessionConversation
+        params <- readSessionRequestParams env.sessionParams
+        history <- readLiveTranscript env.sessionState.stateConversation
         contextWindow <- env.sessionContextWindow
         emitUiEvent runtime $
             UiSetContextUsage
@@ -150,7 +158,7 @@ buildPromptState activeDialect params planState policy account accountSelectable
 
 setSessionEffort :: SessionEnv -> ReasoningEffort -> IO ()
 setSessionEffort env level = do
-    modifyIORef' env.sessionParams (setReasoningEffort level)
+    modifySessionRequestOptions env.sessionParams (setReasoningEffort level)
     let levelText = reasoningEffortText level
     case env.sessionFullscreen of
         Just runtime ->
@@ -189,7 +197,9 @@ runBtwQuestion registerCancel env question = do
         stdoutHandle = env.sessionRender.renderStdout
         stderrHandle = env.sessionRender.renderStderr
     color <- resolveColor stdoutHandle
-    transcriptRef <- newIORef =<< readLiveTranscript env.sessionConversation
+    params <- readSessionRequestParams env.sessionParams
+    transcript <- readLiveTranscript env.sessionState.stateConversation
+    let snapshot = sideCallSnapshot params transcript
     forM_ fullscreen \runtime ->
         emitUiEvent runtime
             (UiSetNotice (Just (progressNotice "btw · asking…")))
@@ -205,13 +215,12 @@ runBtwQuestion registerCancel env question = do
                                     | otherwise ->
                                         withEscCancel
                                             cancel
-                                            env.sessionEscPaused
+                                            env.sessionStdinControl
                                             action
                                 Just _ -> action
                     else action)
             env.sessionBtwBackend
-            env.sessionParams
-            transcriptRef
+            snapshot
             question
     forM_ fullscreen \runtime ->
         emitUiEvent runtime (UiSetNotice Nothing)

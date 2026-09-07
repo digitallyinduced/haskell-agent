@@ -230,6 +230,7 @@ schemaValue = \case
     FreeformApplyPatchSchema -> object []
     FreeformGrammarSchema _ _ -> object []
     HostedComputerSchema -> object []
+    HostedComputerFunctionSchema _ -> object []
 
 hasJsonSchema :: ToolSchema -> Bool
 hasJsonSchema = \case
@@ -238,6 +239,7 @@ hasJsonSchema = \case
     FreeformApplyPatchSchema -> False
     FreeformGrammarSchema _ _ -> False
     HostedComputerSchema -> False
+    HostedComputerFunctionSchema _ -> False
 
 isStaticallyReadOnly :: ApprovalRule -> Bool
 isStaticallyReadOnly = \case
@@ -247,10 +249,12 @@ isStaticallyReadOnly = \case
     AlwaysConfirm -> False
     ClassifyReadOnly _ -> False
     ClassifyApproval _ -> False
+    AutoApprove original -> isStaticallyReadOnly original
 
 isStaticallyFreshApproval :: ApprovalRule -> Bool
 isStaticallyFreshApproval = \case
     AlwaysConfirm -> True
+    AutoApprove original -> isStaticallyFreshApproval original
     _ -> False
 
 requestedProtocolVersion :: Maybe Value -> Text

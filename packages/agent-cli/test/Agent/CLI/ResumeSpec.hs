@@ -14,7 +14,11 @@ import Agent.OpenAI.Compaction (userTextItem)
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
     ( CompactionItem(..)
+    , MessageContent(..)
+    , ResponseContentPart(..)
     , ResponseItem(..)
+    , ResponseMessage(..)
+    , ResponseRole(..)
     )
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
 import Data.IORef (newIORef, readIORef, writeIORef)
@@ -110,34 +114,37 @@ spec = do
                 , legacyGateway
                 ]
 
-        it "offers direct sessions only while disconnected" do
+        it "offers every session while disconnected" do
             map (.metaId)
                 (filterResumeSessionsForBoundary Nothing sessions)
-                `shouldBe` ["direct"]
+                `shouldBe` ["direct", "allowed", "other", "legacy"]
 
-        it "offers only sessions from the exact gateway credential" do
+        it "offers every session while connected to a gateway" do
             map (.metaId)
                 (filterResumeSessionsForBoundary
                     (Just "gateway-a")
                     sessions)
-                `shouldBe` ["allowed"]
+                `shouldBe` ["direct", "allowed", "other", "legacy"]
 
-        it "rejects resume metadata before startup can use it" do
+        it "allows resume metadata from another gateway credential" do
             validateResumeMetaForBoundary
                 (Just "gateway-a")
                 (gateway "gateway-b" "other")
-                `shouldBe`
-                    Left
-                        "This session belongs to a different organization \
-                        \gateway credential and cannot be resumed. Start a new \
-                        \session."
+                `shouldBe` Right ()
 
     describe "resumeNeedsGeneratedContext" do
         it "requeues context after compact, clear, and new boundaries" do
             map
                 (\marker ->
                     resumeNeedsGeneratedContext
-                        [sampleTurn { turnUserText = marker }])
+                        [sampleTurn
+                            { turnUserText = marker
+                            , turnEffect =
+                                if marker == "/compact"
+                                    then TranscriptReplace
+                                    else TranscriptReset
+                            }
+                        ])
                 ["/compact", "/clear", "/new"]
                 `shouldBe` [True, True, True]
 
@@ -148,11 +155,18 @@ spec = do
                         , encryptedContent = Nothing
                         }
             resumeNeedsGeneratedContext
-                [sampleTurn { turnItems = [checkpoint] }]
+                [sampleTurn
+                    { turnItems = [checkpoint]
+                    , turnEffect = TranscriptReplace
+                    }
+                ]
                 `shouldBe` True
 
         it "repairs old compacted sessions until regenerated context persists" do
-            let boundary = sampleTurn { turnUserText = "/compact" }
+            let boundary = sampleTurn
+                    { turnUserText = "/compact"
+                    , turnEffect = TranscriptReplace
+                    }
                 ordinary = sampleTurn
                     { turnUserText = "continue"
                     , turnItems = [userTextItem "ordinary input"]
@@ -169,7 +183,10 @@ spec = do
                 `shouldBe` False
 
         it "does not mistake ephemeral harness context for a reload" do
-            let boundary = sampleTurn { turnUserText = "/compact" }
+            let boundary = sampleTurn
+                    { turnUserText = "/compact"
+                    , turnEffect = TranscriptReplace
+                    }
                 ephemeral text = sampleTurn
                     { turnUserText = "continue"
                     , turnItems = [userTextItem text]
@@ -185,6 +202,94 @@ spec = do
 
         it "does not requeue context without a transcript boundary" do
             resumeNeedsGeneratedContext [sampleTurn] `shouldBe` False
+
+        it "does not infer a boundary from current assistant text" do
+            let ordinarySummaryHeading = sampleTurn
+                    { turnItems =
+                        [ MessageItem ResponseMessage
+                            { messageId = Nothing
+                            , content = MessageContentParts
+                                [ OutputTextPart
+                                    "Compacted conversation summary:\nordinary reply"
+                                    Nothing
+                                    Nothing
+                                ]
+                            , role = RoleAssistant
+                            , status = Nothing
+                            , phase = Nothing
+                            , passthrough = Nothing
+                            }
+                        ]
+                    , turnEffect = TranscriptAppend
+                    }
+            resumeNeedsGeneratedContext [ordinarySummaryHeading]
+                `shouldBe` False
+
+    describe "resolveSessionInitialContext" do
+        it "requests generated context for a fresh session" do
+            let initial = resolveSessionInitialContext False False Nothing
+            initial.initialContextItems `shouldBe` []
+            initial.initialContextResumeNeedsFresh `shouldBe` False
+            initial.initialContextPrevious `shouldBe` Nothing
+            initial.initialContextNeeded `shouldBe` True
+            initial.initialContextMayRestoreSnapshot `shouldBe` False
+
+        it "reuses a compatible response chain without regenerating context" do
+            let meta =
+                    (sampleMeta "abc" "first")
+                        { metaLastResponseId = Just "response-1"
+                        }
+                initial =
+                    resolveSessionInitialContext
+                        False
+                        False
+                        (Just (meta, [sampleTurn]))
+            initial.initialContextPrevious `shouldBe` Just "response-1"
+            initial.initialContextNeeded `shouldBe` False
+            initial.initialContextMayRestoreSnapshot `shouldBe` False
+
+        it "drops the response chain when the provider target changes" do
+            let meta =
+                    (sampleMeta "abc" "first")
+                        { metaLastResponseId = Just "response-1"
+                        }
+                initial =
+                    resolveSessionInitialContext
+                        False
+                        True
+                        (Just (meta, [sampleTurn]))
+            initial.initialContextPrevious `shouldBe` Nothing
+            initial.initialContextNeeded `shouldBe` False
+            initial.initialContextMayRestoreSnapshot `shouldBe` False
+
+        it "requests generated context after a transcript reset" do
+            let boundary =
+                    sampleTurn
+                        { turnEffect = TranscriptReset
+                        }
+                initial =
+                    resolveSessionInitialContext
+                        False
+                        False
+                        (Just (sampleMeta "abc" "first", [boundary]))
+            initial.initialContextResumeNeedsFresh `shouldBe` True
+            initial.initialContextNeeded `shouldBe` True
+            initial.initialContextMayRestoreSnapshot `shouldBe` False
+
+        it "marks a saved prompt snapshot as a possible fast resume" do
+            let meta =
+                    (sampleMeta "abc" "first")
+                        { metaLastResponseId = Nothing
+                        , metaPromptSnapshot =
+                            Just (error "snapshot value should remain lazy")
+                        }
+                initial =
+                    resolveSessionInitialContext
+                        False
+                        False
+                        (Just (meta, []))
+            initial.initialContextNeeded `shouldBe` True
+            initial.initialContextMayRestoreSnapshot `shouldBe` True
 
     describe "applyResumeKey" do
         let entries =

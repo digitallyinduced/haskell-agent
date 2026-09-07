@@ -10,8 +10,12 @@ module Agent.CLI.Turn
     , takeGrokFirstTurnContext
     ) where
 
+import Agent.CLI.Session.Request
+    ( withPersistentSessionRequest
+    )
 import Agent.Cancel (resetCancel)
 import Agent.CLI.CancelWatch (withEscCancel)
+import Agent.CLI.Compaction (AutomaticCompactionBoundary)
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.Plan (extractProposedPlan, planDecisionFollowUp)
 import Agent.CLI.ProviderFallback (isProviderUnavailable)
@@ -65,15 +69,17 @@ import Agent.CLI.Session
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
     )
-import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
+import Agent.CLI.SessionEnv
+    ( PreparedWorkspaceEnvironment(..)
+    , SessionEnv(..)
+    )
 import Agent.CLI.Session.History
     ( currentLiveTranscriptGeneration
     , durableTranscriptCheckpoint
     , evictLiveTranscript
     , readLivePreviousResponseId
     , withLiveTranscript
-    , writeLivePreviousResponseId
-    , writeLiveTranscript
     )
 import Agent.CLI.SessionTitle
     ( SessionTitleResult(..)
@@ -101,42 +107,32 @@ import Agent.CLI.Timestamp
     , stripBracketedTimestamps
     )
 import Agent.CLI.TurnState
-    ( ConversationOutcome(..)
-    , ConversationPatch(..)
-    , FieldUpdate(..)
-    , GrokContextUpdate(..)
+    ( ConversationPatch
     , PreparedTurn(..)
-    , StartupUpdate(..)
-    , TurnAbort(..)
-    , finishConversation
-    , interruptedTurnItems
-    , rebasePreparedTurn
-    , restoreStartupContext
     , turnInputsWithContext
-    , turnNewItems
     , turnReplacesTranscript
-    , uncommittedDisplayItems
     )
+import Agent.Runtime.TurnEngine qualified as Engine
+import Agent.Runtime.TurnExecution qualified as Execution
+import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.Dialect (DialectId(..), dialectId)
+import Agent.Error (ApiError)
 import Agent.Loop
     ( LoopConfig(..)
     , LoopExecution(..)
     , LoopError(..)
-    , LoopProgress(..)
     , LoopResult(..)
-    , TurnCompletion(..)
     , TurnInput(..)
     , TurnOutput(..)
     , addTokenUsage
-    , runLoopInputsDetailed
     , turnInputImages
     )
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
-    ( ResponseCreateParams(model, promptCacheKey)
-    , ResponseItem
+    ( ResponseItem
     )
 import Agent.Store.Postgres (normalizePostgresTimestamp)
+import Agent.Subagents (RootTurnId)
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
     , PlanCompletion(..)
@@ -151,8 +147,10 @@ import Agent.Tools.PlanMode
     , writePlanMarkdown
     )
 import Agent.Tools.TaskPlan
-    ( restoreTaskPlanReminder
+    ( TaskPlanReminder
+    , restoreTaskPlanReminder
     , takeTaskPlanReminder
+    , taskPlanReminderText
     )
 import Agent.OsPath (toText, unsafeToFilePath)
 import Control.Monad (forM_, when)
@@ -205,17 +203,17 @@ runOneTurnWithContext includeTurnContext env promptText inputs = do
     -- Automatic compaction is scoped to one enclosing user turn. A committed
     -- boundary from an earlier attempt is already represented by the live and
     -- durable transcripts and must not affect this turn's suffix calculation.
-    writeIORef env.sessionAutomaticCompaction Nothing
+    writeIORef env.sessionState.stateAutomaticCompaction Nothing
     bracket_
         env.sessionBeginWindowTitleBusy
         env.sessionEndWindowTitleBusy
         (bracket_
             env.sessionBeginTurnActivity
             env.sessionEndTurnActivity
-            (withLiveTranscript env.sessionConversation \beforeItems ->
+            (withLiveTranscript env.sessionState.stateConversation \beforeItems ->
                 runOneTurnBusy
                     includeTurnContext env beforeItems promptText inputs))
-        `finally` writeIORef env.sessionAutomaticCompaction Nothing
+        `finally` writeIORef env.sessionState.stateAutomaticCompaction Nothing
 
 timestampConversationBounds
     :: Persistence
@@ -240,53 +238,76 @@ runOneTurnBusy
     -> Text
     -> [TurnInput]
     -> IO TurnResult
-runOneTurnBusy includeTurnContext env@SessionEnv
-    { sessionLoop = config
-    , sessionRender = render
-    , sessionConversation = conversationRef
-    , sessionPersist = persist
-    , sessionPlanMode = planMode
-    , sessionTaskPlan = taskPlan
-    , sessionStartupContext = startupContext
-    , sessionGrokFirstTurnContext = grokFirstTurnContext
-    , sessionBackground = background
-    , sessionEscPaused = escPaused
-    , sessionInterrupt = interrupt
-    , sessionStoreRoot = storeRoot
-    , sessionUsage = usageRef
-    , sessionLastAssistant = lastAssistantRef
-    , sessionTerminal = terminal
-    , sessionFullscreen = fullscreen
-    , sessionSetWindowTitle = setWindowTitle
-    , sessionBeginSubagentTurn = beginSubagentTurn
-    , sessionFinishSubagentTurn = finishSubagentTurn
-    , sessionAbortSubagentTurn = abortSubagentTurn
-    , sessionOnPersisted = onPersisted
-    } beforeItems promptText inputs = do
-  let stdoutHandle = render.renderStdout
-      stderrHandle = render.renderStderr
+runOneTurnBusy includeTurnContext env@SessionEnv{}
+        beforeItems promptText inputs = do
+  let config = env.sessionLoop
+      fullscreen = env.sessionFullscreen
+      request = BusyTurnRequest
+          { busyIncludeTurnContext = includeTurnContext
+          , busyEnv = env
+          , busyBeforeItems = beforeItems
+          , busyPromptText = promptText
+          , busyInputs = inputs
+          }
   -- Clear the prior turn before publishing this flag to Ctrl-C / Esc.
   -- Resetting inside runLoopInputs could erase the one-shot Esc signal.
   resetCancel config.loopCancel
   writeIORef env.sessionRestartEffort Nothing
-  withTurnCancel interrupt config.loopCancel $
-    (if isJust fullscreen || background
+  withTurnCancel env.sessionInterrupt config.loopCancel $
+    (if isJust fullscreen || env.sessionBackground
         then id
-        else withEscCancel config.loopCancel escPaused) do
+        else withEscCancel config.loopCancel env.sessionStdinControl) do
+    prepared <- prepareBusyTurn request
+    executed <- executeBusyTurn request prepared
+    finishBusyTurn executed
+
+data BusyTurnRequest = BusyTurnRequest
+    { busyIncludeTurnContext :: Bool
+    , busyEnv :: SessionEnv
+    , busyBeforeItems :: [ResponseItem]
+    , busyPromptText :: Text
+    , busyInputs :: [TurnInput]
+    }
+
+data PreparedBusyTurn = PreparedBusyTurn
+    { preparedInitialPlanState :: PlanModeState
+    , preparedPreviousResponseId :: Maybe Text
+    , preparedTaskPlanReminder :: Maybe TaskPlanReminder
+    , preparedConversationTurn :: PreparedTurn
+    }
+
+data ExecutedBusyTurn = ExecutedBusyTurn
+    { executedRequest :: BusyTurnRequest
+    , executedPreparation :: PreparedBusyTurn
+    , executedStartedAt :: Maybe UTCTime
+    , executedWallStarted :: UTCTime
+    , executedRootTurnId :: Maybe RootTurnId
+    , executedLoop :: LoopExecution
+    , executedAutomaticCompaction :: Maybe AutomaticCompactionBoundary
+    , executedCommittedTurn :: PreparedTurn
+    , executedFinalization :: Engine.FinalizedTurn
+    , executedFinishedAt :: UTCTime
+    }
+
+prepareBusyTurn :: BusyTurnRequest -> IO PreparedBusyTurn
+prepareBusyTurn request = do
+    let env = request.busyEnv
+        planMode = env.sessionPlanMode
+        taskPlan = env.sessionTaskPlan
+        grokFirstTurnContext = env.sessionState.stateGrokFirstTurnContext
     applyPendingSessionTitles env
     initialPlanState <- readIORef planMode.planStateRef
     when (initialPlanState == PlanPending) (activatePlanMode planMode)
-    prev <- readLivePreviousResponseId conversationRef
-    when includeTurnContext $
+    prev <- readLivePreviousResponseId env.sessionState.stateConversation
+    when request.busyIncludeTurnContext $
         env.sessionRecordImageGenerationInputs
-            (concatMap turnInputImages inputs)
+            (concatMap turnInputImages request.busyInputs)
     pendingStartup <-
-        if includeTurnContext
-            then atomicModifyIORef' startupContext \pendingCtx ->
-                (Nothing, pendingCtx)
+        if request.busyIncludeTurnContext
+            then RuntimeState.takeStartupContext env.sessionState
             else pure Nothing
     planReminder <-
-        if includeTurnContext
+        if request.busyIncludeTurnContext
             then do
                 planActive <- isPlanModeActive planMode
                 planPath <- planFilePath planMode
@@ -301,18 +322,17 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         else Nothing
             else pure Nothing
     taskPlanReminder <-
-        if includeTurnContext
+        if request.busyIncludeTurnContext
             then maybe (pure Nothing) takeTaskPlanReminder taskPlan
             else pure Nothing
-    let
-        turnInputs0 =
+    let turnInputs0 =
             turnInputsWithContext
                 planReminder
-                taskPlanReminder
+                (taskPlanReminderText <$> taskPlanReminder)
                 pendingStartup
-                inputs
+                request.busyInputs
     (conversationStartedAt, previousActivityAt) <-
-        timestampConversationBounds persist
+        timestampConversationBounds env.sessionPersist
     stampedInputs <-
         stampTurnInputsSince
             conversationStartedAt
@@ -332,444 +352,596 @@ runOneTurnBusy includeTurnContext env@SessionEnv
         if dialectId env.sessionDialect == GrokBuildDialect
             then do
                 let framed = grokFrameLastUserInput stampedInputs
-                    firstTurn = null beforeItems && prev == Nothing
+                    firstTurn =
+                        null request.busyBeforeItems && prev == Nothing
                 if firstTurn
                     then do
                         prefix <-
                             takeGrokFirstTurnContext
                                 grokFirstTurnContext
-                                (loadGrokFirstTurnPrefix env.sessionCwd)
+                                (loadGrokFirstTurnPrefix
+                                    env.sessionPreparedWorkspaceEnvironment
+                                    env.sessionWorkspace.cwd)
                         pure (UserMessage prefix : framed, Just prefix)
                     else pure (framed, Nothing)
             else pure (stampedInputs, Nothing)
-    let restoreConsumedPromptContext = do
-            forM_ sentStartupContext \consumed ->
-                atomicModifyIORef' startupContext \current ->
-                    (restoreStartupContext consumed current, ())
-            forM_ pendingGrokContext \consumed ->
-                atomicModifyIORef' grokFirstTurnContext \current ->
-                    (case current of
-                        Nothing -> Just consumed
-                        Just _ -> current
-                    , ())
-            forM_ taskPlanReminder \_ ->
-                mapM_ restoreTaskPlanReminder taskPlan
-        persistPromptSnapshot = case persist of
-            PersistenceDisabled -> pure ()
-            PersistenceEnabled slotRef -> do
-                created <- isPendingPersistence <$> readIORef slotRef
-                params <- readIORef env.sessionParams
-                modelName <- maybe
-                    (fail "provider request is missing a model")
-                    pure
-                    params.model
-                cacheKey <- maybe
-                    (fail "persistent provider request is missing a cache key")
-                    pure
-                    params.promptCacheKey
-                now <- normalizePostgresTimestamp <$> getCurrentTime
-                let (instructionText, toolSchemas) =
-                        requestPromptParts params
-                    snapshot = SessionPromptSnapshot
-                        { promptSnapshotVersion = 1
-                        , promptSnapshotCreatedAt = now
-                        , promptSnapshotProvider = env.sessionProvider
-                        , promptSnapshotConnection = env.sessionConnection
-                        , promptSnapshotModel = modelName
-                        , promptSnapshotDialect = dialectId env.sessionDialect
-                        , promptSnapshotCwd = env.sessionCwd
-                        , promptSnapshotInstructions = instructionText
-                        , promptSnapshotTools = toolSchemas
-                        , promptSnapshotGeneratedContext = sentStartupContext
-                        , promptSnapshotGrokContext = pendingGrokContext
-                        , promptSnapshotCacheKey = cacheKey
-                        }
-                -- Persist the exact provider-visible prefix before it can be
-                -- sent. Pending sessions create metadata and epoch atomically.
-                handle <-
-                    ensureSessionWithPromptSnapshot slotRef snapshot
-                onPersisted handle
-                writeIORef planMode.planSessionDir (Just handle.sessionDir)
-                writeIORef storeRoot (Just handle.sessionDir)
-                when
-                    ( handle.sessionMeta.metaTitle == "untitled"
-                        && not (Text.null (Text.strip promptText))
-                    )
-                    (setWindowTitle
-                        (cliWindowTitle handle.sessionMeta.metaCwd
-                            (Just (sessionTitleFromPrompt promptText))))
-                when created do
-                    case fullscreen of
-                        Just runtime ->
-                            emitUiEvent runtime
-                                (UiSystemMessage
-                                    ("session: "
-                                        <> handle.sessionMeta.metaId))
-                        Nothing -> do
-                            color <- resolveColor stderrHandle
-                            putTextLn stderrHandle
-                                (roleMuted color
-                                    (glyphSession <> "session: "
-                                        <> handle.sessionMeta.metaId))
-    persistPromptSnapshot `onException` restoreConsumedPromptContext
+    persistTurnPromptSnapshot request sentStartupContext pendingGrokContext
+        `onException`
+            restoreConsumedPromptContext
+                request
+                sentStartupContext
+                pendingGrokContext
+                taskPlanReminder
     let prepared = PreparedTurn
-            { preparedBeforeItems = beforeItems
+            { preparedBeforeItems = request.busyBeforeItems
             , preparedConsumedStartup = sentStartupContext
             , preparedConsumedGrokContext = pendingGrokContext
             , preparedTurnInputs = turnInputs
             }
-        commitConversationPatch patch = do
-            case patch.patchPreviousResponseId of
-                KeepField -> pure ()
-                SetField value -> writeLivePreviousResponseId conversationRef value
-            case patch.patchTranscript of
-                KeepField -> pure ()
-                SetField value -> writeLiveTranscript conversationRef value
-            case patch.patchStartupContext of
-                KeepStartup -> pure ()
-                RestoreStartup consumed ->
-                    atomicModifyIORef' startupContext \current ->
-                        (restoreStartupContext consumed current, ())
-            case patch.patchGrokFirstTurnContext of
-                KeepGrokContext -> pure ()
-                RestoreGrokContext consumed ->
-                    atomicModifyIORef' grokFirstTurnContext \current ->
-                        ( case current of
-                            Nothing -> Just consumed
-                            Just _ -> current
-                        , ()
-                        )
-            atomicModifyIORef' usageRef \current ->
-                (addTokenUsage current patch.patchUsageDelta, ())
-            case patch.patchLastAssistant of
-                KeepField -> pure ()
-                SetField value -> writeIORef lastAssistantRef value
+    pure PreparedBusyTurn
+        { preparedInitialPlanState = initialPlanState
+        , preparedPreviousResponseId = prev
+        , preparedTaskPlanReminder = taskPlanReminder
+        , preparedConversationTurn = prepared
+        }
+
+restoreConsumedPromptContext
+    :: BusyTurnRequest
+    -> Maybe Text
+    -> Maybe Text
+    -> Maybe TaskPlanReminder
+    -> IO ()
+restoreConsumedPromptContext
+        request sentStartupContext pendingGrokContext taskPlanReminder = do
+    let env = request.busyEnv
+    RuntimeState.restoreConsumedPromptContext env.sessionState
+        sentStartupContext pendingGrokContext
+    forM_ taskPlanReminder \reminder ->
+        forM_ env.sessionTaskPlan \taskPlan ->
+            restoreTaskPlanReminder taskPlan reminder
+
+persistTurnPromptSnapshot
+    :: BusyTurnRequest
+    -> Maybe Text
+    -> Maybe Text
+    -> IO ()
+persistTurnPromptSnapshot request sentStartupContext pendingGrokContext =
+    withPersistentSessionRequest env.sessionParams $ \slotRef modelName cacheKey params -> do
+        created <- isPendingPersistence <$> readIORef slotRef
+        now <- normalizePostgresTimestamp <$> getCurrentTime
+        let (instructionText, toolSchemas) = requestPromptParts params
+            snapshot = SessionPromptSnapshot
+                { promptSnapshotVersion = 1
+                , promptSnapshotCreatedAt = now
+                , promptSnapshotProvider = env.sessionProvider
+                , promptSnapshotConnection = env.sessionConnection
+                , promptSnapshotModel = modelName
+                , promptSnapshotDialect = dialectId env.sessionDialect
+                , promptSnapshotCwd = env.sessionWorkspace.cwd
+                , promptSnapshotInstructions = instructionText
+                , promptSnapshotTools = toolSchemas
+                , promptSnapshotGeneratedContext = sentStartupContext
+                , promptSnapshotGrokContext = pendingGrokContext
+                , promptSnapshotCacheKey = cacheKey
+                }
+        -- Persist the exact provider-visible prefix before it can be
+        -- sent. Pending sessions create metadata and epoch atomically.
+        handle <- ensureSessionWithPromptSnapshot slotRef snapshot
+        env.sessionOnPersisted handle
+        writeIORef env.sessionPlanMode.planSessionDir
+            (Just handle.sessionDir)
+        writeIORef env.sessionStoreRoot (Just handle.sessionDir)
+        when
+            ( handle.sessionMeta.metaTitle == "untitled"
+                && not
+                    (Text.null
+                        (Text.strip request.busyPromptText))
+            )
+            (env.sessionSetWindowTitle
+                (cliWindowTitle handle.sessionMeta.metaCwd
+                    (Just
+                        (sessionTitleFromPrompt
+                            request.busyPromptText))))
+        when created do
+            case env.sessionFullscreen of
+                Just runtime ->
+                    emitUiEvent runtime
+                        (UiSystemMessage
+                            ("session: " <> handle.sessionMeta.metaId))
+                Nothing -> do
+                    color <- resolveColor env.sessionRender.renderStderr
+                    putTextLn env.sessionRender.renderStderr
+                        (roleMuted color
+                            (glyphSession <> "session: "
+                                <> handle.sessionMeta.metaId))
+  where
+    env = request.busyEnv
+
+commitConversationPatch :: SessionEnv -> ConversationPatch -> IO ()
+commitConversationPatch env =
+    RuntimeState.commitConversationPatch env.sessionState
+
+executeBusyTurn
+    :: BusyTurnRequest
+    -> PreparedBusyTurn
+    -> IO ExecutedBusyTurn
+executeBusyTurn request preparation = do
+    let env = request.busyEnv
+        render = env.sessionRender
+        terminal = env.sessionTerminal
+        fullscreen = env.sessionFullscreen
+        prepared = preparation.preparedConversationTurn
     startedAt <- stateStartedAt <$> readIORef render.renderState
     wallStarted <- getCurrentTime
     when (isNothing fullscreen && terminal.terminalSemanticPrompts) $
-        emitTerminalSequence terminal stdoutHandle osc133CommandStart
-    rootTurnId <- beginSubagentTurn
-    execution <- runLoopInputsDetailed config prev turnInputs
-        `onException`
-            ( readIORef env.sessionAutomaticCompaction >>= \boundary ->
-              commitConversationPatch
-                (finishConversation
-                    (rebasePreparedTurn boundary prepared)
-                    ConversationInterrupted)
-                >> when (isNothing boundary)
-                    (forM_ taskPlanReminder \_ ->
-                        mapM_ restoreTaskPlanReminder taskPlan)
-                >> restorePlanStateAfterIncomplete planMode initialPlanState
-                >> abortSubagentTurn rootTurnId
-            )
-    automaticCompaction <- readIORef env.sessionAutomaticCompaction
-    let committedPrepared =
-            rebasePreparedTurn automaticCompaction prepared
-    let result = execution.executionResult
+        emitTerminalSequence terminal render.renderStdout osc133CommandStart
+    rootTurnId <- env.sessionBeginSubagentTurn
+    executed <-
+        Execution.executePreparedTurn
+            Execution.PreparedExecution
+                { executionConfig = env.sessionLoop
+                , executionPreviousResponseId =
+                    preparation.preparedPreviousResponseId
+                , executionPreparedTurn = prepared
+                }
+            (readIORef env.sessionState.stateAutomaticCompaction)
+            (rollbackExceptionalTurn request preparation rootTurnId)
+    let execution = executed.executedLoop
+        automaticCompaction = executed.executedCompaction
     clearThinking render
     finishedAt <- getCurrentTime
     restartEffort <-
         atomicModifyIORef' env.sessionRestartEffort \requested ->
             (Nothing, requested)
-    let elapsedDetail extra = case startedAt of
-            Nothing -> extra
-            Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
-        persistIncomplete
-            :: [ResponseItem]
-            -> Text
-            -> Maybe TurnOutput
-            -> Maybe Text
-            -> IO ()
-        persistIncomplete retainedItems errorText maybeTurn displayAssistant = case persist of
-            PersistenceDisabled -> pure ()
-            PersistenceEnabled slotRef -> do
-                now <- getCurrentTime
-                handle <- ensureSession slotRef
-                writeIORef planMode.planSessionDir (Just handle.sessionDir)
-                writeIORef storeRoot (Just handle.sessionDir)
-                let displayItems = uncommittedDisplayItems execution
-                    turn = SessionTurn
-                        { turnAt = now
-                        , turnUserText = promptText
-                        , turnAssistantText =
-                            case displayAssistant of
-                                Just text -> Just text
-                                Nothing -> maybeTurn >>= (.assistantText)
-                        , turnError = Just errorText
-                        , turnResponseId = (.responseId) <$> maybeTurn
-                        , turnEffect = TranscriptAppend
-                        , turnItems = retainedItems
-                        , turnDisplayItems = displayItems
-                        , turnUsage = (.tokenUsage) <$> maybeTurn
-                        , turnProviderTelemetry =
-                            execution.executionProviderTelemetry
-                        }
-                (handle', turnIndex) <-
-                    appendTurnWithMetaUpdateIndexed handle turn \meta ->
-                    meta { metaLastResponseId = Nothing }
-                writeIORef slotRef (PersistenceActive handle')
-                forM_ fullscreen \runtime ->
-                    commitFullscreenHistoryTurn
-                        runtime
-                        (sessionHistoryTurn turnIndex turn)
-                        HistoryCommitAppend
-                evictDurableConversation env handle'
-    case (restartEffort, result) of
-        (Just level, _) -> do
-            abortSubagentTurn rootTurnId
-            commitConversationPatch
-                (finishConversation committedPrepared ConversationRestarted)
-            when (isNothing automaticCompaction) $
-                forM_ taskPlanReminder \_ ->
-                    mapM_ restoreTaskPlanReminder taskPlan
-            planState <- readIORef planMode.planStateRef
-            case fullscreen of
-                Just runtime ->
-                    emitUiEvent runtime UiTurnRestarted
-                Nothing -> pure ()
-            pure $ TurnRestartRequested level PendingTurn
-                { pendingPromptText = promptText
-                , pendingInputs = maybe inputs (const []) automaticCompaction
-                , pendingCheckpointed = isJust automaticCompaction
-                , pendingExitAfter = False
-                , pendingPlanState = planState
+    let finalized = Engine.finalizeTurn
+            Engine.TurnPolicy
+                { providerUnavailable = isProviderUnavailable
+                , normalizeAssistant = stripBracketedTimestamps
                 }
-        (Nothing, Left cancelled@(LoopCancelled _)) -> do
-            restorePlanStateAfterIncomplete planMode initialPlanState
-            finishTerminal (isNothing fullscreen)
-                stdoutHandle terminal wallStarted finishedAt 130 Nothing
-            abortSubagentTurn rootTurnId
-            -- turnInputs already contains any startup context consumed above.
-            -- Checkpoint it instead of restoring it separately, which would
-            -- duplicate the instructions on the next full-history request.
-            -- Completed model steps stay with it; only the sample that never
-            -- committed is dropped.
-            let retained =
-                    interruptedTurnItems
-                        committedPrepared execution TurnAbortedByUser
-            commitConversationPatch
-                (finishConversation committedPrepared
-                    (ConversationCancelled retained))
-            model <- readIORef render.renderModelRef
-            case fullscreen of
-                Just runtime -> do
-                    emitUiEvent runtime
-                        (UiTurnEnded BlockCancelled)
-                    emitUiEvent runtime
-                        (UiSystemMessage
-                            ("cancelled · " <> elapsedDetail model))
-                Nothing -> do
-                    color <- resolveColor stderrHandle
-                    putTextLn stderrHandle
-                        (formatLoopErrorColored color cancelled)
-                    putTextLn stderrHandle
-                        (formatTurnStatus color "cancelled" (elapsedDetail model))
-            -- Text of the sample that never committed is display-only: it
-            -- reaches the durable turn but not the model transcript.
-            persistIncomplete retained "cancelled" Nothing
-                (uncommittedAssistantText execution)
-            pure TurnCancelled
-        (Nothing, Left err) -> do
-            abortSubagentTurn rootTurnId
-            case err of
-                LoopTransport apiError
-                    | execution.executionProgress == NoResponseCommitted
-                    , isProviderUnavailable apiError -> do
-                        commitConversationPatch
-                            (finishConversation
-                                committedPrepared
-                                ConversationProviderUnavailable)
-                        when (isNothing automaticCompaction) $
-                            forM_ taskPlanReminder \_ ->
-                                mapM_ restoreTaskPlanReminder taskPlan
-                        case fullscreen of
-                            Nothing -> pure ()
-                            Just runtime ->
-                                emitUiEvent runtime
-                                    (UiTurnEnded BlockFailed)
-                        finishTerminal (isNothing fullscreen)
-                            stdoutHandle terminal wallStarted finishedAt 1
-                            (Just "Agent provider unavailable")
-                        planState <- readIORef planMode.planStateRef
-                        pure $ TurnProviderUnavailable apiError PendingTurn
-                            { pendingPromptText = promptText
-                            , pendingInputs = maybe inputs (const []) automaticCompaction
-                            , pendingCheckpointed = isJust automaticCompaction
-                            , pendingExitAfter = False
-                            , pendingPlanState = planState
-                            }
-                _ -> do
-                    let failureMessage = formatLoopErrorAt finishedAt err
-                    restorePlanStateAfterIncomplete planMode initialPlanState
-                    finishTerminal (isNothing fullscreen)
-                        stdoutHandle terminal wallStarted finishedAt 1
-                        (Just "Agent turn failed")
-                    let retained =
-                            interruptedTurnItems
-                                committedPrepared
-                                execution
-                                (TurnAbortedByFailure
-                                    (loopErrorAbortReason err))
-                    commitConversationPatch
-                        (finishConversation committedPrepared
-                            (ConversationFailed retained))
-                    model <- readIORef render.renderModelRef
-                    case fullscreen of
-                        Just runtime ->
-                            do
-                                emitUiEvent runtime
-                                    (UiTurnEnded BlockFailed)
-                                emitUiEvent runtime
-                                    (UiErrorMessage
-                                        (failureMessage
-                                            <> "\n"
-                                            <> elapsedDetail model))
-                        Nothing -> do
-                            color <- resolveColor stderrHandle
-                            putTextLn stderrHandle
-                                (formatLoopErrorColoredAt color finishedAt err)
-                            putTextLn stderrHandle
-                                (formatTurnStatus color "error" (elapsedDetail model))
-                    let maybeIncompleteTurn = case err of
-                            LoopIncomplete turn -> Just turn
-                            _ -> Nothing
-                    forM_ maybeIncompleteTurn \turn ->
-                        atomicModifyIORef' usageRef \current ->
-                            (addTokenUsage current turn.tokenUsage, ())
-                    -- Keep the live and resumed model transcript aligned:
-                    -- the same retained items become the durable turn, so
-                    -- the fullscreen history shows what the live turn showed.
-                    -- Response id, usage, and the incomplete reason remain
-                    -- available in turn metadata.
-                    persistIncomplete retained
-                        (formatLoopErrorPersistedAt finishedAt err)
-                        maybeIncompleteTurn
-                        (uncommittedAssistantText execution)
-                    planState <- readIORef planMode.planStateRef
-                    pure $ TurnFailed PendingTurn
-                        { pendingPromptText = promptText
-                        -- ConversationFailed checkpoints the exact stamped
-                        -- inputs (including attachments) in the live
-                        -- transcript. Do not retain a second potentially
-                        -- large copy here.
-                        , pendingInputs = []
-                        , pendingCheckpointed = True
-                        , pendingExitAfter = False
-                        , pendingPlanState = planState
-                        }
-        (Nothing, Right loopResult) -> do
-            finishTerminal (isNothing fullscreen)
-                stdoutHandle terminal wallStarted finishedAt 0
-                (Just "Agent finished")
-            finishSubagentTurn rootTurnId
-            let assistantText =
-                    fmap stripBracketedTimestamps loopResult.finalText
-            commitConversationPatch
-                (finishConversation committedPrepared
-                    (ConversationCompleted
-                        loopResult.finalResponseId
-                        loopResult.tokenUsage
-                        assistantText))
-            do
-                model <- readIORef render.renderModelRef
-                tokenRate <-
-                    stateLastTokensPerSecond <$> readIORef render.renderState
-                let turns = Text.pack (show loopResult.turnsUsed)
-                    unit = if loopResult.turnsUsed == 1 then " turn" else " turns"
-                    usageDetail =
-                        formatUsageWithRate loopResult.tokenUsage tokenRate
-                    extra =
-                        if Text.null usageDetail
-                            then model <> " · " <> turns <> unit
-                            else model <> " · " <> turns <> unit <> " · " <> usageDetail
-                    detail = elapsedDetail extra
-                case fullscreen of
-                    Just runtime ->
-                        emitUiEvent runtime
-                            (UiSetNotice
-                                (Just
-                                    (successNotice
-                                        ("Finished · " <> detail))))
-                    Nothing -> do
-                        color <- resolveColor stderrHandle
-                        putTextLn stderrHandle
-                            (formatTurnStatus color "ok" detail)
-            followUp <- handleProposedPlan planMode loopResult.finalText
-            printedText <- renderPrintedText render
-            case (fullscreen, printedText, assistantText) of
-                (Just _, _, _) -> pure ()
-                (Nothing, False, Just text) | not (Text.null (Text.strip text)) -> do
-                    useColor <- resolveColor stdoutHandle
-                    rendered <-
-                        renderAssistantTextForHandle
-                            stdoutHandle useColor text
-                    putTextLn stdoutHandle rendered
-                _ -> pure ()
-            let newItems =
-                    turnNewItems
-                        committedPrepared.preparedBeforeItems
-                        execution.executionState
-                effect =
-                    if turnReplacesTranscript
-                        committedPrepared.preparedBeforeItems
-                        execution.executionState
-                        then TranscriptReplace
-                        else TranscriptAppend
-            case persist of
-                PersistenceDisabled -> pure ()
-                PersistenceEnabled slotRef -> do
-                    now <- getCurrentTime
-                    handle <- ensureSession slotRef
-                    writeIORef planMode.planSessionDir (Just handle.sessionDir)
-                    writeIORef storeRoot (Just handle.sessionDir)
-                    let turn = SessionTurn
-                            { turnAt = now
-                            , turnUserText = promptText
-                            , turnAssistantText = assistantText
-                            , turnError = Nothing
-                            , turnResponseId = Just loopResult.finalResponseId
-                            , turnEffect = effect
-                            , turnItems = newItems
-                            , turnDisplayItems = []
-                            , turnUsage = Just loopResult.tokenUsage
-                            , turnProviderTelemetry =
-                                execution.executionProviderTelemetry
-                            }
-                    titleTurns <- (+ 1) <$> readIORef env.sessionTitleTurnCount
-                    (countedHandle, turnIndex) <-
-                        appendTurnWithMetaUpdateIndexed handle turn \meta ->
-                            meta { metaTitleUserTurns = titleTurns }
-                    writeIORef env.sessionTitleTurnCount titleTurns
-                    let countedMeta = countedHandle.sessionMeta
-                    writeIORef slotRef (PersistenceActive countedHandle)
-                    forM_ fullscreen \runtime ->
-                        commitFullscreenHistoryTurn
-                            runtime
-                            (sessionHistoryTurn turnIndex turn)
-                            (case effect of
-                                TranscriptAppend -> HistoryCommitAppend
-                                -- Compaction replaces model context, not the
-                                -- on-screen transcript. Keep earlier turns
-                                -- scrollable and archive the compact summary.
-                                TranscriptReplace -> HistoryCommitAppend
-                                TranscriptReset -> HistoryCommitReset)
-                    evictDurableConversation env countedHandle
-                    when
-                        ( not countedMeta.metaTitleIsManual
-                            && shouldRequestSessionTitle titleTurns
-                                countedMeta.metaTitleRefreshIndex
-                        )
-                        (requestConversationTitle env countedHandle titleTurns)
-                    when (countedMeta.metaTitle /= handle.sessionMeta.metaTitle) do
-                        setWindowTitle
-                            (cliWindowTitle countedMeta.metaCwd
-                                (Just countedMeta.metaTitle))
-                    applyPendingSessionTitles env
-            case followUp of
-                Nothing -> pure TurnSucceeded
-                Just notes -> do
-                    resetRenderPrintedText render
-                    runOneTurn env notes [UserMessage notes]
+            restartEffort
+            automaticCompaction
+            prepared
+            execution
+    pure ExecutedBusyTurn
+        { executedRequest = request
+        , executedPreparation = preparation
+        , executedStartedAt = startedAt
+        , executedWallStarted = wallStarted
+        , executedRootTurnId = rootTurnId
+        , executedLoop = execution
+        , executedAutomaticCompaction = automaticCompaction
+        , executedCommittedTurn = finalized.finalizedPrepared
+        , executedFinalization = finalized
+        , executedFinishedAt = finishedAt
+        }
+
+rollbackExceptionalTurn
+    :: BusyTurnRequest
+    -> PreparedBusyTurn
+    -> Maybe RootTurnId
+    -> Execution.ExceptionalTurn
+    -> IO ()
+rollbackExceptionalTurn request preparation rootTurnId exceptional = do
+    let env = request.busyEnv
+    commitConversationPatch env exceptional.exceptionalPatch
+    when (isNothing exceptional.exceptionalCompaction) $
+        forM_ preparation.preparedTaskPlanReminder \reminder ->
+            forM_ env.sessionTaskPlan \taskPlan ->
+                restoreTaskPlanReminder taskPlan reminder
+    restorePlanStateAfterIncomplete
+        env.sessionPlanMode
+        preparation.preparedInitialPlanState
+    env.sessionAbortSubagentTurn rootTurnId
+
+elapsedBusyTurn :: ExecutedBusyTurn -> Text -> Text
+elapsedBusyTurn executed extra =
+    case executed.executedStartedAt of
+        Nothing -> extra
+        Just startedAt ->
+            extra
+                <> " · "
+                <> formatElapsed
+                    (realToFrac
+                        (diffUTCTime
+                            executed.executedFinishedAt
+                            startedAt))
+
+persistIncompleteTurn
+    :: ExecutedBusyTurn
+    -> Engine.ModelItems
+    -> Text
+    -> Maybe TurnOutput
+    -> Maybe Text
+    -> IO ()
+persistIncompleteTurn
+        executed retainedItems errorText maybeTurn displayAssistant =
+    case env.sessionPersist of
+        PersistenceDisabled -> pure ()
+        PersistenceEnabled slotRef -> do
+            now <- getCurrentTime
+            handle <- ensureSession slotRef
+            writeIORef env.sessionPlanMode.planSessionDir
+                (Just handle.sessionDir)
+            writeIORef env.sessionStoreRoot (Just handle.sessionDir)
+            let displayItems =
+                    Engine.displayItems
+                        executed.executedFinalization.finalizedDisplayItems
+                turn = SessionTurn
+                    { turnAt = now
+                    , turnUserText = request.busyPromptText
+                    , turnAssistantText =
+                        case displayAssistant of
+                            Just text -> Just text
+                            Nothing -> maybeTurn >>= (.assistantText)
+                    , turnError = Just errorText
+                    , turnResponseId = (.responseId) <$> maybeTurn
+                    , turnEffect = TranscriptAppend
+                    , turnItems = Engine.modelItems retainedItems
+                    , turnDisplayItems = displayItems
+                    , turnUsage = (.tokenUsage) <$> maybeTurn
+                    , turnProviderTelemetry =
+                        executed.executedLoop.executionProviderTelemetry
+                    }
+            (handle', turnIndex) <-
+                appendTurnWithMetaUpdateIndexed handle turn \meta ->
+                    meta { metaLastResponseId = Nothing }
+            writeIORef slotRef (PersistenceActive handle')
+            forM_ env.sessionFullscreen \runtime ->
+                commitFullscreenHistoryTurn
+                    runtime
+                    (sessionHistoryTurn turnIndex turn)
+                    HistoryCommitAppend
+            evictDurableConversation env handle'
+  where
+    request = executed.executedRequest
+    env = request.busyEnv
+
+finishBusyTurn :: ExecutedBusyTurn -> IO TurnResult
+finishBusyTurn executed =
+    case executed.executedFinalization.finalizedDisposition of
+        Engine.TurnRestarted level -> finishRestartedTurn executed level
+        Engine.TurnCancelled cancelled ->
+            finishCancelledTurn executed cancelled
+        Engine.TurnProviderUnavailable apiError -> do
+            let env = executed.executedRequest.busyEnv
+            env.sessionAbortSubagentTurn executed.executedRootTurnId
+            finishProviderUnavailableTurn executed apiError
+        Engine.TurnFailed err -> do
+            let env = executed.executedRequest.busyEnv
+            env.sessionAbortSubagentTurn executed.executedRootTurnId
+            finishGeneralFailureTurn executed err
+        Engine.TurnCompleted loopResult ->
+            finishSuccessfulTurn executed loopResult
+
+finishRestartedTurn :: ExecutedBusyTurn -> Text -> IO TurnResult
+finishRestartedTurn executed level = do
+    let request = executed.executedRequest
+        env = request.busyEnv
+    env.sessionAbortSubagentTurn executed.executedRootTurnId
+    commitConversationPatch env
+        executed.executedFinalization.finalizedPatch
+    restoreTaskPlanAfterUncompactedTurn executed
+    planState <- readIORef env.sessionPlanMode.planStateRef
+    case env.sessionFullscreen of
+        Just runtime -> emitUiEvent runtime UiTurnRestarted
+        Nothing -> pure ()
+    pure $ TurnRestartRequested level PendingTurn
+        { pendingPromptText = request.busyPromptText
+        , pendingInputs =
+            maybe
+                request.busyInputs
+                (const [])
+                executed.executedAutomaticCompaction
+        , pendingCheckpointed =
+            isJust executed.executedAutomaticCompaction
+        , pendingExitAfter = False
+        , pendingPlanState = planState
+        }
+
+restoreTaskPlanAfterUncompactedTurn :: ExecutedBusyTurn -> IO ()
+restoreTaskPlanAfterUncompactedTurn executed =
+    when (isNothing executed.executedAutomaticCompaction) $
+        forM_
+            executed.executedPreparation.preparedTaskPlanReminder
+            \reminder ->
+                forM_
+                    executed.executedRequest.busyEnv.sessionTaskPlan
+                    \taskPlan ->
+                        restoreTaskPlanReminder taskPlan reminder
+
+finishCancelledTurn :: ExecutedBusyTurn -> LoopError -> IO TurnResult
+finishCancelledTurn executed cancelled = do
+    let request = executed.executedRequest
+        env = request.busyEnv
+        render = env.sessionRender
+        fullscreen = env.sessionFullscreen
+    restorePlanStateAfterIncomplete
+        env.sessionPlanMode
+        executed.executedPreparation.preparedInitialPlanState
+    finishTerminal (isNothing fullscreen)
+        render.renderStdout
+        env.sessionTerminal
+        executed.executedWallStarted
+        executed.executedFinishedAt
+        130
+        Nothing
+    env.sessionAbortSubagentTurn executed.executedRootTurnId
+    -- The prepared inputs already contain any consumed startup context.
+    -- Completed model steps stay with them; only an uncommitted sample drops.
+    let retained =
+            executed.executedFinalization.finalizedModelItems
+    commitConversationPatch env
+        executed.executedFinalization.finalizedPatch
+    model <- render.renderModel
+    case fullscreen of
+        Just runtime -> do
+            emitUiEvent runtime (UiTurnEnded BlockCancelled)
+            emitUiEvent runtime
+                (UiSystemMessage
+                    ("cancelled · " <> elapsedBusyTurn executed model))
+        Nothing -> do
+            color <- resolveColor render.renderStderr
+            putTextLn render.renderStderr
+                (formatLoopErrorColored color cancelled)
+            putTextLn render.renderStderr
+                (formatTurnStatus color "cancelled"
+                    (elapsedBusyTurn executed model))
+    -- The sample that never committed is display-only in durable history.
+    persistIncompleteTurn
+        executed
+        retained
+        "cancelled"
+        Nothing
+        (uncommittedAssistantText executed.executedLoop)
+    pure TurnCancelled
+
+finishProviderUnavailableTurn
+    :: ExecutedBusyTurn
+    -> ApiError
+    -> IO TurnResult
+finishProviderUnavailableTurn executed apiError = do
+    let request = executed.executedRequest
+        env = request.busyEnv
+        fullscreen = env.sessionFullscreen
+    commitConversationPatch env
+        executed.executedFinalization.finalizedPatch
+    restoreTaskPlanAfterUncompactedTurn executed
+    case fullscreen of
+        Nothing -> pure ()
+        Just runtime ->
+            emitUiEvent runtime (UiTurnEnded BlockFailed)
+    finishTerminal (isNothing fullscreen)
+        env.sessionRender.renderStdout
+        env.sessionTerminal
+        executed.executedWallStarted
+        executed.executedFinishedAt
+        1
+        (Just "Agent provider unavailable")
+    planState <- readIORef env.sessionPlanMode.planStateRef
+    pure $ TurnProviderUnavailable apiError PendingTurn
+        { pendingPromptText = request.busyPromptText
+        , pendingInputs =
+            maybe
+                request.busyInputs
+                (const [])
+                executed.executedAutomaticCompaction
+        , pendingCheckpointed =
+            isJust executed.executedAutomaticCompaction
+        , pendingExitAfter = False
+        , pendingPlanState = planState
+        }
+
+finishGeneralFailureTurn
+    :: ExecutedBusyTurn
+    -> LoopError
+    -> IO TurnResult
+finishGeneralFailureTurn executed err = do
+    let request = executed.executedRequest
+        env = request.busyEnv
+        render = env.sessionRender
+        fullscreen = env.sessionFullscreen
+        finishedAt = executed.executedFinishedAt
+        failureMessage = formatLoopErrorAt finishedAt err
+    restorePlanStateAfterIncomplete
+        env.sessionPlanMode
+        executed.executedPreparation.preparedInitialPlanState
+    finishTerminal (isNothing fullscreen)
+        render.renderStdout
+        env.sessionTerminal
+        executed.executedWallStarted
+        finishedAt
+        1
+        (Just "Agent turn failed")
+    let retained =
+            executed.executedFinalization.finalizedModelItems
+    commitConversationPatch env
+        executed.executedFinalization.finalizedPatch
+    model <- render.renderModel
+    case fullscreen of
+        Just runtime -> do
+            emitUiEvent runtime (UiTurnEnded BlockFailed)
+            emitUiEvent runtime
+                (UiErrorMessage
+                    (failureMessage
+                        <> "\n"
+                        <> elapsedBusyTurn executed model))
+        Nothing -> do
+            color <- resolveColor render.renderStderr
+            putTextLn render.renderStderr
+                (formatLoopErrorColoredAt color finishedAt err)
+            putTextLn render.renderStderr
+                (formatTurnStatus color "error"
+                    (elapsedBusyTurn executed model))
+    let maybeIncompleteTurn = case err of
+            LoopIncomplete turn -> Just turn
+            _ -> Nothing
+    forM_ maybeIncompleteTurn \turn ->
+        atomicModifyIORef' env.sessionState.stateUsage \current ->
+            (addTokenUsage current turn.tokenUsage, ())
+    -- Retain the same items in the live and durable transcripts. Response id,
+    -- usage, and the incomplete reason remain available in turn metadata.
+    persistIncompleteTurn
+        executed
+        retained
+        (formatLoopErrorPersistedAt finishedAt err)
+        maybeIncompleteTurn
+        (uncommittedAssistantText executed.executedLoop)
+    planState <- readIORef env.sessionPlanMode.planStateRef
+    pure $ TurnFailed PendingTurn
+        { pendingPromptText = request.busyPromptText
+        -- The live transcript checkpoints the exact stamped inputs, including
+        -- attachments, so do not retain a second potentially large copy.
+        , pendingInputs = []
+        , pendingCheckpointed = True
+        , pendingExitAfter = False
+        , pendingPlanState = planState
+        }
+
+finishSuccessfulTurn
+    :: ExecutedBusyTurn
+    -> LoopResult
+    -> IO TurnResult
+finishSuccessfulTurn executed loopResult = do
+    let request = executed.executedRequest
+        env = request.busyEnv
+        render = env.sessionRender
+        fullscreen = env.sessionFullscreen
+    finishTerminal (isNothing fullscreen)
+        render.renderStdout
+        env.sessionTerminal
+        executed.executedWallStarted
+        executed.executedFinishedAt
+        0
+        (Just "Agent finished")
+    env.sessionFinishSubagentTurn executed.executedRootTurnId
+    let assistantText =
+            fmap stripBracketedTimestamps loopResult.finalText
+    commitConversationPatch env
+        executed.executedFinalization.finalizedPatch
+    reportSuccessfulTurn executed loopResult
+    followUp <-
+        handleProposedPlan env.sessionPlanMode loopResult.finalText
+    printUnrenderedAssistant env assistantText
+    let newItems =
+            Engine.modelItems executed.executedFinalization.finalizedModelItems
+        effect =
+            if turnReplacesTranscript
+                executed.executedCommittedTurn.preparedBeforeItems
+                executed.executedLoop.executionState
+                then TranscriptReplace
+                else TranscriptAppend
+    persistSuccessfulTurn executed loopResult assistantText newItems effect
+    case followUp of
+        Nothing -> pure TurnSucceeded
+        Just notes -> do
+            resetRenderPrintedText render
+            runOneTurn env notes [UserMessage notes]
+
+reportSuccessfulTurn :: ExecutedBusyTurn -> LoopResult -> IO ()
+reportSuccessfulTurn executed loopResult = do
+    let env = executed.executedRequest.busyEnv
+        render = env.sessionRender
+    model <- render.renderModel
+    tokenRate <-
+        stateLastTokensPerSecond <$> readIORef render.renderState
+    let turns = Text.pack (show loopResult.turnsUsed)
+        unit = if loopResult.turnsUsed == 1 then " turn" else " turns"
+        usageDetail = formatUsageWithRate loopResult.tokenUsage tokenRate
+        extra =
+            if Text.null usageDetail
+                then model <> " · " <> turns <> unit
+                else model <> " · " <> turns <> unit <> " · " <> usageDetail
+        detail = elapsedBusyTurn executed extra
+    case env.sessionFullscreen of
+        Just runtime ->
+            emitUiEvent runtime
+                (UiSetNotice
+                    (Just (successNotice ("Finished · " <> detail))))
+        Nothing -> do
+            color <- resolveColor render.renderStderr
+            putTextLn render.renderStderr
+                (formatTurnStatus color "ok" detail)
+
+printUnrenderedAssistant :: SessionEnv -> Maybe Text -> IO ()
+printUnrenderedAssistant env assistantText = do
+    let render = env.sessionRender
+        stdoutHandle = render.renderStdout
+    printedText <- renderPrintedText render
+    case (env.sessionFullscreen, printedText, assistantText) of
+        (Just _, _, _) -> pure ()
+        (Nothing, False, Just text)
+            | not (Text.null (Text.strip text)) -> do
+                useColor <- resolveColor stdoutHandle
+                rendered <-
+                    renderAssistantTextForHandle stdoutHandle useColor text
+                putTextLn stdoutHandle rendered
+        _ -> pure ()
+
+persistSuccessfulTurn
+    :: ExecutedBusyTurn
+    -> LoopResult
+    -> Maybe Text
+    -> [ResponseItem]
+    -> TranscriptEffect
+    -> IO ()
+persistSuccessfulTurn
+        executed loopResult assistantText newItems effect =
+    case env.sessionPersist of
+        PersistenceDisabled -> pure ()
+        PersistenceEnabled slotRef -> do
+            now <- getCurrentTime
+            handle <- ensureSession slotRef
+            writeIORef env.sessionPlanMode.planSessionDir
+                (Just handle.sessionDir)
+            writeIORef env.sessionStoreRoot (Just handle.sessionDir)
+            let turn = SessionTurn
+                    { turnAt = now
+                    , turnUserText = request.busyPromptText
+                    , turnAssistantText = assistantText
+                    , turnError = Nothing
+                    , turnResponseId = Just loopResult.finalResponseId
+                    , turnEffect = effect
+                    , turnItems = newItems
+                    , turnDisplayItems = []
+                    , turnUsage = Just loopResult.tokenUsage
+                    , turnProviderTelemetry =
+                        executed.executedLoop.executionProviderTelemetry
+                    }
+            titleTurns <- (+ 1) <$> readIORef env.sessionTitleTurnCount
+            (countedHandle, turnIndex) <-
+                appendTurnWithMetaUpdateIndexed handle turn \meta ->
+                    meta { metaTitleUserTurns = titleTurns }
+            writeIORef env.sessionTitleTurnCount titleTurns
+            let countedMeta = countedHandle.sessionMeta
+            writeIORef slotRef (PersistenceActive countedHandle)
+            forM_ env.sessionFullscreen \runtime ->
+                commitFullscreenHistoryTurn
+                    runtime
+                    (sessionHistoryTurn turnIndex turn)
+                    (case effect of
+                        TranscriptAppend -> HistoryCommitAppend
+                        -- Compaction replaces model context, not the on-screen
+                        -- transcript. Keep earlier turns scrollable.
+                        TranscriptReplace -> HistoryCommitAppend
+                        TranscriptReset -> HistoryCommitReset)
+            evictDurableConversation env countedHandle
+            when
+                ( not countedMeta.metaTitleIsManual
+                    && shouldRequestSessionTitle
+                        titleTurns
+                        countedMeta.metaTitleRefreshIndex
+                )
+                (requestConversationTitle env countedHandle titleTurns)
+            when
+                (countedMeta.metaTitle /= handle.sessionMeta.metaTitle) do
+                env.sessionSetWindowTitle
+                    (cliWindowTitle
+                        countedMeta.metaCwd
+                        (Just countedMeta.metaTitle))
+            applyPendingSessionTitles env
+  where
+    request = executed.executedRequest
+    env = request.busyEnv
 
 -- | Release the parsed root transcript after the exact turn is durable.
 --
@@ -778,16 +950,16 @@ runOneTurnBusy includeTurnContext env@SessionEnv
 evictDurableConversation :: SessionEnv -> SessionHandle -> IO ()
 evictDurableConversation env handle = do
     generation <-
-        currentLiveTranscriptGeneration env.sessionConversation
+        currentLiveTranscriptGeneration env.sessionState.stateConversation
     let sessionId = handle.sessionMeta.metaId
         checkpoint =
             durableTranscriptCheckpoint
                 env.sessionDatabasePool
-                (sessionsRoot env.sessionHome)
+                (sessionsRoot env.sessionWorkspace.home)
                 sessionId
     evicted <-
         evictLiveTranscript
-            env.sessionConversation generation checkpoint
+            env.sessionState.stateConversation generation checkpoint
     when evicted performMajorGC
 
 -- | Wrap the last actual user payload in the Grok Build request envelope.
@@ -842,13 +1014,26 @@ grokFirstTurnPrefix osName shell cwd today gitStatus =
             <> status
             <> "\n</git_status>"
 
-loadGrokFirstTurnPrefix :: System.OsPath.OsPath -> IO Text
-loadGrokFirstTurnPrefix cwd = do
-    shell <- maybe "/bin/sh" Text.pack <$> lookupEnv "SHELL"
-    osVersion <- loadOperatingSystem
+loadGrokFirstTurnPrefix
+    :: Maybe PreparedWorkspaceEnvironment
+    -> System.OsPath.OsPath
+    -> IO Text
+loadGrokFirstTurnPrefix preparedEnvironment cwd = do
     today <- localDay . zonedTimeToLocalTime <$> getZonedTime
-    status <- loadGitStatus cwd
-    pure (grokFirstTurnPrefix osVersion shell cwd today status)
+    case preparedEnvironment of
+        Nothing -> do
+            shell <- maybe "/bin/sh" Text.pack <$> lookupEnv "SHELL"
+            osVersion <- loadOperatingSystem
+            status <- loadGitStatus cwd
+            pure (grokFirstTurnPrefix osVersion shell cwd today status)
+        Just environment ->
+            pure
+                (grokFirstTurnPrefix
+                    environment.preparedOperatingSystem
+                    environment.preparedShell
+                    cwd
+                    today
+                    Nothing)
 
 -- | Consume a persisted first-turn prefix before consulting the live
 -- environment. The persisted value keeps a resumed request byte-for-byte
@@ -924,21 +1109,6 @@ isPendingPersistence = \case
 uncommittedAssistantText :: LoopExecution -> Maybe Text
 uncommittedAssistantText execution =
     fmap stripBracketedTimestamps execution.executionUncommittedAssistantText
-
--- | Short reason recorded on the synthetic outputs of tool calls a failed
--- turn never executed.
-loopErrorAbortReason :: LoopError -> Text
-loopErrorAbortReason = \case
-    LoopIncomplete turn -> case turn.completion of
-        TurnIncomplete reason _ ->
-            "the response was cut off (" <> reason <> ")"
-        TurnCompleted -> "the response was cut off"
-    LoopMaxTurns _ -> "the turn reached its maximum number of model steps"
-    LoopTransport _ -> "the provider request failed"
-    LoopTransportAfterOutput _ -> "the provider connection was interrupted"
-    LoopNoResponseId -> "the provider returned no response id"
-    LoopUnexpected _ -> "the agent hit an unexpected error"
-    LoopCancelled _ -> "the turn was cancelled"
 
 requestConversationTitle :: SessionEnv -> SessionHandle -> Int -> IO ()
 requestConversationTitle env handle milestone =

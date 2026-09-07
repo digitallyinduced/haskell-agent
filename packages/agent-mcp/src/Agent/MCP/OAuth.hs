@@ -72,11 +72,13 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Network.HTTP.Client (Manager, RequestBody(..), httpLbs, parseRequest, responseBody, responseStatus, urlEncodedBody)
 import qualified Network.HTTP.Client as HC
 import Network.HTTP.Types (statusCode)
+import Network.URI (URI(..), URIAuth(..), parseURI)
 import qualified System.FileLock as FileLock
 import System.IO.Unsafe (unsafePerformIO)
 import System.OsPath (unsafeEncodeUtf)
 import System.Posix.Files (ownerReadMode, ownerWriteMode)
 import System.Posix.IO (OpenFileFlags(..), OpenMode(ReadWrite), closeFd, defaultFileFlags, openFd)
+import Text.Read (readMaybe)
 
 -- ---------------------------------------------------------------------------
 -- Tokens
@@ -396,24 +398,38 @@ probeAuthorizationChallenge manager endpoint = do
 data UrlParts = UrlParts
     { urlScheme :: !Text
     , urlAuthority :: !Text
+    , urlHost :: !Text
+    , urlPort :: !Text
     , urlPath :: !Text
     }
 
 parseUrlParts :: Text -> Maybe UrlParts
 parseUrlParts url = do
-    let (scheme, rest) = Text.breakOn "://" url
-    guard (not (Text.null scheme) && Text.all isSchemeChar scheme && not (Text.null rest))
-    let afterScheme = Text.drop 3 rest
-        (authority, pathQuery) = Text.break (\c -> c == '/' || c == '?' || c == '#') afterScheme
-    guard (not (Text.null authority))
-    let path = Text.takeWhile (\c -> c /= '?' && c /= '#') pathQuery
+    uri <- parseURI (Text.unpack url)
+    authority <- uriAuthority uri
+    guard (not (null (uriScheme uri)))
+    guard (null (uriUserInfo authority))
+    guard (not (null (uriRegName authority)))
+    let scheme = Text.toLower (Text.dropWhileEnd (== ':') (Text.pack (uriScheme uri)))
+        host = Text.toLower (Text.pack (uriRegName authority))
+        port = Text.pack (uriPort authority)
+    guard (validPort port)
     pure UrlParts
-        { urlScheme = Text.toLower scheme
-        , urlAuthority = Text.toLower authority
-        , urlPath = Text.dropWhileEnd (== '/') path
+        { urlScheme = scheme
+        , urlAuthority = host <> port
+        , urlHost = host
+        , urlPort = port
+        , urlPath = Text.dropWhileEnd (== '/') (Text.pack (uriPath uri))
         }
   where
-    isSchemeChar c = isAlphaNum c || c == '+' || c == '-' || c == '.'
+    validPort "" = True
+    validPort rawPort = case Text.stripPrefix ":" rawPort of
+        Just digits
+            | not (Text.null digits)
+            , Text.all (`elem` ['0' .. '9']) digits
+            , Just port <- (readMaybe (Text.unpack digits) :: Maybe Integer) ->
+                port > 0 && port < 65536
+        _ -> False
 
 urlPartsOrigin :: UrlParts -> Text
 urlPartsOrigin parts = parts.urlScheme <> "://" <> parts.urlAuthority
@@ -435,11 +451,10 @@ loopbackRedirectPort :: Text -> Maybe Int
 loopbackRedirectPort url = do
     parts <- parseUrlParts url
     guard (parts.urlScheme == "http")
-    let (host, portText) = Text.breakOn ":" parts.urlAuthority
-    guard (host `elem` ["127.0.0.1", "localhost", "[::1]"])
-    digits <- Text.stripPrefix ":" portText
+    guard (parts.urlHost `elem` ["127.0.0.1", "localhost", "[::1]"])
+    digits <- Text.stripPrefix ":" parts.urlPort
     guard (not (Text.null digits) && Text.all (`elem` ['0' .. '9']) digits)
-    let port = read (Text.unpack digits)
+    port <- readMaybe (Text.unpack digits)
     guard (port > 0 && port < 65536)
     pure port
 
@@ -450,12 +465,10 @@ checkSecureUrl label url = case parseUrlParts url of
     Nothing -> Left (label <> " is not an absolute URL: " <> url)
     Just parts
         | parts.urlScheme == "https" -> Right ()
-        | parts.urlScheme == "http" && isLoopback parts.urlAuthority -> Right ()
+        | parts.urlScheme == "http" && isLoopback parts.urlHost -> Right ()
         | otherwise -> Left (label <> " must use https: " <> url)
   where
-    isLoopback authority =
-        let host = Text.takeWhile (/= ':') (Text.takeWhileEnd (/= '@') authority)
-        in host `elem` ["localhost", "127.0.0.1", "[::1]"]
+    isLoopback host = host `elem` ["localhost", "127.0.0.1", "[::1]"]
 
 -- ---------------------------------------------------------------------------
 -- Protected resource metadata (RFC 9728)

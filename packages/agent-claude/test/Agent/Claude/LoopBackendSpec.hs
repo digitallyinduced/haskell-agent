@@ -14,12 +14,15 @@ import Agent.Claude.Options
     , defaultClaudeCodeOptions
     )
 import Agent.Error (ApiError(..), ErrorType(..))
-import Agent.Json (rawJsonBytes)
+import Agent.Cancel (newCancelFlag, requestCancel)
+import qualified Agent.Loop as Loop
+import Agent.Tools.Types (mkToolRegistry)
+import Agent.Json (rawJsonBytes, rawJsonFromEncoding)
 import Agent.Loop
     ( Backend(..)
     , BackendContinuation(..)
     , BackendResult(..)
-    , BackendSnapshot
+    , BackendSnapshot(..)
     , advanceBackendSnapshot
     , emptyBackendSnapshot
     , FileAttachment(..)
@@ -39,7 +42,8 @@ import Agent.Telemetry
     , TurnTelemetry(..)
     )
 import Agent.Responses.Types
-    ( FunctionCall(..)
+    ( CompactionItem(..)
+    , FunctionCall(..)
     , FunctionCallOutput(..)
     , MessageContent(..)
     , ReasoningConfig(..)
@@ -48,17 +52,23 @@ import Agent.Responses.Types
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
+    , compactionCheckpointOriginItem
     , defaultResponseCreateParams
     )
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     )
 import Control.Exception.Safe (bracket, finally)
+import Control.Concurrent.MVar (newEmptyMVar, takeMVar)
+import Control.Monad (when)
 import qualified Data.Foldable as Foldable
+import qualified Data.Aeson as Aeson
 import Data.IORef
     ( IORef
+    , atomicModifyIORef'
     , modifyIORef'
     , newIORef
     , readIORef
@@ -114,6 +124,12 @@ submitBackendWithState stateRef backend previous inputs onEvent = do
 spec :: Spec
 spec = do
     describe "sdkErrorToApiError" do
+        it "classifies an oversized prompt even with a success result subtype" do
+            sdkErrorToApiError
+                (ResultError "success" Nothing [] (Just "Prompt is too long"))
+                `shouldSatisfy` \case
+                    ProviderError{errorType = ContextWindowExceeded} -> True
+                    _ -> False
         it "classifies status and subtype categories" do
             sdkErrorToApiError
                 (ResultError "rate_limit_error" (Just 429) [] Nothing)
@@ -268,7 +284,7 @@ spec = do
                     "<--input-format>\n<stream-json>"
                 arguments `shouldContain`
                     "<--output-format>\n<stream-json>"
-                arguments `shouldNotContain` "<--include-partial-messages>"
+                arguments `shouldContain` "<--include-partial-messages>"
                 arguments `shouldContain` "<--verbose>"
                 arguments `shouldNotContain` "<AskUserQuestion>"
                 arguments `shouldContain`
@@ -516,6 +532,113 @@ spec = do
                             ]
                             `shouldBe` ["\"Tool reference: WebFetch\\nloaded\""]
 
+        it "preserves tool-result images as typed content across a fresh SDK session" $
+            withFakeClaude \fake ->
+                withEnvironmentVariables [("FAKE_CLAUDE_IMAGE_RESULT", Just "1")] do
+                    transcript <- newIORef []
+                    events <- newIORef []
+                    let options = defaultClaudeCodeOptions fake.executable fake.workingDirectory
+                        runTurn = do
+                            initialHistory <- readIORef transcript
+                            state <- newIORef (initialBackendSnapshot initialHistory)
+                            withClaudeCodeBackend options Nothing
+                                (pure defaultResponseCreateParams) transcript \backend ->
+                                    submitBackendWithState state backend Nothing [UserMessage "inspect"]
+                                        (\event -> modifyIORef' events (<> [event]))
+                    first <- timeout 5_000_000 runTurn
+                    first `shouldSatisfy` \case
+                        Just (Right _) -> True
+                        _ -> False
+                    history <- readIORef transcript
+                    let outputs = [output.output | FunctionCallOutputItem output <- history]
+                        image mime payload = InputImagePart
+                            { detail = Nothing, fileId = Nothing
+                            , imageUrl = Just ("data:" <> mime <> ";base64," <> payload)
+                            , promptCacheBreakpoint = Nothing
+                            }
+                    map (Aeson.decodeStrict' . rawJsonBytes) outputs `shouldBe`
+                        [Just (Aeson.toJSON
+                            [ InputTextPart "before" Nothing
+                            , image "image/png" "b25l"
+                            , InputTextPart "between" Nothing
+                            , image "image/jpeg" "dHdv"
+                            , InputTextPart "after" Nothing
+                            ])]
+                    observed <- readIORef events
+                    observed `shouldContain`
+                        [ToolFinished expectedFakeToolResult
+                            { output = "before\n[image image/png]\nbetween\n[image image/jpeg]\nafter" }]
+                    second <- timeout 5_000_000 runTurn
+                    second `shouldSatisfy` \case
+                        Just (Right _) -> True
+                        _ -> False
+                    submitted <- readFile fake.promptLog
+                    Text.count "\"type\":\"image\"" (Text.pack submitted) `shouldBe` 2
+                    submitted `shouldContain` "\"data\":\"b25l\""
+                    submitted `shouldContain` "\"data\":\"dHdv\""
+                    submitted `shouldContain` "Tool result fake-tool"
+                    submitted `shouldNotContain` "data:image/"
+                    submitted `shouldNotContain` "[image image/png]"
+
+        it "retains ordinary JSON tool-result arrays and text-tagged objects during fresh import" $
+            withFakeClaude \fake -> do
+                let output = rawJsonFromEncoding (Aeson.toEncoding ([1, 2] :: [Int]))
+                let textObject = rawJsonFromEncoding $ Aeson.toEncoding $
+                        Aeson.object ["type" Aeson..= ("text" :: Text), "text" Aeson..= ("legacy object" :: Text)]
+                transcript <- newIORef [FunctionCallOutputItem FunctionCallOutput
+                    { itemId = Nothing, callId = "legacy-json", name = Nothing
+                    , namespace = Nothing, provider = Nothing, output = value
+                    , status = Nothing, async = Nothing, localOutcome = Nothing
+                    } | value <- [output, textObject]]
+                initialHistory <- readIORef transcript
+                state <- newIORef (initialBackendSnapshot initialHistory)
+                result <- timeout 5_000_000 $
+                    withClaudeCodeBackend
+                        (defaultClaudeCodeOptions fake.executable fake.workingDirectory)
+                        Nothing (pure defaultResponseCreateParams) transcript \backend ->
+                            submitBackendWithState state backend Nothing [UserMessage "continue"] (const (pure ()))
+                result `shouldSatisfy` \case
+                    Just (Right _) -> True
+                    _ -> False
+                submitted <- readFile fake.promptLog
+                submitted `shouldContain` "[1,2]"
+                submitted `shouldContain` "legacy object"
+                submitted `shouldNotContain` "content unavailable"
+
+        it "isolates malformed historical tool images without losing valid siblings or leaking payloads" $
+            withFakeClaude \fake -> do
+                let output = rawJsonFromEncoding $ Aeson.toEncoding
+                        [ Aeson.object ["type" Aeson..= ("input_text" :: Text), "text" Aeson..= ("before" :: Text)]
+                        , Aeson.object ["type" Aeson..= ("input_image" :: Text), "image_url" Aeson..= ("data:image/png;base64,SECRET_BAD!" :: Text)]
+                        , Aeson.object ["type" Aeson..= ("input_image" :: Text), "image_url" Aeson..= (42 :: Int)]
+                        , Aeson.object ["type" Aeson..= ("input_image" :: Text), "image_url" Aeson..= ("data:image/png;base64,b25l" :: Text)]
+                        , Aeson.object ["type" Aeson..= ("input_text" :: Text), "text" Aeson..= ("after" :: Text)]
+                        ]
+                transcript <- newIORef [FunctionCallOutputItem FunctionCallOutput
+                    { itemId = Nothing, callId = "malformed-image", name = Nothing
+                    , namespace = Nothing, provider = Nothing, output
+                    , status = Nothing, async = Nothing, localOutcome = Nothing
+                    }]
+                initialHistory <- readIORef transcript
+                state <- newIORef (initialBackendSnapshot initialHistory)
+                result <- timeout 5_000_000 $
+                    withClaudeCodeBackend
+                        (defaultClaudeCodeOptions fake.executable fake.workingDirectory)
+                        Nothing (pure defaultResponseCreateParams) transcript \backend ->
+                            submitBackendWithState state backend Nothing [UserMessage "continue"] (const (pure ()))
+                result `shouldSatisfy` \case
+                    Just (Right _) -> True
+                    _ -> False
+                submitted <- readFile fake.promptLog
+                submitted `shouldContain` "before"
+                submitted `shouldContain` "after"
+                submitted `shouldContain` "Historical image unavailable"
+                submitted `shouldContain` "Historical tool result content unavailable"
+                submitted `shouldContain` "\"data\":\"b25l\""
+                Text.count "\"type\":\"image\"" (Text.pack submitted) `shouldBe` 1
+                submitted `shouldNotContain` "SECRET_BAD"
+                submitted `shouldNotContain` "data:image/"
+
         it "starts from partial tool records and enriches canonical arguments" $
             withFakeClaude \fake ->
                 withEnvironmentVariables
@@ -630,6 +753,36 @@ spec = do
                 submitted `shouldContain` "[Attached file]"
                 submitted `shouldContain` "attachment.txt"
                 submitted `shouldContain` "describe this file"
+
+        mapM_ (\(mode, expected) ->
+            it ("reports latest main-response context usage: " <> mode) $
+                withFakeClaude \fake ->
+                    withEnvironmentVariables
+                        [("FAKE_CLAUDE_CONTEXT_USAGE", Just mode)] do
+                        transcript <- newIORef []
+                        result <- timeout 5_000_000 $
+                            withClaudeCodeBackend
+                                (defaultClaudeCodeOptions
+                                    fake.executable
+                                    fake.workingDirectory)
+                                Nothing
+                                (pure defaultResponseCreateParams)
+                                transcript \backend ->
+                                    expectTurn =<< submitBackend backend
+                                        Nothing [UserMessage "context"] (const (pure ()))
+                        turn <- maybe
+                            (expectationFailure "context usage fake timed out"
+                                >> fail "unreachable")
+                            pure result
+                        turn.contextUsage `shouldBe` expected
+                        -- Billing remains the result/modelUsage delta rather
+                        -- than being overwritten by the latest model call.
+                        turn.tokenUsage `shouldBe` TokenUsage 10 7 5)
+            [ ("latest", Just (TokenUsage 200 9 80))
+            , ("missing", Nothing)
+            , ("boundary-before", Just (TokenUsage 200 9 80))
+            , ("boundary-after", Nothing)
+            ]
 
         it "converts cumulative modelUsage snapshots to per-turn deltas" $
             withFakeClaude \fake -> do
@@ -1008,6 +1161,13 @@ spec = do
             withFakeClaude \fake -> do
                 let initialHistory =
                         turnInputsToItems [UserMessage "older context"]
+                            <> [ CompactionItemValue CompactionItem
+                                    { itemId = Just "cmp-xai"
+                                    , encryptedContent =
+                                        Just "opaque-xai-checkpoint"
+                                    }
+                               , compactionCheckpointOriginItem "xai"
+                               ]
                 transcript <- newIORef initialHistory
                 state <- newIORef (initialBackendSnapshot initialHistory)
                 result <- timeout 5_000_000 $
@@ -1031,6 +1191,248 @@ spec = do
                     "Prior conversation imported from the outer agent harness"
                 submitted `shouldContain` "older context"
                 submitted `shouldContain` "continued request"
+                submitted `shouldNotContain`
+                    "haskell-agent.compaction-checkpoint-origin.xai"
+                submitted `shouldNotContain` "opaque-xai-checkpoint"
+
+        it "imports three historical images in order without resending them on continuation" $
+            withFakeClaude \fake -> do
+                let image mime bytes =
+                        ImageAttachmentItem (ImageAttachment mime bytes)
+                    initialHistory = turnInputsToItems
+                        [ userMessageWithAttachments "first reference"
+                            [image "image/png" "one"]
+                        , userMessageWithAttachments "second reference"
+                            [image "image/jpeg" "two"]
+                        , userMessageWithAttachments "third reference"
+                            [image "image/webp" "three"]
+                        ]
+                transcript <- newIORef initialHistory
+                state <- newIORef (initialBackendSnapshot initialHistory)
+                result <- timeout 5_000_000 $
+                    withClaudeCodeBackend
+                        (defaultClaudeCodeOptions fake.executable fake.workingDirectory)
+                        Nothing
+                        (pure defaultResponseCreateParams)
+                        transcript
+                        \backend -> do
+                            first <- submitBackendWithState state backend Nothing
+                                [userMessageWithAttachments "go" [image "image/gif" "four"]]
+                                (\_ -> pure ())
+                            case first of
+                                Left err -> pure (Left err)
+                                Right turn ->
+                                    submitBackendWithState state backend (Just turn.responseId)
+                                        [UserMessage "continue normally"]
+                                        (\_ -> pure ())
+                result `shouldSatisfy` \case
+                    Just (Right _) -> True
+                    _ -> False
+                submitted <- lines <$> readFile fake.promptLog
+                case submitted of
+                    [first, second] -> do
+                        let serialized = Text.pack first
+                            markers =
+                                [ "<prior_conversation>", "first reference"
+                                , "\"data\":\"b25l\"", "second reference"
+                                , "\"data\":\"dHdv\"", "third reference"
+                                , "\"data\":\"dGhyZWU=\"", "</prior_conversation>"
+                                , "<current_request>", "\"data\":\"Zm91cg==\""
+                                , "go", "</current_request>"
+                                ]
+                            offsets = map (\marker -> Text.length (fst (Text.breakOn marker serialized))) markers
+                        mapM_ (\marker -> Text.count marker serialized `shouldBe` 1) markers
+                        and (zipWith (<) offsets (drop 1 offsets)) `shouldBe` True
+                        Text.count "\"type\":\"image\"" serialized `shouldBe` 4
+                        mapM_ (\mime -> first `shouldContain` mime)
+                            ["image/png", "image/jpeg", "image/webp", "image/gif"]
+                        first `shouldNotContain` "[image omitted]"
+                        second `shouldContain` "continue normally"
+                        second `shouldNotContain` "\"type\":\"image\""
+                        second `shouldNotContain` "first reference"
+                    _ -> expectationFailure "expected an imported request and a normal continuation"
+
+        it "diagnoses unavailable historical images without fetching references" $
+            withFakeClaude \fake -> do
+                let image source = InputImagePart
+                        { detail = Nothing
+                        , fileId = Nothing
+                        , imageUrl = source
+                        , promptCacheBreakpoint = Nothing
+                        }
+                    parts = map image
+                        [ Nothing
+                        , Just "https://example.invalid/private.png"
+                        , Just "file:///private/reference.png"
+                        , Just "data:image/png;base64,!"
+                        , Just "data:image/png;base64,"
+                        , Just "data:image/svg+xml;base64,c3Zn"
+                        ]
+                    initialHistory = map
+                        (\case
+                            MessageItem message -> MessageItem message
+                                { content = MessageContentParts parts }
+                            item -> item)
+                        (turnInputsToItems [UserMessage "references"])
+                transcript <- newIORef initialHistory
+                state <- newIORef (initialBackendSnapshot initialHistory)
+                result <- timeout 5_000_000 $
+                    withClaudeCodeBackend
+                        (defaultClaudeCodeOptions fake.executable fake.workingDirectory)
+                        Nothing
+                        (pure defaultResponseCreateParams)
+                        transcript
+                        \backend -> submitBackendWithState state backend Nothing
+                            [UserMessage "go"] (\_ -> pure ())
+                result `shouldSatisfy` \case
+                    Just (Right _) -> True
+                    _ -> False
+                submitted <- readFile fake.promptLog
+                Text.count "Historical image unavailable to this model" (Text.pack submitted)
+                    `shouldBe` 6
+                submitted `shouldContain` "ask the user before relying on its contents"
+                submitted `shouldNotContain` "\"type\":\"image\""
+                submitted `shouldNotContain` "example.invalid"
+                submitted `shouldNotContain` "[image omitted]"
+
+        it "republishes surviving recovery when the discard UI callback throws" $
+            withFakeClaude \fake ->
+                withEnvironmentVariables
+                    [ ("FAKE_CLAUDE_INTERIM", Just "1")
+                    , ("FAKE_CLAUDE_RECOVERY_PROGRESS", Just "1")
+                    , ("FAKE_CLAUDE_RETRACT_AFTER_PROGRESS", Just "1")
+                    ] do
+                        transcript <- newIORef []
+                        recovery <- newIORef ""
+                        withClaudeCodeBackend
+                            (defaultClaudeCodeOptions fake.executable fake.workingDirectory)
+                            Nothing (pure defaultResponseCreateParams) transcript \backend -> do
+                                let callbacks = Loop.BackendCallbacks
+                                        { Loop.onLoopEvent = \case
+                                            ResponseAttemptDiscarded -> do
+                                                -- The core clears the old attempt before notifying UI.
+                                                writeIORef recovery ""
+                                                ioError (userError "discard UI stopped")
+                                            _ -> pure ()
+                                        , Loop.onAsyncToolCall = \_ -> pure ()
+                                        , Loop.onRecoveryCheckpoint = writeIORef recovery
+                                        }
+                                result <- timeout 5_000_000
+                                    (backend.submitTurnWithCallbacks emptyBackendSnapshot Nothing
+                                        [UserMessage "read it"] callbacks)
+                                result `shouldSatisfy` \case
+                                    Just (Left _) -> True
+                                    _ -> False
+                        note <- Text.unpack <$> readIORef recovery
+                        note `shouldContain` "fake contents"
+                        note `shouldContain` "PR #86 opened"
+                        note `shouldNotContain` "Let me read it."
+
+        mapM_ (\(restart, cancelAtToolResult) ->
+            it ("recovers three images and completed work after cancellation; restart="
+                    <> show restart <> "; tool-result=" <> show cancelAtToolResult) $
+                withFakeClaude \fake ->
+                    withEnvironmentVariables
+                        [("FAKE_CLAUDE_RECOVERY_PROGRESS", Just "1")]
+                        do
+                            transcript <- newIORef []
+                            state <- newIORef emptyBackendSnapshot
+                            let options = defaultClaudeCodeOptions fake.executable fake.workingDirectory
+                                withBackend ref = withClaudeCodeBackend options Nothing
+                                    (pure defaultResponseCreateParams) ref
+                                inputs =
+                                    [userMessageWithAttachments "redesign from these references"
+                                        [ImageAttachmentItem (ImageAttachment "image/png" bytes)
+                                        | bytes <- ["one", "two", "three"]]]
+                                resume backend stateRef =
+                                    expectTurn =<< submitBackendWithState stateRef backend Nothing
+                                        [UserMessage "go"] (\_ -> pure ())
+                                interrupt :: Backend -> IO BackendSnapshot
+                                interrupt backend = do
+                                    cancel <- newCancelFlag
+                                    blocked <- newEmptyMVar
+                                    tools <- either (fail . Text.unpack) pure (mkToolRegistry [])
+                                    let recoveringBackend = Loop.backendWithCallbacks \snapshot previous turnInputs callbacks ->
+                                            backend.submitTurnWithCallbacks snapshot previous turnInputs
+                                                callbacks
+                                                    { Loop.onRecoveryCheckpoint = \note -> do
+                                                        callbacks.onRecoveryCheckpoint note
+                                                        when (not cancelAtToolResult
+                                                                && "PR #86 opened" `Text.isInfixOf` note) do
+                                                            requestCancel cancel
+                                                            takeMVar blocked
+                                                    , Loop.onLoopEvent = \event -> do
+                                                        callbacks.onLoopEvent event
+                                                        when (cancelAtToolResult && case event of
+                                                                ToolFinished{} -> True
+                                                                _ -> False) do
+                                                            requestCancel cancel
+                                                            takeMVar blocked
+                                                    }
+                                        store = Loop.BackendStateStore
+                                            { Loop.readBackendState = readIORef state
+                                            , Loop.commitBackendState = \candidate ->
+                                                atomicModifyIORef' state \old ->
+                                                    let next = advanceBackendSnapshot old
+                                                            candidate.backendItems candidate.backendContinuation
+                                                    in (next, next)
+                                            }
+                                        config = Loop.LoopConfig
+                                            { Loop.loopBackend = recoveringBackend
+                                            , Loop.loopBackendState = store
+                                            , Loop.loopTools = tools
+                                            , Loop.loopDispatch = Loop.defaultLoopDispatch
+                                            , Loop.loopMaxTurns = 2
+                                            , Loop.loopOnEvent = \_ -> pure ()
+                                            , Loop.loopApprove = \_ -> pure (Right True)
+                                            , Loop.loopReadSteering = pure []
+                                            , Loop.loopCommitSteering = \_ -> pure ()
+                                            , Loop.loopInterrupt = pure ()
+                                            , Loop.loopCancel = cancel
+                                            }
+                                    execution <- Loop.runLoopInputsDetailed config Nothing inputs
+                                    execution.executionResult `shouldBe` Left (Loop.LoopCancelled [])
+                                    execution.executionProgress `shouldBe` Loop.ResponseCommitted
+                                    snapshot <- readIORef state
+                                    snapshot.backendContinuation `shouldBe` Nothing
+                                    when (not cancelAtToolResult) $
+                                        show snapshot.backendItems `shouldContain` "PR #86 opened"
+                                    show snapshot.backendItems `shouldContain` "fake contents"
+                                    snapshot.backendItems `shouldSatisfy`
+                                        all (\case MessageItem{} -> True; _ -> False)
+                                    readFile (fake.workingDirectory </> "recovery-side-effect")
+                                        `shouldReturn` "saved"
+                                    pure snapshot
+                            result <- timeout 10_000_000 $
+                                if restart
+                                    then do
+                                        snapshot <- withBackend transcript interrupt
+                                        -- Reconstruct the host state and compatibility transcript,
+                                        -- without retaining any SDK continuation/process memory.
+                                        restored <- newIORef snapshot
+                                        restoredTranscript <- newIORef snapshot.backendItems
+                                        withBackend restoredTranscript \backend -> resume backend restored
+                                    else withBackend transcript \backend -> do
+                                        _ <- interrupt backend
+                                        resume backend state
+                            result `shouldSatisfy` \case Just _ -> True; _ -> False
+                            submitted <- lines <$> readFile fake.promptLog
+                            case submitted of
+                                [_, continued] -> do
+                                    Text.count "\"type\":\"image\"" (Text.pack continued) `shouldBe` 3
+                                    mapM_ (\bytes -> continued `shouldContain` bytes)
+                                        ["\"data\":\"b25l\"", "\"data\":\"dHdv\"", "\"data\":\"dGhyZWU=\""]
+                                    Text.count "PR #86 opened" (Text.pack continued)
+                                        `shouldBe` (if cancelAtToolResult then 0 else 1)
+                                    continued `shouldContain` "fake contents"
+                                    continued `shouldContain` "go"
+                                    continued `shouldNotContain` "[image omitted]"
+                                    continued `shouldNotContain` "Assistant tool call"
+                                _ -> expectationFailure "expected cancelled and recovery requests"
+                            starts <- lines <$> readFile fake.startLog
+                            length starts `shouldBe` 2
+                            all (Text.isPrefixOf "new " . Text.pack) starts `shouldBe` True)
+            [(False, False), (True, False), (False, True)]
 
         it "resumes a Claude UUID without re-injecting host history" $
             withFakeClaude \fake -> do
@@ -1173,7 +1575,7 @@ spec = do
                             previous
                             [UserMessage prompt]
                             (\_ -> pure ())
-                turns <- timeout 5_000_000 $
+                turns <- timeout 15_000_000 $
                     withClaudeCodeBackend
                         options
                         Nothing
@@ -1332,7 +1734,7 @@ spec = do
                                     { promptWriteTimeoutMicros = 200_000 }
                             blockedPrompt =
                                 Text.replicate (4 * 1024 * 1024) "x"
-                        turns <- timeout 8_000_000 $
+                        turns <- timeout 30_000_000 $
                             withClaudeCodeBackend
                                 options
                                 Nothing
@@ -1670,12 +2072,40 @@ fakeClaudeScript promptLog startLog argumentLog =
         , "    printf '{\"type\":\"system\",\"subtype\":\"model_refusal_fallback\",\"uuid\":\"retract-text-%s\",\"session_id\":\"%s\",\"retracted_message_uuids\":[\"interim-%s\"]}\\n' \"$turn\" \"$session_id\" \"$turn\""
         , "  fi"
         , "  if [ \"$FAKE_CLAUDE_PAUSE_AFTER_TOOL\" = 1 ]; then sleep 1; fi"
-        , "  if [ \"$FAKE_CLAUDE_STRUCTURED_RESULT\" = 1 ]; then"
+        , "  if [ \"$FAKE_CLAUDE_RECOVERY_PROGRESS\" = 1 ]; then printf '%s' saved > recovery-side-effect; fi"
+        , "  if [ \"$FAKE_CLAUDE_IMAGE_RESULT\" = 1 ]; then"
+        , "    printf '{\"type\":\"user\",\"uuid\":\"tool-result-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":[{\"type\":\"text\",\"text\":\"before\"},{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"b25l\"}},{\"type\":\"text\",\"text\":\"between\"},{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/jpeg\",\"data\":\"dHdv\"}},{\"type\":\"text\",\"text\":\"after\"}]}]}}\\n' \"$turn\" \"$session_id\""
+        , "  elif [ \"$FAKE_CLAUDE_STRUCTURED_RESULT\" = 1 ]; then"
         , "    printf '{\"type\":\"user\",\"uuid\":\"tool-result-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":[{\"type\":\"tool_reference\",\"tool_name\":\"WebFetch\"},{\"type\":\"text\",\"text\":\"loaded\"}]}]}}\\n' \"$turn\" \"$session_id\""
         , "  else"
         , "    printf '{\"type\":\"user\",\"uuid\":\"tool-result-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":\"fake contents\"}]}}\\n' \"$turn\" \"$session_id\""
         , "  fi"
-        , "  printf '{\"type\":\"assistant\",\"uuid\":\"assistant-%s\",\"session_id\":\"%s\",\"message\":{\"id\":\"message-%s\",\"content\":[{\"type\":\"text\",\"text\":\"fake response\"}]}}\\n' \"$turn\" \"$session_id\" \"$turn\""
+        , "  if [ \"$FAKE_CLAUDE_RECOVERY_PROGRESS\" = 1 ]; then"
+        , "    printf '{\"type\":\"assistant\",\"uuid\":\"progress-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"PR #86 opened; CI green.\"}]}}\\n' \"$turn\" \"$session_id\""
+        , "  fi"
+        , "  if [ \"$FAKE_CLAUDE_RETRACT_AFTER_PROGRESS\" = 1 ]; then"
+        , "    printf '{\"type\":\"system\",\"subtype\":\"model_refusal_fallback\",\"uuid\":\"retract-progress-%s\",\"session_id\":\"%s\",\"retracted_message_uuids\":[\"interim-%s\"]}\\n' \"$turn\" \"$session_id\" \"$turn\""
+        , "  fi"
+        , "  context_usage=''"
+        , "  if [ -n \"$FAKE_CLAUDE_CONTEXT_USAGE\" ]; then"
+        , "    printf '{\"type\":\"assistant\",\"uuid\":\"prior-usage-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":150000,\"output_tokens\":1000}}}\\n' \"$turn\" \"$session_id\""
+        , "    if [ \"$FAKE_CLAUDE_CONTEXT_USAGE\" = boundary-before ]; then"
+        , "      printf '{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"uuid\":\"boundary-before-%s\",\"session_id\":\"%s\"}\\n' \"$turn\" \"$session_id\""
+        , "    fi"
+        , "    printf '{\"type\":\"stream_event\",\"uuid\":\"start-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"message-%s\",\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":80,\"output_tokens\":1}}}}\\n' \"$turn\" \"$session_id\" \"$turn\""
+        , "    context_usage=',\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":80,\"output_tokens\":1}'"
+        , "  fi"
+        , "  printf '{\"type\":\"assistant\",\"uuid\":\"assistant-%s\",\"session_id\":\"%s\",\"message\":{\"id\":\"message-%s\",\"content\":[{\"type\":\"text\",\"text\":\"fake response\"}]%s}}\\n' \"$turn\" \"$session_id\" \"$turn\" \"$context_usage\""
+        , "  if [ -n \"$FAKE_CLAUDE_CONTEXT_USAGE\" ]; then"
+        , "    if [ \"$FAKE_CLAUDE_CONTEXT_USAGE\" != missing ]; then"
+        , "      printf '{\"type\":\"stream_event\",\"uuid\":\"delta-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":100,\"output_tokens\":9}}}\\n' \"$turn\" \"$session_id\""
+        , "      printf '{\"type\":\"stream_event\",\"uuid\":\"stop-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"message_stop\"}}\\n' \"$turn\" \"$session_id\""
+        , "    fi"
+        , "    printf '{\"type\":\"assistant\",\"uuid\":\"child-usage-%s\",\"session_id\":\"%s\",\"parent_tool_use_id\":\"child\",\"message\":{\"content\":[],\"stop_reason\":\"end_turn\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":1000}}}\\n' \"$turn\" \"$session_id\""
+        , "    if [ \"$FAKE_CLAUDE_CONTEXT_USAGE\" = boundary-after ]; then"
+        , "      printf '{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"uuid\":\"boundary-after-%s\",\"session_id\":\"%s\"}\\n' \"$turn\" \"$session_id\""
+        , "    fi"
+        , "  fi"
         , "  if [ \"$FAKE_CLAUDE_EXIT_AFTER_ACTIVITY\" = 1 ]; then exit 17; fi"
         , "  result_session_id=${FAKE_CLAUDE_RESULT_SESSION_ID:-$session_id}"
         , "  if [ -n \"$FAKE_CLAUDE_RESULT_MARKER\" ]; then : > \"$FAKE_CLAUDE_RESULT_MARKER\"; fi"
@@ -1727,6 +2157,9 @@ expectedFakeToolCall = ToolCall
 expectedFakeToolResult :: ToolCallResult
 expectedFakeToolResult = ToolCallResult
     { callId = "fake-tool"
+    , toolResultMode = BlockingToolCall
+    , toolResultImages = []
+    , toolResultOutcome = Nothing
     , output = "fake contents"
     , callKind = FunctionCallKind
     }

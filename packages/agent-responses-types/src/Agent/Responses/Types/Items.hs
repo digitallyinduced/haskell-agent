@@ -8,6 +8,10 @@ module Agent.Responses.Types.Items
     , parseResponseItemType
     , responseItemTypeText
     , ResponseMessage(..)
+    , localCompactionSummaryContentItemKind
+    , responseMessageHasContentItemKind
+    , compactionCheckpointOriginItem
+    , responseItemCompactionCheckpointOrigin
     , FunctionCall(..)
     , FunctionCallOutput(..)
     , CustomToolCall(..)
@@ -38,6 +42,7 @@ module Agent.Responses.Types.Items
     , ContextCompactionItem(..)
     ) where
 
+import Agent.ToolOutcome (ToolOutcome)
 import Agent.Responses.Types.Common
 import Agent.Responses.Types.Content
 import Agent.Responses.Types.Items.Known
@@ -61,6 +66,19 @@ data ResponseMessage = ResponseMessage
     , passthrough :: !(Maybe InternalChatMetadata)
 
     } deriving stock (Eq, Show)
+
+-- | Internal marker attached to locally generated compaction summaries.
+-- Provider request adapters may remove it at the wire boundary after using it
+-- to distinguish checkpoints from ordinary assistant text.
+localCompactionSummaryContentItemKind :: Text
+localCompactionSummaryContentItemKind =
+    "haskell-agent.local-compaction-summary"
+
+responseMessageHasContentItemKind :: Text -> ResponseMessage -> Bool
+responseMessageHasContentItemKind kind message =
+    maybe False
+        (maybe False (kind `elem`) . (.contentItemKinds))
+        message.passthrough
 
 instance ToJSON ResponseMessage where
     toJSON ResponseMessage
@@ -87,13 +105,13 @@ data FunctionCall = FunctionCall
     , arguments              :: !Text
     , encryptedFunctionArgs  :: !(Maybe [Text])
     , status                 :: !(Maybe ItemStatus)
-
+    , async                  :: !(Maybe Bool)
     } deriving stock (Eq, Show)
 
 instance ToJSON FunctionCall where
     toJSON FunctionCall
         { itemId, callId, name, namespace, provider, arguments, encryptedFunctionArgs
-        , status } =
+        , status, async } =
             objectWith
                 [ Just (field "type" ("function_call" :: Text))
                 , optionalField "id" itemId
@@ -104,6 +122,7 @@ instance ToJSON FunctionCall where
                 , Just (field "arguments" arguments)
                 , optionalField "encrypted_function_args" encryptedFunctionArgs
                 , optionalField "status" status
+                , optionalField "async" async
                 ]
 
 data ComputerPoint = ComputerPoint { pointX :: !Int, pointY :: !Int }
@@ -303,12 +322,14 @@ data FunctionCallOutput = FunctionCallOutput
     , provider    :: !(Maybe Text)
     , output      :: !RawJson
     , status      :: !(Maybe ItemStatus)
-
+    , async       :: !(Maybe Bool)
+    -- Local execution facts; never part of provider JSON.
+    , localOutcome :: !(Maybe ToolOutcome)
     } deriving stock (Eq, Show)
 
 instance ToJSON FunctionCallOutput where
     toJSON FunctionCallOutput
-        { itemId, callId, name, namespace, provider, output, status } =
+        { itemId, callId, name, namespace, provider, output, status, async } =
             objectWith
                 [ Just (field "type" ("function_call_output" :: Text))
                 , optionalField "id" itemId
@@ -318,6 +339,7 @@ instance ToJSON FunctionCallOutput where
                 , optionalField "provider" provider
                 , Just (field "output" output)
                 , optionalField "status" status
+                , optionalField "async" async
                 ]
 
 
@@ -328,12 +350,12 @@ data CustomToolCall = CustomToolCall
     , namespace   :: !(Maybe Text)
     , input       :: !Text
     , status      :: !(Maybe ItemStatus)
-
+    , async       :: !(Maybe Bool)
     } deriving stock (Eq, Show)
 
 instance ToJSON CustomToolCall where
     toJSON CustomToolCall
-        { itemId, callId, name, namespace, input, status } =
+        { itemId, callId, name, namespace, input, status, async } =
             objectWith
                 [ Just (field "type" ("custom_tool_call" :: Text))
                 , optionalField "id" itemId
@@ -342,6 +364,7 @@ instance ToJSON CustomToolCall where
                 , optionalField "namespace" namespace
                 , Just (field "input" input)
                 , optionalField "status" status
+                , optionalField "async" async
                 ]
 
 
@@ -351,12 +374,14 @@ data CustomToolCallOutput = CustomToolCallOutput
     , name        :: !(Maybe Text)
     , output      :: !RawJson
     , status      :: !(Maybe ItemStatus)
-
+    , async       :: !(Maybe Bool)
+    -- Local execution facts; never part of provider JSON.
+    , localOutcome :: !(Maybe ToolOutcome)
     } deriving stock (Eq, Show)
 
 instance ToJSON CustomToolCallOutput where
     toJSON CustomToolCallOutput
-        { itemId, callId, name, output, status } =
+        { itemId, callId, name, output, status, async } =
             objectWith
                 [ Just (field "type" ("custom_tool_call_output" :: Text))
                 , optionalField "id" itemId
@@ -364,6 +389,7 @@ instance ToJSON CustomToolCallOutput where
                 , optionalField "name" name
                 , Just (field "output" output)
                 , optionalField "status" status
+                , optionalField "async" async
                 ]
 
 
@@ -695,6 +721,30 @@ data ResponseItem
     | UnknownResponseItem !TaggedObject
     deriving stock (Eq, Show)
 
+-- | Host-only provenance attached immediately after an opaque server
+-- compaction checkpoint. The provider name is kept in the item tag so the
+-- marker survives session persistence without changing the checkpoint item.
+compactionCheckpointOriginItem :: Text -> ResponseItem
+compactionCheckpointOriginItem provider =
+    UnknownResponseItem
+        (TaggedObject
+            (compactionCheckpointOriginPrefix
+                <> Text.toLower (Text.strip provider)))
+
+-- | Recover the provider name from a host-only checkpoint provenance marker.
+responseItemCompactionCheckpointOrigin :: ResponseItem -> Maybe Text
+responseItemCompactionCheckpointOrigin = \case
+    UnknownResponseItem TaggedObject{tag} ->
+        case Text.stripPrefix compactionCheckpointOriginPrefix tag of
+            Just provider
+                | not (Text.null provider) -> Just provider
+            _ -> Nothing
+    _ -> Nothing
+
+compactionCheckpointOriginPrefix :: Text
+compactionCheckpointOriginPrefix =
+    "haskell-agent.compaction-checkpoint-origin."
+
 instance ToJSON ResponseItem where
     toJSON = \case
         MessageItem value -> toJSON value
@@ -907,6 +957,7 @@ functionCallDecoder = Hermes.object $
         <*> Hermes.atKey "arguments" Hermes.text
         <*> optionalAtKey "encrypted_function_args" (Hermes.list Hermes.text)
         <*> optionalAtKey "status" itemStatusDecoder
+        <*> optionalAtKey "async" Hermes.bool
 
 functionCallOutputDecoder :: Hermes.Decoder FunctionCallOutput
 functionCallOutputDecoder = Hermes.object $
@@ -918,6 +969,8 @@ functionCallOutputDecoder = Hermes.object $
         <*> optionalAtKey "provider" Hermes.text
         <*> Hermes.atKey "output" rawJsonDecoder
         <*> optionalAtKey "status" itemStatusDecoder
+        <*> optionalAtKey "async" Hermes.bool
+        <*> pure Nothing
 
 customToolCallDecoder :: Hermes.Decoder CustomToolCall
 customToolCallDecoder = Hermes.object $
@@ -928,6 +981,7 @@ customToolCallDecoder = Hermes.object $
         <*> optionalAtKey "namespace" Hermes.text
         <*> Hermes.atKey "input" Hermes.text
         <*> optionalAtKey "status" itemStatusDecoder
+        <*> optionalAtKey "async" Hermes.bool
 
 customToolCallOutputDecoder :: Hermes.Decoder CustomToolCallOutput
 customToolCallOutputDecoder = Hermes.object $
@@ -937,6 +991,8 @@ customToolCallOutputDecoder = Hermes.object $
         <*> optionalAtKey "name" Hermes.text
         <*> Hermes.atKey "output" rawJsonDecoder
         <*> optionalAtKey "status" itemStatusDecoder
+        <*> optionalAtKey "async" Hermes.bool
+        <*> pure Nothing
 
 reasoningSummaryPartDecoder :: Hermes.Decoder ReasoningSummaryPart
 reasoningSummaryPartDecoder = Hermes.object $

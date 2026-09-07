@@ -68,6 +68,7 @@ library
                     , process               >= 1.6.26
                     , safe-exceptions
                     , text
+                    , transformers
                     , unix
                     , uuid-types
 
@@ -80,6 +81,16 @@ benchmark output-buffer-bench
     build-depends:    base >= 4.17 && < 5
                     , claude-agent-sdk-haskell
                     , bytestring
+                    , safe-exceptions
+
+benchmark control-shutdown-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ControlShutdown.hs
+    ghc-options:      -O2 -threaded -rtsopts
+    build-depends:    base >= 4.17 && < 5
+                    , async
                     , safe-exceptions
 
 test-suite claude-agent-sdk-haskell-test
@@ -99,6 +110,7 @@ test-suite claude-agent-sdk-haskell-test
                     , claude-agent-sdk-haskell
                     , agent-json
                     , aeson
+                    , async
                     , bytestring
                     , containers
                     , directory

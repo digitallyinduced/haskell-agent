@@ -104,12 +104,12 @@ import Agent.CLI.TUI.ImagePreview ( NativePreviewPlacement(..)
     , renderTuiImagePreview
     , sameNativePreviewLayout
     )
-import Agent.TUI.Markdown ( codeWidgetWithSyntaxHighlighting , diffSyntaxLanguages , markdownWidgetWithLinks , markdownWidgetWithSyntaxHighlightingAndLinks )
+import Agent.TUI.Markdown ( codeWidgetWithSyntaxHighlighting , diffSyntaxLanguages , markdownFenceSyntaxLanguages , markdownWidgetWithLinks , markdownWidgetWithSyntaxHighlightingAndLinks )
 import Agent.TUI.FencedCode ( FencedBlock(..)
     , fencedBlocks
     )
 import Agent.TUI.TextWidth ( clampGraphemeCursor , displayTerminalText , nextGraphemeBoundary , previousGraphemeBoundary )
-import Agent.Syntax ( SyntaxHighlighter , loadSyntaxLanguage , newSyntaxHighlighter , resolveFenceLanguage )
+import Agent.Syntax ( SyntaxHighlighter , loadSyntaxLanguage , newSyntaxHighlighter )
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import qualified Agent.CLI.TUI.Transcript as Transcript
 import Agent.CLI.TUI.Types
@@ -358,7 +358,7 @@ applyUiEvent uiEvent state =
                         else state.appNativeProgressKeepaliveBucket
                 }
         nextState =
-            case state.appChoice of
+            case choiceOverlay state of
                 Just choice
                     | choiceClosesOnUiTransition
                         previousUi
@@ -366,7 +366,6 @@ applyUiEvent uiEvent state =
                         choice ->
                         nextState0
                             { appChoice = Nothing
-                            , appChoiceReply = Nothing
                             }
                 _ -> nextState0
     in Composer.applyComposerUiEvent uiEvent nextState
@@ -610,8 +609,11 @@ syntaxLanguagesForBlock :: UiBlock -> [Text]
 syntaxLanguagesForBlock block =
     case block.blockKind of
         BlockAssistant ->
-            mapMaybe
-                (resolveFenceLanguage . (.fencedInfo))
+            concatMap
+                (\fence ->
+                    markdownFenceSyntaxLanguages
+                        fence.fencedInfo
+                        fence.fencedBody)
                 (fencedBlocks block.blockBody)
         BlockShell
             | Just language <- blockCodeLanguage block ->

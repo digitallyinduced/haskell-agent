@@ -1,7 +1,13 @@
 module Agent.CLI.AuthSpec (spec) where
 
+import Data.List.NonEmpty (NonEmpty((:|)))
 import Agent.CLI.Auth
 import Agent.CLI.CredentialStore
+import Agent.CLI.Dictation
+    ( DictationAuthError(..)
+    , DictationBackend(..)
+    , loadDictationBackendAuth
+    )
 import Agent.CLI.GatewayClient
     ( GatewayCredential(..)
     , gatewayCredentialPath
@@ -492,6 +498,80 @@ spec = do
                             SubscriptionBilled
                             "e30.eyJleHAiOjQxMDI0NDQ4MDB9."
                             "account-home"
+
+        it "preserves an unreadable credential store instead of returning nothing" $
+            withTempHome \home ->
+                withCleanOpenAiEnv do
+                    let storeDirectory =
+                            toFilePath home
+                                </> ".haskell-agent"
+                                </> "credentials"
+                    createDirectoryIfMissing True storeDirectory
+                    writeFile
+                        (storeDirectory </> "accounts.json")
+                        "{not-json"
+                    loadOpenAiDictationAuth >>= \case
+                        Right _ ->
+                            expectationFailure
+                                "expected invalid OpenAI dictation auth"
+                        Left err -> do
+                            err
+                                `shouldSatisfy`
+                                    ("no valid OpenAI credentials found:"
+                                        `Text.isPrefixOf`)
+                            err
+                                `shouldSatisfy`
+                                    ("invalid credential store" `Text.isInfixOf`)
+
+        it "preserves invalid managed OpenAI auth JSON instead of returning nothing" $
+            withTempHome \_ ->
+                withCleanOpenAiEnv do
+                    upsertManagedCredential
+                        (openAiMetadata
+                            SubscriptionBilled
+                            "broken-openai"
+                            "broken-account"
+                            True)
+                        (ManagedSecret "broken-openai" "{not-json")
+                        `shouldReturn` Right ()
+                    loadOpenAiDictationAuth >>= \case
+                        Right _ ->
+                            expectationFailure
+                                "expected invalid OpenAI dictation auth"
+                        Left err ->
+                            err
+                                `shouldBe`
+                                    "no valid OpenAI credentials found: \
+                                    \managed OpenAI OAuth credential \
+                                    \broken-openai contains invalid auth JSON"
+
+        it "classifies an unreadable OpenAI store as an invalid dictation credential" $
+            withTempHome \home ->
+                withCleanOpenAiEnv do
+                    let storeDirectory =
+                            toFilePath home
+                                </> ".haskell-agent"
+                                </> "credentials"
+                    createDirectoryIfMissing True storeDirectory
+                    writeFile
+                        (storeDirectory </> "accounts.json")
+                        "{not-json"
+                    loadDictationBackendAuth OpenAIDictation >>= \case
+                        Left (DictationCredentialInvalid err) -> do
+                            err
+                                `shouldSatisfy`
+                                    ("no valid OpenAI credentials found:"
+                                        `Text.isPrefixOf`)
+                            err
+                                `shouldSatisfy`
+                                    ("invalid credential store" `Text.isInfixOf`)
+                        Left (DictationCredentialMissing err) ->
+                            expectationFailure
+                                ("expected invalid OpenAI dictation auth, got missing: "
+                                    <> Text.unpack err)
+                        Right _ ->
+                            expectationFailure
+                                "expected invalid OpenAI dictation auth"
     describe "Gemini loadAuth" do
         it "loads Google AI Studio keys with GOOGLE_API_KEY precedence" $
             withTempHome \_ ->
@@ -1021,9 +1101,7 @@ spec = do
     describe "preferredOpenAiTokenProvider" do
         it "keeps using the selected account until it fails" do
             pool <- OpenAI.newPool
-                [ testAuthStateFor "acc-1"
-                , testAuthStateFor "acc-2"
-                ]
+                (testAuthStateFor "acc-1" :| [testAuthStateFor "acc-2"])
                 (pure . Right)
             fallback <- OpenAICredential.poolTokenProvider pool
             preferred <- newIORef (Just "acc-2")
@@ -1065,9 +1143,7 @@ spec = do
 
         it "falls back when the preferred account is already cooling down" do
             pool <- OpenAI.newPool
-                [ testAuthStateFor "acc-1"
-                , testAuthStateFor "acc-2"
-                ]
+                (testAuthStateFor "acc-1" :| [testAuthStateFor "acc-2"])
                 (pure . Right)
             fallback <- OpenAICredential.poolTokenProvider pool
             preferred <- newIORef (Just "acc-2")
@@ -1089,9 +1165,7 @@ spec = do
 
         it "keeps the selection when another credential reports failure" do
             pool <- OpenAI.newPool
-                [ testAuthStateFor "acc-1"
-                , testAuthStateFor "acc-2"
-                ]
+                (testAuthStateFor "acc-1" :| [testAuthStateFor "acc-2"])
                 (pure . Right)
             fallback <- OpenAICredential.poolTokenProvider pool
             preferred <- newIORef (Just "acc-2")
@@ -2113,9 +2187,11 @@ shouldLoadOpenAiDictationCredential
     -> Expectation
 shouldLoadOpenAiDictationCredential billing expected expectedAccount =
     loadOpenAiDictationAuth >>= \case
-        Nothing ->
-            expectationFailure "expected an OpenAI dictation credential"
-        Just loaded -> do
+        Left err ->
+            expectationFailure
+                ("expected an OpenAI dictation credential, got "
+                    <> Text.unpack err)
+        Right loaded -> do
             loaded.loadedProvider `shouldBe` OpenAIProvider
             tokenProviderBillingMode loaded.loadedTokenProvider
                 `shouldBe` billing

@@ -7,6 +7,8 @@ module Agent.Store.Postgres
     , defaultManagedPostgresConfig
     , managedPostgresConfigFromEnv
     , openStore
+    , openStoreWithRuntimeRole
+    , openStartupOwnerPool
     , closeStore
     , withStore
     , storeConfig
@@ -20,7 +22,7 @@ import Control.Concurrent.MVar
 import Control.Concurrent.Async (mapConcurrently)
 import Control.Concurrent.STM
 import qualified Control.Exception as Exception
-import Control.Exception.Safe (bracket, mask, onException)
+import Control.Exception.Safe (bracket, mask, onException, tryAny)
 import Control.Monad (void)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -29,6 +31,11 @@ import Data.Time.Clock
     , diffTimeToPicoseconds
     , picosecondsToDiffTime
     )
+import qualified Hasql.Decoders as Decoders
+import qualified Hasql.Encoders as Encoders
+import qualified Hasql.Session as Session
+import qualified Hasql.Statement as Statement
+import System.Directory (canonicalizePath)
 
 import Agent.Store.Postgres.Config
 import Agent.Store.Postgres.Connection
@@ -51,53 +58,119 @@ data StoreCloseState
     | StoreClosed !(Either Exception.SomeException ())
 
 openStore :: ManagedPostgresConfig -> IO (Either StoreError Store)
-openStore config = mask \restore ->
-    restore (ensureManagedPostgres config) >>= \case
+openStore config =
+    openStoreWithRuntimeRole config "ha_runtime"
+
+openStoreWithRuntimeRole
+    :: ManagedPostgresConfig
+    -> Text
+    -> IO (Either StoreError Store)
+openStoreWithRuntimeRole config runtimeRole = mask \restore ->
+    restore (openStartupOwnerPool config) >>= \case
         Left err -> pure (Left err)
-        Right _ -> do
-            restore (openStorePool config defaultPoolConfig) >>= \case
-                Left err -> pure (Left err)
-                Right ownerPool -> do
-                    migrationResult <-
-                        restore (runCoreMigrations ownerPool)
+        Right ownerPool -> do
+            migrationResult <-
+                restore
+                    (runCoreMigrationsForRuntimeRole ownerPool runtimeRole)
+                    `onException` closeStorePool ownerPool
+            case migrationResult of
+                Left err ->
+                    closeStorePool ownerPool >> pure (Left err)
+                Right () -> do
+                    runtimeResult <-
+                        restore
+                            (openRoleStorePool
+                                config
+                                runtimeRole
+                                defaultPoolConfig)
                             `onException` closeStorePool ownerPool
-                    case migrationResult of
-                        Left err ->
-                            closeStorePool ownerPool >> pure (Left err)
-                        Right () -> do
-                            runtimeResult <-
-                                restore
-                                    (openRoleStorePool
+                    case runtimeResult of
+                        Left err -> do
+                            closeStorePool ownerPool
+                            pure (Left err)
+                        Right runtimePool -> do
+                            pools <- newPoolCache
+                                8
+                                storeClosedError
+                                storeExceptionError
+                                (\role ->
+                                    openRoleStorePool
                                         config
-                                        "ha_runtime"
-                                        defaultPoolConfig)
-                                    `onException` closeStorePool ownerPool
-                            case runtimeResult of
-                                    Left err -> do
-                                        closeStorePool ownerPool
-                                        pure (Left err)
-                                    Right runtimePool -> do
-                                        pools <- newPoolCache
-                                            8
-                                            storeClosedError
-                                            storeExceptionError
-                                            (\role ->
-                                                openRoleStorePool
-                                                    config
-                                                    role
-                                                    (defaultPoolConfig
-                                                        { poolSize = 2
-                                                        }))
-                                            closeStorePool
-                                        closeState <- newMVar StoreOpen
-                                        pure $ Right Store
-                                            { storeConfigInternal = config
-                                            , provisioningPoolInternal =
-                                                ownerPool
-                                            , trustedPoolInternal = runtimePool
-                                            , scopePoolsInternal = pools
-                                            , storeCloseInternal = closeState
-                                            }
+                                        role
+                                        (defaultPoolConfig
+                                            { poolSize = 2
+                                            }))
+                                closeStorePool
+                            closeState <- newMVar StoreOpen
+                            pure $ Right Store
+                                { storeConfigInternal = config
+                                , provisioningPoolInternal = ownerPool
+                                , trustedPoolInternal = runtimePool
+                                , scopePoolsInternal = pools
+                                , storeCloseInternal = closeState
+                                }
+
+-- | Reuse a direct owner connection when the managed cluster is already
+-- running. The socket check avoids paying even the short connection timeout
+-- on cold startup; any failed optimistic connection falls back to the existing
+-- lifecycle lock and provisioning commands.
+openStartupOwnerPool
+    :: ManagedPostgresConfig
+    -> IO (Either StoreError StorePool)
+openStartupOwnerPool config =
+    prepareManagedPostgres config >>= \case
+        Left err -> pure (Left err)
+        Right socketExists
+            | socketExists ->
+                mask \restore -> do
+                    connectionResult <- restore $
+                        openStorePoolWithConnectionTimeout
+                            config
+                            1
+                            defaultPoolConfig
+                    case connectionResult of
+                        Right pool -> do
+                            matches <-
+                                restore (warmPoolMatchesConfig config pool)
+                                    `onException` closeStorePool pool
+                            if matches
+                                then pure (Right pool)
+                                else
+                                    closeStorePool pool
+                                        >> restore ensureAndOpen
+                        Left _ -> restore ensureAndOpen
+            | otherwise -> ensureAndOpen
+  where
+    ensureAndOpen =
+        ensureManagedPostgres config >>= \case
+            Left err -> pure (Left err)
+            Right _ -> openStorePool config defaultPoolConfig
+
+-- | A socket path can outlive its intended configuration or be shared by a
+-- different PostgreSQL instance. Before bypassing lifecycle management, prove
+-- that the connected server is backed by this configuration's data directory.
+warmPoolMatchesConfig :: ManagedPostgresConfig -> StorePool -> IO Bool
+warmPoolMatchesConfig config pool =
+    withSession
+        pool
+        (Session.statement () managedDataDirectoryStatement) >>= \case
+        Left _ -> pure False
+        Right actualDirectory -> do
+            expectedResult <- tryAny $
+                canonicalizePath
+                    config.postgresPaths.postgresDataDirectory
+            actualResult <- tryAny $
+                canonicalizePath (Text.unpack actualDirectory)
+            pure case (expectedResult, actualResult) of
+                (Right expected, Right actual) -> expected == actual
+                _ -> False
+
+managedDataDirectoryStatement :: Statement.Statement () Text
+managedDataDirectoryStatement = Statement.preparable
+    "SELECT current_setting('data_directory')"
+    Encoders.noParams
+    (Decoders.singleRow
+        (Decoders.column (Decoders.nonNullable Decoders.text)))
 
 closeStore :: Store -> IO ()
 closeStore store =

@@ -37,6 +37,7 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     )
 import Claude.Agent.SDK.Types
     ( AssistantMessage(..)
@@ -48,6 +49,7 @@ import Claude.Agent.SDK.Types
     , SystemMessage(..)
     , Usage(..)
     , ToolResultContent(..)
+    , ToolResultPart(..)
     , UserMessage(..)
     , QueryMessageScope(..)
     , QueryProgress(..)
@@ -57,7 +59,9 @@ import Claude.Agent.SDK.Types
     , messageUuid
     , modelUsageToUsage
     )
+import qualified Data.Aeson as AesonValue
 import qualified Data.Aeson.Encoding as Aeson
+import qualified Data.ByteString.Base64 as Base64
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
@@ -73,6 +77,9 @@ data CompletedClaudeTurn = CompletedClaudeTurn
     -- whatever 'streamClaudeMessage' has not already exposed.
     , liveEvents :: ![ClaudeLiveEvent]
     , tokenUsage :: !Usage
+    -- | Usage of the latest main-conversation model response, not the
+    -- aggregate billing usage of Claude Code's entire tool loop.
+    , contextUsage :: !(Maybe Usage)
     , cumulativeModelUsage :: !(Maybe Usage)
     -- | Host transcript items for this turn in wire order: assistant text
     -- interleaved with tool calls and outputs, always ending in at least
@@ -460,9 +467,33 @@ interpretClaudeTurnWithCredentialValidation validateCredential messages result =
         , assistantText
         , liveEvents
         , tokenUsage = result.usage
+        , contextUsage = latestContextUsage visibleMessages
         , cumulativeModelUsage = cumulative
         , turnItems
         }
+
+-- | The SDK's canonical messages have already had retractions applied.
+-- Never sum their usage: each input count describes a complete request,
+-- including cache creation and cache reads normalized by the SDK decoder.
+-- A boundary without a subsequent measured response invalidates the count,
+-- as does a final assistant record without valid usage.
+latestContextUsage :: [Message] -> Maybe Usage
+latestContextUsage = foldl' step Nothing
+  where
+    step previous = \case
+        MessageAssistant assistant
+            | assistant.error /= Nothing -> Nothing
+            | otherwise -> assistant.usage >>= validUsage
+        MessageSystem system
+            | system.subtype == "compact_boundary" -> Nothing
+        _ -> previous
+    validUsage :: Usage -> Maybe Usage
+    validUsage usage
+        | usage.inputTokens > 0
+        , usage.outputTokens >= 0
+        , usage.cachedTokens >= 0
+        , usage.cachedTokens <= usage.inputTokens = Just usage
+        | otherwise = Nothing
 
 validateSubscriptionSource :: [Message] -> Either ClaudeInterpretationError ()
 validateSubscriptionSource messages =
@@ -608,12 +639,30 @@ functionCallItem callId name input =
         , arguments = rawJsonText input
         , encryptedFunctionArgs = Nothing
         , status = Just ItemCompleted
+        , async = Nothing
         }
 
--- | Persist the text projection rather than the wire JSON: structured
--- results (tool references, image reads carrying base64 payloads) are
--- replayed into the transcript view and imported into later prompts as
--- plain text.
+encodeResultContent :: ToolResultContent -> RawJson
+encodeResultContent content
+    | any isImage content.blocks =
+        rawJsonFromEncoding (AesonValue.toEncoding (map toPart content.blocks))
+    | otherwise = rawJsonFromEncoding (Aeson.text (renderResultContent content))
+  where
+    isImage ToolResultImage{} = True
+    isImage _ = False
+    toPart (ToolResultText text) = InputTextPart text Nothing
+    toPart ToolResultImage{mediaType, imageBytes} =
+        InputImagePart
+            { detail = Nothing
+            , fileId = Nothing
+            , imageUrl = Just $
+                "data:" <> mediaType <> ";base64,"
+                    <> TextEncoding.decodeUtf8 (Base64.encode imageBytes)
+            , promptCacheBreakpoint = Nothing
+            }
+
+-- | Persist validated images as canonical content parts, never as wire JSON
+-- embedded in prompt text. Text-only results retain their historical encoding.
 functionOutputItem
     :: Text
     -> Maybe ToolResultContent
@@ -621,7 +670,8 @@ functionOutputItem
     -> ResponseItem
 functionOutputItem callId content isError =
     FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = Nothing
+        , itemId = Nothing
         , callId
         , name = Nothing
         , namespace = Nothing
@@ -629,13 +679,14 @@ functionOutputItem callId content isError =
         , output =
             maybe
                 (rawJsonFromEncoding Aeson.null_)
-                (rawJsonFromEncoding . Aeson.text . renderResultContent)
+                encodeResultContent
                 content
         , status =
             Just $
                 if isError == Just True
                     then ItemIncomplete
                     else ItemCompleted
+        , async = Nothing
         }
 
 streamEventToolEvents :: StreamEvent -> [ClaudeLiveEvent]
@@ -691,6 +742,9 @@ userBlockEvents = \case
                 { callId = toolUseId
                 , output
                 , callKind = FunctionCallKind
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 }
             ]
     ServerToolResultBlock{toolUseId, content} ->
@@ -700,6 +754,9 @@ userBlockEvents = \case
                 { callId = toolUseId
                 , output = rawOutput
                 , callKind = FunctionCallKind
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 }
             ]
     _ ->

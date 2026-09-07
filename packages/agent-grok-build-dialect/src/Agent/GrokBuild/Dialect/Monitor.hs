@@ -51,7 +51,7 @@ monitorDescription :: Text
 monitorDescription =
     "Start a background monitor that streams events from a long-running script. Each stdout line is an event; exit ends the watch.\n\n\
     \Print only meaningful status changes. Use line-buffered commands in pipes so events are not delayed.\n\n\
-    \Use `$TMPDIR` for temporary files; literal `/tmp` and `/private/tmp` paths are rejected.\n\n\
+    \Use `$TMPDIR` as the only temporary-file root. Put task-specific subdirectories there; do not create alternate scratch directories in the home directory or workspace. Literal `/tmp` and `/private/tmp` paths are rejected.\n\n\
     \Set persistent=true for session-length watches. Otherwise the monitor stops at timeout_ms (default 10h)."
 
 runMonitor :: GrokSession -> MonitorArgs -> IO (Either Text Text)

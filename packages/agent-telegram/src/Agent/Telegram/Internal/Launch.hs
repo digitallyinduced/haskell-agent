@@ -128,12 +128,8 @@ runTelegramWithStore store home config token = do
                     | option.modelTarget.targetProvider == provider ->
                         Just option
                 _ -> Just (rawModelOption provider model)
-    selectedOption <- case configuredOption of
-        Just option -> pure option
-        Nothing -> maybe
-            (die "configured provider has no default model")
-            pure
-            (defaultModelOptionFor catalog provider)
+    let selectedOption =
+            fromMaybe (defaultModelOptionFor catalog provider) configuredOption
     resolvedOption <- resolveModelOptionDialect selectedOption
     let target = resolvedOption.modelTarget
     createDirectoryIfMissing True gatewayDir

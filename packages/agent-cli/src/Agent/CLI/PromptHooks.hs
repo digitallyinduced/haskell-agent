@@ -6,6 +6,10 @@ module Agent.CLI.PromptHooks
     , fullscreenAwareSecretHooks
     ) where
 
+import Agent.CLI.Notification
+    ( AttentionRequest(InputRequested, PlanModeRequested)
+    , notifyAttention
+    )
 import Agent.CLI.Secret (sanitizeSecretPromptText)
 import Agent.CLI.TUI.App
     ( FullscreenRuntime
@@ -30,6 +34,7 @@ import Data.IORef (IORef, readIORef)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import System.IO (stderr)
 
 fullscreenAwarePlanHooks
     :: IORef (Maybe FullscreenRuntime)
@@ -39,7 +44,8 @@ fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
     { planConfirmEnter = \reason ->
         withCurrentFullscreen runtimeRef
             (hooks.planConfirmEnter reason)
-            \runtime ->
+            \runtime -> do
+                notifyAttention stderr PlanModeRequested
                 requestFullscreenChoiceWithBody
                     runtime
                     "Enter plan mode?"
@@ -52,7 +58,8 @@ fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
     , planDecideExit = \planBody ->
         withCurrentFullscreen runtimeRef
             (hooks.planDecideExit planBody)
-            \runtime ->
+            \runtime -> do
+                notifyAttention stderr InputRequested
                 requestFullscreenChoiceWithBody
                     runtime
                     "Ready to implement this plan?"
@@ -64,7 +71,8 @@ fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
                     ]
                     >>= \case
                         Just 0 -> pure PlanApprove
-                        Just 1 ->
+                        Just 1 -> do
+                            notifyAttention stderr InputRequested
                             requestFullscreenText
                                 runtime
                                 "Request changes"
@@ -77,22 +85,24 @@ fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
     , planAskQuestion = \question options ->
         withCurrentFullscreen runtimeRef
             (hooks.planAskQuestion question options)
-            \runtime -> case options of
-                [] ->
-                    requestFullscreenText
-                        runtime
-                        "Planning question"
-                        question
-                        ""
-                        >>= pure . nonBlank
-                choices ->
-                    requestFullscreenChoiceWithBody
-                        runtime
-                        "Planning question"
-                        question
-                        0
-                        [(choice, "") | choice <- choices]
-                        >>= pure . (>>= (`atMay` choices))
+            \runtime -> do
+                notifyAttention stderr InputRequested
+                case options of
+                    [] ->
+                        requestFullscreenText
+                            runtime
+                            "Planning question"
+                            question
+                            ""
+                            >>= pure . nonBlank
+                    choices ->
+                        requestFullscreenChoiceWithBody
+                            runtime
+                            "Planning question"
+                            question
+                            0
+                            [(choice, "") | choice <- choices]
+                            >>= pure . (>>= (`atMay` choices))
     }
 
 fullscreenAwareSecretHooks

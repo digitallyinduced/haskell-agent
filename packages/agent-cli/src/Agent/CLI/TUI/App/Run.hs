@@ -368,6 +368,10 @@ runFullscreen runtime workerAction = do
                     DictationControl
                         { dictationWaitForStop =
                             job.dictationJobWaitForStop
+                        , dictationOnRecording =
+                            enqueueAppEvent runtime $
+                                AppDictationRecording
+                                    job.dictationJobRecordingSession
                         , dictationOnTranscript =
                             enqueueAppEvent runtime . AppDictationPartial
                         }
@@ -429,14 +433,8 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appTheme = runtime.runtimeTheme
         , appSlashIndex = 0
         , appChoice = Nothing
-        , appChoiceReply = Nothing
         , appResume = Nothing
-        , appResumeReply = Nothing
-        , appResumeLoad = Nothing
-        , appResumeDelete = Nothing
-        , appResumeSearch = Nothing
         , appTextPrompt = Nothing
-        , appTextReply = Nothing
         , appMetaConsole = Nothing
         , appSlashDismissed = False
         , appPasted = False

@@ -62,6 +62,14 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (unless)
+import Control.Monad.Trans.Except
+    ( ExceptT(..)
+    , except
+    , runExceptT
+    , throwE
+    , withExceptT
+    )
+import Data.Bifunctor (first)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as AesonKey
 import qualified Data.Aeson.KeyMap as AesonKeyMap
@@ -275,55 +283,55 @@ runImageGeneration
     -> RawJson
     -> IO (Either Text ToolHandlerResult)
 runImageGeneration baseUrl tokenProvider env history displayHooks call raw =
-    case Aeson.eitherDecodeStrict' (rawJsonBytes raw) of
-        Left err ->
-            pure (Left ("invalid imagegen arguments: " <> Text.pack err))
-        Right args ->
-            validateArgs args >>= \case
-                Left err -> pure (Left err)
-                Right () ->
-                    selectReferenceImages env history args >>= \case
-                        Left err -> pure (Left err)
-                        Right references -> do
-                            let (endpoint, requestBody) =
-                                    imageRequest args.prompt references
-                            response <- runWithTokenProvider tokenProvider \credential ->
-                                if credential.provider /= OpenAIProvider
-                                    then pure $ Left $ ProviderError
-                                        InvalidRequestError
-                                        "Image generation requires an OpenAI credential."
-                                        Nothing
-                                    else postCodexJson
-                                        baseUrl
-                                        endpoint
-                                        credential.accessToken
-                                        credential.accountId
-                                        (imageRequestHeaders call.callId)
-                                        requestBody
-                                        imageResponseHandler
-                            case response of
-                                Left err -> pure (Left (renderApiError err))
-                                Right encoded ->
-                                    finishGeneratedImage
-                                        env
-                                        history
-                                        displayHooks
-                                        call
-                                        encoded
+    runExceptT do
+        args <- except $
+            first
+                (("invalid imagegen arguments: " <>) . Text.pack)
+                (Aeson.eitherDecodeStrict' (rawJsonBytes raw))
+        except (validateArgs args)
+        references <- liftTextError (selectReferenceImages env history args)
+        let (endpoint, requestBody) = imageRequest args.prompt references
+        encoded <- liftApiError $
+            runWithTokenProvider tokenProvider \credential ->
+                if credential.provider /= OpenAIProvider
+                    then pure $ Left $ ProviderError
+                        InvalidRequestError
+                        "Image generation requires an OpenAI credential."
+                        Nothing
+                    else postCodexJson
+                        baseUrl
+                        endpoint
+                        credential.accessToken
+                        credential.accountId
+                        (imageRequestHeaders call.callId)
+                        requestBody
+                        imageResponseHandler
+        liftTextError $
+            finishGeneratedImage
+                env
+                history
+                displayHooks
+                call
+                encoded
 
-validateArgs :: ImageGenerationArgs -> IO (Either Text ())
+liftTextError :: IO (Either Text value) -> ExceptT Text IO value
+liftTextError = ExceptT
+
+liftApiError :: IO (Either ApiError value) -> ExceptT Text IO value
+liftApiError = withExceptT renderApiError . ExceptT
+
+validateArgs :: ImageGenerationArgs -> Either Text ()
 validateArgs args
     | maybe False ((> maxSelectableImages) . length) args.referencedImagePaths =
-        pure $ Left "`referenced_image_paths` must contain at most 5 paths"
+        Left "`referenced_image_paths` must contain at most 5 paths"
     | maybe False (\count -> count < 1 || count > maxSelectableImages)
             args.numLastImagesToInclude =
-        pure $ Left
-            "`num_last_images_to_include` must be between 1 and 5"
+        Left "`num_last_images_to_include` must be between 1 and 5"
     | maybe False (not . null) args.referencedImagePaths
         && maybe False (const True) args.numLastImagesToInclude =
-            pure $ Left
+            Left
                 "provide only one of `referenced_image_paths` or `num_last_images_to_include`"
-    | otherwise = pure (Right ())
+    | otherwise = Right ()
 
 selectReferenceImages
     :: ToolEnv
@@ -352,22 +360,17 @@ loadReferencedImages
     :: ToolEnv
     -> [Text]
     -> IO (Either Text [ImageAttachment])
-loadReferencedImages env = go []
+loadReferencedImages env paths =
+    runExceptT (traverse loadReferencedImage paths)
   where
-    go reversed = \case
-        [] -> pure (Right (reverse reversed))
-        pathText : rest ->
-            let requested = fromText pathText
-            in if not (isAbsolute requested)
-                then pure $ Left $
-                    "`referenced_image_paths` entries must be absolute paths: "
-                        <> pathText
-                else resolveForRead env requested >>= \case
-                    Left err -> pure (Left err)
-                    Right path ->
-                        readReferencedImage pathText path >>= \case
-                            Left err -> pure (Left err)
-                            Right image -> go (image : reversed) rest
+    loadReferencedImage pathText = do
+        let requested = fromText pathText
+        unless (isAbsolute requested) $
+            throwE $
+                "`referenced_image_paths` entries must be absolute paths: "
+                    <> pathText
+        path <- liftTextError (resolveForRead env requested)
+        liftTextError (readReferencedImage pathText path)
 
 readReferencedImage
     :: Text

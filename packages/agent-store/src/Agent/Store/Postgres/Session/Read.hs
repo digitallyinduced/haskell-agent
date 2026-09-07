@@ -16,6 +16,7 @@ module Agent.Store.Postgres.Session.Read
     , loadSessions
     , loadSessionMetadataMany
     , loadSessionMetadata
+    , loadSessionMetadataForBoundary
     , loadLatestSessionPromptEpoch
     , loadActiveSession
     , loadActiveSessionWithImplementation
@@ -30,6 +31,7 @@ module Agent.Store.Postgres.Session.Read
     , loadSessionResumeStats
     , loadSessionEvents
     , listSessionMetadata
+    , listSessionMetadataForBoundary
     , listSessionArchiveKeys
     , searchConversationTurns
     , searchConversationTurnsForBoundary
@@ -164,6 +166,24 @@ loadSessionMetadata pool sessionKey =
     withSession pool $
         Transactions.transaction Transactions.RepeatableRead Transactions.Read $
             Transaction.statement sessionKey loadMetadataStatement
+
+-- | Load metadata only when the row belongs to the caller's direct or gateway
+-- route. Gateway credentials share locally owned gateway conversation history.
+-- The predicate is part of the SQL statement, so a row from the other route is
+-- never returned to the application for post-filtering.
+loadSessionMetadataForBoundary
+    :: StorePool
+    -> Text
+    -> Maybe Text
+    -> Text
+    -> IO (Either StoreError (Maybe SessionListEntry))
+loadSessionMetadataForBoundary
+        pool gatewayConnection gatewayIdentity sessionKey =
+    withSession pool $
+        Transactions.transaction Transactions.RepeatableRead Transactions.Read $
+            Transaction.statement
+                (sessionKey, gatewayConnection, gatewayIdentity)
+                loadMetadataForBoundaryStatement
 
 loadSessionMetadataMany
     :: StorePool
@@ -426,6 +446,72 @@ listSessionMetadata pool =
         Transactions.transaction Transactions.RepeatableRead Transactions.Read $
             Transaction.statement () listMetadataStatement
 
+-- | List sessions inside the caller's direct or organization-gateway route.
+--
+-- Gateway mode admits every row for the reserved gateway connection,
+-- including rows written by another or legacy gateway credential. Direct mode
+-- admits only identity-less rows outside the reserved gateway connection.
+-- Both the route and cursor predicates are applied before ordering and LIMIT
+-- so rows from the other route cannot displace authorized results.
+listSessionMetadataForBoundary
+    :: StorePool
+    -> Text
+    -- ^ Reserved organization-gateway connection identifier.
+    -> Maybe Text
+    -- ^ Current gateway credential identity, or 'Nothing' for direct mode.
+    -> SessionArchiveFilter
+    -> Maybe SessionListCursor
+    -> Int
+    -> IO (Either StoreError SessionListPage)
+listSessionMetadataForBoundary
+        pool gatewayConnection gatewayIdentity archiveFilter cursor
+        requestedLimit = do
+    let
+        limit = max 1 (min 100 requestedLimit)
+        cursorUpdatedAt = (.sessionListCursorUpdatedAt) <$> cursor
+        cursorKey = (.sessionListCursorKey) <$> cursor
+    fmap (fmap (toSessionListPage limit)) $
+        withSession pool $
+            Transactions.transaction
+                Transactions.RepeatableRead
+                Transactions.Read $
+                    Transaction.statement
+                        ( gatewayConnection
+                        , gatewayIdentity
+                        , archiveFilterParameter archiveFilter
+                        , cursorUpdatedAt
+                        , cursorKey
+                        , fromIntegral (limit + 1)
+                        )
+                        listMetadataForBoundaryStatement
+
+archiveFilterParameter :: SessionArchiveFilter -> Text
+archiveFilterParameter = \case
+    SessionActive -> "active"
+    SessionArchived -> "archived"
+    SessionAll -> "all"
+
+toSessionListPage :: Int -> [SessionListEntry] -> SessionListPage
+toSessionListPage limit rows =
+    let
+        sessions = take limit rows
+        nextCursor
+            | length rows <= limit = Nothing
+            | otherwise = case reverse sessions of
+                [] -> Nothing
+                entry : _ ->
+                    let metadata = entry.sessionListEntryMetadata
+                    in Just SessionListCursor
+                        { sessionListCursorUpdatedAt =
+                            metadata.sessionMetadataUpdatedAt
+                        , sessionListCursorKey =
+                            metadata.sessionMetadataKey
+                        }
+    in SessionListPage
+        { sessionListPageSessions = sessions
+        , sessionListPageNextCursor = nextCursor
+        }
+
 listSessionArchiveKeys
     :: StorePool
     -> IO (Either StoreError [Text])
@@ -483,9 +569,9 @@ searchNativeConversations pool query limit =
             )
             searchNativeConversationsStatement
 
--- | Native/sidebar search with the same exact credential boundary as CLI
+-- | Native/sidebar search with the same direct/gateway route boundary as CLI
 -- search. The predicate is part of both candidate branches before ordering
--- and LIMIT, so another organization cannot displace or expose results.
+-- and LIMIT, so rows from the other route cannot displace or expose results.
 searchNativeConversationsForBoundary
     :: StorePool
     -> Text
@@ -635,7 +721,7 @@ searchNativeConversationsStatement = mkStatement
     \ FROM harness.sessions s CROSS JOIN query WHERE s.deleted_at IS NULL\
     \ AND ($2 IS NULL OR (\
     \   ($3 IS NULL AND s.connection_id <> $2 AND s.gateway_identity IS NULL)\
-    \   OR ($3 IS NOT NULL AND s.connection_id = $2 AND s.gateway_identity = $3)))\
+    \   OR ($3 IS NOT NULL AND s.connection_id = $2)))\
     \ AND (\
     \ s.title ILIKE '%' || $1 || '%' OR s.cwd ILIKE '%' || $1 || '%' OR\
     \ s.provider ILIKE '%' || $1 || '%' OR s.model_id ILIKE '%' || $1 || '%')\
@@ -651,7 +737,7 @@ searchNativeConversationsStatement = mkStatement
     \ CROSS JOIN query WHERE s.deleted_at IS NULL\
     \ AND ($2 IS NULL OR (\
     \   ($3 IS NULL AND s.connection_id <> $2 AND s.gateway_identity IS NULL)\
-    \   OR ($3 IS NOT NULL AND s.connection_id = $2 AND s.gateway_identity = $3)))\
+    \   OR ($3 IS NOT NULL AND s.connection_id = $2)))\
     \ AND (\
     \ t.search_vector @@ query.ts OR t.user_text ILIKE '%' || $1 || '%' OR\
     \ t.assistant_text ILIKE '%' || $1 || '%'))\
@@ -746,6 +832,28 @@ loadMetadataStatement = mkStatement
     (Decoders.rowMaybe metadataRow)
     True
 
+loadMetadataForBoundaryStatement
+    :: Statement (Text, Text, Maybe Text) (Maybe SessionListEntry)
+loadMetadataForBoundaryStatement = mkStatement
+    (metadataWithArchiveSelectSql
+        <> " WHERE session_key = $1 AND deleted_at IS NULL\
+           \ AND (\
+           \   ($3 IS NULL\
+           \     AND connection_id <> $2\
+           \     AND gateway_identity IS NULL)\
+           \   OR ($3 IS NOT NULL\
+           \     AND connection_id = $2)\
+           \ )")
+    ( ((\(sessionKey, _, _) -> sessionKey)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, gatewayConnection, _) -> gatewayConnection)
+            >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, _, gatewayIdentity) -> gatewayIdentity)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
+    )
+    (Decoders.rowMaybe sessionListEntryRow)
+    True
+
 listMetadataStatement :: Statement () [SessionMetadata]
 listMetadataStatement = mkStatement
     (metadataSelectSql
@@ -753,6 +861,48 @@ listMetadataStatement = mkStatement
            \ ORDER BY updated_at DESC, session_key ASC")
     Encoders.noParams
     (Decoders.rowList metadataRow)
+    True
+
+listMetadataForBoundaryStatement
+    :: Statement
+        (Text, Maybe Text, Text, Maybe UTCTime, Maybe Text, Int64)
+        [SessionListEntry]
+listMetadataForBoundaryStatement = mkStatement
+    (metadataWithArchiveSelectSql
+        <> " WHERE deleted_at IS NULL\
+           \ AND (\
+           \   ($2 IS NULL\
+           \     AND connection_id <> $1\
+           \     AND gateway_identity IS NULL)\
+           \   OR ($2 IS NOT NULL\
+           \     AND connection_id = $1)\
+           \ )\
+           \ AND (\
+           \   ($3 = 'active' AND archived_at IS NULL)\
+           \   OR ($3 = 'archived' AND archived_at IS NOT NULL)\
+           \   OR $3 = 'all'\
+           \ )\
+           \ AND (\
+           \   $4 IS NULL\
+           \   OR updated_at < $4\
+           \   OR (updated_at = $4 AND session_key > $5)\
+           \ )\
+           \ ORDER BY updated_at DESC, session_key ASC\
+           \ LIMIT $6")
+    ( ((\(value, _, _, _, _, _) -> value)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, value, _, _, _, _) -> value)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((\(_, _, value, _, _, _) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, _, _, value, _, _) -> value)
+            >$< Encoders.param (Encoders.nullable Encoders.timestamptz))
+        <> ((\(_, _, _, _, value, _) -> value)
+            >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((\(_, _, _, _, _, value) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowList sessionListEntryRow)
     True
 
 listArchiveKeysStatement :: Statement () [Text]
@@ -767,15 +917,30 @@ listArchiveKeysStatement = mkStatement
 
 metadataSelectSql :: Text
 metadataSelectSql =
-    "SELECT session_key, session_schema_version, created_at, updated_at,\
+    "SELECT " <> metadataSelectColumnsSql <> " FROM harness.sessions"
+
+metadataWithArchiveSelectSql :: Text
+metadataWithArchiveSelectSql =
+    "SELECT "
+        <> metadataSelectColumnsSql
+        <> ", archived_at IS NOT NULL FROM harness.sessions"
+
+metadataSelectColumnsSql :: Text
+metadataSelectColumnsSql =
+    "session_key, session_schema_version, created_at, updated_at,\
     \ provider, connection_id, gateway_identity, model_id,\
     \ transport_model_id, dialect,\
     \ legacy_target_provider, legacy_target_connection,\
     \ legacy_target_effective_model, legacy_target_dialect,\
     \ cwd, effort, title, title_is_manual, title_refresh_index,\
     \ title_user_turns, last_response_id, input_tokens, output_tokens,\
-    \ cached_tokens, last_recap, last_turn_summary, last_recap_main_turns\
-    \ FROM harness.sessions"
+    \ cached_tokens, last_recap, last_turn_summary, last_recap_main_turns"
+
+sessionListEntryRow :: Decoders.Row SessionListEntry
+sessionListEntryRow =
+    SessionListEntry
+        <$> metadataRow
+        <*> Decoders.column (Decoders.nonNullable Decoders.bool)
 
 loadTurnsManyStatement
     :: Statement [Text] (Vector.Vector (Text, TurnRow))
@@ -1123,8 +1288,7 @@ searchTurnsForBoundaryStatement = mkStatement
     \     AND s.connection_id <> $2\
     \     AND s.gateway_identity IS NULL)\
     \   OR ($3 IS NOT NULL\
-    \     AND s.connection_id = $2\
-    \     AND s.gateway_identity = $3)\
+    \     AND s.connection_id = $2)\
     \ )\
     \ AND (\
     \   t.search_vector @@ query.value\

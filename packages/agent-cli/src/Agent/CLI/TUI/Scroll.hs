@@ -8,6 +8,7 @@ module Agent.CLI.TUI.Scroll
     , conversationAnchorSticky
     , conversationFollowScroll
     , followConversationTail
+    , realignConversationAnchor
     , reconcileConversationFollow
     , reflowConversationAnchor
     , startConversationAnchor
@@ -109,6 +110,13 @@ startConversationAnchor blockId text top = ConversationAnchor
     , anchorViewportTop = max 0 top
     , anchorPhase = ConversationFillingPage
     }
+
+-- | Refresh the prompt's content row after rendered transcript geometry
+-- changes. The row captured at submission can become stale when earlier
+-- blocks are replaced, wrapped, or resized.
+realignConversationAnchor :: Int -> ConversationAnchor -> ConversationAnchor
+realignConversationAnchor top anchor =
+    anchor { anchorTop = max 0 top }
 
 -- | Recompute the virtual bottom reserve after a render.
 --

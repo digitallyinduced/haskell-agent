@@ -3,8 +3,15 @@ module Agent.CLI.Tools
     ( requireToolRegistry
     , lookupAppTool
     , schemasFromAppTools
+    , schemasFromAppToolsWithAsyncCapability
+    , schemasFromAppToolsWithHostedSearch
+    , schemasFromAppToolsWithHostedSearchAndAsyncCapability
     , schemasFromAppToolsCodeMode
+    , schemasFromAppToolsCodeModeWithAsyncCapability
+    , schemasFromAppToolsCodeModeWithHostedSearch
+    , schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
     , hostedSearchToolNames
+    , hostedSearchToolNamesWhen
     , hostedSearchToolCollisions
     , webSearchTool
     , xSearchTool
@@ -47,10 +54,13 @@ import Agent.Tools.Types
     , ToolSchema(..)
     , ToolRegistry
     , mkToolRegistry
+    , appToolSupportsAsync
     )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Foldable as Foldable
 import Data.List (partition)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
@@ -69,7 +79,7 @@ requireToolRegistry tools
   where
     reservesComputerFunction tool =
         canonicalToolName tool.appToolName == computerFunctionName
-            && tool.appToolSchema /= HostedComputerSchema
+            && not (isHostedComputerSchema tool.appToolSchema)
 
 lookupAppTool :: Text -> [AppTool] -> Maybe AppTool
 lookupAppTool name tools =
@@ -99,10 +109,23 @@ hostedSearchTools :: Dialect -> [ResponseTool]
 hostedSearchTools dialect =
     map knownResponseTool (hostedSearchToolTypes dialect)
 
+hostedSearchToolsWhen :: Bool -> Dialect -> [ResponseTool]
+hostedSearchToolsWhen includeHostedSearch dialect
+    | includeHostedSearch = hostedSearchTools dialect
+    | otherwise = []
+
 -- | Model-facing names for hosted search tools advertised in this dialect.
 hostedSearchToolNames :: Dialect -> [Text]
 hostedSearchToolNames =
     map responseToolTypeText . hostedSearchToolTypes
+
+-- | Model-facing hosted search names, optionally omitted at an execution
+-- boundary which requires every model-controlled network action to be routed
+-- through an application tool.
+hostedSearchToolNamesWhen :: Bool -> Dialect -> [Text]
+hostedSearchToolNamesWhen includeHostedSearch dialect
+    | includeHostedSearch = hostedSearchToolNames dialect
+    | otherwise = []
 
 -- | Names reserved so MCP servers cannot shadow hosted search tools.
 hostedSearchToolCollisions :: [(Text, Text)]
@@ -112,26 +135,64 @@ hostedSearchToolCollisions =
     ]
 
 schemasFromAppTools :: Dialect -> [AppTool] -> [ResponseTool]
-schemasFromAppTools dialect tools = case dialectToolLayout dialect of
-    CollaborationNamespaceLayout ->
-        let (multi, nonMulti) = partition isMultiAgentTool tools
-            (imageGeneration, rest) =
-                partition isImageGenerationTool nonMulti
-            base = hostedSearchTools dialect
-                ++ mapMaybe (schemaFromAppTool dialect) rest
-            imageNamespaces =
-                [ imageGenerationNamespaceTool imageGeneration
-                | not (null imageGeneration)
-                ]
-            collaborationNamespaces =
-                [ multiAgentNamespaceTool multi
-                | not (null multi)
-                ]
-        in base ++ imageNamespaces ++ collaborationNamespaces
-    FlatToolLayout ->
-        hostedSearchTools dialect ++ mapMaybe (schemaFromAppTool dialect) tools
-    NoHostToolLayout ->
-        []
+schemasFromAppTools = schemasFromAppToolsWithHostedSearch True
+
+schemasFromAppToolsWithAsyncCapability
+    :: Bool
+    -> Dialect
+    -> [AppTool]
+    -> [ResponseTool]
+schemasFromAppToolsWithAsyncCapability =
+    schemasFromAppToolsWithHostedSearchAndAsyncCapability True
+
+-- | Project application tools while explicitly controlling provider-hosted
+-- search. Hosted search bypasses application-tool dispatch, so embeddings
+-- without that capability must pass 'False'.
+schemasFromAppToolsWithHostedSearch
+    :: Bool
+    -> Dialect
+    -> [AppTool]
+    -> [ResponseTool]
+schemasFromAppToolsWithHostedSearch includeHostedSearch =
+    schemasFromAppToolsWithHostedSearchAndAsyncCapability
+        includeHostedSearch
+        False
+
+schemasFromAppToolsWithHostedSearchAndAsyncCapability
+    :: Bool
+    -> Bool
+    -> Dialect
+    -> [AppTool]
+    -> [ResponseTool]
+schemasFromAppToolsWithHostedSearchAndAsyncCapability
+        includeHostedSearch modelSupportsAsync dialect tools =
+    case dialectToolLayout dialect of
+        CollaborationNamespaceLayout ->
+            let (multi, nonMulti) = partition isMultiAgentTool tools
+                (imageGeneration, rest) =
+                    partition isImageGenerationTool nonMulti
+                base = hostedSearchToolsWhen includeHostedSearch dialect
+                    ++ mapMaybe
+                        (schemaFromAppTool modelSupportsAsync dialect)
+                        rest
+                imageNamespaces =
+                    [ imageGenerationNamespaceTool
+                        modelSupportsAsync
+                        imageGeneration
+                    | not (null imageGeneration)
+                    ]
+                collaborationNamespaces =
+                    [ multiAgentNamespaceTool modelSupportsAsync multi
+                    | not (null multi)
+                    ]
+            in base ++ imageNamespaces ++ collaborationNamespaces
+        FlatToolLayout ->
+            hostedSearchToolsWhen includeHostedSearch dialect
+                ++ mapMaybe
+                    (schemaFromAppTool modelSupportsAsync dialect)
+                    tools
+        NoHostToolLayout ->
+            []
 
 isMultiAgentTool :: AppTool -> Bool
 isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
@@ -140,56 +201,78 @@ isImageGenerationTool :: AppTool -> Bool
 isImageGenerationTool tool =
     tool.appToolName == imageGenerationToolName
 
-schemaFromAppTool :: Dialect -> AppTool -> Maybe ResponseTool
-schemaFromAppTool _ tool
+schemaFromAppTool :: Bool -> Dialect -> AppTool -> Maybe ResponseTool
+schemaFromAppTool _ _ tool
     | canonicalToolName tool.appToolName == computerFunctionName
-    , tool.appToolSchema /= HostedComputerSchema =
+    , not (isHostedComputerSchema tool.appToolSchema) =
         Nothing
-schemaFromAppTool dialect tool =
-    case tool.appToolSchema of
-        HostedComputerSchema ->
-            if os == "darwin" && dialectId dialect == CodexDialect
-                then Just (FunctionToolValue FunctionTool
-                    { name = computerFunctionName
+schemaFromAppTool modelSupportsAsync dialect tool =
+    fmap (setAsyncCapability supportsAsync) $
+        case tool.appToolSchema of
+            HostedComputerSchema ->
+                if os `elem` ["darwin", "linux"]
+                        && dialectId dialect == CodexDialect
+                    then Just (FunctionToolValue FunctionTool
+                        { name = computerFunctionName
+                        , description = Just tool.appToolDescription
+                        , parameters = Just
+                            (rawJsonFromEncoding
+                                (Aeson.toEncoding computerFunctionParameters))
+                        , strict = Just True
+                        , async = Nothing
+                        })
+                    else Nothing
+            HostedComputerFunctionSchema parameters ->
+                if os == "darwin" && dialectId dialect == CodexDialect
+                    then Just (FunctionToolValue FunctionTool
+                        { name = computerFunctionName
+                        , description = Just tool.appToolDescription
+                        , parameters = Just
+                            (rawJsonFromEncoding
+                                (Aeson.toEncoding parameters))
+                        , strict = Just
+                            (isStrictHostedFunctionSchema parameters)
+                        , async = Nothing
+                        })
+                    else Nothing
+            JsonFunctionSchema parameters ->
+                case dialectFunctionSchemaStyle dialect of
+                    NoFunctionSchemas ->
+                        Nothing
+                    StrictFunctionSchemas ->
+                        Just (buildSchema buildTool parameters)
+                    LooseFunctionSchemas ->
+                        Just (buildSchema buildGrokTool parameters)
+            RawJsonFunctionSchema parameters ->
+                Just (FunctionToolValue FunctionTool
+                    { name = tool.appToolName
                     , description = Just tool.appToolDescription
-                    , parameters = Just
-                        (rawJsonFromEncoding
-                            (Aeson.toEncoding computerFunctionParameters))
-                    , strict = Just True
+                    , parameters =
+                        Just (rawJsonFromEncoding (Aeson.toEncoding parameters))
+                    , strict = case dialectFunctionSchemaStyle dialect of
+                        StrictFunctionSchemas -> Just False
+                        LooseFunctionSchemas -> Nothing
+                        NoFunctionSchemas -> Nothing
+                    , async = Nothing
                     })
-                else Nothing
-        JsonFunctionSchema parameters ->
-            case dialectFunctionSchemaStyle dialect of
-                NoFunctionSchemas ->
-                    Nothing
-                StrictFunctionSchemas ->
-                    Just (buildSchema buildTool parameters)
-                LooseFunctionSchemas ->
-                    Just (buildSchema buildGrokTool parameters)
-        RawJsonFunctionSchema parameters ->
-            Just (FunctionToolValue FunctionTool
-                { name = tool.appToolName
-                , description = Just tool.appToolDescription
-                , parameters =
-                    Just (rawJsonFromEncoding (Aeson.toEncoding parameters))
-                , strict = case dialectFunctionSchemaStyle dialect of
-                    StrictFunctionSchemas -> Just False
-                    LooseFunctionSchemas -> Nothing
+            FreeformApplyPatchSchema ->
+                case dialectFunctionSchemaStyle dialect of
                     NoFunctionSchemas -> Nothing
-                })
-        FreeformApplyPatchSchema ->
-            case dialectFunctionSchemaStyle dialect of
-                NoFunctionSchemas -> Nothing
-                _ -> Just (applyPatchCustomTool tool.appToolName tool.appToolDescription)
-        FreeformGrammarSchema syntax definition ->
-            case dialectFunctionSchemaStyle dialect of
-                NoFunctionSchemas -> Nothing
-                _ -> Just (grammarCustomTool
-                    tool.appToolName
-                    tool.appToolDescription
-                    syntax
-                    definition)
+                    _ -> Just
+                        (applyPatchCustomTool
+                            tool.appToolName
+                            tool.appToolDescription)
+            FreeformGrammarSchema syntax definition ->
+                case dialectFunctionSchemaStyle dialect of
+                    NoFunctionSchemas -> Nothing
+                    _ -> Just (grammarCustomTool
+                        tool.appToolName
+                        tool.appToolDescription
+                        syntax
+                        definition)
   where
+    supportsAsync = modelSupportsAsync && appToolSupportsAsync tool
+
     buildSchema build parameters =
         let (name, description, projectedParameters) =
                 projectFunctionTool dialect tool parameters
@@ -220,6 +303,16 @@ projectProperty toolName property =
         , description = grokPublicText <$> property.description
         }
 
+setAsyncCapability :: Bool -> ResponseTool -> ResponseTool
+setAsyncCapability enabled = \case
+    FunctionToolValue tool ->
+        FunctionToolValue tool
+            { async = if enabled then Just True else Nothing }
+    CustomToolValue tool ->
+        CustomToolValue tool
+            { async = if enabled then Just True else Nothing }
+    tool -> tool
+
 grokPublicText :: Text -> Text
 grokPublicText =
     replace "run_in_background" "background"
@@ -235,21 +328,23 @@ grokPublicText =
     replaceTaskName = Text.replace "`task`" "`spawn_subagent`"
 
 -- | Codex collaboration namespace: nested non-strict function tools.
-multiAgentNamespaceTool :: [AppTool] -> ResponseTool
-multiAgentNamespaceTool tools =
+multiAgentNamespaceTool :: Bool -> [AppTool] -> ResponseTool
+multiAgentNamespaceTool modelSupportsAsync tools =
     namespaceTool
+        modelSupportsAsync
         multiAgentNamespace
         "Tools for spawning and managing sub-agents."
         tools
 
-imageGenerationNamespaceTool :: [AppTool] -> ResponseTool
-imageGenerationNamespaceTool =
+imageGenerationNamespaceTool :: Bool -> [AppTool] -> ResponseTool
+imageGenerationNamespaceTool modelSupportsAsync =
     namespaceTool
+        modelSupportsAsync
         imageGenerationNamespace
         imageGenerationNamespaceDescription
 
-namespaceTool :: Text -> Text -> [AppTool] -> ResponseTool
-namespaceTool namespaceName namespaceDescription tools =
+namespaceTool :: Bool -> Text -> Text -> [AppTool] -> ResponseTool
+namespaceTool modelSupportsAsync namespaceName namespaceDescription tools =
     NamespaceToolValue NamespaceTool
         { name = namespaceName
         , description = Just namespaceDescription
@@ -257,10 +352,13 @@ namespaceTool namespaceName namespaceDescription tools =
         }
   where
     nestedFunction tool =
+        setAsyncCapability
+            (modelSupportsAsync && appToolSupportsAsync tool) $
         FunctionToolValue FunctionTool
             { name = tool.appToolName
             , description = Just tool.appToolDescription
             , strict = Just False
+            , async = Nothing
             , parameters = Just . rawJsonFromEncoding . Aeson.toEncoding $
                 namespaceParameters tool
             }
@@ -277,6 +375,70 @@ namespaceTool namespaceName namespaceDescription tools =
         FreeformApplyPatchSchema -> Aeson.object []
         FreeformGrammarSchema _ _ -> Aeson.object []
         HostedComputerSchema -> Aeson.object []
+        HostedComputerFunctionSchema _ -> Aeson.object []
+
+isHostedComputerSchema :: ToolSchema -> Bool
+isHostedComputerSchema = \case
+    HostedComputerSchema -> True
+    HostedComputerFunctionSchema _ -> True
+    _ -> False
+
+isStrictHostedFunctionSchema :: Aeson.Value -> Bool
+isStrictHostedFunctionSchema value@(Aeson.Object object) =
+    KeyMap.lookup "type" object == Just (Aeson.String "object")
+        && strictSchemaNode value
+isStrictHostedFunctionSchema _ = False
+
+strictSchemaNode :: Aeson.Value -> Bool
+strictSchemaNode (Aeson.Object object)
+    | any (`KeyMap.member` object)
+        ["allOf", "oneOf", "not", "if", "then", "else", "$ref"] =
+        False
+    | schemaIncludesType "object" object =
+        case
+            ( KeyMap.lookup "properties" object
+            , KeyMap.lookup "required" object
+            , KeyMap.lookup "additionalProperties" object
+            ) of
+            ( Just (Aeson.Object properties)
+                , Just (Aeson.Array required)
+                , Just (Aeson.Bool False)
+                ) ->
+                    let propertyNames =
+                            map (Key.toText) (KeyMap.keys properties)
+                        requiredNames =
+                            [ name
+                            | Aeson.String name <- Foldable.toList required
+                            ]
+                    in length requiredNames == Foldable.length required
+                        && length requiredNames == length propertyNames
+                        && all (`elem` requiredNames) propertyNames
+                        && all strictSchemaNode properties
+            _ -> False
+    | schemaIncludesType "array" object =
+        maybe False strictSchemaNode (KeyMap.lookup "items" object)
+            && strictAlternatives object
+    | otherwise = strictAlternatives object
+strictSchemaNode (Aeson.Array values) =
+    all strictSchemaNode values
+strictSchemaNode _ = True
+
+strictAlternatives :: Aeson.Object -> Bool
+strictAlternatives object =
+    case KeyMap.lookup "anyOf" object of
+        Nothing -> True
+        Just (Aeson.Array alternatives) ->
+            not (Foldable.null alternatives)
+                && all strictSchemaNode alternatives
+        Just _ -> False
+
+schemaIncludesType :: Text -> Aeson.Object -> Bool
+schemaIncludesType expected object =
+    case KeyMap.lookup "type" object of
+        Just (Aeson.String actual) -> actual == expected
+        Just (Aeson.Array actual) ->
+            Aeson.String expected `elem` Foldable.toList actual
+        _ -> False
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.
 applyPatchCustomTool :: Text -> Text -> ResponseTool
@@ -290,6 +452,7 @@ grammarCustomTool name description syntax definition =
     CustomToolValue CustomTool
         { name
         , description = Just description
+        , async = Nothing
         , format = Just . rawJsonFromEncoding . Aeson.toEncoding $
             Aeson.object
                 [ "type" .= ("grammar" :: Text)
@@ -301,6 +464,35 @@ grammarCustomTool name description syntax definition =
 -- | Code-mode tool surface: the @exec@/@wait@ entry points first, hosted
 -- search tools last, matching the upstream Codex wire order.
 schemasFromAppToolsCodeMode :: Dialect -> [AppTool] -> [ResponseTool]
-schemasFromAppToolsCodeMode dialect tools =
-    mapMaybe (schemaFromAppTool dialect) tools
-        ++ hostedSearchTools dialect
+schemasFromAppToolsCodeMode =
+    schemasFromAppToolsCodeModeWithHostedSearch True
+
+schemasFromAppToolsCodeModeWithAsyncCapability
+    :: Bool
+    -> Dialect
+    -> [AppTool]
+    -> [ResponseTool]
+schemasFromAppToolsCodeModeWithAsyncCapability =
+    schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability True
+
+schemasFromAppToolsCodeModeWithHostedSearch
+    :: Bool
+    -> Dialect
+    -> [AppTool]
+    -> [ResponseTool]
+schemasFromAppToolsCodeModeWithHostedSearch
+        includeHostedSearch =
+    schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
+        includeHostedSearch
+        False
+
+schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
+    :: Bool
+    -> Bool
+    -> Dialect
+    -> [AppTool]
+    -> [ResponseTool]
+schemasFromAppToolsCodeModeWithHostedSearchAndAsyncCapability
+        includeHostedSearch modelSupportsAsync dialect tools =
+    mapMaybe (schemaFromAppTool modelSupportsAsync dialect) tools
+        ++ hostedSearchToolsWhen includeHostedSearch dialect

@@ -26,6 +26,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LBS
 import Data.Foldable (for_)
+import Data.Text (Text)
 import qualified Data.Text.Encoding as Text
 import Network.Socket (Socket, close)
 import System.Timeout (timeout)
@@ -58,7 +59,7 @@ defaultServerConfig =
         }
 
 data ServerError
-    = ServerTimedOut String
+    = ServerTimedOut Text
     | ServerSubscriberOverflow
     deriving stock (Eq, Show)
 
@@ -235,7 +236,7 @@ receive config peer =
     within config.ioTimeoutSeconds "socket read" $
         receiveJSONFrame config.maximumFrameBytes peer
 
-within :: Int -> String -> IO value -> IO value
+within :: Int -> Text -> IO value -> IO value
 within seconds label action =
     timeout (max 1 seconds * 1_000_000) action >>= \case
         Nothing -> throwIO (ServerTimedOut label)

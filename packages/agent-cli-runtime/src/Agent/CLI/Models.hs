@@ -33,7 +33,8 @@ module Agent.CLI.Models
 import Agent.CLI.ModelConfig
     ( CatalogModel(..)
     , ConnectionKind(..)
-    , ModelCatalog(..)
+    , ModelCatalog
+    , catalogModels
     , ModelConnection(..)
     , builtinConnectionId
     , organizationGatewayConnectionId
@@ -111,7 +112,10 @@ modelOptionFromCatalog catalog model = do
             -- Gateway-only entries provide protocol and presentation metadata
             -- for live aliases. They must never enter the direct model catalog.
             OrganizationGatewayConnection -> Nothing
-    pure ModelOption
+    pure (modelOptionForProvider provider model)
+
+modelOptionForProvider :: Provider -> CatalogModel -> ModelOption
+modelOptionForProvider provider model = ModelOption
         { modelTarget = ModelTarget
             { targetProvider = provider
             , targetConnectionId = model.catalogModelConnectionId
@@ -126,7 +130,7 @@ modelOptionFromCatalog catalog model = do
 
 modelCatalog :: ModelCatalog -> [ModelOption]
 modelCatalog catalog =
-    mapMaybe (modelOptionFromCatalog catalog) catalog.catalogModels
+    mapMaybe (modelOptionFromCatalog catalog) (catalogModels catalog)
 
 modelsForProvider :: ModelCatalog -> Provider -> [ModelOption]
 modelsForProvider catalog provider =
@@ -174,10 +178,9 @@ resolveSavedModelTarget
         , targetDialect = dialect
         }
 
--- | Refuse to carry provider-visible conversation history across gateway
--- routing boundaries. This check is independent of model overrides: changing
--- the selected alias must never authorize a local or differently-routed
--- session to enter the currently connected organization.
+-- | Persisted conversation history is portable across routing modes. Startup
+-- retargets a resumed session to the currently active direct or organization
+-- gateway route before the next turn.
 validateResumedGatewayBoundary
     :: Maybe Text
     -- ^ Identity of the currently connected gateway credential.
@@ -186,46 +189,19 @@ validateResumedGatewayBoundary
     -> Maybe Text
     -- ^ Persisted gateway identity.
     -> Either Text ()
-validateResumedGatewayBoundary currentIdentity connection savedIdentity =
-    case currentIdentity of
-        Nothing
-            | connection == organizationGatewayConnectionId ->
-                Left
-                    "This session belongs to an organization gateway. \
-                    \Reconnect the same gateway before resuming it."
-            | savedIdentity /= Nothing ->
-                Left
-                    "This session has inconsistent organization gateway \
-                    \routing metadata and cannot be resumed."
-            | otherwise -> Right ()
-        Just current
-            | connection /= organizationGatewayConnectionId ->
-                Left
-                    "This session was created outside the connected \
-                    \organization gateway. Start a new session or disconnect \
-                    \the gateway before resuming it."
-            | savedIdentity == Nothing ->
-                Left
-                    "This gateway session predates organization identity \
-                    \binding and cannot be resumed safely. Start a new session."
-            | savedIdentity /= Just current ->
-                Left
-                    "This session belongs to a different organization gateway \
-                    \credential and cannot be resumed. Start a new session."
-            | otherwise -> Right ()
+validateResumedGatewayBoundary _ _ _ = Right ()
 
 catalogModelIds :: ModelCatalog -> [Text]
 catalogModelIds =
     map (.modelTarget.targetModelId) . modelCatalog
 
-defaultModelOptionFor :: ModelCatalog -> Provider -> Maybe ModelOption
+defaultModelOptionFor :: ModelCatalog -> Provider -> ModelOption
 defaultModelOptionFor catalog provider =
-    catalogDefaultForProvider catalog provider
-        >>= modelOptionFromCatalog catalog
+    modelOptionForProvider provider (catalogDefaultForProvider catalog provider)
 
-defaultModelFor :: ModelCatalog -> Provider -> Maybe Text
+defaultModelFor :: ModelCatalog -> Provider -> Text
 defaultModelFor catalog provider =
-    (.modelTarget.targetModelId) <$> defaultModelOptionFor catalog provider
+    (defaultModelOptionFor catalog provider).modelTarget.targetModelId
 
 resolveConfiguredModel :: ModelCatalog -> Text -> Maybe ModelOption
 resolveConfiguredModel catalog modelId =

@@ -1,8 +1,8 @@
 { mkDerivation, aeson, agent-core, agent-json, agent-responses
 , agent-responses-types, async, base, base64-bytestring, bytestring
 , containers, crypton, entropy, hspec, http-client, http-client-tls
-, http-conduit, http-types, lib, memory, network, retry
-, safe-exceptions, scientific, text, time, wai, warp
+, http-conduit, http-types, lib, memory, network, network-uri
+, retry, safe-exceptions, scientific, text, time, wai, warp
 }:
 mkDerivation {
   pname = "agent-gemini";
@@ -12,7 +12,7 @@ mkDerivation {
     aeson agent-core agent-json agent-responses agent-responses-types
     base base64-bytestring bytestring containers crypton entropy
     http-client http-client-tls http-conduit http-types memory network
-    retry safe-exceptions scientific text time
+    network-uri retry safe-exceptions scientific text time wai warp
   ];
   testHaskellDepends = [
     aeson agent-core agent-json agent-responses agent-responses-types

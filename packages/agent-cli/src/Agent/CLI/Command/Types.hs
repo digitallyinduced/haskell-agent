@@ -2,6 +2,10 @@
 module Agent.CLI.Command.Types
     ( CopyRequest(..)
     , ForkRequest(..)
+    , AttachmentAction(..)
+    , SelectionAction(..)
+    , WorkflowAction(..)
+    , SessionAction(..)
     , ReplAction(..)
     , ShellMode(..)
     , SkillCommand(..)
@@ -41,16 +45,8 @@ data ReplAction
     | ReplInit
     | ReplReview (Maybe Text)
     | ReplDiff
-    | ReplFork !ForkRequest
     | ReplExport (Maybe Text)
     | ReplPermissions
-    | ReplShowEffort
-    | ReplSetEffort ReasoningEffort
-    | ReplToggleFast
-    | ReplShowModel
-    | ReplSetModel Text
-    | ReplShowTheme
-    | ReplSetTheme Text
     | ReplEnableCodeMode
     | ReplToggleAlwaysApprove
     | ReplPlan (Maybe Text)
@@ -71,21 +67,10 @@ data ReplAction
     -- ^ Generate a display-only "where was I" recap of the current session.
     | ReplRetry
     -- ^ Retry the last failed turn with its original attachments.
-    | ReplShowSession
-    | ReplShowSessionInfo
     | ReplDesktop
     -- ^ Open the current persisted conversation in the native macOS app.
-    | ReplAfk (Maybe Text)
-    -- ^ Hand the active session to tmux, optionally on @host:path@.
-    | ReplWorktree
-    | ReplRename Text
-    | ReplRenameAuto
     | ReplLogin
     | ReplReloadAuth
-    | ReplPaste !Bool !Text
-    | ReplClearAttachments
-    | ReplShowAttachments
-    | ReplRemoveAttachment !Int
     | ReplCopy !CopyRequest
     | ReplCopyCode Int
     | ReplCopyDiff
@@ -98,7 +83,45 @@ data ReplAction
     | ReplSetAgentLimit Int
     | ReplMcp
     | ReplMcpPrompt Text Text [(Text, Text)]
-    | ReplGoalStatus
+    | ReplSkills !Bool
+    | ReplShowShell
+    | ReplSetShell !ShellMode
+    | ReplToggleComputerUse
+    | ReplSetComputerUse !Bool
+    | ReplInvokeSkill !Text !Text
+    | ReplHelp (Maybe Text)
+    -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
+    | ReplCompact (Maybe Text)
+    -- ^ Optional focus note for what to keep while compacting history.
+    | ReplUsage
+    | ReplCommandError Text
+    | ReplAttachment !AttachmentAction
+    | ReplSelection !SelectionAction
+    | ReplWorkflow !WorkflowAction
+    | ReplSession !SessionAction
+    deriving (Eq, Show)
+
+-- | Commands routed to the attachment handler. Each subsystem accepts only
+-- its own action type, so adding a command requires an exhaustive handler.
+data AttachmentAction
+    = ReplPaste !Bool !Text
+    | ReplClearAttachments
+    | ReplShowAttachments
+    | ReplRemoveAttachment !Int
+    deriving (Eq, Show)
+
+data SelectionAction
+    = ReplShowEffort
+    | ReplSetEffort ReasoningEffort
+    | ReplToggleFast
+    | ReplShowModel
+    | ReplSetModel Text
+    | ReplShowTheme
+    | ReplSetTheme Text
+    deriving (Eq, Show)
+
+data WorkflowAction
+    = ReplGoalStatus
     | ReplGoalPause
     | ReplGoalResume
     | ReplGoalClear
@@ -107,20 +130,23 @@ data ReplAction
     | ReplWorkflowRuns
     | ReplWorkflowManage !Text !(Maybe Text)
       -- ^ Operation and optional run id/display name.
-    | ReplSkills !Bool
-    | ReplShowShell
-    | ReplSetShell !ShellMode
-    | ReplInvokeSkill !Text !Text
-    | ReplHelp (Maybe Text)
-    -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
+    deriving (Eq, Show)
+
+data SessionAction
+    = ReplFork !ForkRequest
+    | ReplShowSession
+    | ReplShowSessionInfo
+    | ReplAfk (Maybe Text)
+    -- ^ Hand the active session to tmux, optionally on @host:path@.
+    | ReplWorktree
+    | ReplRename Text
+    | ReplRenameAuto
     | ReplResume (Maybe Text)
     -- ^ @Nothing@ opens the session picker; @Just@ is a session id.
     | ReplHome
     -- ^ Return to the session picker.
     | ReplSearch !Text
     -- ^ Search persisted conversation turns and open matching sessions.
-    | ReplCompact (Maybe Text)
-    -- ^ Optional focus note for what to keep while compacting history.
     | ReplRewind
       -- ^ Restore conversation state before a selected prompt.
     | ReplClear
@@ -129,8 +155,6 @@ data ReplAction
       -- ^ Start a fresh persisted session id with empty history.
     | ReplDelete
       -- ^ Confirm deletion, then remove the current session after shutdown.
-    | ReplUsage
-    | ReplCommandError Text
     deriving (Eq, Show)
 
 data ShellMode

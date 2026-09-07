@@ -1,5 +1,6 @@
 module Agent.Codex.DialectSpec (spec) where
 
+import Agent.Cancel (requestCancel)
 import Agent.Codex.Dialect.ApplyPatch (applyPatch)
 import Agent.Codex.Dialect.ProjectInstructions (formatCodexAgentsMd)
 import Agent.Codex.Dialect.Prompt
@@ -24,7 +25,9 @@ import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.Tools.Background (setBackgroundTaskHooks)
 import Agent.Tools.IO (CommandResult(..))
 import Agent.ToolDispatch
-    ( ToolCallResult(..)
+    ( ToolOutcome(..)
+    , toolCallResultOutcome
+    , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , customToolCall
     , dispatchToolCall
@@ -162,6 +165,20 @@ spec = describe "Codex dialect" do
                         Text.isInfixOf "database unavailable"
                     readTaskPlan taskPlan `shouldReturn` Nothing
 
+    it "retains shell exit codes independently of command output" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newCodexCodingTools env Nothing Nothing) (.codexClose) \coding -> do
+                let handlers = appToolHandlers coding.codexAppTools
+                succeeded <- dispatchToolCall testDispatchConfig handlers
+                    (functionToolCall "success" "shell_command"
+                        "{\"command\":\"printf 'Error: quoted log'; exit 0\"}")
+                toolCallResultOutcome succeeded `shouldBe` Just (ShellExited 0)
+                failed <- dispatchToolCall testDispatchConfig handlers
+                    (functionToolCall "failure" "shell_command"
+                        "{\"command\":\"printf done; exit 7\"}")
+                toolCallResultOutcome failed `shouldBe` Just (ShellExited 7)
+
     it "defaults shell_command to the turn cwd when workdir is omitted" do
         withTempDir \dir -> do
             Text.writeFile (dir </> "cwd-marker") "present"
@@ -200,7 +217,9 @@ spec = describe "Codex dialect" do
                     started.output `shouldSatisfy` Text.isInfixOf "started"
                     started.output `shouldNotSatisfy`
                         Text.isInfixOf "timed out"
-                    sessionId <- expectShellSessionId started.output
+                    sessionId <- case toolCallResultOutcome started of
+                        Just (ShellRunning identifier) -> pure (Text.pack (show identifier))
+                        outcome -> expectationFailure (show outcome) >> fail "missing typed shell session"
 
                     interrupted <- dispatchToolCall
                         testDispatchConfig
@@ -224,6 +243,18 @@ spec = describe "Codex dialect" do
                     stale.output `shouldSatisfy`
                         Text.isInfixOf "Unknown session_id"
 
+    it "retains cancellation when stopping a command before its initial yield" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            let config = testDispatchConfig
+                    { toolDispatchOnOutput = \_ _ -> requestCancel env.toolCancel }
+            bracket (newCodexCodingTools env Nothing Nothing) (.codexClose) \coding -> do
+                result <- dispatchToolCall config (appToolHandlers coding.codexAppTools)
+                    (functionToolCall "cancel" "shell_command"
+                        "{\"command\":\"printf ready; sleep 10\"}")
+                toolCallResultOutcome result `shouldBe` Just ShellCancelled
+                result.output `shouldSatisfy` Text.isInfixOf "ready"
+
     it "keeps timeout_ms as an explicit hard timeout" do
         withTempDir \dir -> do
             env <- defaultToolEnv (unsafeEncodeUtf dir)
@@ -242,6 +273,7 @@ spec = describe "Codex dialect" do
                         Text.isInfixOf "timed out after 10ms"
                     result.output `shouldNotSatisfy`
                         Text.isInfixOf "session_id:"
+                    toolCallResultOutcome result `shouldBe` Just ShellTimedOut
 
     it "rejects literal system temp paths in shell commands" do
         withTempDir \dir -> do

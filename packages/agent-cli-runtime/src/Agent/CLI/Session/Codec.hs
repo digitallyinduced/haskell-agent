@@ -338,7 +338,10 @@ fromStoredTurn stored = do
         , turnError = stored.sessionTurnError
         , turnResponseId = stored.sessionTurnResponseId
         , turnEffect = stored.sessionTurnEffect
-        , turnItems = items
+        , turnItems =
+            restoreLegacyLocalCompactionMarker
+                stored.sessionTurnEffect
+                items
         , turnDisplayItems = displayItems
         , turnUsage = fromStoredUsage <$> stored.sessionTurnUsage
         , turnProviderTelemetry = providerTelemetry

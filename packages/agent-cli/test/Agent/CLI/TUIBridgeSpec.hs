@@ -6,8 +6,9 @@ import Agent.CLI.AgentViewport
     , AgentStepState(..)
     , AgentTarget(..)
     )
-import Agent.CLI.Interrupt (CtrlCDecision(..))
+import Agent.CLI.Command (ReplAction(ReplCopyPath))
 import Agent.CLI.Dictation (DictationTarget(..))
+import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
     ( appEventLogicalBytes
     , emitUiEvent
@@ -38,7 +39,7 @@ import Agent.TUI.Presentation
 import Agent.Loop (ImageAttachment(..), LoopEvent(..), emptyTurnOutput)
 import Agent.Provider (Provider(XAIProvider))
 import Agent.Subagents (SubagentId(..))
-import Agent.ToolDispatch (functionToolCall)
+import Agent.ToolDispatch (ToolCall(..), functionToolCall)
 import Agent.TUI.Motion (MotionMode(..))
 import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.STM (readTVarIO)
@@ -178,6 +179,42 @@ spec = describe "fullscreen TUI bridge" do
                         any isNewestOutput rest
                     _ -> False
         newestFollowsBoundary `shouldBe` True
+
+    it "coalesces live tool arguments and lets the canonical call replace them" do
+        runtime <- newBridgeTestRuntime
+        let call arguments =
+                functionToolCall "c1" "apply_patch" arguments
+        emitUiEvent runtime
+            (UiLoop (ToolArgumentsUpdated (call "old")))
+        emitUiEvent runtime (UiLoop (TextDelta "text"))
+        emitUiEvent runtime
+            (UiLoop (ToolArgumentsUpdated (call "latest")))
+        emitUiEvent runtime (UiLoop TurnStarted)
+        emitUiEvent runtime
+            (UiLoop (ToolArgumentsUpdated (call "next")))
+        emitUiEvent runtime
+            (UiLoop (ToolUpdated (call "canonical")))
+        let AppEventMailbox stateRef = runtime.runtimeMailbox
+        pending <- (.mailboxPendingEvents) <$> readTVarIO stateRef
+        [ arguments
+            | PendingUi
+                (PendingExactUi
+                    (UiLoop (ToolArgumentsUpdated toolCall))) <-
+                toList pending
+            , let arguments = toolCall.arguments
+            ]
+            `shouldBe` ["latest"]
+        [ arguments
+            | PendingUi
+                (PendingExactUi (UiLoop (ToolUpdated toolCall))) <-
+                toList pending
+            , let arguments = toolCall.arguments
+            ]
+            `shouldBe` ["canonical"]
+
+    it "accounts model-context reset mailbox overhead" do
+        appEventLogicalBytes (AppUi (UiLoop ModelContextReset))
+            `shouldBe` 128
 
     it "backpressures a single streaming mailbox node by payload bytes" do
         runtime <- newBridgeTestRuntime
@@ -355,6 +392,7 @@ spec = describe "fullscreen TUI bridge" do
                 pasted `shouldBe` True
                 pure (Right ()))
             (const (modifyIORef' calls (<> ["new btw"])))
+            (const (modifyIORef' calls (<> ["new immediate command"])))
             (modifyIORef' calls (<> ["new recap"]))
             (const (modifyIORef' calls (<> ["new effort"])))
             (pure SoftCancel)
@@ -363,6 +401,7 @@ spec = describe "fullscreen TUI bridge" do
         runtime.runtimeCancel
         _ <- runtime.runtimeSteer True "guidance"
         runtime.runtimeBtw "question"
+        runtime.runtimeImmediateCommand ReplCopyPath
         runtime.runtimeRecap
         runtime.runtimeRestartEffort "high"
         runtime.runtimeAgentSelect AgentRoot
@@ -375,7 +414,15 @@ spec = describe "fullscreen TUI bridge" do
                 expectationFailure
                     "expected direct xAI dictation target"
         readIORef calls `shouldReturn`
-            ["old cancel", "new cancel", "new steer", "new btw", "new recap", "new effort", "new agent"]
+            [ "old cancel"
+            , "new cancel"
+            , "new steer"
+            , "new btw"
+            , "new immediate command"
+            , "new recap"
+            , "new effort"
+            , "new agent"
+            ]
         decision `shouldBe` SoftCancel
 
     it "defers syntax loading until the runtime starts it" do

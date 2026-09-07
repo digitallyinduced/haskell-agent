@@ -7,6 +7,7 @@ module Agent.Responses.Client
 
 import Agent.Error (ApiError)
 import qualified Agent.Responses.HttpSSE as HttpSSE
+import Agent.Responses.Request (stripLocalCompactionMarker)
 import Agent.Responses.StreamAssembly (StreamAssemblyConfig)
 import Agent.Responses.Types
 import Control.Retry (RetryPolicyM, retrying)
@@ -41,7 +42,7 @@ performResponsesRequest config request configureRequest =
             }
         config.clientBaseUrl
         config.clientTimeoutSeconds
-        (Aeson.encode request)
+        (Aeson.encode (stripLocalCompactionMarker request))
         configureRequest
 
 -- | Retry a streaming operation only while replay remains invisible to its

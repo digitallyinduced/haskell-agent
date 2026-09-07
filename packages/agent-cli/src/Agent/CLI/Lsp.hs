@@ -77,6 +77,12 @@ import Control.Monad
     , void
     , when
     )
+import Control.Monad.Trans.Except
+    ( ExceptT(..)
+    , runExceptT
+    , throwE
+    , withExceptT
+    )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.ByteString as BS
@@ -393,7 +399,7 @@ spawnClient name config workspace logHandle = mask \restore -> do
                 `onException` stopAsync stderrWorker)
         `onException` closePartial
 initializeClient :: LspClient -> IO (Either Text ())
-initializeClient client = do
+initializeClient client = runExceptT do
     let rootUri = fileUri client.clientWorkspace
         rootName =
             Text.pack
@@ -416,41 +422,29 @@ initializeClient client = do
                 , "initializationOptions"
                     .= client.clientConfig.lspInitializationOptions
                 ]
-    requestClient
-        client
-        client.clientConfig.lspStartupTimeoutMilliseconds
-        "initialize"
-        params >>= \case
-            Left err -> pure (Left ("initialize failed: " <> err))
-            Right _ -> do
-                initialized <-
+        startupTimeout =
+            client.clientConfig.lspStartupTimeoutMilliseconds
+    void $
+        withExceptT ("initialize failed: " <>) $
+            ExceptT $
+                requestClient client startupTimeout "initialize" params
+    withExceptT ("post-initialize notification failed: " <>) $
+        ExceptT $
+            sendNotificationWithin
+                client
+                startupTimeout
+                "initialized"
+                (Aeson.object [])
+    case client.clientConfig.lspSettings of
+        Nothing -> pure ()
+        Just settings ->
+            withExceptT ("settings notification failed: " <>) $
+                ExceptT $
                     sendNotificationWithin
                         client
-                        client.clientConfig.lspStartupTimeoutMilliseconds
-                        "initialized"
-                        (Aeson.object [])
-                case initialized of
-                    Left err ->
-                        pure
-                            (Left
-                                ("post-initialize notification failed: "
-                                    <> err))
-                    Right () ->
-                        case client.clientConfig.lspSettings of
-                            Nothing -> pure (Right ())
-                            Just settings ->
-                                sendNotificationWithin
-                                    client
-                                    client.clientConfig.lspStartupTimeoutMilliseconds
-                                    "workspace/didChangeConfiguration"
-                                    (Aeson.object
-                                        ["settings" .= settings]) >>= \case
-                                            Left err ->
-                                                pure
-                                                    (Left
-                                                        ("settings notification failed: "
-                                                            <> err))
-                                            Right () -> pure (Right ())
+                        startupTimeout
+                        "workspace/didChangeConfiguration"
+                        (Aeson.object ["settings" .= settings])
 
 runLsp :: LspRuntime -> LspRequest -> IO (Either Text Text)
 runLsp runtime = \case
@@ -505,69 +499,48 @@ runFileOperation
     -> Text
     -> (LspClient -> Text -> IO (Either Text Text))
     -> IO (Either Text Text)
-runFileOperation runtime rawPath operation =
-    prepareFileRequest runtime rawPath >>= \case
-        Left err -> pure (Left err)
-        Right (client, path, uri) ->
-            withMVar client.clientOperationLock \() ->
-                synchronizeDocument client path uri >>= \case
-                    Left err -> pure (Left err)
-                    Right () -> operation client uri
+runFileOperation runtime rawPath operation = runExceptT do
+    (client, path, uri) <- ExceptT (prepareFileRequest runtime rawPath)
+    ExceptT $
+        withMVar client.clientOperationLock \() ->
+            runExceptT do
+                ExceptT (synchronizeDocument client path uri)
+                ExceptT (operation client uri)
 
 prepareFileRequest
     :: LspRuntime
     -> Text
     -> IO (Either Text (LspClient, FilePath, Text))
-prepareFileRequest runtime rawPath = do
+prepareFileRequest runtime rawPath = runExceptT do
     let path = Text.unpack rawPath
-    if not (FilePath.isAbsolute path)
-        then pure (Left "lsp file_path must be absolute")
-        else do
-            canonicalResult <-
+    unless (FilePath.isAbsolute path) $
+        throwE "lsp file_path must be absolute"
+    (workspace, canonical) <-
+        withExceptT
+            ( \exception ->
+                "lsp could not resolve file_path: "
+                    <> exceptionText exception
+            )
+            (ExceptT $
                 tryAny $
                     (,)
                         <$> canonicalizePath runtime.runtimeWorkspace
-                        <*> canonicalizePath path
-            case canonicalResult of
-                Left exception ->
-                    pure . Left $
-                        "lsp could not resolve file_path: "
-                            <> exceptionText exception
-                Right (workspace, canonical)
-                    | not
-                        (pathWithin
-                            workspace
-                            canonical) ->
-                        pure
-                            (Left
-                                "lsp file_path must be inside the \
-                                \active workspace")
-                    | otherwise ->
-                        case clientForPath
-                            runtime.runtimeClients canonical
-                        of
-                            Nothing ->
-                                pure . Left $
-                                    "No initialized LSP server is \
-                                    \configured for "
-                                        <> Text.pack
-                                            (FilePath.takeExtension canonical)
-                            Just client
-                                | not
-                                    (pathWithin
-                                        client.clientWorkspace
-                                        canonical) ->
-                                    pure . Left $
-                                        "lsp file_path is outside the \
-                                        \configured server workspace for "
-                                            <> client.clientName
-                            Just client ->
-                                pure
-                                    (Right
-                                        ( client
-                                        , canonical
-                                        , fileUri canonical
-                                        ))
+                        <*> canonicalizePath path)
+    unless (pathWithin workspace canonical) $
+        throwE
+            "lsp file_path must be inside the active workspace"
+    client <-
+        maybe
+            (throwE $
+                "No initialized LSP server is configured for "
+                    <> Text.pack (FilePath.takeExtension canonical))
+            pure
+            (clientForPath runtime.runtimeClients canonical)
+    unless (pathWithin client.clientWorkspace canonical) $
+        throwE $
+            "lsp file_path is outside the configured server workspace for "
+                <> client.clientName
+    pure (client, canonical, fileUri canonical)
 
 runDocumentSymbols
     :: LspClient

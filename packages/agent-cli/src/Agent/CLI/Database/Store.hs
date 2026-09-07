@@ -3,6 +3,7 @@ module Agent.CLI.Database.Store
     ( DatabaseScopes
     , DatabaseBrowsePage(..)
     , deriveDatabaseScopes
+    , deriveDatabaseScopesWithNamespace
     , scopeForDatabase
     , applicableDatabaseScopes
     , databaseToolsEnvForStore
@@ -99,18 +100,54 @@ deriveDatabaseScopes
     -- ^ Canonical project/checkout root.
     -> IO (Either Text DatabaseScopes)
 deriveDatabaseScopes stateDirectory projectRoot = do
-    repositoryIdentity <- discoverRepositoryIdentity projectRoot
+    deriveDatabaseScopesWithNamespace Nothing stateDirectory projectRoot
+
+-- | Derive scopes inside an optional isolation namespace.
+--
+-- The namespace is part of all three stable keys. This matters for
+-- database-per-tenant deployments because generated PostgreSQL roles are
+-- cluster-global and therefore must remain unique across tenant databases.
+deriveDatabaseScopesWithNamespace
+    :: Maybe Text
+    -> FilePath
+    -> FilePath
+    -> IO (Either Text DatabaseScopes)
+deriveDatabaseScopesWithNamespace namespace stateDirectory projectRoot = do
+    -- A namespaced scope is used by the multi-tenant server. The checkout is
+    -- tenant-controlled there, so deriving identity must not invoke host Git
+    -- or follow repository metadata before the request reaches the sandbox.
+    repositoryIdentity <-
+        case namespace of
+            Nothing -> discoverRepositoryIdentity projectRoot
+            Just _ ->
+                pure
+                    ("sandbox-root:"
+                        <> Text.pack (normalise projectRoot))
     pure do
-        userId <- stableScopeId ("user:" <> Text.pack (normalise stateDirectory))
+        userId <- stableScopeId
+            (scopeIdentity "user" (Text.pack (normalise stateDirectory)))
         repositoryId <- stableScopeId
-            ("repository:" <> repositoryIdentity)
+            (scopeIdentity "repository" repositoryIdentity)
         checkoutId <- stableScopeId
-            ("checkout:" <> Text.pack (normalise projectRoot))
+            (scopeIdentity "checkout" (Text.pack (normalise projectRoot)))
         pure DatabaseScopes
             { userScope = Scope UserScope userId
             , repositoryScope = Scope RepositoryScope repositoryId
             , checkoutScope = Scope CheckoutScope checkoutId
             }
+  where
+    scopeIdentity kind identity =
+        case namespace of
+            Nothing -> kind <> ":" <> identity
+            Just value ->
+                "namespace:"
+                    <> Text.pack (show (Text.length value))
+                    <> ":"
+                    <> value
+                    <> ":"
+                    <> kind
+                    <> ":"
+                    <> identity
 
 databaseToolsEnvForStore
     :: Store

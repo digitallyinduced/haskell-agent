@@ -46,13 +46,49 @@ spec = do
                            ]
             trimDanglingToolSuffix items `shouldBe` prefix
 
-        it "does not truncate an old unmatched call before a later message" do
+        it "removes an old unmatched call before a later message" do
             let items =
                     [ userItem "before"
                     , functionCallItem "old-call"
                     , userItem "continued later"
                     ]
+            trimDanglingToolSuffix items
+                `shouldBe` [userItem "before", userItem "continued later"]
+
+        it "removes an orphan output without a preceding call" do
+            let items =
+                    [ functionOutputItem "orphan"
+                    , userItem "continued later"
+                    ]
+            trimDanglingToolSuffix items `shouldBe` [userItem "continued later"]
+
+        it "keeps complete native computer-call pairs" do
+            let items =
+                    [ userItem "before"
+                    , computerCallItem "computer-1"
+                    , computerOutputItem "computer-1"
+                    ]
             trimDanglingToolSuffix items `shouldBe` items
+
+        it "drops reasoning and an unmatched native computer call" do
+            let prefix = [userItem "before"]
+                items = prefix <> [reasoningItem, computerCallItem "computer-live"]
+            trimDanglingToolSuffix items `shouldBe` prefix
+
+        it "removes an orphan native computer output" do
+            let items =
+                    [ computerOutputItem "computer-orphan"
+                    , userItem "continued later"
+                    ]
+            trimDanglingToolSuffix items `shouldBe` [userItem "continued later"]
+
+        it "does not pair an output that precedes its call" do
+            let items =
+                    [ functionOutputItem "torn"
+                    , functionCallItem "torn"
+                    , userItem "continued later"
+                    ]
+            trimDanglingToolSuffix items `shouldBe` [userItem "continued later"]
 
     describe "runBtwWithCancel" do
         it "uses private state and preserves parent params including tools" do
@@ -66,8 +102,6 @@ spec = do
                         , tools = Just [tool]
                         , ..
                         }
-            mainParams <- newIORef originalParams
-            mainTranscript <- newIORef originalItems
             seenPrevious <- newIORef (Just "not-called")
             seenInputs <- newIORef []
             seenPrivateParams <- newIORef Nothing
@@ -85,7 +119,7 @@ spec = do
                             , backendState = privateTranscript
                             }
             result <- runBtwWithCancel (\_ action -> action)
-                factory mainParams mainTranscript "why?"
+                factory (sideCallSnapshot originalParams originalItems) "why?"
             result `shouldBe` Right "side answer"
             readIORef seenPrevious `shouldReturn` Nothing
             seen <- readIORef seenInputs
@@ -96,8 +130,6 @@ spec = do
                 _ -> False
             (.backendItems) <$> readIORef seenPrivateTranscript
                 `shouldReturn` originalItems
-            readIORef mainTranscript `shouldReturn` originalItems
-            readIORef mainParams `shouldReturn` originalParams
             captured <- readIORef seenPrivateParams
             fmap (.tools) captured `shouldBe` Just (Just [tool])
             fmap (.input) captured `shouldBe` Just Nothing
@@ -106,8 +138,6 @@ spec = do
                 `shouldBe` Just (Just (ToolChoiceMode ToolChoiceNone))
 
         it "rejects tool calls without a follow-up submission" do
-            params <- newIORef defaultResponseCreateParams
-            transcript <- newIORef []
             submissions <- newIORef (0 :: Int)
             let factory _ = Backend \state _ _ _ -> do
                     modifyIORef' submissions (+ 1)
@@ -117,13 +147,13 @@ spec = do
                         , backendState = state
                         }
             result <- runBtwWithCancel (\_ action -> action)
-                factory params transcript "do something"
+                factory
+                (sideCallSnapshot defaultResponseCreateParams [])
+                "do something"
             result `shouldBe` Left BtwUnexpectedToolCall
             readIORef submissions `shouldReturn` 1
 
         it "surfaces transport and empty-response failures" do
-            params <- newIORef defaultResponseCreateParams
-            transcript <- newIORef []
             let transport _ = Backend \_ _ _ _ ->
                     pure (Left (ConnectionError "offline"))
                 empty _ = Backend \state _ _ _ ->
@@ -133,10 +163,12 @@ spec = do
                         , backendState = state
                         }
             runBtwWithCancel (\_ action -> action)
-                transport params transcript "why?"
+                transport (sideCallSnapshot defaultResponseCreateParams [])
+                "why?"
                 `shouldReturn` Left (BtwTransport (ConnectionError "offline"))
             runBtwWithCancel (\_ action -> action)
-                empty params transcript "why?"
+                empty (sideCallSnapshot defaultResponseCreateParams [])
+                "why?"
                 `shouldReturn` Left BtwEmptyResponse
 
     describe "formatBtwError" do
@@ -171,17 +203,41 @@ functionCallItem callId = FunctionCallItem FunctionCall
     , arguments = "{}"
     , encryptedFunctionArgs = Nothing
     , status = Nothing
+    , async = Nothing
     }
+
+computerCallItem :: Text.Text -> ResponseItem
+computerCallItem computerCallId = ComputerCallItem ComputerCall
+    { computerCallItemId = Nothing
+    , computerCallId
+    , computerActions = []
+    , pendingSafetyChecks = []
+    , computerCallStatus = Nothing
+    , computerCallExtra = mempty
+    }
+
+computerOutputItem :: Text.Text -> ResponseItem
+computerOutputItem computerOutputCallId =
+    ComputerCallOutputItem ComputerCallOutput
+        { computerOutputItemId = Nothing
+        , computerOutputCallId
+        , screenshotDataUrl = ""
+        , acknowledgedChecks = []
+        , computerOutputStatus = Nothing
+        , computerOutputExtra = mempty
+        }
 
 functionOutputItem :: Text.Text -> ResponseItem
 functionOutputItem callId = FunctionCallOutputItem FunctionCallOutput
-    { itemId = Nothing
+    { localOutcome = Nothing
+    , itemId = Nothing
     , callId
     , name = Nothing
     , namespace = Nothing
     , provider = Nothing
     , output = rawJsonFromEncoding (Aeson.toEncoding ("ok" :: Text.Text))
     , status = Nothing
+    , async = Nothing
     }
 
 reasoningItem :: ResponseItem

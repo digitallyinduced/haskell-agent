@@ -60,6 +60,7 @@ import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
     , cancel
+    , mapConcurrently_
     , race
     , waitCatch
     )
@@ -578,7 +579,7 @@ monitorWorker
                 case decodeProtocolMessage line of
                     Left err ->
                         failClosed hasStarted $
-                            "invalid worker message: " <> Text.pack err
+                            "invalid worker message: " <> err
                     Right WorkerReady
                         | not hasStarted -> do
                             atomically $ void $ tryPutTMVar ready (Right ())
@@ -901,8 +902,7 @@ cancelCellCallbacks :: Cell -> IO ()
 cancelCellCallbacks cell = do
     callbacks <- modifyMVar cell.cellCallbacks \current ->
         pure ([], current)
-    mapM_ cancel callbacks
-    mapM_ (void . waitCatch) callbacks
+    mapConcurrently_ cancel callbacks
 
 stopIncomplete
     :: Handle

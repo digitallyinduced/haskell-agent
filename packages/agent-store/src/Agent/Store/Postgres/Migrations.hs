@@ -8,8 +8,10 @@
 module Agent.Store.Postgres.Migrations
     ( Migration(..)
     , coreMigrations
+    , coreMigrationsForRuntimeRole
     , runMigrations
     , runCoreMigrations
+    , runCoreMigrationsForRuntimeRole
     ) where
 
 import Control.Monad (forM_)
@@ -20,6 +22,7 @@ import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import qualified Hasql.Decoders as Decoders
 import qualified Hasql.Encoders as Encoders
 import Hasql.Statement (Statement)
@@ -271,7 +274,241 @@ coreMigrations =
                  \ ON harness.session_task_plan_items TO ha_runtime"
                ]
         }
+    , Migration
+        { migrationVersion = 110
+        , migrationName = "private database connection privilege"
+        , migrationStatements =
+            [ "DO $ha$\
+              \ BEGIN\
+              \   EXECUTE format(\
+              \     'REVOKE CONNECT ON DATABASE %I FROM PUBLIC',\
+              \     current_database()\
+              \   );\
+              \ END\
+              \ $ha$"
+            , "DO $ha$\
+              \ BEGIN\
+              \   EXECUTE format(\
+              \     'GRANT CONNECT ON DATABASE %I TO ha_runtime',\
+              \     current_database()\
+              \   );\
+              \ END\
+              \ $ha$"
+            ]
+        }
+    , Migration
+        { migrationVersion = 111
+        , migrationName = "durable externally submitted turns"
+        , migrationStatements =
+            [ "CREATE TABLE IF NOT EXISTS harness.server_turn_owners (\
+              \ instance_id uuid PRIMARY KEY,\
+              \ last_heartbeat_at timestamptz NOT NULL\
+              \ )"
+            , "CREATE TABLE IF NOT EXISTS harness.server_turns (\
+              \ turn_id uuid PRIMARY KEY,\
+              \ tenant_id text NOT NULL,\
+              \ gateway_identity text,\
+              \ session_key text NOT NULL,\
+              \ client_request_id uuid NOT NULL,\
+              \ input_digest text NOT NULL CHECK (length(input_digest) = 64),\
+              \ owner_instance_id uuid NOT NULL,\
+              \ status text NOT NULL\
+              \   CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),\
+              \ created_at timestamptz NOT NULL,\
+              \ started_at timestamptz,\
+              \ finished_at timestamptz,\
+              \ assistant_text text,\
+              \ assistant_text_truncated boolean NOT NULL DEFAULT FALSE,\
+              \ response_id text,\
+              \ incomplete_reason text,\
+              \ incomplete_reasoning_tokens bigint\
+              \   CHECK (incomplete_reasoning_tokens IS NULL\
+              \     OR incomplete_reasoning_tokens >= 0),\
+              \ error_text text,\
+              \ UNIQUE NULLS NOT DISTINCT\
+              \   (tenant_id, gateway_identity, session_key, client_request_id),\
+              \ CHECK ((status IN ('completed', 'failed', 'cancelled'))\
+              \   = (finished_at IS NOT NULL)),\
+              \ CHECK (status <> 'completed' OR started_at IS NOT NULL),\
+              \ CHECK ((status = 'completed') = (response_id IS NOT NULL)),\
+              \ CHECK (status = 'completed'\
+              \   OR (assistant_text IS NULL\
+              \     AND assistant_text_truncated = FALSE\
+              \     AND incomplete_reason IS NULL\
+              \     AND incomplete_reasoning_tokens IS NULL)),\
+              \ CHECK (assistant_text IS NOT NULL\
+              \   OR assistant_text_truncated = FALSE),\
+              \ CHECK ((status = 'failed') = (error_text IS NOT NULL)),\
+              \ CHECK (incomplete_reason IS NOT NULL\
+              \   OR incomplete_reasoning_tokens IS NULL)\
+              \ )"
+            , "DO $ha$\
+              \ BEGIN\
+              \   IF EXISTS (\
+              \     SELECT 1\
+              \       FROM information_schema.columns\
+              \      WHERE table_schema = 'harness'\
+              \        AND table_name = 'sessions'\
+              \        AND column_name = 'session_key'\
+              \   ) AND NOT EXISTS (\
+              \     SELECT 1\
+              \       FROM pg_constraint\
+              \      WHERE conname = 'server_turns_session_key_fkey'\
+              \        AND conrelid = 'harness.server_turns'::regclass\
+              \   ) THEN\
+              \     ALTER TABLE harness.server_turns\
+              \       ADD CONSTRAINT server_turns_session_key_fkey\
+              \       FOREIGN KEY (session_key)\
+              \       REFERENCES harness.sessions(session_key)\
+              \       ON DELETE CASCADE;\
+              \   END IF;\
+              \ END\
+              \ $ha$"
+            , "CREATE INDEX IF NOT EXISTS server_turns_boundary_created_idx\
+              \ ON harness.server_turns\
+              \ (tenant_id, gateway_identity, created_at DESC)"
+            , "CREATE UNIQUE INDEX IF NOT EXISTS server_turns_active_session_idx\
+              \ ON harness.server_turns\
+              \ (tenant_id, gateway_identity, session_key)\
+              \ NULLS NOT DISTINCT\
+              \ WHERE status IN ('queued', 'running')"
+            , "GRANT SELECT, INSERT, UPDATE, DELETE\
+              \ ON harness.server_turn_owners TO ha_runtime"
+            , "GRANT SELECT, INSERT, UPDATE\
+              \ ON harness.server_turns TO ha_runtime"
+            ]
+        }
+    , Migration
+        { migrationVersion = 112
+        , migrationName = "cross-instance server coordination"
+        , migrationStatements =
+            [ "ALTER TABLE harness.server_turn_owners\
+              \ ADD COLUMN IF NOT EXISTS revoked_at timestamptz"
+            , "ALTER TABLE harness.server_turns\
+              \ ADD COLUMN IF NOT EXISTS cancellation_requested_at timestamptz"
+            , "ALTER TABLE harness.server_turns\
+              \ ADD COLUMN IF NOT EXISTS teardown_pending boolean\
+              \ NOT NULL DEFAULT FALSE"
+            , "DROP INDEX IF EXISTS harness.server_turns_active_session_idx"
+            , "CREATE UNIQUE INDEX server_turns_active_session_idx\
+              \ ON harness.server_turns\
+              \ (tenant_id, gateway_identity, session_key)\
+              \ NULLS NOT DISTINCT\
+              \ WHERE status IN ('queued', 'running') OR teardown_pending"
+            , "CREATE TABLE IF NOT EXISTS harness.server_session_mutations (\
+              \ tenant_id text NOT NULL,\
+              \ gateway_identity text,\
+              \ session_key text NOT NULL,\
+              \ owner_instance_id uuid NOT NULL\
+              \   REFERENCES harness.server_turn_owners(instance_id) ON DELETE CASCADE,\
+              \ created_at timestamptz NOT NULL\
+              \ )"
+            , "CREATE UNIQUE INDEX IF NOT EXISTS server_session_mutations_boundary_idx\
+              \ ON harness.server_session_mutations\
+              \ (tenant_id, gateway_identity, session_key)\
+              \ NULLS NOT DISTINCT"
+            , "DO $ha$\
+              \ BEGIN\
+              \   IF EXISTS (\
+              \     SELECT 1\
+              \       FROM information_schema.columns\
+              \      WHERE table_schema = 'harness'\
+              \        AND table_name = 'sessions'\
+              \        AND column_name = 'session_key'\
+              \   ) AND NOT EXISTS (\
+              \     SELECT 1\
+              \       FROM pg_constraint\
+              \      WHERE conname = 'server_session_mutations_session_key_fkey'\
+              \        AND conrelid = 'harness.server_session_mutations'::regclass\
+              \   ) THEN\
+              \     ALTER TABLE harness.server_session_mutations\
+              \       ADD CONSTRAINT server_session_mutations_session_key_fkey\
+              \       FOREIGN KEY (session_key)\
+              \       REFERENCES harness.sessions(session_key)\
+              \       ON DELETE CASCADE;\
+              \   END IF;\
+              \ END\
+              \ $ha$"
+            , "CREATE TABLE IF NOT EXISTS harness.server_human_requests (\
+              \ request_id uuid PRIMARY KEY,\
+              \ turn_id uuid NOT NULL\
+              \   REFERENCES harness.server_turns(turn_id) ON DELETE CASCADE,\
+              \ kind text NOT NULL\
+              \   CHECK (kind IN ('tool_approval', 'root_access',\
+              \     'plan_enter', 'plan_exit', 'plan_question')),\
+              \ prompt text NOT NULL,\
+              \ options_json jsonb NOT NULL\
+              \   CHECK (jsonb_typeof(options_json) = 'array'),\
+              \ created_at timestamptz NOT NULL,\
+              \ response_decision text,\
+              \ response_value text,\
+              \ resolved_at timestamptz,\
+              \ CHECK ((response_decision IS NULL) = (resolved_at IS NULL))\
+              \ )"
+            , "CREATE UNIQUE INDEX IF NOT EXISTS\
+              \ server_human_requests_unresolved_turn_idx\
+              \ ON harness.server_human_requests (turn_id)\
+              \ WHERE resolved_at IS NULL"
+            , "CREATE INDEX IF NOT EXISTS\
+              \ server_human_requests_unresolved_created_idx\
+              \ ON harness.server_human_requests (created_at DESC)\
+              \ WHERE resolved_at IS NULL"
+            , "GRANT SELECT, INSERT, DELETE\
+              \ ON harness.server_session_mutations TO ha_runtime"
+            , "GRANT SELECT, INSERT, UPDATE, DELETE\
+              \ ON harness.server_human_requests TO ha_runtime"
+            ]
+        }
+    , Migration
+        { migrationVersion = 113
+        , migrationName = "recoverable server owner fencing"
+        , migrationStatements =
+            [ "DROP INDEX IF EXISTS harness.server_turns_active_session_idx"
+            , "ALTER TABLE harness.server_turns\
+              \ DROP COLUMN IF EXISTS teardown_pending"
+            , "CREATE UNIQUE INDEX server_turns_active_session_idx\
+              \ ON harness.server_turns\
+              \ (tenant_id, gateway_identity, session_key)\
+              \ NULLS NOT DISTINCT\
+              \ WHERE status IN ('queued', 'running')"
+            ]
+        }
+    , Migration
+        { migrationVersion = 114
+        , migrationName = "conversation pull request associations"
+        , migrationStatements =
+            [ "CREATE TABLE IF NOT EXISTS harness.session_pull_requests (session_id uuid PRIMARY KEY REFERENCES harness.sessions(session_id) ON DELETE CASCADE, next_turn_index bigint NOT NULL CHECK (next_turn_index >= 0), urls text[] NOT NULL)"
+            , "GRANT SELECT, INSERT, UPDATE, DELETE ON harness.session_pull_requests TO ha_runtime"
+            ]
+        }
     ]
+
+-- | Specialize all runtime grants for a validated cluster-global role.
+--
+-- Tenant databases use distinct roles while retaining the same relational
+-- schema. Migration history is database-local, so the specialized statements
+-- remain deterministic for that tenant database.
+coreMigrationsForRuntimeRole
+    :: Text
+    -> Either StoreError [Migration]
+coreMigrationsForRuntimeRole runtimeRole
+    | not (validRoleIdentifier runtimeRole) =
+        Left $
+            StoreConfigurationError
+                "the PostgreSQL runtime role is not a safe identifier"
+    | otherwise =
+        Right (map specialize coreMigrations)
+  where
+    specialize migration =
+        migration
+            { migrationStatements =
+                map
+                    ( TextEncoding.encodeUtf8
+                        . Text.replace "ha_runtime" runtimeRole
+                        . TextEncoding.decodeUtf8
+                    )
+                    migration.migrationStatements
+            }
 
 -- Version 1 shipped only on the in-development PostgreSQL branch. Empty
 -- clusters can be upgraded in place; non-empty normalized session stores fail
@@ -595,6 +832,30 @@ sessionRuntimeGrantStatements =
 runCoreMigrations :: StorePool -> IO (Either StoreError ())
 runCoreMigrations pool =
     runMigrations pool coreMigrations
+
+runCoreMigrationsForRuntimeRole
+    :: StorePool
+    -> Text
+    -> IO (Either StoreError ())
+runCoreMigrationsForRuntimeRole pool runtimeRole =
+    case coreMigrationsForRuntimeRole runtimeRole of
+        Left err -> pure (Left err)
+        Right migrations -> runMigrations pool migrations
+
+validRoleIdentifier :: Text -> Bool
+validRoleIdentifier value =
+    Text.length value >= 1
+        && Text.length value <= 63
+        && maybe False isAsciiLower (Text.find (const True) value)
+        && Text.all
+            (\character ->
+                isAsciiLower character
+                    || character >= '0' && character <= '9'
+                    || character == '_')
+            value
+  where
+    isAsciiLower character =
+        character >= 'a' && character <= 'z'
 
 -- | Apply all pending migrations in one serializable transaction.
 --

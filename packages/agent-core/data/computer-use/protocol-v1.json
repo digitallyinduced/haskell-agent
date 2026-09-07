@@ -1,0 +1,66 @@
+[
+  {
+    "protocol_version": 1,
+    "operation": "list_targets",
+    "target_id": null,
+    "actions": null,
+    "include_screenshot": false
+  },
+  {
+    "protocol_version": 1,
+    "operation": "bind",
+    "target_id": "target-1",
+    "actions": null,
+    "include_screenshot": true
+  },
+  {
+    "protocol_version": 1,
+    "operation": "observe",
+    "target_id": null,
+    "actions": null,
+    "include_screenshot": false
+  },
+  {
+    "protocol_version": 1,
+    "operation": "act",
+    "target_id": null,
+    "actions": [
+      {
+        "type": "perform",
+        "element_id": "button-1",
+        "action": "AXPress",
+        "value": null,
+        "text": null
+      },
+      {
+        "type": "set_value",
+        "element_id": "field-1",
+        "action": null,
+        "value": "hello",
+        "text": null
+      },
+      {
+        "type": "set_value",
+        "element_id": "slider-1",
+        "action": null,
+        "value": 42,
+        "text": null
+      },
+      {
+        "type": "set_value",
+        "element_id": "check-1",
+        "action": null,
+        "value": true,
+        "text": null
+      },
+      {
+        "type": "replace_selected_text",
+        "element_id": "field-2",
+        "action": null,
+        "value": null,
+        "text": "world"
+      }
+    ],
+    "include_screenshot": true
+  }
+]

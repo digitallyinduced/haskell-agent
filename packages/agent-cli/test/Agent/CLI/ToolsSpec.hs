@@ -3,9 +3,12 @@ module Agent.CLI.ToolsSpec (spec) where
 import Agent.CLI.Tools
 import Agent.CLI.ComputerUse (computerUseTool)
 import Agent.CLI.CodeModeRuntime
-    ( CodeModeToolProjection(..)
+    ( CodeModeProjectionStrategy(..)
+    , CodeModeToolProjection(..)
+    , filterStartupUnavailableTools
     , imageGenerationCodeModeProjection
     , projectCodeModeTools
+    , projectCodeModeToolsFor
     )
 import Agent.Dialect
     ( claudeCodeDialect
@@ -41,6 +44,7 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
     , ToolSchema(..)
+    , withAsyncToolCalls
     , defaultToolEnv
     , freeformApplyPatchAppTool
     , jsonAppTool
@@ -58,8 +62,24 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
+    it "emits async only when both the model and tool opt in" do
+        let capable = withAsyncToolCalls jsonTool
+            project modelCapability tool =
+                case
+                    schemasFromAppToolsWithAsyncCapability
+                        modelCapability
+                        codexDialect
+                        [tool] of
+                    [_, FunctionToolValue function] -> function.async
+                    other ->
+                        error
+                            ("expected one function tool, got " <> show other)
+        project True capable `shouldBe` Just True
+        project False capable `shouldBe` Nothing
+        project True jsonTool `shouldBe` Nothing
+
     it "advertises computer use as an ordinary strict function" do
-        if os == "darwin"
+        if os `elem` ["darwin", "linux"]
             then case schemasFromAppTools codexDialect [computerUseTool] of
                 [_, FunctionToolValue function] -> do
                     function.name `shouldBe` computerFunctionName
@@ -70,6 +90,52 @@ spec = describe "schemasFromAppTools" do
             else schemasFromAppTools codexDialect [computerUseTool]
                 `shouldBe` [webSearchTool]
 
+    it "advertises a privileged host-supplied computer schema verbatim" do
+        let parameters = Aeson.object
+                [ "type" Aeson..= ("object" :: Text)
+                , "properties" Aeson..= Aeson.object
+                    [ "operation" Aeson..= Aeson.object
+                        ["const" Aeson..= ("observe" :: Text)]
+                    ]
+                , "required" Aeson..= ["operation" :: Text]
+                , "additionalProperties" Aeson..= False
+                ]
+            nativeComputer = computerUseTool
+                { appToolSchema = HostedComputerFunctionSchema parameters }
+        if os == "darwin"
+            then case schemasFromAppTools codexDialect [nativeComputer] of
+                [_, FunctionToolValue function] -> do
+                    function.name `shouldBe` computerFunctionName
+                    function.strict `shouldBe` Just True
+                    fmap (Aeson.decodeStrict' . rawJsonBytes)
+                        function.parameters
+                        `shouldBe` Just (Just parameters)
+                other -> expectationFailure
+                    ("expected semantic computer function, got " <> show other)
+            else schemasFromAppTools codexDialect [nativeComputer]
+                `shouldBe` [webSearchTool]
+
+    it "does not claim strictness for an optional host computer schema" do
+        let parameters = Aeson.object
+                [ "type" Aeson..= ("object" :: Text)
+                , "properties" Aeson..= Aeson.object
+                    [ "operation" Aeson..= Aeson.object
+                        ["type" Aeson..= ("string" :: Text)]
+                    ]
+                , "required" Aeson..= ([] :: [Text])
+                , "additionalProperties" Aeson..= False
+                ]
+            nativeComputer = computerUseTool
+                { appToolSchema = HostedComputerFunctionSchema parameters }
+        if os == "darwin"
+            then case schemasFromAppTools codexDialect [nativeComputer] of
+                [_, FunctionToolValue function] ->
+                    function.strict `shouldBe` Just False
+                other -> expectationFailure
+                    ("expected semantic computer function, got " <> show other)
+            else schemasFromAppTools codexDialect [nativeComputer]
+                `shouldBe` [webSearchTool]
+
     it "reserves the model-facing computer_use function identity" do
         let collision =
                 jsonAppTool computerFunctionName "Unrelated MCP function" []
@@ -78,6 +144,18 @@ spec = describe "schemasFromAppTools" do
         schemasFromAppTools codexDialect [collision]
             `shouldBe` [webSearchTool]
         requireToolRegistry [computerUseTool, collision]
+            `shouldThrow` anyIOException
+
+    it "keeps the host-supplied computer schema privileged" do
+        let parameters = Aeson.object ["type" Aeson..= ("object" :: Text)]
+            nativeComputer = computerUseTool
+                { appToolSchema = HostedComputerFunctionSchema parameters }
+            collision =
+                rawJsonAppTool computerFunctionName "Unrelated MCP function"
+                    parameters
+                    AlwaysPrompt
+                    (noArgsTool computerFunctionName (pure (Right "ok")))
+        requireToolRegistry [nativeComputer, collision]
             `shouldThrow` anyIOException
 
     it "keeps an unrelated function named computer as a function" do
@@ -115,6 +193,35 @@ spec = describe "schemasFromAppTools" do
             `shouldBe` ["shell_command", "computer"]
         map (.appToolName) projection.nestedCodeModeTools
             `shouldBe` ["read_file", "shell_command"]
+
+    it "reprojects direct computer use when a code-mode tool set changes" do
+        let withoutComputer =
+                map testTool ["read_file", "imagegen", "shell_command"]
+            withComputer = withoutComputer <> [computerUseTool]
+            directNames strategy =
+                map (.appToolName)
+                    . (.directCodeModeTools)
+                    . projectCodeModeToolsFor strategy
+        directNames FullCodeModeProjection withoutComputer
+            `shouldBe` ["shell_command"]
+        directNames FullCodeModeProjection withComputer
+            `shouldBe` ["shell_command", "computer"]
+        directNames ImageGenerationOnlyCodeModeProjection withoutComputer
+            `shouldBe` ["read_file", "shell_command"]
+        directNames ImageGenerationOnlyCodeModeProjection withComputer
+            `shouldBe` ["read_file", "shell_command", "computer"]
+
+    it "retains toggleable computer use when imagegen fails at startup" do
+        let refreshTools =
+                filterStartupUnavailableTools
+                    True
+                    [ testTool "read_file"
+                    , testTool "imagegen"
+                    , computerUseTool
+                    ]
+        map (.appToolName) refreshTools
+            `shouldBe` ["read_file", "computer"]
+
     it "nests only imagegen for code-only models when full code mode is off" do
         let tools = map testTool ["read_file", "imagegen", "shell_command"]
         case imageGenerationCodeModeProjection CodeOnlyToolMode tools of
@@ -135,6 +242,23 @@ spec = describe "schemasFromAppTools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             KnownResponseTool ToolWebSearch : _ -> pure ()
             other -> expectationFailure ("expected web_search first, got " <> show other)
+
+    it "omits provider-hosted search at a sandboxed network boundary" do
+        schemasFromAppToolsWithHostedSearch
+            False
+            codexDialect
+            []
+            `shouldBe` []
+        schemasFromAppToolsWithHostedSearch
+            False
+            grokBuildDialect
+            []
+            `shouldBe` []
+        schemasFromAppToolsCodeModeWithHostedSearch
+            False
+            codexDialect
+            []
+            `shouldBe` []
 
     it "disables strict mode for all OpenAI JSON tools" do
         case schemasFromAppTools codexDialect [jsonTool] of

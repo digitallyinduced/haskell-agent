@@ -1,9 +1,11 @@
 module Agent.CLI.RecapSpec (spec) where
 
+import Agent.CLI.Btw (sideCallSnapshot)
 import Agent.CLI.Recap
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
+    , BackendSnapshot(..)
     , TurnInput(..)
     , emptyTurnOutput
     )
@@ -62,8 +64,6 @@ spec = describe "Agent.CLI.Recap" do
                         , passthrough = Nothing
                         }
                     ]
-            params <- newIORef defaultResponseCreateParams
-            transcript <- newIORef original
             seenInputs <- newIORef []
             let factory _ = Backend \state _ inputs _ -> do
                     writeIORef seenInputs inputs
@@ -75,13 +75,14 @@ spec = describe "Agent.CLI.Recap" do
                         }
             result <-
                 runRecapWithCancel (\_ action -> action)
-                    factory params transcript RecapManual
+                    factory
+                    (sideCallSnapshot defaultResponseCreateParams original)
+                    RecapManual
             result
                 `shouldBe`
                     Right
                         (RecapShown
                             "We fixed auth retries in billing/retry.rs.")
-            readIORef transcript `shouldReturn` original
             seen <- readIORef seenInputs
             seen `shouldSatisfy` \case
                 [UserMessage text] ->
@@ -89,8 +90,6 @@ spec = describe "Agent.CLI.Recap" do
                 _ -> False
 
         it "rejects tool calls" do
-            params <- newIORef defaultResponseCreateParams
-            transcript <- newIORef []
             let factory _ = Backend \state _ _ _ ->
                     pure $ Right BackendResult
                         { backendOutput =
@@ -100,5 +99,38 @@ spec = describe "Agent.CLI.Recap" do
                         , backendState = state
                         }
             runRecapWithCancel (\_ action -> action)
-                factory params transcript RecapManual
+                factory
+                (sideCallSnapshot defaultResponseCreateParams [])
+                RecapManual
                 >>= (`shouldBe` Left RecapUnexpectedToolCall)
+
+    describe "runTurnSummaryWithCancel" do
+        it "uses the same immutable transcript for its anchor and request" do
+            let original =
+                    [ MessageItem ResponseMessage
+                        { messageId = Just "u1"
+                        , content = MessageContentText "snapshot question"
+                        , role = RoleUser
+                        , status = Just ItemCompleted
+                        , phase = Nothing
+                        , passthrough = Nothing
+                        }
+                    ]
+            seenInputs <- newIORef []
+            seenTranscript <- newIORef []
+            let factory _ = Backend \state _ inputs _ -> do
+                    writeIORef seenInputs inputs
+                    writeIORef seenTranscript state.backendItems
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "summary-1" [] (Just "snapshot answer")
+                        , backendState = state
+                        }
+            runTurnSummaryWithCancel
+                (\_ action -> action)
+                factory
+                (sideCallSnapshot defaultResponseCreateParams original)
+                `shouldReturn` Right "snapshot answer"
+            readIORef seenTranscript `shouldReturn` original
+            readIORef seenInputs `shouldReturn`
+                [UserMessage (turnSummaryInstruction "snapshot question")]

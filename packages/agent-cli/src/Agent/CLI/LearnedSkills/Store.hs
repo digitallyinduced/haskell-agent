@@ -2,6 +2,8 @@
 module Agent.CLI.LearnedSkills.Store
     ( learnedSkillToolsEnvForStore
     , loadApplicableLearnedSkillsForStore
+    , loadLearnedSkillsWithPreload
+    , successfulLearnedSkillsPreload
     ) where
 
 import Agent.CLI.Database.Store
@@ -237,6 +239,21 @@ loadApplicableLearnedSkillsForStore store scopes =
         listApplicableLearnedSkills
             (trustedPool store)
             (applicableDatabaseScopes scopes)
+
+successfulLearnedSkillsPreload
+    :: Either Text [LearnedSkill]
+    -> Maybe [LearnedSkill]
+successfulLearnedSkillsPreload =
+    either (const Nothing) Just
+
+loadLearnedSkillsWithPreload
+    :: Maybe [LearnedSkill]
+    -> IO (Either Text [LearnedSkill])
+    -> IO (Either Text [LearnedSkill])
+loadLearnedSkillsWithPreload (Just learnedSkills) _ =
+    pure (Right learnedSkills)
+loadLearnedSkillsWithPreload Nothing reload =
+    reload
 
 sourceInput
     :: IO (Maybe Text)

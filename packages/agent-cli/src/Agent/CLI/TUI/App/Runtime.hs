@@ -37,7 +37,10 @@ import Agent.CLI.ImagePreview ( ImagePreviewProtocol(..)
     , kittyPlacedImageSequence
     , positionImagePayload
     )
-import Agent.CLI.Command ( SkillCommand , SlashCatalog(..)
+import Agent.CLI.Command
+    ( ReplAction
+    , SkillCommand
+    , SlashCatalog(..)
     , defaultSlashCatalog
     , slashCatalogWithSkills
     )
@@ -318,6 +321,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
             , sessionCancel = cancelAction
             , sessionSteer = \_ _ -> pure (Right ())
             , sessionBtw = const (pure ())
+            , sessionImmediateCommand = const (pure ())
             , sessionRecap = pure ()
             , sessionRestartEffort = restartEffortAction
             , sessionCtrlC = ctrlCAction
@@ -336,6 +340,9 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
             , runtimeBtw = \question ->
                 readIORef sessionActions >>= \actions ->
                     actions.sessionBtw question
+            , runtimeImmediateCommand = \command ->
+                readIORef sessionActions >>= \actions ->
+                    actions.sessionImmediateCommand command
             , runtimeRecap =
                 readIORef sessionActions >>= (.sessionRecap)
             , runtimeRestartEffort = \level ->
@@ -386,6 +393,7 @@ setFullscreenSessionActions
     -> IO ()
     -> (Bool -> Text -> IO (Either Text ()))
     -> (Text -> IO ())
+    -> (ReplAction -> IO ())
     -> IO ()
     -> (Text -> IO ())
     -> IO CtrlCDecision
@@ -398,6 +406,7 @@ setFullscreenSessionActions
     cancelAction
     steerAction
     btwAction
+    immediateCommandAction
     recapAction
     restartEffortAction
     ctrlCAction
@@ -408,6 +417,7 @@ setFullscreenSessionActions
             , sessionCancel = cancelAction
             , sessionSteer = steerAction
             , sessionBtw = btwAction
+            , sessionImmediateCommand = immediateCommandAction
             , sessionRecap = recapAction
             , sessionRestartEffort = restartEffortAction
             , sessionCtrlC = ctrlCAction

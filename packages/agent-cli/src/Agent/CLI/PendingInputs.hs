@@ -15,7 +15,12 @@ import Agent.CLI.InputBudget
     ( logicalTurnInputBytes
     , saturatingAdd
     )
-import Agent.Loop (Backend(..), TurnInput(..))
+import Agent.Loop
+    ( Backend(..)
+    , BackendMiddleware
+    , TurnInput(..)
+    , backendWithCallbacks
+    )
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception.Safe (mask, onException)
 import Data.Foldable (toList)
@@ -244,9 +249,9 @@ epochOf state = state.pendingEpoch
 queueOf :: PendingState -> Seq.Seq PendingEntry
 queueOf state = state.pendingQueue
 
-withPendingInputs :: PendingInputs -> Backend -> Backend
-withPendingInputs (PendingInputs pending lifecycle) (Backend submit) =
-    Backend \state previous inputs onEvent ->
+withPendingInputs :: PendingInputs -> BackendMiddleware
+withPendingInputs (PendingInputs pending lifecycle) backend =
+    backendWithCallbacks \state previous inputs callbacks ->
         mask \restore ->
             withMVar lifecycle \_ -> do
                 batch <- drainPendingInputs pending
@@ -258,7 +263,8 @@ withPendingInputs (PendingInputs pending lifecycle) (Backend submit) =
                         | otherwise =
                             ((.entryInput) <$> toList queued) <> inputs
                 result <- restore
-                    (submit state previous prefixed onEvent)
+                    (backend.submitTurnWithCallbacks
+                        state previous prefixed callbacks)
                     `onException` requeue
                 case result of
                     Left _ -> requeue

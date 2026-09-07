@@ -15,6 +15,11 @@ module Agent.CLI.Provider.Switch
     , requestStartupProviderFallback
     ) where
 
+import Agent.CLI.Session.Request
+    ( SessionRequestState
+    , readSessionRequestParams
+    , setSessionRequestModel
+    )
 import Agent.CLI.AccountSelection
     ( SelectedAccount(..)
     , providerSupportsUsageAccountSelection
@@ -57,7 +62,6 @@ import Agent.CLI.Project
     , resolveProjectRoot
     , persistModelSwitch
     )
-import Agent.CLI.Request (setRequestModel)
 import Agent.CLI.ProviderAvailability
     ( probeLoadedAutomaticAvailability
     , probeLoadedAvailability
@@ -82,6 +86,7 @@ import Agent.CLI.Runtime.Types
     )
 import Agent.CLI.Session
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Style
     ( glyphOk
     , glyphWarn
@@ -106,7 +111,7 @@ import Agent.Error
     ( ApiError(..)
     , CredentialExhaustionReason(..)
     )
-import Agent.Loop (Backend(..))
+import Agent.Loop (Backend(..), BackendMiddleware, backendWithCallbacks)
 import Agent.Provider
     ( AccountFailure(..)
     , BillingMode(..)
@@ -128,7 +133,6 @@ import Control.Monad
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
-    , modifyIORef'
     , newIORef
     , readIORef
     , writeIORef
@@ -211,7 +215,7 @@ applyModelChange
     -> Text
     -> Text
     -> DialectId
-    -> IORef ResponseCreateParams
+    -> SessionRequestState
     -> RenderConfig
     -> IORef LiveConversation
     -> Persistence
@@ -219,8 +223,7 @@ applyModelChange
 applyModelChange
         home projectRoot provider connection name transportModel dialectId
         paramsRef render previous persist = do
-    modifyIORef' paramsRef (setRequestModel provider name)
-    writeIORef render.renderModelRef name
+    setSessionRequestModel paramsRef provider name
     persistModelSwitch TopLevelSwitch home projectRoot ModelTarget
         { targetProvider = provider
         , targetConnectionId = connection
@@ -366,7 +369,6 @@ requestAccountProviderSwitch
                             , transitionPendingTurn = Nothing
                             , transitionUnavailableProviders = Set.empty
                             , transitionCause = ManualTransition
-                            , transitionAutomaticBilling = Nothing
                             }
                         modelMessage
                             | currentProvider == selectedProvider =
@@ -416,9 +418,7 @@ accountSwitchTarget
                     }
                 }
         else
-            fromMaybe
-                (error "validated default model is missing")
-                (defaultModelOptionFor catalog selectedProvider)
+            defaultModelOptionFor catalog selectedProvider
 
 persistenceTransportModel :: Text -> Persistence -> IO Text
 persistenceTransportModel fallback = \case
@@ -478,13 +478,14 @@ requestAutomaticProviderFallback env apiError pending = do
             sessionId <- ensureTransitionSessionId env.sessionPersist
             unavailable <- readIORef env.sessionUnavailableProviders
             currentModel <-
-                fromMaybe "" . (.model) <$> readIORef env.sessionParams
+                fromMaybe "" . (.model) <$> readSessionRequestParams env.sessionParams
             case env.sessionTokenProvider of
                 Nothing -> pure Nothing
                 Just tokenProvider ->
                     chooseAutomaticProviderTransition
+                        env.sessionProviderFallback
                         env.sessionModelCatalog
-                        env.sessionCwd
+                        env.sessionWorkspace.projectRoot
                         env.sessionRender.renderStderr
                         env.sessionFullscreen
                         (tokenProviderBillingMode tokenProvider)
@@ -505,13 +506,14 @@ requestStartupProviderFallback env apiError = do
         Nothing -> do
             unavailable <- readIORef env.sessionUnavailableProviders
             currentModel <-
-                fromMaybe "" . (.model) <$> readIORef env.sessionParams
+                fromMaybe "" . (.model) <$> readSessionRequestParams env.sessionParams
             case env.sessionTokenProvider of
                 Nothing -> pure Nothing
                 Just tokenProvider ->
                     chooseStartupProviderTransition
+                        env.sessionProviderFallback
                         env.sessionModelCatalog
-                        env.sessionCwd
+                        env.sessionWorkspace.projectRoot
                         env.sessionFullscreen
                         (tokenProviderBillingMode tokenProvider)
                         env.sessionProvider
@@ -521,23 +523,28 @@ requestStartupProviderFallback env apiError = do
                         apiError
 
 continueAutomaticFallback
-    :: Maybe OsPath
+    :: Bool
+    -> Maybe OsPath
+    -> Maybe OsPath
     -> Handle
     -> Maybe FullscreenRuntime
     -> ProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
-continueAutomaticFallback cwdHint stderrHandle fullscreen failed apiError =
-    case ( failed.transitionAutomaticBilling
-         , failed.transitionPendingTurn
-         ) of
-        (Just billing, Just pending) -> do
-            home <- getHomeDirectory
+continueAutomaticFallback
+        fallbackEnabled homeHint cwdHint stderrHandle fullscreen failed apiError
+    | not fallbackEnabled = pure Nothing
+    | otherwise = case ( failed.transitionCause
+                       , failed.transitionPendingTurn
+                       ) of
+        (AutomaticFallback billing, Just pending) -> do
+            home <- maybe getHomeDirectory pure homeHint
             cwd <- maybe getCurrentDirectory pure cwdHint
             loadModelCatalogAt home cwd >>= \case
                 Left _ -> pure Nothing
                 Right catalog ->
                     chooseAutomaticProviderTransition
+                        True
                         catalog
                         cwd
                         stderrHandle
@@ -552,7 +559,8 @@ continueAutomaticFallback cwdHint stderrHandle fullscreen failed apiError =
         _ -> pure Nothing
 
 chooseAutomaticProviderTransition
-    :: ModelCatalog
+    :: Bool
+    -> ModelCatalog
     -> OsPath
     -> Handle
     -> Maybe FullscreenRuntime
@@ -565,9 +573,10 @@ chooseAutomaticProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
 chooseAutomaticProviderTransition
-    catalog cwd stderrHandle fullscreen
-        sourceBilling current currentModel unavailable0 sessionId pending apiError =
-    tryCandidates unavailable0 candidates
+    fallbackEnabled catalog cwd stderrHandle fullscreen
+        sourceBilling current currentModel unavailable0 sessionId pending apiError
+    | not fallbackEnabled = pure Nothing
+    | otherwise = tryCandidates unavailable0 candidates
   where
     candidates =
         fallbackCandidates
@@ -577,7 +586,10 @@ chooseAutomaticProviderTransition
         [] -> pure Nothing
         rawChoice : rest -> do
             choice <- resolveModelOptionDialect rawChoice
-            validateAutomaticProviderTarget cwd sourceBilling choice >>= \case
+            validateAutomaticProviderTarget
+                cwd
+                sourceBilling
+                choice >>= \case
                 Left err -> do
                     let failedProvider =
                             choice.modelTarget.targetProvider
@@ -634,12 +646,12 @@ chooseAutomaticProviderTransition
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Just pending
                         , transitionUnavailableProviders = unavailable'
-                        , transitionCause = AutomaticFallback
-                        , transitionAutomaticBilling = Just sourceBilling
+                        , transitionCause = AutomaticFallback sourceBilling
                         }
 
 chooseStartupProviderTransition
-    :: ModelCatalog
+    :: Bool
+    -> ModelCatalog
     -> OsPath
     -> Maybe FullscreenRuntime
     -> BillingMode
@@ -650,9 +662,10 @@ chooseStartupProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
 chooseStartupProviderTransition
-    catalog cwd fullscreen sourceBilling current currentModel
-        unavailable0 sessionId apiError =
-    tryCandidates unavailable0 candidates
+    fallbackEnabled catalog cwd fullscreen sourceBilling current currentModel
+        unavailable0 sessionId apiError
+    | not fallbackEnabled = pure Nothing
+    | otherwise = tryCandidates unavailable0 candidates
   where
     candidates =
         fallbackCandidates
@@ -662,7 +675,10 @@ chooseStartupProviderTransition
         [] -> pure Nothing
         rawChoice : rest -> do
             choice <- resolveModelOptionDialect rawChoice
-            validateAutomaticProviderTarget cwd sourceBilling choice >>= \case
+            validateAutomaticProviderTarget
+                cwd
+                sourceBilling
+                choice >>= \case
                 Left err -> do
                     let failedProvider =
                             choice.modelTarget.targetProvider
@@ -710,8 +726,7 @@ chooseStartupProviderTransition
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Nothing
                         , transitionUnavailableProviders = unavailable'
-                        , transitionCause = AutomaticFallback
-                        , transitionAutomaticBilling = Just sourceBilling
+                        , transitionCause = AutomaticFallback sourceBilling
                         }
 
 prepareProviderTransition
@@ -736,7 +751,6 @@ prepareProviderTransition cause unavailable pending rawChoice persist = do
                 , transitionPendingTurn = pending
                 , transitionUnavailableProviders = unavailable
                 , transitionCause = cause
-                , transitionAutomaticBilling = Nothing
                 }
 
 validateProviderTarget :: ModelOption -> IO (Either Text ())
@@ -761,8 +775,7 @@ validateAutomaticProviderTarget cwd sourceBilling choice = do
                 probeLoadedAutomaticAvailability
                 choice
         else do
-            projectRoot <- resolveProjectRoot cwd
-            settings <- loadProjectSettings projectRoot
+            settings <- resolveProjectRoot cwd >>= loadProjectSettings
             let rememberedIds = fmap
                     (\account ->
                         ( account.projectAccountSelectionId
@@ -933,12 +946,12 @@ commitBackendOnSuccess
     -> IORef Bool
     -> ProviderTransition
     -> Persistence
-    -> Backend
-    -> Backend
+    -> BackendMiddleware
 commitBackendOnSuccess
-        scope home projectRoot committed transition persist (Backend submit) =
-    Backend \state previous inputs onEvent -> do
-        result <- submit state previous inputs onEvent
+        scope home projectRoot committed transition persist backend =
+    backendWithCallbacks \state previous inputs callbacks -> do
+        result <-
+            backend.submitTurnWithCallbacks state previous inputs callbacks
         case result of
             Right _ -> do
                 shouldCommit <- atomicModifyIORef' committed \done ->

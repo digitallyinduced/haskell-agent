@@ -1,21 +1,29 @@
 -- | Typed inputs shared by provider startup and the session loop.
 module Agent.CLI.Session.Runtime.Types
-    ( SessionBackend(..)
+    ( InitialContextPreload(..)
+    , SessionBackend(..)
     , SessionRequest(..)
     , StartupCancelled(..)
     , StartupFailure(..)
     , StartupRuntime(..)
     ) where
 
+import Agent.CLI.Session.Request
+    ( SessionRequestState
+    )
+import Agent.CLI.ActiveAccount (ActiveAccountRef)
+import Agent.CLI.CancelWatch (StdinControl)
 import Agent.CLI.AgentViewport
     ( AgentEntry
     , AgentTarget
     )
 import Agent.CLI.Claude (ClaudeSessionRuntimeSlot)
+import Agent.CLI.Config (HarnessConfig)
 import Agent.CLI.Session.History (LiveConversation)
+import Agent.CLI.Session.Workspace (WorkspaceContext)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.CodeModeRuntime
-    ( CodeModeNestedSlot
+    ( CodeModeSessionRuntime
     , CodexCatalogSession
     )
 import Agent.CLI.Compaction
@@ -67,12 +75,13 @@ import Agent.Provider
     , Provider
     , TokenProvider
     )
-import Agent.Responses.Types (ResponseCreateParams)
+import Agent.ProjectInstructions (LoadedAgentsMd)
 import Agent.Skills
     ( SkillCatalog
     , SkillInvocation
     )
 import Agent.Store.Postgres (Store)
+import Agent.Store.Postgres.Skill (LearnedSkill)
 import Agent.Subagents
     ( RootTurnId
     , SubagentId
@@ -90,6 +99,7 @@ import Data.IORef (IORef)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Clock
     ( NominalDiffTime
     , UTCTime
@@ -104,6 +114,15 @@ data SessionBackend = SessionBackend
     , resetBackendState :: !(IO ())
     }
 
+-- | Side-effect-free startup reads that can be prepared while independent
+-- tool resources initialize. Their warnings and model-facing formatting are
+-- intentionally deferred until the normal session installation boundary.
+data InitialContextPreload = InitialContextPreload
+    { preloadedAgentsContext :: !(Maybe LoadedAgentsMd)
+    , preloadedLearnedSkills :: !(Maybe [LearnedSkill])
+    }
+    deriving (Eq, Show)
+
 data SessionRequest = SessionRequest
     { catalog :: !ModelCatalog
     , gatewayModelsRef :: !(IORef (Maybe GatewayModelAccess))
@@ -115,8 +134,13 @@ data SessionRequest = SessionRequest
     , options :: !CliOptions
     , provider :: !Provider
     , dialect :: !Dialect
+    , commitAttributionModel :: !Text
+    , commitAttributionEffort :: !Text
     , policyRef :: !(IORef ApprovalPolicy)
     , allTools :: ![AppTool]
+      -- | Full toggleable tool surface, minus tools unavailable at startup.
+      -- Unlike allTools, this list governs provider availability and refreshes.
+    , refreshTools :: ![AppTool]
     , recordImageGenerationInputs :: !([ImageAttachment] -> IO ())
     , clearImageGenerationHistory :: !(IO ())
     , suspendGhci :: !(IO ())
@@ -138,7 +162,7 @@ data SessionRequest = SessionRequest
     , pendingTurn :: !(Maybe PendingTurn)
     , unavailableProviders :: !(Set Provider)
     , startupUnavailable :: !(Maybe (STM ApiError))
-    , paramsRef :: !(IORef ResponseCreateParams)
+    , paramsRef :: !(SessionRequestState)
     , conversationRef :: !(IORef LiveConversation)
     , contextOccupancyRef :: !(IORef (Maybe OccupancySnapshot))
     , currentContextWindow :: !(IO (Maybe Int))
@@ -146,12 +170,11 @@ data SessionRequest = SessionRequest
         :: !(IORef (Maybe AutomaticCompactionBoundary))
     , needsInitialContext :: !Bool
     , queueInitialContext :: !Bool
+    , initialContextPreload :: !InitialContextPreload
     , initialGrokContext :: !(Maybe Text)
     , persist :: !Persistence
     , startupWindowTitle :: !Text
-    , projectRoot :: !OsPath
-    , home :: !OsPath
-    , cwd :: !OsPath
+    , workspace :: !WorkspaceContext
     , tokenProvider :: !(Maybe TokenProvider)
     , openAiPool :: !(Maybe OpenAI.Pool)
     , startupContext :: !(IORef (Maybe Text))
@@ -160,7 +183,7 @@ data SessionRequest = SessionRequest
             (CompactOutcome -> [TurnInput] -> IO CompactionInstall))
     , skillsRef :: !(IORef SkillCatalog)
     , skillInvocationsRef :: !(IORef [SkillInvocation])
-    , escPaused :: !(IORef Bool)
+    , stdinControl :: !StdinControl
     , interrupt :: !InterruptState
     , multiCtx :: !(Maybe MultiAgentContext)
     , rootTurnRef :: !(IORef (Maybe RootTurnId))
@@ -170,26 +193,25 @@ data SessionRequest = SessionRequest
     , agentTypes :: !GrokSubagentSpecs
     , legacyTarget :: !(Maybe LegacySubagentTarget)
     , usageRef :: !(IORef TokenUsage)
-    , accountRef :: !(IORef Text)
-    , accountIdRef :: !(IORef Text)
-    , selectionRef :: !(IORef Text)
+    , accountRef :: !ActiveAccountRef
     , accountLabel :: !(Credential -> IO Text)
     , selectAccount :: !(Maybe (Text -> IO (Either ApiError Text)))
     , onPersisted :: !(SessionHandle -> IO ())
     , compactRunner :: !(Maybe Text -> IO (Either Text CompactOutcome))
-      -- | Late-bound nested dispatcher for code-mode sessions. The runner
-      -- installs the approval-aware invoke once its approval pipeline exists.
-    , codeModeNestedSlot :: !(Maybe CodeModeNestedSlot)
+      -- | Code-mode projection and late-bound nested dispatcher. The runner
+      -- uses the projection to rebuild direct schemas when tools are toggled.
+    , codeModeRuntime :: !(Maybe CodeModeSessionRuntime)
       -- | Catalog-instruction context for OpenAI models with a catalog entry.
     , codexCatalogSession :: !(Maybe CodexCatalogSession)
     }
 
 data StartupRuntime = StartupRuntime
     { startupToolEnv :: !ToolEnv
+    , startupHarnessConfig :: !HarnessConfig
     , startupNetworkRecovery :: !(Maybe NetworkRecovery)
     , startupDatabaseStore :: !Store
     , startupInterrupt :: !InterruptState
-    , startupEscPaused :: !(IORef Bool)
+    , startupStdinControl :: !StdinControl
     , startupUiRuntimeRef :: !(IORef (Maybe FullscreenRuntime))
     , startupFullscreen :: !(Maybe FullscreenRuntime)
     , startupTerminal :: !TerminalCapabilities
@@ -212,11 +234,11 @@ data StartupRuntime = StartupRuntime
     , startupNativeHooks :: !(Maybe NativeRunHooks)
     }
 
-newtype StartupFailure = StartupFailure String
+newtype StartupFailure = StartupFailure Text
     deriving (Show)
 
 instance Exception StartupFailure where
-    displayException (StartupFailure message) = message
+    displayException (StartupFailure message) = Text.unpack message
 
 data StartupCancelled = StartupCancelled
     deriving (Show)

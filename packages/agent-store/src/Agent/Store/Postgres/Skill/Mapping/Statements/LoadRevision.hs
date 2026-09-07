@@ -10,6 +10,10 @@ import qualified Hasql.Encoders as Encoders
 import Hasql.Statement (Statement)
 
 import Agent.Store.Postgres.Hasql (mkStatement)
+import Agent.Store.Postgres.Skill.Mapping.Codec
+    ( revisionRowDecoder
+    , revisionColumns
+    )
 import Agent.Store.Postgres.Skill.Mapping.Types
 
 loadRevisionStatement :: Statement (Text, Int64) (Maybe RevisionRow)
@@ -24,21 +28,4 @@ loadRevisionStatement = mkStatement
 
 revisionSelectSql :: Text
 revisionSelectSql =
-    "SELECT skill_revision_id::text, revision_number, title, description,\
-    \ applies_when, instructions_text, activation_mode, priority, status,\
-    \ change_summary, created_at FROM harness.skill_revisions"
-
-revisionRowDecoder :: Decoders.Row RevisionRow
-revisionRowDecoder =
-    RevisionRow
-        <$> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.int4)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
+    "SELECT " <> revisionColumns "" <> " FROM harness.skill_revisions"

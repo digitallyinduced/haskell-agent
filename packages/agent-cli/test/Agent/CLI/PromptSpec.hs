@@ -1,22 +1,89 @@
 module Agent.CLI.PromptSpec (spec) where
 
-import Agent.CLI.Prompt
+import Agent.CLI.Prompt hiding
+    ( systemPrompt
+    , systemPromptForTools
+    , systemPromptForToolsWithHostedSearch
+    )
+import qualified Agent.CLI.Prompt as Prompt
 import Agent.Dialect
-    ( claudeCodeDialect
+    ( Dialect
+    , claudeCodeDialect
     , codexDialect
     , genericResponsesDialect
     , grokBuildDialect
     )
-import System.OsPath (unsafeEncodeUtf)
 import Agent.Provider (BillingMode(..), Provider(..))
-import Data.Time.Calendar (fromGregorian)
+import Agent.OpenAI.Models (ModelsResponse(..), loadBundledModelsOrThrow)
+import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Time.Calendar (Day, fromGregorian)
+import System.OsPath (OsPath, unsafeEncodeUtf)
 import Test.Hspec
 
+fromFilePath :: String -> OsPath
 fromFilePath = unsafeEncodeUtf
+
+systemPrompt
+    :: Dialect -> OsPath -> Maybe OsPath -> Day -> Bool -> Text
+systemPrompt dialect =
+    Prompt.systemPrompt dialect "gpt-5.6-sol" "high"
+
+systemPromptForTools
+    :: Dialect -> [Text] -> OsPath -> Maybe OsPath -> Day -> Bool -> Text
+systemPromptForTools dialect =
+    Prompt.systemPromptForTools dialect "gpt-5.6-sol" "high"
+
+systemPromptForToolsWithHostedSearch
+    :: Bool
+    -> Dialect
+    -> [Text]
+    -> OsPath
+    -> Maybe OsPath
+    -> Day
+    -> Bool
+    -> Text
+systemPromptForToolsWithHostedSearch includeHostedSearch dialect =
+    Prompt.systemPromptForToolsWithHostedSearch
+        includeHostedSearch
+        dialect
+        "gpt-5.6-sol"
+        "high"
 
 spec :: Spec
 spec = describe "systemPrompt" do
+    it "keeps ownership guidance after bundled catalog instructions" do
+        catalog <- loadBundledModelsOrThrow
+        catalog.models `shouldSatisfy` (not . null)
+        mapM_ (\info ->
+            systemPromptForCatalogModel codexDialect "gpt-5.6-sol" "high"
+                info ["create_agent_session"] Nothing
+                `shouldSatisfy` Text.isInfixOf
+                    "Keep ownership of the user's task in the current session."
+            ) catalog.models
+
+    it "keeps task ownership in the current session across all dialects and filtered tools" do
+        let day = fromGregorian 2026 9 6
+            cwd = fromFilePath "/tmp/repo"
+            dialects = [codexDialect, grokBuildDialect, genericResponsesDialect, claudeCodeDialect]
+            prompts = concatMap
+                (\dialect ->
+                    [ systemPrompt dialect cwd Nothing day False
+                    , systemPromptForTools dialect [] cwd Nothing day False
+                    , systemPromptForTools dialect ["create_agent_session"] cwd Nothing day False
+                    ])
+                dialects
+        mapM_ (\prompt -> do
+            prompt `shouldSatisfy` Text.isInfixOf
+                "Keep ownership of the user's task in the current session."
+            prompt `shouldSatisfy` Text.isInfixOf
+                "use subagents for bounded subtasks"
+            prompt `shouldSatisfy` Text.isInfixOf
+                "Approval to implement a plan is not permission"
+            prompt `shouldSatisfy` Text.isInfixOf
+                "a launch acknowledgement is not a result."
+            ) prompts
+
     it "names grok-build tools for xAI and Codex tools for OpenAI" do
         let day = fromGregorian 2026 8 19
             grok =
@@ -88,6 +155,8 @@ spec = describe "systemPrompt" do
         claude `shouldSatisfy` Text.isInfixOf "at most five minutes"
         claude `shouldSatisfy` Text.isInfixOf
             "report its current status and URL"
+        claude `shouldSatisfy` Text.isInfixOf
+            "Co-authored-by: Haskell Agent (gpt-5.6-sol, high) <agent@digitallyinduced.com>"
 
     it "uses a neutral identity for generic Responses models" do
         let generic =
@@ -128,6 +197,20 @@ spec = describe "systemPrompt" do
         prompt `shouldNotSatisfy` Text.isInfixOf "run_ghci"
         prompt `shouldNotSatisfy` Text.isInfixOf "<background_tasks>"
         prompt `shouldNotSatisfy` Text.isInfixOf "<plan_mode>"
+
+    it "omits hosted search guidance at a sandboxed network boundary" do
+        let prompt =
+                systemPromptForToolsWithHostedSearch
+                    False
+                    grokBuildDialect
+                    ["read_file", "grep"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    True
+        prompt `shouldSatisfy` Text.isInfixOf "read_file"
+        prompt `shouldNotSatisfy` Text.isInfixOf "web_search"
+        prompt `shouldNotSatisfy` Text.isInfixOf "x_search"
 
     it "renders restricted generic child prompts without unavailable tools" do
         let prompt =
@@ -255,6 +338,15 @@ spec = describe "systemPrompt" do
                     , "browser_snapshot"
                     , "browser_click"
                     , "browser_type"
+                    , "browser_key"
+                    , "browser_scroll"
+                    , "browser_back"
+                    , "browser_forward"
+                    , "browser_reload"
+                    , "browser_screenshot"
+                    , "browser_list_tabs"
+                    , "browser_switch_tab"
+                    , "browser_list_downloads"
                     ]
                     (fromFilePath "/tmp/repo")
                     Nothing
@@ -280,6 +372,9 @@ spec = describe "systemPrompt" do
             "appears in the right sidebar"
         withBrowser `shouldSatisfy` Text.isInfixOf
             "Use the browser_* tools for websites"
+        withBrowser `shouldSatisfy` Text.isInfixOf
+            "opaque refs from the latest browser_snapshot"
+        withBrowser `shouldNotSatisfy` Text.isInfixOf "selectors returned"
         withoutBrowser `shouldNotSatisfy` Text.isInfixOf "Browser control:"
         unrelatedBrowserPrefix `shouldNotSatisfy`
             Text.isInfixOf "Browser control:"
@@ -340,6 +435,36 @@ spec = describe "systemPrompt" do
         bashOnly `shouldSatisfy` Text.isInfixOf "shell_command"
         bashOnly `shouldNotSatisfy` Text.isInfixOf "run_ghci"
         bashOnly `shouldNotSatisfy` Text.isInfixOf "Prefer ghci for scripting"
+        ghciOnly `shouldSatisfy` Text.isInfixOf
+            "Co-authored-by: Haskell Agent (gpt-5.6-sol, high) <agent@digitallyinduced.com>"
+        bashOnly `shouldSatisfy` Text.isInfixOf
+            "Co-authored-by: Haskell Agent (gpt-5.6-sol, high) <agent@digitallyinduced.com>"
+
+    it "uses the actual runtime model and reasoning effort in attribution" do
+        let prompt =
+                Prompt.systemPromptForTools
+                    codexDialect
+                    "gpt-5.6-terra"
+                    "xhigh"
+                    ["shell_command"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+        prompt `shouldSatisfy` Text.isInfixOf
+            "Co-authored-by: Haskell Agent (gpt-5.6-terra, xhigh) <agent@digitallyinduced.com>"
+
+    it "omits commit attribution when no command tool can create commits" do
+        let prompt =
+                systemPromptForTools
+                    genericResponsesDialect
+                    ["read_file", "grep", "apply_patch"]
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+        prompt `shouldNotSatisfy` Text.isInfixOf
+            "Co-authored-by: Haskell Agent"
 
     it "omits hidden Grok terminal names from ghci-only prompts" do
         let prompt =
@@ -418,6 +543,12 @@ spec = describe "systemPrompt" do
             "/Users/test/.haskell-agent/tmp/sessions/2026-08-19-abcd1234"
         rootPrompt `shouldSatisfy` Text.isInfixOf
             "clones, downloads, extracted files, generated assets"
+        rootPrompt `shouldSatisfy` Text.isInfixOf
+            "only scratch root for the session"
+        childPrompt `shouldSatisfy` Text.isInfixOf
+            "Do not create alternate temporary directories"
+        childPrompt `shouldSatisfy` Text.isInfixOf
+            "task-specific subdirectories under $TMPDIR"
         childPrompt `shouldSatisfy` Text.isInfixOf
             "relative paths still resolve against the workspace"
         rootPrompt `shouldSatisfy` Text.isInfixOf

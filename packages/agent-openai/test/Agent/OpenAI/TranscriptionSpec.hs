@@ -13,9 +13,14 @@ import Agent.Provider
     , Provider(OpenAIProvider)
     , tokenProvider
     )
-import Control.Concurrent (threadDelay)
+import Control.Concurrent
+    ( newEmptyMVar
+    , putMVar
+    , takeMVar
+    , threadDelay
+    )
 import Control.Concurrent.Async (wait, withAsync)
-import Control.Exception.Safe (bracket, finally)
+import Control.Exception.Safe (bracket, finally, throwString)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
@@ -376,6 +381,133 @@ spec = describe "OpenAI transcription" do
                         ]
             _ -> False
 
+    it "retries a transient ChatGPT server error with the buffered audio" do
+        recorded <- newIORef []
+        attempts <- newIORef (0 :: Int)
+        captures <- newIORef (0 :: Int)
+        callbacks <- newIORef []
+        let credential = openAiCredential "subscription-token"
+            provider = tokenProvider SubscriptionBilled \_ ->
+                pure (Right credential)
+            app request respond =
+                if Wai.rawPathInfo request
+                    == "/backend-api/dictation/stream"
+                    then
+                        respond $ Wai.responseLBS HTTP.status404 [] ""
+                    else do
+                        body <- Wai.strictRequestBody request
+                        modifyIORef' recorded (<> [body])
+                        attempt <- atomicModifyIORef' attempts \count ->
+                            (count + 1, count)
+                        respond $
+                            if attempt == 0
+                                then Wai.responseLBS
+                                    HTTP.status503
+                                    [("Content-Type", "application/json")]
+                                    "{\"error\":\"temporarily unavailable\"}"
+                                else Wai.responseLBS
+                                    HTTP.status200
+                                    [("Content-Type", "application/json")]
+                                    (Aeson.encode (Aeson.object
+                                        [ "text" .=
+                                            ("recovered speech" :: Text)
+                                        ]))
+        withLoopbackApplication (pure app) \port -> do
+            let baseUrl =
+                    "http://127.0.0.1:"
+                        <> Text.pack (show port)
+                        <> "/backend-api"
+                produce send = do
+                    modifyIORef' captures (+ 1)
+                    send "\x01\x00\x02\x00"
+            result <- Timeout.timeout (8 * 1_000_000) $
+                transcribePcmWithOpenAIAt
+                    baseUrl
+                    provider
+                    produce
+                    (\text -> modifyIORef' callbacks (<> [text]))
+            result `shouldBe` Just (Right "recovered speech")
+
+        readIORef captures `shouldReturn` 1
+        readIORef callbacks `shouldReturn` ["recovered speech"]
+        requests <- readIORef recorded
+        requests `shouldSatisfy` \case
+            [first, second] ->
+                first == second
+                    && "RIFF" `BS.isInfixOf` LBS.toStrict first
+            _ -> False
+    it "distinguishes local capture failures from unavailable gateway streams" do
+        sessionStarted <- newEmptyMVar
+        let server pending = do
+                connection <- WS.acceptRequest pending
+                start <- WS.receiveData connection
+                decodeValue start `shouldBe` Aeson.object
+                    [ "type" .= ("session.start" :: Text)
+                    , "config" .= Aeson.object
+                        [ "input_audio_format" .= ("pcm16" :: Text)
+                        , "sample_rate_hz" .= (24_000 :: Int)
+                        , "num_channels" .= (1 :: Int)
+                        , "max_buffer_size_bytes" .= (4 * 1024 * 1024 :: Int)
+                        , "max_utterance_duration_ms" .= (30_000 :: Int)
+                        , "session_ttl_ms" .= (300_000 :: Int)
+                        , "provider_mode" .= ("streaming_sse" :: Text)
+                        , "transcript_delivery_mode" .= ("delta" :: Text)
+                        , "vad" .= Aeson.object
+                            [ "type" .= ("server_vad" :: Text)
+                            , "threshold" .= (0.5 :: Double)
+                            , "prefix_padding_ms" .= (300 :: Int)
+                            , "silence_duration_ms" .= (500 :: Int)
+                            ]
+                        ]
+                    ]
+                sendEvent connection $
+                    Aeson.object ["type" .= ("session.started" :: Text)]
+                putMVar sessionStarted ()
+                let awaitClose :: IO ()
+                    awaitClose =
+                        (WS.receiveData connection :: IO Text) >> awaitClose
+                Timeout.timeout (5 * 1_000_000)
+                    ( awaitClose
+                        `shouldThrow` \case
+                            WS.CloseRequest _ _ -> True
+                            WS.ConnectionClosed -> True
+                            _ -> False
+                    )
+                    `shouldReturn` Just ()
+        withWebSocketServer server \port -> do
+            let websocketUrl =
+                    "ws://127.0.0.1:"
+                        <> Text.pack (show port)
+                        <> "/v1/audio/transcriptions"
+            result <-
+                transcribePcmWithChatGPTStreamAt
+                    websocketUrl
+                    []
+                    ( \_ -> do
+                        Timeout.timeout
+                            (5 * 1_000_000)
+                            (takeMVar sessionStarted) >>= \case
+                                Nothing ->
+                                    throwString
+                                        "test gateway did not start"
+                                Just () ->
+                                    throwString "microphone failed"
+                    )
+                    (const (pure ()))
+            result `shouldSatisfy` \case
+                Left (ChatGPTDictationCaptureFailed message) ->
+                    "microphone failed" `Text.isInfixOf` message
+                _ -> False
+
+        transcribePcmWithChatGPTStreamAt
+            "ftp://gateway.example/v1/audio/transcriptions"
+            []
+            (\_ -> expectationFailure "capture should not start")
+            (const (pure ()))
+            `shouldReturn`
+                Left
+                    (ChatGPTDictationStreamUnavailable
+                        "Dictation WebSocket URL must use WS, WSS, HTTP, or HTTPS")
 withWebSocketServer
     :: WS.ServerApp
     -> (Int -> IO value)

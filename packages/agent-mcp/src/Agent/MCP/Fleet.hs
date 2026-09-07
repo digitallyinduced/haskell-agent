@@ -15,6 +15,7 @@ import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRequirement(..)
     , ApprovalRule(..)
+    , ToolAsyncCapability(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     )
@@ -604,7 +605,7 @@ attachFleetEvents fleet client = do
                     clients <- readTVar fleet.mcpFleetClients
                     case Map.lookup serverName clients of
                         Just current
-                            | current.clientNextId == client.clientNextId -> do
+                            | sameClient client current -> do
                                 revisions <-
                                     readTVar fleet.mcpFleetCatalogRevisions
                                 let nextRevision =
@@ -657,6 +658,9 @@ attachFleetEvents fleet client = do
     when buffered (handleEvent McpToolsListChanged)
   where
     serverName = client.clientConfig.mcpServerName
+    sameClient :: McpClient -> McpClient -> Bool
+    sameClient left right =
+        left.clientRequestRegistry == right.clientRequestRegistry
 
 -- | Run fleet maintenance in the background. Finished workers are pruned on
 -- the next spawn; the rest are cancelled by 'closeMcpFleet'.
@@ -712,7 +716,8 @@ refreshServerTools fleet client expectedRevision =
   where
     serverName = client.clientConfig.mcpServerName
     sameClient :: McpClient -> McpClient -> Bool
-    sameClient left right = left.clientNextId == right.clientNextId
+    sameClient left right =
+        left.clientRequestRegistry == right.clientRequestRegistry
 
 -- * Meta-tools
 
@@ -797,6 +802,7 @@ mcpSearchTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
 
 grokSearchTool :: McpFleet -> AppTool
@@ -918,6 +924,7 @@ grokSearchTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
 
 callCatalogEntryWithReconnect
@@ -1211,6 +1218,7 @@ mcpCallTool fleet = AppTool
             (catalogCallApproval fleet callArgumentsDecoder)
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
 
 grokUseTool :: McpFleet -> AppTool
@@ -1241,6 +1249,7 @@ grokUseTool fleet = AppTool
             (catalogCallApproval fleet grokCallArgumentsDecoder)
     , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
 
 mcpListResourcesTool :: McpFleet -> AppTool
@@ -1280,6 +1289,7 @@ mcpListResourcesTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
   where
     resourceJson :: McpResource -> Value
@@ -1325,6 +1335,7 @@ mcpReadResourceTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
   where
     readArgumentsDecoder = Json.object do

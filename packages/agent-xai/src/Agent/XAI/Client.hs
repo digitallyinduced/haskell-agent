@@ -26,7 +26,11 @@ import Agent.XAI.Error
     , isCapacityBody
     )
 import Agent.XAI.Options
-import Agent.XAI.Request (buildRequest)
+import Agent.XAI.Request
+    ( buildRequest
+    , mapModel
+    , projectXaiOrLegacyCompactionHistory
+    )
 import Agent.XAI.Stream (streamAssemblyConfig)
 import Control.Retry
     ( RetryPolicyM
@@ -34,6 +38,7 @@ import Control.Retry
     , limitRetries
     , retrying
     )
+import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Text.Encoding as Text
 import Network.HTTP.Simple hiding (Response)
 
@@ -115,7 +120,7 @@ createResponseWithMaybeEventsPolicy policy options credential request onEvent
     | otherwise =
         createResponseWithProviderPolicy
             policy
-            (xaiProviderConfig options credential)
+            (xaiProviderConfig options credential request)
             request
             onEvent
 
@@ -126,14 +131,18 @@ defaultTransientPolicy =
 xaiProviderConfig
     :: ClientOptions
     -> Credential
+    -> ResponseCreateParams
     -> ProviderClientConfig
-xaiProviderConfig options credential = ProviderClientConfig
+xaiProviderConfig options credential request = ProviderClientConfig
     { providerExceptionPrefix = "xAI request failed"
     , providerBaseUrl = options.baseUrl
     , providerRequestTimeoutSeconds = options.requestTimeoutSeconds
     , providerBuildRequest = buildRequest options
     , providerConfigureRequest =
-        setRequestHeader "Authorization"
+        configureCompactionHeaders
+            options
+            (projectXaiOrLegacyCompactionHistory request)
+            . setRequestHeader "Authorization"
             ["Bearer " <> Text.encodeUtf8 credential.accessToken]
             . setRequestHeader "X-XAI-Token-Auth"
                 [Text.encodeUtf8 grokTokenAuthValue]
@@ -150,6 +159,57 @@ xaiProviderConfig options credential = ProviderClientConfig
     , providerAssemblyConfig = streamAssemblyConfig
     , providerRetryableFailure = isCapacityRetryable
     }
+
+-- | Mirror the model metadata headers emitted by Grok Build. The fixed
+-- remaining count is sent on every request. The compaction point is omitted
+-- once the stateless transcript contains a checkpoint, matching Grok Build's
+-- @has_compaction_summary@ gate.
+configureCompactionHeaders
+    :: ClientOptions
+    -> ResponseCreateParams
+    -> Request
+    -> Request
+configureCompactionHeaders options request =
+    addCompactionAt . addCompactionsRemaining
+  where
+    wireModel =
+        maybe options.defaultModel (mapModel options) request.model
+
+    addCompactionsRemaining =
+        maybe id
+            (setRequestHeader "x-compactions-remaining" . pure . renderInt)
+            (grokServerCompactionsRemaining wireModel)
+
+    addCompactionAt
+        | requestHasCompactionCheckpoint request = id
+        | otherwise =
+            maybe id
+                (setRequestHeader "x-compaction-at" . pure . renderInt)
+                serverCompactionAtTokens
+
+    serverCompactionAtTokens = do
+        modelDefault <- grokServerCompactionAtTokens wireModel
+        pure $ max 1 $ maybe modelDefault id options.autoCompactTokenLimit
+
+    renderInt = BS8.pack . show
+
+requestHasCompactionCheckpoint :: ResponseCreateParams -> Bool
+requestHasCompactionCheckpoint request = case request.input of
+    Just (ResponseInputItems items) -> any isCompactionCheckpoint items
+    _ -> False
+
+isCompactionCheckpoint :: ResponseItem -> Bool
+isCompactionCheckpoint = \case
+    CompactionItemValue{} -> True
+    ContextCompactionItemValue{} -> True
+    KnownResponseItem ItemCompaction _ -> True
+    KnownResponseItem ItemContextCompaction _ -> True
+    MessageItem message
+        | message.role == RoleAssistant ->
+            responseMessageHasContentItemKind
+                localCompactionSummaryContentItemKind
+                message
+    _ -> False
 
 -- | Retry capacity / overload pressure and short-lived 5xx failures. Generic
 -- connection drops and quota errors are left to the caller. Production uses a

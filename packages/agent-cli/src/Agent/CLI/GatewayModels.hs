@@ -1,7 +1,8 @@
 -- | Load the authoritative model options exposed by a connected organization
 -- gateway for native clients that do not own a long-running CLI session.
 module Agent.CLI.GatewayModels
-    ( loadGatewayModelOptionsAt
+    ( gatewayProviderForStartup
+    , loadGatewayModelOptionsAt
     , loadGatewayModelOptionsWithCredentialAt
     , modelOptionsForGatewayModels
     , modelOptionsForGatewayState
@@ -21,14 +22,28 @@ import Agent.CLI.ModelConfig
     )
 import Agent.CLI.Models
     ( ModelOption
+    , ModelTarget(targetProvider)
     , gatewayModelOptions
     , modelCatalog
     )
 import Agent.Provider
     ( Provider (ClaudeCodeProvider, OpenAIProvider) )
+import Control.Applicative ((<|>))
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import System.OsPath (OsPath)
+
+gatewayProviderForStartup
+    :: Maybe ModelTarget
+    -> Maybe Provider
+    -> Maybe Provider
+    -> Provider
+gatewayProviderForStartup targetHint requestedProvider resumedProvider =
+    fromMaybe OpenAIProvider $
+        (.targetProvider) <$> targetHint
+            <|> requestedProvider
+            <|> resumedProvider
 
 loadGatewayModelOptionsAt
     :: OsPath

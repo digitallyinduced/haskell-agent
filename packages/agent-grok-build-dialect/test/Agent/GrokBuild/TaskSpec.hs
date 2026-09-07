@@ -24,6 +24,7 @@ import Agent.Tools.MultiAgents
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolAsyncCapability(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     , jsonToolParameters
@@ -66,7 +67,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         tool.appToolDescription `shouldSatisfy`
             Text.isInfixOf "subagent_type defaults to general-purpose"
         tool.appToolDescription `shouldSatisfy`
-            Text.isInfixOf "limited to 4 levels"
+            Text.isInfixOf "limited to 1 level"
         tool.appToolDescription `shouldNotSatisfy`
             Text.isInfixOf "must specify a subagent_type"
         expectAlwaysPrompt tool.appToolApproval
@@ -485,6 +486,7 @@ fake name = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
 
 raceArgs :: Text

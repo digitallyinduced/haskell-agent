@@ -2,8 +2,12 @@
 module Agent.CLI.Btw
     ( BtwBackendFactory
     , BtwError(..)
+    , SideCallSnapshot
     , formatBtwError
     , runBtwWithCancel
+    , sideCallSnapshotParams
+    , sideCallSnapshot
+    , sideCallSnapshotTranscript
     , sideQuestionPrompt
     , trimDanglingToolSuffix
     ) where
@@ -19,7 +23,9 @@ import Agent.Loop
     , initialBackendSnapshot
     )
 import Agent.Responses.Types
-    ( CustomToolCall(..)
+    ( ComputerCall(..)
+    , ComputerCallOutput(..)
+    , CustomToolCall(..)
     , CustomToolCallOutput(..)
     , FunctionCall(..)
     , FunctionCallOutput(..)
@@ -29,7 +35,6 @@ import Agent.Responses.Types
     , ToolChoiceMode(..)
     )
 import Control.Concurrent.Async (race)
-import Data.IORef (IORef, readIORef)
 import Data.List (findIndex)
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -39,6 +44,33 @@ import qualified Data.Text as Text
 -- | Construct a provider backend over private request parameters and transcript.
 type BtwBackendFactory =
     ResponseCreateParams -> Backend
+
+-- | Immutable provider parameters and transcript used by a one-shot side call.
+--
+-- Constructing the snapshot also removes request fields that belong to the
+-- parent turn and trims any incomplete live tool-call suffix.
+data SideCallSnapshot = SideCallSnapshot
+    { sideCallParams :: !ResponseCreateParams
+    , sideCallTranscript :: ![ResponseItem]
+    }
+
+sideCallSnapshot
+    :: ResponseCreateParams
+    -> [ResponseItem]
+    -> SideCallSnapshot
+sideCallSnapshot params transcript =
+    SideCallSnapshot
+        { sideCallParams = clearTurnSpecificParams params
+        , sideCallTranscript = trimDanglingToolSuffix transcript
+        }
+
+sideCallSnapshotParams :: SideCallSnapshot -> ResponseCreateParams
+sideCallSnapshotParams SideCallSnapshot{sideCallParams = params} = params
+
+sideCallSnapshotTranscript :: SideCallSnapshot -> [ResponseItem]
+sideCallSnapshotTranscript
+        SideCallSnapshot{sideCallTranscript = transcript} =
+    transcript
 
 data BtwError
     = BtwTransport !ApiError
@@ -71,12 +103,51 @@ sideQuestionPrompt question =
 -- that torn suffix in a fresh request produces invalid tool pairing.
 trimDanglingToolSuffix :: [ResponseItem] -> [ResponseItem]
 trimDanglingToolSuffix items =
-    case findIndex (isUnmatchedCall completed) suffix of
-        Nothing -> items
-        Just index -> prefix <> dropTrailingReasoning (take index suffix)
+    retainCompleteToolPairs $
+        case findIndex (isUnmatchedCall completed) suffix of
+            Nothing -> items
+            Just index -> prefix <> dropTrailingReasoning (take index suffix)
   where
     completed = outputCallIds items
     (prefix, suffix) = splitAfterLastMessage items
+
+data ToolCallKey
+    = FunctionCallKey !Text
+    | CustomToolCallKey !Text
+    | ComputerCallKey !Text
+    deriving (Eq, Ord)
+
+-- A fresh request cannot rely on provider-side continuation state. Keep only
+-- tool calls whose matching output occurs later in the inherited transcript,
+-- and discard orphan outputs as well as old unmatched calls.
+retainCompleteToolPairs :: [ResponseItem] -> [ResponseItem]
+retainCompleteToolPairs items =
+    filter (belongsTo complete) items
+  where
+    complete = snd (foldl' collect (Set.empty, Set.empty) items)
+
+    collect (seen, paired) item = case itemKey item of
+        Just (True, key) -> (Set.insert key seen, paired)
+        Just (False, key)
+            | Set.member key seen -> (seen, Set.insert key paired)
+        _ -> (seen, paired)
+
+    belongsTo paired item = case itemKey item of
+        Just (_, key) -> Set.member key paired
+        Nothing -> True
+
+    itemKey = \case
+        FunctionCallItem call -> Just (True, FunctionCallKey call.callId)
+        FunctionCallOutputItem output ->
+            Just (False, FunctionCallKey output.callId)
+        CustomToolCallItem call -> Just (True, CustomToolCallKey call.callId)
+        CustomToolCallOutputItem output ->
+            Just (False, CustomToolCallKey output.callId)
+        ComputerCallItem call ->
+            Just (True, ComputerCallKey call.computerCallId)
+        ComputerCallOutputItem output ->
+            Just (False, ComputerCallKey output.computerOutputCallId)
+        _ -> Nothing
 
 splitAfterLastMessage :: [ResponseItem] -> ([ResponseItem], [ResponseItem])
 splitAfterLastMessage items =
@@ -96,12 +167,14 @@ outputCallIds :: [ResponseItem] -> Set Text
 outputCallIds = Set.fromList . foldMap \case
     FunctionCallOutputItem output -> [output.callId]
     CustomToolCallOutputItem output -> [output.callId]
+    ComputerCallOutputItem output -> [output.computerOutputCallId]
     _ -> []
 
 isUnmatchedCall :: Set Text -> ResponseItem -> Bool
 isUnmatchedCall completed = \case
     FunctionCallItem call -> Set.notMember call.callId completed
     CustomToolCallItem call -> Set.notMember call.callId completed
+    ComputerCallItem call -> Set.notMember call.computerCallId completed
     _ -> False
 
 dropTrailingReasoning :: [ResponseItem] -> [ResponseItem]
@@ -118,13 +191,17 @@ runBtwWithCancel
         -> IO (Either BtwError Text)
         -> IO (Either BtwError Text))
     -> BtwBackendFactory
-    -> IORef ResponseCreateParams
-    -> IORef [ResponseItem]
+    -> SideCallSnapshot
     -> Text
     -> IO (Either BtwError Text)
-runBtwWithCancel withCancelScope makeBackend paramsRef transcriptRef question = do
-    params <- clearTurnSpecificParams <$> readIORef paramsRef
-    transcript <- trimDanglingToolSuffix <$> readIORef transcriptRef
+runBtwWithCancel
+        withCancelScope
+        makeBackend
+        SideCallSnapshot
+            { sideCallParams = params
+            , sideCallTranscript = transcript
+            }
+        question = do
     cancel <- newCancelFlag
     let Backend submit = makeBackend params
         request =

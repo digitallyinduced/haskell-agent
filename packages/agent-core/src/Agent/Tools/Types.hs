@@ -1,5 +1,10 @@
 module Agent.Tools.Types
     ( AppTool(..)
+    , ToolAsyncCapability(..)
+    , AppToolGroup(..)
+    , appToolsFromGroups
+    , executionToolsFromGroups
+    , hostToolsFromGroups
     , BackgroundTaskHooks(..)
     , BackgroundTaskNotice(..)
     , ToolSchema(..)
@@ -10,6 +15,7 @@ module Agent.Tools.Types
     , ToolEnv(..)
     , addToolAllowedRoot
     , defaultToolEnv
+    , setToolHumanInputWaitHooks
     , setToolRootAccessRequest
     , setToolSkillRoots
     , setToolSessionTmp
@@ -21,7 +27,10 @@ module Agent.Tools.Types
     , freeformApplyPatchAppTool
     , freeformApplyPatchAppToolWithExecution
     , freeformGrammarAppToolWithExecution
+    , withToolHumanInputWait
     , withToolResourceClaims
+    , withAsyncToolCalls
+    , appToolSupportsAsync
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
@@ -36,6 +45,8 @@ module Agent.Tools.Types
     , toolAllowsWithoutPrompt
     , toolRequiresExplicitApproval
     , toolCallRequiresExplicitApproval
+    , toolAutoApproves
+    , toolSupportsAsync
     ) where
 
 import Agent.Cancel (CancelFlag, newCancelFlag)
@@ -58,10 +69,16 @@ import Agent.Tools.Scheduling
     , ToolResourceClaim(..)
     , ToolSchedulingPlan(..)
     )
-import Control.Exception.Safe (tryAny)
+import Control.Exception.Safe (bracket_, tryAny)
 import Control.Monad (foldM)
 import Data.Aeson (Value)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, writeIORef)
+import Data.IORef
+    ( IORef
+    , atomicModifyIORef'
+    , newIORef
+    , readIORef
+    , writeIORef
+    )
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -85,6 +102,16 @@ data ToolSchema
     -- caller-defined JSON functions prevents an unrelated MCP tool from
     -- acquiring the desktop-control handler or its output encoding.
     | HostedComputerSchema
+    -- | A host-supplied schema for the privileged local computer function.
+    -- Native embeddings use this to expose semantic accessibility operations
+    -- without allowing an ordinary raw-JSON tool to acquire computer calls.
+    | HostedComputerFunctionSchema !Value
+    deriving (Eq, Show)
+
+-- | Whether a tool may be selected for provider-requested asynchronous calls.
+data ToolAsyncCapability
+    = BlockingOnly
+    | AsyncCapable
     deriving (Eq, Show)
 
 -- | Approval needed for one concrete tool invocation.
@@ -110,6 +137,9 @@ data ApprovalRule
     -- This is intended for multiplexing tools whose selected operation can
     -- require a fresh confirmation even when broader approval is enabled.
     | ClassifyApproval !(ToolCall -> IO ApprovalRequirement)
+    -- | Host-scoped auto-approval, retaining the original classification for
+    -- plan mode and explicit deny-mutating policies. Never set from tool input.
+    | AutoApprove !ApprovalRule
 
 -- | Whether a tool handler may overlap other handlers emitted in the same
 -- model turn. Approval callbacks are always evaluated serially in call order.
@@ -132,7 +162,31 @@ data AppTool = AppTool
     , appToolApproval :: !ApprovalRule
     , appToolExecution :: !ToolExecutionPolicy
     , appToolResourceClaims :: !(Maybe ToolResourceResolver)
+    , appToolAsyncCapability :: !ToolAsyncCapability
     }
+
+-- | A construction-time partition between ambient execution handlers and
+-- explicit host services. The generic tool registry only receives the
+-- flattened tools; embeddings may replace an entire execution group before
+-- constructing that registry.
+data AppToolGroup
+    = ExecutionToolGroup ![AppTool]
+    | HostToolGroup ![AppTool]
+
+appToolsFromGroups :: [AppToolGroup] -> [AppTool]
+appToolsFromGroups = concatMap \case
+    ExecutionToolGroup tools -> tools
+    HostToolGroup tools -> tools
+
+executionToolsFromGroups :: [AppToolGroup] -> [AppTool]
+executionToolsFromGroups = concatMap \case
+    ExecutionToolGroup tools -> tools
+    HostToolGroup _ -> []
+
+hostToolsFromGroups :: [AppToolGroup] -> [AppTool]
+hostToolsFromGroups = concatMap \case
+    ExecutionToolGroup _ -> []
+    HostToolGroup tools -> tools
 
 -- | Registration order is retained for stable provider schemas while lookup is
 -- canonical and validated once at construction.
@@ -167,6 +221,10 @@ data ToolEnv = ToolEnv
       -- | Optional session-local callback used when a path falls outside
       -- the configured roots. An approved path is added to
       -- 'toolAllowedRoots' by the filesystem resolver.
+    , toolHumanInputWaitHooks :: !(IORef (IO (), IO ()))
+      -- | Session-local callbacks that bracket tool-driven waits for human
+      -- input. Stored behind an IORef because the CLI title controller is
+      -- installed after the tool runtime is constructed.
     , toolSkillRoots :: !(IORef [OsPath])
       -- | Directories belonging to the currently discovered skill catalog.
       -- Kept separate so catalog refreshes can replace them without
@@ -189,6 +247,7 @@ defaultToolEnv cwd = do
     cancel <- newCancelFlag
     allowedRoots <- newIORef []
     rootAccessRequest <- newIORef Nothing
+    humanInputWaitHooks <- newIORef (pure (), pure ())
     skillRoots <- newIORef []
     sessionTmp <- newIORef Nothing
     backgroundTaskHooks <- newIORef noBackgroundTaskHooks
@@ -196,6 +255,7 @@ defaultToolEnv cwd = do
         { toolCwd = dropTrailingPathSeparator cwd
         , toolAllowedRoots = allowedRoots
         , toolRootAccessRequest = rootAccessRequest
+        , toolHumanInputWaitHooks = humanInputWaitHooks
         , toolSkillRoots = skillRoots
         , toolSessionTmp = sessionTmp
         , toolOutputInlineCap = 50 * 1024
@@ -211,6 +271,19 @@ defaultToolEnv cwd = do
 -- approval and return whether the requested root may be added.
 setToolRootAccessRequest :: ToolEnv -> Maybe (OsPath -> IO Bool) -> IO ()
 setToolRootAccessRequest env = writeIORef env.toolRootAccessRequest
+
+-- | Configure callbacks which bracket tool-driven waits for human input.
+-- The default callbacks are no-ops for non-interactive hosts.
+setToolHumanInputWaitHooks :: ToolEnv -> IO () -> IO () -> IO ()
+setToolHumanInputWaitHooks env beginWait endWait =
+    writeIORef env.toolHumanInputWaitHooks (beginWait, endWait)
+
+-- | Run a tool-driven human interaction within the current session hooks.
+-- Cleanup runs even when the interaction throws or is interrupted.
+withToolHumanInputWait :: ToolEnv -> IO a -> IO a
+withToolHumanInputWait env action = do
+    (beginWait, endWait) <- readIORef env.toolHumanInputWaitHooks
+    bracket_ beginWait endWait action
 
 -- | Add a canonical directory to the roots available for this session.
 -- Duplicate roots are ignored so repeated approvals remain idempotent.
@@ -274,6 +347,7 @@ jsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
 
 -- | Construct a JSON tool from an already-built JSON Schema value. Dynamic
@@ -306,6 +380,7 @@ rawJsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
 
 withToolResourceClaims
@@ -314,6 +389,15 @@ withToolResourceClaims
     -> AppTool
 withToolResourceClaims resolver tool =
     tool { appToolResourceClaims = Just resolver }
+
+-- | Explicitly opt a tool into provider-requested asynchronous execution.
+withAsyncToolCalls :: AppTool -> AppTool
+withAsyncToolCalls tool =
+    tool { appToolAsyncCapability = AsyncCapable }
+
+appToolSupportsAsync :: AppTool -> Bool
+appToolSupportsAsync tool =
+    tool.appToolAsyncCapability == AsyncCapable
 
 -- | Construct a freeform tool with the conservative turn-sequential default.
 freeformApplyPatchAppTool
@@ -342,6 +426,7 @@ freeformApplyPatchAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
 
 -- | Construct a freeform tool that advertises an explicit grammar.
@@ -363,6 +448,7 @@ freeformGrammarAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
 
 mkToolRegistry :: [AppTool] -> Either Text ToolRegistry
@@ -395,6 +481,13 @@ toolRegistryTools = (.registryTools)
 lookupRegisteredTool :: Text -> ToolRegistry -> Maybe AppTool
 lookupRegisteredTool name registry =
     Map.lookup (canonicalToolName name) registry.registryByName
+
+-- | Whether a registered tool accepts an asynchronous call request.
+-- Unknown tools remain conservative and report no async support.
+toolSupportsAsync :: ToolRegistry -> ToolCall -> Bool
+toolSupportsAsync registry call =
+    maybe False appToolSupportsAsync
+        (lookupRegisteredTool call.name registry)
 
 -- | Unknown tools are conservative barriers. Their dispatch will still
 -- produce the normal unknown-tool result, but never overlap known work.
@@ -459,6 +552,9 @@ toolAcceptsCall tool call =
         (HostedComputerSchema, ComputerCallKind) -> True
         (HostedComputerSchema, ComputerFunctionCallKind) -> True
         (HostedComputerSchema, _) -> False
+        (HostedComputerFunctionSchema _, ComputerCallKind) -> True
+        (HostedComputerFunctionSchema _, ComputerFunctionCallKind) -> True
+        (HostedComputerFunctionSchema _, _) -> False
         (_, ComputerCallKind) -> False
         (_, ComputerFunctionCallKind) -> False
         _ -> True
@@ -470,6 +566,7 @@ jsonToolParameters tool = case tool.appToolSchema of
     FreeformApplyPatchSchema -> Nothing
     FreeformGrammarSchema _ _ -> Nothing
     HostedComputerSchema -> Nothing
+    HostedComputerFunctionSchema _ -> Nothing
 
 -- | Compatibility helper for direct handler consumers. New dispatch paths
 -- should retain and use 'ToolRegistry' instead.
@@ -482,28 +579,39 @@ toolAllowsWithoutPrompt tool call =
 
 -- | Resolve the approval requirement for one concrete invocation.
 toolApprovalRequirement :: AppTool -> ToolCall -> IO ApprovalRequirement
-toolApprovalRequirement tool call = case tool.appToolApproval of
-    AlwaysReadOnly -> pure ApprovalNotRequired
-    AlwaysAllowed -> pure ApprovalNotRequired
-    AlwaysPrompt -> pure ApprovalPromptRequired
-    AlwaysConfirm -> pure FreshApprovalRequired
-    ClassifyReadOnly classify -> do
-        readOnly <- classify call
-        pure $ if readOnly
-            then ApprovalNotRequired
-            else ApprovalPromptRequired
-    ClassifyApproval classify -> classify call
+toolApprovalRequirement tool call = classifyRule tool.appToolApproval
+  where
+    classifyRule = \case
+        AlwaysReadOnly -> pure ApprovalNotRequired
+        AlwaysAllowed -> pure ApprovalNotRequired
+        AlwaysPrompt -> pure ApprovalPromptRequired
+        AlwaysConfirm -> pure FreshApprovalRequired
+        ClassifyReadOnly classify -> do
+            readOnly <- classify call
+            pure $ if readOnly
+                then ApprovalNotRequired
+                else ApprovalPromptRequired
+        ClassifyApproval classify -> classify call
+        AutoApprove original -> classifyRule original
 
 -- | Whether every invocation must be confirmed by the parent user. This is
 -- deliberately separate from read-only classification so provider-native
 -- metadata cannot accidentally downgrade a sensitive mutation.
 toolRequiresExplicitApproval :: AppTool -> Bool
-toolRequiresExplicitApproval tool = case tool.appToolApproval of
-    AlwaysConfirm -> True
-    _ -> False
+toolRequiresExplicitApproval tool = requiresExplicit tool.appToolApproval
+  where
+    requiresExplicit = \case
+        AlwaysConfirm -> True
+        AutoApprove original -> requiresExplicit original
+        _ -> False
 
 -- | Whether this invocation requires a fresh parent-user confirmation.
 -- Unlike 'toolRequiresExplicitApproval', this evaluates call-sensitive rules.
 toolCallRequiresExplicitApproval :: AppTool -> ToolCall -> IO Bool
 toolCallRequiresExplicitApproval tool call =
     (== FreshApprovalRequired) <$> toolApprovalRequirement tool call
+
+toolAutoApproves :: AppTool -> Bool
+toolAutoApproves tool = case tool.appToolApproval of
+    AutoApprove _ -> True
+    _ -> False

@@ -18,6 +18,7 @@ import Agent.TUI.Model
 import Agent.TUI.TextWidth (graphemeClusters)
 import Agent.ToolDispatch
     ( ToolCallResult(..)
+    , ToolCallMode(..)
     , ToolCallKind(..)
     , functionToolCall
     )
@@ -185,6 +186,7 @@ generatedLoopEvent = frequency
     , (3, WarningRaised <$> generatedText)
     , (2, ResponseRestarted <$> generatedText)
     , (2, pure TurnStarted)
+    , (1, pure ModelContextReset)
     ]
 
 generatedNotice :: Gen (Maybe UiNotice)
@@ -572,7 +574,10 @@ toolEvent command = case command of
         UiLoop (ToolOutputUpdated callId output)
     FinishTool callId output ->
         UiLoop (ToolFinished ToolCallResult
-            { callId
+            { toolResultMode = BlockingToolCall
+            , toolResultImages = []
+            , toolResultOutcome = Nothing
+            , callId
             , output
             , callKind = FunctionCallKind
             })

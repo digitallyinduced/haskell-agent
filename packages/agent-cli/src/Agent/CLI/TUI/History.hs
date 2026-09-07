@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
@@ -40,6 +41,7 @@ module Agent.CLI.TUI.History
     , unarchivedLiveStart
     ) where
 
+import Agent.CLI.TUI.Transcript (coalesceInspectionBlocks, transcriptChunks)
 import Agent.TUI.Model (BlockId, UiBlock(..))
 import Data.Foldable (toList)
 import Data.Int (Int64)
@@ -94,6 +96,10 @@ data HistoryWindow = HistoryWindow
     , historyWindowTurns :: !(Seq HistoryTurn)
     , historyWindowTurnsByCursor :: !(Map HistoryCursor HistoryTurn)
     , historyWindowBlocksById :: !(Map BlockId UiBlock)
+    -- | Block-only display projection, shared by redraws until turns change.
+    -- Coalesce within each turn (never across turn boundaries), then chunk
+    -- across the window so short turns benefit from image caching too.
+    , historyWindowTranscriptChunks :: ![Seq UiBlock]
     , historyWindowHasOlder :: !Bool
     , historyWindowHasNewer :: !Bool
     , historyWindowMaxTurns :: !Int
@@ -124,6 +130,7 @@ emptyHistoryWindow generation maxTurns maxBlocks maxBytes =
         , historyWindowTurns = Seq.empty
         , historyWindowTurnsByCursor = Map.empty
         , historyWindowBlocksById = Map.empty
+        , historyWindowTranscriptChunks = []
         , historyWindowHasOlder = False
         , historyWindowHasNewer = False
         , historyWindowMaxTurns = max 1 maxTurns
@@ -140,6 +147,9 @@ setHistoryWindowTurns :: Seq HistoryTurn -> HistoryWindow -> HistoryWindow
 setHistoryWindowTurns turns window =
     window
         { historyWindowTurns = turns
+        , historyWindowTranscriptChunks =
+            transcriptChunks $
+                foldMap (coalesceInspectionBlocks . (.historyTurnBlocks)) turns
         , historyWindowTurnsByCursor =
             Map.fromList
                 [ (turn.historyTurnCursor, turn)
@@ -158,11 +168,13 @@ historyWindowLoadedTurns = Seq.length . (.historyWindowTurns)
 
 historyWindowLoadedBlocks :: HistoryWindow -> Int
 historyWindowLoadedBlocks =
-    sum . fmap (Seq.length . (.historyTurnBlocks)) . (.historyWindowTurns)
+    foldl' (\total turn -> total + Seq.length turn.historyTurnBlocks) 0
+        . (.historyWindowTurns)
 
 historyWindowLoadedBytes :: HistoryWindow -> Int
 historyWindowLoadedBytes =
-    sum . fmap historyTurnBytes . (.historyWindowTurns)
+    foldl' (\total turn -> total + historyTurnBytes turn) 0
+        . (.historyWindowTurns)
 
 historyWindowHasBlocks :: HistoryWindow -> Bool
 historyWindowHasBlocks = not . Seq.null . (.historyWindowTurns)
@@ -353,7 +365,9 @@ applyHistoryPage page window
 
 mergePage :: HistoryPage -> HistoryWindow -> HistoryWindow
 mergePage page window =
-    trimWindowPrefer
+    setHistoryWindowTurns trimmed.historyWindowTurns trimmed
+  where
+    trimmed = trimWindowPrefer
         (case direction of
             HistoryOlder -> HistoryNewer
             HistoryNewer -> HistoryOlder)
@@ -369,7 +383,6 @@ mergePage page window =
             , historyWindowHasNewer =
                 page.historyPageHasNewer
             }
-  where
     direction = page.historyPageDirection
     incoming = uniqueTurns page.historyPageTurns
     existing = window.historyWindowTurns
@@ -378,7 +391,7 @@ mergePage page window =
             HistoryOlder -> incoming <> existing
             HistoryNewer -> existing <> incoming
     window' =
-        setHistoryWindowTurns (uniqueTurns (sortTurns merged)) window
+        window { historyWindowTurns = uniqueTurns (sortTurns merged) }
 
 sortTurns :: Seq HistoryTurn -> Seq HistoryTurn
 sortTurns = Seq.fromList . sortOn (.historyTurnCursor) . toList
@@ -404,12 +417,41 @@ trimWindowPrefer
     -> HistoryWindow
     -> HistoryWindow
 trimWindowPrefer preferred window
+    -- Keep the common no-eviction path out of the staged accounting worker.
     | withinBudget window = window
-    | otherwise =
-        case preferredEvictionDirection preferred window of
-            Nothing -> window
-            Just direction ->
-                trimWindowPrefer preferred (evictOne direction window)
+    | turnCount > window.historyWindowMaxTurns = turnTrimmed
+    | blockCount > window.historyWindowMaxBlocks = blockTrimmed
+    | otherwise = snd $
+        trimBudget historyTurnBytes window.historyWindowMaxBytes
+            (historyWindowLoadedBytes blockTrimmed) blockTrimmed
+  where
+    -- Evictions follow the same edge preference for every budget, so satisfy
+    -- the cheap limits first. In particular, do not measure text belonging
+    -- to turns that the turn/block limits will discard anyway.
+    (turnCount, turnTrimmed) = trimBudget (const 1) window.historyWindowMaxTurns
+        (historyWindowLoadedTurns window) window
+    (blockCount, blockTrimmed) = trimBudget (Seq.length . (.historyTurnBlocks))
+        window.historyWindowMaxBlocks
+        (historyWindowLoadedBlocks turnTrimmed) turnTrimmed
+
+    -- Accounting is local to this merge: public record updates cannot leave
+    -- a cached total stale. Indexes are rebuilt once, after all evictions.
+    trimBudget measure limit = go
+      where
+        go !total current
+            | total <= limit = (total, current)
+            -- Turns remain the paging unit. Keep one oversized turn rather
+            -- than making a long completed response disappear altogether.
+            | historyWindowLoadedTurns current <= 1 = (total, current)
+            | otherwise =
+                case preferredEvictionDirection preferred current of
+                    Nothing -> (total, current)
+                    Just direction ->
+                        case edgeTurn direction current of
+                            Nothing -> (total, current)
+                            Just removed ->
+                                go (total - measure removed)
+                                    (evictOne direction current)
 
 withinBudget :: HistoryWindow -> Bool
 withinBudget window =
@@ -470,11 +512,15 @@ evictOne :: HistoryDirection -> HistoryWindow -> HistoryWindow
 evictOne direction window =
     case direction of
         HistoryOlder ->
-            setHistoryWindowTurns dropFirst $
-                window { historyWindowHasOlder = True }
+            window
+                { historyWindowTurns = dropFirst
+                , historyWindowHasOlder = True
+                }
         HistoryNewer ->
-            setHistoryWindowTurns dropLast $
-                window { historyWindowHasNewer = True }
+            window
+                { historyWindowTurns = dropLast
+                , historyWindowHasNewer = True
+                }
   where
     turns = window.historyWindowTurns
     dropFirst =

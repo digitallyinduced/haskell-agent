@@ -15,6 +15,10 @@ module Agent.Store.Postgres.Session.Types
     , ConversationSearchResult(..)
     , NativeConversationSearchResult(..)
     , SessionTurnPage(..)
+    , SessionListCursor(..)
+    , SessionListEntry(..)
+    , SessionListPage(..)
+    , SessionArchiveFilter(..)
     , SessionHistorySnapshot(..)
     , SessionResumeStats(..)
     , SessionTaskPlanStatus(..)
@@ -63,6 +67,13 @@ data SessionLegacyTarget = SessionLegacyTarget
     , sessionLegacyEffectiveModel :: !Text
     , sessionLegacyDialect :: !Text
     }
+    deriving (Eq, Show)
+
+-- | Archive visibility applied by PostgreSQL before ordering and pagination.
+data SessionArchiveFilter
+    = SessionActive
+    | SessionArchived
+    | SessionAll
     deriving (Eq, Show)
 
 data NativeConversationSearchResult = NativeConversationSearchResult
@@ -126,6 +137,28 @@ data SessionTurnPage = SessionTurnPage
     , sessionPageTotal :: !Int64
     , sessionPageHasOlder :: !Bool
     , sessionPageHasNewer :: !Bool
+    }
+    deriving (Eq, Show)
+
+-- | Stable keyset cursor for the session list's
+-- @(updated_at DESC, session_key ASC)@ ordering.
+data SessionListCursor = SessionListCursor
+    { sessionListCursorUpdatedAt :: !UTCTime
+    , sessionListCursorKey :: !Text
+    }
+    deriving (Eq, Show)
+
+data SessionListEntry = SessionListEntry
+    { sessionListEntryMetadata :: !SessionMetadata
+    , sessionListEntryArchived :: !Bool
+    }
+    deriving (Eq, Show)
+
+-- | One page of session metadata. A next cursor is present only when another
+-- row existed inside the same gateway boundary at query time.
+data SessionListPage = SessionListPage
+    { sessionListPageSessions :: ![SessionListEntry]
+    , sessionListPageNextCursor :: !(Maybe SessionListCursor)
     }
     deriving (Eq, Show)
 

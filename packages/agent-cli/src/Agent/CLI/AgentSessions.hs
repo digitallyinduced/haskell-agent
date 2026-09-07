@@ -10,6 +10,8 @@ module Agent.CLI.AgentSessions
     , closeSessionThreadManager
     , closeSessionProcessManager
     , launchSessionThread
+    , launchSessionThreadNotifying
+    , formatSessionCompletionNotice
     , launchManagedTurn
     , launchManagedTurnBounded
     , launchSessionTurn
@@ -18,6 +20,7 @@ module Agent.CLI.AgentSessions
     , newSessionProcessManagerWithLifetime
     , signalManagedSessionReady
     , sessionThreadStatus
+    , prepareSessionThreadWait
     , sessionProcessStatus
     ) where
 
@@ -34,7 +37,16 @@ import Agent.CLI.AgentSessions.Process
     , signalManagedSessionReady
     )
 import Agent.CLI.AgentSessions.Render (renderAgentSession)
-import Agent.CLI.Error (formatException)
+import Agent.CLI.AgentSessions.WaitGraph (withSessionWaitEdge)
+import Agent.CLI.Session.Threads
+    ( SessionThreadManager
+    , closeSessionThreadManager
+    , launchSessionThread
+    , launchSessionThreadNotifying
+    , newSessionThreadManager
+    , prepareSessionThreadWait
+    , sessionThreadStatus
+    )
 import Agent.CLI.Session
     ( SessionCreate(..)
     , SessionHandle(..)
@@ -48,10 +60,6 @@ import Agent.CLI.Session
     , sessionTitleFromPrompt
     )
 import Agent.Store.Postgres.Connection (StorePool)
-import Agent.CLI.SessionLock
-    ( sessionLockIsActive
-    , sessionLockPath
-    )
 import Agent.CLI.Models
     ( ModelOption(..)
     , ModelTarget(..)
@@ -73,30 +81,8 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , jsonTool
     )
-import Control.Concurrent.Async
-    ( Async
-    , asyncWithUnmask
-    , cancel
-    , poll
-    , waitCatch
-    )
-import Control.Concurrent.MVar
-    ( MVar
-    , modifyMVar
-    , modifyMVar_
-    , newEmptyMVar
-    , newMVar
-    , putMVar
-    , takeMVar
-    )
-import Control.Exception.Safe
-    ( mask
-    , tryAny
-    )
-import Control.Monad (void)
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
+import System.Timeout (timeout)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
@@ -117,174 +103,87 @@ data AgentSessionToolsEnv = AgentSessionToolsEnv
     , toolsCurrentSessionId :: !(IO (Maybe Text))
     , toolsLaunchTurn :: !(SessionHandle -> Text -> IO (Either Text Text))
     , toolsSessionStatus :: !(Text -> IO Text)
+    -- | Capture the current run now, then wait without following later runs.
+    , toolsPrepareSessionWait :: !(Text -> IO (IO Text))
     }
 
-data ManagedSessionThread
-    = ManagedSessionThreadRunning !(Async ())
-    | ManagedSessionThreadCompleted
-    | ManagedSessionThreadFailed !Text
-
-data SessionThreadManagerState = SessionThreadManagerState
-    { threadManagerClosed :: !Bool
-    , managedThreads :: !(Map Text ManagedSessionThread)
-    }
-
-data SessionThreadManager = SessionThreadManager
-    { threadManagerRoot :: !OsPath
-    , threadManagerState :: !(MVar SessionThreadManagerState)
-    }
-
-newSessionThreadManager :: OsPath -> IO SessionThreadManager
-newSessionThreadManager root = do
-    state <- newMVar SessionThreadManagerState
-        { threadManagerClosed = False
-        , managedThreads = Map.empty
-        }
-    pure SessionThreadManager
-        { threadManagerRoot = root
-        , threadManagerState = state
-        }
-
--- | Start one in-process background turn. The task is registered before it is
--- allowed to execute, so shutdown can always cancel and join every live turn.
-launchSessionThread
-    :: SessionThreadManager
-    -> Text
-    -> IO (Either Text ())
-    -> IO (Either Text Text)
-launchSessionThread manager sessionId action =
-    mask \_ -> do
-        launched <- modifyMVar manager.threadManagerState \state ->
-            if state.threadManagerClosed
-                then pure (state, Left "agent session manager is closed")
-                else case Map.lookup sessionId state.managedThreads of
-                    Just (ManagedSessionThreadRunning _) ->
-                        pure
-                            ( state
-                            , Left
-                                ("session " <> sessionId
-                                    <> " is already running")
-                            )
-                    _ -> do
-                        gate <- newEmptyMVar
-                        started <- tryAny $
-                            asyncWithUnmask \unmask -> do
-                                takeMVar gate
-                                result <- tryAny (unmask action)
-                                let terminal = case result of
-                                        Left err ->
-                                            ManagedSessionThreadFailed
-                                                (formatException err)
-                                        Right (Left err) ->
-                                            ManagedSessionThreadFailed err
-                                        Right (Right ()) ->
-                                            ManagedSessionThreadCompleted
-                                modifyMVar_ manager.threadManagerState \current ->
-                                    pure $
-                                        if current.threadManagerClosed
-                                            then current
-                                            else current
-                                                { managedThreads =
-                                                    Map.insert
-                                                        sessionId
-                                                        terminal
-                                                        current.managedThreads
-                                                }
-                        case started of
-                            Left err ->
-                                pure
-                                    ( state
-                                    , Left
-                                        ("failed to start agent session: "
-                                            <> formatException err)
-                                    )
-                            Right worker -> do
-                                let running = state
-                                        { managedThreads =
-                                            Map.insert
-                                                sessionId
-                                                (ManagedSessionThreadRunning worker)
-                                                state.managedThreads
-                                        }
-                                putMVar gate ()
-                                pure
-                                    ( running
-                                    , Right ("started session " <> sessionId)
-                                    )
-        pure launched
-
-sessionThreadStatus :: SessionThreadManager -> Text -> IO Text
-sessionThreadStatus manager sessionId =
-    modifyMVar manager.threadManagerState \state ->
-        case Map.lookup sessionId state.managedThreads of
-            Nothing -> do
-                locked <- lockIsActive
-                pure (state, if locked then "running" else "idle")
-            Just (ManagedSessionThreadRunning worker) ->
-                poll worker >>= \case
-                    Nothing -> pure (state, "running")
-                    Just (Right ()) ->
-                        settle state ManagedSessionThreadCompleted "completed"
-                    Just (Left err) ->
-                        let message = "failed (" <> formatException err <> ")"
-                        in settle state
-                            (ManagedSessionThreadFailed message)
-                            message
-            Just ManagedSessionThreadCompleted ->
-                terminalStatus state "completed"
-            Just (ManagedSessionThreadFailed err) ->
-                terminalStatus state ("failed (" <> err <> ")")
-  where
-    lockIsActive =
-        sessionLockIsActive
-            (sessionLockPath
-                (manager.threadManagerRoot
-                    </> unsafeEncodeUtf (Text.unpack sessionId)))
-    -- Persist the terminal outcome instead of deleting it, so repeated status
-    -- polls stay observable. The background worker itself records the same
-    -- terminal constructor on exit (launchSessionThread); deleting it here
-    -- destroyed that record, making a failed session report "idle" on the
-    -- second poll (and never report its failure at all when a poll landed
-    -- while the session lock was still held). A still-active lock only masks
-    -- the outcome as "running" for this poll; the retained record surfaces the
-    -- real status once the lock clears.
-    settle state record terminal = do
-        locked <- lockIsActive
-        pure
-            ( state
-                { managedThreads =
-                    Map.insert sessionId record state.managedThreads
-                }
-            , if locked then "running" else terminal
-            )
-    terminalStatus state terminal = do
-        locked <- lockIsActive
-        pure (state, if locked then "running" else terminal)
-
-closeSessionThreadManager :: SessionThreadManager -> IO ()
-closeSessionThreadManager manager = do
-    workers <- modifyMVar manager.threadManagerState \state ->
-        let running =
-                [ worker
-                | ManagedSessionThreadRunning worker <-
-                    Map.elems state.managedThreads
-                ]
-        in pure
-            ( state
-                { threadManagerClosed = True
-                , managedThreads = Map.empty
-                }
-            , running
-            )
-    mapM_ cancel workers
-    mapM_ (void . waitCatch) workers
+formatSessionCompletionNotice :: Text -> Text -> Text
+formatSessionCompletionNotice sessionId status =
+    "<agent_session_notification>\n"
+        <> "The agent session turn you started has finished.\n"
+        <> "Session ID: " <> sessionId <> "\n"
+        <> "Status: " <> status <> "\n"
+        <> "Use read_agent_session with this session_id to inspect its response, "
+        <> "or send_agent_session_message to provide further input.\n"
+        <> "</agent_session_notification>"
 
 agentSessionTools :: AgentSessionToolsEnv -> [AppTool]
 agentSessionTools env =
     [ createAgentSessionTool env
     , readAgentSessionTool env
     , sendAgentSessionMessageTool env
+    , waitAgentSessionTool env
     ]
+
+data WaitAgentSessionArgs = WaitAgentSessionArgs
+    { sessionId :: Text
+    , timeoutMs :: Maybe Int
+    }
+
+waitAgentSessionTool :: AgentSessionToolsEnv -> AppTool
+waitAgentSessionTool env = jsonTool
+    "wait_agent_session"
+    "Wait for another persisted session's current turn, not the lifetime of its conversation. Returns status and latest saved output, or timed_out. Already idle sessions return immediately. Locally managed turns report completed, failed, or cancelled; external turns report idle when their activity ends (the exit reason is unknown). Recent output may include a later resume. Use this instead of polling read_agent_session. Cancelling or timing out this wait does not cancel the target."
+    [ PropertySchema "session_id" PropertyString True $ Just
+        "Persisted target session id. Self-waits and circular waits are rejected."
+    , PropertySchema "timeout_ms" PropertyInteger False $ Just
+        "Maximum wait in milliseconds, from 1 to 300000. Defaults to 30000."
+    ]
+    True
+    ParallelSafe
+    (typedTool "wait_agent_session"
+        (Hermes.object $ WaitAgentSessionArgs
+            <$> Hermes.atKey "session_id" Hermes.text
+            <*> optionalKey "timeout_ms" Hermes.int)
+        (runWaitAgentSession env))
+
+runWaitAgentSession :: AgentSessionToolsEnv -> WaitAgentSessionArgs -> IO (Either Text Text)
+runWaitAgentSession env args
+    | milliseconds < 1 || milliseconds > 300000 =
+        pure (Left "timeout_ms must be between 1 and 300000")
+    | otherwise = do
+        current <- env.toolsCurrentSessionId
+        if current == Just args.sessionId
+            then pure (Left "cannot wait for the current agent session")
+            else loadSessionMeta env.toolsPool env.toolsRoot args.sessionId >>= \case
+                Left err -> pure (Left err)
+                Right meta -> case validateToolSessionBoundary env meta of
+                    Left err -> pure (Left err)
+                    Right () -> do
+                        -- Authorization precedes all status, transcript, and
+                        -- coordination access, matching read_agent_session.
+                        result <- timeout (milliseconds * 1000) $
+                            case current of
+                                Nothing -> waitForTurn meta
+                                Just caller -> do
+                                    guarded <- withSessionWaitEdge
+                                        env.toolsRoot caller args.sessionId
+                                        (waitForTurn meta)
+                                    pure (guarded >>= id)
+                        pure $ fromMaybe
+                            (Right ("Session: " <> args.sessionId
+                                <> "\nStatus: timed_out\nThe target was not cancelled."))
+                            result
+  where
+    milliseconds = fromMaybe 30000 args.timeoutMs
+    waitForTurn meta = do
+        wait <- env.toolsPrepareSessionWait args.sessionId
+        status <- wait
+        loadRecentSessionTurns env.toolsPool env.toolsRoot args.sessionId 1 >>= \case
+            Left err -> pure (Left err)
+            Right page -> pure $ Right $
+                renderAgentSession meta status Nothing (map snd page.pageTurns)
+                    <> "\nOutput is the latest saved turn at read time; it may include a later resume."
 
 data CreateAgentSessionArgs = CreateAgentSessionArgs
     { message :: Text
@@ -304,7 +203,7 @@ createAgentSessionArgsDecoder = Hermes.object $
 createAgentSessionTool :: AgentSessionToolsEnv -> AppTool
 createAgentSessionTool env = jsonTool
     "create_agent_session"
-    "Create a persisted top-level agent session and start its first turn in the background. Returns the session id and status as readable text."
+    "Create a persisted top-level agent session and start its first turn in the background. Use only when the user explicitly requests independent/background work or a separate session; do not offload the entire current task here. For bounded subtasks, use subagents and retain responsibility for integration, verification, and the final answer. Returns the session id and status as readable text, not a completed result. The interactive parent session is notified when the background turn finishes; use read_agent_session to inspect its response or send_agent_session_message to continue it."
     [ PropertySchema "message" PropertyString True $ Just
         "Initial task or message for the new agent session."
     , PropertySchema "title" PropertyString False $ Just
@@ -509,7 +408,7 @@ sendAgentSessionMessageArgsDecoder = Hermes.object $
 sendAgentSessionMessageTool :: AgentSessionToolsEnv -> AppTool
 sendAgentSessionMessageTool env = jsonTool
     "send_agent_session_message"
-    "Send a message to a persisted agent session by starting a resumed background turn. Returns the session id and status as readable text; fails if that session is already running."
+    "Send a message to a persisted agent session by starting a resumed background turn. Use for explicitly requested independent/background work or continuation of that separate session, not to transfer responsibility for the current task. Returns the session id and status as readable text, not a completed result; fails if that session is already running. The interactive parent session is notified when this turn finishes."
     [ PropertySchema "session_id" PropertyString True $ Just
         "Persisted target session id."
     , PropertySchema "message" PropertyString True $ Just

@@ -60,6 +60,7 @@ import Data.IORef
     )
 import Data.Containers.ListUtils (nubOrdOn)
 import Data.List (find)
+import qualified Data.List.NonEmpty as NonEmpty
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -151,21 +152,27 @@ preferredOpenAiTokenProvider preferredAccount pool fallback =
 -- | Load the best OpenAI credential for dictation. ChatGPT OAuth is preferred
 -- because the official desktop client transcribes subscription audio through
 -- the ChatGPT backend. API keys remain available for the public Realtime API.
-loadOpenAiDictationAuth :: IO (Maybe LoadedAuth)
+-- Lookup failures are preserved so callers can distinguish a missing account
+-- from a broken configuration.
+loadOpenAiDictationAuth :: IO (Either Text LoadedAuth)
 loadOpenAiDictationAuth =
     runExceptT loadOpenAi >>= \case
         Right loaded
             | tokenProviderBillingMode loaded.loadedTokenProvider
                 == SubscriptionBilled ->
-                pure (Just loaded)
+                pure (Right loaded)
             | otherwise ->
                 loadExternalOpenAiApiKeyDictationAuth >>= \case
                     Just external ->
-                        pure (Just external)
+                        pure (Right external)
                     Nothing ->
-                        pure (Just loaded)
-        Left _ ->
-            loadOpenAiApiKeyDictationAuth
+                        pure (Right loaded)
+        Left err ->
+            loadOpenAiApiKeyDictationAuth >>= \case
+                Just loaded ->
+                    pure (Right loaded)
+                Nothing ->
+                    pure (Left err)
 
 loadOpenAiApiKeyDictationAuth :: IO (Maybe LoadedAuth)
 loadOpenAiApiKeyDictationAuth =
@@ -320,8 +327,9 @@ loadOpenAi = do
             filter ((== billing) . (.openAiBilling)) accounts
     refreshLock <- lift (newMVar ())
     accountSources <- lift (newIORef activeAccounts)
-    let initial = map (.openAiState) activeAccounts
-        refresh =
+    initial <- maybe (throwE noAuthHint) pure $
+        NonEmpty.nonEmpty (map (.openAiState) activeAccounts)
+    let refresh =
             refreshOpenAiAccount refreshLock clientId accountSources
         discover =
             discoverOpenAiAccounts billing accountSources

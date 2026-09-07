@@ -4,15 +4,20 @@ module Agent.CLI.Compaction.Continuation
 
 import Agent.CLI.Compaction.Projection
     ( automaticCompactionHeadroom
+    , occupancyForSubmission
     , projectRequestTokens
     , toolContinuationTooLargeError
     )
 import Agent.CLI.Compaction.Types
 import Agent.Loop
     ( Backend(..)
+    , BackendCallbacks(..)
+    , BackendMiddleware
     , BackendSnapshot(..)
+    , LoopEvent(..)
     , TurnInput(..)
     , advanceBackendSnapshot
+    , backendWithCallbacks
     )
 import Agent.OpenAI.Compaction
     ( estimateItemsTokens
@@ -23,7 +28,6 @@ import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
 import Agent.ToolDispatch
     ( ToolCallResult(..)
-    , toolCallResultImages
     )
 import Control.Applicative ((<|>))
 import Data.IORef (IORef, readIORef)
@@ -40,16 +44,18 @@ boundCompletedToolContinuations
     :: (ResponseCreateParams -> Int)
     -> IO ResponseCreateParams
     -> IORef (Maybe OccupancySnapshot)
-    -> Backend
-    -> Backend
-boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Backend submit) =
-    Backend \snapshot previous inputs onEvent ->
+    -> BackendMiddleware
+boundCompletedToolContinuations contextWindowFor getParams contextTokensRef backend =
+    backendWithCallbacks \snapshot previous inputs callbacks ->
         if not (any isCompletedTool inputs)
-            then submit snapshot previous inputs onEvent
+            then backend.submitTurnWithCallbacks
+                snapshot previous inputs callbacks
             else do
                 params <- getParams
-                occupancy <- readIORef contextTokensRef
-                let history = snapshot.backendItems
+                cachedOccupancy <- readIORef contextTokensRef
+                let occupancy =
+                        occupancyForSubmission snapshot previous cachedOccupancy
+                    history = snapshot.backendItems
                     contextWindow = contextWindowFor params
                 let liveChain =
                         isJust snapshot.backendContinuation || isJust previous
@@ -57,7 +63,7 @@ boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Bac
                         | liveChain =
                             case occupancy of
                                 Just snapshot
-                                    | snapshot.occupancyLength == length history
+                                    | occupancyMatchesHistory history snapshot
                                     , snapshot.occupancyTokens > 0
                                     , snapshot.occupancyKind == ReportedOccupancy ->
                                         snapshot.occupancyTokens
@@ -89,22 +95,26 @@ boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Bac
                                 requestTokens
                                 inputs
                 if requestTokens inputs <= contextWindow
-                    then submit snapshot previous inputs onEvent
+                    then backend.submitTurnWithCallbacks
+                        snapshot previous inputs callbacks
                     else if requestTokens truncated <= contextWindow
-                        then submit snapshot previous truncated onEvent
+                        then do
+                            callbacks.onLoopEvent ModelContextReset
+                            backend.submitTurnWithCallbacks
+                                snapshot previous truncated callbacks
                         else submitTrimmedHistory
                             params
                             contextWindow
                             snapshot
                             history
                             truncated
-                            onEvent
+                            callbacks
   where
     isCompletedTool = \case
         CompletedTool{} -> True
         _ -> False
 
-    submitTrimmedHistory params contextWindow snapshot history inputs onEvent = do
+    submitTrimmedHistory params contextWindow snapshot history inputs callbacks = do
         let callIds = pendingToolCallIds inputs
             (danglingCalls, prefix) =
                 partition (isPendingToolCall callIds) history
@@ -121,9 +131,11 @@ boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Bac
                     params
                     (fittedHistory <> turnInputsToItems inputs)
         if fittedTokens <= contextWindow
-            then submit
-                (advanceBackendSnapshot snapshot fittedHistory Nothing)
-                Nothing inputs onEvent
+            then do
+                callbacks.onLoopEvent ModelContextReset
+                backend.submitTurnWithCallbacks
+                    (advanceBackendSnapshot snapshot fittedHistory Nothing)
+                    Nothing inputs callbacks
             else pure (Left toolContinuationTooLargeError)
 
 pendingToolCallIds :: [TurnInput] -> [Text]
@@ -172,21 +184,9 @@ capCompletedToolOutputs maximumCharacters =
         CompletedTool result -> CompletedTool (capToolResult result)
         input -> input
   where
+    capToolResult :: ToolCallResult -> ToolCallResult
     capToolResult result =
-        let cappedOutput =
-                capToolOutput maximumCharacters result.output
-        in case toolCallResultImages result of
-            [] -> ToolCallResult
-                { callId = result.callId
-                , output = cappedOutput
-                , callKind = result.callKind
-                }
-            images -> ToolCallResultWithImages
-                { callId = result.callId
-                , output = cappedOutput
-                , callKind = result.callKind
-                , toolResultImages = images
-                }
+        result { output = capToolOutput maximumCharacters result.output }
 
 capToolOutput :: Int -> Text -> Text
 capToolOutput maximumCharacters text

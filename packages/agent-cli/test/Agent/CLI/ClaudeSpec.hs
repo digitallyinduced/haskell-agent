@@ -15,6 +15,7 @@ import Agent.Tools.PlanMode
     , readPlanMarkdown
     )
 import Control.Exception.Safe (bracket)
+import Control.Monad (forM_)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
@@ -63,6 +64,31 @@ spec =
                     }
             readIORef observed `shouldReturn` [("Read", Just True)]
             isPlanModeActive plan `shouldReturn` False
+
+        it "denies provider-native tools when the runtime omits them" do
+            observed <- newIORef (0 :: Int)
+            (slot, _) <- testRuntimeWithNativeTools False \_ _ -> do
+                modifyIORef' observed (+ 1)
+                pure (Right True)
+            forM_ ["Read", "Bash", "WebFetch"] \toolName ->
+                handleClaudePermissionRequest slot
+                    (permissionRequest toolName (Aeson.object []))
+                    `shouldReturn`
+                        ClaudeCodePermissionDeny
+                            { message =
+                                "Provider-native tools are unavailable in this runtime."
+                            , interrupt = False
+                            }
+            handleClaudePermissionRequest slot
+                (permissionRequest
+                    "mcp__haskell-agent__database_query"
+                    (Aeson.object []))
+                `shouldReturn`
+                    ClaudeCodePermissionAllow
+                        { updatedInput = Nothing
+                        , updatedPermissions = []
+                        }
+            readIORef observed `shouldReturn` 0
 
         it "routes registered tools through the host approval pipeline" do
             observed <- newIORef []
@@ -215,7 +241,19 @@ testRuntime
         -> IO (Either Text Bool))
     -> IO (ClaudeSessionRuntimeSlot, PlanModeEnv)
 testRuntime approve = do
-    testRuntimeAt (unsafeEncodeUtf "/tmp") approve
+    testRuntimeWithNativeTools True approve
+
+testRuntimeWithNativeTools
+    :: Bool
+    -> (ToolCall
+        -> Maybe Bool
+        -> IO (Either Text Bool))
+    -> IO (ClaudeSessionRuntimeSlot, PlanModeEnv)
+testRuntimeWithNativeTools enabled approve =
+    testRuntimeAtWithNativeTools
+        enabled
+        (unsafeEncodeUtf "/tmp")
+        approve
 
 testRuntimeAt
     :: OsPath
@@ -224,6 +262,16 @@ testRuntimeAt
         -> IO (Either Text Bool))
     -> IO (ClaudeSessionRuntimeSlot, PlanModeEnv)
 testRuntimeAt directory approve = do
+    testRuntimeAtWithNativeTools True directory approve
+
+testRuntimeAtWithNativeTools
+    :: Bool
+    -> OsPath
+    -> (ToolCall
+        -> Maybe Bool
+        -> IO (Either Text Bool))
+    -> IO (ClaudeSessionRuntimeSlot, PlanModeEnv)
+testRuntimeAtWithNativeTools enabled directory approve = do
     let hooks = PlanModeHooks
             { planConfirmEnter = \_ -> pure True
             , planDecideExit = \_ -> pure PlanApprove
@@ -235,6 +283,7 @@ testRuntimeAt directory approve = do
         { approveNativeTool = approve
         , approveRegisteredTool = \call -> approve call Nothing
         , planMode = plan
+        , providerNativeToolsEnabled = enabled
         }
     pure (slot, plan)
 

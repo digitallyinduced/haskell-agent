@@ -16,7 +16,6 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM
     ( atomically
     , check
-    , modifyTVar'
     , newTVarIO
     , readTVar
     , writeTVar
@@ -31,12 +30,15 @@ data WindowTitleController = WindowTitleController
     { windowTitleSet :: !(Text -> IO ())
     , windowTitleBeginBusy :: !(IO ())
     , windowTitleEndBusy :: !(IO ())
+    , windowTitleBeginInputWait :: !(IO ())
+    , windowTitleEndInputWait :: !(IO ())
     , windowTitleWorker :: !(IO ())
     }
 
 data WindowTitleState = WindowTitleState
     { titleBase :: !Text
     , titleBusyDepth :: !Int
+    , titleInputWaitDepth :: !Int
     }
 
 -- | Build a title controller. The caller supplies a shared output lock and the
@@ -53,6 +55,7 @@ newWindowTitleController motionMode initialTitle withOutputLock writeTitle = do
         WindowTitleState
             { titleBase = initialTitle
             , titleBusyDepth = 0
+            , titleInputWaitDepth = 0
             }
     let frames = case spinnerFrames of
             [] -> ["*"]
@@ -68,38 +71,43 @@ newWindowTitleController motionMode initialTitle withOutputLock writeTitle = do
                     writeTVar stateVar updated
                     pure updated
                 writeTitle
-                    (if state.titleBusyDepth > 0
+                    (if titleIsBusy state
                         then busyWindowTitle firstFrame title
                         else title)
-        beginBusy =
+        changeActivity update =
             withOutputLock do
-                state <- atomically do
-                    modifyTVar' stateVar \current ->
-                        current
-                            { titleBusyDepth = current.titleBusyDepth + 1 }
-                    readTVar stateVar
-                when (state.titleBusyDepth == 1) $
-                    writeTitle (busyWindowTitle firstFrame state.titleBase)
-        endBusy =
-            withOutputLock do
-                state <- atomically do
-                    modifyTVar' stateVar \current ->
-                        current
-                            { titleBusyDepth =
-                                max 0 (current.titleBusyDepth - 1)
-                            }
-                    readTVar stateVar
-                when (state.titleBusyDepth == 0) $
-                    writeTitle state.titleBase
+                (wasBusy, state) <- atomically do
+                    current <- readTVar stateVar
+                    let updated = update current
+                    writeTVar stateVar updated
+                    pure (titleIsBusy current, updated)
+                when (wasBusy /= titleIsBusy state) $
+                    writeTitle $
+                        if titleIsBusy state
+                            then busyWindowTitle firstFrame state.titleBase
+                            else state.titleBase
+        beginBusy = changeActivity \current ->
+            current { titleBusyDepth = current.titleBusyDepth + 1 }
+        endBusy = changeActivity \current ->
+            current
+                { titleBusyDepth = max 0 (current.titleBusyDepth - 1) }
+        beginInputWait = changeActivity \current ->
+            current
+                { titleInputWaitDepth = current.titleInputWaitDepth + 1 }
+        endInputWait = changeActivity \current ->
+            current
+                { titleInputWaitDepth =
+                    max 0 (current.titleInputWaitDepth - 1)
+                }
         worker =
             when (motionMode == MotionFull) $
                 forM_ (cycle frames) \frame -> do
                     atomically do
                         state <- readTVar stateVar
-                        check (state.titleBusyDepth > 0)
+                        check (titleIsBusy state)
                     withOutputLock do
                         state <- atomically (readTVar stateVar)
-                        when (state.titleBusyDepth > 0) $
+                        when (titleIsBusy state) $
                             writeTitle
                                 (busyWindowTitle frame state.titleBase)
                     threadDelay (motionIntervalMicros motionMode MotionSlow)
@@ -107,8 +115,14 @@ newWindowTitleController motionMode initialTitle withOutputLock writeTitle = do
         { windowTitleSet = setTitle
         , windowTitleBeginBusy = beginBusy
         , windowTitleEndBusy = endBusy
+        , windowTitleBeginInputWait = beginInputWait
+        , windowTitleEndInputWait = endInputWait
         , windowTitleWorker = worker
         }
+
+titleIsBusy :: WindowTitleState -> Bool
+titleIsBusy state =
+    state.titleBusyDepth > 0 && state.titleInputWaitDepth == 0
 
 busyWindowTitle :: Text -> Text -> Text
 busyWindowTitle frame title = frame <> " " <> title

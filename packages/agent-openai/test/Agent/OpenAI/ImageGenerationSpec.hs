@@ -182,7 +182,7 @@ spec = describe "image generation tool" do
                 , "size" .= ("auto" :: Text)
                 ]
 
-    it "rejects conflicting image selectors before making a request" do
+    it "rejects invalid image selectors before making a request" do
         withSystemTempDirectory "agent-imagegen-invalid" \cwd -> do
             env <- defaultToolEnv (fromText (Text.pack cwd))
             history <- newImageGenerationHistory
@@ -192,19 +192,19 @@ spec = describe "image generation tool" do
                     env
                     history
                     Nothing
-            result <- dispatchToolCall
-                defaultLoopDispatch
-                (appToolHandlers [tool])
-                (functionToolCall
-                    "invalid-1"
-                    "imagegen"
-                    "{\"prompt\":\"edit\",\
-                    \\"referenced_image_paths\":[\"/tmp/a.png\"],\
-                    \\"num_last_images_to_include\":1}")
-            result.output `shouldSatisfy`
-                Text.isInfixOf
-                    "provide only one of `referenced_image_paths` or `num_last_images_to_include`"
-            toolCallResultImages result `shouldBe` []
+            mapM_
+                (\(index, (arguments, expectedError)) -> do
+                    result <- dispatchToolCall
+                        defaultLoopDispatch
+                        (appToolHandlers [tool])
+                        (functionToolCall
+                            ("invalid-" <> Text.pack (show index))
+                            "imagegen"
+                            arguments)
+                    result.output `shouldSatisfy`
+                        Text.isInfixOf expectedError
+                    toolCallResultImages result `shouldBe` [])
+                (zip [1 :: Int ..] invalidSelectorCases)
 
 openAiProvider =
     tokenProvider SubscriptionBilled \_ ->
@@ -280,3 +280,24 @@ generatedPng =
 
 jpegBytes :: BS.ByteString
 jpegBytes = BS.pack [0xff, 0xd8, 0xff, 0x00]
+
+invalidSelectorCases :: [(Text, Text)]
+invalidSelectorCases =
+    [ ( "{\"prompt\":\"edit\",\
+        \\"referenced_image_paths\":[\"/tmp/a.png\"],\
+        \\"num_last_images_to_include\":1}"
+      , "provide only one of `referenced_image_paths` or `num_last_images_to_include`"
+      )
+    , ( "{\"prompt\":\"edit\",\
+        \\"referenced_image_paths\":[\
+        \\"/a.png\",\"/b.png\",\"/c.png\",\"/d.png\",\"/e.png\",\"/f.png\"]}"
+      , "`referenced_image_paths` must contain at most 5 paths"
+      )
+    , ( "{\"prompt\":\"edit\",\"num_last_images_to_include\":0}"
+      , "`num_last_images_to_include` must be between 1 and 5"
+      )
+    , ( "{\"prompt\":\"edit\",\
+        \\"referenced_image_paths\":[\"relative.png\"]}"
+      , "`referenced_image_paths` entries must be absolute paths: relative.png"
+      )
+    ]

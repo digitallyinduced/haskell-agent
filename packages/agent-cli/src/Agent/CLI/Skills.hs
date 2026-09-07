@@ -10,6 +10,7 @@ module Agent.CLI.Skills
     , queueSkillCatalogContextWithOmissions
     , reservedSlashNames
     , resolvePromptSkillMentions
+    , resolvePromptSkillMentionsWithWarnings
     , skillInvocationCommand
     ) where
 
@@ -41,7 +42,7 @@ import qualified System.Directory as Directory
 import qualified System.Environment as Environment
 import qualified System.FilePath as FilePath
 import System.IO (stderr)
-import System.OsPath (OsPath, unsafeEncodeUtf)
+import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
 
 reservedSlashNames :: [Text]
 reservedSlashNames =
@@ -54,9 +55,17 @@ resolvePromptSkillMentions
     -> [SkillInvocation]
     -> Text
     -> Either Text [SkillInvocation]
-resolvePromptSkillMentions pasted invocations prompt
-    | pasted = Right []
-    | otherwise = resolveSkillMentions invocations prompt
+resolvePromptSkillMentions pasted invocations prompt =
+    Right (snd (resolvePromptSkillMentionsWithWarnings pasted invocations prompt))
+
+resolvePromptSkillMentionsWithWarnings
+    :: Bool
+    -> [SkillInvocation]
+    -> Text
+    -> ([Text], [SkillInvocation])
+resolvePromptSkillMentionsWithWarnings pasted invocations prompt
+    | pasted = ([], [])
+    | otherwise = resolveSkillMentionsWithWarnings invocations prompt
 
 loadSkillsCatalog
     :: CliOptions
@@ -202,7 +211,26 @@ installSkillCatalogWithOmissions reservedNames queueContext contextRef catalogRe
 -- live outside the worktree (for example under /nix/store).
 installSkillToolRoots :: ToolEnv -> SkillCatalog -> IO ()
 installSkillToolRoots env catalog =
-    setToolSkillRoots env (map (.skillDirectory) catalog.catalogSkills)
+    setToolSkillRoots
+        env
+        (map (.skillDirectory) catalog.catalogSkills <> sharedRoots)
+  where
+    sharedRoots =
+        case filter isBuiltinExternalResume catalog.catalogSkills of
+            skill : _ ->
+                [ takeDirectory skill.skillDirectory
+                    </> unsafeEncodeUtf "shared/resume-session"
+                ]
+            [] -> []
+
+    isBuiltinExternalResume skill =
+        skill.skillScope == BuiltinSkill
+            && skill.skillName `elem`
+                [ "resume-claude"
+                , "resume-codex"
+                , "resume-cursor"
+                , "resume-grok"
+                ]
 
 skillInvocationCommand :: SkillInvocation -> SkillCommand
 skillInvocationCommand invocation =

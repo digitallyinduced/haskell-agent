@@ -920,7 +920,7 @@ decodeResponse value =
     case ResponsesCodec.decodeResponse
         (LBS.toStrict (Aeson.encode value)) of
         Right response -> response
-        Left err -> error err
+        Left err -> error (Text.unpack err)
 
 extractAssistantText :: Response -> Maybe Text
 extractAssistantText response = case

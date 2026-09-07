@@ -496,7 +496,15 @@ telegramAgentPrompt prompt =
         \this initial update. Skip it when you can answer immediately \
         \or when no reply should be sent. Your answer and available \
         \reasoning summaries are shown to the user as a live Telegram draft \
-        \while you work, followed by your normal final response. If the best \
+        \while you work, followed by your normal final response. When the user \
+        \asks you to implement a non-trivial software feature and the \
+        \create_agent_session and wait_agent_session tools are available, act \
+        \as the coordinator: delegate implementation and testing to a new \
+        \persisted session, wait for its current turn with wait_agent_session \
+        \(waiting again after a timeout when needed), inspect its result, and \
+        \retain responsibility for verification and the final answer. Do not \
+        \use this indirection for small edits or questions, and do not modify \
+        \the same files concurrently with the delegated session. If the best \
         \complete response \
         \is only a lightweight acknowledgement, you may instead respond with \
         \exactly one standard Telegram reaction emoji. Do not mention these \

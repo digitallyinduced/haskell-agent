@@ -47,7 +47,6 @@ import Agent.TUI.Presentation
     ( formatToolDiffRelative
     , formatToolDiffRelativeWithOutput
     , formatToolOutputRelative
-    , isInspectionTool
     , todoListFromToolArguments
     , todoListFromToolOutput
     , toolCallHeaderRelative
@@ -55,13 +54,17 @@ import Agent.TUI.Presentation
     , toolCallTitleRelative
     )
 import Agent.TUI.TextWidth (clampGraphemeCursor)
+import Agent.TUI.Model.Block
 import Agent.TUI.Model.Edit
+import Agent.TUI.Model.Inspection
+import Agent.TUI.Model.Selection
+import Agent.TUI.Model.Shell
+import Agent.TUI.Model.ToolResult
 import Agent.TUI.Model.State
 import Agent.TUI.Model.Timing
 import Agent.TUI.Model.Types
 import Agent.TUI.Motion
     ( completionStatusDurationMillis )
-import qualified Agent.Json.Decode as Hermes
 import Agent.Loop
     ( LoopEvent(..)
     , TokenUsage(..)
@@ -83,7 +86,6 @@ import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Char (isSpace)
 
 reduceUi :: UiEvent -> UiState -> UiState
 reduceUi event state = case event of
@@ -169,17 +171,7 @@ reduceUi event state = case event of
             { uiContextTokens = tokens
             , uiContextWindow = contextWindow
             }
-    UiSetAwaitingInput awaiting ->
-        (if awaiting then finalizeStreams state else state)
-            { uiAwaitingInput = awaiting
-            , uiRunning = if awaiting then False else state.uiRunning
-            , uiGenerating =
-                if awaiting then False else state.uiGenerating
-            , uiActivity =
-                if awaiting && state.uiCompletionRemainingMillis == 0
-                    then "Ready"
-                    else state.uiActivity
-            }
+    UiSetAwaitingInput awaiting -> setAwaitingInput awaiting state
     UiSetRepository branch cwd workspace ->
         state { uiBranch = branch, uiCwd = cwd, uiWorkspaceRoot = workspace }
     UiSetNotice notice ->
@@ -230,114 +222,134 @@ reduceUi event state = case event of
         replaceOrAppendRecap "Generating recap…" BlockRunning state
     UiRecapReady summary ->
         replaceOrAppendRecap summary BlockComplete state
-    UiRecapUnavailable message ->
-        case latestRecapIndex state of
-            Just index ->
-                (removeBlockAt index state)
-                    { uiNotice = Just (warningNotice message)
-                    , uiNoticeElapsedMillis = 0
-                    }
-            Nothing ->
-                state
-                    { uiNotice = Just (warningNotice message)
-                    , uiNoticeElapsedMillis = 0
-                    }
+    UiRecapUnavailable message -> recapUnavailable message state
     UiErrorMessage message ->
         (appendBlock BlockError "Error" message "" BlockFailed Nothing state)
             { uiRetryCountdown = Nothing }
     UiRetryCountdown prefix remainingMillis suffix ->
-        let
-            ident = BlockId state.uiNextBlockId
-            remaining = max 0 remainingMillis
-            withBlock =
-                appendBlock
-                    BlockError
-                    "Error"
-                    (retryCountdownText prefix remaining suffix)
-                    ""
-                    BlockFailed
-                    Nothing
-                    state
-        in withBlock
-            { uiRetryCountdown =
-                if remaining == 0
-                    then Nothing
-                    else Just RetryCountdown
-                        { retryCountdownBlockId = ident
-                        , retryCountdownPrefix = prefix
-                        , retryCountdownRemainingMillis = remaining
-                        , retryCountdownSuffix = suffix
-                        }
-            }
-    UiConversationCleared ->
-        state
-            { uiBlocks = Seq.empty
-            , uiSelectedBlock = Nothing
-            , uiSelectedBlockIndex = Nothing
-            , uiBlockIndices = Map.empty
-            , uiNextBlockId = 1
-            , uiTurnStartBlock = 0
-            , uiAttemptStartBlock = 0
-            , uiToolCalls = Map.empty
-            , uiInspectionGroups = Map.empty
-            , uiShellProcesses = Map.empty
-            , uiShellPolls = Map.empty
-            , uiRetryCountdown = Nothing
-            , uiTodos = []
-            , uiGenerating = False
-            , uiGenerationChars = 0
-            , uiGenerationMillis = 0
-            , uiGenerationLastDeltaMillis = 0
-            , uiResponseMillis = 0
-            , uiLastTokensPerSecond = Nothing
-            }
-    UiSetFollow follow ->
-        state
-            { uiFollow = follow
-            , uiSelectedBlock =
-                if follow
-                    then (.blockId) <$> Seq.lookup
-                        (Seq.length state.uiBlocks - 1)
-                        state.uiBlocks
-                    else state.uiSelectedBlock
-            , uiSelectedBlockIndex =
-                if follow
-                    then
-                        if Seq.null state.uiBlocks
-                            then Nothing
-                            else Just (Seq.length state.uiBlocks - 1)
-                    else state.uiSelectedBlockIndex
-            }
+        setRetryCountdown prefix remainingMillis suffix state
+    UiConversationCleared -> clearConversation state
+    UiSetFollow follow -> setFollow follow state
     UiTurnEnded terminalState ->
         finalizeTurn terminalState state
-    UiTurnRestarted ->
-        let blocks = Seq.take state.uiTurnStartBlock state.uiBlocks
-            selected =
-                selectionAfterTruncate
-                    blocks
-                    state.uiSelectedBlockIndex
-            processes =
-                retainShellProcesses blocks state.uiShellProcesses
-        in state
-            { uiBlocks = blocks
-            , uiSelectedBlock = (.blockId) . snd <$> selected
-            , uiSelectedBlockIndex = fst <$> selected
-            , uiBlockIndices =
-                Map.filter (< Seq.length blocks) state.uiBlockIndices
-            , uiRunning = False
-            , uiGenerating = False
-            , uiActivity = "Restarting…"
-            , uiNotice =
-                Just (progressNotice "Restarting current turn…")
+    UiTurnRestarted -> restartTurn state
+
+setAwaitingInput :: Bool -> UiState -> UiState
+setAwaitingInput awaiting state =
+    (if awaiting then finalizeStreams state else state)
+        { uiAwaitingInput = awaiting
+        , uiRunning = if awaiting then False else state.uiRunning
+        , uiGenerating = if awaiting then False else state.uiGenerating
+        , uiActivity =
+            if awaiting && state.uiCompletionRemainingMillis == 0
+                then "Ready"
+                else state.uiActivity
+        }
+
+recapUnavailable :: Text -> UiState -> UiState
+recapUnavailable message state =
+    withNotice
+        (maybe state (`removeBlockAt` state) (latestRecapIndex state))
+  where
+    withNotice current =
+        current
+            { uiNotice = Just (warningNotice message)
             , uiNoticeElapsedMillis = 0
-            , uiCompletionRemainingMillis = 0
-            , uiToolCalls = Map.empty
-            , uiInspectionGroups = Map.empty
-            , uiShellProcesses = processes
-            , uiShellPolls =
-                retainShellPolls processes state.uiShellPolls
-            , uiAttemptStartBlock = state.uiTurnStartBlock
             }
+
+setRetryCountdown :: Text -> Int -> Text -> UiState -> UiState
+setRetryCountdown prefix remainingMillis suffix state =
+    withBlock
+        { uiRetryCountdown =
+            if remaining == 0
+                then Nothing
+                else Just RetryCountdown
+                    { retryCountdownBlockId = ident
+                    , retryCountdownPrefix = prefix
+                    , retryCountdownRemainingMillis = remaining
+                    , retryCountdownSuffix = suffix
+                    }
+        }
+  where
+    ident = BlockId state.uiNextBlockId
+    remaining = max 0 remainingMillis
+    withBlock =
+        appendBlock
+            BlockError
+            "Error"
+            (retryCountdownText prefix remaining suffix)
+            ""
+            BlockFailed
+            Nothing
+            state
+
+clearConversation :: UiState -> UiState
+clearConversation state =
+    state
+        { uiBlocks = Seq.empty
+        , uiSelectedBlock = Nothing
+        , uiSelectedBlockIndex = Nothing
+        , uiBlockIndices = Map.empty
+        , uiNextBlockId = 1
+        , uiTurnStartBlock = 0
+        , uiAttemptStartBlock = 0
+        , uiToolCalls = Map.empty
+        , uiInspectionGroups = Map.empty
+        , uiShellProcesses = Map.empty
+        , uiShellPolls = Map.empty
+        , uiRetryCountdown = Nothing
+        , uiTodos = []
+        , uiGenerating = False
+        , uiGenerationChars = 0
+        , uiGenerationMillis = 0
+        , uiGenerationLastDeltaMillis = 0
+        , uiResponseMillis = 0
+        , uiLastTokensPerSecond = Nothing
+        }
+
+setFollow :: Bool -> UiState -> UiState
+setFollow follow state =
+    state
+        { uiFollow = follow
+        , uiSelectedBlock =
+            if follow
+                then (.blockId) <$> Seq.lookup lastIndex state.uiBlocks
+                else state.uiSelectedBlock
+        , uiSelectedBlockIndex =
+            if follow
+                then
+                    if Seq.null state.uiBlocks
+                        then Nothing
+                        else Just lastIndex
+                else state.uiSelectedBlockIndex
+        }
+  where
+    lastIndex = Seq.length state.uiBlocks - 1
+
+restartTurn :: UiState -> UiState
+restartTurn state =
+    state
+        { uiBlocks = blocks
+        , uiSelectedBlock = (.blockId) . snd <$> selected
+        , uiSelectedBlockIndex = fst <$> selected
+        , uiBlockIndices =
+            Map.filter (< Seq.length blocks) state.uiBlockIndices
+        , uiRunning = False
+        , uiGenerating = False
+        , uiActivity = "Restarting…"
+        , uiNotice = Just (progressNotice "Restarting current turn…")
+        , uiNoticeElapsedMillis = 0
+        , uiCompletionRemainingMillis = 0
+        , uiToolCalls = Map.empty
+        , uiInspectionGroups = Map.empty
+        , uiShellProcesses = processes
+        , uiShellPolls = retainShellPolls processes state.uiShellPolls
+        , uiAttemptStartBlock = state.uiTurnStartBlock
+        }
+  where
+    blocks = Seq.take state.uiTurnStartBlock state.uiBlocks
+    selected = selectionAfterTruncate blocks state.uiSelectedBlockIndex
+    processes = retainShellProcesses blocks state.uiShellProcesses
 
 resetGeneration :: UiState -> UiState
 resetGeneration state =
@@ -377,21 +389,7 @@ snapshotGenerationRate usage state =
 
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of
-    TurnStarted ->
-        resetGeneration
-            state
-                { uiRunning = True
-                , uiAwaitingInput = False
-                , uiActivity = "Thinking…"
-                , uiNotice = Nothing
-                , uiNoticeElapsedMillis = 0
-                , uiElapsedMillis = 0
-                , uiCompletionRemainingMillis = 0
-                , uiTurnStartBlock = Seq.length state.uiBlocks
-                , uiAttemptStartBlock = Seq.length state.uiBlocks
-                , uiToolCalls = Map.empty
-                , uiInspectionGroups = Map.empty
-                }
+    TurnStarted -> startTurn state
     ReasoningDelta delta ->
         appendOrExtend BlockThinking "Thought" delta BlockStreaming $
             appendGenerationChars delta state
@@ -404,51 +402,18 @@ reduceLoop event state = case event of
                 }
     ActivityUpdated activity ->
         state { uiActivity = activity }
+    ModelContextReset -> state
     ProviderLimitUpdated
         { providerLimitText = text
         , providerLimitWarning = warning
-        } ->
-        state
-            { uiPrompt =
-                state.uiPrompt
-                    { promptLimitStatus =
-                        Just PromptLimitStatus
-                            { promptLimitText = text
-                            , promptLimitWarning = warning
-                            }
-                    }
-            }
+        } -> setProviderLimit text warning state
     WarningRaised warning ->
         state
             { uiNotice = Just (warningNotice warning)
             , uiNoticeElapsedMillis = 0
             }
-    ResponseRestarted message ->
-        let finalized =
-                finalizeAttempt BlockFailed (finalizeStreams state)
-        in resetGeneration
-            finalized
-                { uiRunning = True
-                , uiActivity = "Retrying response…"
-                , uiNotice = Just (warningNotice message)
-                , uiNoticeElapsedMillis = 0
-                , uiAttemptStartBlock = Seq.length finalized.uiBlocks
-                , uiToolCalls = Map.empty
-                , uiInspectionGroups = Map.empty
-                }
-    ToolStarted call
-        | Map.member call.callId state.uiToolCalls
-            || Map.member call.callId state.uiShellPolls ->
-            -- A streaming backend may announce the call before execution;
-            -- the core loop announces it again once the response is complete.
-            -- Refresh the canonical metadata without adding another block.
-            updateToolCall call
-                state
-                    { uiRunning = True
-                    , uiGenerating = False
-                    , uiAwaitingInput = False
-                    }
-        | otherwise -> startToolCall call state
+    ResponseRestarted message -> restartResponse message state
+    ToolStarted call -> startOrUpdateToolCall call state
     ToolUpdated call ->
         updateToolCall call state
     ToolArgumentsUpdated call ->
@@ -469,34 +434,98 @@ reduceLoop event state = case event of
         state
     NativeAgentFinished{} ->
         state
-    TurnFinished output ->
-        let finalized = finalizeStreams state
-            continuing = not (null output.toolCalls)
-            finishedActivity =
-                case telemetrySummary <$> output.providerTelemetry of
-                    Just summary
-                        | not (Text.null summary) ->
-                            "Finished · " <> summary
-                    _ -> "Finished"
-            withFallback = case output.assistantText of
-                Just text
-                    | not (Text.null (Text.strip text))
-                    , not
-                        (hasAssistantTextSince
-                            finalized.uiAttemptStartBlock
-                            finalized) ->
-                        appendBlock BlockAssistant "Assistant" text ""
-                            BlockComplete Nothing finalized
-                _ -> finalized
-        in snapshotGenerationRate output.tokenUsage withFallback
-            { uiRunning = continuing
-            , uiActivity =
-                if continuing
-                    then "Running tools…"
-                    else finishedActivity
-            , uiCompletionRemainingMillis =
-                if continuing then 0 else completionStatusDurationMillis
+    TurnFinished output -> finishLoopTurn output state
+
+startTurn :: UiState -> UiState
+startTurn state =
+    resetGeneration
+        state
+            { uiRunning = True
+            , uiAwaitingInput = False
+            , uiActivity = "Thinking…"
+            , uiNotice = Nothing
+            , uiNoticeElapsedMillis = 0
+            , uiElapsedMillis = 0
+            , uiCompletionRemainingMillis = 0
+            , uiTurnStartBlock = Seq.length state.uiBlocks
+            , uiAttemptStartBlock = Seq.length state.uiBlocks
+            , uiToolCalls = Map.empty
+            , uiInspectionGroups = Map.empty
             }
+
+setProviderLimit :: Text -> Bool -> UiState -> UiState
+setProviderLimit text warning state =
+    state
+        { uiPrompt =
+            state.uiPrompt
+                { promptLimitStatus =
+                    Just PromptLimitStatus
+                        { promptLimitText = text
+                        , promptLimitWarning = warning
+                        }
+                }
+        }
+
+restartResponse :: Text -> UiState -> UiState
+restartResponse message state =
+    resetGeneration
+        finalized
+            { uiRunning = True
+            , uiActivity = "Retrying response…"
+            , uiNotice = Just (warningNotice message)
+            , uiNoticeElapsedMillis = 0
+            , uiAttemptStartBlock = Seq.length finalized.uiBlocks
+            , uiToolCalls = Map.empty
+            , uiInspectionGroups = Map.empty
+            }
+  where
+    finalized = finalizeAttempt BlockFailed (finalizeStreams state)
+
+startOrUpdateToolCall :: ToolCall -> UiState -> UiState
+startOrUpdateToolCall call state
+    | Map.member call.callId state.uiToolCalls
+        || Map.member call.callId state.uiShellPolls =
+        -- A streaming backend may announce the call before execution;
+        -- the core loop announces it again once the response is complete.
+        -- Refresh the canonical metadata without adding another block.
+        updateToolCall call
+            state
+                { uiRunning = True
+                , uiGenerating = False
+                , uiAwaitingInput = False
+                }
+    | otherwise = startToolCall call state
+
+finishLoopTurn :: TurnOutput -> UiState -> UiState
+finishLoopTurn output state =
+    snapshotGenerationRate output.tokenUsage withFallback
+        { uiRunning = continuing
+        , uiActivity =
+            if continuing
+                then "Running tools…"
+                else finishedActivity
+        , uiCompletionRemainingMillis =
+            if continuing then 0 else completionStatusDurationMillis
+        }
+  where
+    finalized = finalizeStreams state
+    continuing = not (null output.toolCalls)
+    finishedActivity =
+        case telemetrySummary <$> output.providerTelemetry of
+            Just summary
+                | not (Text.null summary) ->
+                    "Finished · " <> summary
+            _ -> "Finished"
+    withFallback = case output.assistantText of
+        Just text
+            | not (Text.null (Text.strip text))
+            , not
+                (hasAssistantTextSince
+                    finalized.uiAttemptStartBlock
+                    finalized) ->
+                appendBlock BlockAssistant "Assistant" text ""
+                    BlockComplete Nothing finalized
+        _ -> finalized
 
 appendOrExtend
     :: BlockKind
@@ -568,259 +597,6 @@ startToolCall call state
                         state.uiToolCalls
                 }
 
-startInspectionCall :: ToolCall -> UiState -> UiState
-startInspectionCall call state =
-    case Seq.viewr state.uiBlocks of
-        _ Seq.:> block
-            | block.blockKind == BlockInspect
-            , Just group <- Map.lookup block.blockId state.uiInspectionGroups
-            , group.inspectionGroupOpen ->
-                extend block group
-        _ -> start
-  where
-    activity = toolCallTitleRelative state.uiWorkspaceRoot call
-    (title, headerDetail) =
-        toolCallHeaderRelative state.uiWorkspaceRoot call
-    detail = fromMaybe "" headerDetail
-    item = InspectionItem
-        { inspectionCallId = call.callId
-        , inspectionToolName = canonicalToolName call.name
-        , inspectionTitle = title
-        , inspectionDetail = detail
-        , inspectionBody =
-            formatToolDiffRelative state.uiWorkspaceRoot call
-        , inspectionState = BlockRunning
-        }
-    common current =
-        current
-            { uiRunning = True
-            , uiGenerating = False
-            , uiAwaitingInput = False
-            , uiActivity = activity
-            }
-    extend block group =
-        let
-            blockIndex = Seq.length state.uiBlocks - 1
-            updatedGroup =
-                group
-                    { inspectionGroupItems =
-                        group.inspectionGroupItems <> [item]
-                    }
-        in common state
-            { uiBlocks =
-                Seq.adjust
-                    (renderInspectionGroup updatedGroup)
-                    blockIndex
-                    state.uiBlocks
-            , uiInspectionGroups =
-                Map.insert
-                    block.blockId
-                    updatedGroup
-                    state.uiInspectionGroups
-            , uiToolCalls =
-                Map.insert
-                    call.callId
-                    (blockIndex, call)
-                    state.uiToolCalls
-            }
-    start =
-        let
-            prepared = closeInspectionGroups state
-            blockIndex = Seq.length prepared.uiBlocks
-            ident = BlockId prepared.uiNextBlockId
-            group = InspectionGroup
-                { inspectionGroupOpen = True
-                , inspectionGroupItems = [item]
-                }
-            appended =
-                appendBlock
-                    BlockInspect
-                    title
-                    item.inspectionBody
-                    detail
-                    BlockRunning
-                    (Just call.callId)
-                    (common prepared)
-        in appended
-            { uiBlocks =
-                Seq.adjust
-                    (\block ->
-                        block { blockInspectionGroupable = True })
-                    blockIndex
-                    appended.uiBlocks
-            , uiInspectionGroups =
-                Map.insert ident group appended.uiInspectionGroups
-            , uiToolCalls =
-                Map.insert
-                    call.callId
-                    (blockIndex, call)
-                    appended.uiToolCalls
-            }
-
--- | Close a burst when another visible event intervenes. Keep its item
--- metadata until the turn ends so a provider can still retract an individual
--- completed call without removing the rest of the grouped block.
-closeInspectionGroups :: UiState -> UiState
-closeInspectionGroups state =
-    state
-        { uiInspectionGroups =
-            Map.map
-                (\group -> group { inspectionGroupOpen = False })
-                state.uiInspectionGroups
-        }
-
-renderInspectionGroup :: InspectionGroup -> UiBlock -> UiBlock
-renderInspectionGroup group block =
-    block
-        { blockTitle = inspectionGroupTitle items
-        , blockBody = inspectionGroupBody items
-        , blockState = inspectionGroupState items
-        , blockDetail = inspectionGroupDetail items
-        , blockCallId = (.inspectionCallId) <$> listToMaybe items
-        , blockInspectionGroupable =
-            block.blockInspectionGroupable && length items == 1
-        }
-  where
-    items = group.inspectionGroupItems
-
-inspectionGroupTitle :: [InspectionItem] -> Text
-inspectionGroupTitle [] = "Inspected"
-inspectionGroupTitle [item] = item.inspectionTitle
-inspectionGroupTitle items =
-    Text.intercalate ", " (inspectionSummaries items)
-        <> statusSuffix
-  where
-    failed =
-        length
-            (filter
-                ((== BlockFailed) . (.inspectionState))
-                items)
-    denied =
-        length
-            (filter
-                ((== BlockDenied) . (.inspectionState))
-                items)
-    suffixes =
-        [ Text.pack (show failed) <> " failed" | failed > 0 ]
-            <> [ Text.pack (show denied) <> " denied" | denied > 0 ]
-    statusSuffix =
-        case suffixes of
-            [] -> ""
-            _ -> " · " <> Text.intercalate ", " suffixes
-
-inspectionGroupDetail :: [InspectionItem] -> Text
-inspectionGroupDetail [item] = item.inspectionDetail
-inspectionGroupDetail _ = ""
-
-inspectionSummaries :: [InspectionItem] -> [Text]
-inspectionSummaries =
-    map render . foldl add []
-  where
-    add counts item =
-        let label = inspectionSummaryLabel item.inspectionToolName
-        in case break ((== label) . fst) counts of
-            (before, (_, count) : after) ->
-                before <> [(label, count + 1)] <> after
-            _ -> counts <> [(label, 1)]
-    render :: (Text, Int) -> Text
-    render (label, count) =
-        label
-            <> " "
-            <> Text.pack (show count)
-            <> if count == 1 then " item" else " items"
-
-inspectionSummaryLabel :: Text -> Text
-inspectionSummaryLabel name
-    | name `elem` ["read_file", "read_tool_output", "mcp_read_resource"] =
-        "Read"
-    | name
-        `elem` ["list_dir", "mcp_list_resources", "list_agents", "ListAgents", "Glob"] =
-        "Listed"
-    | name
-        `elem`
-            [ "grep"
-            , "search_tool_output"
-            , "mcp_search"
-            , "search_tool"
-            , "conversation_search"
-            , "skill_search"
-            , "WebSearch"
-            , "ToolSearch"
-            ] =
-        "Searched"
-    | otherwise = "Inspected"
-
--- Image rendering and long-running task-output polling attach lifecycle data
--- to one exact block, so only compact read/list/search calls join a burst.
-isGroupableInspectionTool :: Text -> Bool
-isGroupableInspectionTool rawName =
-    canonicalToolName rawName
-        `elem`
-            [ "read_file"
-            , "list_dir"
-            , "grep"
-            , "read_tool_output"
-            , "search_tool_output"
-            , "mcp_search"
-            , "search_tool"
-            , "mcp_list_resources"
-            , "mcp_read_resource"
-            , "conversation_search"
-            , "skill_search"
-            , "view_skill"
-            , "list_agents"
-            , "Glob"
-            , "WebSearch"
-            , "ToolSearch"
-            , "ListAgents"
-            ]
-
-inspectionGroupBody :: [InspectionItem] -> Text
-inspectionGroupBody [item] = item.inspectionBody
-inspectionGroupBody items =
-    Text.intercalate "\n" headers
-        <> if null details
-            then ""
-            else "\n\n" <> Text.intercalate "\n\n" details
-  where
-    headers = map inspectionItemHeader items
-    details =
-        [ inspectionItemTitle item <> "\n"
-            <> Text.unlines
-                (map ("    " <>) (Text.lines item.inspectionBody))
-        | item <- items
-        , not (Text.null (Text.strip item.inspectionBody))
-        ]
-
-inspectionItemHeader :: InspectionItem -> Text
-inspectionItemHeader item =
-    "  "
-        <> inspectionStateGlyph item.inspectionState
-        <> " "
-        <> inspectionItemTitle item
-
-inspectionItemTitle :: InspectionItem -> Text
-inspectionItemTitle item
-    | Text.null item.inspectionDetail = item.inspectionTitle
-    | otherwise = item.inspectionTitle <> " " <> item.inspectionDetail
-
-inspectionStateGlyph :: BlockState -> Text
-inspectionStateGlyph = \case
-    BlockComplete -> "◇"
-    BlockFailed -> "✗"
-    BlockCancelled -> "⊘"
-    BlockDenied -> "⊘"
-    BlockStreaming -> "◆"
-    BlockRunning -> "◆"
-
-inspectionGroupState :: [InspectionItem] -> BlockState
-inspectionGroupState items
-    | any ((== BlockRunning) . (.inspectionState)) items = BlockRunning
-    | any ((== BlockFailed) . (.inspectionState)) items = BlockFailed
-    | any ((== BlockDenied) . (.inspectionState)) items = BlockDenied
-    | any ((== BlockCancelled) . (.inspectionState)) items = BlockCancelled
-    | otherwise = BlockComplete
-
 replaceOrAppendRecap :: Text -> BlockState -> UiState -> UiState
 replaceOrAppendRecap body blockState state =
     case latestRecapIndex state of
@@ -844,10 +620,6 @@ latestRecapIndex state =
     case Seq.findIndexR ((== BlockRecap) . (.blockKind)) state.uiBlocks of
         Just index -> Just index
         Nothing -> Nothing
-
-selectedIndexFor :: Maybe BlockId -> Seq UiBlock -> Maybe Int
-selectedIndexFor selected remaining =
-    selected >>= \ident -> Seq.findIndexL ((== ident) . (.blockId)) remaining
 
 removeBlockAt :: Int -> UiState -> UiState
 removeBlockAt index state =
@@ -896,42 +668,6 @@ removeBlockAt index state =
         , uiAttemptStartBlock = adjustIndex state.uiAttemptStartBlock
         }
 
-appendBlock
-    :: BlockKind
-    -> Text
-    -> Text
-    -> Text
-    -> BlockState
-    -> Maybe Text
-    -> UiState
-    -> UiState
-appendBlock kind title body detail blockState callId state =
-    let prepared = closeInspectionGroups state
-        index = Seq.length prepared.uiBlocks
-        ident = BlockId prepared.uiNextBlockId
-        block = UiBlock
-            { blockId = ident
-            , blockKind = kind
-            , blockTitle = title
-            , blockBody = body
-            , blockTimestamp = ""
-            , blockDetail = detail
-            , blockState
-            , blockExpanded =
-                kind `elem` [BlockUser, BlockAssistant, BlockSystem, BlockRecap, BlockError]
-                    || (kind == BlockShell
-                        && blockState `elem` [BlockStreaming, BlockRunning])
-            , blockCallId = callId
-            , blockInspectionGroupable = False
-            }
-    in prepared
-        { uiBlocks = prepared.uiBlocks Seq.|> block
-        , uiNextBlockId = prepared.uiNextBlockId + 1
-        , uiSelectedBlock = Just ident
-        , uiSelectedBlockIndex = Just index
-        , uiBlockIndices = Map.insert ident index prepared.uiBlockIndices
-        }
-
 -- | Attach one captured wall-clock label to newly appended conversation
 -- messages. Tool and status blocks deliberately remain unstamped.
 timestampNewMessageBlocks :: Int -> Text -> UiState -> UiState
@@ -952,7 +688,7 @@ timestampNewMessageBlocks firstNewIndex timestamp state
 
 completeTool :: Int -> ToolCall -> ToolCallResult -> UiState -> UiState
 completeTool blockIndex call result state =
-    let resultState = toolResultState result.output
+    let resultState = resultBlockState result
         diff =
             formatToolDiffRelativeWithOutput
                 state.uiWorkspaceRoot
@@ -1062,145 +798,12 @@ finishVisibleTool result state =
             | blockIndex < Seq.length state.uiBlocks
             , isShellProcessTool call.name
             , Just (sessionId, output) <-
-                runningShellResult result.output
+                runningShellOutcome result
             , Map.notMember sessionId next.uiShellProcesses ->
                 retainRunningShell blockIndex sessionId output next
             | blockIndex < Seq.length state.uiBlocks ->
                 completeTool blockIndex call displayed next
         Just _ -> next
-
-trackedShellOwner :: ToolCall -> UiState -> Maybe BlockId
-trackedShellOwner call state = do
-    sessionId <- writeStdinSession call
-    Map.lookup sessionId state.uiShellProcesses
-
--- A non-empty write_stdin remains visible as an input action, but it can also
--- observe the underlying command finishing. Keep the process owner in sync
--- without duplicating the continuation output across both blocks.
-reconcileVisibleShellContinuation
-    :: ToolCall
-    -> ToolCallResult
-    -> UiState
-    -> UiState
-reconcileVisibleShellContinuation call result state =
-    case writeStdinSession call of
-        Nothing -> state
-        Just sessionId ->
-            case Map.lookup sessionId state.uiShellProcesses of
-                Nothing -> state
-                Just ownerId ->
-                    case runningShellResult result.output of
-                        Just (returnedSessionId, _) ->
-                            state
-                                { uiShellProcesses =
-                                    Map.insert
-                                        returnedSessionId
-                                        ownerId
-                                        (Map.delete
-                                            sessionId
-                                            state.uiShellProcesses)
-                                }
-                        Nothing ->
-                            case terminalShellResult result.output of
-                                Nothing -> state
-                                Just (blockState, _) ->
-                                    let
-                                        processes =
-                                            Map.delete
-                                                sessionId
-                                                state.uiShellProcesses
-                                        blocks =
-                                            case lookupBlockIndex ownerId state of
-                                                Nothing -> state.uiBlocks
-                                                Just (blockIndex, _) ->
-                                                    Seq.adjust
-                                                        (setBlockState blockState)
-                                                        blockIndex
-                                                        state.uiBlocks
-                                    in state
-                                        { uiBlocks = blocks
-                                        , uiShellProcesses = processes
-                                        , uiShellPolls =
-                                            retainShellPolls
-                                                processes
-                                                state.uiShellPolls
-                                        }
-
-retainRunningShell :: Int -> Int -> Text -> UiState -> UiState
-retainRunningShell blockIndex sessionId output state =
-    case Seq.lookup blockIndex state.uiBlocks of
-        Nothing -> state
-        Just owner ->
-            state
-                { uiBlocks =
-                    Seq.adjust
-                        (\block ->
-                            setBlockState BlockRunning block
-                                { blockBody = output })
-                        blockIndex
-                        state.uiBlocks
-                , uiShellProcesses =
-                    Map.insert
-                        sessionId
-                        owner.blockId
-                        state.uiShellProcesses
-                }
-
-finishShellPoll :: Int -> ToolCallResult -> UiState -> UiState
-finishShellPoll sessionId result state =
-    let
-        next =
-            state
-                { uiRunning = True
-                , uiAwaitingInput = False
-                , uiActivity = "Thinking…"
-                , uiShellPolls =
-                    Map.delete result.callId state.uiShellPolls
-                }
-        withoutSession =
-            Map.delete sessionId next.uiShellProcesses
-    in case Map.lookup sessionId state.uiShellProcesses of
-        Nothing ->
-            next { uiShellProcesses = withoutSession }
-        Just ownerId ->
-            case lookupBlockIndex ownerId next of
-                Nothing ->
-                    next { uiShellProcesses = withoutSession }
-                Just (blockIndex, _) ->
-                    case runningShellResult result.output of
-                        Just (returnedSessionId, output) ->
-                            appendShellOutput blockIndex output BlockRunning
-                                next
-                                    { uiShellProcesses =
-                                        Map.insert
-                                            returnedSessionId
-                                            ownerId
-                                            withoutSession
-                                    }
-                        Nothing ->
-                            case terminalShellResult result.output of
-                                Nothing -> next
-                                Just (blockState, output) ->
-                                    appendShellOutput
-                                        blockIndex
-                                        output
-                                        blockState
-                                        next
-                                            { uiShellProcesses =
-                                                withoutSession
-                                            }
-
-appendShellOutput :: Int -> Text -> BlockState -> UiState -> UiState
-appendShellOutput blockIndex output blockState state =
-    state
-        { uiBlocks =
-            Seq.adjust
-                (\block ->
-                    setBlockState blockState block
-                        { blockBody = block.blockBody <> output })
-                blockIndex
-                state.uiBlocks
-        }
 
 finalizeAttempt :: BlockState -> UiState -> UiState
 finalizeAttempt terminalState state =
@@ -1589,21 +1192,6 @@ finalizeTurn terminalState state =
         , uiShellPolls = Map.empty
         }
 
--- Shell commands start open while output is live, then compact to a one-line
--- summary. Preserve any manual folding while they are still running; a user
--- can also expand the completed block again with the normal block toggle.
-setBlockState :: BlockState -> UiBlock -> UiBlock
-setBlockState blockState block =
-    block
-        { blockState
-        , blockExpanded =
-            if block.blockKind == BlockShell
-                && block.blockState `elem` [BlockStreaming, BlockRunning]
-                && blockState `notElem` [BlockStreaming, BlockRunning]
-                then False
-                else block.blockExpanded
-        }
-
 infoNotice, successNotice, warningNotice, progressNotice, errorNotice
     :: Text -> UiNotice
 infoNotice = transientNotice NoticeInfo
@@ -1643,235 +1231,3 @@ hasAssistantTextSince start =
                 && not (Text.null (Text.strip block.blockBody)))
         . Seq.drop start
         . (.uiBlocks)
-
-moveSelection :: Int -> UiState -> UiState
-moveSelection delta state =
-    case Seq.lookup next blocks of
-        Nothing ->
-            state
-                { uiSelectedBlock = Nothing
-                , uiSelectedBlockIndex = Nothing
-                }
-        Just block ->
-            state
-                { uiSelectedBlock = Just block.blockId
-                , uiSelectedBlockIndex = Just next
-                , uiFollow = next == lastIndex
-                }
-  where
-    blocks = state.uiBlocks
-    lastIndex = Seq.length blocks - 1
-    next = max 0 (min lastIndex (selectedBlockIndex state + delta))
-
-selectBlock :: BlockId -> UiState -> UiState
-selectBlock ident state =
-    case lookupBlockIndex ident state of
-        Nothing -> state
-        Just (index, _) ->
-            state
-                { uiSelectedBlock = Just ident
-                , uiSelectedBlockIndex = Just index
-                , uiFollow =
-                    index == Seq.length state.uiBlocks - 1
-                }
-
-lookupBlock :: BlockId -> UiState -> Maybe UiBlock
-lookupBlock ident state =
-    snd <$> lookupBlockIndex ident state
-
-lookupBlockIndex :: BlockId -> UiState -> Maybe (Int, UiBlock)
-lookupBlockIndex ident state = do
-    index <- Map.lookup ident state.uiBlockIndices
-    block <- Seq.lookup index state.uiBlocks
-    if block.blockId == ident
-        then Just (index, block)
-        else Nothing
-
-selectedBlockIndex :: UiState -> Int
-selectedBlockIndex state =
-    maybe fallback fst (selectedBlockEntry state)
-  where
-    fallback = max 0 (Seq.length state.uiBlocks - 1)
-
-toggleSelected :: UiState -> UiState
-toggleSelected state =
-    case selectedBlockEntry state of
-        Nothing -> state
-        Just (index, _) ->
-            state
-                { uiBlocks =
-                    Seq.adjust
-                        (\block ->
-                            block
-                                { blockExpanded = not block.blockExpanded })
-                        index
-                        state.uiBlocks
-                }
-
-selectedBlockEntry :: UiState -> Maybe (Int, UiBlock)
-selectedBlockEntry state = do
-    ident <- state.uiSelectedBlock
-    index <- state.uiSelectedBlockIndex
-    storedIndex <- Map.lookup ident state.uiBlockIndices
-    block <- Seq.lookup index state.uiBlocks
-    if storedIndex == index && block.blockId == ident
-        then Just (index, block)
-        else Nothing
-
-selectionAfterTruncate
-    :: Seq UiBlock
-    -> Maybe Int
-    -> Maybe (Int, UiBlock)
-selectionAfterTruncate blocks selected =
-    case selected of
-        Just index
-            | Just block <- Seq.lookup index blocks ->
-                Just (index, block)
-        _ ->
-            let index = Seq.length blocks - 1
-            in (\block -> (index, block)) <$> Seq.lookup index blocks
-
-retainShellProcesses
-    :: Seq UiBlock
-    -> Map.Map Int BlockId
-    -> Map.Map Int BlockId
-retainShellProcesses blocks =
-    Map.filter \ownerId ->
-        any
-            (\block ->
-                block.blockId == ownerId
-                    && block.blockState == BlockRunning)
-            blocks
-
-retainShellPolls
-    :: Map.Map Int BlockId
-    -> Map.Map Text Int
-    -> Map.Map Text Int
-retainShellPolls processes =
-    Map.filter (`Map.member` processes)
-
-writeStdinInput :: ToolCall -> Maybe (Int, Maybe Text)
-writeStdinInput call = do
-    guard (canonicalToolName call.name == "write_stdin")
-    either (const Nothing) Just $
-        Hermes.decodeText
-            (Hermes.object $
-                (,)
-                    <$> Hermes.atKey "session_id" Hermes.int
-                    <*> Hermes.optionalKey "chars" Hermes.text)
-            call.arguments
-
-writeStdinSession :: ToolCall -> Maybe Int
-writeStdinSession = fmap fst . writeStdinInput
-
-emptyWriteStdinSession :: ToolCall -> Maybe Int
-emptyWriteStdinSession call = do
-    (sessionId, chars) <- writeStdinInput call
-    guard (maybe True Text.null chars)
-    pure sessionId
-
-runningShellResult :: Text -> Maybe (Int, Text)
-runningShellResult output = do
-    rest <- Text.stripPrefix
-        "Process still running.\nsession_id: "
-        output
-    let (sessionText, withNewline) = Text.breakOn "\n" rest
-    body <- Text.stripPrefix "\n" withNewline
-    sessionId <- readWholeInt sessionText
-    pure (sessionId, body)
-
-terminalShellResult :: Text -> Maybe (BlockState, Text)
-terminalShellResult output =
-    case Text.stripPrefix "Exit code: " output of
-        Just rest ->
-            let (codeText, withNewline) = Text.breakOn "\n" rest
-            in case (readWholeInt codeText, Text.stripPrefix "\n" withNewline) of
-                (Just code, Just body) ->
-                    Just
-                        ( if code == 0 then BlockComplete else BlockFailed
-                        , body
-                        )
-                _ -> Nothing
-        Nothing
-            | "Error: Command cancelled" `Text.isPrefixOf` output ->
-                Just (toolResultState output, output)
-            | "Error: Command timed out" `Text.isPrefixOf` output ->
-                Just (toolResultState output, output)
-            | otherwise -> Nothing
-
-readWholeInt :: Text -> Maybe Int
-readWholeInt text =
-    case reads (Text.unpack text) of
-        [(value, "")] -> Just value
-        _ -> Nothing
-
-isTodoTool :: Text -> Bool
-isTodoTool name =
-    canonicalToolName name `elem` ["todo_write", "update_plan"]
-
-isShellProcessTool :: Text -> Bool
-isShellProcessTool name =
-    canonicalToolName name `elem` ["shell_command", "write_stdin"]
-
-toolBlockKind :: Text -> BlockKind
-toolBlockKind rawName
-    | name `elem` ["run_terminal_cmd", "shell_command", "write_stdin", "run_ghci", "exec"] =
-        BlockShell
-    | name `elem` ["search_replace", "apply_patch", "Write", "NotebookEdit"] =
-        BlockEdit
-    | name `elem` ["todo_write", "update_plan"] =
-        BlockTodo
-    | isInspectionTool rawName = BlockInspect
-    | otherwise = BlockTool
-  where
-    name = canonicalToolName rawName
-
--- | Syntax grammar for code carried in a shell-style tool block.
--- The title is retained alongside the source after the original call leaves
--- the live-tool map, so it also identifies exec's JavaScript code here.
-blockCodeLanguage :: UiBlock -> Maybe Text
-blockCodeLanguage block
-    | block.blockKind /= BlockShell = Nothing
-    | Text.null (Text.strip block.blockDetail) = Nothing
-    | block.blockTitle == "$ exec" = Just "javascript"
-    | otherwise = Just "haskell"
-
-outputLooksFailed :: Text -> Bool
-outputLooksFailed output =
-    let lowered = Text.toLower (Text.strip output)
-    in "error:" `Text.isPrefixOf` lowered
-        || "exit: 1" `Text.isPrefixOf` lowered
-        || "exit: 2" `Text.isPrefixOf` lowered
-
-toolResultState :: Text -> BlockState
-toolResultState output
-    | "tool call rejected by user" `Text.isInfixOf` lowered =
-        BlockDenied
-    | structuredCancellation lowered =
-        BlockCancelled
-    | outputLooksFailed output = BlockFailed
-    | Just code <- exitCodeFrom lowered
-    , code /= 0 = BlockFailed
-    | otherwise = BlockComplete
-  where
-    lowered = Text.toLower (Text.strip output)
-
-structuredCancellation :: Text -> Bool
-structuredCancellation output =
-    let header = Text.strip (headLine output)
-    in header == "exit: cancelled"
-        || header == "error: command cancelled"
-        || header == "cancelled"
-        || "cancelled (" `Text.isPrefixOf` header
-
-headLine :: Text -> Text
-headLine = Text.takeWhile (/= '\n')
-
-exitCodeFrom :: Text -> Maybe Int
-exitCodeFrom text = do
-    rest <-
-        Text.stripPrefix "exit:" text
-            <|> Text.stripPrefix "exit code:" text
-    case reads (Text.unpack (Text.takeWhile (not . isSpace) (Text.strip rest))) of
-        [(code, "")] -> Just code
-        _ -> Nothing

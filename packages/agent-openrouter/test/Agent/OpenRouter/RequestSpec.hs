@@ -10,6 +10,7 @@ import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
@@ -30,6 +31,38 @@ spec = do
             mapModel options "gpt-4o" `shouldBe` "openai/gpt-5.1"
 
     describe "buildRequest" do
+        it "keeps Claude tool-result images as ordered typed content" do
+            let parts =
+                    [ InputTextPart "before" Nothing
+                    , InputImagePart Nothing Nothing
+                        (Just "data:image/png;base64,cG5nLWJ5dGVz") Nothing
+                    , InputTextPart "after" Nothing
+                    ]
+                output = FunctionCallOutputItem FunctionCallOutput
+                    { localOutcome = Nothing
+                    , itemId = Nothing
+                    , callId = "claude-image-read"
+                    , name = Nothing
+                    , namespace = Nothing
+                    , provider = Just "claude-code"
+                    , output = rawJsonFromEncoding (Aeson.toEncoding parts)
+                    , status = Just ItemCompleted
+                    , async = Nothing
+                    }
+                params :: ResponseCreateParams
+                params = sampleRequest
+                    { input = Just (ResponseInputItems [output]) }
+            object <- expectObject (requestValue defaultClientOptions params)
+            items <- expectArray (KeyMap.lookup "input" object)
+            case items of
+                [item] -> do
+                    wireOutput <- expectObject item
+                    KeyMap.lookup "call_id" wireOutput
+                        `shouldBe` Just (Aeson.String "claude-image-read")
+                    KeyMap.lookup "output" wireOutput
+                        `shouldBe` Just (Aeson.toJSON parts)
+                other -> expectationFailure ("unexpected input: " <> show other)
+
         it "forces a stateless streaming Responses request" do
             let value = requestValue defaultClientOptions sampleRequest
             object <- expectObject value
@@ -70,6 +103,7 @@ spec = do
                         { name = "grammar"
                         , description = Nothing
                         , format = Nothing
+                        , async = Nothing
                         }
                     , NamespaceToolValue NamespaceTool
                         { name = "tools"
@@ -99,6 +133,16 @@ spec = do
             KeyMap.lookup "reasoning" object `shouldBe` Just (Aeson.object
                 [ "effort" .= ("high" :: Text)
                 ])
+
+        it "strips local compaction metadata from serialized input" do
+            let encoded = LBS.toStrict . Aeson.encode $
+                    buildRequest defaultClientOptions markedSummaryRequest
+            BS.isInfixOf
+                "haskell-agent.local-compaction-summary"
+                encoded
+                `shouldBe` False
+            BS.isInfixOf "opaque-xai-checkpoint" encoded `shouldBe` False
+            BS.isInfixOf "preserved.kind" encoded `shouldBe` True
 
     describe "SSE assembly" do
         it "decodes typed event constructors and builds the merged final response" do
@@ -179,6 +223,7 @@ sampleRequest = defaultResponseCreateParams
             , parameters = Just $
                 rawJsonFromEncoding (Aeson.toEncoding (Aeson.object []))
             , strict = Nothing
+            , async = Nothing
             }
         , KnownResponseTool ToolWebSearch
         , KnownResponseTool ToolComputer
@@ -192,6 +237,34 @@ sampleRequest = defaultResponseCreateParams
         }
     , include = Just [ResponseInclude "reasoning.encrypted_content"]
     , promptCacheKey = Just "cache-1"
+    }
+
+markedSummaryRequest :: ResponseCreateParams
+markedSummaryRequest = sampleRequest
+    { input = Just (ResponseInputItems
+        [ MessageItem ResponseMessage
+            { messageId = Nothing
+            , content = MessageContentParts
+                [OutputTextPart "summary" Nothing Nothing]
+            , role = RoleAssistant
+            , status = Nothing
+            , phase = Nothing
+            , passthrough = Just InternalChatMetadata
+                { turnId = Nothing
+                , createTime = Nothing
+                , contentItemKinds = Just
+                    [ localCompactionSummaryContentItemKind
+                    , "preserved.kind"
+                    ]
+                , executedToolCalls = Nothing
+                }
+            }
+        , CompactionItemValue CompactionItem
+            { itemId = Just "cmp-xai"
+            , encryptedContent = Just "opaque-xai-checkpoint"
+            }
+        , compactionCheckpointOriginItem "xai"
+        ])
     }
 
 withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams

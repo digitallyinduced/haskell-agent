@@ -275,7 +275,8 @@ taskDescription allowedModels =
     \- subagent_type defaults to general-purpose when omitted.\n\
     \- Nested delegation is limited to "
     <> Text.pack (show defaultMaxDepth)
-    <> " levels below the root agent. At the limit, complete the assigned task directly.\n\
+    <> (if defaultMaxDepth == 1 then " level" else " levels")
+    <> " below the root agent. At the limit, complete the assigned task directly.\n\
     \- When launching independent subagents, you MUST incorporate the results into the task based on requirements BEFORE concluding.\n\n\
     \Resuming a previous agent (resume_from):\n\
     \- Use resume_from to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior spawn_subagent call. A resumed agent keeps its transcript, so only describe what changed since the last run.\n\

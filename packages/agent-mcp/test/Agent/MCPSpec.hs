@@ -2,6 +2,8 @@ module Agent.MCPSpec (spec) where
 
 import Agent.Loop (defaultLoopDispatch)
 import Agent.MCP
+import Agent.MCP.Fleet (spawnFleetWorker)
+import Agent.MCP.Supervisor (acquireMcpFleetWith)
 import Agent.MCP.Client
     ( ProbeOutcome(..)
     , annotateHeaderParams
@@ -14,6 +16,8 @@ import Agent.MCP.Client
     , readBounded
     , remainingHardDeadlineMicros
     , retryUnauthorizedOnce
+    , emptyRequestRegistry
+    , registerPending
     , spawnClientWorker
     , splitSseChunk
     , splitLines
@@ -30,6 +34,8 @@ import Agent.MCP.Types
     , McpTool(..)
     , mcpToolDecoder
     , mcpToolRetrySafe
+    , PendingRequest(..)
+    , RequestRegistry(..)
     )
 import Agent.Json (RawJson, rawJsonBytes, rawJsonDecoder, rawJsonFromEncoding)
 import qualified Agent.Json.Decode as Json
@@ -38,6 +44,7 @@ import Control.Concurrent.STM
     , atomically
     , modifyTVar'
     , newEmptyTMVarIO
+    , newTVarIO
     , readTMVar
     , readTVar
     , readTVarIO
@@ -63,9 +70,16 @@ import Agent.Tools.Types
     , toolApprovalRequirement
     , toolAllowsWithoutPrompt
     )
-import Control.Exception.Safe (bracket)
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (async, wait, waitCatch, withAsync)
+import Control.Exception.Safe (bracket, finally)
+import Control.Concurrent
+    ( newEmptyMVar
+    , putMVar
+    , takeMVar
+    , threadDelay
+    , tryPutMVar
+    )
+import Control.Concurrent.Async (async, cancel, wait, waitCatch, withAsync)
+import Control.Monad (void)
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson
 import qualified Data.ByteString as BS
@@ -78,6 +92,7 @@ import Data.IORef
     , readIORef
     )
 import Data.List (find)
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
@@ -103,6 +118,16 @@ import Test.QuickCheck
     , (===)
     )
 
+testPendingRequest :: IO PendingRequest
+testPendingRequest = do
+    response <- newEmptyTMVarIO
+    activity <- newTVarIO 0
+    pure PendingRequest
+        { pendingResponse = response
+        , pendingActivity = activity
+        , pendingOnProgress = const (pure ())
+        }
+
 spec :: Spec
 spec = describe "Agent.MCP" do
     it "redacts configured environment values from Show" do
@@ -120,6 +145,30 @@ spec = describe "Agent.MCP" do
         rendered `shouldContain` "API_TOKEN"
         rendered `shouldContain` "<redacted>"
         rendered `shouldNotContain` "super-secret"
+
+    describe "request registry" do
+        it "allocates sequential ids while installing each waiter" do
+            first <- testPendingRequest
+            second <- testPendingRequest
+            let (afterFirst, firstId) =
+                    registerPending first emptyRequestRegistry
+                (afterSecond, secondId) =
+                    registerPending second afterFirst
+            firstId `shouldBe` 1
+            secondId `shouldBe` 2
+            afterSecond.requestRegistryNextId `shouldBe` 3
+            IntMap.keys afterSecond.requestRegistryPending
+                `shouldBe` [1, 2]
+            case IntMap.lookup firstId afterSecond.requestRegistryPending of
+                Nothing -> expectationFailure "first waiter was not registered"
+                Just registered ->
+                    registered.pendingResponse == first.pendingResponse
+                        `shouldBe` True
+            case IntMap.lookup secondId afterSecond.requestRegistryPending of
+                Nothing -> expectationFailure "second waiter was not registered"
+                Just registered ->
+                    registered.pendingResponse == second.pendingResponse
+                        `shouldBe` True
 
     describe "client transport" do
         it "stores only HTTP state for an HTTP client" $
@@ -425,6 +474,20 @@ spec = describe "Agent.MCP" do
                                     ]
                     other -> expectationFailure
                         ("unexpected skill registrations: " <> show other)
+
+    it "keeps discovered tools when optional Skills discovery fails" $
+        withBodyServer "agent-mcp-skills-warning.sh" skillsWarningServer \script -> do
+            fleet <- startMcpFleet [baseConfig "partial" script]
+            bracket (pure fleet) closeMcpFleet \_ -> do
+                map (.appToolName) (mcpFleetTools fleet)
+                    `shouldBe` ["partial__read", "partial__second_read"]
+                mcpFleetStatuses fleet `shouldReturn`
+                    [McpServerStatus "partial" McpReady 2]
+                fleet.mcpFleetWarnings `shouldSatisfy` \case
+                    [warning] ->
+                        "skills/list failed" `Text.isInfixOf` warning
+                            && "catalog unavailable" `Text.isInfixOf` warning
+                    _ -> False
 
     it "starts servers concurrently and preserves configured tool order" $
         withConcurrentFakeServer \script barrier -> do
@@ -885,6 +948,24 @@ spec = describe "Agent.MCP" do
                 countLogEntries callLog "call" `shouldReturn` 1
                 countLogEntries callLog "update" `shouldReturn` 0
                 readIORef elicited `shouldReturn` 0
+    it "treats task update responses and errors as best-effort acknowledgements" $
+        withBodyServer "agent-mcp-task-update.sh" taskUpdateServer \script -> do
+            let hooks = defaultMcpHostHooks
+                    { mcpHostElicit = pure $ Just \_ ->
+                        pure (McpElicitAccept (Just (raw "{\"answer\":\"yes\"}")))
+                    }
+                run mode =
+                    bracket
+                        (startMcpFleetWithProgressHooks hooks (const (pure ()))
+                            [ (baseConfig "task-update" script)
+                                { mcpServerArgs = [mode] }
+                            ])
+                        closeMcpFleet
+                        \fleet -> callFleetTool fleet "task-update__input_task" "{}"
+            accepted <- run "accept"
+            accepted.output `shouldBe` "task updated"
+            rejected <- run "reject"
+            rejected.output `shouldBe` "task updated"
 
     it "answers pings, extends timeouts on progress, refreshes changed tool lists, and cancels timeouts" $
         withCountingServer legacyEventsServer \script log -> do
@@ -1108,6 +1189,44 @@ spec = describe "Agent.MCP" do
                     `shouldReturn` Just ()
                 _ <- waitCatch acquiring
                 pure ()
+
+        it "cancels a startup interrupted while an obsolete fleet closes" do
+            supervisor <- newMcpSupervisor
+            obsoleteStarted <- newEmptyMVar
+            obsoleteCleanupStarted <- newEmptyMVar
+            obsoleteCleanupRelease <- newEmptyMVar
+            startupStarted <- newEmptyMVar
+            startupBlock <- newEmptyMVar
+            startupStopped <- newEmptyMVar
+            bracket (pure supervisor) closeMcpSupervisor \_ ->
+                (`finally` void (tryPutMVar obsoleteCleanupRelease ())) do
+                    oldLease <- acquireMcpFleet supervisor []
+                    spawnFleetWorker oldLease.mcpLeaseFleet $
+                        (putMVar obsoleteStarted () >> takeMVar startupBlock)
+                            `finally` do
+                                putMVar obsoleteCleanupStarted ()
+                                takeMVar obsoleteCleanupRelease
+                    takeMVar obsoleteStarted
+                    releaseMcpFleetLease oldLease
+                    let startReplacement _ =
+                            (putMVar startupStarted ()
+                                >> takeMVar startupBlock
+                                >> startMcpFleet [])
+                                `finally` putMVar startupStopped ()
+                        replacement =
+                            baseConfig "replacement" "/unused"
+                    withAsync
+                        (acquireMcpFleetWith
+                            supervisor
+                            False
+                            startReplacement
+                            [replacement])
+                        \acquiring -> do
+                            takeMVar startupStarted
+                            takeMVar obsoleteCleanupStarted
+                            cancel acquiring
+                            timeout 1000000 (takeMVar startupStopped)
+                                `shouldReturn` Just ()
 
         it "reconnects once and retries a meta-tool call after transport loss" $
             withCountingReconnectServer \script counter -> do
@@ -1357,17 +1476,7 @@ waitForConcurrentStarts barrier = go (300 :: Int)
             else threadDelay 10000 >> go (remaining - 1)
 
 withFakeServer :: (FilePath -> IO a) -> IO a
-withFakeServer action = do
-    temporary <- getTemporaryDirectory
-    bracket
-        (do
-            (path, handle) <- openTempFile temporary "agent-mcp-fake.sh"
-            LBS.hPutStr handle fakeServer
-            hClose handle
-            setFileMode path 0o700
-            pure path)
-        removeFile
-        action
+withFakeServer = withBodyServer "agent-mcp-fake.sh" fakeServer
 
 withPaginationCycleServer :: (FilePath -> IO a) -> IO a
 withPaginationCycleServer action = do
@@ -1384,12 +1493,20 @@ withPaginationCycleServer action = do
         action
 
 withSkillsFakeServer :: (FilePath -> IO a) -> IO a
-withSkillsFakeServer action = do
+withSkillsFakeServer =
+    withBodyServer "agent-mcp-skills.sh" skillsFakeServer
+
+withBodyServer
+    :: String
+    -> LBS.ByteString
+    -> (FilePath -> IO a)
+    -> IO a
+withBodyServer template body action = do
     temporary <- getTemporaryDirectory
     bracket
         (do
-            (path, handle) <- openTempFile temporary "agent-mcp-skills.sh"
-            LBS.hPutStr handle skillsFakeServer
+            (path, handle) <- openTempFile temporary template
+            LBS.hPutStr handle body
             hClose handle
             setFileMode path 0o700
             pure path)
@@ -1638,6 +1755,65 @@ paginationCycleServer =
     \    *'\"method\":\"notifications/initialized\"'*) ;;\n\
     \    *'\"method\":\"tools/list\"'*)\n\
     \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"tools\":[],\"nextCursor\":\"same\"}}'\n\
+    \      ;;\n\
+    \  esac\n\
+    \done\n"
+
+skillsWarningServer :: LBS.ByteString
+skillsWarningServer =
+    "#!/bin/sh\n\
+    \tool_pages=0\n\
+    \while IFS= read -r line; do\n\
+    \  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p')\n\
+    \  case \"$line\" in\n\
+    \    *'\"method\":\"server/discover\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"supportedVersions\":[\"2026-07-28\"],\"capabilities\":{\"tools\":{},\"extensions\":{\"io.modelcontextprotocol/skills\":{}}}}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"tools/list\"'*)\n\
+    \      tool_pages=$((tool_pages+1))\n\
+    \      if [ \"$tool_pages\" -eq 1 ]; then\n\
+    \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"tools\":[{\"name\":\"read\",\"description\":\"Read.\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":true}}],\"nextCursor\":\"next\"}}'\n\
+    \      else\n\
+    \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"tools\":[{\"name\":\"second_read\",\"description\":\"Read another page.\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":true}}]}}'\n\
+    \      fi\n\
+    \      ;;\n\
+    \    *'\"method\":\"skills/list\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"error\":{\"code\":-32000,\"message\":\"catalog unavailable\"}}'\n\
+    \      ;;\n\
+    \  esac\n\
+    \done\n"
+
+taskUpdateServer :: LBS.ByteString
+taskUpdateServer =
+    "#!/bin/sh\n\
+    \mode=\"$1\"\n\
+    \polls=0\n\
+    \while IFS= read -r line; do\n\
+    \  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p')\n\
+    \  case \"$line\" in\n\
+    \    *'\"method\":\"server/discover\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"supportedVersions\":[\"2026-07-28\"],\"capabilities\":{\"tools\":{}}}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"tools/list\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"tools\":[{\"name\":\"input_task\",\"description\":\"Task.\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":true}}]}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"tools/call\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"resultType\":\"task\",\"taskId\":\"input-1\",\"status\":\"working\",\"pollIntervalMs\":1}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"tasks/get\"'*)\n\
+    \      polls=$((polls+1))\n\
+    \      if [ \"$polls\" -eq 1 ]; then\n\
+    \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"taskId\":\"input-1\",\"status\":\"input_required\",\"pollIntervalMs\":1,\"inputRequests\":{\"answer\":{\"method\":\"elicitation/create\",\"params\":{\"message\":\"Continue?\"}}}}}'\n\
+    \      else\n\
+    \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"taskId\":\"input-1\",\"status\":\"completed\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"task updated\"}]}}}'\n\
+    \      fi\n\
+    \      ;;\n\
+    \    *'\"method\":\"tasks/update\"'*)\n\
+    \      if [ \"$mode\" = reject ]; then\n\
+    \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"error\":{\"code\":-32000,\"message\":\"input rejected\"}}'\n\
+    \      else\n\
+    \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"acknowledged\":true,\"ignoredPayload\":\"deliberate\"}}'\n\
+    \      fi\n\
     \      ;;\n\
     \  esac\n\
     \done\n"

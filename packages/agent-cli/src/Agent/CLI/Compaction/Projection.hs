@@ -2,6 +2,8 @@ module Agent.CLI.Compaction.Projection
     ( automaticCompactionHeadroom
     , compactedSnapshotThresholdError
     , hasFocus
+    , occupancyOnTurnFinished
+    , occupancyForSubmission
     , occupancySnapshot
     , projectRequestTokens
     , providerLabel
@@ -15,7 +17,8 @@ module Agent.CLI.Compaction.Projection
 import Agent.CLI.Compaction.Types
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
-    ( BackendResult(..)
+    ( BackendContinuation(..)
+    , BackendResult(..)
     , BackendSnapshot(..)
     , TokenUsage(..)
     , TurnInput
@@ -43,12 +46,62 @@ reportedContextTokens usage
 
 occupancySnapshot :: BackendResult -> Maybe OccupancySnapshot
 occupancySnapshot result
-    | Text.null result.backendOutput.responseId = Nothing
+    | Text.null output.responseId = Nothing
     | otherwise =
-        reportedContextTokens result.backendOutput.tokenUsage >>= \tokens ->
+        output.contextUsage >>= reportedContextTokens >>= \tokens ->
             Just
-                (reportedOccupancy tokens
-                    (length result.backendState.backendItems))
+                ((reportedOccupancy tokens
+                    (length state.backendItems))
+                    { occupancyCheckpoint =
+                        case state.backendContinuation of
+                            Nothing -> Nothing
+                            Just _ -> Just state
+                    })
+  where
+    state = result.backendState
+    output = result.backendOutput
+
+-- | Completion must not rebind a live process's measurement to a revision
+-- assigned by the host store: that revision may force a fresh process import.
+-- Preserve the middleware's provider checkpoint, but clear missing usage.
+occupancyOnTurnFinished
+    :: BackendSnapshot
+    -> TurnOutput
+    -> Maybe OccupancySnapshot
+    -> Maybe OccupancySnapshot
+occupancyOnTurnFinished state output cached = do
+    measured <- occupancySnapshot (BackendResult output state)
+    case cached of
+        Just existing | Just _ <- existing.occupancyCheckpoint ->
+            Just existing
+        _ -> Just measured
+
+-- | Discard measurements of a different live provider context before
+-- projecting a submission. In particular, a cleared Claude continuation
+-- means the host history will be imported into a fresh process, so the old
+-- process's potentially compacted context size cannot describe that prompt.
+occupancyForSubmission
+    :: BackendSnapshot
+    -> Maybe Text
+    -> Maybe OccupancySnapshot
+    -> Maybe OccupancySnapshot
+occupancyForSubmission state previous occupancy = do
+    snapshot <- occupancy
+    case snapshot.occupancyCheckpoint of
+        Nothing -> Just snapshot
+        Just checkpoint
+            | checkpoint /= state -> Nothing
+            | otherwise ->
+                case checkpoint.backendContinuation of
+                    Just continuation
+                        | continuation.continuationProvider == "anthropic.claude-code"
+                        , previous /= Just continuation.continuationToken ->
+                            Nothing
+                        | Just requested <- previous
+                        , requested /= continuation.continuationToken ->
+                            Nothing
+                        | otherwise -> Just snapshot
+                    Nothing -> Nothing
 
 -- | Project the next request from last occupancy when that snapshot still
 -- describes @history@. Provider-reported occupancy already includes
@@ -64,12 +117,12 @@ projectRequestTokens
 projectRequestTokens params occupancy history inputs =
     case occupancy of
         Just snapshot
-            | snapshot.occupancyLength == length history
+            | occupancyMatchesHistory history snapshot
             , snapshot.occupancyTokens > 0
             , snapshot.occupancyKind == ReportedOccupancy ->
                 snapshot.occupancyTokens + estimateItemsTokens pendingItems
         Just snapshot
-            | snapshot.occupancyLength == length history
+            | occupancyMatchesHistory history snapshot
             , snapshot.occupancyTokens > 0
             , snapshot.occupancyKind == EstimatedOccupancy
             , Nothing <- params ->

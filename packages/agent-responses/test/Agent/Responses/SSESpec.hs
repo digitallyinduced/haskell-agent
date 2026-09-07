@@ -252,7 +252,7 @@ genLifecycleEvent index = do
                 , "model" .= model
                 , "status" .= status
                 ]
-        response = either error id
+        response = either (error . Text.unpack) id
             (Codec.decodeResponse
                 (LBS.toStrict (Aeson.encode responseValue)))
     elements

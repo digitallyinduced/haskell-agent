@@ -25,6 +25,7 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , ToolExecutionPolicy(..)
     , jsonTool
+    , withToolHumanInputWait
     )
 import Control.Concurrent.MVar
     ( MVar
@@ -152,10 +153,11 @@ runAskSecret store args
         pure (Left "Secret prompt must not be empty.")
     | otherwise = do
         prompted <- tryAny $
-            store.secretHooks.promptSecret SecretPrompt
-            { secretPromptMessage = args.prompt
-            , secretPromptPurpose = args.purpose
-            }
+            withToolHumanInputWait store.secretToolEnv $
+                store.secretHooks.promptSecret SecretPrompt
+                    { secretPromptMessage = args.prompt
+                    , secretPromptPurpose = args.purpose
+                    }
         case prompted of
             Left _ -> pure (Left "Secure secret entry failed.")
             Right (Left err) -> pure (Left err)

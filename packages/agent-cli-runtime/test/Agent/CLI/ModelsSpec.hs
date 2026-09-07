@@ -21,7 +21,6 @@ import Agent.Provider (Provider(..))
 import Control.Exception.Safe (bracket)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBS8
-import Data.Either (isLeft)
 import Data.List (find, nub)
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Text as Text
@@ -40,26 +39,28 @@ spec = do
     describe "modelsForProvider" do
         it "puts the provider default first" do
             firstId (modelsForProvider catalog XAIProvider)
-                `shouldBe` defaultModelFor catalog XAIProvider
+                `shouldBe` Just (defaultModelFor catalog XAIProvider)
             firstId (modelsForProvider catalog OpenAIProvider)
-                `shouldBe` defaultModelFor catalog OpenAIProvider
+                `shouldBe` Just (defaultModelFor catalog OpenAIProvider)
             firstId (modelsForProvider catalog OpenRouterProvider)
-                `shouldBe` defaultModelFor catalog OpenRouterProvider
+                `shouldBe` Just (defaultModelFor catalog OpenRouterProvider)
             firstId (modelsForProvider catalog GeminiProvider)
-                `shouldBe` defaultModelFor catalog GeminiProvider
+                `shouldBe` Just (defaultModelFor catalog GeminiProvider)
             firstId (modelsForProvider catalog ClaudeCodeProvider)
-                `shouldBe` defaultModelFor catalog ClaudeCodeProvider
+                `shouldBe` Just (defaultModelFor catalog ClaudeCodeProvider)
 
         it "ships the configured frontier models for each provider" do
-            modelIdsFor OpenAIProvider `shouldContain` ["gpt-5.6-sol"]
+            modelIdsFor OpenAIProvider
+                `shouldContain` ["gpt-5.6-sol", "gpt-6-astra"]
             modelIdsFor XAIProvider `shouldContain` ["grok-4.6"]
             modelIdsFor OpenRouterProvider `shouldContain` ["stealth/ox-alpha"]
             modelIdsFor GeminiProvider `shouldContain` ["gemini-3.7-flash"]
 
-        it "ships the GPT-5.6 series and each other provider frontier model" do
+        it "ships the OpenAI frontier models and each other provider frontier model" do
             modelIdsFor OpenAIProvider
                 `shouldBe`
                     [ "gpt-5.6-sol"
+                    , "gpt-6-astra"
                     , "gpt-5.6-terra"
                     , "gpt-5.6-luna"
                     ]
@@ -216,6 +217,23 @@ spec = do
                 options
                 `shouldBe` True
 
+        it "uses Grok capabilities for the gateway Grok model" do
+            gatewayModelOptions catalog OpenAIProvider ["grok-4.6"]
+                `shouldBe`
+                    [ ModelOption
+                        { modelTarget =
+                            ModelTarget
+                                OpenAIProvider
+                                organizationGatewayConnectionId
+                                "grok-4.6"
+                                "grok-4.6"
+                                GrokBuildDialect
+                        , modelContextWindow = Just 500_000
+                        , modelLabel = Nothing
+                        , modelFallbackPriority = Nothing
+                        }
+                    ]
+
         it "rejects a persisted gateway route after disconnection" do
             let resolve deferToGateway =
                     resolveSavedModelTarget
@@ -241,7 +259,7 @@ spec = do
                         "saved model organization-gateway/company-private requires an active organization gateway"
 
         describe "validateResumedGatewayBoundary" do
-            it "allows sessions that stay on their original routing boundary" do
+            it "allows resume across direct and gateway routing modes" do
                 validateResumedGatewayBoundary
                     Nothing
                     "local-openai"
@@ -252,35 +270,31 @@ spec = do
                     organizationGatewayConnectionId
                     (Just "gateway-a")
                     `shouldBe` Right ()
-
-            it "rejects local and legacy sessions entering a gateway" do
                 validateResumedGatewayBoundary
                     (Just "gateway-a")
                     "local-openai"
                     Nothing
-                    `shouldSatisfy` isLeft
+                    `shouldBe` Right ()
                 validateResumedGatewayBoundary
                     (Just "gateway-a")
                     organizationGatewayConnectionId
                     Nothing
-                    `shouldSatisfy` isLeft
-
-            it "rejects sessions crossing gateway credentials or disconnecting" do
+                    `shouldBe` Right ()
                 validateResumedGatewayBoundary
                     (Just "gateway-b")
                     organizationGatewayConnectionId
                     (Just "gateway-a")
-                    `shouldSatisfy` isLeft
+                    `shouldBe` Right ()
                 validateResumedGatewayBoundary
                     Nothing
                     organizationGatewayConnectionId
                     (Just "gateway-a")
-                    `shouldSatisfy` isLeft
+                    `shouldBe` Right ()
                 validateResumedGatewayBoundary
                     Nothing
                     "local-openai"
                     (Just "gateway-a")
-                    `shouldSatisfy` isLeft
+                    `shouldBe` Right ()
 
         it "loads only valid gateway-scoped alias metadata" do
             defaults <- readPackagedDefaults
@@ -501,9 +515,7 @@ spec = do
 
         it "does not duplicate a known current model" do
             let base = modelsForProvider catalog XAIProvider
-                def = fromMaybe
-                    (error "shipped xAI default is missing")
-                    (defaultModelFor catalog XAIProvider)
+                def = defaultModelFor catalog XAIProvider
                 opts =
                     ensureCurrentInList
                         "xai"

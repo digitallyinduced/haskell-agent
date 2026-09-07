@@ -23,6 +23,10 @@ module Agent.Responses.Types
     , parseResponseItemType
     , responseItemTypeText
     , ResponseMessage(..)
+    , localCompactionSummaryContentItemKind
+    , responseMessageHasContentItemKind
+    , compactionCheckpointOriginItem
+    , responseItemCompactionCheckpointOrigin
     , ResponseAgentMessage(..)
     , InternalChatMetadata(..)
     , AdditionalToolsItem(..)

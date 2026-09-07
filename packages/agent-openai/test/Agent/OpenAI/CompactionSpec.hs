@@ -198,6 +198,29 @@ spec = do
             trimmed `shouldSatisfy` elem (checkpoint "compaction")
             trimmed `shouldSatisfy` elem typedContextCheckpoint
 
+        it "keeps checkpoint provenance adjacent while trimming" do
+            let params = defaultResponseCreateParams
+                opaqueCheckpoint =
+                    CompactionItemValue CompactionItem
+                        { itemId = Just "xai"
+                        , encryptedContent = Just "opaque"
+                        }
+                origin = compactionCheckpointOriginItem "xai"
+                trimmed =
+                    trimResponseHistoryToFit
+                        20
+                        params
+                        []
+                        [ user (Text.replicate 5_000 "old")
+                        , opaqueCheckpoint
+                        , origin
+                        , user (Text.replicate 5_000 "new")
+                        ]
+            dropWhile (/= opaqueCheckpoint) trimmed
+                `shouldSatisfy` \case
+                    _ : next : _ -> next == origin
+                    _ -> False
+
         it "rewrites the newest boundary after dropping older oversized items" do
             let history =
                     [ user (Text.replicate 20_000 "old")
@@ -231,6 +254,7 @@ spec = do
                             ]
                         ]))
                     , strict = Nothing
+                    , async = Nothing
                     }
                 params = (defaultResponseCreateParams :: ResponseCreateParams)
                     { tools = Just [tool]
@@ -256,6 +280,7 @@ spec = do
                             "x"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 trimmed =
                     trimRemoteCompactionRequestToFit
@@ -288,6 +313,7 @@ spec = do
                             (remoteCompactionMaxStringLength + 1)
                             "x"
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 trimmed =
                     trimRemoteCompactionRequestToFit
@@ -318,6 +344,7 @@ spec = do
                     , arguments
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 trimmed =
                     trimResponseHistoryToFit
@@ -356,6 +383,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 history =
                     [ user "old"
@@ -604,13 +632,15 @@ spec = do
 
         it "rewrites a trailing oversized tool output to fit the request window" do
             let oversized = FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
                     , provider = Nothing
                     , output = raw (Aeson.String (Text.replicate 10_000 "x"))
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -628,13 +658,15 @@ spec = do
         it "truncates oversized messages without rewriting a tiny trailing output" do
             let huge = user (Text.replicate 20_000 "x")
                 tiny = FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
                     , provider = Nothing
                     , output = raw (Aeson.String "ok")
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -658,13 +690,15 @@ spec = do
         it "revisits old messages after rewriting later oversized outputs" do
             let huge = user (Text.replicate 20_000 "x")
                 output = FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
                     , provider = Nothing
                     , output = raw (Aeson.String (Text.replicate 20_000 "y"))
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -694,12 +728,14 @@ spec = do
                         ]
                     }
                 recent = FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
                     , output = Aeson.String "ok"
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -750,14 +786,17 @@ spec = do
                     , arguments = Text.replicate 20_000 "x"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
+                    , async = Nothing
                     }
                 output = FunctionCallOutputItem FunctionCallOutput
-                    { itemId = Nothing
+                    { localOutcome = Nothing
+                    , itemId = Nothing
                     , callId = ""
                     , name = Nothing
                     , namespace = Nothing
                     , output = Aeson.String "ok"
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 recent = user "recent"
                 trimmed =
@@ -1043,12 +1082,13 @@ spec = do
 
     describe "Codex model metadata" do
         it "derives the 90% auto-compaction limit for curated 272k models" do
-            codexModelMetadata "gpt-5.6-luna"
+            codexModelMetadata "gpt-6-astra"
                 `shouldBe` Just CodexModelMetadata
                     { modelContextWindow = 272_000
                     , modelEffectiveContextWindow = 258_400
                     , modelAutoCompactTokenLimit = 244_800
                     }
+            isCodexResponsesLiteModel "gpt-6-astra" `shouldBe` True
             codexAutoCompactTokenLimitFor (Just "gpt-5.6-sol")
                 `shouldBe` 244_800
 
@@ -1195,6 +1235,10 @@ spec = do
                 `shouldBe` True
             hasCompactionCheckpoint [assistant "ordinary response"]
                 `shouldBe` False
+            hasCompactionCheckpoint
+                [assistant
+                    "Compacted conversation summary:\nordinary response"]
+                `shouldBe` False
 
     describe "isCompactSessionTurn" do
         it "recognizes compact markers" do
@@ -1272,13 +1316,15 @@ spec = do
         , passthrough = Nothing
         }
     toolOutput output = FunctionCallOutputItem FunctionCallOutput
-        { itemId = Nothing
+        { localOutcome = Nothing
+        , itemId = Nothing
         , callId = "call-image"
         , name = Nothing
         , namespace = Nothing
         , provider = Nothing
         , output
         , status = Just ItemCompleted
+        , async = Nothing
         }
     assistant text = MessageItem ResponseMessage
         { messageId = Nothing
@@ -1319,7 +1365,7 @@ spec = do
             , "output" .= output
             ] of
             Right response -> response
-            Left err -> error err
+            Left err -> error (Text.unpack err)
     agentMessage :: Text.Text -> Text.Text -> Text.Text -> ResponseItem
     agentMessage author recipient text =
         AgentMessageItem ResponseAgentMessage

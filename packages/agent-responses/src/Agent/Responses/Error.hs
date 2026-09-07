@@ -33,7 +33,7 @@ data ProviderErrorPayload = ProviderErrorPayload
     , payloadRetryAfter :: !(Maybe Int)
     }
 
-decodeOpenAIError :: Text -> Either String ApiError
+decodeOpenAIError :: Text -> Either Text ApiError
 decodeOpenAIError body = do
     payload <- decodeProviderErrorPayload body
     pure $ mkOpenAIError
@@ -120,10 +120,10 @@ nonGenericErrorType value
     | Text.toLower value == "error" = Nothing
     | otherwise = Just value
 
-decodeProviderErrorPayload :: Text -> Either String ProviderErrorPayload
+decodeProviderErrorPayload :: Text -> Either Text ProviderErrorPayload
 decodeProviderErrorPayload body =
     either
-        (Left . Text.unpack . jsonErrorMessage)
+        (Left . jsonErrorMessage)
         Right
         (decodeText providerErrorPayloadDecoder body)
 

@@ -1,8 +1,11 @@
 module Agent.Gemini.RequestSpec (spec) where
 
+import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Gemini.Request
 import Agent.Responses.Types
 import Data.Aeson (Value(..), object, (.=))
+import qualified Data.Aeson as Aeson
+import Agent.Json (rawJsonFromEncoding)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Set as Set
@@ -11,6 +14,76 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Gemini request projection" do
+    it "projects Claude tool-result images as ordered native parts, not JSON text" do
+        let parts =
+                [ InputTextPart "before" Nothing
+                , InputImagePart Nothing Nothing
+                    (Just "data:image/png;base64,cG5nLWJ5dGVz") Nothing
+                , InputTextPart "after" Nothing
+                ]
+            output = FunctionCallOutputItem FunctionCallOutput
+                { localOutcome = Nothing, itemId = Nothing
+                , callId = "claude-image-read", name = Just "Read"
+                , namespace = Nothing, provider = Just "claude-code"
+                , output = rawJsonFromEncoding (Aeson.toEncoding parts)
+                , status = Just ItemCompleted, async = Nothing
+                }
+            params :: ResponseCreateParams
+            params = defaultResponseCreateParams
+                { input = Just (ResponseInputItems [output]) }
+        fmap (.requestBody) (buildRequest "gemini-test" params)
+            `shouldBe` Right (object
+                [ "contents" .= [object
+                    [ "role" .= ("user" :: Text)
+                    , "parts" .=
+                        [ object ["functionResponse" .= object
+                            [ "id" .= ("claude-image-read" :: Text)
+                            , "name" .= ("Read" :: Text)
+                            , "response" .= object
+                                ["result" .= ("Tool result content follows." :: Text)]
+                            ]]
+                        , object ["text" .= ("before" :: Text)]
+                        , object ["inlineData" .= object
+                            [ "mimeType" .= ("image/png" :: Text)
+                            , "data" .= ("cG5nLWJ5dGVz" :: Text)
+                            ]]
+                        , object ["text" .= ("after" :: Text)]
+                        ]
+                    ]]
+                ])
+
+    it "omits malformed image-only tool results instead of exposing raw image JSON" do
+        let malformed = [object
+                [ "type" .= ("input_image" :: Text)
+                , "image_url" .= object
+                    ["url" .= ("data:image/png;base64,cG5nLWJ5dGVz" :: Text)]
+                ]]
+            output = FunctionCallOutputItem FunctionCallOutput
+                { localOutcome = Nothing, itemId = Nothing
+                , callId = "malformed-image", name = Just "Read"
+                , namespace = Nothing, provider = Just "claude-code"
+                , output = rawJsonFromEncoding (Aeson.toEncoding malformed)
+                , status = Just ItemCompleted, async = Nothing
+                }
+            params :: ResponseCreateParams
+            params = defaultResponseCreateParams
+                { input = Just (ResponseInputItems [output]) }
+        fmap (.requestBody) (buildRequest "gemini-test" params)
+            `shouldBe` Right (object
+                [ "contents" .= [object
+                    [ "role" .= ("user" :: Text)
+                    , "parts" .=
+                        [ object ["functionResponse" .= object
+                            [ "id" .= ("malformed-image" :: Text)
+                            , "name" .= ("Read" :: Text)
+                            , "response" .= object
+                                ["result" .= ("Tool result content follows." :: Text)]
+                            ]]
+                        , object ["text" .= ("[Unsupported tool result content omitted]" :: Text)]
+                        ]
+                    ]]
+                ])
+
     it "projects instructions, user text, and model normalization" do
         let params = defaultResponseCreateParams
                 { model = Just " models/gemini-test "
@@ -36,6 +109,7 @@ spec = describe "Gemini request projection" do
                 , description = Just "Look up a value"
                 , parameters = Nothing
                 , strict = Nothing
+                , async = Nothing
                 }
             params :: ResponseCreateParams
             params = defaultResponseCreateParams
@@ -78,23 +152,56 @@ spec = describe "Gemini request projection" do
             `shouldBe`
                 Right (object ["contents" .= ([] :: [Value])])
 
+    it "projects valid JSON arguments for ordinary function calls" do
+        let params :: ResponseCreateParams
+            params = withInput
+                (Just (ResponseInputItems
+                    [functionCall "lookup" "{\"query\":\"weather\"}"]))
+                defaultResponseCreateParams
+        fmap (.requestBody) (buildRequest "gemini-test" params)
+            `shouldBe`
+                Right
+                    (object
+                        [ "contents" .=
+                            [ object
+                                [ "role" .= ("model" :: Text)
+                                , "parts" .=
+                                    [ object
+                                        [ "functionCall" .= object
+                                            [ "id" .= ("call-1" :: Text)
+                                            , "name" .= ("lookup" :: Text)
+                                            , "args" .= object
+                                                [ "query" .= ("weather" :: Text)
+                                                ]
+                                            ]
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ])
+
+    it "rejects malformed JSON arguments for ordinary function calls" do
+        let params :: ResponseCreateParams
+            params = withInput
+                (Just (ResponseInputItems
+                    [functionCall "lookup" "{not json"]))
+                defaultResponseCreateParams
+        buildRequest "gemini-test" params
+            `shouldBe`
+                Left
+                    (ProviderError InvalidRequestError
+                        "Gemini function call `lookup` arguments must be valid JSON"
+                        Nothing)
+
     it "adapts freeform custom tools and preserves raw replay input" do
         let patch = "*** Begin Patch\n*** End Patch"
             custom = CustomToolValue CustomTool
                 { name = "apply_patch"
                 , description = Just "Apply a patch."
                 , format = Nothing
+                , async = Nothing
                 }
-            call = FunctionCallItem FunctionCall
-                { itemId = Just "item-1"
-                , callId = "call-1"
-                , name = "apply_patch"
-                , namespace = Nothing
-                , provider = Just "gemini"
-                , arguments = patch
-                , encryptedFunctionArgs = Nothing
-                , status = Just ItemCompleted
-                }
+            call = functionCall "apply_patch" patch
             params = defaultResponseCreateParams
                 { tools = Just [custom]
                 , input = Just (ResponseInputItems [call])
@@ -150,6 +257,43 @@ spec = describe "Gemini request projection" do
                         ]
                     ]
 
+    it "preserves custom replay input when tools are disabled" do
+        let patch = "*** Begin Patch\n*** End Patch"
+            custom = CustomToolValue CustomTool
+                { name = "apply_patch"
+                , description = Just "Apply a patch."
+                , format = Nothing
+                , async = Nothing
+                }
+            params = defaultResponseCreateParams
+                { tools = Just [custom]
+                , toolChoice = Just (ToolChoiceMode ToolChoiceNone)
+                , input = Just
+                    (ResponseInputItems [functionCall "apply_patch" patch])
+                }
+        case buildRequest "gemini-test" params of
+            Left err -> expectationFailure
+                ("unexpected request error: " <> show err)
+            Right request -> do
+                request.requestCustomToolNames `shouldBe` Set.empty
+                request.requestBody `shouldBe` object
+                    [ "contents" .=
+                        [ object
+                            [ "role" .= ("model" :: Text)
+                            , "parts" .=
+                                [ object
+                                    [ "functionCall" .= object
+                                        [ "id" .= ("call-1" :: Text)
+                                        , "name" .= ("apply_patch" :: Text)
+                                        , "args" .= object
+                                            ["input" .= (patch :: Text)]
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ]
+                    ]
+
     it "maps disabled reasoning to the model's minimum thinking level" do
         let params :: ResponseCreateParams
             params = withReasoning
@@ -189,10 +333,24 @@ spec = describe "Gemini request projection" do
         , content = MessageContentText text, status = Nothing
         , phase = Nothing, passthrough = Nothing
         }
+    functionCall callName callArguments = FunctionCallItem FunctionCall
+        { itemId = Just "item-1"
+        , callId = "call-1"
+        , name = callName
+        , namespace = Nothing
+        , provider = Just "gemini"
+        , arguments = callArguments
+        , encryptedFunctionArgs = Nothing
+        , status = Just ItemCompleted
+        , async = Nothing
+        }
     member key objectValue = KeyMap.member (Key.fromText key) objectValue
 
     withTools value ResponseCreateParams{..} =
         ResponseCreateParams { tools = value, .. }
+
+    withInput value ResponseCreateParams{..} =
+        ResponseCreateParams { input = value, .. }
 
     withToolChoice value ResponseCreateParams{..} =
         ResponseCreateParams { toolChoice = value, .. }

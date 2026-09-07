@@ -8,6 +8,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import qualified System.Directory as Directory
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode(..))
 import qualified System.FilePath as FilePath
 import System.OsPath (OsPath, (</>))
@@ -92,6 +93,76 @@ spec = describe "Agent.CLI.GitDiff" do
             diff `shouldSatisfy` (not . Text.elem '\BEL')
             diff `shouldSatisfy` (not . Text.elem '\r')
             diff `shouldSatisfy` Text.isInfixOf "␛]52;c;ZXZpbA==␇"
+
+    it "finishes both inspections and prefers the tracked failure" $
+        withFakeGit
+            [ "rev-parse) printf 'true\\n';;"
+            , "config) exit 1;;"
+            , "diff) printf tracked >&2; exit 2;;"
+            , "ls-files) : > listed; printf untracked >&2; exit 2;;"
+            ] \repo -> do
+                result <- getGitDiff repo
+                result `shouldSatisfy` isFailureContaining "tracked"
+                result `shouldSatisfy` (not . isFailureContaining "untracked")
+                Directory.doesFileExist
+                    (unsafeToFilePath (repo </> fromText "listed"))
+                    `shouldReturn` True
+
+    it "finishes all untracked diffs and returns the first failure" $
+        withFakeGit
+            [ "rev-parse) printf 'true\\n';;"
+            , "config) exit 1;;"
+            , "ls-files) printf 'first\\000second\\000';;"
+            , "diff)"
+            , "  case \"$*\" in"
+            , "    *--no-index*)"
+            , "      for path do :; done"
+            , "      printf '%s\\n' \"$path\" >> inspected"
+            , "      printf '%s failed' \"$path\" >&2; exit 2;;"
+            , "    *) exit 0;;"
+            , "  esac;;"
+            ] \repo -> do
+                getGitDiff repo >>= (`shouldSatisfy` isFailureContaining "first failed")
+                readFile (unsafeToFilePath (repo </> fromText "inspected"))
+                    `shouldReturn` "first\nsecond\n"
+
+    it "includes both staged and unstaged changes in an unborn repository" $
+        withTempDir "agent-git-diff-unborn-both-" \repo -> do
+            git repo ["init"]
+            writeUtf8 (repo </> fromText "first") "staged\n"
+            git repo ["add", "first"]
+            writeUtf8 (repo </> fromText "first") "unstaged\n"
+            diff <- expectDiff =<< getGitDiff repo
+            diff `shouldSatisfy` Text.isInfixOf "+staged"
+            diff `shouldSatisfy` Text.isInfixOf "-staged"
+            diff `shouldSatisfy` Text.isInfixOf "+unstaged"
+
+isFailureContaining :: Text -> Either Text a -> Bool
+isFailureContaining expected = \case
+    Left err -> expected `Text.isInfixOf` err
+    Right _ -> False
+
+-- The fixture uses only shell builtins and restores PATH before cleanup.
+withFakeGit :: [String] -> (OsPath -> IO a) -> IO a
+withFakeGit cases action =
+    withTempDir "agent-git-diff-fake-" \repo -> do
+        let executable = unsafeToFilePath (repo </> fromText "git")
+        writeFile executable $ unlines
+            ( [ "#!/bin/sh"
+              , "while [ \"$1\" = -c ]; do shift 2; done"
+              , "command=$1; shift"
+              , "case \"$command\" in"
+              ]
+                <> cases
+                <> ["*) exit 99;;", "esac"]
+            )
+        setFileMode executable 0o700
+        bracket
+            (lookupEnv "PATH")
+            (maybe (unsetEnv "PATH") (setEnv "PATH"))
+            \_ -> do
+                setEnv "PATH" (unsafeToFilePath repo)
+                action repo
 
 expectDiff :: Either Text GitDiffResult -> IO Text
 expectDiff = \case

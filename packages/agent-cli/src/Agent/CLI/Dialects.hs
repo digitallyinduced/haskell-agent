@@ -59,7 +59,12 @@ import Agent.Tools.Secret
     , newSecretStore
     )
 import Agent.Tools.ShowImage (ImageDisplayHooks, showImageTool)
-import Agent.Tools.Types (AppTool(..), ToolEnv(..))
+import Agent.Tools.Types
+    ( AppTool(..)
+    , AppToolGroup(..)
+    , ToolEnv(..)
+    , appToolsFromGroups
+    )
 import Control.Exception.Safe (finally, onException)
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
@@ -77,6 +82,7 @@ sanitizeTaskName =
 
 data CodingTools = CodingTools
     { codingAppTools :: ![AppTool]
+    , codingAppToolGroups :: ![AppToolGroup]
     , codingPlanMode :: !PlanModeEnv
     , codingTaskPlan :: !(Maybe TaskPlanEnv)
     , codingSuspendGhci :: !(IO ())
@@ -143,16 +149,19 @@ codingToolsForWithTypes
                 _ -> Nothing
         secretTools = maybe [] (pure . askSecretTool) secretStore
         imageTools = maybe [] (pure . showImageTool env) imageHooks
-        finish tools includeArtifacts plan currentTaskPlan suspendGhci resetSessionTemp
+        finish toolGroups includeArtifacts plan currentTaskPlan suspendGhci resetSessionTemp
                 close agentTypes grokRuntime =
-            CodingTools
-                { codingAppTools =
-                    tools
-                        <> (if includeArtifacts
-                            then artifactTools env analysisSpawner
-                            else [])
-                        <> secretTools
-                        <> imageTools
+            let groups =
+                    toolGroups
+                        <> [ ExecutionToolGroup
+                                (if includeArtifacts
+                                    then artifactTools env analysisSpawner
+                                    else [])
+                           , HostToolGroup (secretTools <> imageTools)
+                           ]
+            in CodingTools
+                { codingAppTools = appToolsFromGroups groups
+                , codingAppToolGroups = groups
                 , codingPlanMode = plan
                 , codingTaskPlan = currentTaskPlan
                 , codingSuspendGhci = suspendGhci
@@ -170,7 +179,7 @@ codingToolsForWithTypes
                         env planHooks current multi
             pure $
                 finish
-                    coding.codexAppTools
+                    coding.codexAppToolGroups
                     True
                     coding.codexPlanMode
                     (Just coding.codexTaskPlan)
@@ -183,7 +192,7 @@ codingToolsForWithTypes
             coding <- newGrokCodingTools env planHooks multi typesRef
             pure $
                 finish
-                    coding.grokAppTools
+                    coding.grokAppToolGroups
                     True
                     coding.grokPlanMode
                     taskPlan
@@ -196,7 +205,7 @@ codingToolsForWithTypes
             plan <- newPlanModeEnv env.toolCwd planHooks
             pure $
                 finish
-                    [askUserQuestionTool plan]
+                    [HostToolGroup [askUserQuestionTool plan]]
                     False
                     plan
                     taskPlan

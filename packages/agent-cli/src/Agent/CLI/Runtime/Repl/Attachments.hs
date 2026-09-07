@@ -1,6 +1,7 @@
 -- | Clipboard paste and pending-attachment commands.
 module Agent.CLI.Runtime.Repl.Attachments
     ( handleAttachmentAction
+    , ClipboardInput(..)
     , handleClipboardInput
     ) where
 
@@ -8,10 +9,8 @@ import Agent.CLI.Clipboard
     ( formatImageSize, loadImagesFromPastedText, nonEmptyClipboardImages,
       readClipboardImagesForPaste, readClipboardImagesImageFirst )
 import Agent.CLI.Command
-    ( ReplAction(ReplPaste, ReplShowAttachments, ReplClearAttachments,
+    ( AttachmentAction(ReplPaste, ReplShowAttachments, ReplClearAttachments,
                  ReplRemoveAttachment) )
-import Agent.CLI.Input
-    ( ReplLine(ReplClipboardPaste, ReplClipboardPasteOrText) )
 import Agent.CLI.ProviderTransition ( TurnResult )
 import Agent.CLI.Render ( resetRenderPrintedText )
 import Agent.CLI.Runtime.Types ( RunResult )
@@ -21,6 +20,7 @@ import Agent.CLI.SessionState (removeImageAttachmentAt)
 import Agent.CLI.Session.History
     ( modifyLiveAttachments, readLiveAttachments )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
+import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Style ( glyphOk, glyphSession, roleError, roleMuted )
 import Agent.CLI.TUI.App
     ( emitUiEvent, setFullscreenImagePreviews )
@@ -41,21 +41,27 @@ import qualified Data.ByteString as BS ( length )
 import qualified Data.Text as Text ( intercalate, null )
 import qualified Data.Text.IO as Text ( hPutStrLn, putStrLn )
 
+-- | Clipboard operations after the REPL input has been classified.
+data ClipboardInput
+    = ClipboardPaste !Text !(Maybe [ImageAttachment])
+    | ClipboardPasteOrText !Text !Text !Text
+
 handleClipboardInput
     :: SessionEnv
     -> (Text -> IO RunResult)
     -> Bool
-    -> ReplLine
+    -> ClipboardInput
     -> IO RunResult
 handleClipboardInput
         SessionEnv
-            { sessionConversation = conversationRef
+            { sessionState = RuntimeState.SessionState
+                { stateConversation = conversationRef }
             , sessionPreviewId = previewIdRef
             , sessionFullscreen = fullscreen
             }
         continueWith
         stdoutColor = \case
-    ReplClipboardPaste keptDraft clipboardPasteImages -> do
+    ClipboardPaste keptDraft clipboardPasteImages -> do
         case clipboardPasteImages of
             Just images@(_:_) -> do
                 message <- queueAttachedImages
@@ -88,7 +94,7 @@ handleClipboardInput
                                     (roleMuted stdoutColor
                                         (glyphOk <> message))
         continueWith keptDraft
-    ReplClipboardPasteOrText keptDraft pasted pastedDraft -> do
+    ClipboardPasteOrText keptDraft pasted pastedDraft -> do
         pastedImages <- loadImagesFromPastedText pasted
         imagesResult <- case pastedImages of
             Just images@(_:_) -> pure (Just images)
@@ -113,7 +119,6 @@ handleClipboardInput
             _ -> do
                 fullscreenEvent (UiSetNotice Nothing)
                 continueWith pastedDraft
-    _ -> error "handleClipboardInput: unsupported input"
   where
     fullscreenEvent event = case fullscreen of
         Nothing -> pure ()
@@ -133,12 +138,13 @@ handleAttachmentAction
     :: SessionEnv
     -> (Bool -> TurnResult -> IO RunResult)
     -> IO RunResult
-    -> ReplAction
+    -> AttachmentAction
     -> IO RunResult
 handleAttachmentAction
         env@SessionEnv
             { sessionRender = render
-            , sessionConversation = conversationRef
+            , sessionState = RuntimeState.SessionState
+                { stateConversation = conversationRef }
             , sessionPreviewId = previewIdRef
             , sessionFullscreen = fullscreen
             }
@@ -243,7 +249,6 @@ handleAttachmentAction
             Text.putStrLn
                 (roleMuted color (glyphOk <> message))
         continue
-    _ -> error "handleAttachmentAction: unsupported action"
   where
     fullscreenEvent event = case fullscreen of
         Nothing -> pure ()

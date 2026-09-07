@@ -1,19 +1,34 @@
 module Main (main) where
 
+import qualified Agent.CLI.SessionActivitySpec as SessionActivitySpec
+import qualified Agent.CLI.SessionRequestSpec as SessionRequestSpec
+import qualified Agent.CLI.SessionThreadsSpec as SessionThreadsSpec
 import Agent.CLI.Session.TitlePolicy (titleRefreshIndex)
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
 import qualified Agent.CLI.EnvironmentSpec as EnvironmentSpec
 import qualified Agent.CLI.ErrorSpec as ErrorSpec
+import qualified Agent.CLI.GatewayBoundarySpec as GatewayBoundarySpec
 import qualified Agent.CLI.GatewayBridgeSpec as GatewayBridgeSpec
 import qualified Agent.CLI.GatewayClientSpec as GatewayClientSpec
 import qualified Agent.CLI.ManagedTurnSpec as ManagedTurnSpec
 import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
+import qualified Agent.CLI.NativeProcessSpec as NativeProcessSpec
 import qualified Agent.CLI.SessionSpec as SessionSpec
+import qualified Agent.Runtime.RequestSpec as RuntimeRequestSpec
+import qualified Agent.Runtime.StartupPolicySpec as StartupPolicySpec
+import qualified Agent.Runtime.ConversationStoreSpec as ConversationStoreSpec
+import qualified Agent.Runtime.ConversationSessionSpec as ConversationSessionSpec
+import qualified Agent.Runtime.TurnEngineSpec as TurnEngineSpec
+import qualified Agent.Runtime.TurnExecutionSpec as TurnExecutionSpec
+import qualified Agent.Runtime.TurnStateSpec as TurnStateSpec
 import Test.Hspec
 
 main :: IO ()
 main = hspec do
+    SessionActivitySpec.spec
+    SessionRequestSpec.spec
+    SessionThreadsSpec.spec
     describe "titleRefreshIndex" do
         it "advances only at the persisted title milestones" do
             map titleRefreshIndex [0, 1, 2, 3, 5, 6, 10]
@@ -21,9 +36,18 @@ main = hspec do
     CredentialStoreSpec.spec
     EnvironmentSpec.spec
     ErrorSpec.spec
+    GatewayBoundarySpec.spec
     GatewayBridgeSpec.spec
     GatewayClientSpec.spec
     ManagedTurnSpec.spec
     ModelConfigSpec.spec
     ModelsSpec.spec
+    NativeProcessSpec.spec
     SessionSpec.spec
+    RuntimeRequestSpec.spec
+    StartupPolicySpec.spec
+    ConversationStoreSpec.spec
+    ConversationSessionSpec.spec
+    TurnEngineSpec.spec
+    TurnExecutionSpec.spec
+    TurnStateSpec.spec

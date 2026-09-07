@@ -112,6 +112,7 @@ spec = describe "Gemini response assembly" do
                 , arguments = "*** Begin Patch"
                 , encryptedFunctionArgs = Nothing
                 , status = Just ItemCompleted
+                , async = Nothing
                 }
             ]
   where

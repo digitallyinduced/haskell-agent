@@ -84,13 +84,13 @@ markStartupStage startup label = do
     recordStartupTiming startup.startupStartedAt startup.startupTimings label
     setStartupNotice startup.startupFullscreen label
 
-startupDie :: StartupRuntime -> String -> IO a
+startupDie :: StartupRuntime -> Text -> IO a
 startupDie startup message =
     case startup.startupFullscreen of
         Nothing
             | startup.startupBackground ->
                 throwIO (StartupFailure message)
-            | otherwise -> die message
+            | otherwise -> die (Text.unpack message)
         Just _ -> throwIO (StartupFailure message)
 
 loadStartupAuth
@@ -129,10 +129,10 @@ loadStartupAuthFromResult startup transition requestedProvider = \case
                     >>= \(provider, learnAboutUser) ->
                         loadAuth (Just provider)
                             >>= either
-                                (startupDie startup . Text.unpack)
+                                (startupDie startup)
                                 (\loaded -> pure (loaded, learnAboutUser))
             | otherwise ->
-                startupDie startup (Text.unpack err)
+                startupDie startup err
 
 shouldReconnectGemini
     :: Maybe ProviderTransition
@@ -159,7 +159,7 @@ reconnectGeminiAtStartup startup runtime = do
             connectProviderAccount color GeminiProvider
     selectionId <- maybe (throwIO StartupCancelled) pure connected
     loadAuthForAccount GeminiProvider selectionId >>= either
-        (startupDie startup . Text.unpack)
+        (startupDie startup)
         (\loaded -> pure (loaded, False))
 
 loadTransitionAuth

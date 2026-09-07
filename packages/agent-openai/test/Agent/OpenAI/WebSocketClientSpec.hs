@@ -2,6 +2,7 @@ module Agent.OpenAI.WebSocketClientSpec (spec) where
 
 import Test.Hspec
 import Agent.Error
+import Agent.ClientIdentity (gatewayUserAgent)
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
 import qualified Agent.Responses.Codec as ResponsesCodec
@@ -15,6 +16,7 @@ import Data.Foldable (toList)
 import Data.Either (isLeft)
 import Data.IORef
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 spec :: Spec
 spec = do
@@ -37,6 +39,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
                 ])
         readCodexTurnState turnState `shouldReturn` Just "ts-first"
@@ -81,6 +84,23 @@ spec = do
         readCodexTurnState turnState `shouldReturn` Nothing
 
   describe "buildCodexWsHeaders" do
+    it "identifies gateway clients without changing direct-provider handshakes" do
+        let gateway = Credential
+                { accessToken = "gateway-token"
+                , accountId = "wss://gateway.example/v1/responses"
+                , leaseId = Nothing
+                , provider = OpenAIProvider
+                }
+            direct = gateway { accountId = "chatgpt-account" }
+        userAgent <- gatewayUserAgent
+        headers <- buildCodexWsHandshakeHeaders gateway
+        [value | (name, value) <- headers, name == "User-Agent"]
+            `shouldBe` [userAgent]
+        lookup "Authorization" headers `shouldBe` Just "Bearer gateway-token"
+        lookup "chatgpt-account-id" headers `shouldBe` Nothing
+        buildCodexWsHandshakeHeaders direct
+            `shouldReturn` buildCodexWsHeaders direct
+
     it "advertises remote compaction v2 on the session handshake" do
         let credential = Credential
                 { accessToken = "token"
@@ -219,6 +239,40 @@ spec = do
                         expectationFailure
                             ("expected one developer message, got "
                                 <> show other)
+            other ->
+                expectationFailure
+                    ("expected input array, got " <> show other)
+
+    it "drops xAI checkpoint pairs from the Codex wire payload" do
+        let checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "cmp-xai"
+                , encryptedContent = Just "opaque"
+                }
+            request = withInputItems
+                [ checkpoint
+                , compactionCheckpointOriginItem "xai"
+                ]
+                sampleRequest
+            payload = buildWsPayloadWithOptions
+                defaultCodexWsOptions request Nothing
+        case field "input" payload of
+            Just (Aeson.Array items) ->
+                length items `shouldBe` 0
+            other ->
+                expectationFailure
+                    ("expected input array, got " <> show other)
+
+    it "keeps legacy unmarked OpenAI checkpoints in the Codex wire payload" do
+        let checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "cmp-openai"
+                , encryptedContent = Just "opaque"
+                }
+            request = withInputItems [checkpoint] sampleRequest
+            payload = buildWsPayloadWithOptions
+                defaultCodexWsOptions request Nothing
+        case field "input" payload of
+            Just (Aeson.Array items) ->
+                length items `shouldBe` 1
             other ->
                 expectationFailure
                     ("expected input array, got " <> show other)
@@ -749,4 +803,4 @@ responseWithOutput output =
             , "output" Aeson..= output
             ] of
         Right response -> response
-        Left err -> error err
+        Left err -> error (Text.unpack err)

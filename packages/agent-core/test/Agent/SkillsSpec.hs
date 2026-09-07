@@ -216,6 +216,15 @@ spec = describe "Agent.Skills" do
             `shouldBe` Right [invocation]
         resolveSkillMentions [invocation] "use $missing"
             `shouldSatisfy` isLeft
+        resolveSkillMentionsWithWarnings
+            [invocation]
+            "use $missing then $deploy"
+            `shouldBe`
+                ( [ "unknown skill: missing"
+                        <> " (available: deploy)"
+                  ]
+                , [invocation]
+                )
         formatSkillActivation invocation "production"
             `shouldSatisfy` Text.isInfixOf "Invocation arguments: production"
 

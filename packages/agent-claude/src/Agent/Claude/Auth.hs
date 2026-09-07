@@ -15,9 +15,14 @@ import Agent.Claude.Transport
     )
 import Agent.Process (terminateProcessGroup)
 import qualified Agent.Json.Decode as Json
-import Control.Concurrent (forkIO, killThread)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Exception.Safe (displayException, mask, onException, tryAny)
+import Control.Concurrent.Async (poll, waitBoth, withAsync)
+import Control.Exception.Safe
+    ( displayException
+    , finally
+    , mask
+    , onException
+    , tryAny
+    )
 import Control.Monad (void)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -124,30 +129,38 @@ runAuthStatusProbe executablePath cleanEnvironment =
         case (mOut, mErr) of
             (Just out, Just err) -> do
                 mapM_ setupHandle [out, err]
-                outDone <- newEmptyMVar
-                errDone <- newEmptyMVar
-                outThread <- forkIO (safeDrain out outDone)
-                errThread <- forkIO (safeDrain err errDone)
-                let cleanup = do
-                        killThread outThread
-                        killThread errThread
-                        mapM_ hCloseQuiet [out, err]
-                    stop = do
+                let stop = do
                         group <- getPid processHandle
                         terminateProcessGroup group processHandle
-                        cleanup
-                result <- restore
-                    (timeout authProbeTimeoutMicros (waitForProcess processHandle))
-                    `onException` stop
-                case result of
-                    Nothing -> do
-                        stop
-                        pure (ExitFailure 124, "", "authentication probe timed out")
-                    Just code -> do
-                        stdoutText <- maybe "" id <$> timeout readerDrainTimeoutMicros (takeMVar outDone)
-                        stderrText <- maybe "" id <$> timeout readerDrainTimeoutMicros (takeMVar errDone)
-                        cleanup
-                        pure (code, stdoutText, stderrText)
+                    awaitProbe =
+                        withAsync (safeDrain out) \outReader ->
+                            withAsync (safeDrain err) \errReader -> do
+                                result <- restore
+                                    (timeout authProbeTimeoutMicros
+                                        (waitForProcess processHandle))
+                                    `onException` stop
+                                case result of
+                                    Nothing -> do
+                                        stop
+                                        pure
+                                            ( ExitFailure 124
+                                            , ""
+                                            , "authentication probe timed out"
+                                            )
+                                    Just code -> do
+                                        streams <- restore $
+                                            timeout readerDrainTimeoutMicros
+                                                (waitBoth outReader errReader)
+                                        (stdoutText, stderrText) <-
+                                            case streams of
+                                                Just completed ->
+                                                    pure completed
+                                                Nothing ->
+                                                    (,)
+                                                        <$> completedOutput outReader
+                                                        <*> completedOutput errReader
+                                        pure (code, stdoutText, stderrText)
+                awaitProbe `finally` mapM_ hCloseQuiet [out, err]
             _ -> do
                 mapM_ (maybe (pure ()) hCloseQuiet) [mOut, mErr]
                 group <- getPid processHandle
@@ -155,9 +168,12 @@ runAuthStatusProbe executablePath cleanEnvironment =
                 pure (ExitFailure 1, "", "Claude Code did not provide output pipes")
   where
     hCloseQuiet = void . tryAny . hClose
-    safeDrain handle slot = do
-        value <- tryAny (drainCapped handle)
-        putMVar slot (either (const "") id value)
+    safeDrain handle =
+        either (const "") id <$> tryAny (drainCapped handle)
+    completedOutput reader =
+        poll reader >>= \case
+            Just (Right output) -> pure output
+            _ -> pure ""
     setupHandle handle = do
         hSetBinaryMode handle True
         hSetBuffering handle NoBuffering

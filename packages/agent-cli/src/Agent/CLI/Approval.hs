@@ -61,6 +61,7 @@ import Agent.Tools.Types
     , toolAcceptsCall
     , toolAllowsWithoutPrompt
     , toolApprovalRequirement
+    , toolAutoApproves
     )
 import Data.IORef
     ( IORef
@@ -242,7 +243,7 @@ approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
             planActive <- isPlanModeActive planMode
             planPath <- planFilePath planMode
             let initialFacts = ApprovalFacts
-                    { policy
+                    { policy = scopedToolPolicy policy tools call
                     , planActive
                     , planPath
                     , readOnly = Nothing
@@ -259,13 +260,7 @@ approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
         NeedReadOnlyClassification -> do
             let registeredTool = lookupRegisteredTool call.name tools
             requirement <- case registeredTool of
-                Just tool -> case tool.appToolApproval of
-                    AlwaysConfirm -> pure FreshApprovalRequired
-                    ClassifyApproval classify -> classify call
-                    _ -> classifyReadOnly call >>= \case
-                        Just True -> pure ApprovalNotRequired
-                        Just False -> pure ApprovalPromptRequired
-                        Nothing -> toolApprovalRequirement tool call
+                Just tool -> registeredRequirement tool tool.appToolApproval
                 Nothing -> classifyReadOnly call >>= \case
                     Just True -> pure ApprovalNotRequired
                     _ -> pure ApprovalPromptRequired
@@ -289,6 +284,15 @@ approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
             interpret facts
                 (resolveApprovalPromptWith
                     facts.requiresExplicitApproval call choice)
+
+    registeredRequirement tool = \case
+        AlwaysConfirm -> pure FreshApprovalRequired
+        ClassifyApproval classify -> classify call
+        AutoApprove original -> registeredRequirement tool original
+        _ -> classifyReadOnly call >>= \case
+            Just True -> pure ApprovalNotRequired
+            Just False -> pure ApprovalPromptRequired
+            Nothing -> toolApprovalRequirement tool call
 
     runAction = \case
         SetApprovalPolicy next ->
@@ -332,19 +336,16 @@ childApprove _ tools call
 childApprove _ _ call
     | isComputerToolCallKind call.callKind =
         pure $ Left
-            "Computer use requires an explicit parent approval for every call."
+            "Computer use must be approved in the interactive parent session."
 childApprove policy tools call =
     case lookupRegisteredTool call.name tools of
-        Just tool -> case tool.appToolApproval of
-            AlwaysConfirm -> decide FreshApprovalRequired
-            ClassifyApproval classify -> classify call >>= decide
-            _ -> ordinaryDecision (Just tool)
+        Just tool -> toolApprovalRequirement tool call >>= decide
         Nothing -> ordinaryDecision Nothing
   where
     decide FreshApprovalRequired =
         pure $ Left
             "This sensitive tool requires an explicit parent approval for every call."
-    decide requirement = case policy of
+    decide requirement = case scopedToolPolicy policy tools call of
         ApproveAll -> pure (Right True)
         DenyMutating ->
             pure (Right (requirement == ApprovalNotRequired))
@@ -352,7 +353,7 @@ childApprove policy tools call =
             | requirement == ApprovalNotRequired -> pure (Right True)
             | otherwise -> childCannotPrompt
 
-    ordinaryDecision tool = case policy of
+    ordinaryDecision tool = case scopedToolPolicy policy tools call of
         ApproveAll -> pure (Right True)
         DenyMutating -> Right <$> isReadOnly tool
         PromptMutating ->
@@ -368,3 +369,12 @@ childApprove policy tools call =
         "Subagent cannot prompt for approval on mutating tools. \
         \Re-run the parent with auto-approve/--yolo, or have the \
         \parent perform this edit."
+
+-- Only the ordinary mutation prompt is waived. Classification, plan mode,
+-- dangerous-command checks and computer-use consent still run as before.
+-- Do not change the live policy or persist a project-wide YOLO setting.
+scopedToolPolicy :: ApprovalPolicy -> ToolRegistry -> ToolCall -> ApprovalPolicy
+scopedToolPolicy PromptMutating tools call
+    | Just tool <- lookupRegisteredTool call.name tools
+    , toolAutoApproves tool = ApproveAll
+scopedToolPolicy policy _ _ = policy

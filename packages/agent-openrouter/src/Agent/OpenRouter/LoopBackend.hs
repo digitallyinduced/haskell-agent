@@ -13,8 +13,8 @@ module Agent.OpenRouter.LoopBackend
 import Agent.Error (ApiError)
 import Agent.Loop (Backend)
 import Agent.Responses.LoopBackend
-    ( statelessResponsesBackend
-    , tokenProviderStatelessResponsesBackend
+    ( statelessResponsesBackendPreservingHistory
+    , tokenProviderStatelessResponsesBackendPreservingHistory
     )
 import Agent.Responses.Types
 import Agent.Provider (TokenProvider)
@@ -32,7 +32,7 @@ openRouterBackend
     -> IO ResponseCreateParams
     -> Backend
 openRouterBackend options provider =
-    tokenProviderStatelessResponsesBackend provider
+    tokenProviderStatelessResponsesBackendPreservingHistory provider
         (createResponseWithEvents options)
 
 -- | Same mapping as 'openRouterBackend', with an injectable transport for tests
@@ -43,4 +43,5 @@ openRouterBackendWith
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
     -> Backend
-openRouterBackendWith = statelessResponsesBackend
+openRouterBackendWith =
+    statelessResponsesBackendPreservingHistory

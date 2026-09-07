@@ -14,6 +14,7 @@ import Agent.Loop
     )
 import Agent.ToolDispatch
     ( ToolCallResult(..)
+    , ToolCallMode(..)
     , ToolCallKind(..)
     , customToolCall
     , functionToolCall
@@ -337,7 +338,7 @@ spec = describe "fullscreen UI reducer" do
                             (ToolCallResult
                                 "c1"
                                 "contents"
-                                FunctionCallKind))
+                                FunctionCallKind BlockingToolCall [] Nothing))
                     , UiLoop (ToolStarted runningCall)
                     , UiLoop ResponseAttemptFailed
                     ]
@@ -391,7 +392,10 @@ spec = describe "fullscreen UI reducer" do
     it "matches tool completion by call id" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"git status\"}"
             result = ToolCallResult
-                { callId = "c1"
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "c1"
                 , output = "exit: 0\nclean"
                 , callKind = FunctionCallKind
                 }
@@ -425,7 +429,10 @@ spec = describe "fullscreen UI reducer" do
                 reduceUi
                     (UiLoop
                         (ToolFinished ToolCallResult
-                            { callId = "c1"
+                            { toolResultMode = BlockingToolCall
+                            , toolResultImages = []
+                            , toolResultOutcome = Nothing
+                            , callId = "c1"
                             , output = "exit: 0\nclean"
                             , callKind = FunctionCallKind
                             }))
@@ -483,6 +490,30 @@ spec = describe "fullscreen UI reducer" do
         Foldable.toList state.uiToolCalls
             `shouldBe` [(0, preview)]
 
+    it "repaints an inspection call from incomplete streamed arguments" do
+        let early = functionToolCall "read-1" "read_file" ""
+            preview =
+                functionToolCall
+                    "read-1"
+                    "read_file"
+                    "{\"target_file\":\"src/Ma"
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted early)
+                    , UiLoop (ToolArgumentsUpdated preview)
+                    ]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockInspect
+                block.blockTitle `shouldBe` "Read"
+                block.blockDetail `shouldBe` "src/Ma"
+                block.blockState `shouldBe` BlockRunning
+                state.uiActivity `shouldBe` "Read src/Ma"
+            _ -> expectationFailure "expected one updated inspection block"
+        Foldable.toList state.uiToolCalls
+            `shouldBe` [(0, preview)]
+
     it "makes repeated tool starts idempotent by call id" do
         let early = functionToolCall "c1" "Task" "{}"
             canonical =
@@ -521,7 +552,10 @@ spec = describe "fullscreen UI reducer" do
                     (UiLoop
                         (ToolFinished
                             ToolCallResult
-                                { callId = "c2"
+                                { toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
+                                , callId = "c2"
                                 , output = "contents"
                                 , callKind = FunctionCallKind
                                 }))
@@ -541,7 +575,10 @@ spec = describe "fullscreen UI reducer" do
                     , UiLoop
                         (ToolFinished
                             ToolCallResult
-                                { callId = "c1"
+                                { toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
+                                , callId = "c1"
                                 , output = "done"
                                 , callKind = FunctionCallKind
                                 })
@@ -607,14 +644,20 @@ spec = describe "fullscreen UI reducer" do
                     "{\"session_id\":6,\"chars\":null}"
             running callId output =
                 ToolCallResult
-                    { callId
+                    { toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    , callId
                     , output =
                         "Process still running.\nsession_id: 6\n" <> output
                     , callKind = FunctionCallKind
                     }
             finished =
                 ToolCallResult
-                    { callId = "poll-2"
+                    { toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    , callId = "poll-2"
                     , output = "Exit code: 0\nthird\n"
                     , callKind = FunctionCallKind
                     }
@@ -670,7 +713,10 @@ spec = describe "fullscreen UI reducer" do
                     , UiLoop
                         (ToolFinished
                             ToolCallResult
-                                { callId = "shell-1"
+                                { toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
+                                , callId = "shell-1"
                                 , output =
                                     "Process still running.\nsession_id: 6\nfirst\n"
                                 , callKind = FunctionCallKind
@@ -680,7 +726,10 @@ spec = describe "fullscreen UI reducer" do
                     , UiLoop
                         (ToolFinished
                             ToolCallResult
-                                { callId = "poll-1"
+                                { toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
+                                , callId = "poll-1"
                                 , output =
                                     "Error: Poll cancelled; session 6 is still running"
                                 , callKind = FunctionCallKind
@@ -711,7 +760,10 @@ spec = describe "fullscreen UI reducer" do
                     , UiLoop
                         (ToolFinished
                             ToolCallResult
-                                { callId = "shell-1"
+                                { toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
+                                , callId = "shell-1"
                                 , output =
                                     "Process still running.\nsession_id: 6\n"
                                 , callKind = FunctionCallKind
@@ -738,7 +790,10 @@ spec = describe "fullscreen UI reducer" do
                     "{\"session_id\":6,\"chars\":\"yes\\n\"}"
             running callId output =
                 ToolCallResult
-                    { callId
+                    { toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    , callId
                     , output =
                         "Process still running.\nsession_id: 6\n" <> output
                     , callKind = FunctionCallKind
@@ -773,7 +828,10 @@ spec = describe "fullscreen UI reducer" do
                     "{\"session_id\":6,\"chars\":\"yes\\n\"}"
             running =
                 ToolCallResult
-                    { callId = "shell-1"
+                    { toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    , callId = "shell-1"
                     , output =
                         "Process still running.\nsession_id: 6\nfirst\n"
                     , callKind = FunctionCallKind
@@ -788,7 +846,10 @@ spec = describe "fullscreen UI reducer" do
                     , UiLoop
                         (ToolFinished
                             ToolCallResult
-                                { callId = "input-1"
+                                { toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
+                                , callId = "input-1"
                                 , output
                                 , callKind = FunctionCallKind
                                 })
@@ -891,7 +952,10 @@ spec = describe "fullscreen UI reducer" do
                     (UiLoop
                         (ToolFinished
                             ToolCallResult
-                                { callId = "c2"
+                                { toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
+                                , callId = "c2"
                                 , output = "exit: 0\nsecond output"
                                 , callKind = FunctionCallKind
                                 }))
@@ -923,7 +987,10 @@ spec = describe "fullscreen UI reducer" do
                     "run_terminal_cmd"
                     "{\"command\":\"work\"}"
             result = ToolCallResult
-                { callId = "c1"
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "c1"
                 , output = "exit: 0\nlate final output"
                 , callKind = FunctionCallKind
                 }
@@ -958,7 +1025,10 @@ spec = describe "fullscreen UI reducer" do
                     "run_terminal_cmd"
                     "{\"command\":\"work\"}"
             result = ToolCallResult
-                { callId = "c1"
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "c1"
                 , output = "exit: 0\nlate final output"
                 , callKind = FunctionCallKind
                 }
@@ -995,7 +1065,10 @@ spec = describe "fullscreen UI reducer" do
                     "run_terminal_cmd"
                     "{\"command\":\"work\"}"
             result = ToolCallResult
-                { callId = "c1"
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "c1"
                 , output = "exit: 0\nlate final output"
                 , callKind = FunctionCallKind
                 }
@@ -1021,7 +1094,10 @@ spec = describe "fullscreen UI reducer" do
     it "replaces a live snapshot with the final tool result" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"work\"}"
             result = ToolCallResult
-                { callId = "c1"
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "c1"
                 , output = "exit: 0\nfinal output"
                 , callKind = FunctionCallKind
                 }
@@ -1041,7 +1117,10 @@ spec = describe "fullscreen UI reducer" do
     it "ignores tool output snapshots received after completion" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"work\"}"
             result = ToolCallResult
-                { callId = "c1"
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "c1"
                 , output = "exit: 0\nfinal output"
                 , callKind = FunctionCallKind
                 }
@@ -1359,7 +1438,10 @@ spec = describe "fullscreen UI reducer" do
                     (UiLoop
                         (ToolFinished
                             ToolCallResult
-                                { callId = "edit-abs"
+                                { toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
+                                , callId = "edit-abs"
                                 , output =
                                     "The file "
                                         <> path
@@ -1389,7 +1471,10 @@ spec = describe "fullscreen UI reducer" do
                     "{\"file_path\":\"src/Main.hs\"}"
             result =
                 ToolCallResult
-                    { callId = "read-1"
+                    { toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
+                    , callId = "read-1"
                     , output = "module Main where"
                     , callKind = FunctionCallKind
                     }
@@ -1447,7 +1532,10 @@ spec = describe "fullscreen UI reducer" do
                 UiLoop
                     (ToolFinished
                         ToolCallResult
-                            { callId
+                            { toolResultMode = BlockingToolCall
+                            , toolResultImages = []
+                            , toolResultOutcome = Nothing
+                            , callId
                             , output
                             , callKind = FunctionCallKind
                             })
@@ -1486,7 +1574,10 @@ spec = describe "fullscreen UI reducer" do
                 UiLoop
                     (ToolFinished
                         ToolCallResult
-                            { callId
+                            { toolResultMode = BlockingToolCall
+                            , toolResultImages = []
+                            , toolResultOutcome = Nothing
+                            , callId
                             , output
                             , callKind = FunctionCallKind
                             })
@@ -1541,7 +1632,7 @@ spec = describe "fullscreen UI reducer" do
                             (ToolCallResult
                                 "read-a"
                                 "module A where"
-                                FunctionCallKind)))
+                                FunctionCallKind BlockingToolCall [] Nothing)))
                     started
             failed =
                 reduceUi
@@ -1550,7 +1641,7 @@ spec = describe "fullscreen UI reducer" do
                             (ToolCallResult
                                 "search-a"
                                 "Error: search failed"
-                                FunctionCallKind)))
+                                FunctionCallKind BlockingToolCall [] Nothing)))
                     firstFinished
         map (.blockState) (Foldable.toList firstFinished.uiBlocks)
             `shouldBe` [BlockRunning]
@@ -1585,14 +1676,14 @@ spec = describe "fullscreen UI reducer" do
                             (ToolCallResult
                                 "read-a"
                                 "module A where"
-                                FunctionCallKind))
+                                FunctionCallKind BlockingToolCall [] Nothing))
                     , UiLoop (ToolStarted readB)
                     , UiLoop
                         (ToolFinished
                             (ToolCallResult
                                 "read-b"
                                 "Tool call rejected by user"
-                                FunctionCallKind))
+                                FunctionCallKind BlockingToolCall [] Nothing))
                     ]
         case Foldable.toList state.uiBlocks of
             [block] -> do
@@ -1623,7 +1714,7 @@ spec = describe "fullscreen UI reducer" do
                             (ToolCallResult
                                 "read-a"
                                 "module A where"
-                                FunctionCallKind))
+                                FunctionCallKind BlockingToolCall [] Nothing))
                     , UiSystemMessage "Checking another source"
                     , UiLoop (ToolStarted second)
                     ]
@@ -1647,7 +1738,7 @@ spec = describe "fullscreen UI reducer" do
                         (ToolCallResult
                             callId
                             "done"
-                            FunctionCallKind))
+                            FunctionCallKind BlockingToolCall [] Nothing))
             state =
                 apply
                     [ UiLoop TurnStarted
@@ -1662,8 +1753,22 @@ spec = describe "fullscreen UI reducer" do
         map (.blockInspectionGroupable) blocks
             `shouldBe` [False, False]
 
-    it "shows an apply_patch diff while running and after completion" do
-        let call =
+    it "repaints an apply_patch diff while input streams" do
+        let early =
+                customToolCall
+                    "patch-1"
+                    "apply_patch"
+                    ""
+            preview =
+                customToolCall
+                    "patch-1"
+                    "apply_patch"
+                    "*** Begin Patch\n\
+                    \*** Update File: A.hs\n\
+                    \@@\n\
+                    \-old\n\
+                    \+ne"
+            canonical =
                 customToolCall
                     "patch-1"
                     "apply_patch"
@@ -1673,26 +1778,33 @@ spec = describe "fullscreen UI reducer" do
                     \-old\n\
                     \+new\n\
                     \*** End Patch"
-            started =
+            running =
                 apply
                     [ UiLoop TurnStarted
-                    , UiLoop (ToolStarted call)
+                    , UiLoop (ToolStarted early)
+                    , UiLoop (ToolArgumentsUpdated preview)
                     ]
+            updated =
+                reduceUi (UiLoop (ToolUpdated canonical)) running
             finished =
                 reduceUi
                     (UiLoop
                         (ToolFinished
                             ToolCallResult
-                                { callId = "patch-1"
+                                { toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
+                                , callId = "patch-1"
                                 , output = "Updated A.hs"
                                 , callKind = CustomCallKind
                                 }))
-                    started
-        case Foldable.toList started.uiBlocks of
+                    updated
+        case Foldable.toList running.uiBlocks of
             [block] -> do
                 block.blockKind `shouldBe` BlockEdit
                 block.blockBody `shouldSatisfy` Text.isInfixOf "-old"
-                block.blockBody `shouldSatisfy` Text.isInfixOf "+new"
+                block.blockBody `shouldSatisfy` Text.isInfixOf "+ne"
+                block.blockState `shouldBe` BlockRunning
             _ -> expectationFailure "expected one running edit block"
         case Foldable.toList finished.uiBlocks of
             [block] -> do
@@ -1714,7 +1826,10 @@ spec = describe "fullscreen UI reducer" do
                     , UiLoop
                         (ToolFinished
                             ToolCallResult
-                                { callId = "edit-failed"
+                                { toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
+                                , callId = "edit-failed"
                                 , output = "Error: stale edit"
                                 , callKind = FunctionCallKind
                                 })
@@ -1732,7 +1847,10 @@ spec = describe "fullscreen UI reducer" do
                     "todo_write"
                     "{\"todos\":[{\"id\":\"1\",\"content\":\"Find and clone repos\",\"status\":\"pending\"}]}"
             result = ToolCallResult
-                { callId = "todo-1"
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "todo-1"
                 , output =
                     "- [completed] 1: Find and clone repos\n\
                     \- [in_progress] 2: Investigate Grok Build"
@@ -1777,7 +1895,10 @@ spec = describe "fullscreen UI reducer" do
                     "todo_write"
                     "{\"todos\":[{\"id\":\"1\",\"content\":\"Inspect Model.hs\"}]}"
             result = ToolCallResult
-                { callId = "todo-1"
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "todo-1"
                 , output =
                     "- [completed] 1: Open the file\n\
                     \- [pending] 2: Inspect Model.hs"
@@ -1809,14 +1930,20 @@ spec = describe "fullscreen UI reducer" do
                     "todo_write"
                     "{\"todos\":[{\"id\":\"1\",\"content\":\"Keep this list\"}]}"
             todoResult = ToolCallResult
-                { callId = "todo-1"
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "todo-1"
                 , output = "- [in_progress] 1: Keep this list"
                 , callKind = FunctionCallKind
                 }
             shellCall =
                 functionToolCall "shell-1" "run_terminal_cmd" "{\"command\":\"ls\"}"
             shellResult = ToolCallResult
-                { callId = "shell-1"
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "shell-1"
                 , output = "- [pending] 99: spoofed checklist from stdout"
                 , callKind = FunctionCallKind
                 }
@@ -1840,7 +1967,10 @@ spec = describe "fullscreen UI reducer" do
                     "collaboration.spawn_agent"
                     "{\"task_name\":\"reviewer\",\"message\":\"review\"}"
             result = ToolCallResult
-                { callId = "c1"
+                { toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , callId = "c1"
                 , output = "{\"task_name\":\"/root/reviewer\",\"nickname\":null}"
                 , callKind = FunctionCallKind
                 }
@@ -1995,7 +2125,10 @@ spec = describe "fullscreen UI reducer" do
                     (UiLoop
                         (ToolFinished
                             (ToolCallResult
-                                { callId = "busy-tool"
+                                { toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
+                                , callId = "busy-tool"
                                 , output = "exit: 0"
                                 , callKind = FunctionCallKind
                                 })))
@@ -2041,7 +2174,10 @@ toolStateFor output =
                 "run_terminal_cmd"
                 "{\"command\":\"echo test\"}"
         result = ToolCallResult
-            { callId = "cancel-test"
+            { toolResultMode = BlockingToolCall
+            , toolResultImages = []
+            , toolResultOutcome = Nothing
+            , callId = "cancel-test"
             , output
             , callKind = FunctionCallKind
             }

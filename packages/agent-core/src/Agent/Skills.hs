@@ -17,6 +17,7 @@ module Agent.Skills
     , formatSkillActivation
     , resolveSkillInvocation
     , resolveSkillMentions
+    , resolveSkillMentionsWithWarnings
     ) where
 
 import Agent.Concurrent (mapConcurrentlyBounded)
@@ -649,19 +650,37 @@ resolveSkillMentions
     -> Text
     -> Either Text [SkillInvocation]
 resolveSkillMentions invocations text =
-    dedupe <$> traverse resolve mentioned
+    dedupe <$> traverse resolve (skillMentionNames text)
   where
-    mentioned =
-        [ Text.drop 1 token
-        | token <- Text.words text
-        , "$" `Text.isPrefixOf` token
-        , let name = Text.drop 1 token
-        , not (Text.null name)
-        , Text.all mentionChar name
-        ]
-    mentionChar c = isAlphaNum c || c `elem` ['-', ':']
     resolve = resolveSkillInvocation invocations
-    dedupe = go Set.empty
+
+resolveSkillMentionsWithWarnings
+    :: [SkillInvocation]
+    -> Text
+    -> ([Text], [SkillInvocation])
+resolveSkillMentionsWithWarnings invocations text =
+    ( [warning | Left warning <- resolved]
+    , dedupe [invocation | Right invocation <- resolved]
+    )
+  where
+    resolved =
+        map (resolveSkillInvocation invocations) (skillMentionNames text)
+
+skillMentionNames :: Text -> [Text]
+skillMentionNames text =
+    [ name
+    | token <- Text.words text
+    , "$" `Text.isPrefixOf` token
+    , let name = Text.drop 1 token
+    , not (Text.null name)
+    , Text.all mentionChar name
+    ]
+  where
+    mentionChar c = isAlphaNum c || c `elem` ['-', ':']
+
+dedupe :: [SkillInvocation] -> [SkillInvocation]
+dedupe = go Set.empty
+  where
     go :: Set OsPath -> [SkillInvocation] -> [SkillInvocation]
     go _ [] = []
     go seen (item:rest)

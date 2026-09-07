@@ -13,6 +13,30 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = do
+    describe "worktree administration" do
+        it "parses dry-run and inactivity override" do
+            parseArgs ["worktree", "gc", "--dry-run"]
+                `shouldBe` Right (Worktree (WorktreeGC True Nothing))
+            parseArgs ["worktree", "gc", "--inactivity-days", "30"]
+                `shouldBe` Right (Worktree (WorktreeGC False (Just 30)))
+        it "requires a positive expiry" do
+            parseArgs ["worktree", "gc", "--inactivity-days", "0"]
+                `shouldSatisfy` either (const True) (const False)
+            parseArgs ["worktree", "gc", "--inactivity-days", "-1"]
+                `shouldSatisfy` either (const True) (const False)
+        it "parses explicit enrollment, recovery, and protection" do
+            let path = fromFilePath "/checkout"
+            parseArgs ["worktree", "enroll", "/checkout"]
+                `shouldBe` Right (Worktree (WorktreeEnroll path))
+            parseArgs ["worktree", "restore", "/checkout"]
+                `shouldBe` Right (Worktree (WorktreeRestore path))
+            parseArgs ["worktree", "protect", "/checkout"]
+                `shouldBe` Right (Worktree (WorktreeProtect path))
+            parseArgs ["worktree", "unprotect", "/checkout"]
+                `shouldBe` Right (Worktree (WorktreeUnprotect path))
+        it "does not reinterpret incomplete administration as a prompt" do
+            parseArgs ["worktree", "enroll"]
+                `shouldSatisfy` either (const True) (const False)
     describe "freshSessionOptions" do
         it "drops the old routing and resume state after a gateway change" do
             let cwd = fromFilePath "/tmp/company-work"
@@ -366,14 +390,66 @@ spec = do
             parseArgs ["--no-bash", "--bash"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optBash = True })
 
-        it "keeps computer use opt-in" do
-            defaultCliOptions.optComputerUse `shouldBe` False
-            parseArgs ["--computer-use"]
+        it "tracks explicit computer-use overrides with last-flag-wins semantics" do
+            defaultCliOptions.optComputerUse `shouldBe` True
+            defaultCliOptions.optComputerUseExplicit `shouldBe` False
+            parseArgs ["--no-computer-use"]
                 `shouldBe` Right (RunAgent defaultCliOptions
-                    { optComputerUse = True })
+                    { optComputerUse = False
+                    , optComputerUseExplicit = True
+                    })
+            parseArgs ["--no-computer-use", "--computer-use"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optComputerUse = True
+                    , optComputerUseExplicit = True
+                    })
             parseArgs ["--computer-use", "--no-computer-use"]
                 `shouldBe` Right (RunAgent defaultCliOptions
-                    { optComputerUse = False })
+                    { optComputerUse = False
+                    , optComputerUseExplicit = True
+                    })
+
+        it "defaults computer use to TTY sessions while honoring explicit flags" do
+            resolveComputerUseEnabled defaultCliOptions True `shouldBe` True
+            resolveComputerUseEnabled defaultCliOptions False `shouldBe` False
+            resolveComputerUseEnabled
+                defaultCliOptions
+                    { optComputerUse = True
+                    , optComputerUseExplicit = True
+                    }
+                False
+                `shouldBe` True
+            resolveComputerUseEnabled
+                defaultCliOptions
+                    { optComputerUse = False
+                    , optComputerUseExplicit = True
+                    }
+                True
+                `shouldBe` False
+
+        it "requires an explicit opt-in for one-shot TTY invocations" do
+            resolveComputerUseEnabled
+                defaultCliOptions { optPrompt = Just "hi" }
+                True
+                `shouldBe` False
+            resolveComputerUseEnabled
+                defaultCliOptions
+                    { optPromptFile = Just (fromFilePath "prompt.md") }
+                True
+                `shouldBe` False
+            resolveComputerUseEnabled
+                defaultCliOptions
+                    { optManagedTurnFile = Just (fromFilePath "turn.json") }
+                True
+                `shouldBe` False
+            resolveComputerUseEnabled
+                defaultCliOptions
+                    { optPrompt = Just "hi"
+                    , optComputerUse = True
+                    , optComputerUseExplicit = True
+                    }
+                True
+                `shouldBe` True
 
         it "uses conventional tool calling by default" do
             defaultCliOptions.optCodeMode `shouldBe` False

@@ -36,6 +36,7 @@ import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolAsyncCapability(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     , defaultToolEnv
@@ -563,6 +564,7 @@ fake name = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
+    , appToolAsyncCapability = BlockingOnly
     }
 
 withTempDir :: (FilePath -> IO a) -> IO a

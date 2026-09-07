@@ -1,13 +1,19 @@
 module Agent.Responses.LoopBackendSpec (spec) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Cancel (newCancelFlag)
+import qualified Agent.Loop as Loop
 import Agent.Loop
     ( Backend(..)
+    , BackendCallbacks(..)
+    , BackendResult(..)
+    , BackendSnapshot(..)
     , FileAttachment(..)
     , ImageAttachment(..)
     , LoopEvent(..)
     , TurnAttachment(..)
     , TurnInput(..)
+    , advanceBackendSnapshot
     , emptyBackendSnapshot
     , userMessageWithAttachments
     )
@@ -20,8 +26,11 @@ import Agent.Provider
     )
 import Agent.Json (rawJsonFromEncoding)
 import qualified Agent.Json.Decode as Json
+import qualified Agent.Responses.Codec as Codec
+import Agent.Responses.GenericBackend (genericResponsesBackendWith)
 import Agent.Responses.LoopBackend
-    ( newStreamEventToLoopEvents
+    ( emptyStreamProjectionState
+    , newStreamEventToLoopEvents
     , statelessResponsesBackend
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
@@ -29,17 +38,21 @@ import Agent.Responses.LoopBackend
     , responseItemToToolCall
     , toolResultToItem
     , withRequestInput
+    , streamEventToLoopEventsStep
     )
 import Agent.Responses.Types
     ( MessageContent(..)
     , CodexRateLimits(..)
+    , CompactionItem(..)
     , ComputerAction(..)
     , ComputerCall(..)
     , ComputerCallOutput(..)
     , CustomToolCall(..)
     , CustomToolCallOutput(..)
+    , CustomTool(..)
     , FunctionCall(..)
     , FunctionCallOutput(..)
+    , FunctionTool(..)
     , InternalChatMetadata(..)
     , ItemStatus(..)
     , LocalShellCall(..)
@@ -48,6 +61,8 @@ import Agent.Responses.Types
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
+    , Response
+    , ResponseTool(..)
     , ResponseStreamEvent(..)
     , StreamEventType(..)
     , ResponseInput(..)
@@ -55,14 +70,16 @@ import Agent.Responses.Types
     , TaggedObject(..)
     , computerFunctionNamespace
     , computerFunctionName
+    , compactionCheckpointOriginItem
     , defaultResponseCreateParams
     , legacyComputerFunctionName
     )
 import Agent.Responses.Types.Items (responseItemDecoder)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
-import qualified Data.Aeson.Key as Key
 import Data.IORef
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import System.Timeout (timeout)
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Either (isLeft)
 import qualified Data.Text as Text
@@ -70,18 +87,122 @@ import qualified Data.Text.Encoding as TextEncoding
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
+    , ToolCallMode(..)
     , ToolCallResult(..)
     , ToolResultImage(..)
+    , toolCallMode
+    , noArgsTool
+    )
+import Agent.Tools.Types
+    ( ApprovalRule(..)
+    , ToolExecutionPolicy(..)
+    , jsonAppToolWithExecution
+    , mkToolRegistry
+    , withAsyncToolCalls
     )
 import Test.Hspec
 
 spec :: Spec
 spec = do
+    wireAsyncSpec
     backendSpec
     streamProjectionSpec
 
+wireAsyncSpec :: Spec
+wireAsyncSpec = describe "Responses async wire fields" do
+    it "decodes async function and custom calls without changing legacy defaults" do
+        let decodeItem value =
+                Json.decodeEither responseItemDecoder
+                    (LBS.toStrict (Aeson.encode value))
+            functionValue :: Maybe Bool -> Aeson.Value
+            functionValue flag = Aeson.object
+                ( [ "type" Aeson..= ("function_call" :: Text.Text)
+                  , "call_id" Aeson..= ("function-call" :: Text.Text)
+                  , "name" Aeson..= ("read_file" :: Text.Text)
+                  , "arguments" Aeson..= ("{}" :: Text.Text)
+                  ]
+                    <> maybe [] (\value -> ["async" Aeson..= value]) flag
+                )
+            customValue :: Maybe Bool -> Aeson.Value
+            customValue flag = Aeson.object
+                ( [ "type" Aeson..= ("custom_tool_call" :: Text.Text)
+                  , "call_id" Aeson..= ("custom-call" :: Text.Text)
+                  , "name" Aeson..= ("apply_patch" :: Text.Text)
+                  , "input" Aeson..= ("patch" :: Text.Text)
+                  ]
+                    <> maybe [] (\value -> ["async" Aeson..= value]) flag
+                )
+        decodeItem (functionValue (Just True))
+            `shouldSatisfy` \case
+                Right (FunctionCallItem FunctionCall{async = Just True}) -> True
+                _ -> False
+        decodeItem (functionValue (Just False))
+            `shouldSatisfy` \case
+                Right (FunctionCallItem FunctionCall{async = Just False}) -> True
+                _ -> False
+        decodeItem (functionValue Nothing)
+            `shouldSatisfy` \case
+                Right (FunctionCallItem FunctionCall{async = Nothing}) -> True
+                _ -> False
+        decodeItem (customValue (Just True))
+            `shouldSatisfy` \case
+                Right (CustomToolCallItem CustomToolCall{async = Just True}) -> True
+                _ -> False
+        decodeItem (customValue (Just False))
+            `shouldSatisfy` \case
+                Right (CustomToolCallItem CustomToolCall{async = Just False}) -> True
+                _ -> False
+        decodeItem (customValue Nothing)
+            `shouldSatisfy` \case
+                Right (CustomToolCallItem CustomToolCall{async = Nothing}) -> True
+                _ -> False
+
+    it "encodes async tools explicitly and omits absent capability" do
+        let function flag = FunctionToolValue FunctionTool
+                { name = "read_file"
+                , description = Nothing
+                , parameters = Nothing
+                , strict = Nothing
+                , async = flag
+                }
+            custom flag = CustomToolValue CustomTool
+                { name = "apply_patch"
+                , description = Nothing
+                , format = Nothing
+                , async = flag
+                }
+            hasAsync expected = \case
+                Aeson.Object object ->
+                    KeyMap.lookup "async" object == expected
+                _ -> False
+        Aeson.toJSON (function (Just True))
+            `shouldSatisfy` hasAsync (Just (Aeson.Bool True))
+        Aeson.toJSON (custom (Just True))
+            `shouldSatisfy` hasAsync (Just (Aeson.Bool True))
+        Aeson.toJSON (function Nothing) `shouldSatisfy` hasAsync Nothing
+        Aeson.toJSON (custom Nothing) `shouldSatisfy` hasAsync Nothing
+
 backendSpec :: Spec
 backendSpec = describe "tokenProviderStatelessResponsesBackend" do
+    it "preserves checkpoint provenance for provider-aware projection" do
+        let request =
+                withRequestInput
+                    defaultResponseCreateParams
+                    [ CompactionItemValue CompactionItem
+                        { itemId = Just "cmp-1"
+                        , encryptedContent = Just "opaque"
+                        }
+                    , compactionCheckpointOriginItem "xai"
+                    ]
+        request.input `shouldBe` Just
+            (ResponseInputItems
+                [ CompactionItemValue CompactionItem
+                    { itemId = Just "cmp-1"
+                    , encryptedContent = Just "opaque"
+                    }
+                , compactionCheckpointOriginItem "xai"
+                ])
+
     it "rejects computer coordinates outside the platform Int range" do
         let tooLarge = toInteger (maxBound :: Int) + 1
             payload = LBS.toStrict $ Aeson.encode $ Aeson.object
@@ -109,6 +230,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     "{\"actions\":[{\"type\":\"type\",\"text\":\"secret\"}]}"
                 , encryptedFunctionArgs = Nothing
                 , status = Nothing
+                , async = Nothing
                 }
         case responseItemToToolCall (FunctionCallItem call) of
             Just projected -> do
@@ -129,6 +251,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     "{\"actions\":[{\"type\":\"screenshot\"}]}"
                 , encryptedFunctionArgs = Nothing
                 , status = Nothing
+                , async = Nothing
                 }
         case responseItemToToolCall (FunctionCallItem call) of
             Just projected -> do
@@ -136,6 +259,59 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 projected.callKind `shouldBe` ComputerFunctionCallKind
             Nothing -> expectationFailure
                 "standard computer function was not routed"
+
+    it "projects async mode only for calls marked async true" do
+        let function flag = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = "function-call"
+                , name = "read_file"
+                , namespace = Nothing
+                , provider = Nothing
+                , arguments = "{}"
+                , encryptedFunctionArgs = Nothing
+                , status = Nothing
+                , async = flag
+                }
+            custom flag = CustomToolCallItem CustomToolCall
+                { itemId = Nothing
+                , callId = "custom-call"
+                , name = "apply_patch"
+                , namespace = Nothing
+                , input = "patch"
+                , status = Nothing
+                , async = flag
+                }
+            mode item = toolCallMode <$> responseItemToToolCall item
+        mode (function (Just True)) `shouldBe` Just AsyncToolCall
+        mode (function (Just False)) `shouldBe` Just BlockingToolCall
+        mode (function Nothing) `shouldBe` Just BlockingToolCall
+        mode (custom (Just True)) `shouldBe` Just AsyncToolCall
+        mode (custom Nothing) `shouldBe` Just BlockingToolCall
+
+    it "marks only async tool results on continuation items" do
+        let blocking = toolResultToItem ToolCallResult
+                { callId = "blocking-call"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , output = "done"
+                , callKind = FunctionCallKind
+                }
+            asynchronous = toolResultToItem ToolCallResult
+                { callId = "async-call"
+                , toolResultMode = AsyncToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , output = "done"
+                , callKind = CustomCallKind
+                }
+        blocking `shouldSatisfy` \case
+            FunctionCallOutputItem FunctionCallOutput{async = Nothing} -> True
+            _ -> False
+        asynchronous `shouldSatisfy` \case
+            CustomToolCallOutputItem CustomToolCallOutput{async = Just True} ->
+                True
+            _ -> False
 
     it "returns computer results as text plus a fresh user screenshot" do
         let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
@@ -149,6 +325,9 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 }
             result = ToolCallResult
                 { callId = "call-1"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
                 , output = encoded
                 , callKind = ComputerFunctionCallKind
                 }
@@ -167,6 +346,270 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             other -> expectationFailure
                 ("unexpected computer continuation: " <> show other)
 
+    it "returns native computer accessibility state beside the screenshot" do
+        let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                (Aeson.object
+                    [ "operation" Aeson..= ("observe" :: Text.Text)
+                    , "mode" Aeson..= ("accessibility" :: Text.Text)
+                    , "accessibility_state" Aeson..=
+                        ("app=\"TextEdit\"\n[1] AXButton \"Save\"" :: Text.Text)
+                    ])
+            result = ToolCallResult
+                { callId = "call-native"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages =
+                    [ ToolResultImage
+                        { imageUrl = "data:image/jpeg;base64,AA=="
+                        , imageDetail = Just "auto"
+                        }
+                    ]
+                , toolResultOutcome = Nothing
+                , output = encoded
+                , callKind = ComputerFunctionCallKind
+                }
+        case turnInputsToItems [CompletedTool result] of
+            [ FunctionCallOutputItem output
+                , MessageItem ResponseMessage
+                    { content =
+                        MessageContentParts
+                            [ InputTextPart{}
+                                , InputImagePart{imageUrl}
+                            ]
+                    }
+                ] -> do
+                Aeson.toJSON output.output `shouldBe` Aeson.toJSON
+                    [ InputImagePart
+                        { detail = Just "auto"
+                        , fileId = Nothing
+                        , imageUrl = Just "data:image/jpeg;base64,AA=="
+                        , promptCacheBreakpoint = Nothing
+                        }
+                    , InputTextPart
+                        { text =
+                            "Computer action completed.\n\nCurrent macOS accessibility state:\napp=\"TextEdit\"\n[1] AXButton \"Save\""
+                        , promptCacheBreakpoint = Nothing
+                        }
+                    ]
+                imageUrl `shouldBe` Just "data:image/jpeg;base64,AA=="
+            other -> expectationFailure
+                ("unexpected native computer continuation: " <> show other)
+
+    it "preserves native computer list-target results without accessibility state" do
+        let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                (Aeson.object
+                    [ "operation" Aeson..= ("list_targets" :: Text.Text)
+                    , "mode" Aeson..= ("accessibility" :: Text.Text)
+                    , "targets" Aeson..= ([] :: [Aeson.Value])
+                    ])
+            result = ToolCallResult
+                { callId = "call-native-targets"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , output = encoded
+                , callKind = ComputerFunctionCallKind
+                }
+        case toolResultToItem result of
+            FunctionCallOutputItem output ->
+                Aeson.toJSON output.output `shouldBe` Aeson.String encoded
+            other -> expectationFailure
+                ("unexpected native list-target output: " <> show other)
+
+    it "keeps AX-only computer results text-only" do
+        let result = ToolCallResult
+                { callId = "call-ax-only"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , output = "Current macOS accessibility state"
+                , callKind = ComputerFunctionCallKind
+                }
+        case toolResultToItem result of
+            FunctionCallOutputItem output ->
+                Aeson.toJSON output.output `shouldBe`
+                    Aeson.String "Current macOS accessibility state"
+            other -> expectationFailure
+                ("expected text-only computer output, got " <> show other)
+
+    it "preserves explicitly requested computer screenshots as image content" do
+        let result callKind = ToolCallResult
+                { callId = "call-ax-image"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages =
+                    [ ToolResultImage
+                        { imageUrl = "data:image/png;base64,AA=="
+                        , imageDetail = Just "high"
+                        }
+                    ]
+                , toolResultOutcome = Nothing
+                , output = "Current macOS accessibility state"
+                , callKind
+                }
+            assertKind callKind =
+                case toolResultToItem (result callKind) of
+                    FunctionCallOutputItem output ->
+                        Aeson.toJSON output.output `shouldBe` Aeson.toJSON
+                            [ InputImagePart
+                                { detail = Just "high"
+                                , fileId = Nothing
+                                , imageUrl = Just "data:image/png;base64,AA=="
+                                , promptCacheBreakpoint = Nothing
+                                }
+                            , InputTextPart
+                                { text = "Current macOS accessibility state"
+                                , promptCacheBreakpoint = Nothing
+                                }
+                            ]
+                    other -> expectationFailure
+                        ("expected rich computer output, got " <> show other)
+        mapM_ assertKind [ComputerCallKind, ComputerFunctionCallKind]
+
+    it "prefers out-of-band computer screenshots for the fresh observation" do
+        let legacyOutput = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "call-ax-image"
+                    , screenshotDataUrl = "data:image/png;base64,LEGACY"
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Nothing
+                    , computerOutputExtra = KeyMap.empty
+                    }
+            result = ToolCallResult
+                { callId = "call-ax-image"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages =
+                    [ ToolResultImage
+                        { imageUrl = "data:image/png;base64,NATIVE"
+                        , imageDetail = Just "high"
+                        }
+                    ]
+                , toolResultOutcome = Nothing
+                , output = legacyOutput
+                , callKind = ComputerFunctionCallKind
+                }
+        case turnInputsToItems [CompletedTool result] of
+            [ FunctionCallOutputItem{}
+                , MessageItem ResponseMessage
+                    { content =
+                        MessageContentParts
+                            [ InputTextPart{}
+                                , InputImagePart{imageUrl}
+                            ]
+                    }
+                ] ->
+                    imageUrl `shouldBe`
+                        Just "data:image/png;base64,NATIVE"
+            other -> expectationFailure
+                ("expected the native screenshot observation, got " <> show other)
+
+    it "labels a structured full accessibility snapshot with its revision" do
+        let accessibilityState = Aeson.object
+                [ "kind" Aeson..= ("full" :: Text.Text)
+                , "revision" Aeson..= (1 :: Int)
+                , "snapshot" Aeson..= Aeson.object
+                    ["application" Aeson..= ("TextEdit" :: Text.Text)]
+                ]
+            encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                (Aeson.object
+                    [ "operation" Aeson..= ("observe" :: Text.Text)
+                    , "mode" Aeson..= ("accessibility" :: Text.Text)
+                    , "accessibility_state" Aeson..= accessibilityState
+                    ])
+            result = ToolCallResult
+                { callId = "call-native-full"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , output = encoded
+                , callKind = ComputerFunctionCallKind
+                }
+        case turnInputsToItems [CompletedTool result] of
+            FunctionCallOutputItem output : _ ->
+                case Aeson.toJSON output.output of
+                    Aeson.String rendered -> do
+                        rendered `shouldSatisfy` Text.isInfixOf
+                            "Full macOS accessibility snapshot, revision 1:"
+                        rendered `shouldSatisfy` Text.isInfixOf
+                            "\"kind\":\"full\""
+                    other -> expectationFailure
+                        ("expected text output, got " <> show other)
+            other -> expectationFailure
+                ("unexpected native computer continuation: " <> show other)
+
+    it "labels accessibility deltas with their base and new revisions" do
+        let accessibilityState = Aeson.object
+                [ "kind" Aeson..= ("delta" :: Text.Text)
+                , "base_revision" Aeson..= (3 :: Int)
+                , "revision" Aeson..= (4 :: Int)
+                , "patch" Aeson..= ([] :: [Aeson.Value])
+                ]
+            encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "ignored"
+                    , screenshotDataUrl = "data:image/jpeg;base64,AA=="
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Nothing
+                    , computerOutputExtra = KeyMap.singleton
+                        "accessibility_state"
+                        accessibilityState
+                    }
+            result = ToolCallResult
+                { callId = "call-native-delta"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , output = encoded
+                , callKind = ComputerFunctionCallKind
+                }
+        case turnInputsToItems [CompletedTool result] of
+            FunctionCallOutputItem output : _ ->
+                Aeson.toJSON output.output `shouldSatisfy` \case
+                    Aeson.String rendered ->
+                        "macOS accessibility changes, revision 3 -> 4:"
+                            `Text.isInfixOf` rendered
+                            && "\"patch\":[]" `Text.isInfixOf` rendered
+                    _ -> False
+            other -> expectationFailure
+                ("unexpected native computer continuation: " <> show other)
+
+    it "labels structured accessibility capture failures" do
+        let accessibilityState = Aeson.object
+                [ "kind" Aeson..= ("unavailable" :: Text.Text)
+                , "revision" Aeson..= (2 :: Int)
+                , "reason" Aeson..= ("AX timeout" :: Text.Text)
+                ]
+            encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "ignored"
+                    , screenshotDataUrl = "data:image/jpeg;base64,AA=="
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Nothing
+                    , computerOutputExtra = KeyMap.singleton
+                        "accessibility_state"
+                        accessibilityState
+                    }
+            result = ToolCallResult
+                { callId = "call-native-unavailable"
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                , output = encoded
+                , callKind = ComputerFunctionCallKind
+                }
+        case turnInputsToItems [CompletedTool result] of
+            FunctionCallOutputItem output : _ ->
+                Aeson.toJSON output.output `shouldSatisfy` \case
+                    Aeson.String rendered ->
+                        "macOS accessibility state unavailable, revision 2:"
+                            `Text.isInfixOf` rendered
+                            && "\"reason\":\"AX timeout\""
+                                `Text.isInfixOf` rendered
+                    _ -> False
+            other -> expectationFailure
+                ("unexpected native computer continuation: " <> show other)
+
     it "keeps computer output before its observation in standard and Lite requests" do
         let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
                 ComputerCallOutput
@@ -181,6 +624,9 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 turnInputsToItems
                     [ CompletedTool ToolCallResult
                         { callId = "call-function"
+                        , toolResultMode = BlockingToolCall
+                        , toolResultImages = []
+                        , toolResultOutcome = Nothing
                         , output = encoded
                         , callKind = ComputerFunctionCallKind
                         }
@@ -234,11 +680,17 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             inputs =
                 [ CompletedTool ToolCallResult
                     { callId = "call-success"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = successful
                     , callKind = ComputerFunctionCallKind
                     }
                 , CompletedTool ToolCallResult
                     { callId = "call-failed"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = "Computer input failed after changing the UI."
                     , callKind = ComputerFunctionCallKind
                     }
@@ -323,10 +775,12 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                         "{\"actions\":[{\"type\":\"screenshot\"}]}"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
+                    , async = Nothing
                     }
             output =
                 FunctionCallOutput
-                    { itemId = Just "legacy-output-item"
+                    { localOutcome = Nothing
+                    , itemId = Just "legacy-output-item"
                     , callId = "legacy-function-call"
                     , name = Nothing
                     , namespace = Nothing
@@ -345,6 +799,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                                 ]
                             ]
                     , status = Nothing
+                    , async = Nothing
                     }
             request =
                 withRequestInput
@@ -379,6 +834,9 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             toolResultToItem
                 ToolCallResult
                     { callId = "call-failed"
+                    , toolResultMode = BlockingToolCall
+                    , toolResultImages = []
+                    , toolResultOutcome = Nothing
                     , output = "Tool call rejected by user."
                     , callKind = ComputerCallKind
                     } of
@@ -407,6 +865,9 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 [ CompletedTool
                     ToolCallResult
                         { callId = "call-large"
+                        , toolResultMode = BlockingToolCall
+                        , toolResultImages = []
+                        , toolResultOutcome = Nothing
                         , output = encoded
                         , callKind = ComputerCallKind
                         }
@@ -441,8 +902,10 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             other -> expectationFailure ("unexpected items: " <> show other)
 
     it "encodes rich function outputs as image content followed by the hint" do
-        case toolResultToItem ToolCallResultWithImages
+        case toolResultToItem ToolCallResult
                 { callId = "image-call"
+                , toolResultMode = BlockingToolCall
+                , toolResultOutcome = Nothing
                 , output = "saved under generated_images"
                 , callKind = FunctionCallKind
                 , toolResultImages =
@@ -492,6 +955,116 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
         result `shouldBe` Left (ConnectionError "stopped after failover")
         readIORef attempts `shouldReturn` [first, second]
 
+    it "replaces obsolete history after a server compaction checkpoint" do
+        let oldItems = turnInputsToItems [UserMessage "old context"]
+            checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "compact-1"
+                , encryptedContent = Just "opaque"
+                }
+            answer = MessageItem ResponseMessage
+                { messageId = Just "message-1"
+                , content = MessageContentParts
+                    [OutputTextPart "continued" Nothing Nothing]
+                , role = RoleAssistant
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                }
+            send _params _onEvent =
+                pure (Right (responseWithOutput [checkpoint, answer]))
+            backend =
+                statelessResponsesBackend send
+                    (pure defaultResponseCreateParams)
+            snapshot =
+                advanceBackendSnapshot
+                    emptyBackendSnapshot
+                    oldItems
+                    Nothing
+
+        result <- backend.submitTurn
+            snapshot
+            Nothing
+            [UserMessage "new input"]
+            (const (pure ()))
+
+        fmap (.backendState.backendItems) result
+            `shouldBe` Right [checkpoint, answer]
+
+    it "retains generic history while dropping an unreplayable checkpoint" do
+        let oldItems = turnInputsToItems [UserMessage "old context"]
+            newItems = turnInputsToItems [UserMessage "new input"]
+            checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "compact-generic"
+                , encryptedContent = Just "opaque"
+                }
+            answer = MessageItem ResponseMessage
+                { messageId = Just "message-generic"
+                , content = MessageContentParts
+                    [OutputTextPart "continued" Nothing Nothing]
+                , role = RoleAssistant
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                }
+            send _params _onEvent =
+                pure (Right (responseWithOutput [checkpoint, answer]))
+            backend =
+                genericResponsesBackendWith send
+                    (pure defaultResponseCreateParams)
+            snapshot =
+                advanceBackendSnapshot
+                    emptyBackendSnapshot
+                    oldItems
+                    Nothing
+
+        result <- backend.submitTurn
+            snapshot
+            Nothing
+            [UserMessage "new input"]
+            (const (pure ()))
+
+        fmap (.backendState.backendItems) result
+            `shouldBe`
+                Right
+                    (oldItems <> newItems <> [answer])
+
+    it "preserves retained history when only the request has a checkpoint" do
+        let retained = turnInputsToItems [UserMessage "retained context"]
+            checkpoint = CompactionItemValue CompactionItem
+                { itemId = Just "compact-old"
+                , encryptedContent = Just "opaque"
+                }
+            existingItems = retained <> [checkpoint]
+            newItems = turnInputsToItems [UserMessage "new input"]
+            answer = MessageItem ResponseMessage
+                { messageId = Just "message-ordinary"
+                , content = MessageContentParts
+                    [OutputTextPart "continued" Nothing Nothing]
+                , role = RoleAssistant
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                }
+            send _params _onEvent =
+                pure (Right (responseWithOutput [answer]))
+            backend =
+                statelessResponsesBackend send
+                    (pure defaultResponseCreateParams)
+            snapshot =
+                advanceBackendSnapshot
+                    emptyBackendSnapshot
+                    existingItems
+                    Nothing
+
+        result <- backend.submitTurn
+            snapshot
+            Nothing
+            [UserMessage "new input"]
+            (const (pure ()))
+
+        fmap (.backendState.backendItems) result
+            `shouldBe` Right (existingItems <> newItems <> [answer])
+
     it "forwards raw provider reasoning text to the UI loop" do
         events <- newIORef []
         let send _params onStreamEvent = do
@@ -515,6 +1088,170 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
         result `shouldBe` Left (ConnectionError "stop after reasoning")
         readIORef events `shouldReturn`
             [ReasoningDelta "checking the implementation"]
+
+    it "announces async calls only when a completed output item arrives" do
+        announced <- newIORef []
+        let partialCall = FunctionCall
+                { itemId = Just "async-item"
+                , callId = "async-call"
+                , name = "read_file"
+                , namespace = Nothing
+                , provider = Nothing
+                , arguments = ""
+                , encryptedFunctionArgs = Nothing
+                , status = Nothing
+                , async = Just True
+                }
+            completedCall = partialCall
+                { arguments = "{\"path\":\"README.md\"}"
+                , status = Just ItemCompleted
+                }
+            blockingCall = FunctionCall
+                { itemId = Just "blocking-item"
+                , callId = "blocking-call"
+                , name = "read_file"
+                , namespace = Nothing
+                , provider = Nothing
+                , arguments = "{\"path\":\"README.md\"}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                , async = Nothing
+                }
+            send _params onStreamEvent = do
+                onStreamEvent ResponseOutputItemAddedEvent
+                    { item = FunctionCallItem partialCall
+                    , outputIndex = Just 0
+                    , sequenceNumber = Just 1
+                    }
+                onStreamEvent ResponseFunctionCallArgumentsDeltaEvent
+                    { delta = Just "{\"path\":\"README.md\"}"
+                    , streamItemId = Just "async-item"
+                    , streamOutputIndex = Just 0
+                    , sequenceNumber = Just 2
+                    }
+                onStreamEvent ResponseOutputItemDoneEvent
+                    { item = FunctionCallItem completedCall
+                    , outputIndex = Just 0
+                    , sequenceNumber = Just 3
+                    }
+                onStreamEvent ResponseOutputItemDoneEvent
+                    { item = FunctionCallItem blockingCall
+                    , outputIndex = Just 1
+                    , sequenceNumber = Just 4
+                    }
+                pure (Left (ConnectionError "stop after calls"))
+            backend =
+                statelessResponsesBackend send
+                    (pure defaultResponseCreateParams)
+
+        result <- backend.submitTurnWithCallbacks
+            emptyBackendSnapshot
+            Nothing
+            [UserMessage "hello"]
+            BackendCallbacks
+                { onLoopEvent = const (pure ())
+                , onRecoveryCheckpoint = const (pure ())
+                , onAsyncToolCall =
+                    \call -> modifyIORef' announced (<> [call])
+                }
+
+        result `shouldBe` Left (ConnectionError "stop after calls")
+        calls <- readIORef announced
+        map (.callId) calls `shouldBe` ["async-call"]
+        map toolCallMode calls `shouldBe` [AsyncToolCall]
+        map (.arguments) calls `shouldBe` ["{\"path\":\"README.md\"}"]
+
+    it "recovers a completed host side effect when the stream fails after output_item.done" do
+        finished <- newEmptyMVar
+        sideEffects <- newIORef (0 :: Int)
+        state <- newIORef emptyBackendSnapshot
+        cancel <- newCancelFlag
+        let call = FunctionCall
+                { itemId = Just "uncommitted-item"
+                , callId = "side-effect-call"
+                , name = "write_receipt"
+                , namespace = Nothing
+                , provider = Nothing
+                , arguments = "{}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                , async = Just True
+                }
+            send _params onStreamEvent = do
+                onStreamEvent ResponseOutputItemDoneEvent
+                    { item = FunctionCallItem call
+                    , outputIndex = Just 0
+                    , sequenceNumber = Just 1
+                    }
+                -- The event sink acknowledges the real host result before
+                -- failing the still-open provider stream. No timing sleeps.
+                takeMVar finished
+                onStreamEvent ResponseOutputItemAddedEvent
+                    { item = FunctionCallItem call
+                        { callId = "malformed-never-admitted"
+                        , arguments = "{\"unfinished\":"
+                        , status = Just ItemIncomplete
+                        }
+                    , outputIndex = Just 1
+                    , sequenceNumber = Just 2
+                    }
+                pure (Left (ConnectionError "stream broke after side effect"))
+            backend = statelessResponsesBackend send
+                (pure defaultResponseCreateParams)
+            tool = withAsyncToolCalls $
+                jsonAppToolWithExecution "write_receipt" "" []
+                    AlwaysReadOnly ParallelSafe $
+                    noArgsTool "write_receipt" do
+                        modifyIORef' sideEffects (+ 1)
+                        pure (Right "receipt-4711 persisted")
+            registry = either (error . Text.unpack) id (mkToolRegistry [tool])
+            config = Loop.LoopConfig
+                { loopBackend = backend
+                , loopBackendState = Loop.BackendStateStore
+                    { readBackendState = readIORef state
+                    , commitBackendState = \snapshot ->
+                        writeIORef state snapshot >> pure snapshot
+                    }
+                , loopTools = registry
+                , loopDispatch = Loop.defaultLoopDispatch
+                , loopMaxTurns = Loop.defaultLoopMaxTurns
+                , loopOnEvent = \case
+                    ToolFinished _ -> putMVar finished ()
+                    _ -> pure ()
+                , loopApprove = const (pure (Right True))
+                , loopReadSteering = pure []
+                , loopCommitSteering = const (pure ())
+                , loopInterrupt = pure ()
+                , loopCancel = cancel
+                }
+        outcome <- timeout 5000000 $
+            Loop.runLoopInputsDetailed config Nothing [UserMessage "write once"]
+        execution <- case outcome of
+            Nothing -> expectationFailure "stream recovery timed out" >> fail "timeout"
+            Just value -> pure value
+        execution.executionResult `shouldSatisfy` isLeft
+        readIORef sideEffects `shouldReturn` 1
+        let history = execution.executionState
+            encodedHistory = TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode history))
+        encodedHistory `shouldSatisfy` Text.isInfixOf "receipt-4711 persisted"
+        encodedHistory `shouldSatisfy` Text.isInfixOf "write_receipt"
+        encodedHistory `shouldSatisfy` (not . Text.isInfixOf "malformed-never-admitted")
+        history `shouldSatisfy` all (\case MessageItem{} -> True; _ -> False)
+        -- Feed the recovered snapshot into a fresh provider submission. The
+        -- observation must reach the wire without recreating executable calls.
+        resumedRequests <- newIORef []
+        let resumedBackend = statelessResponsesBackend
+                (\params _ -> do
+                    modifyIORef' resumedRequests (<> [params.input])
+                    pure (Right (responseWithOutput [])))
+                (pure defaultResponseCreateParams)
+        recovered <- readIORef state
+        _ <- resumedBackend.submitTurn recovered Nothing [UserMessage "continue"]
+            (const (pure ()))
+        requests <- readIORef resumedRequests
+        requests `shouldBe`
+            [Just (ResponseInputItems (history <> turnInputsToItems [UserMessage "continue"]))]
+        readIORef sideEffects `shouldReturn` 1
 
     it "can hide raw reasoning while retaining reasoning summaries" do
         events <- newIORef []
@@ -671,13 +1408,15 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , "image_url" Aeson..= ("data:image/png;base64,AA==" :: Text.Text)
                 ]))
             toolOutput = FunctionCallOutputItem FunctionCallOutput
-                { itemId = Nothing
+                { localOutcome = Nothing
+                , itemId = Nothing
                 , callId = "call-1"
                 , name = Nothing
                 , namespace = Nothing
                 , provider = Nothing
                 , output = toolOutputValue
                 , status = Nothing
+                , async = Nothing
 
                 }
             params = paramsWithInputItems [additional]
@@ -761,9 +1500,11 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , arguments = "{}"
                 , encryptedFunctionArgs = Nothing
                 , status = Just ItemCompleted
+                , async = Nothing
                 }
             output = FunctionCallOutputItem FunctionCallOutput
-                { itemId = Nothing
+                { localOutcome = Nothing
+                , itemId = Nothing
                 , callId = "call-1"
                 , name = Nothing
                 , namespace = Nothing
@@ -771,14 +1512,17 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , output = rawJsonFromEncoding
                     (Aeson.toEncoding ("ok" :: Text.Text))
                 , status = Just ItemIncomplete
+                , async = Nothing
                 }
             customOutput = CustomToolCallOutputItem CustomToolCallOutput
-                { itemId = Nothing
+                { localOutcome = Nothing
+                , itemId = Nothing
                 , callId = "call-2"
                 , name = Nothing
                 , output = rawJsonFromEncoding
                     (Aeson.toEncoding ("ok" :: Text.Text))
                 , status = Just ItemCompleted
+                , async = Nothing
                 }
             customCall = CustomToolCallItem CustomToolCall
                 { itemId = Just "ctc-1"
@@ -787,6 +1531,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , namespace = Nothing
                 , input = "*** Begin Patch"
                 , status = Just ItemCompleted
+                , async = Nothing
                 }
             shell = LocalShellCallItem LocalShellCall
                 { itemId = Just "lsh-1"
@@ -814,12 +1559,38 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
         map encodedField (requestInputItems request) !! 1
             `shouldBe` Just (Aeson.String "opaque")
 
--- | Streamed tool calls are announced immediately. Shell argument deltas
--- repaint that call with the partial command, while other tools retain coarse
--- activity updates.
+-- | Streamed tool calls are announced immediately. Safe argument deltas
+-- repaint the call, while sensitive tools retain coarse activity updates.
 streamProjectionSpec :: Spec
 streamProjectionSpec = describe "newStreamEventToLoopEvents" do
-    it "publishes Codex weekly capacity updates for retained prompt chrome" do
+    it "starts a pure projection attempt without retaining reused tool ids" do
+        let (firstState, _) =
+                streamEventToLoopEventsStep False
+                    emptyStreamProjectionState
+                    (functionCallAdded "fc-1" "call-1" "shell_command")
+            (_, firstEvents) =
+                streamEventToLoopEventsStep False firstState
+                    (argumentsDelta "fc-1" "{\"command\":\"pwd\"}")
+            (secondState, _) =
+                streamEventToLoopEventsStep False
+                    emptyStreamProjectionState
+                    (functionCallAdded "fc-1" "call-2" "apply_patch")
+            (_, secondEvents) =
+                streamEventToLoopEventsStep False secondState
+                    (argumentsDelta "fc-1" "{}")
+        firstEvents `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    "{\"command\":\"pwd\"}")
+            ]
+        secondEvents `shouldSatisfy` \case
+            [ToolArgumentsUpdated call] ->
+                call.callId == "call-2" && call.name == "apply_patch"
+            _ -> False
+
+    it "leaves Codex capacity display to the authoritative usage endpoint" do
         projectEvent <- newStreamEventToLoopEvents False
         events <- projectEvent ResponseCodexRateLimitsEvent
             { rateLimits = CodexRateLimits
@@ -830,12 +1601,7 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                 }
             , sequenceNumber = Nothing
             }
-        events `shouldBe`
-            [ ProviderLimitUpdated
-                { providerLimitText = "Weekly limit left: 21%"
-                , providerLimitWarning = False
-                }
-            ]
+        events `shouldBe` []
 
     it "publishes a streamed function call immediately" do
         projectEvent <- newStreamEventToLoopEvents False
@@ -866,6 +1632,124 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                     "{\"command\":\"git status\"}")
             ]
 
+    it "batches a long shell tail and flushes it when arguments finish" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
+        let firstCommand = Text.replicate 116 "a"
+            firstArguments = "{\"command\":\"" <> firstCommand
+            batchedSuffix = Text.replicate 63 "b" <> "c"
+            tailSuffix = "tail"
+            completeCommand = firstCommand <> batchedSuffix <> tailSuffix
+            completeArguments =
+                "{\"command\":\"" <> completeCommand <> "\"}"
+        first <- projectEvent (argumentsDelta "fc-1" firstArguments)
+        first `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    ("{\"command\":\"" <> firstCommand <> "\"}"))
+            ]
+        quiet <- projectEvent
+            (argumentsDelta "fc-1" (Text.replicate 63 "b"))
+        quiet `shouldBe` []
+        batched <- projectEvent (argumentsDelta "fc-1" "c")
+        batched `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    ( "{\"command\":\""
+                        <> firstCommand
+                        <> batchedSuffix
+                        <> "\"}"
+                    ))
+            ]
+        tailEvents <- projectEvent
+            (argumentsDelta "fc-1" (tailSuffix <> "\"}"))
+        tailEvents `shouldBe` []
+        flushed <- projectEvent
+            (functionArgumentsDone
+                (Just "fc-1")
+                (Just 0)
+                (Just completeArguments))
+        flushed `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    completeArguments)
+            ]
+
+    it "repaints an ordinary JSON tool call as its arguments arrive" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "read_file")
+        first <- projectEvent
+            (argumentsDelta "fc-1" "{\"target_file\":\"src/Ma")
+        first `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "read_file"
+                    "{\"target_file\":\"src/Ma")
+            ]
+        second <- projectEvent (argumentsDelta "fc-1" "in.hs\"}")
+        second `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-1"
+                    "read_file"
+                    "{\"target_file\":\"src/Main.hs\"}")
+            ]
+
+    it "routes parallel argument streams by output index" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (functionCallAddedAt 0 "fc-read" "call-read" "read_file")
+        _ <- projectEvent
+            (functionCallAddedAt 1 "fc-grep" "call-grep" "grep")
+        events <- projectEvent
+            (argumentsDeltaAt
+                Nothing
+                (Just 0)
+                "{\"target_file\":\"src/Main.hs\"}")
+        events `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall
+                    "call-read"
+                    "read_file"
+                    "{\"target_file\":\"src/Main.hs\"}")
+            ]
+
+    it "publishes a structured prefix eagerly, then batches tiny deltas" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "read_file")
+        batches <- mapM
+            (\_ -> projectEvent (argumentsDelta "fc-1" "x"))
+            [1 :: Int .. 8064]
+        let previews =
+                [ call.arguments
+                | ToolArgumentsUpdated call <- concat batches
+                ]
+        take 3 previews `shouldBe` ["x", "xx", "xxx"]
+        length previews `shouldSatisfy` (< 170)
+        last previews `shouldBe` Text.replicate 8064 "x"
+
+    it "flushes a pending function argument tail on arguments done" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "read_file")
+        let prefix = Text.replicate 128 "p"
+            complete = prefix <> "canonical"
+        _ <- projectEvent (argumentsDelta "fc-1" prefix)
+        quiet <- projectEvent (argumentsDelta "fc-1" "tail")
+        quiet `shouldBe` []
+        flushed <- projectEvent
+            (functionArgumentsDone (Just "fc-1") (Just 0) (Just complete))
+        flushed `shouldBe`
+            [ ToolArgumentsUpdated
+                (functionToolCall "call-1" "read_file" complete)
+            ]
+
     it "replaces streamed tool metadata with the canonical done item" do
         projectEvent <- newStreamEventToLoopEvents False
         _ <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
@@ -883,19 +1767,108 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                     "{\"command\":\"git status\"}")
             ]
 
+    it "preserves streamed arguments across a sparse function done item" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "read_file")
+        let prefix = Text.replicate 128 "p"
+            tailText = "tail"
+        _ <- projectEvent (argumentsDelta "fc-1" prefix)
+        quiet <- projectEvent (argumentsDelta "fc-1" tailText)
+        quiet `shouldBe` []
+        events <- projectEvent
+            (functionCallDone "fc-1" "call-1" "read_file" "")
+        events `shouldBe`
+            [ ToolUpdated
+                (functionToolCall "call-1" "read_file" (prefix <> tailText))
+            ]
+
     it "publishes a streamed custom tool call immediately" do
         projectEvent <- newStreamEventToLoopEvents False
         events <- projectEvent
             (customToolCallAdded "ct-1" "call-9" "apply_patch")
         events `shouldBe`
-            [ ToolStarted ToolCall
-                { callId = "call-9"
-                , name = "apply_patch"
-                , arguments = ""
-                , callKind = CustomCallKind
-                , argumentsEncrypted = False
-                }
-            , ActivityUpdated "Writing apply_patch call…"
+            [ToolStarted (customToolCall "call-9" "apply_patch" "")]
+
+    it "repaints streamed apply_patch input as it arrives" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        let prefix = "*** Begin Patch\n*** Update File: A.hs\n"
+        first <- projectEvent
+            (customInputDelta "ct-1" "call-9" prefix)
+        first `shouldBe`
+            [ ToolArgumentsUpdated
+                (customToolCall
+                    "call-9"
+                    "apply_patch"
+                    prefix)
+            ]
+        let continuation =
+                "@@\n-old\n+new\n" <> Text.replicate 256 "x"
+        second <- projectEvent
+            (customInputDelta "ct-1" "call-9" continuation)
+        second `shouldBe`
+            [ ToolArgumentsUpdated
+                (customToolCall
+                    "call-9"
+                    "apply_patch"
+                    (prefix <> continuation))
+            ]
+
+    it "batches tiny apply_patch deltas without losing their content" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        batches <- mapM
+            (\_ -> projectEvent (customInputDelta "ct-1" "call-9" "x"))
+            [1 :: Int .. 8193]
+        let previews =
+                [ call.arguments
+                | ToolArgumentsUpdated call <- concat batches
+                ]
+        length previews `shouldSatisfy` (< 40)
+        last previews `shouldBe` Text.replicate 8193 "x"
+
+    it "bounds a live apply_patch preview" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        let retained = Text.replicate (64 * 1024) "p"
+        first <- projectEvent
+            (customInputDelta
+                "ct-1"
+                "call-9"
+                (retained <> "not retained"))
+        first `shouldBe`
+            [ ToolArgumentsUpdated
+                (customToolCall "call-9" "apply_patch" retained)
+            ]
+        second <- projectEvent
+            (customInputDelta "ct-1" "call-9" "still not retained")
+        second `shouldBe` []
+
+    it "flushes accumulated custom input when input done omits it" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        let prefix = "*** Begin Patch\n"
+            tailText = "*** End Patch\n"
+        _ <- projectEvent (customInputDelta "ct-1" "call-9" prefix)
+        quiet <- projectEvent
+            (customInputDelta "ct-1" "call-9" tailText)
+        quiet `shouldBe` []
+        flushed <- projectEvent
+            (customInputStreamDone
+                (Just "ct-1")
+                (Just "call-9")
+                (Just 0)
+                Nothing)
+        flushed `shouldBe`
+            [ ToolArgumentsUpdated
+                (customToolCall
+                    "call-9"
+                    "apply_patch"
+                    (prefix <> tailText))
             ]
 
     it "updates a streamed custom tool from its done item" do
@@ -909,14 +1882,48 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                 "apply_patch"
                 "*** Begin Patch")
         events `shouldBe`
-            [ ToolUpdated ToolCall
-                { callId = "call-9"
-                , name = "apply_patch"
-                , arguments = "*** Begin Patch"
-                , callKind = CustomCallKind
-                , argumentsEncrypted = False
-                }
+            [ ToolUpdated
+                (customToolCall "call-9" "apply_patch" "*** Begin Patch")
             ]
+
+    it "preserves streamed input across a sparse custom done item" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        let prefix = "*** Begin Patch\n"
+            tailText = "*** End Patch\n"
+        _ <- projectEvent (customInputDelta "ct-1" "call-9" prefix)
+        quiet <- projectEvent
+            (customInputDelta "ct-1" "call-9" tailText)
+        quiet `shouldBe` []
+        events <- projectEvent
+            (customToolCallDone "ct-1" "call-9" "apply_patch" "")
+        events `shouldBe`
+            [ ToolUpdated
+                (customToolCall
+                    "call-9"
+                    "apply_patch"
+                    (prefix <> tailText))
+            ]
+
+    it "retains the ordinary done projection for native computer calls" do
+        projectEvent <- newStreamEventToLoopEvents False
+        let item = ComputerCallItem ComputerCall
+                { computerCallItemId = Just "native-item"
+                , computerCallId = "native-call"
+                , computerActions = [TypeAction "secret"]
+                , pendingSafetyChecks = []
+                , computerCallStatus = Just ItemCompleted
+                , computerCallExtra = KeyMap.empty
+                }
+        events <- projectEvent ResponseOutputItemDoneEvent
+            { item
+            , outputIndex = Just 0
+            , sequenceNumber = Just 2
+            }
+        case responseItemToToolCall item of
+            Just call -> events `shouldBe` [ToolUpdated call]
+            Nothing -> expectationFailure "native computer call was not projected"
 
     it "does not replace a shell preview with coarse argument activity" do
         projectEvent <- newStreamEventToLoopEvents False
@@ -944,13 +1951,41 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
         third <- projectEvent (argumentsDelta "fc-1" bigDelta)
         third `shouldBe` []
 
-    it "counts custom tool input as argument streaming" do
+    it "repaints streamed custom tool input" do
         projectEvent <- newStreamEventToLoopEvents False
-        _ <- projectEvent (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "large_custom_tool")
+        let arguments = Text.replicate 10000 "p"
         loud <- projectEvent
-            (customInputDelta "ct-1" "call-9" (Text.replicate 10000 "p"))
+            (customInputDelta "ct-1" "call-9" arguments)
         loud `shouldBe`
-            [ActivityUpdated "Writing apply_patch call… (10k chars)"]
+            [ ToolArgumentsUpdated
+                (customToolCall
+                    "call-9"
+                    "large_custom_tool"
+                    arguments)
+            ]
+
+    it "keeps sensitive computer arguments out of live previews" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (functionCallAdded "fc-1" "call-1" computerFunctionName)
+        loud <- projectEvent
+            (argumentsDelta "fc-1" (Text.replicate 10000 "s"))
+        loud `shouldBe`
+            [ ActivityUpdated
+                ("Writing " <> computerFunctionName <> " call… (10k chars)")
+            ]
+
+    it "keeps encrypted collaboration arguments out of live previews" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent encryptedCollaborationCallAdded
+        loud <- projectEvent
+            (argumentsDelta "fc-secret" (Text.replicate 10000 "s"))
+        loud `shouldBe`
+            [ ActivityUpdated
+                "Writing collaboration.spawn_agent call… (10k chars)"
+            ]
 
     it "keeps plain deltas mapped through the pure projection" do
         projectEvent <- newStreamEventToLoopEvents False
@@ -974,8 +2009,26 @@ functionToolCall functionCallId functionName functionArguments = ToolCall
     , argumentsEncrypted = False
     }
 
+customToolCall :: Text.Text -> Text.Text -> Text.Text -> ToolCall
+customToolCall customCallId customName customInput = ToolCall
+    { callId = customCallId
+    , name = customName
+    , arguments = customInput
+    , callKind = CustomCallKind
+    , argumentsEncrypted = False
+    }
+
 functionCallAdded :: Text.Text -> Text.Text -> Text.Text -> ResponseStreamEvent
 functionCallAdded functionItemId functionCallId functionName =
+    functionCallAddedAt 0 functionItemId functionCallId functionName
+
+functionCallAddedAt
+    :: Int
+    -> Text.Text
+    -> Text.Text
+    -> Text.Text
+    -> ResponseStreamEvent
+functionCallAddedAt index functionItemId functionCallId functionName =
     ResponseOutputItemAddedEvent
         { item = FunctionCallItem FunctionCall
             { itemId = Just functionItemId
@@ -986,6 +2039,27 @@ functionCallAdded functionItemId functionCallId functionName =
             , arguments = ""
             , encryptedFunctionArgs = Nothing
             , status = Nothing
+            , async = Nothing
+
+            }
+        , outputIndex = Just index
+        , sequenceNumber = Just 1
+
+        }
+
+encryptedCollaborationCallAdded :: ResponseStreamEvent
+encryptedCollaborationCallAdded =
+    ResponseOutputItemAddedEvent
+        { item = FunctionCallItem FunctionCall
+            { itemId = Just "fc-secret"
+            , callId = "call-secret"
+            , name = "spawn_agent"
+            , namespace = Just "collaboration"
+            , provider = Nothing
+            , arguments = ""
+            , encryptedFunctionArgs = Just ["message"]
+            , status = Nothing
+            , async = Nothing
 
             }
         , outputIndex = Just 0
@@ -1010,6 +2084,7 @@ functionCallDone functionItemId functionCallId functionName functionArguments =
             , arguments = functionArguments
             , encryptedFunctionArgs = Nothing
             , status = Nothing
+            , async = Nothing
 
             }
         , outputIndex = Just 0
@@ -1027,6 +2102,7 @@ customToolCallAdded customItemId customCallId customName =
             , namespace = Nothing
             , input = ""
             , status = Nothing
+            , async = Nothing
 
             }
         , outputIndex = Just 0
@@ -1049,6 +2125,7 @@ customToolCallDone customItemId customCallId customName customInput =
             , namespace = Nothing
             , input = customInput
             , status = Nothing
+            , async = Nothing
 
             }
         , outputIndex = Just 0
@@ -1058,10 +2135,33 @@ customToolCallDone customItemId customCallId customName customInput =
 
 argumentsDelta :: Text.Text -> Text.Text -> ResponseStreamEvent
 argumentsDelta deltaItemId deltaText =
+    argumentsDeltaAt (Just deltaItemId) (Just 0) deltaText
+
+argumentsDeltaAt
+    :: Maybe Text.Text
+    -> Maybe Int
+    -> Text.Text
+    -> ResponseStreamEvent
+argumentsDeltaAt deltaItemId outputIndex deltaText =
     ResponseFunctionCallArgumentsDeltaEvent
         { delta = Just deltaText
-        , streamItemId = Just deltaItemId
-        , streamOutputIndex = Just 0
+        , streamItemId = deltaItemId
+        , streamOutputIndex = outputIndex
+        , sequenceNumber = Nothing
+
+        }
+
+functionArgumentsDone
+    :: Maybe Text.Text
+    -> Maybe Int
+    -> Maybe Text.Text
+    -> ResponseStreamEvent
+functionArgumentsDone deltaItemId outputIndex functionArguments =
+    ResponseFunctionCallArgumentsDoneEvent
+        { arguments = functionArguments
+        , functionName = Nothing
+        , streamItemId = deltaItemId
+        , streamOutputIndex = outputIndex
         , sequenceNumber = Nothing
 
         }
@@ -1073,6 +2173,22 @@ customInputDelta deltaItemId deltaCallId deltaText =
         , streamItemId = Just deltaItemId
         , streamCallId = Just deltaCallId
         , streamOutputIndex = Just 0
+        , sequenceNumber = Nothing
+
+        }
+
+customInputStreamDone
+    :: Maybe Text.Text
+    -> Maybe Text.Text
+    -> Maybe Int
+    -> Maybe Text.Text
+    -> ResponseStreamEvent
+customInputStreamDone deltaItemId deltaCallId outputIndex completeInput =
+    ResponseCustomToolInputDoneEvent
+        { inputText = completeInput
+        , streamItemId = deltaItemId
+        , streamCallId = deltaCallId
+        , streamOutputIndex = outputIndex
         , sequenceNumber = Nothing
 
         }
@@ -1120,6 +2236,20 @@ isUserMessage = \case
                 _ -> False
     _ -> False
 
+responseWithOutput :: [ResponseItem] -> Response
+responseWithOutput output =
+    either (error . Text.unpack) id
+        . Codec.decodeResponse
+        . LBS.toStrict
+        . Aeson.encode $
+        Aeson.object
+            [ "id" Aeson..= ("resp-compacted" :: Text.Text)
+            , "created_at" Aeson..= (0 :: Int)
+            , "model" Aeson..= ("grok-4.6" :: Text.Text)
+            , "status" Aeson..= ("completed" :: Text.Text)
+            , "output" Aeson..= output
+            ]
+
 isEmptyAssistantFollowup :: ResponseItem -> Bool
 isEmptyAssistantFollowup = \case
     MessageItem message ->
@@ -1144,12 +2274,5 @@ developerMessage messageText contentItemKinds =
             , createTime = Nothing
             , contentItemKinds = Just contentItemKinds
             , executedToolCalls = Nothing
-
             }
-
         }
-
-jsonField :: Text.Text -> Aeson.Value -> Maybe Aeson.Value
-jsonField fieldName = \case
-    Aeson.Object object -> KeyMap.lookup (Key.fromText fieldName) object
-    _ -> Nothing

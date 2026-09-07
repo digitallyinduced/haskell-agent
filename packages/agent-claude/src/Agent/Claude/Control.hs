@@ -77,6 +77,7 @@ data ClaudeCodeHostHandlers = ClaudeCodeHostHandlers
         :: !(Maybe (ClaudeCodeMcpRequest -> IO Value))
     , mcpServerName :: !Text
     , mcpToolNames :: ![Text]
+    , nativeToolsEnabled :: !Bool
     }
 
 defaultClaudeCodeHostHandlers :: ClaudeCodeHostHandlers
@@ -85,6 +86,7 @@ defaultClaudeCodeHostHandlers = ClaudeCodeHostHandlers
     , handleMcpMessage = Nothing
     , mcpServerName = "haskell-agent"
     , mcpToolNames = []
+    , nativeToolsEnabled = True
     }
 
 -- | Install the synthetic SDK MCP server in Claude Code's strict MCP
@@ -95,12 +97,16 @@ configureClaudeCodeHostTools
     -> ClaudeAgentOptions
     -> ClaudeAgentOptions
 configureClaudeCodeHostTools handlers options =
+    let baseOptions
+            | handlers.nativeToolsEnabled = options
+            | otherwise = options { tools = Just [] }
+    in
     case handlers.handleMcpMessage of
-        Nothing -> options
+        Nothing -> baseOptions
         Just _ ->
-            options
+            baseOptions
                 { allowedTools =
-                    options.allowedTools
+                    baseOptions.allowedTools
                         <> map
                             (mcpQualifiedName handlers.mcpServerName)
                             handlers.mcpToolNames

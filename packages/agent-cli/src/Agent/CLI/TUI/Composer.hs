@@ -14,6 +14,8 @@ module Agent.CLI.TUI.Composer
     , DictationKeyAction(..)
     , dictationKeyAction
     , dictationProgressNotice
+    , dictationStartingNotice
+    , dictationSessionIsRecording
     , draftCursorLocation
     , draftWindowStart
     , drawComposer
@@ -28,6 +30,7 @@ module Agent.CLI.TUI.Composer
     , handleEffortControlClick
     , handlePromptControlClick
     , immediateBtwQuestion
+    , immediateReplCommand
     , isKillKey
     , newFullscreenInputBuffer
     , prepareBracketedPaste
@@ -72,12 +75,12 @@ import Agent.TUI.TextWidth
     , previousGraphemeBoundary
     )
 import Brick
-import Control.Concurrent (newEmptyMVar, takeMVar, tryPutMVar)
+import Control.Concurrent (MVar, isEmptyMVar, newEmptyMVar, readMVar, tryPutMVar)
 import Control.Concurrent.STM (atomically, writeTQueue)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Data.IORef (newIORef, writeIORef)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (elemIndex)
 import Data.Maybe (fromMaybe)
 import qualified Data.Sequence as Seq
@@ -109,6 +112,20 @@ dictationKeyAction = \case
             Just DictationAbort
     _ -> Nothing
 
+dictationStartingNotice :: UiNotice
+dictationStartingNotice =
+    progressNotice "Starting microphone… Enter to stop · Esc to cancel"
+
+-- | A ready event can arrive after stop or after the session has finished.
+-- Keep the stop signal filled so consuming it cannot revive the listening UI.
+dictationSessionIsRecording :: MVar () -> Maybe DictationSession -> IO Bool
+dictationSessionIsRecording stop = \case
+    Just session | session.dictationStop == stop -> do
+        notStopped <- isEmptyMVar stop
+        aborted <- readIORef session.dictationAbort
+        pure (notStopped && not aborted)
+    _ -> pure False
+
 dictationProgressNotice :: Text -> UiNotice
 dictationProgressNotice transcript =
     progressNotice $
@@ -124,16 +141,21 @@ requestDictationStop session abort = do
     void (tryPutMVar session.dictationStop ())
 
 handleDictationKey
-    :: EventM Name AppState CtrlCDecision
+    :: (UiEvent -> EventM Name AppState ())
+    -> EventM Name AppState CtrlCDecision
     -> DictationSession
     -> V.Event
     -> EventM Name AppState ()
-handleDictationKey handleCtrlC session event =
+handleDictationKey applyUiEvent handleCtrlC session event =
     case dictationKeyAction event of
-        Just DictationCommit ->
+        Just DictationCommit -> do
             liftIO (requestDictationStop session False)
+            applyUiEvent $
+                UiSetNotice (Just (progressNotice "Transcribing…"))
         Just DictationAbort -> do
             liftIO (requestDictationStop session True)
+            applyUiEvent $
+                UiSetNotice (Just (progressNotice "Cancelling dictation…"))
             case event of
                 V.EvKey (V.KChar 'c') modifiers
                     | V.MCtrl `elem` modifiers ->
@@ -207,7 +229,7 @@ handleEffortControlClick applyUiEvent = do
                         _ -> pure ()
                 modify' \currentState ->
                     currentState
-                        { appChoice = Just ChoiceOverlay
+                        { appChoice = Just $ PendingDialog choose ChoiceOverlay
                             { choicePresentation = ChoiceDialog
                             , choiceTitle = "Reasoning effort"
                             , choiceBody =
@@ -220,7 +242,6 @@ handleEffortControlClick applyUiEvent = do
                             , choiceAdjustmentIndices = []
                             , choiceCloseOnTurnEnd = True
                             }
-                        , appChoiceReply = Just choose
                         }
                 vScrollToBeginning (viewportScroll OverlayViewport)
             else
@@ -340,21 +361,21 @@ handleComposerKey
         slashMenu = currentSlashMenu state
     case event of
         _ | Bridge.isSendNowKey event ->
-            sendNow
+            sendNow applyUiEvent
         V.EvKey (V.KChar 'q') modifiers
             | V.MCtrl `elem` modifiers ->
-                submitRaw ReplEof
+                submitRaw applyUiEvent ReplEof
         V.EvKey (V.KChar 'd') modifiers
             | V.MCtrl `elem` modifiers
             , Text.null ui.uiDraft ->
-                submitRaw ReplEof
+                submitRaw applyUiEvent ReplEof
         V.EvKey (V.KChar 'd') modifiers
             | V.MCtrl `elem` modifiers ->
-                deleteAfter
+                deleteAfter applyUiEvent
         V.EvKey (V.KChar 'd') modifiers
             | V.MMeta `elem` modifiers
                 || V.MAlt `elem` modifiers ->
-                killWordAfter
+                killWordAfter applyUiEvent
         V.EvKey (V.KChar 'c') modifiers
             | V.MCtrl `elem` modifiers ->
                 void handleCtrlC
@@ -363,7 +384,7 @@ handleComposerKey
                 ui.uiAwaitingInput
                 (maybe False (const True) slashMenu) of
                 EscapeCancelTurn ->
-                    cancelOrClear
+                    cancelOrClear applyUiEvent
                 EscapeDismissSlashMenu ->
                     modify' \current ->
                         current { appSlashDismissed = True }
@@ -371,121 +392,121 @@ handleComposerKey
                     pure ()
         V.EvKey V.KBackTab []
             | ui.uiAwaitingInput ->
-                submitRaw (ReplCycleMode ui.uiDraft)
+                submitRaw applyUiEvent (ReplCycleMode ui.uiDraft)
         V.EvKey V.KUp []
             | Just menu <- slashMenu
             , not (null menu.slashMenuSuggestions) ->
                 moveSlash (-1) (length menu.slashMenuSuggestions)
         V.EvKey V.KUp [] ->
             case verticalCursorMove (-1) ui.uiDraft ui.uiCursor of
-                Just cursor -> setCursor cursor
-                Nothing -> moveHistory 1
+                Just cursor -> setCursor applyUiEvent cursor
+                Nothing -> moveHistory applyUiEvent 1
         V.EvKey V.KDown []
             | Just menu <- slashMenu
             , not (null menu.slashMenuSuggestions) ->
                 moveSlash 1 (length menu.slashMenuSuggestions)
         V.EvKey V.KDown [] ->
             case verticalCursorMove 1 ui.uiDraft ui.uiCursor of
-                Just cursor -> setCursor cursor
-                Nothing -> moveHistory (-1)
+                Just cursor -> setCursor applyUiEvent cursor
+                Nothing -> moveHistory applyUiEvent (-1)
         V.EvKey (V.KChar '\t') [] ->
             case slashMenu of
-                Just menu -> acceptSlash menu
+                Just menu -> acceptSlash applyUiEvent menu
                 Nothing ->
                     when
                         (composerScrollbackAvailable
                             ui
                             state.appHistoryWindow) $
-                        modifyUi (UiFocusChanged FocusScrollback)
+                        modifyUi applyUiEvent (UiFocusChanged FocusScrollback)
         V.EvKey V.KEnter modifiers
             | V.MShift `elem` modifiers ->
-                insertText "\n"
+                insertText applyUiEvent "\n"
         V.EvKey V.KEnter [] ->
             case slashMenu of
-                Just menu -> handleSlashEnter menu
-                Nothing -> submitDraft
+                Just menu -> handleSlashEnter applyUiEvent menu
+                Nothing -> submitDraft applyUiEvent
         V.EvKey V.KBS [] ->
-            deleteBefore
+            deleteBefore applyUiEvent
         V.EvKey V.KBS modifiers
             | any (`elem` modifiers) [V.MMeta, V.MAlt, V.MCtrl] ->
-                killPreviousWord
+                killPreviousWord applyUiEvent
         V.EvKey (V.KChar 'w') modifiers
             | V.MCtrl `elem` modifiers ->
-                killPreviousWord
+                killPreviousWord applyUiEvent
         V.EvKey (V.KChar 'u') modifiers
             | V.MCtrl `elem` modifiers ->
-                killLineStart
+                killLineStart applyUiEvent
         V.EvKey (V.KChar 'k') modifiers
             | V.MCtrl `elem` modifiers ->
-                killLineEnd
+                killLineEnd applyUiEvent
         V.EvKey (V.KChar 'y') modifiers
             | V.MCtrl `elem` modifiers ->
-                insertKillBuffer
+                insertKillBuffer applyUiEvent
         V.EvKey (V.KChar 'l') modifiers
             | V.MCtrl `elem` modifiers ->
                 invalidateCache
         V.EvKey (V.KChar 'r') modifiers
             | V.MCtrl `elem` modifiers ->
-                startDictation
+                startDictation applyUiEvent
         V.EvKey (V.KChar '\DC2') _ ->
-            startDictation
+            startDictation applyUiEvent
         V.EvKey (V.KChar 'a') modifiers
             | V.MCtrl `elem` modifiers ->
-                setCursor (lineStartCursor ui.uiDraft ui.uiCursor)
+                setCursor applyUiEvent (lineStartCursor ui.uiDraft ui.uiCursor)
         V.EvKey (V.KChar 'e') modifiers
             | V.MCtrl `elem` modifiers ->
-                setCursor (lineEndCursor ui.uiDraft ui.uiCursor)
+                setCursor applyUiEvent (lineEndCursor ui.uiDraft ui.uiCursor)
         V.EvKey (V.KChar 'b') modifiers
             | V.MCtrl `elem` modifiers ->
-                moveCursor (-1)
+                moveCursor applyUiEvent (-1)
         V.EvKey (V.KChar 'b') modifiers
             | V.MMeta `elem` modifiers
                 || V.MAlt `elem` modifiers ->
-                setCursor (moveWordLeft ui.uiDraft ui.uiCursor)
+                setCursor applyUiEvent (moveWordLeft ui.uiDraft ui.uiCursor)
         V.EvKey (V.KChar 'f') modifiers
             | V.MCtrl `elem` modifiers ->
-                moveCursor 1
+                moveCursor applyUiEvent 1
         V.EvKey (V.KChar 'f') modifiers
             | V.MMeta `elem` modifiers
                 || V.MAlt `elem` modifiers ->
-                setCursor (moveWordRight ui.uiDraft ui.uiCursor)
+                setCursor applyUiEvent (moveWordRight ui.uiDraft ui.uiCursor)
         V.EvKey (V.KChar '_') modifiers
             | V.MCtrl `elem` modifiers ->
-                undoEdit
+                undoEdit applyUiEvent
         V.EvKey (V.KChar '\US') _ ->
-            undoEdit
+            undoEdit applyUiEvent
         V.EvKey (V.KChar 'v') modifiers
             | V.MCtrl `elem` modifiers
                 || V.MMeta `elem` modifiers -> do
                 clipboardText <- liftIO readClipboardText
                 case nonEmptyClipboardText clipboardText of
-                    Just text -> insertPastedText text
+                    Just text -> insertPastedText applyUiEvent text
                     Nothing ->
-                        submitRaw (ReplClipboardPaste ui.uiDraft Nothing)
+                        submitRaw applyUiEvent (ReplClipboardPaste ui.uiDraft Nothing)
         V.EvKey V.KDel [] ->
-            deleteAfter
+            deleteAfter applyUiEvent
         V.EvKey V.KLeft modifiers
             | V.MMeta `elem` modifiers
                 || V.MAlt `elem` modifiers ->
-                setCursor (moveWordLeft ui.uiDraft ui.uiCursor)
+                setCursor applyUiEvent (moveWordLeft ui.uiDraft ui.uiCursor)
         V.EvKey V.KRight modifiers
             | V.MMeta `elem` modifiers
                 || V.MAlt `elem` modifiers ->
-                setCursor (moveWordRight ui.uiDraft ui.uiCursor)
+                setCursor applyUiEvent (moveWordRight ui.uiDraft ui.uiCursor)
         V.EvKey V.KLeft [] ->
-            moveCursor (-1)
+            moveCursor applyUiEvent (-1)
         V.EvKey V.KRight [] ->
-            moveCursor 1
+            moveCursor applyUiEvent 1
         V.EvKey V.KHome [] ->
-            setCursor (lineStartCursor ui.uiDraft ui.uiCursor)
+            setCursor applyUiEvent (lineStartCursor ui.uiDraft ui.uiCursor)
         V.EvKey V.KEnd [] ->
-            setCursor (lineEndCursor ui.uiDraft ui.uiCursor)
+            setCursor applyUiEvent (lineEndCursor ui.uiDraft ui.uiCursor)
         V.EvKey V.KPageUp [] ->
             scrollConversationPage Up
         V.EvKey V.KPageDown [] ->
             scrollConversationPage Down
         V.EvKey (V.KChar character) [] ->
-            insertText (Text.singleton character)
+            insertText applyUiEvent (Text.singleton character)
         V.EvPaste bytes -> do
             let pasted = decodePaste bytes
                 (pastedDraft, pastedCursor, clipboardInput) =
@@ -496,438 +517,498 @@ handleComposerKey
                         pasted
             case clipboardInput of
                 Nothing -> do
-                    modifyUiResetSlash
+                    modifyUiResetSlash applyUiEvent
                         (UiSetDraft pastedDraft pastedCursor)
                     modify' \current -> current { appPasted = True }
                 Just replLine -> do
                     when (not (Text.null pasted)) $
-                        modifyUi
+                        modifyUi applyUiEvent
                             (UiSetNotice
                                 (Just (progressNotice "Reading clipboard…")))
-                    submitRaw replLine
+                    submitRaw applyUiEvent replLine
         _ -> pure ()
     -- Only a kill directly followed by another kill accumulates into the
     -- kill buffer; any other key breaks the chain.
     modify' \current -> current { appKillChain = isKillKey event }
-  where
-    startDictation = do
-        current <- get
-        case current.appDictation of
-            Just session ->
-                liftIO (requestDictationStop session False)
-            Nothing -> do
-                stop <- liftIO newEmptyMVar
-                abort <- liftIO (newIORef False)
-                let session =
-                        DictationSession
-                            { dictationStop = stop
-                            , dictationAbort = abort
-                            }
-                applyUiEvent
-                    (UiSetNotice (Just (dictationProgressNotice "")))
-                    \state -> state { appDictation = Just session }
-                liftIO $ atomically $
-                    writeTQueue
-                        current.appRuntime.runtimeDictationJobs
-                        DictationJob
-                            { dictationJobWaitForStop = takeMVar stop
-                            }
 
-    submitRaw replLine = do
-        state <- get
-        void (enqueueInput state replLine Nothing False)
-
-    submitDraft = do
-        state <- get
-        let draft = state.appUi.uiDraft
-            attachmentCount =
-                state.appUi.uiPrompt.promptAttachments
-        case submissionPromptText attachmentCount draft of
-            Nothing -> pure ()
-            Just text -> submitText state text state.appPasted
-
-    submitText state text pasted = do
-        let replLine = if pasted then ReplPasted text else ReplText text
-        accepted <- case immediateBtwQuestion state.appUi replLine of
-            Just question -> do
-                applyUiEvent UiDraftSubmitted \current ->
-                    current
-                        { appSlashIndex = 0
-                        , appSlashDismissed = False
-                        , appUndo = []
+startDictation :: ApplyLocalUiEvent -> EventM Name AppState ()
+startDictation applyUiEvent = do
+    current <- get
+    case current.appDictation of
+        Just session ->
+            liftIO (requestDictationStop session False)
+        Nothing -> do
+            stop <- liftIO newEmptyMVar
+            abort <- liftIO (newIORef False)
+            let session =
+                    DictationSession
+                        { dictationStop = stop
+                        , dictationAbort = abort
                         }
-                _ <- liftIO (state.appRuntime.runtimeBtw question)
-                pure True
-            Nothing ->
-                case steeringPrompt state.appUi pasted text of
-                    Just (steeringPasted, prompt) -> do
-                        result <- liftIO
-                            (state.appRuntime.runtimeSteer
-                                steeringPasted
-                                prompt)
-                        case result of
-                            Left message -> do
-                                applyUiEvent
-                                    (UiSetNotice
-                                        (Just (warningNotice message)))
-                                    id
-                                pure False
-                            Right () -> do
-                                applyUiEvent UiDraftSubmitted \current ->
-                                    current
-                                        { appSlashIndex = 0
-                                        , appSlashDismissed = False
-                                        , appUndo = []
-                                        }
-                                pure True
-                    Nothing ->
-                        enqueueInput state replLine (Just text) True
-        when accepted do
-            liftIO (appendReplHistory text)
-            modify' \current ->
-                current
-                    { appPasted = False
-                    , appHistory = Bridge.pushHistory text current.appHistory
-                    , appHistoryIndex = Nothing
-                    , appHistoryDraft = ""
-                    }
-            vScrollToEnd (viewportScroll ConversationViewport)
+            applyUiEvent
+                (UiSetNotice (Just dictationStartingNotice))
+                \state -> state { appDictation = Just session }
+            liftIO $ atomically $
+                writeTQueue
+                    current.appRuntime.runtimeDictationJobs
+                    DictationJob
+                        { dictationJobWaitForStop = readMVar stop
+                        , dictationJobRecordingSession = stop
+                        }
 
-    sendNow = do
-        state <- get
-        let ui = state.appUi
-            draft = ui.uiDraft
-        when ui.uiRunning $
-            if Text.null (Text.strip draft)
-                then
-                    if Seq.null ui.uiQueuedInputs
-                        then modifyUi
-                            (UiSetNotice
-                                (Just
-                                    (warningNotice
-                                        "There is no queued prompt to send now.")))
-                        else do
-                            modifyUi
-                                (UiSetNotice
-                                    (Just
-                                        (warningNotice
-                                            "Cancelling the current turn; sending the queued prompt next…")))
-                            liftIO state.appRuntime.runtimeCancel
-                else do
-                    promoted <- liftIO $ atomically $
-                        promoteFullscreenInput
-                            state.appRuntime.runtimeInput
-                            FullscreenInput
-                                { fullscreenInputLine =
-                                    if state.appPasted
-                                        then ReplPasted draft
-                                        else ReplText draft
-                                , fullscreenInputQueued = True
-                                , fullscreenInputDisplay = Just draft
-                                }
-                    case promoted of
-                        Left message ->
-                            modifyUi
-                                (UiSetNotice
-                                    (Just (warningNotice message)))
-                        Right () -> do
-                            liftIO (appendReplHistory draft)
-                            applyUiEvent
-                                (UiInputPromoted draft)
-                                \current ->
-                                    current
-                                        { appPasted = False
-                                        , appHistory =
-                                            Bridge.pushHistory draft current.appHistory
-                                        , appHistoryIndex = Nothing
-                                        , appHistoryDraft = ""
-                                        , appSlashIndex = 0
-                                        , appSlashDismissed = False
-                                        , appUndo = []
-                                        }
-                            liftIO state.appRuntime.runtimeCancel
-                            vScrollToEnd
-                                (viewportScroll ConversationViewport)
+submitRaw :: ApplyLocalUiEvent -> ReplLine -> EventM Name AppState ()
+submitRaw applyUiEvent replLine = do
+    state <- get
+    void (enqueueInput applyUiEvent state replLine Nothing False)
 
-    enqueueInput state replLine display clearDraft = do
-        let queued = not state.appUi.uiAwaitingInput
-            event =
-                if queued
-                    then UiInputQueued <$> display
-                    else Just
-                        (if clearDraft
-                            then UiDraftSubmitted
-                            else UiSetAwaitingInput False)
-            update current =
+submitDraft :: ApplyLocalUiEvent -> EventM Name AppState ()
+submitDraft applyUiEvent = do
+    state <- get
+    let draft = state.appUi.uiDraft
+        attachmentCount =
+            state.appUi.uiPrompt.promptAttachments
+    case submissionPromptText attachmentCount draft of
+        Nothing -> pure ()
+        Just text -> submitText applyUiEvent state text state.appPasted
+
+submitText
+    :: ApplyLocalUiEvent
+    -> AppState
+    -> Text
+    -> Bool
+    -> EventM Name AppState ()
+submitText applyUiEvent state text pasted = do
+    let replLine = if pasted then ReplPasted text else ReplText text
+    accepted <- case immediateReplCommand state.appUi replLine of
+        Just command -> do
+            applyUiEvent UiDraftSubmitted \current ->
                 current
                     { appSlashIndex = 0
                     , appSlashDismissed = False
-                    , appUndo =
-                        -- A submitted prompt leaves an empty composer; its
-                        -- edit steps are no longer undoable.
-                        if clearDraft || maybe False (const True) display
-                            then []
-                            else current.appUndo
+                    , appUndo = []
                     }
-        result <- liftIO $ atomically $
-            appendFullscreenInput state.appRuntime.runtimeInput FullscreenInput
-                { fullscreenInputLine = replLine
-                , fullscreenInputQueued = queued
-                , fullscreenInputDisplay = display
-                }
-        case result of
-            Left message -> do
-                applyUiEvent
-                    (UiSetNotice (Just (warningNotice message)))
-                    id
-                pure False
-            Right () -> do
-                case event of
-                    Nothing -> modify' update
-                    Just uiEvent -> applyUiEvent uiEvent update
-                pure True
-
-    cancelOrClear = do
-        state <- get
-        if not state.appUi.uiAwaitingInput
-            then do
-                liftIO state.appRuntime.runtimeCancel
-                modifyUi
-                    (UiSetNotice (Just (progressNotice "Cancelling…")))
-            else do
-                -- Esc must not destroy a typed draft irrecoverably: stash it
-                -- in the kill buffer so Ctrl-Y (or Ctrl-_) restores it.
-                let draft = state.appUi.uiDraft
-                if Text.null draft
-                    then modifyUi (UiSetDraft "" 0)
-                    else modifyUiWithKill
-                        KillBackward
-                        draft
-                        (UiSetDraft "" 0)
-
-    insertText inserted = do
-        state <- get
-        let ui = state.appUi
-            before = Text.take ui.uiCursor ui.uiDraft
-            after = Text.drop ui.uiCursor ui.uiDraft
-        modifyUiResetSlash $
-            UiSetDraft
-                (before <> inserted <> after)
-                (ui.uiCursor + Text.length inserted)
-
-    insertPastedText inserted = do
-        insertText inserted
-        modify' \current -> current { appPasted = True }
-
-    deleteBefore = do
-        state <- get
-        let ui = state.appUi
-        when (ui.uiCursor > 0) do
-            let start =
-                    previousGraphemeBoundary
-                        ui.uiDraft
-                        ui.uiCursor
-                before = Text.take start ui.uiDraft
-                after = Text.drop ui.uiCursor ui.uiDraft
-            modifyUiResetSlash
-                (UiSetDraft (before <> after) start)
-
-    deleteAfter = do
-        state <- get
-        let ui = state.appUi
-        when (ui.uiCursor < Text.length ui.uiDraft) do
-            let before = Text.take ui.uiCursor ui.uiDraft
-                after =
-                    Text.drop
-                        (nextGraphemeBoundary ui.uiDraft ui.uiCursor)
-                        ui.uiDraft
-            modifyUiResetSlash
-                (UiSetDraft (before <> after) ui.uiCursor)
-
-    killPreviousWord = do
-        state <- get
-        let old = state.appUi.uiDraft
-            oldCursor = state.appUi.uiCursor
-            (next, cursor) =
-                deleteWordBefore state.appUi.uiDraft state.appUi.uiCursor
-            killed =
-                Text.take (oldCursor - cursor) (Text.drop cursor old)
-        modifyUiWithKill KillBackward killed (UiSetDraft next cursor)
-
-    killWordAfter = do
-        state <- get
-        let old = state.appUi.uiDraft
-            oldCursor = state.appUi.uiCursor
-            (next, cursor) =
-                deleteWordAfter state.appUi.uiDraft state.appUi.uiCursor
-            killedLength = Text.length old - Text.length next
-            killed = Text.take killedLength (Text.drop oldCursor old)
-        modifyUiWithKill KillForward killed (UiSetDraft next cursor)
-
-    killLineEnd = do
-        state <- get
-        let old = state.appUi.uiDraft
-            oldCursor = state.appUi.uiCursor
-            (next, cursor) =
-                deleteToLineEnd state.appUi.uiDraft state.appUi.uiCursor
-            killedLength = Text.length old - Text.length next
-            killed = Text.take killedLength (Text.drop oldCursor old)
-        modifyUiWithKill KillForward killed (UiSetDraft next cursor)
-
-    killLineStart = do
-        state <- get
-        let old = state.appUi.uiDraft
-            oldCursor = state.appUi.uiCursor
-            (next, cursor) =
-                deleteToLineStart state.appUi.uiDraft state.appUi.uiCursor
-            killed =
-                Text.take (oldCursor - cursor) (Text.drop cursor old)
-        modifyUiWithKill KillBackward killed (UiSetDraft next cursor)
-
-    undoEdit = do
-        state <- get
-        case state.appUndo of
-            [] -> pure ()
-            (text, cursor) : rest ->
-                applyUiEvent (UiSetDraft text cursor) \current ->
-                    current
-                        { appUndo = rest
-                        , appSlashIndex = 0
-                        , appSlashDismissed = False
-                        , appHistoryIndex = Nothing
-                        , appHistoryDraft = text
-                        }
-
-    insertKillBuffer = do
-        state <- get
-        when (not (Text.null state.appKillBuffer)) $
-            insertText state.appKillBuffer
-
-    moveCursor :: Int -> EventM Name AppState ()
-    moveCursor delta = do
-        state <- get
-        let ui = state.appUi
-            cursor
-                | delta < 0 =
-                    previousGraphemeBoundary ui.uiDraft ui.uiCursor
-                | delta > 0 =
-                    nextGraphemeBoundary ui.uiDraft ui.uiCursor
-                | otherwise = ui.uiCursor
-        setCursor cursor
-
-    setCursor cursor =
-        get >>= \current ->
-            applyUiEvent
-                (UiSetDraft current.appUi.uiDraft cursor)
-                \state -> state { appSlashIndex = 0 }
-
-    modifyUi uiEvent =
-        applyUiEvent uiEvent id
-
-    modifyUiResetSlash uiEvent = do
-        old <- get
-        applyUiEvent uiEvent \state ->
-            (pushUndo old uiEvent state)
-                { appSlashIndex = 0
-                , appSlashDismissed = False
-                , appHistoryIndex = Nothing
-                , appHistoryDraft =
-                    case uiEvent of
-                        UiSetDraft text _ -> text
-                        _ -> state.appHistoryDraft
-                }
-
-    modifyUiWithKill direction killed uiEvent = do
-        old <- get
-        applyUiEvent uiEvent \state ->
-            (pushUndo old uiEvent state)
-                { appSlashIndex = 0
-                , appSlashDismissed = False
-                , appKillBuffer =
-                    if Text.null killed
-                        then state.appKillBuffer
-                        else if old.appKillChain
-                            then combineKill
-                                direction
-                                killed
-                                state.appKillBuffer
-                            else killed
-                , appHistoryIndex = Nothing
-                , appHistoryDraft =
-                    case uiEvent of
-                        UiSetDraft text _ -> text
-                        _ -> state.appHistoryDraft
-                }
-
-    -- Record the pre-edit draft for Ctrl-_ when the edit changes the text.
-    pushUndo old uiEvent state =
-        case uiEvent of
-            UiSetDraft text _
-                | text /= old.appUi.uiDraft ->
-                    state
-                        { appUndo =
-                            take undoLimit
-                                ((old.appUi.uiDraft, old.appUi.uiCursor)
-                                    : state.appUndo)
-                        }
-            _ -> state
-
-    moveHistory delta = do
-        state <- get
-        let (text, index, draft) =
-                Bridge.historyMove
-                    delta
-                    state.appHistory
-                    state.appHistoryIndex
-                    state.appUi.uiDraft
-                    state.appHistoryDraft
-        applyUiEvent
-            (UiSetDraft text (Text.length text))
-            \currentState ->
-                currentState
-                    { appHistoryIndex = index
-                    , appHistoryDraft = draft
-                    , appSlashIndex = 0
-                    , appSlashDismissed = False
-                    }
-
-    moveSlash delta count =
+            _ <- liftIO
+                (state.appRuntime.runtimeImmediateCommand command)
+            pure True
+        Nothing ->
+            case immediateBtwQuestion state.appUi replLine of
+                Just question -> do
+                    applyUiEvent UiDraftSubmitted \current ->
+                        current
+                            { appSlashIndex = 0
+                            , appSlashDismissed = False
+                            , appUndo = []
+                            }
+                    _ <- liftIO (state.appRuntime.runtimeBtw question)
+                    pure True
+                Nothing ->
+                    case steeringPrompt state.appUi pasted text of
+                        Just (steeringPasted, prompt) -> do
+                            result <- liftIO
+                                (state.appRuntime.runtimeSteer
+                                    steeringPasted
+                                    prompt)
+                            case result of
+                                Left message -> do
+                                    applyUiEvent
+                                        (UiSetNotice
+                                            (Just (warningNotice message)))
+                                        id
+                                    pure False
+                                Right () -> do
+                                    applyUiEvent UiDraftSubmitted \current ->
+                                        current
+                                            { appSlashIndex = 0
+                                            , appSlashDismissed = False
+                                            , appUndo = []
+                                            }
+                                    pure True
+                        Nothing ->
+                            enqueueInput applyUiEvent state replLine (Just text) True
+    when accepted do
+        liftIO (appendReplHistory text)
         modify' \current ->
             current
-                { appSlashIndex =
-                    (current.appSlashIndex + delta) `mod` count
+                { appPasted = False
+                , appHistory = Bridge.pushHistory text current.appHistory
+                , appHistoryIndex = Nothing
+                , appHistoryDraft = ""
+                }
+        vScrollToEnd (viewportScroll ConversationViewport)
+
+sendNow :: ApplyLocalUiEvent -> EventM Name AppState ()
+sendNow applyUiEvent = do
+    state <- get
+    let ui = state.appUi
+        draft = ui.uiDraft
+    when ui.uiRunning $
+        if Text.null (Text.strip draft)
+            then
+                if Seq.null ui.uiQueuedInputs
+                    then modifyUi applyUiEvent
+                        (UiSetNotice
+                            (Just
+                                (warningNotice
+                                    "There is no queued prompt to send now.")))
+                    else do
+                        modifyUi applyUiEvent
+                            (UiSetNotice
+                                (Just
+                                    (warningNotice
+                                        "Cancelling the current turn; sending the queued prompt next…")))
+                        liftIO state.appRuntime.runtimeCancel
+            else do
+                promoted <- liftIO $ atomically $
+                    promoteFullscreenInput
+                        state.appRuntime.runtimeInput
+                        FullscreenInput
+                            { fullscreenInputLine =
+                                if state.appPasted
+                                    then ReplPasted draft
+                                    else ReplText draft
+                            , fullscreenInputQueued = True
+                            , fullscreenInputDisplay = Just draft
+                            }
+                case promoted of
+                    Left message ->
+                        modifyUi applyUiEvent
+                            (UiSetNotice
+                                (Just (warningNotice message)))
+                    Right () -> do
+                        liftIO (appendReplHistory draft)
+                        applyUiEvent
+                            (UiInputPromoted draft)
+                            \current ->
+                                current
+                                    { appPasted = False
+                                    , appHistory =
+                                        Bridge.pushHistory draft current.appHistory
+                                    , appHistoryIndex = Nothing
+                                    , appHistoryDraft = ""
+                                    , appSlashIndex = 0
+                                    , appSlashDismissed = False
+                                    , appUndo = []
+                                    }
+                        liftIO state.appRuntime.runtimeCancel
+                        vScrollToEnd
+                            (viewportScroll ConversationViewport)
+
+enqueueInput
+    :: ApplyLocalUiEvent
+    -> AppState
+    -> ReplLine
+    -> Maybe Text
+    -> Bool
+    -> EventM Name AppState Bool
+enqueueInput applyUiEvent state replLine display clearDraft = do
+    let queued = not state.appUi.uiAwaitingInput
+        event =
+            if queued
+                then UiInputQueued <$> display
+                else Just
+                    (if clearDraft
+                        then UiDraftSubmitted
+                        else UiSetAwaitingInput False)
+        update current =
+            current
+                { appSlashIndex = 0
+                , appSlashDismissed = False
+                , appUndo =
+                    -- A submitted prompt leaves an empty composer; its
+                    -- edit steps are no longer undoable.
+                    if clearDraft || maybe False (const True) display
+                        then []
+                        else current.appUndo
+                }
+    result <- liftIO $ atomically $
+        appendFullscreenInput state.appRuntime.runtimeInput FullscreenInput
+            { fullscreenInputLine = replLine
+            , fullscreenInputQueued = queued
+            , fullscreenInputDisplay = display
+            }
+    case result of
+        Left message -> do
+            applyUiEvent
+                (UiSetNotice (Just (warningNotice message)))
+                id
+            pure False
+        Right () -> do
+            case event of
+                Nothing -> modify' update
+                Just uiEvent -> applyUiEvent uiEvent update
+            pure True
+
+cancelOrClear :: ApplyLocalUiEvent -> EventM Name AppState ()
+cancelOrClear applyUiEvent = do
+    state <- get
+    if not state.appUi.uiAwaitingInput
+        then do
+            liftIO state.appRuntime.runtimeCancel
+            modifyUi applyUiEvent
+                (UiSetNotice (Just (progressNotice "Cancelling…")))
+        else do
+            -- Esc must not destroy a typed draft irrecoverably: stash it
+            -- in the kill buffer so Ctrl-Y (or Ctrl-_) restores it.
+            let draft = state.appUi.uiDraft
+            if Text.null draft
+                then modifyUi applyUiEvent (UiSetDraft "" 0)
+                else modifyUiWithKill applyUiEvent
+                    KillBackward
+                    draft
+                    (UiSetDraft "" 0)
+
+insertText :: ApplyLocalUiEvent -> Text -> EventM Name AppState ()
+insertText applyUiEvent inserted = do
+    state <- get
+    let ui = state.appUi
+        before = Text.take ui.uiCursor ui.uiDraft
+        after = Text.drop ui.uiCursor ui.uiDraft
+    modifyUiResetSlash applyUiEvent $
+        UiSetDraft
+            (before <> inserted <> after)
+            (ui.uiCursor + Text.length inserted)
+
+insertPastedText :: ApplyLocalUiEvent -> Text -> EventM Name AppState ()
+insertPastedText applyUiEvent inserted = do
+    insertText applyUiEvent inserted
+    modify' \current -> current { appPasted = True }
+
+deleteBefore :: ApplyLocalUiEvent -> EventM Name AppState ()
+deleteBefore applyUiEvent = do
+    state <- get
+    let ui = state.appUi
+    when (ui.uiCursor > 0) do
+        let start =
+                previousGraphemeBoundary
+                    ui.uiDraft
+                    ui.uiCursor
+            before = Text.take start ui.uiDraft
+            after = Text.drop ui.uiCursor ui.uiDraft
+        modifyUiResetSlash applyUiEvent
+            (UiSetDraft (before <> after) start)
+
+deleteAfter :: ApplyLocalUiEvent -> EventM Name AppState ()
+deleteAfter applyUiEvent = do
+    state <- get
+    let ui = state.appUi
+    when (ui.uiCursor < Text.length ui.uiDraft) do
+        let before = Text.take ui.uiCursor ui.uiDraft
+            after =
+                Text.drop
+                    (nextGraphemeBoundary ui.uiDraft ui.uiCursor)
+                    ui.uiDraft
+        modifyUiResetSlash applyUiEvent
+            (UiSetDraft (before <> after) ui.uiCursor)
+
+killPreviousWord :: ApplyLocalUiEvent -> EventM Name AppState ()
+killPreviousWord applyUiEvent = do
+    state <- get
+    let old = state.appUi.uiDraft
+        oldCursor = state.appUi.uiCursor
+        (next, cursor) =
+            deleteWordBefore state.appUi.uiDraft state.appUi.uiCursor
+        killed =
+            Text.take (oldCursor - cursor) (Text.drop cursor old)
+    modifyUiWithKill applyUiEvent KillBackward killed (UiSetDraft next cursor)
+
+killWordAfter :: ApplyLocalUiEvent -> EventM Name AppState ()
+killWordAfter applyUiEvent = do
+    state <- get
+    let old = state.appUi.uiDraft
+        oldCursor = state.appUi.uiCursor
+        (next, cursor) =
+            deleteWordAfter state.appUi.uiDraft state.appUi.uiCursor
+        killedLength = Text.length old - Text.length next
+        killed = Text.take killedLength (Text.drop oldCursor old)
+    modifyUiWithKill applyUiEvent KillForward killed (UiSetDraft next cursor)
+
+killLineEnd :: ApplyLocalUiEvent -> EventM Name AppState ()
+killLineEnd applyUiEvent = do
+    state <- get
+    let old = state.appUi.uiDraft
+        oldCursor = state.appUi.uiCursor
+        (next, cursor) =
+            deleteToLineEnd state.appUi.uiDraft state.appUi.uiCursor
+        killedLength = Text.length old - Text.length next
+        killed = Text.take killedLength (Text.drop oldCursor old)
+    modifyUiWithKill applyUiEvent KillForward killed (UiSetDraft next cursor)
+
+killLineStart :: ApplyLocalUiEvent -> EventM Name AppState ()
+killLineStart applyUiEvent = do
+    state <- get
+    let old = state.appUi.uiDraft
+        oldCursor = state.appUi.uiCursor
+        (next, cursor) =
+            deleteToLineStart state.appUi.uiDraft state.appUi.uiCursor
+        killed =
+            Text.take (oldCursor - cursor) (Text.drop cursor old)
+    modifyUiWithKill applyUiEvent KillBackward killed (UiSetDraft next cursor)
+
+undoEdit :: ApplyLocalUiEvent -> EventM Name AppState ()
+undoEdit applyUiEvent = do
+    state <- get
+    case state.appUndo of
+        [] -> pure ()
+        (text, cursor) : rest ->
+            applyUiEvent (UiSetDraft text cursor) \current ->
+                current
+                    { appUndo = rest
+                    , appSlashIndex = 0
+                    , appSlashDismissed = False
+                    , appHistoryIndex = Nothing
+                    , appHistoryDraft = text
+                    }
+
+insertKillBuffer :: ApplyLocalUiEvent -> EventM Name AppState ()
+insertKillBuffer applyUiEvent = do
+    state <- get
+    when (not (Text.null state.appKillBuffer)) $
+        insertText applyUiEvent state.appKillBuffer
+
+moveCursor :: ApplyLocalUiEvent -> Int -> EventM Name AppState ()
+moveCursor applyUiEvent delta = do
+    state <- get
+    let ui = state.appUi
+        cursor
+            | delta < 0 =
+                previousGraphemeBoundary ui.uiDraft ui.uiCursor
+            | delta > 0 =
+                nextGraphemeBoundary ui.uiDraft ui.uiCursor
+            | otherwise = ui.uiCursor
+    setCursor applyUiEvent cursor
+
+setCursor :: ApplyLocalUiEvent -> Int -> EventM Name AppState ()
+setCursor applyUiEvent cursor =
+    get >>= \current ->
+        applyUiEvent
+            (UiSetDraft current.appUi.uiDraft cursor)
+            \state -> state { appSlashIndex = 0 }
+
+modifyUi :: ApplyLocalUiEvent -> UiEvent -> EventM Name AppState ()
+modifyUi applyUiEvent uiEvent =
+    applyUiEvent uiEvent id
+
+modifyUiResetSlash :: ApplyLocalUiEvent -> UiEvent -> EventM Name AppState ()
+modifyUiResetSlash applyUiEvent uiEvent = do
+    old <- get
+    applyUiEvent uiEvent \state ->
+        (pushUndo old uiEvent state)
+            { appSlashIndex = 0
+            , appSlashDismissed = False
+            , appHistoryIndex = Nothing
+            , appHistoryDraft =
+                case uiEvent of
+                    UiSetDraft text _ -> text
+                    _ -> state.appHistoryDraft
+            }
+
+modifyUiWithKill
+    :: ApplyLocalUiEvent
+    -> KillDirection
+    -> Text
+    -> UiEvent
+    -> EventM Name AppState ()
+modifyUiWithKill applyUiEvent direction killed uiEvent = do
+    old <- get
+    applyUiEvent uiEvent \state ->
+        (pushUndo old uiEvent state)
+            { appSlashIndex = 0
+            , appSlashDismissed = False
+            , appKillBuffer =
+                if Text.null killed
+                    then state.appKillBuffer
+                    else if old.appKillChain
+                        then combineKill
+                            direction
+                            killed
+                            state.appKillBuffer
+                        else killed
+            , appHistoryIndex = Nothing
+            , appHistoryDraft =
+                case uiEvent of
+                    UiSetDraft text _ -> text
+                    _ -> state.appHistoryDraft
+            }
+
+-- Record the pre-edit draft for Ctrl-_ when the edit changes the text.
+pushUndo :: AppState -> UiEvent -> AppState -> AppState
+pushUndo old uiEvent state =
+    case uiEvent of
+        UiSetDraft text _
+            | text /= old.appUi.uiDraft ->
+                state
+                    { appUndo =
+                        take undoLimit
+                            ((old.appUi.uiDraft, old.appUi.uiCursor)
+                                : state.appUndo)
+                    }
+        _ -> state
+
+moveHistory :: ApplyLocalUiEvent -> Int -> EventM Name AppState ()
+moveHistory applyUiEvent delta = do
+    state <- get
+    let (text, index, draft) =
+            Bridge.historyMove
+                delta
+                state.appHistory
+                state.appHistoryIndex
+                state.appUi.uiDraft
+                state.appHistoryDraft
+    applyUiEvent
+        (UiSetDraft text (Text.length text))
+        \currentState ->
+            currentState
+                { appHistoryIndex = index
+                , appHistoryDraft = draft
+                , appSlashIndex = 0
+                , appSlashDismissed = False
                 }
 
-    acceptSlash menu = do
-        current <- get
-        case selectedSlashSuggestion current menu of
-            Nothing -> pure ()
-            Just suggestion -> acceptSlashSuggestion menu suggestion
+moveSlash :: Int -> Int -> EventM Name AppState ()
+moveSlash delta count =
+    modify' \current ->
+        current
+            { appSlashIndex =
+                (current.appSlashIndex + delta) `mod` count
+            }
 
-    handleSlashEnter menu = do
-        current <- get
-        case selectedSlashSuggestion current menu of
-            Nothing -> submitDraft
-            Just suggestion
-                | Text.strip current.appUi.uiDraft
-                    == suggestion.slashSuggestionDisplay ->
-                        submitDraft
-                | suggestion.slashSuggestionTakesArguments ->
-                    acceptSlashSuggestion menu suggestion
-                | otherwise -> do
-                    let next = slashReplacement
-                            current.appUi.uiDraft
-                            menu
-                            suggestion
-                    submitText current next False
+acceptSlash :: ApplyLocalUiEvent -> SlashMenu -> EventM Name AppState ()
+acceptSlash applyUiEvent menu = do
+    current <- get
+    case selectedSlashSuggestion current menu of
+        Nothing -> pure ()
+        Just suggestion -> acceptSlashSuggestion applyUiEvent menu suggestion
 
-    acceptSlashSuggestion menu suggestion = do
-        current <- get
-        let next = slashReplacement
-                current.appUi.uiDraft
-                menu
-                suggestion
-            cursor =
-                menu.slashMenuReplaceStart
-                    + Text.length suggestion.slashSuggestionReplacement
-        modifyUiResetSlash (UiSetDraft next cursor)
+handleSlashEnter :: ApplyLocalUiEvent -> SlashMenu -> EventM Name AppState ()
+handleSlashEnter applyUiEvent menu = do
+    current <- get
+    case selectedSlashSuggestion current menu of
+        Nothing -> submitDraft applyUiEvent
+        Just suggestion
+            | Text.strip current.appUi.uiDraft
+                == suggestion.slashSuggestionDisplay ->
+                    submitDraft applyUiEvent
+            | suggestion.slashSuggestionTakesArguments ->
+                acceptSlashSuggestion applyUiEvent menu suggestion
+            | otherwise -> do
+                let next = slashReplacement
+                        current.appUi.uiDraft
+                        menu
+                        suggestion
+                submitText applyUiEvent current next False
+
+acceptSlashSuggestion
+    :: ApplyLocalUiEvent
+    -> SlashMenu
+    -> SlashSuggestion
+    -> EventM Name AppState ()
+acceptSlashSuggestion applyUiEvent menu suggestion = do
+    current <- get
+    let next = slashReplacement
+            current.appUi.uiDraft
+            menu
+            suggestion
+        cursor =
+            menu.slashMenuReplaceStart
+                + Text.length suggestion.slashSuggestionReplacement
+    modifyUiResetSlash applyUiEvent (UiSetDraft next cursor)

@@ -1,8 +1,10 @@
 module Main (main) where
 
 import qualified Agent.Auth.JWTSpec as JWTSpec
+import qualified Agent.ClientIdentitySpec as ClientIdentitySpec
 import qualified Agent.CancelSpec as CancelSpec
 import qualified Agent.ConcurrentSpec as ConcurrentSpec
+import qualified Agent.ComputerUse.ProtocolSpec as ComputerUseProtocolSpec
 import qualified Agent.DialectSpec as DialectSpec
 import qualified Agent.ErrorSpec as ErrorSpec
 import qualified Agent.Http.HeaderSpec as HttpHeaderSpec
@@ -42,8 +44,10 @@ import Test.Hspec (hspec)
 main :: IO ()
 main = hspec do
     JWTSpec.spec
+    ClientIdentitySpec.spec
     CancelSpec.spec
     ConcurrentSpec.spec
+    ComputerUseProtocolSpec.spec
     DialectSpec.spec
     ErrorSpec.spec
     HttpHeaderSpec.spec

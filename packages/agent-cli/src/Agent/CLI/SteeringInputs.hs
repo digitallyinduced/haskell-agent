@@ -10,6 +10,7 @@ module Agent.CLI.SteeringInputs
     , hasBackgroundCompletionWake
     , hasBackgroundCompletions
     , newSteeringInputs
+    , prepareBackgroundCompletion
     , readSteeringInputs
     , steeringInputByteLimit
     , steeringInputCountLimit
@@ -51,13 +52,14 @@ data SteeringEntry = SteeringEntry
 data SteeringState = SteeringState
     { steeringQueue :: !(Seq.Seq SteeringEntry)
     , steeringBytes :: !Int
+    , steeringEpoch :: !Word
     }
 
 newtype SteeringInputs = SteeringInputs (TVar SteeringState)
 
 newSteeringInputs :: IO SteeringInputs
 newSteeringInputs =
-    SteeringInputs <$> newTVarIO (SteeringState Seq.empty 0)
+    SteeringInputs <$> newTVarIO (SteeringState Seq.empty 0 0)
 
 enqueueSteeringInputs
     :: SteeringInputs
@@ -89,7 +91,7 @@ enqueueSteeringInputs (SteeringInputs ref) inputs =
                 pure $ Left
                     "Steering queue is full; wait for the active turn to consume guidance."
             else do
-                writeTVar ref SteeringState
+                writeTVar ref state
                     { steeringQueue =
                         state.steeringQueue Seq.>< Seq.fromList measured
                     , steeringBytes = nextBytes
@@ -103,11 +105,29 @@ enqueueBackgroundCompletion
     -> Text
     -> TurnInput
     -> IO (Either Text Bool)
-enqueueBackgroundCompletion (SteeringInputs ref) key input =
+enqueueBackgroundCompletion = enqueueBackgroundCompletionForEpoch Nothing
+
+-- | Capture the owning conversation, so a late child completion cannot wake
+-- or inject input into a different conversation after a session reset.
+prepareBackgroundCompletion
+    :: SteeringInputs
+    -> IO (Text -> TurnInput -> IO (Either Text Bool))
+prepareBackgroundCompletion inputs@(SteeringInputs ref) = do
+    state <- readTVarIO ref
+    pure (enqueueBackgroundCompletionForEpoch (Just state.steeringEpoch) inputs)
+
+enqueueBackgroundCompletionForEpoch
+    :: Maybe Word
+    -> SteeringInputs
+    -> Text
+    -> TurnInput
+    -> IO (Either Text Bool)
+enqueueBackgroundCompletionForEpoch epoch (SteeringInputs ref) key input =
     atomically do
         state <- readTVar ref
-        if any ((== Just key) . (.steeringBackgroundKey))
-                state.steeringQueue
+        if maybe False (/= state.steeringEpoch) epoch
+                || any ((== Just key) . (.steeringBackgroundKey))
+                    state.steeringQueue
             then pure (Right False)
             else do
                 let bytes = logicalTurnInputBytes input
@@ -190,12 +210,12 @@ commitSteeringInputs (SteeringInputs ref) count =
                     entry.steeringBytes `saturatingAdd` total)
                 0
                 removed
-        in SteeringState
+        in state
             { steeringQueue = remaining
             , steeringBytes = max 0 (state.steeringBytes - removedBytes)
             }
 
 clearSteeringInputs :: SteeringInputs -> IO ()
 clearSteeringInputs (SteeringInputs ref) =
-    atomically $ modifyTVar' ref \_ ->
-        SteeringState Seq.empty 0
+    atomically $ modifyTVar' ref \state ->
+        SteeringState Seq.empty 0 (state.steeringEpoch + 1)

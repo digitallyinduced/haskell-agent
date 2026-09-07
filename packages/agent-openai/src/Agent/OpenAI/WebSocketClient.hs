@@ -18,6 +18,7 @@ module Agent.OpenAI.WebSocketClient
     , buildWsPayloadWithOptions
     , addTurnStateToPayload
     , buildCodexWsHeaders
+    , buildCodexWsHandshakeHeaders
     , WebSocketEndpoint(..)
     , gatewayWebSocketEndpoint
     , isGatewayWebSocketCredential
@@ -45,6 +46,7 @@ module Agent.OpenAI.WebSocketClient
 import Agent.OpenAI.Auth (Pool)
 import Agent.OpenAI.Credential (poolTokenProvider)
 import Agent.Error
+import Agent.ClientIdentity (gatewayUserAgent)
 import Agent.Http.Header (parseRetryAfterSeconds)
 import Agent.OpenAI.Error (isPreviousResponseIdError, mkOpenAIError)
 import Agent.OpenAI.Features (remoteCompactionV2Feature)
@@ -407,7 +409,7 @@ runConnectionAttemptWithPolicyAndTurnState _ _ credential _action
         Nothing
 runConnectionAttemptWithPolicyAndTurnState retryPolicy sharedTurnState
         credential action = do
-    let headers = buildCodexWsHeaders credential
+    headers <- buildCodexWsHandshakeHeaders credential
     case gatewayWebSocketEndpoint credential of
         Left err -> pure (Left (ConnectionError err))
         Right endpoint ->
@@ -528,7 +530,16 @@ runCredentialWebSocket endpoint headers action =
                     headers
                     action
 
--- | Pure handshake-header builder exported for transport contract tests.
+-- | Add the host application's identity only for organization gateways.
+-- Keeping this at the handshake boundary also covers reconnects and subagents.
+buildCodexWsHandshakeHeaders :: Credential -> IO WS.Headers
+buildCodexWsHandshakeHeaders credential
+    | isGatewayWebSocketCredential credential = do
+        userAgent <- gatewayUserAgent
+        pure (("User-Agent", userAgent) : buildCodexWsHeaders credential)
+    | otherwise = pure (buildCodexWsHeaders credential)
+
+-- | Pure authentication-header builder exported for transport contract tests.
 buildCodexWsHeaders :: Credential -> WS.Headers
 buildCodexWsHeaders credential =
     [ ("Authorization", "Bearer " <> Text.encodeUtf8 credential.accessToken)
@@ -955,13 +966,13 @@ receiveWsResponseWithActions modelHint actions onEvent =
                     failure.failureErrorCode
                     Nothing
 
-unparsedStreamEvent :: String -> LBS.ByteString -> ResponseStreamEvent
+unparsedStreamEvent :: Text -> LBS.ByteString -> ResponseStreamEvent
 unparsedStreamEvent err bytes =
     OtherResponseStreamEvent
         { otherEventType = StreamEventUnknown unparsedStreamEventTypeText
         , sequenceNumber = Nothing
         , eventDelta = Just
-            (Text.pack err <> ": " <> framePreview bytes)
+            (err <> ": " <> framePreview bytes)
         , streamItemId = Nothing
         , streamOutputIndex = Nothing
         , summaryIndex = Nothing

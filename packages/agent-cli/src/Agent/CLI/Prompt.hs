@@ -2,6 +2,7 @@
 module Agent.CLI.Prompt
     ( appendMcpInstructions
     , codexEnvironmentContext
+    , commitAttributionGuidanceForTools
     , mcpInstructionsForRequest
     , mcpInstructionsGuidance
     , secretInputGuidance
@@ -10,7 +11,9 @@ module Agent.CLI.Prompt
     , sessionTempGuidance
     , systemPrompt
     , systemPromptForCatalogModel
+    , systemPromptForCatalogModelWithHostedSearch
     , systemPromptForTools
+    , systemPromptForToolsWithHostedSearch
     ) where
 
 import Agent.CLI.Timestamp (timeContextGuidance)
@@ -38,7 +41,7 @@ import Agent.Dialect
     , PromptStyle(..)
     , dialectPromptStyle
     )
-import Agent.CLI.Tools (hostedSearchToolNames)
+import Agent.CLI.Tools (hostedSearchToolNamesWhen)
 import Agent.GrokBuild.Dialect.Prompt
     ( codingGrokPromptTools
     , grokSystemPrompt
@@ -46,6 +49,7 @@ import Agent.GrokBuild.Dialect.Prompt
     )
 import Agent.OsPath (toText)
 import Agent.Provider (BillingMode(..), Provider(..))
+import Data.Char (isControl)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -85,12 +89,22 @@ subscriptionSubagentModelGuidance provider billing
     | otherwise = Nothing
 
 -- | @isNonInteractive@ is True for one-shot @-p@ (no human in the loop).
-systemPrompt :: Dialect -> OsPath -> Maybe OsPath -> Day -> Bool -> Text
-systemPrompt dialect cwd sessionTmp today isNonInteractive =
+systemPrompt
+    :: Dialect
+    -> Text
+    -> Text
+    -> OsPath
+    -> Maybe OsPath
+    -> Day
+    -> Bool
+    -> Text
+systemPrompt dialect model effort cwd sessionTmp today isNonInteractive =
     Text.intercalate "\n\n" $
         filter (not . Text.null)
             [ base
+            , delegationOwnershipGuidance
             , sessionTempGuidance sessionTmp
+            , commitAttributionGuidance model effort
             , ghciGuidanceForDialect dialect
             , timeContextGuidance
             ]
@@ -104,22 +118,47 @@ systemPrompt dialect cwd sessionTmp today isNonInteractive =
         ClaudeCodePromptStyle ->
             claudeCodeSystemPrompt cwd today
 
--- | Render a child prompt against the final filtered application-tool set.
--- Hosted search tools are server-side and remain available independently.
+-- | Render a child prompt against the final filtered application-tool set,
+-- including provider-hosted search by default.
 systemPromptForTools
     :: Dialect
+    -> Text
+    -> Text
     -> [Text]
     -> OsPath
     -> Maybe OsPath
     -> Day
     -> Bool
     -> Text
-systemPromptForTools
-        dialect toolNames cwd sessionTmp today isNonInteractive =
+systemPromptForTools =
+    systemPromptForToolsWithHostedSearch True
+
+-- | Render a prompt while explicitly controlling provider-hosted search.
+-- Embeddings without that capability omit it because hosted tools bypass the
+-- application-tool execution boundary.
+systemPromptForToolsWithHostedSearch
+    :: Bool
+    -> Dialect
+    -> Text
+    -> Text
+    -> [Text]
+    -> OsPath
+    -> Maybe OsPath
+    -> Day
+    -> Bool
+    -> Text
+systemPromptForToolsWithHostedSearch includeHostedSearch
+        dialect model effort toolNames cwd sessionTmp today isNonInteractive =
     Text.intercalate "\n\n" $
         filter (not . Text.null)
             [ base
+            , delegationOwnershipGuidance
             , sessionTempGuidance sessionTmp
+            , commitAttributionGuidanceForTools
+                dialect
+                model
+                effort
+                (Set.toList available)
             , secretInputGuidance available
             , imageDisplayGuidance available
             , learnedSkillGuidance available
@@ -129,7 +168,8 @@ systemPromptForTools
             , timeContextGuidance
             ]
   where
-    availableNames = hostedSearchToolNames dialect ++ toolNames
+    availableNames =
+        hostedSearchToolNamesWhen includeHostedSearch dialect ++ toolNames
     available = Set.fromList availableNames
     base = case dialectPromptStyle dialect of
         GrokBuildPromptStyle ->
@@ -158,16 +198,37 @@ systemPromptForTools
 -- them through 'codexEnvironmentContext', matching upstream placement.
 systemPromptForCatalogModel
     :: Dialect
+    -> Text
+    -> Text
     -> ModelInfo
     -> [Text]
     -> Maybe OsPath
     -> Text
-systemPromptForCatalogModel dialect info toolNames sessionTmp =
+systemPromptForCatalogModel =
+    systemPromptForCatalogModelWithHostedSearch True
+
+systemPromptForCatalogModelWithHostedSearch
+    :: Bool
+    -> Dialect
+    -> Text
+    -> Text
+    -> ModelInfo
+    -> [Text]
+    -> Maybe OsPath
+    -> Text
+systemPromptForCatalogModelWithHostedSearch
+        includeHostedSearch dialect model effort info toolNames sessionTmp =
     Text.intercalate "\n\n" $
         filter (not . Text.null)
             [ Text.strip
                 (renderModelInstructions ModelPersonalityDefault info)
+            , delegationOwnershipGuidance
             , sessionTempGuidance sessionTmp
+            , commitAttributionGuidanceForTools
+                dialect
+                model
+                effort
+                (Set.toList available)
             , secretInputGuidance available
             , imageDisplayGuidance available
             , learnedSkillGuidance available
@@ -178,7 +239,25 @@ systemPromptForCatalogModel dialect info toolNames sessionTmp =
             ]
   where
     available =
-        Set.fromList (hostedSearchToolNames dialect ++ toolNames)
+        Set.fromList
+            (hostedSearchToolNamesWhen includeHostedSearch dialect ++ toolNames)
+
+-- | Shared across dialects and catalog templates. Delegation is an execution
+-- aid, not a transfer of responsibility for the user's current request.
+delegationOwnershipGuidance :: Text
+delegationOwnershipGuidance = Text.unwords
+    [ "Keep ownership of the user's task in the current session."
+    , "Do the work directly by default. When delegation tools are available,"
+    , "use subagents for bounded subtasks; retain responsibility for integration,"
+    , "verification, and the final answer. Do not delegate the entire current"
+    , "task to another session and end your turn with only a session id or"
+    , "an 'implementation is running' update."
+    , "Create or resume an independent background session only when the user"
+    , "explicitly requests independent/background work or a separate session."
+    , "Approval to implement a plan is not permission to move that work elsewhere."
+    , "When delegated work is needed for your answer, collect and review its"
+    , "results before reporting completion; a launch acknowledgement is not a result."
+    ]
 
 -- | The upstream @<environment_context>@ user fragment: working directory,
 -- shell, date, and timezone. Sent as conversation context rather than inside
@@ -219,10 +298,54 @@ sessionTempGuidance = \case
         Text.unlines
             [ "Session temporary directory: " <> toText path
             , "Use this private directory for clones, downloads, extracted files, generated assets, and other scratch work."
+            , "This is the only scratch root for the session. Do not create alternate temporary directories in the home directory, the workspace, or elsewhere under ~/.haskell-agent; create task-specific subdirectories under $TMPDIR instead."
             , "Filesystem tools may access both the workspace and this directory; relative paths still resolve against the workspace."
             , "Filesystem-tool paths under /tmp or /private/tmp are redirected into this directory."
             , "HASKELL_AGENT_TMPDIR and TMPDIR point to this directory for shell commands; use $TMPDIR instead of a literal /tmp or /private/tmp path."
             ]
+
+-- | Keep the user's configured Git identity as the commit author while making
+-- the harness's contribution visible in GitHub and other trailer-aware tools.
+commitAttributionGuidance :: Text -> Text -> Text
+commitAttributionGuidance model effort =
+    Text.unlines
+        [ "Git commit attribution:"
+        , "- When you create or amend a Git commit for work performed in this session, append exactly one `"
+            <> trailer
+            <> "` trailer to the commit message."
+        , "- Preserve the user's configured author identity and any existing co-author trailers."
+        , "- Do not add a duplicate Haskell Agent trailer, and omit it if the user explicitly asks you not to add it."
+        ]
+  where
+    trailer =
+        "Co-authored-by: Haskell Agent ("
+            <> sanitizeCommitIdentityComponent model
+            <> ", "
+            <> sanitizeCommitIdentityComponent effort
+            <> ") <agent@digitallyinduced.com>"
+
+commitAttributionGuidanceForTools
+    :: Dialect -> Text -> Text -> [Text] -> Text
+commitAttributionGuidanceForTools dialect model effort available
+    | dialectPromptStyle dialect == ClaudeCodePromptStyle =
+        commitAttributionGuidance model effort
+    | not (any (`Set.member` commandTools) available) = ""
+    | otherwise = commitAttributionGuidance model effort
+  where
+    commandTools =
+        Set.fromList
+            [ "shell_command"
+            , "run_terminal_cmd"
+            , "run_terminal_command"
+            , "run_ghci"
+            ]
+
+sanitizeCommitIdentityComponent :: Text -> Text
+sanitizeCommitIdentityComponent =
+    Text.map \character ->
+        if isControl character || character `elem` ['<', '>']
+            then '-'
+            else character
 
 -- | Keep sensitive values outside model-visible text and tool arguments when
 -- the host exposes the dedicated secret-entry capability.
@@ -301,7 +424,9 @@ browserControlGuidance available
             [ "Browser control:"
             , "- Use the browser_* tools for websites instead of whole-desktop computer control."
             , "- In Haskell Agent for macOS, the user can show the connected in-app browser with the browser button; it appears in the right sidebar. A configured dedicated Safari tab may be connected when that pane is hidden."
-            , "- Navigate or take a snapshot first, then use selectors returned by browser_snapshot for interaction."
+            , "- Navigate or take a snapshot first, then interact only with opaque refs from the latest browser_snapshot. Re-snapshot after navigation, actions, or tab switches because old refs become stale."
+            , "- Use browser_list_tabs and browser_switch_tab only for agent-owned tabs. Use browser_screenshot explicitly when pixels are needed; screenshots are not attached automatically."
+            , "- browser_list_downloads contains only downloads attributed to approved browser actions, never an arbitrary filesystem listing."
             ]
   where
     requiredBrowserTools = Set.fromList
@@ -309,6 +434,15 @@ browserControlGuidance available
         , "browser_snapshot"
         , "browser_click"
         , "browser_type"
+        , "browser_key"
+        , "browser_scroll"
+        , "browser_back"
+        , "browser_forward"
+        , "browser_reload"
+        , "browser_screenshot"
+        , "browser_list_tabs"
+        , "browser_switch_tab"
+        , "browser_list_downloads"
         ]
 
 mailGuidance :: Set Text -> Text

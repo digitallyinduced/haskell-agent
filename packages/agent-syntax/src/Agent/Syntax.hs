@@ -645,6 +645,7 @@ languageAliases =
         , ("shell", "bash")
         , ("ts", "typescript")
         , ("tsx", "jsx")
+        , ("udiff", "diff")
         , ("yml", "yaml")
         ]
 

@@ -1,0 +1,19 @@
+stage	sample	wall-seconds	nix-client-max-rss-kib	compiling-lines	agent-cli-library-modules
+# base-revision	db9d4f05d4a9d17a5dc27d89fd3dd1561f68a5d2
+# date	2026-09-04
+# target	.#agent-cli-static
+# rebuild-command	nix build .#agent-cli-static --no-link --print-build-logs --rebuild --max-jobs 1 --cores 4
+# baseline-derivation	/nix/store/lgr2nwa7md3il61j431n88dm8dbglrfd-agent-cli-static-x86_64-unknown-linux-musl-0.1.0.0.drv
+# candidate-derivation	/nix/store/bflc2nnkn5fwzyl803plv8ayinwsmvkh-agent-cli-static-x86_64-unknown-linux-musl-0.1.0.0.drv
+# priming-build-baseline-seconds	60.39
+# priming-build-candidate-seconds	52.64
+# nix-store-free-baseline	57 GiB
+# nix-store-free-package-split	35 GiB
+baseline	1	58.27	43840	215	212
+baseline	2	64.97	43996	215	212
+baseline	3	73.37	43624	215	212
+# median-baseline	64.97
+package-split	1	53.27	44112	209	206
+package-split	2	56.56	43836	209	206
+package-split	3	58.31	43780	209	206
+# median-package-split	56.56

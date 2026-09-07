@@ -75,10 +75,10 @@
                 # vendored, mirroring how other third-party dependencies enter
                 # the closure. The runtime additionally refreshes the catalog
                 # from the ChatGPT /models endpoint when credentials permit.
-                codexUpstreamRev = "4f39251a010a8bd7d692d25fb33832ff06f1635a";
+                codexUpstreamRev = "a97cf1b72eaad05aa49847bc81d09ceac9327754";
                 codexModelsJson = pkgs.fetchurl {
                     url = "https://raw.githubusercontent.com/openai/codex/${codexUpstreamRev}/codex-rs/models-manager/models.json";
-                    hash = "sha256-6w17ml3K8QOJXF+KFMFrJp30bgObN1pVupf2I4VC0u0=";
+                    hash = "sha256-1xNqQTz6wbWxaG2eDcxcgMoFvr7V6fw5ETdlYdDvbug=";
                 };
                 codexPromptMd = pkgs.fetchurl {
                     url = "https://raw.githubusercontent.com/openai/codex/${codexUpstreamRev}/codex-rs/models-manager/prompt.md";
@@ -97,6 +97,16 @@
                         "LICENSE"
                         "README.md"
                         "UPSTREAM.md"
+                    ];
+                };
+
+                agentServerClientSource = nix-filter.lib {
+                    root = ./packages/agent-server-client;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-server-client.cabal"
+                        "LICENSE"
                     ];
                 };
 
@@ -290,11 +300,8 @@
                     root = ./packages/agent-cli;
                     include = [
                         "app"
-                        "cbits"
                         "data"
                         "eval"
-                        "ffi"
-                        "include"
                         "skills"
                         "src"
                         "agent-cli.cabal"
@@ -306,15 +313,75 @@
                     root = ./packages/agent-cli;
                     include = [
                         "app"
-                        "cbits"
                         "data"
                         "eval"
-                        "ffi"
-                        "include"
                         "skills"
                         "src"
                         "test"
                         "agent-cli.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentExternalSessionProductionSource = nix-filter.lib {
+                    root = ./packages/agent-external-session;
+                    include = [
+                        "src"
+                        "agent-external-session.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentExternalSessionCheckSource = nix-filter.lib {
+                    root = ./packages/agent-external-session;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-external-session.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentRepositoryProductionSource = nix-filter.lib {
+                    root = ./packages/agent-repository;
+                    include = [
+                        "src"
+                        "agent-repository.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentRepositoryCheckSource = nix-filter.lib {
+                    root = ./packages/agent-repository;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-repository.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentNativeBridgeProductionSource = nix-filter.lib {
+                    root = ./packages/agent-native-bridge;
+                    include = [
+                        "cbits"
+                        "ffi"
+                        "include"
+                        "src"
+                        "agent-native-bridge.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentNativeBridgeCheckSource = nix-filter.lib {
+                    root = ./packages/agent-native-bridge;
+                    include = [
+                        "cbits"
+                        "ffi"
+                        "include"
+                        "src"
+                        "test"
+                        "agent-native-bridge.cabal"
                         "LICENSE"
                     ];
                 };
@@ -361,6 +428,29 @@
                     ];
                 };
 
+                agentServerProductionSource = nix-filter.lib {
+                    root = ./packages/agent-server;
+                    include = [
+                        "app"
+                        "openapi.json"
+                        "src"
+                        "agent-server.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentServerCheckSource = nix-filter.lib {
+                    root = ./packages/agent-server;
+                    include = [
+                        "app"
+                        "openapi.json"
+                        "src"
+                        "test"
+                        "agent-server.cabal"
+                        "LICENSE"
+                    ];
+                };
+
                 agentXaiSource = nix-filter.lib {
                     root = ./packages/agent-xai;
                     include = [
@@ -401,19 +491,32 @@
                 skylightingSyntaxDirectory =
                     "${skylightingSyntaxes}/share/skylighting/xml";
 
-                mkHaskellPackages = baseHaskellPackages: checkLocalPackages:
+                mkHaskellPackages = baseHaskellPackages: packageMode:
                     baseHaskellPackages.extend (
                     final: previous:
                     let
-                        # User-facing builds only need the statically linked
-                        # executables. Keep the complete builds for the dev
-                        # shell and `nix flake check`.
+                        # Checks exercise unoptimised static libraries.
+                        # Optimisation, profiling/shared copies, and Haddock
+                        # output add compile work without adding test coverage.
+                        # User-facing builds remain optimised and only need the
+                        # statically linked executables. Development packages
+                        # retain the upstream defaults.
                         localPackage = package:
-                            if checkLocalPackages then package else
+                            if packageMode == "check"
+                            then
+                                pkgs.haskell.lib.dontHaddock
+                                    (pkgs.haskell.lib.disableSharedLibraries
+                                        (pkgs.haskell.lib.disableLibraryProfiling
+                                            (pkgs.haskell.lib.disableOptimization
+                                                package)))
+                            else if packageMode == "production"
+                            then
                                 pkgs.haskell.lib.dontHaddock
                                     (pkgs.haskell.lib.dontCheck
                                         (pkgs.haskell.lib.disableSharedLibraries
-                                            (pkgs.haskell.lib.disableLibraryProfiling package)));
+                                            (pkgs.haskell.lib.disableLibraryProfiling package)))
+                            else
+                                package;
                     in {
                         hermes-json =
                             pkgs.haskell.lib.overrideSrc previous.hermes-json {
@@ -496,9 +599,16 @@
                                 }));
                         agent-core = localPackage (
                             pkgs.haskell.lib.addTestToolDepends
-                            (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
+                            ((pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
                                 src = agentCoreSource;
-                            })
+                            }).overrideAttrs (old: {
+                                # Match the CLI's production build identity,
+                                # while retaining stable check-package caches.
+                                configureFlags = (old.configureFlags or [ ])
+                                    ++ pkgs.lib.optionals (packageMode != "check") [
+                                        "--ghc-option=-DAGENT_BUILD_COMMIT=\"${agentBuildCommit}\""
+                                    ];
+                            }))
                             [
                                 pkgs.git
                                 bun_1_4
@@ -610,6 +720,14 @@
                                     src = agentStoreSource;
                                 })
                             [ pkgs.postgresql_18 ]);
+                        agent-server-client = localPackage
+                            (pkgs.haskell.lib.overrideSrc
+                                (final.callPackage
+                                    ./packages/agent-server-client/package.nix
+                                    { })
+                                {
+                                    src = agentServerClientSource;
+                                });
                         agent-cli-runtime = localPackage
                             (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc
@@ -618,32 +736,72 @@
                                     { })
                                 {
                                     src =
-                                        if checkLocalPackages
+                                        if packageMode != "production"
                                             then agentCliRuntimeCheckSource
                                             else agentCliRuntimeProductionSource;
                                 })
                             [ pkgs.postgresql_18 ]);
+                        agent-external-session = localPackage
+                            (pkgs.haskell.lib.addTestToolDepends
+                                (pkgs.haskell.lib.overrideSrc
+                                    (final.callPackage
+                                        ./packages/agent-external-session/package.nix
+                                        { })
+                                    {
+                                        src =
+                                            if packageMode != "production"
+                                                then agentExternalSessionCheckSource
+                                                else agentExternalSessionProductionSource;
+                                    })
+                                [ pkgs.zstd ]);
+                        agent-repository = localPackage
+                            (pkgs.haskell.lib.addTestToolDepends
+                                (pkgs.haskell.lib.overrideSrc
+                                    (final.callPackage
+                                        ./packages/agent-repository/package.nix
+                                        { })
+                                    {
+                                        src =
+                                            if packageMode != "production"
+                                                then agentRepositoryCheckSource
+                                                else agentRepositoryProductionSource;
+                                    })
+                                [
+                                    pkgs.bash
+                                    pkgs.coreutils
+                                    pkgs.git
+                                    pkgs.python3
+                                ]);
                         agent-cli = localPackage (pkgs.haskell.lib.addTestToolDepends
                             ((pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
                                 src =
-                                    if checkLocalPackages
+                                    if packageMode != "production"
                                         then agentCliCheckSource
                                         else agentCliProductionSource;
                             }).overrideAttrs (old: {
-                                configureFlags = (old.configureFlags or [ ]) ++ [
-                                    "--ghc-option=-DAGENT_BUILD_COMMIT=\"${agentBuildCommit}\""
-                                    "--ghc-option=-DAGENT_BUILD_DATE=\"${agentBuildDate}\""
-                                ];
-                                # GHC's Darwin native-shared output is already
-                                # linked for runtime loading. Stripping it in
-                                # the parent package can turn it into an object
-                                # file, so exclude only the bridge dylib.
-                                stripExclude =
-                                    (old.stripExclude or [ ])
+                                # Check packages use the source defaults for
+                                # build identity. Embedding every merge SHA in
+                                # them invalidates the test cache even when the
+                                # filtered package sources are unchanged.
+                                configureFlags =
+                                    (old.configureFlags or [ ])
                                     ++ pkgs.lib.optionals
-                                        pkgs.stdenv.hostPlatform.isDarwin
-                                        [ "lib/libhaskell-agent-bridge.dylib" ];
-                            }))
+                                        (packageMode != "check")
+                                        [
+                                            "--ghc-option=-DAGENT_BUILD_COMMIT=\"${agentBuildCommit}\""
+                                            "--ghc-option=-DAGENT_BUILD_DATE=\"${agentBuildDate}\""
+                                        ];
+                            } // pkgs.lib.optionalAttrs
+                                (packageMode == "check"
+                                    && pkgs.stdenv.hostPlatform.isLinux)
+                                {
+                                    # Each shard is a separate process, so
+                                    # tests that temporarily modify
+                                    # process-global state remain isolated
+                                    # while the subprocess-heavy suite runs
+                                    # concurrently.
+                                    AGENT_CLI_TEST_SHARDS = "6";
+                                }))
                             [
                                 pkgs.bash
                                 pkgs.coreutils
@@ -651,24 +809,63 @@
                                 bun_1_4
                                 pkgs.postgresql_18
                                 pkgs.python3
+                                pkgs.zstd
                             ]);
+                        agent-native-bridge = localPackage
+                            ((pkgs.haskell.lib.overrideSrc
+                                (final.callPackage
+                                    ./packages/agent-native-bridge/package.nix
+                                    { })
+                                {
+                                    src =
+                                        if packageMode != "production"
+                                            then agentNativeBridgeCheckSource
+                                            else agentNativeBridgeProductionSource;
+                                }).overrideAttrs (old: {
+                                    # GHC's Darwin native-shared output is
+                                    # already linked for runtime loading.
+                                    # Stripping it in the package can turn it
+                                    # into an object file, so exclude only the
+                                    # bridge dylib.
+                                    stripExclude =
+                                        (old.stripExclude or [ ])
+                                        ++ pkgs.lib.optionals
+                                            pkgs.stdenv.hostPlatform.isDarwin
+                                            [ "lib/libhaskell-agent-bridge.dylib" ];
+                                }));
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
                                 src =
-                                    if checkLocalPackages
+                                    if packageMode != "production"
                                         then agentTelegramCheckSource
                                         else agentTelegramProductionSource;
                             })
                             [ pkgs.postgresql_18 ]);
+                        agent-server = localPackage
+                            (pkgs.haskell.lib.overrideSrc
+                                (final.callPackage
+                                    ./packages/agent-server/package.nix
+                                    { })
+                                {
+                                    src =
+                                        if packageMode != "production"
+                                            then agentServerCheckSource
+                                            else agentServerProductionSource;
+                                });
                     }
                 );
 
-                haskellPackages = mkHaskellPackages pkgs.haskellPackages true;
+                haskellPackages =
+                    mkHaskellPackages pkgs.haskellPackages "check";
+                developmentHaskellPackages =
+                    mkHaskellPackages pkgs.haskellPackages "development";
                 productionHaskellPackages =
-                    mkHaskellPackages pkgs.haskellPackages false;
+                    mkHaskellPackages pkgs.haskellPackages "production";
                 staticHaskellPackages =
                     if pkgs.stdenv.hostPlatform.isLinux then
-                        mkHaskellPackages pkgs.pkgsStatic.haskellPackages false
+                        mkHaskellPackages
+                            pkgs.pkgsStatic.haskellPackages
+                            "production"
                     else
                         null;
                 agentCorePackage = productionHaskellPackages.agent-core;
@@ -695,22 +892,71 @@
                 agentStorePackage = productionHaskellPackages.agent-store;
                 agentCliRuntimePackage =
                     productionHaskellPackages.agent-cli-runtime;
+                agentExternalSessionPackage =
+                    productionHaskellPackages.agent-external-session;
+                agentRepositoryPackage =
+                    productionHaskellPackages.agent-repository;
                 agentCliPackage = productionHaskellPackages.agent-cli;
+                agentNativeBridgeHaskellPackage =
+                    productionHaskellPackages.agent-native-bridge;
                 agentTelegramPackage = productionHaskellPackages.agent-telegram;
+                agentServerPackage = productionHaskellPackages.agent-server;
+                agentServerClientPackage =
+                    productionHaskellPackages.agent-server-client;
+                # Exercise these packages' own test suites against the
+                # production dependency graph. Referencing the all-check
+                # package set here would also rerun every transitive local
+                # package test suite, making focused checks fail for unrelated
+                # dependencies already covered by the agent-cli root.
+                agentTelegramCheckPackage = pkgs.haskell.lib.doCheck
+                    (pkgs.haskell.lib.overrideSrc agentTelegramPackage {
+                        src = agentTelegramCheckSource;
+                    });
+                agentNativeBridgeCheckPackage = pkgs.haskell.lib.doCheck
+                    (pkgs.haskell.lib.overrideSrc
+                        agentNativeBridgeHaskellPackage {
+                            src = agentNativeBridgeCheckSource;
+                        });
+                agentServerCheckPackage = pkgs.haskell.lib.doCheck
+                    (pkgs.haskell.lib.overrideSrc agentServerPackage {
+                        src = agentServerCheckSource;
+                    });
                 # Both installable CLI variants expose the same advertised
                 # runtime capabilities; only the harness linkage differs.
+                agentCliGstreamerCorePlugins =
+                    pkgs.lib.getLib pkgs.gst_all_1.gstreamer;
+                agentCliGstreamerPlugins =
+                    pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                        # Core elements supplies filesink, which terminates
+                        # the Wayland portal screenshot pipeline.
+                        agentCliGstreamerCorePlugins
+                        pkgs.gst_all_1.gst-plugins-base
+                        pkgs.gst_all_1.gst-plugins-good
+                        pkgs.gst_all_1.gst-plugins-bad
+                    ];
+                agentCliLinuxComputerUseTools =
+                    pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                        pkgs.gst_all_1.gstreamer
+                        pkgs.maim
+                        pkgs.xdotool
+                        pkgs.xrandr
+                    ];
                 agentCliRuntimeTools = [
                     pkgs.ffmpeg
                     bun_1_4
+                    pkgs.curl
+                    pkgs.gh
+                    pkgs.git
+                    pkgs.jq
                     pkgs.postgresql_18
                     pkgs.ripgrep
-                ];
-                wrapAgentCli = package:
+                    pkgs.zstd
+                ] ++ agentCliLinuxComputerUseTools;
+                prepareAgentCli = package:
                     package.overrideAttrs
                         (old: {
                             nativeBuildInputs =
                                 (old.nativeBuildInputs or [ ])
-                                ++ [ pkgs.makeWrapper ]
                                 ++ pkgs.lib.optionals
                                     (system == "aarch64-darwin")
                                     [ pkgs.removeReferencesTo ];
@@ -731,6 +977,39 @@
                                             -t ${agentOpenaiPackage} \
                                             -t ${agentCorePackage} \
                                             "$out/bin/agent-cli"
+                                    '';
+                        } // pkgs.lib.optionalAttrs
+                            pkgs.stdenv.hostPlatform.isDarwin {
+                                # Darwin retains GHC as a requisite of the
+                                # justStaticExecutables output. GHC is
+                                # deliberately not included in either runtime
+                                # package, so code mode still uses an
+                                # independently installed compiler when one is
+                                # available.
+                                disallowedRequisites = pkgs.lib.remove
+                                    haskellPackages.ghc
+                                    (old.disallowedRequisites or [ ]);
+                            });
+                wrapAgentCli = package:
+                    package.overrideAttrs
+                        (old: {
+                            nativeBuildInputs =
+                                (old.nativeBuildInputs or [ ])
+                                ++ [ pkgs.makeWrapper ];
+                            postInstall =
+                                (old.postInstall or "")
+                                + ''
+                                    computerUseWrapperArgs=()
+                                ''
+                                + pkgs.lib.optionalString
+                                    pkgs.stdenv.hostPlatform.isLinux
+                                    ''
+                                        computerUseWrapperArgs+=(
+                                            --prefix GST_PLUGIN_SYSTEM_PATH_1_0 :
+                                            "${pkgs.lib.makeSearchPath
+                                                "lib/gstreamer-1.0"
+                                                agentCliGstreamerPlugins}"
+                                        )
                                     ''
                                 + ''
                                     wrapProgram "$out/bin/agent-cli" \
@@ -739,19 +1018,13 @@
                                         --set-default AGENT_POSTGRES_BIN \
                                             "${pkgs.postgresql_18}/bin" \
                                         --prefix PATH : \
-                                            "${pkgs.lib.makeBinPath agentCliRuntimeTools}"
+                                            "${pkgs.lib.makeBinPath agentCliRuntimeTools}" \
+                                        "''${computerUseWrapperArgs[@]}"
                                 '';
-                        } // pkgs.lib.optionalAttrs
-                            pkgs.stdenv.hostPlatform.isDarwin {
-                                # Darwin retains GHC as a requisite of the
-                                # wrapped justStaticExecutables output. GHC is
-                                # deliberately not added to PATH, so code mode
-                                # still uses an independently installed
-                                # compiler when one is available.
-                                disallowedRequisites = pkgs.lib.remove
-                                    haskellPackages.ghc
-                                    (old.disallowedRequisites or [ ]);
-                            });
+                        });
+                agentCliBareExecutable =
+                    prepareAgentCli
+                        (pkgs.haskell.lib.justStaticExecutables agentCliPackage);
                 agentCliStaticExecutable =
                     if pkgs.stdenv.hostPlatform.isLinux then
                         wrapAgentCli
@@ -760,8 +1033,21 @@
                     else
                         agentCliExecutable;
                 agentCliExecutable =
-                    wrapAgentCli
-                        (pkgs.haskell.lib.justStaticExecutables agentCliPackage);
+                    wrapAgentCli agentCliBareExecutable;
+                agentCliMacosRelease =
+                    if pkgs.stdenv.hostPlatform.isDarwin then
+                        import ./nix/macos-bundle.nix {
+                            inherit pkgs skylightingSyntaxes;
+                            agentCli = agentCliBareExecutable;
+                            agentCliSource = agentCliProductionSource;
+                            agentCliRuntimeSource =
+                                agentCliRuntimeProductionSource;
+                            inherit agentCoreSource;
+                            bun = bun_1_4;
+                            sourceDateEpoch = self.lastModified or 1;
+                        }
+                    else
+                        null;
                 agentRuntimeDaemonExecutable =
                     pkgs.haskell.lib.justStaticExecutables
                         agentRuntimeDaemonPackage;
@@ -784,6 +1070,33 @@
                                 run_agent storage stop || true
                             }
                             trap cleanup EXIT
+
+                            wrapper="${agentCliStaticExecutable}/bin/agent-cli"
+                            for dependency in \
+                                ${pkgs.gst_all_1.gstreamer} \
+                                ${pkgs.maim} \
+                                ${pkgs.xdotool} \
+                                ${pkgs.xrandr}
+                            do
+                                ${pkgs.gnugrep}/bin/grep -F \
+                                    "$dependency/bin" "$wrapper"
+                            done
+                            ${pkgs.gnugrep}/bin/grep -F \
+                                "GST_PLUGIN_SYSTEM_PATH_1_0" "$wrapper"
+                            pluginPath="${pkgs.lib.makeSearchPath
+                                "lib/gstreamer-1.0"
+                                agentCliGstreamerPlugins}"
+                            ${pkgs.gnugrep}/bin/grep -F \
+                                "${
+                                    agentCliGstreamerCorePlugins
+                                }/lib/gstreamer-1.0" \
+                                "$wrapper"
+                            env -i \
+                                HOME="$home" \
+                                GST_PLUGIN_SYSTEM_PATH_1_0="$pluginPath" \
+                                GST_REGISTRY_1_0="$TMPDIR/gstreamer-registry.bin" \
+                                ${pkgs.gst_all_1.gstreamer}/bin/gst-inspect-1.0 \
+                                filesink >/dev/null
 
                             run_agent storage start
                             test "$(
@@ -819,20 +1132,68 @@
                                             ]}"
                                 '';
                         });
+                agentServerExecutable =
+                    (pkgs.haskell.lib.justStaticExecutables
+                        agentServerPackage).overrideAttrs
+                        (old: {
+                            nativeBuildInputs =
+                                (old.nativeBuildInputs or [ ])
+                                ++ [ pkgs.makeWrapper ];
+                            postInstall =
+                                (old.postInstall or "")
+                                + ''
+                                    wrapProgram "$out/bin/agent-server" \
+                                        --set-default AGENT_SYNTAX_DIR \
+                                            "${skylightingSyntaxDirectory}" \
+                                        --set-default AGENT_POSTGRES_BIN \
+                                            "${pkgs.postgresql_18}/bin" \
+                                        --prefix PATH : \
+                                            "${pkgs.lib.makeBinPath agentCliRuntimeTools}"
+                                '';
+                        } // pkgs.lib.optionalAttrs
+                            pkgs.stdenv.hostPlatform.isDarwin {
+                                disallowedRequisites = pkgs.lib.remove
+                                    haskellPackages.ghc
+                                    (old.disallowedRequisites or [ ]);
+                            });
+                agentSandboxWorkerExecutable =
+                    (pkgs.haskell.lib.justStaticExecutables
+                        agentServerPackage).overrideAttrs
+                        (old: {
+                            postInstall = (old.postInstall or "") + ''
+                                rm -f "$out/bin/agent-server"
+                            '';
+                        });
+                agentSandboxRootfs =
+                    if pkgs.stdenv.hostPlatform.isLinux then
+                        import ./nix/sandbox-rootfs.nix {
+                            inherit pkgs;
+                            agentServer = agentSandboxWorkerExecutable;
+                        }
+                    else
+                        null;
+                agentSandboxRunner =
+                    if pkgs.stdenv.hostPlatform.isLinux then
+                        import ./nix/sandbox-runner.nix {
+                            inherit pkgs;
+                            rootfs = agentSandboxRootfs;
+                        }
+                    else
+                        null;
                 agentNativeBridgePackage = pkgs.runCommand
                     "haskell-agent-native-bridge-0.1.0"
                     {
-                        # The bridge was already excluded from the parent
+                        # The bridge was already excluded from its Cabal
                         # package's strip pass; do not strip it after copying.
                         dontStrip = true;
                     }
                     ''
                         bridge="$(${pkgs.findutils}/bin/find \
-                            ${agentCliPackage}/lib \
+                            ${agentNativeBridgeHaskellPackage}/lib \
                             -name libhaskell-agent-bridge.dylib \
                             -print -quit)"
                         header="$(${pkgs.findutils}/bin/find \
-                            ${agentCliPackage}/lib \
+                            ${agentNativeBridgeHaskellPackage}/lib \
                             -name HaskellAgentBridge.h \
                             -print -quit)"
                         test -n "$bridge"
@@ -971,9 +1332,26 @@
                 packages.agent-cli-static = agentCliStaticExecutable;
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;
+                packages.agent-server = agentServerExecutable;
+                packages.agent-server-client = agentServerClientPackage;
+                packages.${if pkgs.stdenv.hostPlatform.isLinux
+                    then "agent-sandbox-runner" else null} = agentSandboxRunner;
+                packages.${if pkgs.stdenv.hostPlatform.isLinux
+                    then "agent-sandbox-rootfs" else null} = agentSandboxRootfs;
                 packages.${if pkgs.stdenv.hostPlatform.isDarwin
                     then "agent-native-bridge" else null} = agentNativeBridgePackage;
+                packages.${if pkgs.stdenv.hostPlatform.isDarwin
+                    then "agent-cli-macos-bundle" else null} =
+                    agentCliMacosRelease.bundle;
+                packages.${if pkgs.stdenv.hostPlatform.isDarwin
+                    then "agent-cli-macos-archive" else null} =
+                    agentCliMacosRelease.archive;
                 packages.agent-cli-runtime = agentCliRuntimePackage;
+                packages.agent-external-session =
+                    agentExternalSessionPackage;
+                packages.agent-repository = agentRepositoryPackage;
+                packages.agent-native-bridge-library =
+                    agentNativeBridgeHaskellPackage;
                 packages.agent-core = agentCorePackage;
                 packages.agent-mcp = agentMcpPackage;
                 packages.agent-mail = agentMailPackage;
@@ -1005,6 +1383,16 @@
                     drv = self.packages.${system}.agent-telegram;
                     exePath = "/bin/agent-telegram";
                 };
+                apps.agent-server = flake-utils.lib.mkApp {
+                    drv = self.packages.${system}.agent-server;
+                    exePath = "/bin/agent-server";
+                };
+                apps.${if pkgs.stdenv.hostPlatform.isLinux
+                    then "agent-sandbox-runner" else null} =
+                    flake-utils.lib.mkApp {
+                        drv = self.packages.${system}.agent-sandbox-runner;
+                        exePath = "/bin/agent-sandbox-runner";
+                    };
                 apps.agent-runtime-daemon = flake-utils.lib.mkApp {
                     drv = self.packages.${system}.agent-runtime-daemon;
                     exePath = "/bin/agent-runtime-daemon";
@@ -1014,11 +1402,15 @@
                     exePath = "/bin/agent-openai-login";
                 };
 
-                devShells.default = haskellPackages.shellFor {
+                devShells.default = developmentHaskellPackages.shellFor {
                     packages = packages: [
                         packages.agent-cli
                         packages.agent-cli-runtime
+                        packages.agent-external-session
+                        packages.agent-repository
+                        packages.agent-native-bridge
                         packages.agent-telegram
+                        packages.agent-server
                         packages.agent-core
                         packages.agent-mcp
                         packages.agent-mail
@@ -1066,8 +1458,12 @@
                             ffmpeg
                             bun_1_4
                             postgresql_18
+                            python3
                             ripgrep
+                            zstd
                         ])
+                        ++ agentCliLinuxComputerUseTools
+                        ++ agentCliGstreamerPlugins
                         ++ [ agentRepl ];
                 };
 
@@ -1076,8 +1472,28 @@
                     # justStaticExecutables output or its requisite assertions.
                     agent-cli-executable = agentCliExecutable;
                     agent-cli-runtime = haskellPackages.agent-cli-runtime;
+                    agent-external-session =
+                        haskellPackages.agent-external-session;
+                    agent-repository = haskellPackages.agent-repository;
+                    agent-native-bridge = agentNativeBridgeCheckPackage;
                     agent-cli = haskellPackages.agent-cli;
-                    agent-telegram = haskellPackages.agent-telegram;
+                    package-boundaries = pkgs.runCommand
+                        "agent-package-boundaries"
+                        {
+                            nativeBuildInputs = [
+                                pkgs.bash
+                                pkgs.ripgrep
+                            ];
+                        }
+                        ''
+                            bash ${./scripts/check-package-boundaries.sh} \
+                                ${./.}
+                            touch "$out"
+                        '';
+                    agent-telegram = agentTelegramCheckPackage;
+                    agent-server = agentServerCheckPackage;
+                    agent-server-client =
+                        haskellPackages.agent-server-client;
                     agent-core = haskellPackages.agent-core;
                     agent-mcp = haskellPackages.agent-mcp;
                     agent-mail = haskellPackages.agent-mail;
@@ -1102,13 +1518,25 @@
                     agent-claude = haskellPackages.agent-claude;
                 } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
                     agent-cli-static-runtime = agentCliStaticRuntimeCheck;
+                    agent-sandbox-runner = agentSandboxRunner;
+                    agent-server-nixos-module = import ./nix/tests/agent-server-module.nix {
+                        inherit self nixpkgs pkgs system;
+                    };
                     nixos-module = import ./nix/tests/telegram-module.nix {
                         inherit self nixpkgs pkgs system;
                     };
+                } // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+                    agent-server-nixos-module-vm = import ./nix/tests/agent-server-module-vm.nix {
+                        inherit self pkgs;
+                    };
+                } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+                    agent-cli-macos-bundle = agentCliMacosRelease.bundle;
                 } // pkgs.lib.optionalAttrs functionalTestEnabled {
-                    agent-cli-functional-openai-hello-world =
-                        agentCliHelloWorldFunctional "openai"
-                            (functionalTestModel "OPENAI" "gpt-5.6-terra");
+                    # Temporarily disabled while the CI OpenAI account has no
+                    # verified available usage. Keep package/unit checks enabled.
+                    # agent-cli-functional-openai-hello-world =
+                    #     agentCliHelloWorldFunctional "openai"
+                    #         (functionalTestModel "OPENAI" "gpt-5.6-terra");
                     # Temporarily disabled while the CI Grok account has no
                     # verified available usage. Keep package/unit checks enabled.
                     # agent-cli-functional-xai-hello-world =
@@ -1120,6 +1548,9 @@
             }
         )
         // {
+            nixosModules.agent-server = import ./nix/modules/agent-server.nix {
+                inherit self;
+            };
             nixosModules.telegram = import ./nix/modules/telegram.nix {
                 inherit self;
             };

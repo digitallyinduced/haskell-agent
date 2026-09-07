@@ -40,6 +40,7 @@ library
     exposed-modules:  Agent.Claude
                     , Agent.Claude.Auth
                     , Agent.Claude.Control
+                    , Agent.Claude.Internal.Recovery
                     , Agent.Claude.LoopBackend
                     , Agent.Claude.Options
                     , Agent.Claude.ReasoningEffort
@@ -54,6 +55,8 @@ library
                     , agent-responses-types >= 0.1 && < 0.2
                     , claude-agent-sdk-haskell >= 0.1 && < 0.2
                     , aeson                 >= 2.0
+                    , async
+                    , base64-bytestring
                     , bytestring
                     , containers
                     , directory
@@ -72,6 +75,7 @@ test-suite agent-claude-test
     other-modules:    Agent.Claude.AuthSpec
                     , Agent.Claude.LoopBackendSpec
                     , Agent.Claude.OptionsSpec
+                    , Agent.Claude.RecoverySpec
     ghc-options:      -threaded
     build-depends:    base >= 4.14 && < 5
                     , agent-claude

@@ -1,133 +1,148 @@
 module Agent.CLI.NativeRuntime
     ( NativeProcessRuntime
     , NativeInteractionMode(..)
+    , NativeDiscoveryContext(..)
+    , NativeWorkspaceDiscovery(..)
+    , NativeRunCapabilities(..)
     , NativeShellMode(..)
     , NativeRunHooks(..)
+    , fullNativeRunCapabilities
+    , nativeLoadsHostWorkspaceContext
+    , nativePreparedDiscovery
+    , NativeSessionTarget(..)
+    , NativeTurnRequest(..)
     , StartupFailure(..)
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
+    , nativeTurnOptions
+    , applyNativeStartupPolicy
     , restartNativeMcpRuntime
     , runNativeAgent
+    , runNativeTurn
     ) where
 
-import Agent.CLI.AgentSessions
-    ( SessionThreadManager
-    , closeSessionThreadManager
-    , newSessionThreadManager
+import Agent.CLI.NativeProcess
+    ( NativeProcessRuntime
+        ( nativeMcpSupervisor
+        , nativeSessionThreads
+        , nativeNetworkRecovery
+        , nativeStartCleanup
+        , nativeMcpElicitation
+        )
+    , closeNativeProcessRuntime
+    , newNativeProcessRuntime
+    , restartNativeMcpRuntime
+    )
+import Agent.Runtime.StartupPolicy
+    ( NativeStartupPolicy(..)
+    , NativeContextSources(..)
+    , NativeExecutionFacilities(..)
+    )
+import Agent.Loop
+    ( TurnAttachment(ImageAttachmentItem)
+    , userMessageWithAttachments
     )
 import Agent.CLI.Options
     ( Command(..)
     , CliOptions(..)
+    , ScreenMode(..)
+    , defaultCliOptions
     , parseArgs
     )
-import Agent.Connectivity.NetworkPath
-    ( NetworkRecoveryMonitor
-    , closeNetworkRecoveryMonitor
-    , networkRecovery
-    , newNetworkRecoveryMonitor
-    )
+import Agent.Connectivity.NetworkPath (networkRecovery)
 import Agent.CLI.Runtime.Orchestration (runAgentWithRuntime)
 import Agent.CLI.Runtime.Orchestration.Types
     ( AgentProcessRuntime(..)
     , NativeInteractionMode(..)
+    , NativeDiscoveryContext(..)
+    , NativeWorkspaceDiscovery(..)
+    , NativeRunCapabilities(..)
     , NativeShellMode(..)
     , NativeRunHooks(..)
+    , fullNativeRunCapabilities
+    , nativeLoadsHostWorkspaceContext
+    , nativePreparedDiscovery
     , nativeRunMode
     )
 import Agent.CLI.Runtime.Types (DevResult(..), StartupFailure(..))
-import qualified Agent.MCP as MCP
-import Control.Concurrent.Async
-    ( Async
-    , async
-    , cancel
-    , waitCatch
+import Agent.Runtime.Request
+    ( NativeSessionTarget(..)
+    , NativeTurnRequest(..)
+    , validateNativeTurnRequest
     )
-import Control.Concurrent.MVar
-    ( newEmptyMVar
-    , putMVar
-    , takeMVar
-    )
-import Control.Exception.Safe (finally, mask_, onException)
-import Control.Monad (void)
-import Data.IORef
-    ( IORef
-    , atomicModifyIORef'
-    , newIORef
-    , readIORef
-    )
+import Agent.TUI.Motion (MotionMode(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.IO (Handle)
 import System.OsPath (OsPath)
 
-data NativeProcessRuntime = NativeProcessRuntime
-    { nativeMcpSupervisor :: !MCP.McpSupervisor
-    , nativeSessionThreads :: !SessionThreadManager
-    , nativeNetworkRecovery :: !NetworkRecoveryMonitor
-    , nativeStartCleanup :: !(IO () -> IO ())
-    , nativeMcpElicitation
-        :: !(IORef (Maybe
-            (MCP.McpElicitRequest -> IO MCP.McpElicitResult)))
-    , nativeCleanupWorker :: !(Async ())
-    }
+-- | Execute one typed native turn without reconstructing command-line
+-- arguments.
+--
+-- Auto-approval is deliberately unavailable through this entry point. Native
+-- HTTP and embedding transports must surface approval requests through hooks
+-- instead of silently inheriting the CLI's non-interactive yolo behavior.
+runNativeTurn
+    :: NativeProcessRuntime
+    -> Handle
+    -> NativeRunHooks
+    -> NativeTurnRequest
+    -> IO (Either Text ())
+runNativeTurn runtime output hooks request =
+    case nativeTurnOptions request of
+        Left err -> pure (Left err)
+        Right options ->
+            runNativeOptions
+                runtime
+                output
+                request.nativeTurnCwd
+                hooks
+                    { nativeInteractionMode =
+                        request.nativeTurnInteractionMode
+                    , nativeShellMode = request.nativeTurnShellMode
+                    , nativeInitialTurnInputs =
+                        Just
+                            [ userMessageWithAttachments
+                                initialPrompt
+                                (map ImageAttachmentItem request.nativeTurnImages)
+                            ]
+                    }
+                options
+  where
+    initialPrompt
+        | Text.null (Text.strip request.nativeTurnPrompt)
+        , not (null request.nativeTurnImages) = "Image attached."
+        | otherwise = request.nativeTurnPrompt
 
-newNativeProcessRuntime :: OsPath -> IO NativeProcessRuntime
-newNativeProcessRuntime root = do
-    elicitationRef <- newIORef Nothing
-    cleanupStarted <- newIORef False
-    cleanupRequest <- newEmptyMVar
-    cleanupWorker <- async (takeMVar cleanupRequest >>= id)
-    let closeCleanupWorker = do
-            cancel cleanupWorker
-            void (waitCatch cleanupWorker)
-        startCleanup action = mask_ do
-            shouldStart <- atomicModifyIORef'
-                cleanupStarted
-                (\started -> (True, not started))
-            if shouldStart
-                then putMVar cleanupRequest action
-                else pure ()
-    networkMonitor <-
-        newNetworkRecoveryMonitor
-            `onException` closeCleanupWorker
-    mcpSupervisor <-
-        MCP.newMcpSupervisorWith
-            MCP.defaultMcpHostHooks
-                { MCP.mcpHostElicit = readIORef elicitationRef }
-            `onException`
-                (closeNetworkRecoveryMonitor networkMonitor
-                    `finally` closeCleanupWorker)
-    sessionThreads <-
-        newSessionThreadManager root
-            `onException`
-                (MCP.closeMcpSupervisor mcpSupervisor
-                    `finally`
-                        (closeNetworkRecoveryMonitor networkMonitor
-                            `finally` closeCleanupWorker))
-    pure NativeProcessRuntime
-        { nativeMcpSupervisor = mcpSupervisor
-        , nativeSessionThreads = sessionThreads
-        , nativeNetworkRecovery = networkMonitor
-        , nativeStartCleanup = startCleanup
-        , nativeMcpElicitation = elicitationRef
-        , nativeCleanupWorker = cleanupWorker
-        }
-
-closeNativeProcessRuntime :: NativeProcessRuntime -> IO ()
-closeNativeProcessRuntime runtime =
-    closeSessionThreadManager runtime.nativeSessionThreads
-        `finally`
-            (MCP.closeMcpSupervisor runtime.nativeMcpSupervisor
-                `finally`
-                    (closeNetworkRecoveryMonitor
-                        runtime.nativeNetworkRecovery
-                        `finally` do
-                            cancel runtime.nativeCleanupWorker
-                            void (waitCatch runtime.nativeCleanupWorker)))
-
-restartNativeMcpRuntime :: NativeProcessRuntime -> IO ()
-restartNativeMcpRuntime runtime =
-    MCP.restartMcpSupervisor runtime.nativeMcpSupervisor
+-- | Lower a typed native request into the existing orchestration options.
+--
+-- This compatibility adapter never enables capabilities excluded from native
+-- turns. Transport adapters can validate without CLI options using
+-- 'validateNativeTurnRequest'.
+nativeTurnOptions :: NativeTurnRequest -> Either Text CliOptions
+nativeTurnOptions request = do
+    validateNativeTurnRequest request
+    pure defaultCliOptions
+            { optProvider = request.nativeTurnProvider
+            , optModel = request.nativeTurnModel
+            , optCwd = Just request.nativeTurnCwd
+            , optWorktree = False
+            , optYolo = False
+            , optNoYolo = True
+            , optEffort = request.nativeTurnEffort
+            , optPrompt = Just request.nativeTurnPrompt
+            , optPromptFile = Nothing
+            , optManagedTurnFile = Nothing
+            , optResume = case request.nativeTurnSession of
+                NativeNewSession -> Nothing
+                NativeResumeSession sessionId -> Just sessionId
+            , optSaveSession = True
+            , optGhci = nativeGhciEnabled request.nativeTurnShellMode
+            , optBash = nativeBashEnabled request.nativeTurnShellMode
+            , optComputerUse = False
+            , optScreenMode = ScreenMinimal
+            , optMotionMode = MotionOff
+            }
 
 runNativeAgent
     :: NativeProcessRuntime
@@ -140,26 +155,66 @@ runNativeAgent runtime output cwd hooks args =
     case parseArgs args of
         Left err -> pure (Left (Text.pack err))
         Right (RunAgent options) ->
-            runAgentWithRuntime
-                AgentProcessRuntime
-                    { processMcpSupervisor = runtime.nativeMcpSupervisor
-                    , processSessionThreads = runtime.nativeSessionThreads
-                    , processStartCleanup = runtime.nativeStartCleanup
-                    , processMcpElicitation = runtime.nativeMcpElicitation
-                    , processNetworkRecovery =
-                        networkRecovery runtime.nativeNetworkRecovery
-                    }
-                (nativeRunMode output cwd hooks)
-                options
-                    { optGhci = nativeGhciEnabled hooks.nativeShellMode
-                    , optBash = nativeBashEnabled hooks.nativeShellMode
-                    } >>= \case
-                    DevQuit -> pure (Right ())
-                    DevReload _ ->
-                        pure (Left
-                            "native turn unexpectedly requested a reload")
+            runNativeOptions runtime output cwd hooks options
         Right _ -> pure (Left
             "native turn arguments did not select an agent")
+
+runNativeOptions
+    :: NativeProcessRuntime
+    -> Handle
+    -> OsPath
+    -> NativeRunHooks
+    -> CliOptions
+    -> IO (Either Text ())
+runNativeOptions runtime output cwd hooks options =
+    runAgentWithRuntime
+        AgentProcessRuntime
+            { processMcpSupervisor = runtime.nativeMcpSupervisor
+            , processSessionThreads = runtime.nativeSessionThreads
+            , processStartCleanup = runtime.nativeStartCleanup
+            , processMcpElicitation = runtime.nativeMcpElicitation
+            , processNetworkRecovery =
+                networkRecovery runtime.nativeNetworkRecovery
+            }
+        (nativeRunMode output cwd hooks)
+        (applyNativeStartupPolicy hooks.nativeStartupPolicy cwd
+            (shellOptions options)) >>= \case
+            DevQuit -> pure (Right ())
+            DevReload _ ->
+                pure (Left
+                    "native turn unexpectedly requested a reload")
+  where
+    shellOptions prepared =
+        prepared
+            { optGhci = nativeGhciEnabled hooks.nativeShellMode
+            , optBash = nativeBashEnabled hooks.nativeShellMode
+            }
+
+-- | The only legacy-options translation of native startup permissions.
+-- Apply after request/argument preparation so conflicting options cannot
+-- relax the embedding's restrictions. Typed-turn invariants are enforced
+-- independently by 'nativeTurnOptions'.
+applyNativeStartupPolicy :: NativeStartupPolicy -> OsPath -> CliOptions -> CliOptions
+applyNativeStartupPolicy policy cwd = restrictContext . restrictFacilities
+  where
+    restrictContext options = case policy.nativeContextSources of
+        WorkspaceContextAllowed -> options
+        SuppliedContextOnly -> options
+            { optAgentsMd = False
+            , optSkills = False
+            }
+    restrictFacilities options = case policy.nativeExecutionFacilities of
+        HostStartupFacilities -> options
+        TurnScopedFacilities -> options
+            { optCwd = Just cwd
+            , optWorktree = False
+            , optYolo = False
+            , optNoYolo = True
+            , optPromptFile = Nothing
+            , optManagedTurnFile = Nothing
+            , optComputerUse = False
+            , optCodeMode = False
+            }
 
 nativeGhciEnabled :: NativeShellMode -> Bool
 nativeGhciEnabled = \case

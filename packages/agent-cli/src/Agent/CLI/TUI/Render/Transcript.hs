@@ -1,6 +1,7 @@
 -- | Internal fullscreen rendering helpers.
 module Agent.CLI.TUI.Render.Transcript
     ( drawTranscript
+    , drawTranscriptChunks
     , historyRangeWidgets
     , stickyPromptLayers
     , drawEmptyConversation
@@ -38,16 +39,17 @@ import Agent.CLI.Startup.Format
 import Agent.CLI.Style ()
 import Agent.CLI.TUI.History
     ( HistoryWindow(historyWindowTurns, historyWindowTotalTurns,
+                    historyWindowTranscriptChunks,
                     historyWindowGenerationStart, historyWindowHasNewer,
                     historyWindowHasOlder, historyWindowPending),
-      HistoryTurn(historyTurnCursor, historyTurnBlocks),
+      HistoryTurn(historyTurnCursor),
       HistoryDirection(..),
       HistoryCursor(HistoryCursor) )
 import Agent.CLI.TUI.ImagePreview ()
 import Agent.CLI.TUI.LambdaArt ( lambdaArtWidget )
 import Agent.TUI.Accent ()
 import Agent.CLI.TUI.Types
-    ( AppState(appConversationAnchor, appHoveredControl,
+    ( AppState(appConversationAnchor, appHoveredControl, appHistorySelectedBlock,
                appAgentEntries, appSlashCatalog, appHistoryWindow, appUi,
                appAgentSelected),
       Name(QuickStartModel, CodeCopy, ConversationChunkCache,
@@ -161,23 +163,24 @@ terminalTxtWrap = txtWrap . displayTerminalText
 drawTranscript :: AppState -> Widget Name
 drawTranscript state =
     vBox $
-        [ vBox $
-            olderGap
-                <> map
-                    (drawBlock state AgentRoot state.appUi)
-                    historicalBlocks
-                <> newerGap
-                <> [drawConversationBlocks state AgentRoot state.appUi]
-        ]
-            <> conversationReserveWidgets anchor
+        [vBox (drawTranscriptContentChunks state)]
+            <> conversationReserveWidgets state.appConversationAnchor
+
+-- | Retain chunk boundaries so the viewport can compose only visible results.
+drawTranscriptChunks :: AppState -> [Widget Name]
+drawTranscriptChunks state =
+    drawTranscriptContentChunks state
+        <> conversationReserveWidgets state.appConversationAnchor
+
+drawTranscriptContentChunks :: AppState -> [Widget Name]
+drawTranscriptContentChunks state =
+    olderGap
+        <> map
+            (drawTranscriptChunk state AgentRoot state.appUi)
+            state.appHistoryWindow.historyWindowTranscriptChunks
+        <> newerGap
+        <> [drawConversationBlocks state AgentRoot state.appUi]
   where
-    historicalBlocks =
-        concatMap
-            ( toList
-                . Transcript.coalesceInspectionBlocks
-                . (.historyTurnBlocks)
-            )
-            (toList state.appHistoryWindow.historyWindowTurns)
     olderGap =
         historyGapWidget
             HistoryOlder
@@ -188,7 +191,6 @@ drawTranscript state =
             HistoryNewer
             state.appHistoryWindow.historyWindowHasNewer
             state.appHistoryWindow.historyWindowPending
-    anchor = state.appConversationAnchor
 
 -- | Cache completed transcript blocks in moderately sized groups.
 --
@@ -229,6 +231,12 @@ drawTranscriptChunk state target ui blocks =
         , state.appAgentSelected == target
         , blockId <- maybeToList ui.uiSelectedBlock
         ]
+            <> [ blockId
+               | target == AgentRoot
+               , state.appUi.uiFocus == FocusScrollback
+               , state.appAgentSelected == target
+               , blockId <- maybeToList state.appHistorySelectedBlock
+               ]
             <> [ blockId
                | Just (CodeCopy hoveredTarget blockId _) <-
                     [state.appHoveredControl]

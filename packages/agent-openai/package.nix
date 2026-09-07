@@ -4,7 +4,7 @@
 , HsOpenSSL, hspec, http-client, http-conduit, http-streams
 , http-types, io-streams, lib, network, network-uri, retry
 , safe-exceptions, scientific, template-haskell, temporary, text
-, time, unix, vector, wai, warp, websockets, wuss
+, time, transformers, unix, vector, wai, warp, websockets, wuss
 }:
 mkDerivation {
   pname = "agent-openai";
@@ -17,7 +17,7 @@ mkDerivation {
     async base base64-bytestring bytestring containers directory
     exceptions filepath HsOpenSSL http-client http-conduit http-streams
     io-streams network-uri retry safe-exceptions scientific
-    template-haskell text time unix vector websockets wuss
+    template-haskell text time transformers unix vector websockets wuss
   ];
   executableHaskellDepends = [
     agent-core base directory filepath text

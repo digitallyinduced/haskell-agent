@@ -19,6 +19,8 @@ import Agent.CLI.Style (roleError, roleMuted, roleSuccess)
 import Control.Concurrent.Async (concurrently)
 import Control.Exception.Safe (displayException, tryIO)
 import Control.Monad (void)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Except (ExceptT(..), except, runExceptT, throwE)
 import qualified Data.ByteString as ByteString
 import Data.List (intercalate, sort)
 import Data.Text (Text)
@@ -55,51 +57,41 @@ data GitDiffResult
 -- An empty 'GitDiffOutput' means the directory is a repository with no
 -- working-tree changes.
 getGitDiff :: OsPath -> IO (Either Text GitDiffResult)
-getGitDiff cwd = do
+getGitDiff cwd = runExceptT do
     inside <- insideGitWorkTree cwd
-    case inside of
-        Left err -> pure (Left err)
-        Right False -> pure (Right GitDiffNotRepository)
-        Right True -> do
-            filterOverrides <- executableFilterOverrides cwd
-            case filterOverrides of
-                Left err -> pure (Left err)
-                Right overrides -> do
-                    (tracked, untracked) <-
-                        concurrently
-                            (runTrackedDiff cwd overrides)
-                            (runGitSuccess cwd [] untrackedListArguments)
-                    case (tracked, untracked) of
-                        (Left err, _) -> pure (Left err)
-                        (_, Left err) -> pure (Left err)
-                        (Right trackedText, Right untrackedOutput) -> do
-                            untrackedDiffs <-
-                                traverse
-                                    (runUntrackedDiff cwd overrides)
-                                    (nulSeparatedPaths
-                                        untrackedOutput.gitCommandStdout)
-                            pure do
-                                pieces <- sequence untrackedDiffs
-                                Right
-                                    (GitDiffOutput
-                                        (trackedText <> Text.concat pieces))
+    if not inside
+        then pure GitDiffNotRepository
+        else do
+            overrides <- executableFilterOverrides cwd
+            -- Finish both inspections before selecting the tracked error first.
+            (tracked, untracked) <- liftIO $
+                concurrently
+                    (runExceptT (runTrackedDiff cwd overrides))
+                    (runExceptT (runGitSuccess cwd [] untrackedListArguments))
+            trackedText <- except tracked
+            untrackedOutput <- except untracked
+            -- Preserve inspection of every path even if an earlier diff fails.
+            untrackedDiffs <- liftIO $
+                traverse
+                    (runExceptT . runUntrackedDiff cwd overrides)
+                    (nulSeparatedPaths untrackedOutput.gitCommandStdout)
+            pieces <- except (sequence untrackedDiffs)
+            pure (GitDiffOutput (trackedText <> Text.concat pieces))
 
-insideGitWorkTree :: OsPath -> IO (Either Text Bool)
-insideGitWorkTree cwd =
-    runSafeGit cwd [] ["rev-parse", "--is-inside-work-tree"] >>= \case
-        Left err -> pure (Left err)
-        Right output ->
-            pure $
-                Right
-                    ( output.gitCommandExitCode == ExitSuccess
-                        && Text.strip (gitOutputText output) == "true"
-                    )
+insideGitWorkTree :: OsPath -> ExceptT Text IO Bool
+insideGitWorkTree cwd = do
+    output <- ExceptT $
+        runSafeGit cwd [] ["rev-parse", "--is-inside-work-tree"]
+    pure
+        ( output.gitCommandExitCode == ExitSuccess
+            && Text.strip (gitOutputText output) == "true"
+        )
 
 executableFilterOverrides
     :: OsPath
-    -> IO (Either Text [(Text, Text)])
-executableFilterOverrides cwd =
-    runSafeGit
+    -> ExceptT Text IO [(Text, Text)]
+executableFilterOverrides cwd = do
+    output <- ExceptT $ runSafeGit
         cwd
         []
         [ "config"
@@ -107,18 +99,13 @@ executableFilterOverrides cwd =
         , "--name-only"
         , "--get-regexp"
         , "^filter\\..*\\.(clean|process)$"
-        ] >>= \case
-            Left err -> pure (Left err)
-            Right output
-                | output.gitCommandExitCode == ExitSuccess
-                    || output.gitCommandExitCode == ExitFailure 1 ->
-                        pure $
-                            Right
-                                (concatMap disableDriver
-                                    (configuredFilterDrivers
-                                        output.gitCommandStdout))
-                | otherwise ->
-                    pure (Left (gitFailure "git config" output))
+        ]
+    if output.gitCommandExitCode == ExitSuccess
+        || output.gitCommandExitCode == ExitFailure 1
+        then pure $
+            concatMap disableDriver
+                (configuredFilterDrivers output.gitCommandStdout)
+        else throwE (gitFailure "git config" output)
   where
     disableDriver driver =
         [ (driver <> ".clean", "")
@@ -145,7 +132,7 @@ runUntrackedDiff
     :: OsPath
     -> [(Text, Text)]
     -> String
-    -> IO (Either Text Text)
+    -> ExceptT Text IO Text
 runUntrackedDiff cwd overrides path =
     runDiff cwd overrides
         (commonDiffArguments
@@ -154,52 +141,45 @@ runUntrackedDiff cwd overrides path =
 runTrackedDiff
     :: OsPath
     -> [(Text, Text)]
-    -> IO (Either Text Text)
-runTrackedDiff cwd overrides =
-    runSafeGit cwd [] ["rev-parse", "--verify", "--quiet", "HEAD"] >>= \case
-        Left err -> pure (Left err)
-        Right output
-            | output.gitCommandExitCode == ExitSuccess ->
-                runDiff cwd overrides (commonDiffArguments <> ["HEAD", "--"])
-            | output.gitCommandExitCode == ExitFailure 1 -> do
-                -- In an unborn repository, staged files are compared with the
-                -- empty index while unstaged edits are compared with the index.
-                (staged, unstaged) <-
-                    concurrently
-                        (runDiff cwd overrides cachedDiffArguments)
-                        (runDiff cwd overrides trackedDiffArguments)
-                pure ((<>) <$> staged <*> unstaged)
-            | otherwise ->
-                pure (Left (gitFailure "git rev-parse HEAD" output))
+    -> ExceptT Text IO Text
+runTrackedDiff cwd overrides = do
+    output <- ExceptT $
+        runSafeGit cwd [] ["rev-parse", "--verify", "--quiet", "HEAD"]
+    case output.gitCommandExitCode of
+        ExitSuccess ->
+            runDiff cwd overrides (commonDiffArguments <> ["HEAD", "--"])
+        ExitFailure 1 -> do
+            -- In an unborn repository, staged files are compared with the
+            -- empty index while unstaged edits are compared with the index.
+            (staged, unstaged) <- liftIO $
+                concurrently
+                    (runExceptT (runDiff cwd overrides cachedDiffArguments))
+                    (runExceptT (runDiff cwd overrides trackedDiffArguments))
+            except ((<>) <$> staged <*> unstaged)
+        _ -> throwE (gitFailure "git rev-parse HEAD" output)
 
 runDiff
     :: OsPath
     -> [(Text, Text)]
     -> [String]
-    -> IO (Either Text Text)
-runDiff cwd overrides arguments =
-    runSafeGit cwd overrides arguments >>= \case
-        Left err -> pure (Left err)
-        Right output
-            | output.gitCommandExitCode == ExitSuccess
-                || output.gitCommandExitCode == ExitFailure 1 ->
-                    pure (Right (displayTerminalText (gitOutputText output)))
-            | otherwise ->
-                pure (Left (gitFailure (renderGitCommand arguments) output))
+    -> ExceptT Text IO Text
+runDiff cwd overrides arguments = do
+    output <- ExceptT (runSafeGit cwd overrides arguments)
+    if output.gitCommandExitCode == ExitSuccess
+        || output.gitCommandExitCode == ExitFailure 1
+        then pure (displayTerminalText (gitOutputText output))
+        else throwE (gitFailure (renderGitCommand arguments) output)
 
 runGitSuccess
     :: OsPath
     -> [(Text, Text)]
     -> [String]
-    -> IO (Either Text GitCommandOutput)
-runGitSuccess cwd overrides arguments =
-    runSafeGit cwd overrides arguments >>= \case
-        Left err -> pure (Left err)
-        Right output
-            | output.gitCommandExitCode == ExitSuccess ->
-                pure (Right output)
-            | otherwise ->
-                pure (Left (gitFailure (renderGitCommand arguments) output))
+    -> ExceptT Text IO GitCommandOutput
+runGitSuccess cwd overrides arguments = do
+    output <- ExceptT (runSafeGit cwd overrides arguments)
+    if output.gitCommandExitCode == ExitSuccess
+        then pure output
+        else throwE (gitFailure (renderGitCommand arguments) output)
 
 -- | Run one bounded Git command with repository-configured hooks and
 -- fsmonitor disabled. Additional config values are passed as individual

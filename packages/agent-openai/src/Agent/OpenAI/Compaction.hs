@@ -59,7 +59,7 @@ import Agent.Responses.Types
 import Agent.Tools.TaskPlan (isTaskPlanContextText)
 import Agent.Json (RawJson, rawJsonFromEncoding)
 import qualified Data.Aeson as Aeson
-import Data.Maybe (listToMaybe, mapMaybe)
+import Data.Maybe (isJust, listToMaybe, mapMaybe)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.ByteString.Lazy as LBS
@@ -331,7 +331,8 @@ protocolDropUnits items =
     go outputIndices paired ((index, item) : rest)
         | Set.member index paired =
             go outputIndices paired rest
-        | isCompactionCheckpoint item =
+        | isCompactionCheckpoint item
+            || isJust (responseItemCompactionCheckpointOrigin item) =
             KeepUnit : go outputIndices paired rest
         | otherwise =
             case item of
@@ -519,6 +520,7 @@ sanitizeOversizedToolCall = \case
                 , arguments = oversizedFunctionArguments
                 , encryptedFunctionArgs = call.encryptedFunctionArgs
                 , status = call.status
+                , async = call.async
                 }
     CustomToolCallItem call
         | Text.length call.input > remoteCompactionMaxStringLength ->
@@ -529,6 +531,7 @@ sanitizeOversizedToolCall = \case
                 , namespace = call.namespace
                 , input = oversizedToolArgumentsMessage
                 , status = call.status
+                , async = call.async
                 }
     item -> item
 
@@ -546,13 +549,15 @@ rewriteOversizedToolOutput :: ResponseItem -> Maybe ResponseItem
 rewriteOversizedToolOutput = \case
     FunctionCallOutputItem output ->
         Just $ FunctionCallOutputItem FunctionCallOutput
-            { itemId = output.itemId
+            { localOutcome = output.localOutcome
+            , itemId = output.itemId
             , callId = output.callId
             , name = output.name
             , namespace = output.namespace
             , provider = output.provider
             , output = truncatedOutputJson
             , status = output.status
+            , async = output.async
             }
     ComputerCallOutputItem output ->
         Just $ ComputerCallOutputItem ComputerCallOutput
@@ -565,11 +570,13 @@ rewriteOversizedToolOutput = \case
             }
     CustomToolCallOutputItem output ->
         Just $ CustomToolCallOutputItem CustomToolCallOutput
-            { itemId = output.itemId
+            { localOutcome = output.localOutcome
+            , itemId = output.itemId
             , callId = output.callId
             , name = output.name
             , output = truncatedOutputJson
             , status = output.status
+            , async = output.async
             }
     ToolSearchOutputItem output ->
         Just $ ToolSearchOutputItem ToolSearchOutput
@@ -1028,7 +1035,13 @@ assistantSummaryItem summary =
         , role = RoleAssistant
         , status = Nothing
         , phase = Nothing
-        , passthrough = Nothing
+        , passthrough = Just InternalChatMetadata
+            { turnId = Nothing
+            , createTime = Nothing
+            , contentItemKinds =
+                Just [localCompactionSummaryContentItemKind]
+            , executedToolCalls = Nothing
+            }
         }
 
 -- | Grok-style local rebuild: recent user texts + assistant summary.
@@ -1103,7 +1116,7 @@ hasCompactionCheckpoint = any \case
     KnownResponseItem ItemContextCompaction _ -> True
     MessageItem message
         | message.role == RoleAssistant ->
-            maybe False
-                (Text.isPrefixOf summaryPrefix . Text.stripStart)
-                (messageText message)
+            responseMessageHasContentItemKind
+                localCompactionSummaryContentItemKind
+                message
     _ -> False

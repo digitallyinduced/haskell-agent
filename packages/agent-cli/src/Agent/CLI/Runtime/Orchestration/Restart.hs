@@ -55,7 +55,7 @@ runFullscreenRestartLoop callbacks runtime =
         -- chain, rather than stopping Brick after the first provider exits.
         try @_ @StartupFailure action >>= \case
             Left (StartupFailure message) ->
-                recoverStartup options transition (Text.pack message)
+                recoverStartup options transition message
             Right result -> case result of
                 RunRestart sessionId -> do
                     let nextOptions = callbacks.restartOptions options sessionId
@@ -72,7 +72,7 @@ runFullscreenRestartLoop callbacks runtime =
                 RunProviderStartFailed apiError ->
                     case transition of
                         Just failed
-                            | failed.transitionCause == AutomaticFallback ->
+                            | AutomaticFallback _ <- failed.transitionCause ->
                                 callbacks.restartFallback failed apiError
                                     >>= \case
                                     Just next -> do
@@ -97,7 +97,7 @@ runFullscreenRestartLoop callbacks runtime =
         try @_ @StartupFailure
             (callbacks.restartPrepare options transition) >>= \case
                 Left (StartupFailure message) ->
-                    recoverStartup options transition (Text.pack message)
+                    recoverStartup options transition message
                 Right prepared ->
                     loop options transition prepared.preparedRun
 

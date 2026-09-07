@@ -8,6 +8,9 @@ module Agent.TUI.Markdown
     , diffWidgetWithSyntaxHighlighting
     , highlightDiffCodeRows
     , inlinePlainText
+    , isDiffFenceInfo
+    , looksLikeUnifiedDiff
+    , markdownFenceSyntaxLanguages
     , markdownWidget
     , markdownWidgetWithLinks
     , markdownWidgetWithCodeControls
@@ -32,6 +35,7 @@ import Agent.Syntax
     , SyntaxHighlighter
     , SyntaxSpan(..)
     , highlightCode
+    , resolveFenceLanguage
     , resolvePathLanguage
     )
 import Agent.TUI.Presentation
@@ -49,12 +53,14 @@ import Agent.TUI.TextWidth
 import qualified Agent.TUI.Theme as Theme
 import Brick
 import qualified Brick.Types as B
+import Control.Applicative ((<|>))
 import Data.Bits ((.|.))
 import Data.Char (isDigit, isSpace)
 import qualified Data.List as List
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Text.Read (readMaybe)
 import qualified Data.Text.Lazy as LazyText
 import qualified Data.Text.Lazy.Builder as Builder
 import qualified Graphics.Vty as V
@@ -192,6 +198,32 @@ diffSyntaxLanguages initialPath body =
         , Just language <- [resolvePathLanguage path]
         ]
 
+-- | Fence info that should be painted as a unified/edit diff rather than
+-- tokenized with Skylighting's @diff@ grammar. That grammar maps removed
+-- lines to strings (green) and added lines to variables (cyan).
+isDiffFenceInfo :: Text -> Bool
+isDiffFenceInfo info =
+    resolveFenceLanguage info == Just "diff"
+
+-- | Conservative detection for unlabeled unified diffs. A hunk header at the
+-- start of a line is distinctive enough that ordinary source is unlikely to
+-- match.
+looksLikeUnifiedDiff :: Text -> Bool
+looksLikeUnifiedDiff =
+    any ("@@" `Text.isPrefixOf`) . Text.lines
+
+-- | Grammars to load for one Markdown fence. Diff fences contribute the
+-- languages of the files they name rather than the @diff@ grammar itself.
+markdownFenceSyntaxLanguages :: Text -> Text -> [Text]
+markdownFenceSyntaxLanguages info body =
+    case resolveFenceLanguage info of
+        Just "diff" -> diffSyntaxLanguages "" body
+        Just language -> [language]
+        Nothing
+            | looksLikeUnifiedDiff body ->
+                diffSyntaxLanguages "" body
+            | otherwise -> []
+
 -- | Render a compact edit preview with token-level syntax foregrounds over
 -- full-width added/removed backgrounds.
 diffWidgetWithSyntaxHighlighting
@@ -261,37 +293,89 @@ data StyledDiffRow = StyledDiffRow
     , styledDiffFragments :: ![(V.Attr, Text)]
     }
 
+data DiffParseState = DiffParseState
+    { parsePaths :: !DiffPaths
+    , parseHunk :: !(Maybe HunkRemaining)
+    }
+
+data HunkRemaining = HunkRemaining
+    { hunkOldLeft :: !Int
+    , hunkNewLeft :: !Int
+    }
+
 parseDiffLines :: Text -> Text -> [ParsedDiffLine]
 parseDiffLines initialPath =
-    go
-        (maybe emptyDiffPaths sameDiffPaths (nonEmptyText initialPath))
-        . Text.lines
+    go initialState . Text.lines
   where
+    initialState =
+        DiffParseState
+            { parsePaths =
+                maybe emptyDiffPaths sameDiffPaths (nonEmptyText initialPath)
+            , parseHunk = Nothing
+            }
+
     go _ [] = []
-    go currentPaths (line : rest)
+    go state (line : rest)
         | Just nextPaths <- diffHeaderPaths line =
             ParsedDiffLine DiffLineHeader nextPaths "" line
-                : go nextPaths rest
+                : go
+                    state { parsePaths = nextPaths, parseHunk = Nothing }
+                    rest
+        | Just hunk <- state.parseHunk =
+            parseInsideHunk state hunk line rest
+        | otherwise =
+            parseOutsideHunk state line rest
+
+    parseInsideHunk state hunk line rest
+        | Just nextPaths <- gitDiffFileStart line =
+            ParsedDiffLine DiffLineMeta nextPaths "" line
+                : go
+                    state { parsePaths = nextPaths, parseHunk = Nothing }
+                    rest
+        | Just nextHunk <- parseHunkCounts line =
+            ParsedDiffLine DiffLineMeta state.parsePaths "" line
+                : go state { parseHunk = Just nextHunk } rest
+        | isNoNewlineMarker line =
+            ParsedDiffLine DiffLineMeta state.parsePaths "" line
+                : go state rest
+        | Just (kind, prefix, source) <- unifiedHunkLine line =
+            ParsedDiffLine kind state.parsePaths prefix source
+                : go
+                    state { parseHunk = advanceHunk hunk kind }
+                    rest
+        | otherwise =
+            ParsedDiffLine DiffLinePlain state.parsePaths "" line
+                : go state rest
+
+    parseOutsideHunk state line rest
+        | Just nextPaths <- unifiedDiffHeaderPaths state.parsePaths line =
+            ParsedDiffLine DiffLineMeta nextPaths "" line
+                : go state { parsePaths = nextPaths } rest
+        | Just hunk <- parseHunkCounts line =
+            ParsedDiffLine DiffLineMeta state.parsePaths "" line
+                : go state { parseHunk = Just hunk } rest
         | Just displayLine <- parseDiffDisplayLine line =
             ParsedDiffLine
                 (displayLineKind displayLine.diffDisplayKind)
-                currentPaths
+                state.parsePaths
                 ( displayLine.diffDisplayGutter
                     <> " │ "
                     <> displayLine.diffDisplayMarker
                 )
                 displayLine.diffDisplayCode
-                : go currentPaths rest
+                : go state rest
         | Just (kind, prefix, source) <- changedDiffLine line =
-            ParsedDiffLine kind currentPaths prefix source
-                : go currentPaths rest
-        | "  …" `Text.isPrefixOf` line
-            || "… +" `Text.isPrefixOf` line =
-            ParsedDiffLine DiffLineMeta currentPaths "" line
-                : go currentPaths rest
+            ParsedDiffLine kind state.parsePaths prefix source
+                : go state rest
+        | isDiffMetaLine line =
+            ParsedDiffLine DiffLineMeta state.parsePaths "" line
+                : go state rest
+        | Just (kind, prefix, source) <- unifiedHunkLine line =
+            ParsedDiffLine kind state.parsePaths prefix source
+                : go state rest
         | otherwise =
-            ParsedDiffLine DiffLinePlain currentPaths "" line
-                : go currentPaths rest
+            ParsedDiffLine DiffLinePlain state.parsePaths "" line
+                : go state rest
 
 displayLineKind :: Presentation.DiffLineKind -> DiffLineKind
 displayLineKind = \case
@@ -356,6 +440,155 @@ diffHeaderPaths line =
                         , diffAddedPath = Just destinationPath
                         })
             Nothing -> pure (sameDiffPaths sourcePath)
+
+-- | Git/unified headers update the current file paths so later +/- rows can
+-- pick a source grammar. They stay muted rather than using the compact
+-- create/update chrome. @---@/@+++@ are headers only when the payload looks
+-- like a git path; inside a hunk the first character is always the marker.
+unifiedDiffHeaderPaths :: DiffPaths -> Text -> Maybe DiffPaths
+unifiedDiffHeaderPaths current line
+    | Just nextPaths <- gitDiffFileStart line =
+        Just nextPaths
+    | Just rest <- Text.stripPrefix "--- " line
+    , looksLikeGitHeaderPath rest =
+        let removed = gitDiffPath rest
+        in Just
+            current
+                { diffRemovedPath = removed
+                , diffAddedPath = current.diffAddedPath <|> removed
+                }
+    | Just rest <- Text.stripPrefix "+++ " line
+    , looksLikeGitHeaderPath rest =
+        let added = gitDiffPath rest
+        in Just
+            current
+                { diffAddedPath = added
+                , diffRemovedPath = current.diffRemovedPath <|> added
+                }
+    | otherwise = Nothing
+
+gitDiffFileStart :: Text -> Maybe DiffPaths
+gitDiffFileStart line = do
+    rest <- Text.stripPrefix "diff --git " line
+    case Text.words rest of
+        [source, destination] ->
+            Just
+                DiffPaths
+                    { diffRemovedPath = gitDiffPath source
+                    , diffAddedPath = gitDiffPath destination
+                    }
+        _ -> Nothing
+
+looksLikeGitHeaderPath :: Text -> Bool
+looksLikeGitHeaderPath raw =
+    let trimmed = Text.strip (Text.takeWhile (/= '\t') raw)
+        unquoted = stripDiffQuotes trimmed
+    in unquoted == "/dev/null"
+        || "a/" `Text.isPrefixOf` unquoted
+        || "b/" `Text.isPrefixOf` unquoted
+        || Text.any (`elem` ['/', '\\']) unquoted
+
+gitDiffPath :: Text -> Maybe Text
+gitDiffPath raw =
+    let trimmed = Text.strip (Text.takeWhile (/= '\t') raw)
+        unquoted = stripDiffQuotes trimmed
+        withoutPrefix
+            | "a/" `Text.isPrefixOf` unquoted
+                || "b/" `Text.isPrefixOf` unquoted =
+                Text.drop 2 unquoted
+            | otherwise = unquoted
+    in if Text.null withoutPrefix || withoutPrefix == "/dev/null"
+        then Nothing
+        else Just withoutPrefix
+
+stripDiffQuotes :: Text -> Text
+stripDiffQuotes text =
+    case Text.uncons text of
+        Just ('"', rest)
+            | Text.isSuffixOf "\"" rest && not (Text.null rest) ->
+                Text.dropEnd 1 rest
+        _ -> text
+
+-- | Inside a hunk only the first character is the marker, so added
+-- @++counter;@ (@+++counter;@) and removed @-- comment@ (@--- comment@) stay
+-- change rows instead of being mistaken for file headers.
+unifiedHunkLine :: Text -> Maybe (DiffLineKind, Text, Text)
+unifiedHunkLine line =
+    case Text.uncons line of
+        Just ('+', rest) -> Just (DiffLineAdded, "+", rest)
+        Just ('-', rest) -> Just (DiffLineRemoved, "-", rest)
+        Just (' ', rest) -> Just (DiffLineContext, " ", rest)
+        _ -> Nothing
+
+parseHunkCounts :: Text -> Maybe HunkRemaining
+parseHunkCounts line = do
+    afterOpen <- Text.stripPrefix "@@" (Text.stripStart line)
+    afterMinus <- Text.stripPrefix "-" (Text.strip afterOpen)
+    (oldCount, afterOld) <- hunkCount afterMinus
+    afterPlus <- Text.stripPrefix "+" (Text.strip afterOld)
+    (newCount, _) <- hunkCount afterPlus
+    pure
+        HunkRemaining
+            { hunkOldLeft = oldCount
+            , hunkNewLeft = newCount
+            }
+
+hunkCount :: Text -> Maybe (Int, Text)
+hunkCount text = do
+    let (startDigits, afterStart) = Text.span isDigit text
+    _start <- readNonEmptyDigits startDigits
+    case Text.uncons afterStart of
+        Just (',', rest) -> do
+            let (countDigits, afterCount) = Text.span isDigit rest
+            count <- readNonEmptyDigits countDigits
+            pure (count, afterCount)
+        _ ->
+            Just (1, afterStart)
+
+readNonEmptyDigits :: Text -> Maybe Int
+readNonEmptyDigits digits
+    | Text.null digits = Nothing
+    | otherwise = readMaybe (Text.unpack digits)
+
+advanceHunk :: HunkRemaining -> DiffLineKind -> Maybe HunkRemaining
+advanceHunk hunk kind =
+    let next = case kind of
+            DiffLineRemoved ->
+                hunk { hunkOldLeft = max 0 (hunk.hunkOldLeft - 1) }
+            DiffLineAdded ->
+                hunk { hunkNewLeft = max 0 (hunk.hunkNewLeft - 1) }
+            DiffLineContext ->
+                hunk
+                    { hunkOldLeft = max 0 (hunk.hunkOldLeft - 1)
+                    , hunkNewLeft = max 0 (hunk.hunkNewLeft - 1)
+                    }
+            _ -> hunk
+    in if next.hunkOldLeft == 0 && next.hunkNewLeft == 0
+        then Nothing
+        else Just next
+
+isNoNewlineMarker :: Text -> Bool
+isNoNewlineMarker line =
+    "\\ " `Text.isPrefixOf` line
+        || "\\ No newline" `Text.isPrefixOf` line
+
+isDiffMetaLine :: Text -> Bool
+isDiffMetaLine line =
+    "  …" `Text.isPrefixOf` line
+        || "… +" `Text.isPrefixOf` line
+        || "@@" `Text.isPrefixOf` Text.stripStart line
+        || isNoNewlineMarker line
+        || "index " `Text.isPrefixOf` line
+        || "new file mode " `Text.isPrefixOf` line
+        || "deleted file mode " `Text.isPrefixOf` line
+        || "old mode " `Text.isPrefixOf` line
+        || "new mode " `Text.isPrefixOf` line
+        || "similarity index " `Text.isPrefixOf` line
+        || "rename from " `Text.isPrefixOf` line
+        || "rename to " `Text.isPrefixOf` line
+        || "copy from " `Text.isPrefixOf` line
+        || "copy to " `Text.isPrefixOf` line
+        || "Binary files " `Text.isPrefixOf` line
 
 emptyDiffPaths :: DiffPaths
 emptyDiffPaths =
@@ -705,11 +938,26 @@ renderChunk syntaxHighlighter _ cacheCode codeHeader (FenceBlock block) =
         else bodyWidget
     ]
   where
-    bodyWidget =
-        renderCodeBody
-            (if block.fencedClosed then syntaxHighlighter else Nothing)
-            block.fencedInfo
-            (codeBodyLines block.fencedBody)
+    highlighter =
+        if block.fencedClosed then syntaxHighlighter else Nothing
+    bodyWidget
+        | shouldRenderFenceAsDiff block =
+            diffWidgetWithSyntaxHighlighting
+                highlighter
+                ""
+                block.fencedBody
+        | otherwise =
+            renderCodeBody
+                highlighter
+                block.fencedInfo
+                (codeBodyLines block.fencedBody)
+
+shouldRenderFenceAsDiff :: FencedBlock -> Bool
+shouldRenderFenceAsDiff block =
+    isDiffFenceInfo block.fencedInfo
+        || ( Text.null (Text.strip block.fencedInfo)
+            && looksLikeUnifiedDiff block.fencedBody
+           )
 
 renderLines
     :: Ord n
@@ -719,7 +967,7 @@ renderLines
 renderLines _ [] = []
 renderLines linkName lines_
     | Just (table, rest) <- Block.takeTableRows lines_ =
-        tableWidget table : renderLines linkName rest
+        tableWidget linkName table : renderLines linkName rest
 renderLines linkName (line : rest)
     | Just (_, heading) <- Block.headingPartsWith (== ' ') line =
         padTop (Pad 1)
@@ -942,17 +1190,24 @@ renderCodeRow paddingAttr horizontalPadding fragments =
 -- | Render a table against the width Brick actually gives it. Natural column
 -- widths are only preferences: short columns keep their size while verbose
 -- columns share the remaining space and wrap inside it.
-tableWidget :: Block.MarkdownTable -> Widget n
-tableWidget table = case table.tableRows of
+tableWidget
+    :: Ord n
+    => Maybe (Text -> n)
+    -> Block.MarkdownTable
+    -> Widget n
+tableWidget linkName table = case table.tableRows of
   [] -> emptyWidget
-  rows@(headerCells : _) -> tableRowsWidget table rows headerCells
+  rows@(headerCells : _) ->
+      tableRowsWidget linkName table rows headerCells
 
 tableRowsWidget
-    :: Block.MarkdownTable
+    :: Ord n
+    => Maybe (Text -> n)
+    -> Block.MarkdownTable
     -> [[Text]]
     -> [Text]
     -> Widget n
-tableRowsWidget table rows headerCells =
+tableRowsWidget linkName table rows headerCells =
     B.Widget B.Greedy B.Fixed do
         context <- B.getContext
         borderAttr <- B.lookupAttrName Theme.borderAttr
@@ -1001,10 +1256,12 @@ tableRowsWidget table rows headerCells =
                     header : body ->
                         let logicalRows =
                                 renderTableRow
+                                    linkName
                                     borderAttr headerAttr horizontalPadding
                                     table.tableAlignments widths header
                                     : map
                                         (renderTableRow
+                                            linkName
                                             borderAttr bodyAttr
                                             horizontalPadding
                                             table.tableAlignments widths)
@@ -1012,16 +1269,12 @@ tableRowsWidget table rows headerCells =
                         in top
                             : (List.intersperse divider logicalRows
                                 <> [bottom])
-            image =
+            tableContent =
                 if gridFits
-                    then V.vertCat renderedRows
-                    else compactTableImage
-                        availableWidth borderAttr styledRows
-            boundedImage
-                | V.imageWidth image > availableWidth =
-                    V.cropRight availableWidth image
-                | otherwise = image
-        pure B.emptyResult { B.image = boundedImage }
+                    then vBox renderedRows
+                    else compactTableWidget
+                        linkName availableWidth borderAttr styledRows
+        B.render tableContent
   where
     columnCount = length headerCells
     normalizedRows =
@@ -1098,15 +1351,17 @@ fitColumnWidths budget minimumWidths naturalWidths
         | otherwise =
             (remaining, current)
 
-compactTableImage
-    :: Int
+compactTableWidget
+    :: Ord n
+    => Maybe (Text -> n)
+    -> Int
     -> V.Attr
     -> [[[(V.Attr, Text)]]]
-    -> V.Image
-compactTableImage width borderAttr rows =
-    V.vertCat $
+    -> Widget n
+compactTableWidget linkName width borderAttr rows =
+    vBox $
         concat
-            [ map renderStyledLine $
+            [ map (styledFragmentsWidget linkName) $
                 wrapStyledWords width $
                     List.intercalate
                         [(borderAttr, " │ ")]
@@ -1128,9 +1383,10 @@ tableRule
     -> Char
     -> Char
     -> [Int]
-    -> V.Image
+    -> Widget n
 tableRule attr horizontalPadding left middle right widths =
-    V.text' attr $
+    imageWidget $
+        V.text' attr $
         Text.singleton left
             <> Text.intercalate
                 (Text.singleton middle)
@@ -1142,21 +1398,23 @@ tableRule attr horizontalPadding left middle right widths =
             <> Text.singleton right
 
 renderTableRow
-    :: V.Attr
+    :: Ord n
+    => Maybe (Text -> n)
+    -> V.Attr
     -> V.Attr
     -> Int
     -> [Block.TableAlignment]
     -> [Int]
     -> [[(V.Attr, Text)]]
-    -> V.Image
+    -> Widget n
 renderTableRow
-    borderAttr paddingAttr horizontalPadding alignments widths cells =
-    V.vertCat
-        [ V.horizCat $
+    linkName borderAttr paddingAttr horizontalPadding alignments widths cells =
+    vBox
+        [ hBox $
             border
                 : (List.intersperse border
                     [ renderTableCell
-                        paddingAttr alignment horizontalPadding width fragments
+                        linkName paddingAttr alignment horizontalPadding width fragments
                     | (alignment, width, fragments) <-
                         zip3 normalizedAlignments widths rowFragments
                     ]
@@ -1164,7 +1422,7 @@ renderTableRow
         | rowFragments <- physicalRows
         ]
   where
-    border = V.char borderAttr '│'
+    border = imageWidget (V.char borderAttr '│')
     normalizedAlignments = alignments <> repeat Block.AlignDefault
     wrappedCells =
         zipWith
@@ -1179,14 +1437,16 @@ renderTableRow
             ]
 
 renderTableCell
-    :: V.Attr
+    :: Ord n
+    => Maybe (Text -> n)
+    -> V.Attr
     -> Block.TableAlignment
     -> Int
     -> Int
     -> [(V.Attr, Text)]
-    -> V.Image
-renderTableCell paddingAttr alignment horizontalPadding width fragments =
-    V.horizCat
+    -> Widget n
+renderTableCell linkName paddingAttr alignment horizontalPadding width fragments =
+    hBox
         [ blank horizontalPadding
         , blank leftPadding
         , content
@@ -1198,13 +1458,10 @@ renderTableCell paddingAttr alignment horizontalPadding width fragments =
         tableAlignmentPadding alignment $
             max 0 (width - fragmentsDisplayWidth fragments)
     content =
-        V.horizCat
-            [ terminalTextImage attr text
-            | (attr, text) <- fragments
-            ]
+        styledFragmentsWidget linkName fragments
     blank count
-        | count <= 0 = V.emptyImage
-        | otherwise = V.charFill paddingAttr ' ' count 1
+        | count <= 0 = emptyWidget
+        | otherwise = imageWidget (V.charFill paddingAttr ' ' count 1)
 
 tableAlignmentPadding :: Block.TableAlignment -> Int -> (Int, Int)
 tableAlignmentPadding alignment padding = case alignment of
@@ -1222,6 +1479,29 @@ fragmentsDisplayWidth =
                 . graphemeClusters
                 . snd)
 
+styledFragmentsWidget
+    :: Ord n
+    => Maybe (Text -> n)
+    -> [(V.Attr, Text)]
+    -> Widget n
+styledFragmentsWidget linkName =
+    hBox . map renderFragment
+  where
+    renderFragment (attr, text) =
+        case (linkName, V.attrURL attr) of
+            (Just toName, V.SetTo url) ->
+                clickable (toName url) (spanWidget attr text)
+            _ -> spanWidget attr text
+
+imageWidget :: V.Image -> Widget n
+imageWidget image =
+    B.Widget B.Fixed B.Fixed $
+        pure B.emptyResult { B.image = image }
+
+spanWidget :: V.Attr -> Text -> Widget n
+spanWidget attr text =
+    imageWidget (terminalTextImage attr text)
+
 inlineWidgetWithAttr
     :: Ord n
     => Maybe (Text -> n)
@@ -1234,23 +1514,7 @@ inlineWidgetWithAttr linkName plainAttr inlines =
         styled <- resolveInline plainAttr inlines
         let width = max 1 context.availWidth
             rows = wrapStyled width styled
-            rowWidget row =
-                hBox
-                    [ linkWidget attr text
-                    | (attr, text) <- row
-                    ]
-            linkWidget attr text =
-                case (linkName, V.attrURL attr) of
-                    (Just toName, V.SetTo url) ->
-                        clickable (toName url) (spanWidget attr text)
-                    _ -> spanWidget attr text
-            spanWidget attr text =
-                B.Widget B.Fixed B.Fixed $
-                    pure B.emptyResult
-                        { B.image =
-                            terminalTextImage attr text
-                        }
-        B.render (vBox (map rowWidget rows))
+        B.render (vBox (map (styledFragmentsWidget linkName) rows))
 
 data InlineContext = InlineContext
     { inlineStrong :: !Bool

@@ -11,6 +11,7 @@ module Agent.Subagents.Types
     , defaultSubagentConfig
     , defaultMaxConcurrent
     , defaultMaxDepth
+    , defaultMaxSpawnedPerTurn
     , defaultWaitTimeoutMs
     , minWaitTimeoutMs
     , maxWaitTimeoutMs
@@ -59,18 +60,25 @@ data SubagentConfig = SubagentConfig
     { maxConcurrent :: !Int
       -- | 'Nothing' means unlimited nesting depth.
     , maxDepth :: !(Maybe Int)
+      -- | Cumulative new-agent admissions owned by one root turn.
+      -- 'Nothing' disables the budget.
+    , maxSpawnedPerTurn :: !(Maybe Int)
     } deriving (Eq, Show)
 
 defaultMaxConcurrent :: Int
-defaultMaxConcurrent = 32
+defaultMaxConcurrent = 8
 
 defaultMaxDepth :: Int
-defaultMaxDepth = 4
+defaultMaxDepth = 1
+
+defaultMaxSpawnedPerTurn :: Int
+defaultMaxSpawnedPerTurn = 16
 
 defaultSubagentConfig :: SubagentConfig
 defaultSubagentConfig = SubagentConfig
     { maxConcurrent = defaultMaxConcurrent
     , maxDepth = Just defaultMaxDepth
+    , maxSpawnedPerTurn = Just defaultMaxSpawnedPerTurn
     }
 
 minWaitTimeoutMs :: Int

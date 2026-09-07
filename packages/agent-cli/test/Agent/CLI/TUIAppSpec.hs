@@ -1,5 +1,7 @@
 module Agent.CLI.TUIAppSpec (spec) where
 
+import Agent.CLI.TUIAppSpec.AgentFixtures
+import qualified Agent.CLI.TUIAppSpec.Motion as Motion
 import Agent.CLI.AgentViewport
     ( AgentEntry(..)
     , AgentStep(..)
@@ -20,21 +22,17 @@ import Agent.CLI.TUI.App
     ( applyStoredFullscreenWindowTitle
     , applyMetaConsoleEdit
     , applyTextPromptEdit
-    , advanceCompletionFlashes
     , adjustChoiceValue
     , agentEntryWindow
     , agentPaneEntryLimit
     , agentPaneVisible
     , backgroundActivityText
     , cacheableBlock
-    , completionFlashTransitions
-    , completionRequiresRedraw
     , conversationScrollbarRenderer
     , choiceRowColumns
     , drawApp
     , filterChoiceRowLimit
     , choiceClosesOnUiTransition
-    , elapsedMillisSince
     , externalUrlCommand
     , launchExternalUrlCommand
     , fullscreenBounds
@@ -50,9 +48,6 @@ import Agent.CLI.TUI.App
     , withTrackedVtyBuilder
     , wrapFullscreenKeyboardVty
     , wrapMarkdownLinkCursorVty
-    , motionDemandFor
-    , motionDemandForTerminalFocus
-    , motionModeForTerminalFocus
     , lambdaArtWidget
     , quickStartCardHeight
     , quickStartRows
@@ -61,8 +56,6 @@ import Agent.CLI.TUI.App
     , quickStartCardWidth
     , drawQuickStartCard
     , startupCapabilityLines
-    , nativeProgressKeepaliveDue
-    , nextMotionSchedule
     , onboardingVisibleRowIndices
     , maskedSecretText
     , normalizeTextOverlayInsertion
@@ -73,8 +66,6 @@ import Agent.CLI.TUI.App
     , syntaxLanguagesForBlocks
     , textOverlayDisplayText
     , toolImageBlockId
-    , turnCompletionRequiresRedraw
-    , uiEventRestartsMotionSchedule
     )
 import Agent.CLI.WindowTitle (oscWindowTitleBytes)
 import Agent.CLI.TUI.Types
@@ -85,6 +76,7 @@ import Agent.CLI.TUI.Types
     , ChoiceSelection(..)
     , CommandPaletteAction(..)
     , CommandPaletteEntry(..)
+    , DictationSession(..)
     , FullscreenInput(..)
     , commandPaletteActionAt
     , commandPaletteEntries
@@ -96,8 +88,9 @@ import Agent.CLI.TUI.Types
     , HistoryCommit(..)
     , MetaConsoleOverlay(..)
     , Name(..)
+    , PendingDialog(..)
+    , ResumeActions(..)
     , ResumeOverlay(..)
-    , TerminalFocus(..)
     , TextInputMode(..)
     , TextOverlay(..)
     )
@@ -111,10 +104,18 @@ import Agent.CLI.TUI.History
     , HistoryWindow(..)
     , applyHistoryPage
     , emptyHistoryWindow
+    , historyWindowBlock
+    , setHistoryWindowTurns
     )
 import Agent.CLI.TUI.ImagePreview
     ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
+    )
+import Agent.CLI.TUI.Scroll
+    ( ConversationAnchor(..)
+    , ConversationPhase(..)
+    , conversationAnchorSticky
+    , startConversationAnchor
     )
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
@@ -141,6 +142,7 @@ import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallMode(..)
     , customToolCall
     , functionToolCall
     )
@@ -150,6 +152,7 @@ import Agent.TUI.Presentation
     , TodoDisplayStatus(..)
     )
 import Agent.TUI.Motion
+import Control.Concurrent (newEmptyMVar)
 import Control.Concurrent.STM
     ( atomically
     , newEmptyTMVarIO
@@ -160,7 +163,13 @@ import Control.Concurrent.STM
 import Control.Monad (replicateM_)
 import qualified Data.ByteString as ByteString
 import Data.Foldable (find, toList)
-import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
+import Data.IORef
+    ( modifyIORef'
+    , newIORef
+    , readIORef
+    , writeIORef
+    )
+import Data.Maybe (isNothing)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
@@ -179,6 +188,26 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "dictation readiness" do
+        it "does not erase a transcript that arrives before the ready event" do
+            stop <- newEmptyMVar
+            abort <- newIORef False
+            let ui = reduceUi
+                    (UiSetNotice (Just Composer.dictationStartingNotice))
+                    initialUiState
+            runtime <- newScriptRuntime ui
+            let initialState =
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                        { appDictation = Just (DictationSession stop abort) }
+                script =
+                    [ FullscreenScriptApp (AppDictationPartial "opening words")
+                    , FullscreenScriptApp (AppDictationRecording stop)
+                    , FullscreenScriptHalt
+                    ]
+            (_, finalState) <- runFullscreenScriptWithState initialState script
+            finalState.appUi.uiNotice
+                `shouldBe` Just (Composer.dictationProgressNotice "opening words")
+
     describe "toolImageBlockId" do
         let started callId name =
                 reduceUi
@@ -187,7 +216,7 @@ spec = do
                 reduceUi
                     (UiLoop
                         (ToolFinished
-                            (ToolCallResult callId "done" FunctionCallKind)))
+                            (ToolCallResult callId "done" FunctionCallKind BlockingToolCall [] Nothing)))
             firstBlock = BlockId initialUiState.uiNextBlockId
             secondBlock = BlockId (initialUiState.uiNextBlockId + 1)
 
@@ -232,7 +261,7 @@ spec = do
                                 (ToolCallResult
                                     "read-1"
                                     "module Main where"
-                                    FunctionCallKind)))
+                                    FunctionCallKind BlockingToolCall [] Nothing)))
                         running
             runtime <- newScriptRuntime completed
             let appState =
@@ -301,6 +330,17 @@ spec = do
                         initialUiState
             syntaxLanguagesForBlocks (toList conversation.uiBlocks)
                 `shouldBe` Set.fromList ["haskell", "python"]
+
+        it "requests source grammars from Markdown diff fences" do
+            let conversation =
+                    reduceUi
+                        (UiAssistantHistory
+                            "```diff\n--- a/src/Agent/Syntax.hs\n\
+                            \+++ b/src/Agent/Syntax.hs\n\
+                            \@@ -1 +1 @@\n-old\n+new\n```")
+                        initialUiState
+            syntaxLanguagesForBlocks (toList conversation.uiBlocks)
+                `shouldBe` Set.singleton "haskell"
 
         it "requests the JavaScript grammar for exec source" do
             let conversation =
@@ -375,8 +415,10 @@ spec = do
                 `shouldBe` Nothing
 
         it "does not block on a long-running URL opener" do
-            result <- timeout 1_000_000
-                (launchExternalUrlCommand ("sleep", ["2"]))
+            -- Keep CI scheduling headroom while remaining well below the
+            -- child lifetime, so waiting for the opener would still fail.
+            result <- timeout 5_000_000
+                (launchExternalUrlCommand ("sleep", ["10"]))
             result `shouldBe` Just True
 
         it "reports an opener that exits unsuccessfully" do
@@ -418,7 +460,7 @@ spec = do
                         []
                         0)
                         { appTextPrompt =
-                            Just
+                            Just $ PendingDialog (const (pure ()))
                                 (textOverlay draft (Text.length draft))
                                     { textTitle = "Request changes"
                                     , textBody =
@@ -442,6 +484,81 @@ spec = do
                     RowEnd width -> Text.replicate width " "
             rendered `shouldSatisfy` Text.isInfixOf marker
 
+    describe "pending dialogs" do
+        it "keeps each reply through edits and resolves simultaneous dialogs in priority order" do
+            runtime <- newScriptRuntime initialUiState
+            choiceReply <- newEmptyTMVarIO
+            textReply <- newEmptyTMVarIO
+            resumeReply <- newEmptyTMVarIO
+            searches <- newIORef []
+            let initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+                browser = initialResumeBrowser (posixSecondsToUTCTime 0) []
+                key value = FullscreenScriptVty (V.EvKey value [])
+                openDialogs =
+                    [ FullscreenScriptApp
+                        (AppAskChoice ChoiceDialog "Choose" "" 0
+                            [("first", ""), ("second", "")] choiceReply)
+                    , FullscreenScriptApp
+                        (AppAskText TextInputPlain "Answer" "" "draft" textReply)
+                    , FullscreenScriptApp
+                        (AppAskResume browser
+                            (const (pure (Left "not used")))
+                            (const (pure (Right ())))
+                            (\query -> do
+                                modifyIORef' searches (<> [query])
+                                pure (Right []))
+                            resumeReply)
+                    , key (V.KChar '/')
+                    , key (V.KChar 'x')
+                    , key V.KEnter
+                    , key V.KEsc
+                    , FullscreenScriptHalt
+                    ]
+            (_, afterResume) <-
+                runFullscreenScriptWithState initialState openDialogs
+            readIORef searches `shouldReturn` ["x"]
+            atomically (tryReadTMVar resumeReply)
+                `shouldReturn` Just Nothing
+            atomically (tryReadTMVar textReply) `shouldReturn` Nothing
+            atomically (tryReadTMVar choiceReply) `shouldReturn` Nothing
+            isNothing afterResume.appResume `shouldBe` True
+            (_, afterText) <-
+                runFullscreenScriptWithState afterResume
+                    [ key (V.KChar '!')
+                    , key V.KEnter
+                    , FullscreenScriptHalt
+                    ]
+            atomically (tryReadTMVar textReply)
+                `shouldReturn` Just (Just "draft!")
+            atomically (tryReadTMVar choiceReply) `shouldReturn` Nothing
+            isNothing afterText.appTextPrompt `shouldBe` True
+            (_, afterChoice) <-
+                runFullscreenScriptWithState afterText
+                    [ key V.KDown
+                    , key V.KEnter
+                    , FullscreenScriptHalt
+                    ]
+            atomically (tryReadTMVar choiceReply)
+                `shouldReturn` Just (Just 1)
+            isNothing afterChoice.appChoice `shouldBe` True
+
+        it "cancels edited text without returning the draft" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            let initialState =
+                    initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, finalState) <-
+                runFullscreenScriptWithState initialState
+                    [ FullscreenScriptApp
+                        (AppAskText TextInputPlain "Answer" "" "draft" reply)
+                    , FullscreenScriptVty (V.EvKey (V.KChar '!') [])
+                    , FullscreenScriptVty (V.EvKey V.KEsc [])
+                    , FullscreenScriptHalt
+                    ]
+            atomically (tryReadTMVar reply) `shouldReturn` Just Nothing
+            isNothing finalState.appTextPrompt `shouldBe` True
+
     describe "search overlay input viewport" do
         it "keeps the tail of a long searchable choice query visible" do
             runtime <- newScriptRuntime initialUiState
@@ -455,7 +572,7 @@ spec = do
                         []
                         0)
                         { appChoice =
-                            Just
+                            Just $ PendingDialog (const (pure ()))
                                 (choiceOverlay False)
                                     { choiceSearch = True
                                     , choiceQuery = query
@@ -466,6 +583,7 @@ spec = do
 
         it "keeps a long resume query visible while editing and afterward" do
             runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
             let marker = "RESUMETAIL"
                 query = Text.replicate 1000 "a" <> marker
                 browser =
@@ -483,19 +601,29 @@ spec = do
                         []
                         0)
                         { appResume =
-                            Just ResumeOverlay
+                            Just $ PendingDialog
+                                ResumeActions
+                                    { resumeReply = reply
+                                    , resumeLoad = const (pure (Left "not used"))
+                                    , resumeDelete = const (pure (Right ()))
+                                    , resumeSearch = const (pure (Right []))
+                                    }
+                                ResumeOverlay
                                 { resumeOverlayBrowser = browser
                                 }
                         }
                 inactiveState =
                     state
                         { appResume =
-                            Just ResumeOverlay
-                                { resumeOverlayBrowser =
-                                    browser
-                                        { resumeBrowserSearching = False
-                                        }
-                                }
+                            fmap
+                                (fmap \overlay ->
+                                    overlay
+                                        { resumeOverlayBrowser =
+                                            browser
+                                                { resumeBrowserSearching = False
+                                                }
+                                        })
+                                state.appResume
                         }
             renderedAppText (80, 24) state
                 `shouldSatisfy` Text.isInfixOf marker
@@ -751,7 +879,7 @@ spec = do
                 runFullscreenScriptWithState
                     initialState
                     (openAndSearch <> [FullscreenScriptHalt])
-            (.choiceQuery) <$> searchedState.appChoice
+            (.dialogOverlay.choiceQuery) <$> searchedState.appChoice
                 `shouldBe` Just ""
             (_, closedState) <-
                 runFullscreenScriptWithState
@@ -760,7 +888,7 @@ spec = do
                         <> [ FullscreenScriptVty (V.EvKey V.KEsc [])
                            , FullscreenScriptHalt
                            ])
-            closedState.appChoice `shouldBe` Nothing
+            isNothing closedState.appChoice `shouldBe` True
 
         it "inserts required command prefixes at the composer cursor" do
             let ui =
@@ -852,7 +980,7 @@ spec = do
             rendered
                 `shouldSatisfy`
                     ByteString.isInfixOf (encoded marker)
-            finalState.appChoice `shouldBe` Nothing
+            isNothing finalState.appChoice `shouldBe` True
             atomically (tryReadTMVar reply)
                 `shouldReturn` Just Nothing
 
@@ -1535,6 +1663,9 @@ spec = do
                         (UiLoop
                             (ToolFinished ToolCallResult
                                 { callId = "shell-1"
+                                , toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
                                 , output = "Exit code: 0\nclean"
                                 , callKind = FunctionCallKind
                                 }))
@@ -1570,6 +1701,9 @@ spec = do
                         , UiLoop
                             (ToolFinished ToolCallResult
                                 { callId = "todo-1"
+                                , toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
                                 , output = "- [in_progress] 1: Keep this list"
                                 , callKind = FunctionCallKind
                                 })
@@ -1597,6 +1731,9 @@ spec = do
                         (UiLoop
                             (ToolFinished ToolCallResult
                                 { callId = resultCallId
+                                , toolResultMode = BlockingToolCall
+                                , toolResultImages = []
+                                , toolResultOutcome = Nothing
                                 , output
                                 , callKind = resultCallKind
                                 }))
@@ -1706,6 +1843,11 @@ spec = do
                 (conversationScrollbarRenderer @()).renderVScrollbar
                 `shouldBe` V.char V.defAttr '┃'
 
+    describe "conversation prompt anchor" do
+        it "does not stick a stale prompt that is visible at the tail" do
+            timeout 2_000_000 visiblePromptRepairsStaleAnchor
+                `shouldReturn` Just True
+
     describe "history replacement viewport" do
         it "keeps startup system messages ahead of the first committed turn" do
             timeout 2_000_000 startupMessagesPrecedeFirstCommittedTurn
@@ -1760,6 +1902,15 @@ spec = do
             timeout 2_000_000 (replacementPreservesFollow False)
                 `shouldReturn` Just True
 
+    describe "history transcript chunk cache" do
+        it "redraws and clears a historical selection after warming the cache" do
+            timeout 2_000_000 cachedHistorySelectionRenders
+                `shouldReturn` Just True
+
+        it "renders expansion without losing it on deselection" do
+            timeout 2_000_000 cachedHistoryExpansionRenders
+                `shouldReturn` Just True
+
     describe "submitted image history retention" do
         it "remaps a live preview onto its committed durable block" do
             timeout 2_000_000 committedPreviewKeys
@@ -1806,352 +1957,7 @@ spec = do
             timeout 2_000_000 unfocusedStreamingRefreshesOnMotionTick
                 `shouldReturn` Just True
 
-    describe "motion demand" do
-        it "distinguishes foreground, waiting, background, and static modes" do
-            let idle =
-                    reduceUi
-                        (UiUserSubmitted "done")
-                        initialUiState
-                running =
-                    reduceUi (UiLoop TurnStarted) idle
-            motionDemandFor MotionFull False False False running
-                `shouldBe` MotionFast
-            motionDemandFor MotionFull True False False running
-                `shouldBe` MotionSlow
-            motionDemandFor MotionFull False True False idle
-                `shouldBe` MotionSlow
-            motionDemandFor MotionFull False False False idle
-                `shouldBe` MotionNone
-            motionDemandFor MotionFull False False False initialUiState
-                `shouldBe` MotionSlow
-            motionDemandFor MotionReduced False False False initialUiState
-                `shouldBe` MotionNone
-            motionDemandFor MotionReduced False False False running
-                `shouldBe` MotionSlow
-            motionDemandFor MotionOff False False False running
-                `shouldBe` MotionSlow
-
-        it "keeps semantic countdown updates active in every motion mode" do
-            let countdown =
-                    reduceUi
-                        (UiRetryCountdown
-                            "Provider unavailable.\n"
-                            60000
-                            ", or choose another provider.")
-                        initialUiState
-            motionDemandFor MotionFull False False False countdown
-                `shouldBe` MotionSlow
-            motionDemandFor MotionReduced False False False countdown
-                `shouldBe` MotionSlow
-            motionDemandFor MotionOff False False False countdown
-                `shouldBe` MotionSlow
-
-        it "suppresses cosmetic motion and slows cadence while unfocused" do
-            let idle =
-                    reduceUi
-                        (UiUserSubmitted "done")
-                        initialUiState
-                running =
-                    reduceUi (UiLoop TurnStarted) idle
-            motionDemandForTerminalFocus
-                TerminalFocused
-                MotionFull
-                False
-                False
-                False
-                running
-                `shouldBe` MotionFast
-            motionDemandForTerminalFocus
-                TerminalUnfocused
-                MotionFull
-                False
-                True
-                True
-                idle
-                `shouldBe` MotionNone
-            motionDemandForTerminalFocus
-                TerminalUnfocused
-                MotionFull
-                False
-                False
-                False
-                running
-                `shouldBe` MotionSlow
-            motionModeForTerminalFocus TerminalFocused MotionFull
-                `shouldBe` MotionFull
-            motionModeForTerminalFocus TerminalFocusUnknown MotionReduced
-                `shouldBe` MotionReduced
-            motionModeForTerminalFocus TerminalUnfocused MotionFull
-                `shouldBe` MotionOff
-
-        it "bumps the scheduler generation on demand or timer boundaries" do
-            nextMotionSchedule
-                False
-                MotionSlow
-                160000
-                (MotionSlow, 160000, 4)
-                `shouldBe` (MotionSlow, 160000, 4)
-            nextMotionSchedule
-                True
-                MotionSlow
-                160000
-                (MotionSlow, 160000, 4)
-                `shouldBe` (MotionSlow, 160000, 5)
-            nextMotionSchedule
-                False
-                MotionFast
-                80000
-                (MotionSlow, 160000, 4)
-                `shouldBe` (MotionFast, 80000, 5)
-            nextMotionSchedule
-                False
-                MotionSlow
-                400000
-                (MotionSlow, 500000, 4)
-                `shouldBe` (MotionSlow, 400000, 5)
-
-        it "requests one unfocused redraw when a running turn becomes idle" do
-            let running = reduceUi (UiLoop TurnStarted) initialUiState
-                finished =
-                    reduceUi
-                        (UiLoop
-                            (TurnFinished
-                                (emptyTurnOutput "response-1" [] Nothing)))
-                        running
-                continuing =
-                    reduceUi
-                        (UiLoop
-                            (TurnFinished
-                                (emptyTurnOutput
-                                    "response-1"
-                                    [functionToolCall "call-1" "read_file" "{}"]
-                                    Nothing)))
-                        running
-            turnCompletionRequiresRedraw running finished `shouldBe` True
-            turnCompletionRequiresRedraw running continuing `shouldBe` False
-            turnCompletionRequiresRedraw finished finished `shouldBe` False
-
-        it "requests an unfocused redraw when any child agent finishes" do
-            let runningChild = childEntry 1
-                sibling = childEntry 2
-                finishedChild =
-                    runningChild { agentStatus = "completed" }
-                stillStreaming =
-                    runningChild
-                        { agentTranscript = ["assistant: still working"] }
-            completionRequiresRedraw
-                initialUiState
-                [rootEntry, runningChild, sibling]
-                initialUiState
-                [rootEntry, finishedChild, sibling]
-                `shouldBe` True
-            completionRequiresRedraw
-                initialUiState
-                [rootEntry, runningChild, sibling]
-                initialUiState
-                [rootEntry, stillStreaming, sibling]
-                `shouldBe` False
-            completionRequiresRedraw
-                initialUiState
-                [rootEntry, runningChild, sibling]
-                initialUiState
-                [rootEntry, sibling]
-                `shouldBe` True
-
-        it "retains sub-millisecond time across clock samples" do
-            elapsedMillisSince 1000000 1499999
-                `shouldBe` (0, 1000000)
-            elapsedMillisSince 1234567 3234999
-                `shouldBe` (2, 3234567)
-            elapsedMillisSince 4000000 3000000
-                `shouldBe` (0, 4000000)
-
-        it "restarts cadence when turn, notice, and promoted-input timers start" do
-            let idle =
-                    reduceUi
-                        (UiUserSubmitted "done")
-                        initialUiState
-                turnStarted =
-                    reduceUi (UiLoop TurnStarted) idle
-                turnFinished =
-                    reduceUi
-                        (UiLoop
-                            (TurnFinished
-                                (emptyTurnOutput
-                                    "response-1"
-                                    []
-                                    Nothing)))
-                        turnStarted
-                notice =
-                    reduceUi
-                        (UiSetNotice
-                            (Just (successNotice "saved")))
-                        idle
-                warning =
-                    reduceUi
-                        (UiLoop (WarningRaised "Codex usage is low"))
-                        turnStarted
-                promoted =
-                    reduceUi (UiInputPromoted "urgent") turnStarted
-            uiEventRestartsMotionSchedule
-                (UiLoop TurnStarted)
-                idle
-                turnStarted
-                Map.empty
-                `shouldBe` True
-            uiEventRestartsMotionSchedule
-                (UiLoop
-                    (TurnFinished
-                        (emptyTurnOutput "response-1" [] Nothing)))
-                turnStarted
-                turnFinished
-                Map.empty
-                `shouldBe` True
-            uiEventRestartsMotionSchedule
-                (UiSetNotice (Just (successNotice "saved")))
-                idle
-                notice
-                Map.empty
-                `shouldBe` True
-            uiEventRestartsMotionSchedule
-                (UiLoop (WarningRaised "Codex usage is low"))
-                turnStarted
-                warning
-                Map.empty
-                `shouldBe` True
-            uiEventRestartsMotionSchedule
-                (UiInputPromoted "urgent")
-                turnStarted
-                promoted
-                Map.empty
-                `shouldBe` True
-            uiEventRestartsMotionSchedule
-                (UiLoop (ActivityUpdated "still working"))
-                turnStarted
-                (reduceUi
-                    (UiLoop (ActivityUpdated "still working"))
-                    turnStarted)
-                Map.empty
-                `shouldBe` False
-
-        it "refreshes native progress only after each five-second bucket" do
-            let running =
-                    advanceUiTime 5000 $
-                        reduceUi (UiLoop TurnStarted) initialUiState
-            nativeProgressKeepaliveDue False 0 running
-                `shouldBe` True
-            nativeProgressKeepaliveDue False 1 running
-                `shouldBe` False
-            nativeProgressKeepaliveDue True 0 running
-                `shouldBe` False
-
-        it "self-schedules completion flashes but disables them in off mode" do
-            let idle =
-                    reduceUi
-                        (UiUserSubmitted "done")
-                        initialUiState
-            motionDemandFor MotionFull False False True idle
-                `shouldBe` MotionFast
-            motionDemandFor MotionReduced False False True idle
-                `shouldBe` MotionSlow
-            motionDemandFor MotionOff False False True idle
-                `shouldBe` MotionNone
-
-    describe "completion flashes" do
-        it "detects only live-to-terminal block transitions" do
-            let call =
-                    functionToolCall
-                        "tool-1"
-                        "run_terminal_cmd"
-                        "{\"command\":\"true\"}"
-                running =
-                    reduceUi
-                        (UiLoop (ToolStarted call))
-                        (reduceUi (UiLoop TurnStarted) initialUiState)
-                completed =
-                    reduceUi
-                        (UiLoop
-                            (ToolFinished
-                                ToolCallResult
-                                    { callId = "tool-1"
-                                    , output = "exit: 0"
-                                    , callKind = FunctionCallKind
-                                    }))
-                        running
-            completionFlashTransitions running completed
-                `shouldBe` [BlockId 1]
-            completionFlashTransitions completed completed
-                `shouldBe` []
-
-        it "does not schedule completion flashes for inspection blocks" do
-            let call =
-                    functionToolCall
-                        "inspect-1"
-                        "read_file"
-                        "{\"target_file\":\"README.md\"}"
-                running =
-                    reduceUi
-                        (UiLoop (ToolStarted call))
-                        (reduceUi (UiLoop TurnStarted) initialUiState)
-                completed =
-                    reduceUi
-                        (UiLoop
-                            (ToolFinished
-                                ToolCallResult
-                                    { callId = "inspect-1"
-                                    , output = "contents"
-                                    , callKind = FunctionCallKind
-                                    }))
-                        running
-            completionFlashTransitions running completed
-                `shouldBe` []
-
-        it "ignores assistant streams and unsuccessful terminal states" do
-            let assistantRunning =
-                    reduceUi
-                        (UiLoop (TextDelta "answer"))
-                        (reduceUi (UiLoop TurnStarted) initialUiState)
-                assistantComplete =
-                    reduceUi
-                        (UiLoop
-                            (TurnFinished
-                                (emptyTurnOutput
-                                    "response-1"
-                                    []
-                                    (Just "answer"))))
-                        assistantRunning
-                call =
-                    functionToolCall
-                        "tool-2"
-                        "run_terminal_cmd"
-                        "{\"command\":\"false\"}"
-                toolRunning =
-                    reduceUi
-                        (UiLoop (ToolStarted call))
-                        (reduceUi (UiLoop TurnStarted) initialUiState)
-                toolFailed =
-                    reduceUi
-                        (UiLoop
-                            (ToolFinished
-                                ToolCallResult
-                                    { callId = "tool-2"
-                                    , output = "Error: failed"
-                                    , callKind = FunctionCallKind
-                                    }))
-                        toolRunning
-            completionFlashTransitions
-                assistantRunning
-                assistantComplete
-                `shouldBe` []
-            completionFlashTransitions toolRunning toolFailed
-                `shouldBe` []
-
-        it "expires completion flashes from elapsed milliseconds" do
-            let active = Map.singleton (BlockId 7) 400
-            advanceCompletionFlashes 399 active
-                `shouldBe` Map.singleton (BlockId 7) 1
-            advanceCompletionFlashes 400 active
-                `shouldBe` Map.empty
+    Motion.spec
 
 data FullscreenScriptEvent
     = FullscreenScriptApp !AppEvent
@@ -2723,6 +2529,24 @@ runFullscreenScriptWithState
     -> [FullscreenScriptEvent]
     -> IO (ByteString.ByteString, AppState)
 runFullscreenScriptWithState initialState script = do
+    (rendered, _, finalState) <-
+        runFullscreenScriptDetailed initialState script
+    pure (rendered, finalState)
+
+runFullscreenScriptFramesWithState
+    :: AppState
+    -> [FullscreenScriptEvent]
+    -> IO ([V.Picture], AppState)
+runFullscreenScriptFramesWithState initialState script = do
+    (_, frames, finalState) <-
+        runFullscreenScriptDetailed initialState script
+    pure (frames, finalState)
+
+runFullscreenScriptDetailed
+    :: AppState
+    -> [FullscreenScriptEvent]
+    -> IO (ByteString.ByteString, [V.Picture], AppState)
+runFullscreenScriptDetailed initialState script = do
     let scriptedApp = App
             { appDraw = fullscreenApp.appDraw
             , appChooseCursor = fullscreenApp.appChooseCursor
@@ -2752,6 +2576,7 @@ runFullscreenScriptWithState initialState script = do
     let bounds = (80, 24)
     (_, mockOutput) <- VMock.mockTerminal bounds
     outputBytes <- newIORef ByteString.empty
+    renderedFrames <- newIORef []
     let output = mockOutput
             { V.outputByteBuffer = \bytes ->
                 modifyIORef' outputBytes (<> bytes)
@@ -2759,7 +2584,9 @@ runFullscreenScriptWithState initialState script = do
     context <- V.mkDisplayContext output output bounds
     internalEvents <- newTChanIO
     let vty = V.Vty
-            { V.update = V.outputPicture context
+            { V.update = \picture -> do
+                modifyIORef' renderedFrames (picture :)
+                V.outputPicture context picture
             , V.nextEvent = atomically retry
             , V.nextEventNonblocking = pure Nothing
             , V.inputIface = V.Input
@@ -2776,7 +2603,8 @@ runFullscreenScriptWithState initialState script = do
     finalState <-
         customMain vty (pure vty) (Just events) scriptedApp initialState
     rendered <- readIORef outputBytes
-    pure (rendered, finalState)
+    frames <- reverse <$> readIORef renderedFrames
+    pure (rendered, frames, finalState)
 
 markerBlock :: BlockId -> Text -> UiBlock
 markerBlock blockId body = UiBlock
@@ -2792,20 +2620,181 @@ markerBlock blockId body = UiBlock
     , blockInspectionGroupable = False
     }
 
+cachedHistorySelectionRenders :: IO Bool
+cachedHistorySelectionRenders = do
+    let selectedId = BlockId (-32)
+        selectedBlock =
+            (markerBlock selectedId "selected body")
+                { blockKind = BlockTool
+                , blockTitle = "cached selection"
+                }
+        blocks =
+            selectedBlock
+                : [ markerBlock
+                        (BlockId ident)
+                        ("cached history " <> Text.pack (show ident))
+                  | ident <- [-31 .. -1]
+                  ]
+    initialState <- cachedHistoryState blocks
+    (frames, finalState) <-
+        runFullscreenScriptFramesWithState
+            initialState
+            [ FullscreenScriptVty (V.EvKey V.KDown [])
+            , FullscreenScriptVty (V.EvKey V.KEsc [])
+            , FullscreenScriptHalt
+            ]
+    let rendered = map renderedPictureText frames
+        selectedMarker text =
+            markerBeforeTitle (Text.lines text)
+        markerBeforeTitle = \case
+            [] -> False
+            line : rest ->
+                ( Text.isInfixOf "❯ " line
+                    && any
+                        (Text.isInfixOf "cached selection")
+                        (take 2 rest)
+                )
+                    || markerBeforeTitle rest
+    pure $ case rendered of
+        initialFrame : laterFrames ->
+            not (selectedMarker initialFrame)
+                && any selectedMarker laterFrames
+                && maybe False (not . selectedMarker) (lastMaybe rendered)
+                && finalState.appHistorySelectedBlock == Nothing
+        [] -> False
+
+cachedHistoryExpansionRenders :: IO Bool
+cachedHistoryExpansionRenders = do
+    let expandingId = BlockId (-32)
+        expandingBlock =
+            (markerBlock
+                expandingId
+                (Text.unlines
+                    [ "visible one"
+                    , "visible two"
+                    , "visible three"
+                    , "expanded history marker"
+                    ]))
+                { blockKind = BlockTool
+                , blockTitle = "cached expansion"
+                }
+        blocks =
+            expandingBlock
+                : [ markerBlock
+                        (BlockId ident)
+                        ("cached history " <> Text.pack (show ident))
+                  | ident <- [-31 .. -1]
+                  ]
+    initialState <- cachedHistoryState blocks
+    (frames, finalState) <-
+        runFullscreenScriptFramesWithState
+            initialState
+            [ FullscreenScriptVty (V.EvKey V.KDown [])
+            , FullscreenScriptVty (V.EvKey V.KEnter [])
+            , FullscreenScriptVty (V.EvKey V.KEsc [])
+            , FullscreenScriptHalt
+            ]
+    let rendered = map renderedPictureText frames
+        expansionVisible =
+            Text.isInfixOf "expanded history marker"
+    pure $ case rendered of
+        initialFrame : laterFrames ->
+            not (expansionVisible initialFrame)
+                && any expansionVisible laterFrames
+                && finalState.appHistorySelectedBlock == Nothing
+                && maybe
+                    False
+                    (.blockExpanded)
+                    (historyWindowBlock
+                        expandingId
+                        finalState.appHistoryWindow)
+        [] -> False
+
+cachedHistoryState :: [UiBlock] -> IO AppState
+cachedHistoryState blocks = do
+    let ui = reduceUi (UiFocusChanged FocusScrollback) initialUiState
+        turn = HistoryTurn
+            { historyTurnCursor = HistoryCursor 0
+            , historyTurnBlocks = Seq.fromList blocks
+            }
+        window =
+            setHistoryWindowTurns
+                (Seq.singleton turn)
+                (emptyHistoryWindow
+                    (HistoryGeneration 0)
+                    64
+                    1_000
+                    1_000_000)
+    runtime <- newScriptRuntime ui
+    pure $
+        (initialFullscreenAppState runtime [] AgentRoot [] 0)
+            { appUi = ui
+            , appHistoryWindow = window
+            }
+
+visiblePromptRepairsStaleAnchor :: IO Bool
+visiblePromptRepairsStaleAnchor = do
+    let prompt = "latest prompt"
+        ui =
+            reduceUi (UiUserSubmitted prompt) $
+                reduceUi
+                    (UiAssistantHistory
+                        (Text.unlines
+                            (replicate 30 "earlier transcript row")))
+                    initialUiState
+        promptBlockId = BlockId (ui.uiNextBlockId - 1)
+        staleAnchor =
+            (startConversationAnchor promptBlockId prompt 0)
+                { anchorViewportTop = 1
+                , anchorPhase = ConversationFollowingTail
+                }
+    runtime <- newScriptRuntime ui
+    let initialState =
+            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                { appUi = ui
+                , appConversationAnchor = Just staleAnchor
+                }
+    (_, finalState) <-
+        runFullscreenScriptWithState
+            initialState
+            [ FullscreenScriptVty (V.EvKey V.KEnd [])
+            , FullscreenScriptApp AppConversationReflow
+            , FullscreenScriptHalt
+            ]
+    pure $
+        maybe
+            False
+            (not . conversationAnchorSticky)
+            finalState.appConversationAnchor
+
 renderedAppText :: (Int, Int) -> AppState -> Text
 renderedAppText size state =
+    renderedPictureTextAt size (renderWidget Nothing (drawApp state) size)
+
+renderedPictureText :: V.Picture -> Text
+renderedPictureText picture =
+    let image = V.picImage picture
+    in renderedPictureTextAt
+        (V.imageWidth image, V.imageHeight image)
+        picture
+
+renderedPictureTextAt :: (Int, Int) -> V.Picture -> Text
+renderedPictureTextAt size picture =
     Text.unlines $
         map
             (Text.concat . map spanText . toList)
             (toList
-                (displayOpsForPic
-                    (renderWidget Nothing (drawApp state) size)
-                    size))
+                (displayOpsForPic picture size))
   where
     spanText = \case
         TextSpan _ _ _ text -> LazyText.toStrict text
         Skip width -> Text.replicate width " "
         RowEnd width -> Text.replicate width " "
+
+lastMaybe :: [a] -> Maybe a
+lastMaybe = \case
+    [] -> Nothing
+    values -> Just (last values)
 
 encoded :: Text -> ByteString.ByteString
 encoded = TextEncoding.encodeUtf8
@@ -2852,28 +2841,3 @@ textOverlay draft cursor = TextOverlay
     , textCursor = cursor
     , textInputMode = TextInputPlain
     }
-
-rootEntry :: AgentEntry
-rootEntry = AgentEntry
-    { agentTarget = AgentRoot
-    , agentPath = "/root"
-    , agentStatus = "active"
-    , agentModel = Nothing
-    , agentSteps = []
-    , agentTranscript = []
-    , agentConversation = initialUiState
-    }
-
-childEntry :: Int -> AgentEntry
-childEntry index = AgentEntry
-    { agentTarget = AgentChild (SubagentId name)
-    , agentPath = "/root/" <> name
-    , agentStatus = "running"
-    , agentModel = Just "gpt-5.6-luna"
-    , agentSteps = []
-    , agentTranscript = []
-    , agentConversation = initialUiState
-    }
-  where
-    name :: Text
-    name = "agent-" <> Text.pack (show index)

@@ -5,7 +5,8 @@
 -- run_ghci is a local extension shared with Grok/OpenRouter.
 -- Multi-agent v1 tools are optional and registered when a registry is supplied.
 module Agent.Codex.Dialect.Tools
-    ( codexTools
+    ( CodexToolSet(..)
+    , codexTools
     , shellCommandIsReadOnly
     ) where
 
@@ -18,7 +19,11 @@ import Agent.ToolDSL
     )
 import Agent.Tools.ViewImage (viewImageTool)
 import Agent.ToolDispatch
-    ( ToolCall(..)
+    ( ToolOutcome(..)
+    , ToolHandlerResult(..)
+    , typedStreamingRichTool
+    , typedRichToolWithCall
+    , ToolCall(..)
     , ToolCallKind(..)
     , decodeToolArguments
     , textTool
@@ -71,6 +76,7 @@ import Agent.Tools.Scheduling
 import Agent.Tools.ShellReadOnly (shellCommandIsReadOnly)
 import Agent.Tools.Types
     ( AppTool
+    , AppToolGroup(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
     , ToolEnv(..)
@@ -86,6 +92,13 @@ import qualified Data.Text as Text
 import qualified Data.Text.Read as Text
 import System.OsPath (unsafeEncodeUtf)
 
+-- | Construction-time partition of Codex tools. Execution tools may be
+-- replaced wholesale by an embedding before the generic agent loop sees
+-- them; host-service tools remain implemented by the embedding.
+data CodexToolSet = CodexToolSet
+    { codexToolGroups :: ![AppToolGroup]
+    }
+
 codexTools
     :: ToolEnv
     -> CodexShellSession
@@ -93,23 +106,35 @@ codexTools
     -> PlanModeEnv
     -> TaskPlanEnv
     -> Maybe MultiAgentContext
-    -> IO [AppTool]
+    -> IO CodexToolSet
 codexTools env shellSession ghci planMode taskPlan multi =
-    pure $
+    pure CodexToolSet
+        { codexToolGroups =
+            [ ExecutionToolGroup executionPrefix
+            , HostToolGroup hostServices
+            , ExecutionToolGroup executionSuffix
+            ]
+        }
+  where
+    executionPrefix =
         [ runGhciTool ghci
         , viewImageTool env
         , readFileTool env
         , grepTool env
         , listDirTool env
         , applyPatchTool env
-        , updatePlanTool planMode taskPlan
+        ]
+    hostServices =
+        [ updatePlanTool planMode taskPlan
         , enterCodexPlanModeTool planMode
         , writePlanTool planMode
         , askUserQuestionTool planMode
-        , shellCommandTool env shellSession
+        ]
+    executionSuffix =
+        [ shellCommandTool env shellSession
         , writeStdinTool shellSession
         ]
-        ++ maybe [] multiAgentTools multi
+            <> maybe [] multiAgentTools multi
 
 --------------------------------------------------------------------------------
 -- shell_command
@@ -149,7 +174,7 @@ shellCommandTool env session =
             ])
         AlwaysPrompt
         TurnSequential
-        (typedStreamingTool
+        (typedStreamingRichTool
             "shell_command"
             shellCommandArgsDecoder
             (runShell env session))
@@ -180,7 +205,7 @@ shellDescription :: Text
 shellDescription =
     "Runs a shell command and returns its output.\n\
     \- `workdir` is optional; omit it to use the turn cwd. Do not use `cd` unless absolutely necessary.\n\
-    \- Use `$TMPDIR` for temporary files; literal `/tmp` and `/private/tmp` paths are rejected.\n\
+    \- Use `$TMPDIR` as the only temporary-file root. Put task-specific subdirectories there; do not create alternate scratch directories in the home directory or workspace. Literal `/tmp` and `/private/tmp` paths are rejected.\n\
     \- By default, a command that is still running after 10000 ms is retained and returned with a session_id. Completion is reported automatically; do not poll or run sleep commands while waiting.\n\
     \- Set `timeout_ms` only when the command should be stopped after a fixed runtime, or `yield_time_ms` to change the initial wait.\n\
     \- Use `write_stdin` only to send input, interrupt, inspect a current snapshot, or perform one bounded wait."
@@ -193,7 +218,7 @@ runShell
     -> CodexShellSession
     -> (Text -> IO ())
     -> ShellCommandArgs
-    -> IO (Either Text Text)
+    -> IO (Either Text ToolHandlerResult)
 runShell env session emitOutput args
     | args.timeoutMs /= Nothing && args.yieldTimeMs /= Nothing =
         pure (Left "timeout_ms and yield_time_ms are mutually exclusive")
@@ -220,27 +245,25 @@ runShell env session emitOutput args
         startCodexShellCommand
             session
             dir
-            (Text.unpack args.command)
+            args.command
             yieldMs
             (\out err -> emitOutput (commandBody out err))
-            >>= pure . fmap renderShellResult
+            >>= pure . fmap shellHandlerResult
 
     runWithTimeout dir requestedTimeout = do
         let timeoutMs = clampMs requestedTimeout
         result <- runShellCommandStreaming
             env
             dir
-            (Text.unpack args.command)
+            args.command
             timeoutMs
             (\out err -> emitOutput (commandBody out err))
-        if result.commandCancelled
-            then pure $ Left "Error: Command cancelled"
-            else if result.commandTimedOut
-            then pure $ Left $
-                "Error: Command timed out after "
-                    <> Text.pack (show timeoutMs)
-                    <> "ms"
-            else pure $ Right $ renderFinished result
+        let finished = finishedHandlerResult result
+        pure $ Right $
+            if result.commandTimedOut
+                then finished { resultText = "Error: Command timed out after "
+                    <> Text.pack (show timeoutMs) <> "ms" }
+                else finished
 
 data WriteStdinArgs = WriteStdinArgs
     { sessionId :: Int
@@ -268,7 +291,7 @@ writeStdinTool session =
         ]
         (ClassifyReadOnly writeStdinIsReadOnly)
         TurnSequential
-        (typedTool "write_stdin" writeStdinArgsDecoder (runWriteStdin session))
+        (typedRichToolWithCall "write_stdin" writeStdinArgsDecoder (\_ -> runWriteStdin session))
 
 writeStdinResourceClaims
     :: ToolCall
@@ -295,7 +318,7 @@ writeStdinIsReadOnly call =
 runWriteStdin
     :: CodexShellSession
     -> WriteStdinArgs
-    -> IO (Either Text Text)
+    -> IO (Either Text ToolHandlerResult)
 runWriteStdin session args = do
     let
         requestedYield = fromMaybe 5000 args.yieldTimeMs
@@ -306,7 +329,7 @@ runWriteStdin session args = do
             | maybe True Text.null args.chars =
                 min 300000 (max 5000 requestedYield)
             | otherwise = clampMs requestedYield
-    fmap renderShellResult <$> continueCodexShellCommand
+    fmap shellHandlerResult <$> continueCodexShellCommand
         session
         args.sessionId
         (fromMaybe "" args.chars)
@@ -314,6 +337,21 @@ runWriteStdin session args = do
 
 clampMs :: Int -> Int
 clampMs = min 300000 . max 1
+
+shellHandlerResult :: CodexShellResult -> ToolHandlerResult
+shellHandlerResult result = case result of
+    CodexShellFinished finished -> finishedHandlerResult finished
+    CodexShellRunning sessionId _ _ ->
+        ToolHandlerResultWithOutcome (renderShellResult result) [] (ShellRunning sessionId)
+
+finishedHandlerResult :: CommandResult -> ToolHandlerResult
+finishedHandlerResult result =
+    ToolHandlerResultWithOutcome (renderFinished result) [] outcome
+  where
+    outcome
+        | result.commandCancelled = ShellCancelled
+        | result.commandTimedOut = ShellTimedOut
+        | otherwise = ShellExited (fromMaybe 1 result.commandExitCode)
 
 renderShellResult :: CodexShellResult -> Text
 renderShellResult = \case

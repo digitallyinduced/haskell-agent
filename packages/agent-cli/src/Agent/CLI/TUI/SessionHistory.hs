@@ -13,12 +13,11 @@ import Agent.CLI.Session
     , SessionTurnPage(..)
     )
 import Agent.CLI.Session.Types (TranscriptEffect(..))
+import Agent.CLI.Render (renderToolOutputValue)
 import Agent.CLI.TurnState
     ( isDisplayAttemptBoundary
     , isTurnAbortedNote
     )
-import Agent.Json (RawJson, rawJsonBytes)
-import qualified Agent.Json.Decode as Hermes
 import Agent.CLI.TUI.History
     ( HistoryCursor(..)
     , HistoryDirection
@@ -46,6 +45,7 @@ import Agent.Responses.Types
     )
 import Agent.ToolDispatch
     ( ToolCallKind(..)
+    , ToolCallMode(..)
     , ToolCallResult(..)
     , customToolCall
     , functionToolCall
@@ -62,7 +62,6 @@ import Agent.TUI.Model
 import Data.Foldable (toList)
 import qualified Data.Sequence as Seq
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 
 sessionHistoryPage
     :: HistoryGeneration
@@ -214,7 +213,8 @@ projectItem state = \case
                     (ToolCallResult
                         output.computerOutputCallId
                         "Screenshot captured"
-                        ComputerCallKind)))
+                        ComputerCallKind
+                        BlockingToolCall [] Nothing)))
             state
     ComputerCallItem call ->
         maybe state
@@ -235,8 +235,9 @@ projectItem state = \case
                 (ToolFinished
                     (ToolCallResult
                         output.callId
-                        (renderJsonValue output.output)
-                        FunctionCallKind)))
+                        (renderToolOutputValue output.output)
+                        FunctionCallKind
+                        BlockingToolCall [] output.localOutcome)))
             state
     CustomToolCallOutputItem output ->
         reduceUi
@@ -244,8 +245,9 @@ projectItem state = \case
                 (ToolFinished
                     (ToolCallResult
                         output.callId
-                        (renderJsonValue output.output)
-                        CustomCallKind)))
+                        (renderToolOutputValue output.output)
+                        CustomCallKind
+                        BlockingToolCall [] output.localOutcome)))
             state
     _ -> state
 
@@ -263,7 +265,7 @@ projectDisplayItem state item
                         (UiLoop
                             (ToolOutputUpdated
                                 output.callId
-                                (renderJsonValue output.output)))
+                                (renderToolOutputValue output.output)))
                         state
             CustomToolCallOutputItem output
                 | output.status == Just ItemIncomplete ->
@@ -271,7 +273,7 @@ projectDisplayItem state item
                         (UiLoop
                             (ToolOutputUpdated
                                 output.callId
-                                (renderJsonValue output.output)))
+                                (renderToolOutputValue output.output)))
                         state
             _ -> projectItem state item
 
@@ -342,12 +344,3 @@ responseContentText = \case
     SummaryTextPart{text} -> [text]
     RefusalPart{refusal} -> [refusal]
     _ -> []
-
-renderJsonValue :: RawJson -> Text.Text
-renderJsonValue value =
-    case Hermes.decodeEither
-            (Hermes.nullable Hermes.text)
-            (rawJsonBytes value) of
-        Right (Just text) -> text
-        Right Nothing -> ""
-        Left _ -> TextEncoding.decodeUtf8 (rawJsonBytes value)

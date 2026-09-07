@@ -7,7 +7,10 @@ module Agent.Gemini.Request
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Json (RawJson, rawJsonBytes)
+import qualified Agent.Json.Decode as Json
 import Agent.Responses.Types
+import Agent.Responses.Types.Content (responseContentPartDecoder)
 import Control.Applicative ((<|>))
 import Control.Monad (foldM)
 import Data.Aeson
@@ -39,7 +42,9 @@ buildRequest
 buildRequest fallbackModel params = do
     (tools, customToolNames) <-
         projectTools (enabledTools params.toolChoice params.tools)
-    projection <- projectInput customToolNames params.input
+    projection <- projectInput
+        (declaredCustomToolNames params.tools)
+        params.input
     let model = normalizeModelId
             (fromMaybe fallbackModel params.model)
         systemTexts =
@@ -78,6 +83,16 @@ enabledTools
 enabledTools (Just (ToolChoiceMode ToolChoiceNone)) _ = Nothing
 enabledTools _ tools = tools
 
+declaredCustomToolNames :: Maybe [ResponseTool] -> Set Text
+declaredCustomToolNames =
+    maybe Set.empty (Set.unions . map customNames)
+  where
+    customNames = \case
+        CustomToolValue tool -> Set.singleton tool.name
+        NamespaceToolValue namespace ->
+            Set.unions (map customNames namespace.tools)
+        _ -> Set.empty
+
 data Projection = Projection
     { systemTexts :: ![Text]
     , contents :: ![Value]
@@ -114,11 +129,11 @@ projectItem projection = \case
     ReasoningItemValue reasoning ->
         pure (projectReasoning projection reasoning)
     FunctionCallItem call ->
-        pure (projectFunctionCall projection call)
+        projectFunctionCall projection call
     FunctionCallOutputItem callOutput ->
         pure (projectFunctionOutput projection callOutput)
     CustomToolCallItem call ->
-        pure (projectCustomToolCall projection call)
+        projectCustomToolCall projection call
     CustomToolCallOutputItem callOutput ->
         pure (projectCustomToolOutput projection callOutput)
     -- Local compaction snapshots are represented by ordinary messages. The
@@ -200,32 +215,41 @@ projectReasoning projection reasoning
         reasoning.encryptedContent
             <|> projection.pendingThoughtSignature
 
-projectFunctionCall :: Projection -> FunctionCall -> Projection
-projectFunctionCall projection call =
-    appendContent "model" [part] projection
+projectFunctionCall
+    :: Projection
+    -> FunctionCall
+    -> Either ApiError Projection
+projectFunctionCall projection call = do
+    args <-
+        if call.name `Set.member` projection.customToolNames
+            then pure (object ["input" .= call.arguments])
+            else case Aeson.eitherDecodeStrict' (encodeUtf8 call.arguments) of
+                Right value -> pure value
+                Left _ -> Left $ ProviderError InvalidRequestError
+                    ( "Gemini function call `" <> call.name
+                        <> "` arguments must be valid JSON"
+                    )
+                    Nothing
+    pure $ appendContent "model" [part args] projection
         { callNames = Map.insert call.callId call.name projection.callNames
         , pendingThoughtSignature = Nothing
         }
   where
-    args
-        | call.name `Set.member` projection.customToolNames =
-            object ["input" .= call.arguments]
-        | otherwise =
-            case Aeson.eitherDecodeStrict' (encodeUtf8 call.arguments) of
-                Right value -> value
-                Left _ -> Object KeyMap.empty
-    functionCall = object
+    functionCall args = object
         [ "id" .= call.callId
         , "name" .= call.name
         , "args" .= args
         ]
-    part = object $
-        ["functionCall" .= functionCall]
+    part args = object $
+        ["functionCall" .= functionCall args]
             <> maybe []
                 (\signature -> ["thoughtSignature" .= signature])
                 projection.pendingThoughtSignature
 
-projectCustomToolCall :: Projection -> CustomToolCall -> Projection
+projectCustomToolCall
+    :: Projection
+    -> CustomToolCall
+    -> Either ApiError Projection
 projectCustomToolCall projection call =
     projectFunctionCall projection FunctionCall
         { itemId = call.itemId
@@ -236,6 +260,7 @@ projectCustomToolCall projection call =
         , arguments = call.input
         , encryptedFunctionArgs = Nothing
         , status = call.status
+        , async = call.async
         }
 
 projectCustomToolOutput
@@ -244,23 +269,31 @@ projectCustomToolOutput
     -> Projection
 projectCustomToolOutput projection callOutput =
     projectFunctionOutput projection FunctionCallOutput
-        { itemId = callOutput.itemId
+        { localOutcome = Nothing
+        , itemId = callOutput.itemId
         , callId = callOutput.callId
         , name = callOutput.name
         , namespace = Nothing
         , provider = Just "gemini"
         , output = callOutput.output
         , status = callOutput.status
+        , async = callOutput.async
         }
 
 projectFunctionOutput :: Projection -> FunctionCallOutput -> Projection
 projectFunctionOutput projection callOutput =
-    appendContent "user" [part] projection
+    appendContent "user" (part : imageContent) projection
   where
     callName = fromMaybe "tool"
         (callOutput.name
             <|> Map.lookup callOutput.callId projection.callNames)
-    result = toJSON callOutput.output
+    -- A canonical image-bearing result is not ordinary JSON tool data:
+    -- send its ordered content as native user parts, never base64 in response
+    -- text. Keep the function response itself for call/result association.
+    (result, imageContent) = case toolImageContent callOutput.output of
+        Just parts ->
+            (String "Tool result content follows.", parts)
+        Nothing -> (toJSON callOutput.output, [])
     responseObject = case result of
         Object objectValue -> Object objectValue
         value -> object ["result" .= value]
@@ -271,6 +304,23 @@ projectFunctionOutput projection callOutput =
             , "response" .= responseObject
             ]
         ]
+
+toolImageContent :: RawJson -> Maybe [Value]
+toolImageContent raw =
+    case Json.decodeEither decoder (rawJsonBytes raw) of
+        Right parts | any fst parts -> Just (concatMap (project . snd) parts)
+        _ -> Nothing
+  where
+    decoder = Json.list (Json.withOwnedRawJson \bytes -> pure
+        ( Json.decodeEither (Json.object (Json.atKey "type" Json.text)) bytes
+            == Right "input_image"
+        , Json.decodeEither responseContentPartDecoder bytes
+        ))
+    -- Classify by the tag independently of decoding the payload so malformed
+    -- image-only results cannot fall back to raw JSON containing image bytes.
+    project (Right part@InputImagePart{}) = contentPart part
+    project (Right part@InputTextPart{}) = contentPart part
+    project _ = [textPart "[Unsupported tool result content omitted]"]
 
 appendContent :: Text -> [Value] -> Projection -> Projection
 appendContent _ [] projection = projection

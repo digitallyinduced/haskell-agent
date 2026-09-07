@@ -13,6 +13,9 @@ module Agent.CLI.Runtime.MetaConsole
     , runMetaPlanner
     ) where
 
+import Agent.CLI.Session.Request
+    ( readSessionRequestParams
+    )
 import Agent.Cancel (CancelFlag)
 import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Command
@@ -43,7 +46,7 @@ import Agent.CLI.MetaConsole
 import Agent.CLI.ModelConfig
     ( organizationGatewayConnectionId
     , CatalogModel(..)
-    , ModelCatalog(..)
+    , catalogModels
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.SessionEnv (SessionEnv(..))
@@ -350,7 +353,7 @@ metaConfigRequiresRestart = any isMetaConfigAction
 -- are intentionally absent.
 buildMetaContext :: SessionEnv -> HarnessConfig -> IO Aeson.Value
 buildMetaContext env config = do
-    params <- readIORef env.sessionParams
+    params <- readSessionRequestParams env.sessionParams
     policy <- readIORef env.sessionPolicy
     shellMode <- env.sessionShellMode
     gatewayAccess <- readIORef env.sessionGatewayModels
@@ -358,7 +361,7 @@ buildMetaContext env config = do
         Nothing ->
             pure
                 [ (model.catalogModelId, model.catalogModelConnectionId)
-                | model <- env.sessionModelCatalog.catalogModels
+                | model <- catalogModels env.sessionModelCatalog
                 ]
         Just access ->
             maybe
@@ -413,7 +416,7 @@ metaCancelScope env cancel action =
         case env.sessionFullscreen of
             Nothing
                 | not env.sessionBackground ->
-                    withEscCancel cancel env.sessionEscPaused action
+                    withEscCancel cancel env.sessionStdinControl action
             _ -> action
 
 shellModeText :: ShellMode -> Text

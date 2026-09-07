@@ -33,7 +33,6 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
-import qualified Data.Text as Text
 
 data CodeModeToolMetadata = CodeModeToolMetadata
     { toolMetadataName :: !Text
@@ -131,9 +130,9 @@ toolInvocationDecoder = Json.object $
             <*> Json.atKey "name" Json.text
             <*> Json.atKey "arguments" rawJsonDecoder
 
-decodeProtocolMessage :: BS.ByteString -> Either String ProtocolMessage
+decodeProtocolMessage :: BS.ByteString -> Either Text ProtocolMessage
 decodeProtocolMessage =
-    either (Left . Text.unpack . (.jsonErrorMessage)) Right
+    either (Left . (.jsonErrorMessage)) Right
         . Json.decodeEither protocolMessageDecoder
 
 emptyResult :: RawJson

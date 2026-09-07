@@ -4,6 +4,7 @@ module Agent.CLI.Resume
     , ResumeBrowser(..)
     , ResumeSourceFilter(..)
     , ResumeState(..)
+    , SessionInitialContext(..)
     , applyResumeKey
     , applyResumeSearchResults
     , beginResumeSearch
@@ -30,6 +31,7 @@ module Agent.CLI.Resume
     , resumeSearchEntries
     , filterResumeSessionsForBoundary
     , resumeRelativeAge
+    , resolveSessionInitialContext
     , resumeSourceLabel
     , selectedResumeBrowser
     , setResumeDeletePending
@@ -51,13 +53,10 @@ import Agent.CLI.Session
     , loadSessionMeta
     , loadSessionResumeStats
     )
+import Agent.CLI.Session.History (foldSessionItems)
 import Agent.CLI.Session.Types (TranscriptEffect(..))
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
-import Agent.OpenAI.Compaction
-    ( hasCompactionCheckpoint
-    , hasReloadedGeneratedContextItems
-    , isTranscriptResetTurn
-    )
+import Agent.OpenAI.Compaction (hasReloadedGeneratedContextItems)
 import Agent.CLI.TextLayout
     ( SplitPaneFrame(..)
     , clampSelectionIndex
@@ -72,7 +71,7 @@ import Control.Monad (forM)
 import Data.Char (isAlphaNum)
 import Data.Containers.ListUtils (nubOrd)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -87,6 +86,46 @@ data ResumeSourceFilter
     = ResumeAll
     | ResumeProvider !Text
     deriving (Eq, Show)
+
+-- | Transcript-derived context requirements that can be resolved before
+-- provider prompt construction. Keeping this decision pure allows startup
+-- context reads to overlap independent tool acquisition without changing
+-- resume semantics.
+data SessionInitialContext = SessionInitialContext
+    { initialContextItems :: [ResponseItem]
+    , initialContextResumeNeedsFresh :: Bool
+    , initialContextPrevious :: Maybe Text
+    , initialContextNeeded :: Bool
+    , initialContextMayRestoreSnapshot :: Bool
+    }
+    deriving (Eq, Show)
+
+resolveSessionInitialContext
+    :: Bool
+    -> Bool
+    -> Maybe (SessionMeta, [SessionTurn])
+    -> SessionInitialContext
+resolveSessionInitialContext hasTransition resumeTargetChanged resumed =
+    SessionInitialContext{..}
+  where
+    initialTurns = maybe [] snd resumed
+    initialContextItems = maybe [] (foldSessionItems . snd) resumed
+    initialContextResumeNeedsFresh =
+        resumeNeedsGeneratedContext initialTurns
+    initialContextPrevious
+        | hasTransition || resumeTargetChanged = Nothing
+        | otherwise =
+            resumed >>= \(meta, _) -> meta.metaLastResponseId
+    initialContextNeeded =
+        initialContextResumeNeedsFresh
+            || (null initialTurns && initialContextPrevious == Nothing)
+    initialContextMayRestoreSnapshot =
+        case resumed of
+            Just (meta, turns) ->
+                null turns
+                    && initialContextPrevious == Nothing
+                    && isJust meta.metaPromptSnapshot
+            Nothing -> False
 
 data ResumeEntry = ResumeEntry
     { resumeId :: !Text
@@ -147,8 +186,7 @@ resumeNeedsGeneratedContext turns =
                         newerTurns)
   where
     isContextBoundary turn =
-        isTranscriptResetTurn turn.turnUserText
-            || hasCompactionCheckpoint turn.turnItems
+        turn.turnEffect /= TranscriptAppend
 
 -- | Build picker entries from already loaded sessions.
 resumeEntriesFrom :: [(SessionMeta, [SessionTurn])] -> [ResumeEntry]
@@ -157,8 +195,8 @@ resumeEntriesFrom = map (uncurry entryFrom)
 resumeEntryFromMeta :: SessionMeta -> ResumeEntry
 resumeEntryFromMeta meta = entryFromWith False meta []
 
--- | Keep the resume surface on the same direct/gateway credential boundary
--- as the active session. Startup validates again before loading any history.
+-- | Conversation history is portable across direct and gateway routes. The
+-- selected session is retargeted to the active route during startup.
 filterResumeSessionsForBoundary
     :: Maybe Text
     -> [SessionMeta]
@@ -169,8 +207,8 @@ filterResumeSessionsForBoundary gatewayIdentity =
             Right () -> True
             Left _ -> False
 
--- | Validate loaded resume metadata before any of its cwd, repository, model,
--- or transcript state is allowed to reach startup surfaces.
+-- | Apply the resume admission policy before loaded metadata reaches startup
+-- surfaces.
 validateResumeMetaForBoundary
     :: Maybe Text
     -> SessionMeta
@@ -181,9 +219,8 @@ validateResumeMetaForBoundary gatewayIdentity meta =
         meta.metaConnection
         meta.metaGatewayIdentity
 
--- | Keep transcript publication behind the same fail-closed boundary used by
--- startup. In particular, a fullscreen resume must not enqueue history before
--- startup has accepted the active gateway credential identity.
+-- | Keep transcript publication behind the same admission hook used by
+-- startup.
 publishResumeHistoryAfterBoundary
     :: Either Text ()
     -> IO ()

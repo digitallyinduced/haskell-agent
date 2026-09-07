@@ -32,8 +32,10 @@ import Agent.Responses.Error
     )
 import qualified Agent.Responses.HttpSSE as HttpSSE
 import Agent.Responses.Request
-    ( forceStatelessStreaming
+    ( filterRequestCompactionCheckpointsByOrigin
+    , forceStatelessStreaming
     , setResponseModel
+    , stripLocalCompactionMarker
     )
 import Agent.Responses.StreamAssembly
     ( StreamAssemblyConfig(..)
@@ -86,7 +88,9 @@ data ProviderClientConfig = ProviderClientConfig
 -- so remote storage and continuation identifiers must stay disabled.
 buildRequest :: GenericClientOptions -> ResponseCreateParams -> ResponseCreateParams
 buildRequest options request =
-    setResponseModel options.model (forceStatelessStreaming request)
+    stripLocalCompactionMarker $
+        filterRequestCompactionCheckpointsByOrigin (const False) $
+            setResponseModel options.model (forceStatelessStreaming request)
 
 createResponseWith
     :: GenericClientOptions

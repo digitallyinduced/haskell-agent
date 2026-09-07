@@ -8,6 +8,7 @@ module Agent.CLI.TUI.Composer.Logic
     , composerEscapeAction
     , currentSlashMenu
     , immediateBtwQuestion
+    , immediateReplCommand
     , isKillKey
     , selectedSlashSuggestion
     , slashReplacement
@@ -15,7 +16,8 @@ module Agent.CLI.TUI.Composer.Logic
     ) where
 
 import Agent.CLI.Command
-    ( ReplAction(..)
+    ( CopyRequest(..)
+    , ReplAction(..)
     , SlashMenu(..)
     , SlashSuggestion(..)
     , parseReplLine
@@ -60,6 +62,29 @@ immediateBtwQuestion ui replLine
   where
     fromText text = case parseReplLine text of
         ReplBtw question -> Just question
+        _ -> Nothing
+
+-- | Read-only inspection and clipboard commands may safely run while the
+-- provider turn continues.
+immediateReplCommand :: UiState -> ReplLine -> Maybe ReplAction
+immediateReplCommand ui replLine
+    | not ui.uiRunning = Nothing
+    | otherwise = case replLine of
+        ReplText text -> fromText text
+        ReplPasted text -> fromText text
+        _ -> Nothing
+  where
+    fromText text = case parseReplLine text of
+        action@(ReplCopy request)
+            | request.copyResponseIndex == 1
+            , Nothing <- request.copyDestination ->
+                Just action
+        action@ReplCopyCode{} -> Just action
+        ReplCopyDiff -> Just ReplCopyDiff
+        ReplCopyPath -> Just ReplCopyPath
+        ReplCopySession -> Just ReplCopySession
+        ReplQueue -> Just ReplQueue
+        ReplContext -> Just ReplContext
         _ -> Nothing
 
 applyComposerUiEvent :: UiEvent -> AppState -> AppState

@@ -65,6 +65,7 @@ import Agent.Tools.Types
     , ToolSchema(..)
     , freeformGrammarAppToolWithExecution
     , jsonAppToolWithExecution
+    , withAsyncToolCalls
     )
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (finally)
@@ -213,6 +214,7 @@ buildNestedTools =
   where
     add current spec
         | HostedComputerSchema <- tool.appToolSchema = Right current
+        | HostedComputerFunctionSchema _ <- tool.appToolSchema = Right current
         | codeName `elem` ["exec", "wait"] = Right current
         | Map.member codeName current =
             -- Match Codex's stable first-wins projection when two provider
@@ -352,6 +354,7 @@ defaultWaitYieldTimeMs = 10000
 
 execTool :: CodeModeHost -> [CodeModeToolMetadata] -> Text -> AppTool
 execTool host nestedTools description =
+    withAsyncToolCalls $
     freeformGrammarAppToolWithExecution
         "exec"
         description
@@ -465,6 +468,7 @@ waitArgsDecoder = objectArgsExact
 
 waitTool :: CodeModeHost -> AppTool
 waitTool host =
+    withAsyncToolCalls $
     jsonAppToolWithExecution
         "wait"
         waitDescription

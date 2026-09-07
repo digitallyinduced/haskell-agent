@@ -16,6 +16,7 @@ import Agent.GrokBuild.Dialect.Scheduler
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.GrokBuild.Dialect.Tools
     ( closeGrokSession
+    , GrokToolSet(..)
     , grokTools
     , newGrokSession
     )
@@ -36,7 +37,12 @@ import Agent.Tools.Ghci
     )
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks, newPlanModeEnv)
-import Agent.Tools.Types (AppTool, ToolEnv(..))
+import Agent.Tools.Types
+    ( AppTool
+    , AppToolGroup
+    , ToolEnv(..)
+    , appToolsFromGroups
+    )
 import Control.Exception.Safe (onException)
 import Control.Monad (forM)
 import Data.Maybe (isNothing)
@@ -44,6 +50,7 @@ import System.OsPath (OsPath)
 
 data GrokCodingTools = GrokCodingTools
     { grokAppTools :: ![AppTool]
+    , grokAppToolGroups :: ![AppToolGroup]
     , grokPlanMode :: !PlanModeEnv
     , grokSuspendGhci :: !(IO ())
     , grokResetSessionTemp :: !(OsPath -> IO ())
@@ -92,8 +99,7 @@ newGrokCodingTools env hooks multi typesRef = do
                 , grokSchedulerRuntime = scheduler
                 , grokWorkflowRuntime = workflows
                 }
-        pure GrokCodingTools
-            { grokAppTools =
+        let tools =
                 grokTools
                     session
                     ghci
@@ -103,6 +109,9 @@ newGrokCodingTools env hooks multi typesRef = do
                     workflows
                     multi
                     typesRef
+        pure GrokCodingTools
+            { grokAppTools = appToolsFromGroups tools.grokToolGroups
+            , grokAppToolGroups = tools.grokToolGroups
             , grokPlanMode = plan
             , grokSuspendGhci = suspendGhciSession ghci
             , grokResetSessionTemp = \tempDir -> do
