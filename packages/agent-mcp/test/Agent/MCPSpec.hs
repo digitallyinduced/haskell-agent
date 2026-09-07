@@ -94,6 +94,7 @@ import Agent.Tools.Types
     , toolAllowsWithoutPrompt
     )
 import Control.Exception.Safe (bracket, finally)
+import Control.Exception (MaskingState(MaskedUninterruptible), getMaskingState)
 import Control.Concurrent
     ( newEmptyMVar
     , putMVar
@@ -113,11 +114,13 @@ import Data.IORef
     , modifyIORef'
     , newIORef
     , readIORef
+    , writeIORef
     )
 import Data.List (find)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Text as Text
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
+import qualified Network.Socket as Socket
 import System.Directory
     ( createDirectory
     , getTemporaryDirectory
@@ -128,8 +131,11 @@ import System.Directory
     )
 import System.IO
     ( SeekMode(AbsoluteSeek)
+    , IOMode(ReadWriteMode)
     , hClose
     , hFlush
+    , hGetLine
+    , hPutStr
     , hSeek
     , openTempFile
     , stderr
@@ -296,6 +302,62 @@ spec = describe "Agent.MCP" do
                         readIORef transport.httpSession `shouldReturn` Nothing
                     _ ->
                         expectationFailure "expected an HTTP transport"
+
+        it "bounds HTTP session shutdown under an uninterruptible finalizer" $
+            Socket.withSocketsDo $
+                bracket
+                    (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol)
+                    Socket.close
+                    \listener -> do
+                        Socket.bind listener
+                            (Socket.SockAddrInet 0 (Socket.tupleToHostAddress (127, 0, 0, 1)))
+                        Socket.listen listener 1
+                        address <- Socket.getSocketName listener
+                        port <- case address of
+                            Socket.SockAddrInet port _ -> pure port
+                            _ -> fail "expected an IPv4 listener"
+                        requestStarted <- newEmptyMVar
+                        releaseResponse <- newEmptyMVar
+                        finalizerMask <- newIORef Nothing
+                        let serve =
+                                bracket
+                                    (Socket.accept listener >>= \(connection, _) ->
+                                        Socket.socketToHandle connection ReadWriteMode)
+                                    hClose
+                                    \connection -> do
+                                        request <- hGetLine connection
+                                        putMVar requestStarted request
+                                        takeMVar releaseResponse
+                                        hPutStr connection
+                                            "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"
+                                        hFlush connection
+                            config = workerClientConfig
+                                { mcpServerUrl = Just $
+                                    "http://127.0.0.1:" <> Text.pack (show port) <> "/mcp"
+                                , mcpServerRequestTimeoutSeconds = 60
+                                }
+                        withAsync serve \_ ->
+                            bracket (startMcpClient config) closeMcpClient \client -> do
+                                case client.clientTransport of
+                                    McpClientHttp transport ->
+                                        writeIORef transport.httpSession (Just "shutdown-session")
+                                    _ -> fail "expected an HTTP transport"
+                                let close = do
+                                        getMaskingState >>= writeIORef finalizerMask . Just
+                                        closeMcpClient client
+                                withAsync (pure () `finally` close) \closing ->
+                                    (do
+                                        timeout 2000000 (takeMVar requestStarted)
+                                            `shouldReturn` Just "DELETE /mcp HTTP/1.1\r"
+                                        readIORef finalizerMask
+                                            `shouldReturn` Just MaskedUninterruptible
+                                        timeout 2000000 (wait closing)
+                                            `shouldReturn` Just ())
+                                    `finally` do
+                                        -- Release the server before scope exit
+                                        -- joins the closer, including on the
+                                        -- defective implementation's failure.
+                                        void (tryPutMVar releaseResponse ())
 
         it "stores only process state for a stdio client" $
             withFakeServer \script ->

@@ -69,7 +69,8 @@ import Agent.Process
 import Agent.Tools.Types ()
 import Control.Concurrent ( threadDelay )
 import Control.Concurrent.Async
-    ( Async, async, asyncWithUnmask, cancel, poll, waitCatch )
+    ( Async, async, asyncWithUnmask, cancel, poll, wait, waitCatch
+    , withAsyncWithUnmask )
 import Control.Concurrent.MVar ( modifyMVar_, withMVar, readMVar )
 import Control.Concurrent.STM
     ( atomically,
@@ -1825,22 +1826,32 @@ closeHttpSession client transport = do
     era <- mcpClientEra client
     case (session, era) of
         (Just sessionId, era')
-            | era' /= Just McpEraModern -> void $ tryAny do
-                request <- parseRequest (Text.unpack transport.httpUrl)
-                bearer <- either (const Nothing) id <$> configuredAccessToken client
-                let request' = request
-                        { HC.method = "DELETE"
-                        , HC.requestHeaders =
-                            [ ("Mcp-Session-Id", TextEncoding.encodeUtf8 sessionId)
-                            ]
-                            <> maybe [] (\token ->
-                                [ ("Authorization", "Bearer " <> TextEncoding.encodeUtf8 token) ])
-                                bearer
-                        , HC.redirectCount = 0
-                        }
-                void $ timeout (secondsToMicros client.clientConfig.mcpServerRequestTimeoutSeconds)
-                    (HC.httpNoBody request' mcpHttpManager)
+            | era' /= Just McpEraModern -> void $ tryAny $
+                -- The enclosing client/fleet finalizer may be uninterruptibly
+                -- masked. Give the deadline an unmasked, scoped owner so a
+                -- blocked token refresh or DELETE cannot prevent shutdown.
+                withAsyncWithUnmask
+                    (\unmask -> unmask $
+                        void $ timeout
+                            (secondsToMicros (min 1 client.clientConfig.mcpServerRequestTimeoutSeconds))
+                            (terminateSession sessionId))
+                    wait
         _ -> pure ()
+  where
+    terminateSession sessionId = do
+        request <- parseRequest (Text.unpack transport.httpUrl)
+        bearer <- either (const Nothing) id <$> configuredAccessToken client
+        let request' = request
+                { HC.method = "DELETE"
+                , HC.requestHeaders =
+                    [ ("Mcp-Session-Id", TextEncoding.encodeUtf8 sessionId)
+                    ]
+                    <> maybe [] (\token ->
+                        [ ("Authorization", "Bearer " <> TextEncoding.encodeUtf8 token) ])
+                        bearer
+                , HC.redirectCount = 0
+                }
+        void $ HC.httpNoBody request' mcpHttpManager
 
 stopWorker :: Async () -> IO ()
 stopWorker worker = do

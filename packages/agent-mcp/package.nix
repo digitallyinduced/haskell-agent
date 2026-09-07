@@ -1,7 +1,7 @@
 { mkDerivation, aeson, agent-core, agent-json, agent-process, async
 , base, base64-bytestring, bytestring, containers, directory
 , filelock, filepath, hspec, http-client, http-client-tls
-, http-types, lib, network-uri, process, QuickCheck
+, http-types, lib, network, network-uri, process, QuickCheck
 , safe-exceptions, scientific, stm, text, time, transformers, unix
 , vector
 }:
@@ -17,8 +17,8 @@ mkDerivation {
   ];
   testHaskellDepends = [
     aeson agent-core agent-json async base bytestring containers
-    directory filepath hspec QuickCheck safe-exceptions stm text time
-    unix
+    directory filepath hspec network QuickCheck safe-exceptions stm
+    text time unix
   ];
   benchmarkHaskellDepends = [
     base bytestring directory safe-exceptions text unix

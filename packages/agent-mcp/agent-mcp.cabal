@@ -94,6 +94,7 @@ test-suite agent-mcp-test
                     , directory
                     , filepath
                     , hspec
+                    , network
                     , QuickCheck >= 2.14 && < 2.16
                     , safe-exceptions
                     , stm
