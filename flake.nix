@@ -590,6 +590,12 @@
                                     ver = "1.2.3.1";
                                     sha256 = "sha256-EteEnSgJB4MXixv/58D2Qo70L/AfZxNGin/pYiIjVhY=";
                                 } { });
+                        # Avoid Nagle/delayed-ACK stalls between TLS and the first
+                        # HTTP request. Patch the existing socket path rather
+                        # than replacing its proxy/fallback/cleanup behavior.
+                        crypton-connection = pkgs.haskell.lib.appendPatch
+                            previous.crypton-connection
+                            ./patches/crypton-connection-nodelay.patch;
                         vty-unix = pkgs.haskell.lib.appendPatch
                             previous.vty-unix
                             ./patches/vty-unix-all-motion.patch;

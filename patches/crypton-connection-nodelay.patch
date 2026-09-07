@@ -1,0 +1,14 @@
+--- a/Network/Connection.hs
++++ b/Network/Connection.hs
+@@ -239,7 +239,10 @@
+             E.bracketOnError
+                 (socket (addrFamily addr) (addrSocketType addr) (addrProtocol addr))
+                 (close)
+-                (\sock -> connect sock (addrAddress addr) >> return (sock, addrAddress addr))
++                (\sock -> do
++                    setSocketOption sock NoDelay 1
++                    connect sock (addrAddress addr)
++                    return (sock, addrAddress addr))
+         firstSuccessful = go []
+           where
+             go :: [E.IOException] -> [IO a] -> IO a
