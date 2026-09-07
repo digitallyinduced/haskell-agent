@@ -20,6 +20,7 @@ import Agent.CLI.Session.Runtime.Types (SessionBackend)
 import Agent.Claude (ClaudeCodeAuth)
 import Agent.Claude.Control (ClaudeCodeHostHandlers)
 import Agent.Connectivity.NetworkPath (NetworkRecovery)
+import Agent.Dialect (DialectId)
 import Agent.Error (ApiError)
 import Agent.Loop (Backend, TokenUsage, TurnInput)
 import Agent.OpenAI.Auth (Pool)
@@ -44,6 +45,7 @@ data OpenAiConfig = OpenAiConfig
     { tokenProvider :: TokenProvider
     , showRawReasoning :: Bool
     , transportModel :: Text -> Text
+    , dialectId :: !DialectId
     , accounts :: OpenAiAccounts
     }
 

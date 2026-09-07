@@ -12,6 +12,7 @@ import Agent.CLI.Compaction
     , autoCompactOpenAiBackendWithSender
     , autoCompactOpenAiBackendWithSenderAndHook
     , autoCompactOpenAiBackendWithSenderHookAndDecorator
+    , autoCompactOpenAiBackendForDialect
     , autoCompactOpenAiBackendWithThreshold
     , codexAutoCompactTokenLimit
     , claudeAutoCompactTokenLimit
@@ -43,6 +44,7 @@ import Agent.OpenAI.Compaction
     , summarizationPrompt
     , userTextItem
     )
+import Agent.Dialect (DialectId(..))
 import Agent.OpenAI.ModelMetadata (codexEffectiveContextWindowFor)
 import Agent.ToolDispatch
     ( ToolCallKind(..)
@@ -128,6 +130,41 @@ spec = do
             map requestItems <$> readIORef requests
                 `shouldReturn` [history <> [compactionTriggerItem]]
             readIORef recordedUsage `shouldReturn` [compactionUsage]
+
+        it "summarizes Grok models locally instead of sending compaction_trigger" do
+            params <- testRequestState
+                (withModel (Just "grok-4.6") defaultResponseCreateParams)
+            let history = [userTextItem "old context"]
+            transcript <- newIORef history
+            requests <- newIORef []
+            result <-
+                runProviderCompactWith
+                    (Just \request -> do
+                        modifyIORef' requests (<> [request])
+                        pure (Right (summaryResponse "local summary")))
+                    (const (pure ()))
+                    OpenAIProvider
+                    Nothing
+                    params
+                    transcript
+                    Nothing
+            case result of
+                Left err -> expectationFailure (show err)
+                Right outcome -> do
+                    outcome.compactSummary `shouldBe` "local summary"
+                    outcome.compactHistory
+                        `shouldBe`
+                            [ userTextItem "old context"
+                            , assistantSummaryItem "local summary"
+                            ]
+            seen <- readIORef requests
+            length seen `shouldBe` 1
+            map (.tools) seen `shouldBe` [Nothing]
+            map (.parallelToolCalls) seen `shouldBe` [Just False]
+            map (elem compactionTriggerItem . requestItems) seen
+                `shouldBe` [False]
+            map (last . requestItems) seen
+                `shouldBe` [userTextItem (summarizationPrompt Nothing)]
 
         it "records completed-response usage with asynchronous exceptions masked" do
             params <- testRequestState defaultResponseCreateParams
@@ -1378,6 +1415,103 @@ spec = do
     ManualOpenAI.spec
 
     TaskPlan.spec
+
+    describe "autoCompactOpenAiBackendForDialect" do
+        it "summarizes Grok Build dialect locally instead of sending compaction_trigger" do
+            let history = [userTextItem "old context"]
+                threshold = 2_000
+                params = withModel (Just "grok-4.6") defaultResponseCreateParams
+            contextState <- newIORef
+                (Just (reportedOccupancy threshold (length history)))
+            requests <- newIORef []
+            continuationHistory <- newIORef []
+            let sender request = do
+                    modifyIORef' requests (<> [request])
+                    pure (Right (summaryResponse "local summary"))
+                base = Backend \state _previous _inputs _onEvent -> do
+                    writeIORef continuationHistory state.backendItems
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
+                        , providerTelemetry = Nothing
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendForDialect
+                        GrokBuildDialect
+                        (pure Nothing)
+                        (Just threshold)
+                        sender
+                        (const (pure ()))
+                        (pure params)
+                        pure
+                        (\_outcome _inputs -> pure CompactionInstalled)
+                        contextState
+                        base
+            result <-
+                backend.submitTurn
+                    (initialBackendSnapshot history)
+                    Nothing
+                    [UserMessage "new"]
+                    (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            seen <- readIORef requests
+            length seen `shouldBe` 1
+            map (.tools) seen `shouldBe` [Nothing]
+            map (elem compactionTriggerItem . requestItems) seen
+                `shouldBe` [False]
+            map (last . requestItems) seen
+                `shouldBe` [userTextItem (summarizationPrompt Nothing)]
+            readIORef continuationHistory
+                `shouldReturn`
+                    [ userTextItem "old context"
+                    , assistantSummaryItem "local summary"
+                    , userTextItem "new"
+                    ]
+
+        it "keeps Codex remote compaction v2 for Codex-hosted non-Grok models" do
+            let history = [userTextItem "old context"]
+                threshold = 2_000
+            contextState <- newIORef
+                (Just (reportedOccupancy threshold (length history)))
+            requests <- newIORef []
+            let sender request = do
+                    modifyIORef' requests (<> [request])
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _previous _inputs _onEvent ->
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , contextUsage = Just (TokenUsage 20 5 0)
+                        , providerTelemetry = Nothing
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendForDialect
+                        CodexDialect
+                        (pure Nothing)
+                        (Just threshold)
+                        sender
+                        (const (pure ()))
+                        (pure defaultResponseCreateParams)
+                        pure
+                        (\_outcome _inputs -> pure CompactionInstalled)
+                        contextState
+                        base
+            result <-
+                backend.submitTurn
+                    (initialBackendSnapshot history)
+                    Nothing
+                    [UserMessage "new"]
+                    (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            map requestItems <$> readIORef requests
+                `shouldReturn` [history <> [compactionTriggerItem]]
 
     describe "autoCompactOpenAiBackendWith" do
         it "decorates before publishing and continuing automatic compaction" do

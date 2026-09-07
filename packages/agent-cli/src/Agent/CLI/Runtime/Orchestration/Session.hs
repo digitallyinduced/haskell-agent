@@ -1186,6 +1186,7 @@ prepareProviderConfig request promptRuntime nativeCapabilities = case request.pr
         { tokenProvider = request.tokenProvider
         , showRawReasoning = request.options.optShowRawReasoning
         , transportModel = request.transportModel
+        , dialectId = dialectId request.dialect
         , accounts = OpenAiAccounts
             { selectablePool = if isGatewayLoadedAuth request.loaded
                 then Nothing else request.loaded.loadedOpenAiPool

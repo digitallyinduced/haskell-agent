@@ -60,6 +60,41 @@ spec = do
             map requestItems seen
                 `shouldBe` [history <> [compactionTriggerItem]]
 
+        it "summarizes Grok models locally instead of sending compaction_trigger" do
+            requests <- newIORef []
+            let provider = tokenProvider SubscriptionBilled \_ ->
+                    error "local summarization unexpectedly requested credentials"
+                send _ request = do
+                    modifyIORef' requests (<> [request])
+                    pure (Right (summaryResponse "local summary"))
+                history = [userTextItem "old context"]
+                params = withModel (Just "grok-4.6") defaultResponseCreateParams
+                    { instructions = Just "keep these instructions"
+                    , tools = Just []
+                    }
+            result <- runExceptT $
+                compactOpenAIWith send
+                    (Just provider)
+                    params
+                    history
+                    100
+                    Nothing
+            case result of
+                Left err -> expectationFailure (show err)
+                Right outcome -> do
+                    outcome.compactSummary `shouldBe` "local summary"
+                    outcome.compactHistory
+                        `shouldBe`
+                            [ userTextItem "old context"
+                            , assistantSummaryItem "local summary"
+                            ]
+            seen <- readIORef requests
+            length seen `shouldBe` 1
+            map (.tools) seen `shouldBe` [Nothing]
+            map (.parallelToolCalls) seen `shouldBe` [Just False]
+            map (elem compactionTriggerItem . requestItems) seen
+                `shouldBe` [False]
+
         it "disables parallel tool calls for Responses Lite remote compaction" do
             requests <- newIORef []
             let provider = tokenProvider SubscriptionBilled \_ ->

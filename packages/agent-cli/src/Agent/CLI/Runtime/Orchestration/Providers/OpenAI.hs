@@ -343,6 +343,8 @@ withConnectedOpenAiProvider OpenAiConfig{..}
                 networkRecovery
                 (isGatewayWebSocketCredential
                     credential)
+                dialectId
+                (currentModelContextWindow transportModel)
                 compactThreshold
                 showRawReasoning
                 wsLock

@@ -115,6 +115,31 @@ spec = do
                 , Just (Aeson.String "function_call")
                 ]
 
+        it "drops Codex compaction_trigger items the Grok proxy cannot decode" do
+            let trigger = CompactionTriggerItemValue CompactionTriggerItem
+                unknownTrigger = UnknownResponseItem
+                    (TaggedObject "compaction_trigger")
+                message = MessageItem ResponseMessage
+                    { messageId = Just "msg_1"
+                    , content = MessageContentParts
+                        [InputTextPart "hello" Nothing]
+                    , role = RoleUser
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+                request = setInstructions Nothing $
+                    setInput
+                        (Just (ResponseInputItems
+                            [message, trigger, unknownTrigger]))
+                        sampleRequest
+                value = requestValue defaultClientOptions request
+            object <- expectObject value
+            input <- expectArray (KeyMap.lookup "input" object)
+            itemObjects <- traverse expectObject input
+            map (KeyMap.lookup "type") itemObjects `shouldBe`
+                [Just (Aeson.String "message")]
+
         it "flattens resumed OpenAI agent messages into Grok user messages" do
             let agentMessage = AgentMessageItem ResponseAgentMessage
                     { messageId = Nothing

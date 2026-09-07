@@ -10,6 +10,7 @@ module Agent.XAI.Request
 import Agent.Responses.Request
     ( filterRequestCompactionCheckpointsByOrigin
     , forceStatelessStreaming
+    , isCompactionTriggerItem
     , isServerCompactionCheckpoint
     , mapResponseTools
     , selectConfiguredModel
@@ -188,7 +189,8 @@ xaiReasoningEffort value =
 
 requestInputItems :: ResponseCreateParams -> [ResponseItem]
 requestInputItems request = case request.input of
-    Just (ResponseInputItems items) -> map normalizeInputItem items
+    Just (ResponseInputItems items) ->
+        map normalizeInputItem (filter (not . isCompactionTriggerItem) items)
     Just (ResponseInputText inputText) ->
         [ MessageItem ResponseMessage
             { messageId = Nothing

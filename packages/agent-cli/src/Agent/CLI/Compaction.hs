@@ -12,6 +12,7 @@ module Agent.CLI.Compaction
     , autoCompactOpenAiBackendWithSender
     , autoCompactOpenAiBackendWithSenderAndHook
     , autoCompactOpenAiBackendWithSenderHookAndDecorator
+    , autoCompactOpenAiBackendForDialect
     , autoCompactOpenAiBackendWith
     , autoCompactOpenAiBackendWithApi
     , autoCompactBackendWith
@@ -93,6 +94,10 @@ import Agent.OpenAI.Compaction
     , trimRemoteCompactionRequestToFit
     , trimResponseHistoryToFit
     , userTextItem
+    )
+import Agent.Dialect
+    ( DialectId(..)
+    , supportsCodexRemoteCompaction
     )
 import Agent.OpenAI.ModelMetadata
     ( codexAutoCompactTokenLimitFor
@@ -894,6 +899,15 @@ compactOpenAIAttempt
     -> Maybe Text
     -> IO (CompactAttempt ApiError)
 compactOpenAIAttempt send params history before focus
+    | not (supportsCodexRemoteCompaction CodexDialect params.model) =
+        summarizeLocalAttemptWith
+            XAI.grokDefaultContextWindow
+            prepareXaiLocalSummaryHistory
+            send
+            params
+            history
+            before
+            focus
     | hasFocus focus =
         summarizeLocalAttempt send params history before focus
     | otherwise =
@@ -1246,9 +1260,37 @@ autoCompactOpenAiBackendWithSenderHookAndDecorator
 autoCompactOpenAiBackendWithSenderHookAndDecorator
         configuredThreshold send recordUsage getParams decorateOutcome
         onCompacted contextTokensRef backend =
-    rejectOversizedInitialRequest getParams $
+    autoCompactOpenAiBackendForDialect
+        CodexDialect
+        (pure Nothing)
+        configuredThreshold
+        send
+        recordUsage
+        getParams
+        decorateOutcome
+        onCompacted
+        contextTokensRef
+        backend
+
+-- | OpenAI-transport automatic compaction that selects Codex remote v2 or
+-- Grok-safe local summarization from the live dialect and model name.
+autoCompactOpenAiBackendForDialect
+    :: DialectId
+    -> IO (Maybe Int)
+    -> Maybe Int
+    -> OpenAiCompactionSender
+    -> (TokenUsage -> IO ())
+    -> IO ResponseCreateParams
+    -> (CompactOutcome -> IO CompactOutcome)
+    -> (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
+    -> IORef (Maybe OccupancySnapshot)
+    -> BackendMiddleware
+autoCompactOpenAiBackendForDialect
+        dialectId getCatalogWindow configuredThreshold send recordUsage
+        getParams decorateOutcome onCompacted contextTokensRef backend =
+    rejectOversizedInitialRequest contextWindowFor getParams $
         boundCompletedToolContinuations
-            (codexEffectiveContextWindowFor . (.model))
+            contextWindowFor
             getParams
             contextTokensRef $
             autoCompactOpenAiBackendWithLimit
@@ -1261,24 +1303,24 @@ autoCompactOpenAiBackendWithSenderHookAndDecorator
                 contextTokensRef
                 backend
   where
+    contextWindowFor params =
+        openAiCompactContextWindow dialectId Nothing params
     getLimit = do
         params <- getParams
-        let configuredLimit =
-                fromMaybe
-                    (codexAutoCompactTokenLimitFor params.model)
-                    configuredThreshold
-        pure $
-            min
-                configuredLimit
-                (codexEffectiveContextWindowFor params.model)
+        catalogWindow <- getCatalogWindow
+        pure (openAiCompactTokenLimit
+            dialectId configuredThreshold catalogWindow params)
     compactAction history inputs = do
         params <- getParams
+        catalogWindow <- getCatalogWindow
         tokenLimit <- getLimit
-        let fixedRequestTokens =
+        let useRemote =
+                supportsCodexRemoteCompaction dialectId params.model
+            fixedRequestTokens =
                 estimateRequestTokensWithItems params []
             pendingItems = turnInputsToItems inputs
             contextWindow =
-                codexEffectiveContextWindowFor params.model
+                openAiCompactContextWindow dialectId catalogWindow params
             continuationBaseTokens checkpoint =
                 estimateRequestTokensWithItems
                     params
@@ -1305,12 +1347,23 @@ autoCompactOpenAiBackendWithSenderHookAndDecorator
                     Left (thresholdError fixedRequestTokens)
             else do
                 rawAttempt <-
-                    compactRemoteV2AttemptWithRetainedBudget
-                        send
-                        params
-                        history
-                        (estimateItemsTokens history)
-                        retainedBudget
+                    if useRemote
+                        then
+                            compactRemoteV2AttemptWithRetainedBudget
+                                send
+                                params
+                                history
+                                (estimateItemsTokens history)
+                                retainedBudget
+                        else
+                            summarizeLocalAttemptWith
+                                contextWindow
+                                prepareXaiLocalSummaryHistory
+                                send
+                                params
+                                history
+                                (estimateItemsTokens history)
+                                Nothing
                 attempt <-
                     case rawAttempt.compactAttemptResult of
                         Left _ -> pure rawAttempt
@@ -1375,10 +1428,40 @@ autoCompactOpenAiBackendWithSenderHookAndDecorator
         params <- getParams
         pure (projectRequestTokens (Just params) occupancy history inputs)
 
+openAiCompactContextWindow
+    :: DialectId
+    -> Maybe Int
+    -> ResponseCreateParams
+    -> Int
+openAiCompactContextWindow dialect catalogWindow params
+    | supportsCodexRemoteCompaction dialect params.model =
+        codexEffectiveContextWindowFor params.model
+    | otherwise =
+        fromMaybe XAI.grokDefaultContextWindow catalogWindow
+
+openAiCompactTokenLimit
+    :: DialectId
+    -> Maybe Int
+    -> Maybe Int
+    -> ResponseCreateParams
+    -> Int
+openAiCompactTokenLimit dialect configuredThreshold catalogWindow params =
+    let window = openAiCompactContextWindow dialect catalogWindow params
+        defaultLimit
+            | supportsCodexRemoteCompaction dialect params.model =
+                codexAutoCompactTokenLimitFor params.model
+            | otherwise =
+                XAI.grokAutoCompactTokenLimit
+                    (fromMaybe "grok-4.6" params.model)
+                    window
+        configuredLimit = fromMaybe defaultLimit configuredThreshold
+    in max 1 (min configuredLimit window)
+
 rejectOversizedInitialRequest
-    :: IO ResponseCreateParams
+    :: (ResponseCreateParams -> Int)
+    -> IO ResponseCreateParams
     -> BackendMiddleware
-rejectOversizedInitialRequest getParams backend =
+rejectOversizedInitialRequest contextWindowFor getParams backend =
     backendWithCallbacks \snapshot previous inputs callbacks ->
         if null snapshot.backendItems
             then do
@@ -1387,8 +1470,7 @@ rejectOversizedInitialRequest getParams backend =
                         estimateRequestTokensWithItems
                             params
                             (turnInputsToItems inputs)
-                    contextWindow =
-                        codexEffectiveContextWindowFor params.model
+                    contextWindow = contextWindowFor params
                 if requestTokens > contextWindow
                     then
                         pure $

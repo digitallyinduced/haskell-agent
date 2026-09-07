@@ -18,7 +18,7 @@ import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.CLI.Compaction
     ( CompactionInstall(CompactionNotInstalled)
     , autoCompactBackendWith
-    , autoCompactOpenAiBackendWithSenderHookAndDecorator
+    , autoCompactOpenAiBackendForDialect
     , boundCompletedToolContinuations
     , decorateCompactOutcomeWithTaskPlan
     , runXaiBackendCompactHistoryWithContextWindow
@@ -879,7 +879,9 @@ runCodexChildBackend
                         tokenProvider
                         request
         compactingBackend =
-            autoCompactOpenAiBackendWithSenderHookAndDecorator
+            autoCompactOpenAiBackendForDialect
+                (dialectId preparation.codexPreparationDialect)
+                (pure Nothing)
                 runtime.subagentOptions.optCompactThreshold
                 compactSender
                 (const (pure ()))

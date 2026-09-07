@@ -14,6 +14,7 @@ import qualified Agent.OpenAI.ModelsClientSpec as ModelsClientSpec
 import qualified Agent.OpenAI.ModelsManagerSpec as ModelsManagerSpec
 import qualified Agent.OpenAI.ModelsTypesSpec as ModelsTypesSpec
 import qualified Agent.OpenAI.CompactionSpec as CompactionSpec
+import qualified Agent.OpenAI.RequestSpec as RequestSpec
 import qualified Agent.OpenAI.ToolDSLSpec as ToolDSLSpec
 import qualified Agent.OpenAI.TranscriptionSpec as TranscriptionSpec
 import qualified Agent.OpenAI.UsageSpec as UsageSpec
@@ -33,6 +34,7 @@ main = hspec do
     ModelsManagerSpec.spec
     ModelsTypesSpec.spec
     CompactionSpec.spec
+    RequestSpec.spec
     ToolDSLSpec.spec
     TranscriptionSpec.spec
     UsageSpec.spec

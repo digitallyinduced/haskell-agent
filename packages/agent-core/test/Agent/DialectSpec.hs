@@ -95,6 +95,28 @@ spec = describe "Agent.Dialect" do
             providerSupportsDialect OpenRouterProvider ClaudeCodeDialect
                 `shouldBe` False
 
+    describe "Codex remote compaction eligibility" do
+        it "recognizes Grok model ids including OpenRouter slugs" do
+            isGrokModelName "grok-4.6" `shouldBe` True
+            isGrokModelName " GROK-4.5 " `shouldBe` True
+            isGrokModelName "x-ai/grok-4" `shouldBe` True
+            isGrokModelName "gpt-5.6-sol" `shouldBe` False
+            isGrokModelName "acme-coder" `shouldBe` False
+
+        it "enables remote compaction v2 only for Codex-hosted non-Grok models" do
+            supportsCodexRemoteCompaction CodexDialect (Just "gpt-5.6-sol")
+                `shouldBe` True
+            supportsCodexRemoteCompaction CodexDialect Nothing
+                `shouldBe` True
+            supportsCodexRemoteCompaction CodexDialect (Just "grok-4.6")
+                `shouldBe` False
+            supportsCodexRemoteCompaction GrokBuildDialect (Just "grok-4.6")
+                `shouldBe` False
+            supportsCodexRemoteCompaction GrokBuildDialect (Just "acme-coder")
+                `shouldBe` False
+            supportsCodexRemoteCompaction GenericResponsesDialect (Just "gpt-5.6-sol")
+                `shouldBe` False
+
     describe "static profiles" do
         it "defines the Codex model-facing contract" do
             dialectProfile codexDialect `shouldBe`

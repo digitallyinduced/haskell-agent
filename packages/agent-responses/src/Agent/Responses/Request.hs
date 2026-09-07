@@ -8,6 +8,8 @@ module Agent.Responses.Request
     , filterRequestCompactionCheckpointsByOrigin
     , isServerCompactionCheckpoint
     , stripLocalCompactionMarker
+    , stripRequestCompactionTriggers
+    , isCompactionTriggerItem
     , stripReplayedItemStatus
     , stripReplayedInputStatus
     ) where
@@ -17,6 +19,7 @@ import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 -- | Disable remote transcript state and require a streaming response.
 forceStatelessStreaming
@@ -117,6 +120,31 @@ isServerCompactionCheckpoint = \case
     KnownResponseItem ItemCompaction _ -> True
     KnownResponseItem ItemContextCompaction _ -> True
     _ -> False
+
+-- | Codex remote-compaction-v2 sentinel. Grok and other non-Codex Responses
+-- hosts reject this item type.
+isCompactionTriggerItem :: ResponseItem -> Bool
+isCompactionTriggerItem = \case
+    CompactionTriggerItemValue{} -> True
+    KnownResponseItem ItemCompactionTrigger _ -> True
+    UnknownResponseItem tagged ->
+        Text.toLower (Text.strip tagged.tag) == "compaction_trigger"
+    _ -> False
+
+-- | Drop Codex @compaction_trigger@ items before a non-Codex host sees them.
+stripRequestCompactionTriggers
+    :: ResponseCreateParams
+    -> ResponseCreateParams
+stripRequestCompactionTriggers ResponseCreateParams { input, .. } =
+    ResponseCreateParams
+        { input = stripInput <$> input
+        , ..
+        }
+  where
+    stripInput = \case
+        ResponseInputItems items ->
+            ResponseInputItems (filter (not . isCompactionTriggerItem) items)
+        other -> other
 
 -- | Remove host-only compaction metadata. These markers remain in persisted
 -- state so compaction policy can recognize local summaries and the provider

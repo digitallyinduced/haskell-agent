@@ -29,6 +29,8 @@ module Agent.Dialect
     , dialectForModel
     , legacyDialectIdForProvider
     , providerSupportsDialect
+    , isGrokModelName
+    , supportsCodexRemoteCompaction
     , grokBuildPublicToolName
     , grokBuildCanonicalToolName
     , claudeCodeCanonicalToolName
@@ -246,6 +248,20 @@ providerSupportsDialect provider dialect = case provider of
     OpenRouterProvider -> dialect /= ClaudeCodeDialect
     GeminiProvider -> dialect == GenericResponsesDialect
     ClaudeCodeProvider -> dialect == ClaudeCodeDialect
+
+-- | Grok Build model ids, including OpenRouter's @x-ai/grok-*@ slugs.
+isGrokModelName :: Text -> Bool
+isGrokModelName model =
+    let normalized = Text.toLower (Text.strip model)
+    in "grok" `Text.isPrefixOf` normalized
+        || "x-ai/grok" `Text.isPrefixOf` normalized
+
+-- | Codex remote compaction v2 appends a @compaction_trigger@ input item.
+-- Only ChatGPT Codex Responses hosts implement that protocol. Grok models
+-- reject the tag even when they are routed over the OpenAI transport.
+supportsCodexRemoteCompaction :: DialectId -> Maybe Text -> Bool
+supportsCodexRemoteCompaction dialect model =
+    dialect == CodexDialect && not (maybe False isGrokModelName model)
 
 -- | Current public Grok Build names for stable internal tool identifiers.
 grokBuildPublicToolName :: Text -> Text

@@ -3,10 +3,12 @@ module Agent.OpenAI.Request
     ( sanitizeCodexRequest
     ) where
 
+import Agent.Dialect (isGrokModelName)
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.Responses.Request
     ( filterRequestCompactionCheckpointsByOrigin
     , stripLocalCompactionMarker
+    , stripRequestCompactionTriggers
     , stripReplayedInputStatus
     )
 import Agent.Responses.Types
@@ -39,25 +41,30 @@ sanitizeCodexRequest ResponseCreateParams
         , parallelToolCalls
         , ..
         } =
-    stripLocalCompactionMarker $
-        filterRequestCompactionCheckpointsByOrigin
-            keepOpenAiOrLegacyCheckpoint $
-            ResponseCreateParams
-                { promptCacheRetention = Nothing
-                , input =
-                    fmap
-                        (stripReplayedInputStatus . stripContentItemKindsInput)
-                        input
-                , parallelToolCalls =
-                    if maybe False isCodexResponsesLiteModel model
-                        then Just False
-                        else parallelToolCalls
-                , ..
-                }
+    grokIncompatibleItems $
+        stripLocalCompactionMarker $
+            filterRequestCompactionCheckpointsByOrigin
+                keepOpenAiOrLegacyCheckpoint $
+                ResponseCreateParams
+                    { promptCacheRetention = Nothing
+                    , input =
+                        fmap
+                            (stripReplayedInputStatus . stripContentItemKindsInput)
+                            input
+                    , parallelToolCalls =
+                        if maybe False isCodexResponsesLiteModel model
+                            then Just False
+                            else parallelToolCalls
+                    , ..
+                    }
   where
     keepOpenAiOrLegacyCheckpoint = \case
         Nothing -> True
         Just origin -> origin == "openai"
+    grokIncompatibleItems request
+        | maybe False isGrokModelName model =
+            stripRequestCompactionTriggers request
+        | otherwise = request
 
 stripContentItemKindsInput :: ResponseInput -> ResponseInput
 stripContentItemKindsInput = \case

@@ -9,7 +9,7 @@ import Agent.CLI.Compaction
     , CompactionInstall
     , OccupancySnapshot
     , OpenAiCompactionSender
-    , autoCompactOpenAiBackendWithSenderHookAndDecorator
+    , autoCompactOpenAiBackendForDialect
     )
 import Agent.Connectivity (withConnectionRecoveryOn)
 import Agent.Connectivity.NetworkPath (NetworkRecovery)
@@ -40,6 +40,7 @@ import Agent.Provider
 import Agent.Responses.LoopBackend
     ( statelessResponsesBackendWithRawReasoning
     )
+import Agent.Dialect (DialectId)
 import Agent.Responses.Types (ResponseCreateParams)
 import Control.Concurrent.MVar
     ( MVar
@@ -64,6 +65,8 @@ lockedOpenAiSession
     -> Bool
     -- ^ When true, every model and compaction request must remain on the
     -- gateway WebSocket; direct provider HTTP fallback is forbidden.
+    -> DialectId
+    -> IO (Maybe Int)
     -> Maybe Int
     -> Bool
     -> MVar ()
@@ -76,7 +79,8 @@ lockedOpenAiSession
     -> (CompactOutcome -> IO CompactOutcome)
     -> (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
     -> (OpenAiCompactionSender, Backend)
-lockedOpenAiSession networkRecovery gatewayOnly compactThreshold
+lockedOpenAiSession networkRecovery gatewayOnly dialectId getContextWindow
+        compactThreshold
         showRawReasoning wsLock fallbackActive provider activeConnection
         getParams contextTokens
         recordCompactionUsage decorateCompaction onCompacted =
@@ -165,7 +169,9 @@ lockedOpenAiSession networkRecovery gatewayOnly compactThreshold
                                 sendHttpCompaction request
                         _ -> pure result
         compactingBackend =
-            autoCompactOpenAiBackendWithSenderHookAndDecorator
+            autoCompactOpenAiBackendForDialect
+                dialectId
+                getContextWindow
                 compactThreshold
                 compactSender
                 recordCompactionUsage
