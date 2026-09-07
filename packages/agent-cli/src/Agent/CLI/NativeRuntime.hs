@@ -15,6 +15,7 @@ module Agent.CLI.NativeRuntime
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
     , newNativeProcessRuntimeWithIntegrations
+    , newNativeProcessRuntimeWithOrganizationIntegrations
     , nativeProcessIntegrationSupervisor
     , nativeTurnOptions
     , applyNativeStartupPolicy
@@ -27,8 +28,10 @@ import qualified Agent.CLI.NativeProcess as NativeProcess
 import Agent.Integration.API
     ( IntegrationSupervisor
     , closeIntegrationSupervisor
-    , newIntegrationSupervisor
+    , newIntegrationSupervisorWithOrganizationProvider
+    , resetIntegrationSupervisor
     , IntegrationProvider
+    , OrganizationIntegrationProvider
     , emptyIntegrationProvider
     )
 import Agent.Runtime.StartupPolicy
@@ -90,10 +93,19 @@ newNativeProcessRuntime = newNativeProcessRuntimeWithIntegrations emptyIntegrati
 
 newNativeProcessRuntimeWithIntegrations
     :: IntegrationProvider -> OsPath -> IO NativeProcessRuntime
-newNativeProcessRuntimeWithIntegrations provider root = mask \restore -> do
+newNativeProcessRuntimeWithIntegrations provider =
+    newNativeProcessRuntimeWithOrganizationIntegrations provider Nothing
+
+-- | Organization-local execution is a separate distribution opt-in; supplying
+-- an ordinary local provider alone never enables it for gateway users.
+newNativeProcessRuntimeWithOrganizationIntegrations
+    :: IntegrationProvider -> Maybe OrganizationIntegrationProvider
+    -> OsPath -> IO NativeProcessRuntime
+newNativeProcessRuntimeWithOrganizationIntegrations provider organizationProvider root = mask \restore -> do
     integrationToolEnv <- restore (defaultToolEnv root)
     integrations <-
-        restore (newIntegrationSupervisor provider integrationToolEnv)
+        restore (newIntegrationSupervisorWithOrganizationProvider
+            provider organizationProvider integrationToolEnv)
     core <- restore (NativeProcess.newNativeProcessRuntimeWithMcpHooks
         MCP.defaultMcpHostHooks
         root) `onException` closeIntegrationSupervisor integrations
@@ -109,8 +121,9 @@ closeNativeProcessRuntime runtime =
             closeIntegrationSupervisor runtime.nativeIntegrationSupervisor
 
 restartNativeMcpRuntime :: NativeProcessRuntime -> IO ()
-restartNativeMcpRuntime =
-    NativeProcess.restartNativeMcpRuntime . (.nativeProcessCore)
+restartNativeMcpRuntime runtime =
+    NativeProcess.restartNativeMcpRuntime runtime.nativeProcessCore
+        `finally` resetIntegrationSupervisor runtime.nativeIntegrationSupervisor
 
 nativeProcessIntegrationSupervisor
     :: NativeProcessRuntime

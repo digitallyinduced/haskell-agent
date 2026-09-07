@@ -446,6 +446,96 @@ typedef struct ha_mcp_env_entry {
     ha_utf8_slice value;
 } ha_mcp_env_entry;
 
+typedef struct ha_connection_answer {
+    ha_utf8_slice identifier;
+    ha_utf8_slice value;
+} ha_connection_answer;
+
+typedef struct ha_connection_field {
+    ha_utf8_slice identifier;
+    ha_utf8_slice label;
+    int32_t kind; /* 0 text, 1 secret (never echoed) */
+    int32_t required;
+} ha_connection_field;
+
+typedef struct ha_connection_item {
+    ha_utf8_slice identifier;
+    ha_utf8_slice title;
+    ha_utf8_slice detail;
+    int32_t selected;
+} ha_connection_item;
+
+typedef struct ha_connection_snapshot {
+    /* 0 catalog, 1 search, 2 credentials, 3 challenge, 4 redirect,
+     * 5 selection, 6 connected, 7 waiting */
+    int32_t phase;
+    ha_utf8_slice session_id;
+    ha_utf8_slice title;
+    ha_utf8_slice message;
+    ha_utf8_slice redirect_url;
+    uint32_t poll_after_milliseconds;
+    const ha_connection_field *fields;
+    size_t field_count;
+    const ha_connection_item *items;
+    size_t item_count;
+} ha_connection_snapshot;
+
+/*
+ * Exactly one completion for an accepted request, on a runtime worker (not
+ * the main thread). All output memory is borrowed for the callback only.
+ * Copy before returning; never free it. status 0 has snapshot, -1 has error.
+ * Input strings/answers are synchronously copied, limited to 16 KiB each,
+ * 64 answers; secrets are never sent through the conversational protocol.
+ * Return 0 accepted, 1 null engine, 2 invalid input, 3 engine closed.
+ * Caller retains both callback contexts through terminal completion.
+ * Engine destruction cancels accepted requests and joins their workers;
+ * all accepted terminal callbacks have returned before destruction returns.
+ * Do not synchronously destroy the engine or mutate gateway credentials from
+ * a callback. Dispatch host UI work asynchronously.
+ */
+typedef void (*ha_connection_callback)(
+    void *context, int32_t status, const ha_connection_snapshot *snapshot,
+    const uint8_t *error, size_t error_length);
+
+/* A secure-store callback writes exactly 32 key bytes on success (return 0).
+ * Called on a worker; scope is an opaque identity-scoped key identifier.
+ * No key is returned in snapshots. Output buffer is borrowed for this call.
+ * No callback/context is retained after the terminal connection callback. */
+typedef int32_t (*ha_connection_secret_callback)(
+    void *context, const uint8_t *scope, size_t scope_length,
+    uint8_t *key_out, size_t key_capacity);
+
+int32_t ha_engine_connections_list(
+    void *engine, ha_connection_secret_callback secret, void *secret_context,
+    ha_connection_callback callback, void *context);
+int32_t ha_engine_connections_search(
+    void *engine, const uint8_t *provider, size_t provider_length,
+    const uint8_t *query, size_t query_length,
+    ha_connection_secret_callback secret, void *secret_context,
+    ha_connection_callback callback, void *context);
+int32_t ha_engine_connection_begin(
+    void *engine, const uint8_t *provider, size_t provider_length,
+    const uint8_t *identifier, size_t identifier_length,
+    ha_connection_secret_callback secret, void *secret_context,
+    ha_connection_callback callback, void *context);
+int32_t ha_engine_connection_submit(
+    void *engine, const uint8_t *session, size_t session_length,
+    const ha_connection_answer *answers, size_t answer_count,
+    ha_connection_secret_callback secret, void *secret_context,
+    ha_connection_callback callback, void *context);
+int32_t ha_engine_connection_poll(
+    void *engine, const uint8_t *session, size_t session_length,
+    ha_connection_secret_callback secret, void *secret_context,
+    ha_connection_callback callback, void *context);
+int32_t ha_engine_connection_cancel(
+    void *engine, const uint8_t *session, size_t session_length,
+    ha_connection_secret_callback secret, void *secret_context,
+    ha_connection_callback callback, void *context);
+int32_t ha_engine_connection_disconnect(
+    void *engine, const uint8_t *identifier, size_t identifier_length,
+    ha_connection_secret_callback secret, void *secret_context,
+    ha_connection_callback callback, void *context);
+
 /*
  * MCP catalog reads expose redacted typed rows. Environment values are never
  * returned: field callbacks use kind 0 for an argument and kind 1 for an
