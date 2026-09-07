@@ -22,6 +22,7 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , withToolCallMode
     )
+import qualified Agent.ToolDispatch as ToolDispatch
 import qualified Data.ByteString as BS
 import qualified Data.Aeson as Aeson
 import qualified Data.Text as Text
@@ -112,7 +113,7 @@ spec = describe "native loop event binary encoding" do
                         , callKind = FunctionCallKind
                         }
                 encodeNativeLoopEvent "turn" (ToolFinished result)
-                    `shouldBe` Just (frame 5 0 ["turn", "map-1", output])
+                    `shouldBe` Just (frame 5 0 ["turn", "map-1", Text.unpack output])
                 let persisted = FunctionCallOutput
                         { localOutcome = Nothing
                         , itemId = Nothing
@@ -155,7 +156,7 @@ spec = describe "native loop event binary encoding" do
                 , callKind = FunctionCallKind
                 , argumentsEncrypted = False
                 }
-            ordinaryCall = integrationCall { name = "other_tool" }
+            ordinaryCall = integrationCall { ToolDispatch.name = "other_tool" }
         boundedApprovalArguments integrationCall `shouldBe` (arguments, False)
         boundedApprovalArguments ordinaryCall
             `shouldBe` (Text.take 8192 arguments, True)
