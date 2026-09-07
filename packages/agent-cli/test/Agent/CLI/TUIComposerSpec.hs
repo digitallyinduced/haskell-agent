@@ -39,6 +39,7 @@ import Agent.TUI.TextWidth
     , previousGraphemeBoundary
     )
 import Control.Concurrent (newEmptyMVar, readMVar)
+import Control.Concurrent.Async (withAsync, wait)
 import Control.Concurrent.STM (atomically)
 import Data.IORef (newIORef)
 import qualified Data.ByteString as ByteString
@@ -52,6 +53,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Graphics.Vty as V
 import Test.Hspec
+import System.Timeout (timeout)
 import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
 import qualified Graphics.Vty as V
 import Test.QuickCheck
@@ -531,6 +533,44 @@ spec = describe "fullscreen composer" do
         _ <- atomically (takeFullscreenInput buffer)
         atomically (appendFullscreenInput buffer (prompt 129))
             `shouldReturn` Right ()
+
+    it "closes a full prompt queue without consuming queued turns" do
+        buffer <- newFullscreenInputBuffer
+        accepted <- atomically $
+            mapM (appendFullscreenInput buffer . input . ReplText)
+                (replicate fullscreenInputCountLimit "pending")
+        accepted `shouldSatisfy` all (== Right ())
+        timeout 1_000_000 (atomically (closeFullscreenInputBuffer buffer))
+            `shouldReturn` Just ()
+        (.fullscreenInputLine) <$> atomically (takeFullscreenInput buffer)
+            `shouldReturn` ReplEof
+        Seq.null <$> atomically (readFullscreenInputs buffer)
+            `shouldReturn` True
+
+    it "keeps closed input at EOF and rejects appended or promoted prompts" do
+        buffer <- newFullscreenInputBuffer
+        atomically (closeFullscreenInputBuffer buffer)
+        atomically (closeFullscreenInputBuffer buffer)
+        (.fullscreenInputLine) <$> atomically (takeFullscreenInput buffer)
+            `shouldReturn` ReplEof
+        (.fullscreenInputLine) <$> atomically (takeFullscreenInput buffer)
+            `shouldReturn` ReplEof
+        atomically (appendFullscreenInput buffer (input (ReplText "late")))
+            `shouldReturn` Left "Prompt input is closed."
+        atomically (promoteFullscreenInput buffer (input (ReplText "late")))
+            `shouldReturn` Left "Prompt input is closed."
+        fmap (.fullscreenInputLine) <$>
+            atomically (takeFullscreenInputOr buffer (pure ()))
+                `shouldReturn` Right ReplEof
+
+    it "wakes an empty prompt queue reader when input closes" do
+        buffer <- newFullscreenInputBuffer
+        withAsync
+            ((.fullscreenInputLine) <$> atomically (takeFullscreenInput buffer))
+            \reader -> do
+                timeout 20_000 (wait reader) `shouldReturn` Nothing
+                atomically (closeFullscreenInputBuffer buffer)
+                timeout 1_000_000 (wait reader) `shouldReturn` Just ReplEof
   where
     input replLine = FullscreenInput
         { fullscreenInputLine = replLine

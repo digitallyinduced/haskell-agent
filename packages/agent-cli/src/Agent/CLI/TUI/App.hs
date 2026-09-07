@@ -26,6 +26,8 @@ module Agent.CLI.TUI.App
     , drawTranscriptChunks
     , elapsedMillisSince
     , appEventLogicalBytes
+    , closeAppEventMailbox
+    , closeFullscreenChannels
     , emitUiEvent
     , enqueueAppEvent
     , externalUrlCommand
@@ -79,6 +81,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenSecret
     , requestFullscreenText
     , runFullscreen
+    , withFullscreenWorker
     , commitFullscreenImagePreviews
     , commitFullscreenHistoryTurn
     , beginFullscreenLiveHistory

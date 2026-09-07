@@ -1492,5 +1492,7 @@ handleCtrlC = do
                         warningNotice
                             "Press Ctrl-C again to exit."
         ForceExit ->
-            liftIO (throwIO UserInterrupt)
+            -- Halt Brick so its owner can close the input and output channels
+            -- before joining the session worker.
+            halt
     pure decision

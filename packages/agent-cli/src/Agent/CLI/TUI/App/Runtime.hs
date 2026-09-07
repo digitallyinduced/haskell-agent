@@ -292,7 +292,8 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
     initial = do
         events <- newBChan appEventChannelCapacity
         mailbox <- AppEventMailbox <$> newTVarIO AppEventMailboxState
-            { mailboxPendingEvents = Seq.empty
+            { mailboxClosed = False
+            , mailboxPendingEvents = Seq.empty
             , mailboxPendingCount = 0
             , mailboxPendingBytes = 0
             , mailboxHighWaterCount = 0

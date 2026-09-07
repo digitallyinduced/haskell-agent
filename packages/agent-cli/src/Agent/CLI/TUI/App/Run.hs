@@ -137,14 +137,21 @@ import Brick.Widgets.Border.Style (unicodeRounded)
 import Brick.Widgets.Center (center, centerLayer, hCenter)
 import Codec.Picture (pixelAt)
 import Control.Applicative ((<|>))
-import Control.Concurrent.Async (wait, waitCatch, withAsync)
+import Control.Concurrent.Async
+    ( Async
+    , poll
+    , wait
+    , waitCatch
+    , withAsync
+    , withAsyncWithUnmask
+    )
 import Control.Concurrent (threadDelay)
 import Control.Monad (forever, unless, void, when, (>=>))
 import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Control.Exception.Safe (finally, mask, onException, throwIO, tryAny)
+import Control.Exception.Safe (finally, onException, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
@@ -153,6 +160,7 @@ import Data.List ( find , findIndex , intersperse , nub , sort , sortOn )
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe, maybeToList)
+import System.Timeout (timeout)
 import Data.Sequence (Seq, ViewL(..), ViewR(..), (|>))
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
@@ -175,6 +183,32 @@ import Agent.CLI.TUI.App.Runtime
 import Agent.CLI.TUI.App.Mailbox
 import Agent.CLI.TUI.App.History
 import Agent.CLI.TUI.App.Event
+
+-- | The UI owns the session worker until it has terminated, including when
+-- the UI fails. Closing input is a nonblocking, idempotent operation, not an
+-- EOF insertion into the bounded prompt queue.
+--
+-- The grace interval bounds cooperative shutdown only. If it expires, scope
+-- exit cancels and joins the worker; we never abandon it or kill the host
+-- process. Resource finalizers must themselves provide interruptible cleanup.
+withFullscreenWorker :: (Async a -> IO ()) -> IO a -> (Async a -> IO ()) -> IO a
+withFullscreenWorker closeChannels workerAction runUi =
+    withAsyncWithUnmask (\unmask -> unmask workerAction) \worker -> do
+        runUi worker `finally` closeChannels worker
+        timeout 2_000_000 (wait worker) >>= \case
+            Just result -> pure result
+            Nothing -> throwIO UserInterrupt
+
+closeFullscreenChannels :: FullscreenRuntime -> Async a -> IO ()
+closeFullscreenChannels runtime worker = do
+    workerResult <- poll worker
+    atomically do
+        closeAppEventMailbox runtime.runtimeMailbox
+        -- Completed workers may return a session/provider transition. The
+        -- outer flow reuses their input buffer, including queued prompts.
+        case workerResult of
+            Nothing -> Composer.closeFullscreenInputBuffer runtime.runtimeInput
+            Just _ -> pure ()
 
 runFullscreen :: FullscreenRuntime -> IO a -> IO a
 runFullscreen runtime workerAction = do
@@ -229,55 +263,52 @@ runFullscreen runtime workerAction = do
             writeTVar
                 runtime.runtimeMotionSchedule
                 (initialDemand, initialDelay, 0)
-        withAsync workerAction \worker ->
-            withAsync uiTicker \_uiTicker ->
-                withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
-                    withAsync (eventPump runtime) \_eventPump ->
-                        withAsync (recapTicker runtime) \_recapTicker ->
-                            withAsync
-                                historyLoader
-                                \_historyLoader ->
-                                withAsync
-                                    dictationWorker
-                                    \_dictationWorker ->
-                                    withAsync
-                                        (runSyntaxHighlighterForRuntime runtime)
-                                        \_syntaxLoader ->
-                                            withAsync
-                                                (void (waitCatch worker)
-                                                    >> enqueueAppEvent runtime AppStop)
-                                                \_notifier -> do
-                                                    finalState <-
-                                                        customMain
-                                                            initialVty
-                                                            buildVty
-                                                            (Just runtime.runtimeEvents)
-                                                            fullscreenApp
-                                                            initialState
-                                                        `finally`
-                                                            runtime.runtimeNativeProgress False
-                                                    mapM_
-                                                        (`Composer.requestDictationStop` True)
-                                                        finalState.appDictation
-                                                    when (not finalState.appWorkerStopped) $
-                                                        atomically do
-                                                            queued <-
-                                                                Composer.appendFullscreenInput
-                                                                    runtime.runtimeInput
-                                                                    FullscreenInput
-                                                                        { fullscreenInputLine =
-                                                                            ReplEof
-                                                                        , fullscreenInputQueued =
-                                                                            False
-                                                                        , fullscreenInputDisplay =
-                                                                            Nothing
-                                                                        }
-                                                            either
-                                                                (const retry)
-                                                                pure
-                                                                queued
-                                                    wait worker
+        withFullscreenWorker
+            (closeFullscreenChannels runtime)
+            workerAction
+            \worker ->
+                runFullscreenUi
+                    runtime
+                    worker
+                    initialVty
+                    buildVty
+                    initialState
+                    initialAgent
+                    initialAgents
   where
+    runFullscreenUi
+            runtime worker initialVty buildVty initialState
+            initialAgent initialAgents =
+        withAsync uiTicker \_uiTicker ->
+            withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
+                withAsync (eventPump runtime) \_eventPump ->
+                    withAsync (recapTicker runtime) \_recapTicker ->
+                        withAsync
+                            historyLoader
+                            \_historyLoader ->
+                            withAsync
+                                dictationWorker
+                                \_dictationWorker ->
+                                withAsync
+                                    (runSyntaxHighlighterForRuntime runtime)
+                                    \_syntaxLoader ->
+                                    withAsync
+                                        (void (waitCatch worker)
+                                            >> enqueueAppEvent runtime AppStop)
+                                        \_notifier -> do
+                                            finalState <-
+                                                customMain
+                                                    initialVty
+                                                    buildVty
+                                                    (Just runtime.runtimeEvents)
+                                                    fullscreenApp
+                                                    initialState
+                                                `finally`
+                                                    (closeFullscreenChannels runtime worker
+                                                        >> runtime.runtimeNativeProgress False)
+                                            mapM_
+                                                (`Composer.requestDictationStop` True)
+                                                finalState.appDictation
     recapTicker _runtime = forever do
         threadDelay 20_000_000
         enqueueAppEvent runtime AppRecapPoll

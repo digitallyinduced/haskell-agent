@@ -11,6 +11,7 @@ import Agent.CLI.Dictation (DictationTarget(..))
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
     ( appEventLogicalBytes
+    , closeAppEventMailbox
     , emitUiEvent
     , enqueueAppEvent
     , loadSyntaxHighlighterForRuntime
@@ -42,8 +43,9 @@ import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch (ToolCall(..), functionToolCall)
 import Agent.TUI.Motion (MotionMode(..))
 import Control.Concurrent.Async (wait, withAsync)
-import Control.Concurrent.STM (readTVarIO)
-import Control.Exception.Safe (throwString)
+import Control.Concurrent.STM (atomically, readTVarIO)
+import Control.Exception (MaskingState(MaskedUninterruptible), getMaskingState)
+import Control.Exception.Safe (finally, throwString)
 import Control.Monad (replicateM_)
 import qualified Data.ByteString as BS
 import Data.Foldable (toList)
@@ -215,6 +217,51 @@ spec = describe "fullscreen TUI bridge" do
     it "accounts model-context reset mailbox overhead" do
         appEventLogicalBytes (AppUi (UiLoop ModelContextReset))
             `shouldBe` 128
+
+    it "closes the display mailbox idempotently and discards subsequent output" do
+        runtime <- newBridgeTestRuntime
+        emitUiEvent runtime (UiLoop (TextDelta "retained"))
+        let close = atomically (closeAppEventMailbox runtime.runtimeMailbox)
+            AppEventMailbox stateRef = runtime.runtimeMailbox
+        close
+        close
+        completed <- timeout 2000000 $
+            replicateM_ 2000 do
+                emitUiEvent runtime (UiLoop (TextDelta "discarded"))
+                emitUiEvent runtime (UiLoop TurnStarted)
+                enqueueAppEvent runtime AppStop
+        completed `shouldBe` Just ()
+        state <- readTVarIO stateRef
+        state.mailboxClosed `shouldBe` True
+        null state.mailboxPendingEvents `shouldBe` True
+        state.mailboxPendingCount `shouldBe` 0
+        state.mailboxPendingBytes `shouldBe` 0
+        state.mailboxHighWaterCount `shouldBe` 1
+
+    it "releases a masked finalizer blocked on a full display mailbox" do
+        runtime <- newBridgeTestRuntime
+        let exactBudgetText =
+                Text.replicate
+                    ((16 * 1024 * 1024 - 64) `div` 4)
+                    "x"
+            close = atomically (closeAppEventMailbox runtime.runtimeMailbox)
+        emitUiEvent runtime (UiLoop (TextDelta exactBudgetText))
+        withAsync
+            (pure () `finally` do
+                getMaskingState `shouldReturn` MaskedUninterruptible
+                emitUiEvent runtime (UiLoop (TextDelta "cleanup")))
+            \publishing ->
+                (do
+                    timeout 100000 (wait publishing)
+                        `shouldReturn` Nothing
+                    close
+                    timeout 2000000 (wait publishing)
+                        `shouldReturn` Just ()
+                    let AppEventMailbox stateRef = runtime.runtimeMailbox
+                    state <- readTVarIO stateRef
+                    state.mailboxPendingCount `shouldBe` 0
+                    state.mailboxPendingBytes `shouldBe` 0)
+                `finally` close
 
     it "backpressures a single streaming mailbox node by payload bytes" do
         runtime <- newBridgeTestRuntime

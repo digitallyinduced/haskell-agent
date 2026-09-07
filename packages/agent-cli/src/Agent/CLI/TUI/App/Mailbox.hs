@@ -286,49 +286,64 @@ appEventMailboxTextChunkCodeUnits :: Int
 appEventMailboxTextChunkCodeUnits =
     (appEventMailboxPayloadBudgetBytes - 64) `div` 4
 
+-- | Retire display output before joining session workers. Closing never waits
+-- for capacity, releases retained display data, and wakes producers that may
+-- be publishing from masked finalizers after Brick has stopped consuming.
+-- This is terminal: a subsequent fullscreen run requires a new runtime.
+closeAppEventMailbox :: AppEventMailbox -> STM ()
+closeAppEventMailbox (AppEventMailbox stateRef) = do
+    state <- readTVar stateRef
+    writeTVar stateRef state
+        { mailboxClosed = True
+        , mailboxPendingEvents = Seq.empty
+        , mailboxPendingCount = 0
+        , mailboxPendingBytes = 0
+        }
+
 enqueueMailboxEvent :: AppEventMailbox -> AppEvent -> STM ()
 enqueueMailboxEvent (AppEventMailbox stateRef) event = do
     state <- readTVar stateRef
-    let (pending, payloadBytes) =
-            appendAppEventAccounted
-                event
-                state.mailboxPendingEvents
-                state.mailboxPendingBytes
-        count = Seq.length pending
-        control = isControlAppEvent event
-        countLimit =
-            appEventMailboxCapacity
-                + if control then appEventMailboxControlReserve else 0
-        byteLimit =
-            appEventMailboxPayloadBudgetBytes
-                + if control then appEventMailboxControlReserveBytes else 0
-        -- An indivisible event may itself exceed the budget. Refusing that
-        -- first event would retry forever even though the mailbox is empty;
-        -- admitting exactly one lets the consumer make progress while still
-        -- preventing any additional payload from accumulating behind it.
-        firstOversizedSingleton =
-            Seq.null state.mailboxPendingEvents
-                && count == 1
-        oversizedKeyedReplacement =
-            Seq.length state.mailboxPendingEvents == 1
-                && count == 1
-                && isJust (appEventCoalesceKey event)
-    check
-        ( count <= countLimit
-            && ( payloadBytes <= byteLimit
-                || firstOversizedSingleton
-                || oversizedKeyedReplacement
-               )
-        )
-    writeTVar stateRef state
-        { mailboxPendingEvents = pending
-        , mailboxPendingCount = count
-        , mailboxPendingBytes = payloadBytes
-        , mailboxHighWaterCount =
-            max state.mailboxHighWaterCount count
-        , mailboxHighWaterBytes =
-            max state.mailboxHighWaterBytes payloadBytes
-        }
+    unless state.mailboxClosed do
+        let (pending, payloadBytes) =
+                appendAppEventAccounted
+                    event
+                    state.mailboxPendingEvents
+                    state.mailboxPendingBytes
+            count = Seq.length pending
+            control = isControlAppEvent event
+            countLimit =
+                appEventMailboxCapacity
+                    + if control then appEventMailboxControlReserve else 0
+            byteLimit =
+                appEventMailboxPayloadBudgetBytes
+                    + if control then appEventMailboxControlReserveBytes else 0
+            -- An indivisible event may itself exceed the budget. Refusing that
+            -- first event would retry forever even though the mailbox is empty;
+            -- admitting exactly one lets the consumer make progress while still
+            -- preventing any additional payload from accumulating behind it.
+            firstOversizedSingleton =
+                Seq.null state.mailboxPendingEvents
+                    && count == 1
+            oversizedKeyedReplacement =
+                Seq.length state.mailboxPendingEvents == 1
+                    && count == 1
+                    && isJust (appEventCoalesceKey event)
+        check
+            ( count <= countLimit
+                && ( payloadBytes <= byteLimit
+                    || firstOversizedSingleton
+                    || oversizedKeyedReplacement
+                   )
+            )
+        writeTVar stateRef state
+            { mailboxPendingEvents = pending
+            , mailboxPendingCount = count
+            , mailboxPendingBytes = payloadBytes
+            , mailboxHighWaterCount =
+                max state.mailboxHighWaterCount count
+            , mailboxHighWaterBytes =
+                max state.mailboxHighWaterBytes payloadBytes
+            }
 
 appendAppEventAccounted
     :: AppEvent

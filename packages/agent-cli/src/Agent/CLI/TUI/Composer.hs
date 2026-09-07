@@ -4,6 +4,7 @@ module Agent.CLI.TUI.Composer
     , KillDirection(..)
     , activateSlashAt
     , appendFullscreenInput
+    , closeFullscreenInputBuffer
     , applyComposerUiEvent
     , combineKill
     , composerEscapeAction
