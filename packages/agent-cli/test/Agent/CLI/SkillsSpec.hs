@@ -201,9 +201,22 @@ spec = describe "Agent.CLI.Skills" do
         resolvePromptSkillMentions True invocations pastedSql
             `shouldBe` Right []
         resolvePromptSkillMentions False invocations pastedSql
-            `shouldSatisfy` isLeft
+            `shouldBe` Right []
         resolvePromptSkillMentions False invocations "please $deploy"
             `shouldBe` Right invocations
+
+    it "warns about unknown skill mentions without rejecting the prompt" do
+        let invocations = [SkillInvocation "deploy" fakeSkill True]
+        resolvePromptSkillMentionsWithWarnings
+            False
+            invocations
+            "compare $missing with $deploy"
+            `shouldBe`
+                ( [ "unknown skill: missing"
+                        <> " (available: deploy)"
+                  ]
+                , invocations
+                )
 
     it "installs a deferred catalog, invocations, and startup context together" do
         context <- newIORef (Just "agents")

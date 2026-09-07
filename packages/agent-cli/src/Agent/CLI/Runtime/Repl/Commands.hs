@@ -130,7 +130,7 @@ import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Skills
     ( formatSkillsListing
-    , resolvePromptSkillMentions
+    , resolvePromptSkillMentionsWithWarnings
     )
 import Agent.CLI.Status ( applyReplMode, cycleReplInteraction )
 import Agent.CLI.Style
@@ -155,7 +155,7 @@ import Agent.CLI.Terminal
     )
 import Agent.CLI.Turn ( runOneTurn )
 import Agent.Loop
-    ( LoopEvent(ActivityUpdated)
+    ( LoopEvent(ActivityUpdated, WarningRaised)
     , TurnAttachment(ImageAttachmentItem)
     , TurnInput(UserMessage)
     , userMessageWithAttachments
@@ -1606,13 +1606,21 @@ preparePromptSkillInputsWithPaste
     -> IO (Either Text [TurnInput])
 preparePromptSkillInputsWithPaste env pasted prompt inputs = do
     invocations <- readIORef env.sessionSkillInvocations
-    pure do
-        selected <- resolvePromptSkillMentions pasted invocations prompt
-        let activations =
-                [ UserMessage (formatSkillActivation invocation prompt)
-                | invocation <- selected
-                ]
-        pure (activations <> inputs)
+    let (warnings, selected) =
+            resolvePromptSkillMentionsWithWarnings pasted invocations prompt
+        activations =
+            [ UserMessage (formatSkillActivation invocation prompt)
+            | invocation <- selected
+            ]
+    mapM_ reportWarning warnings
+    pure (Right (activations <> inputs))
+  where
+    reportWarning warning =
+        let message = "Ignoring skill mention: " <> warning
+        in case env.sessionFullscreen of
+            Nothing -> renderEvent env.sessionRender (WarningRaised message)
+            Just runtime ->
+                emitUiEvent runtime (UiSystemMessage ("Warning: " <> message))
 
 putTrailingNewline :: RenderConfig -> IO ()
 putTrailingNewline render = do
