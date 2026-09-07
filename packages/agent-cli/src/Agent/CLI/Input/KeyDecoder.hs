@@ -12,6 +12,7 @@ module Agent.CLI.Input.KeyDecoder
     , isClipboardPasteKey
     , isClipboardPasteCsiBody
     , isShiftEnterCsiBody
+    , isShiftTabCsiBody
     , splitFields
     , listAt
     , stripFinal
@@ -19,7 +20,7 @@ module Agent.CLI.Input.KeyDecoder
     ) where
 
 import Agent.CLI.Input.Types (EditorKey(..), KittyKey(..))
-import Agent.CLI.Terminal (shiftEnterCsiBodies)
+import Agent.CLI.Terminal (shiftEnterCsiBodies, shiftTabCsiBodies)
 import Data.Bits ((.&.))
 import Data.Char (ord)
 import Data.Maybe (fromMaybe)
@@ -48,6 +49,9 @@ isClipboardPasteCsiBody body =
 
 isShiftEnterCsiBody :: String -> Bool
 isShiftEnterCsiBody body = body `elem` shiftEnterCsiBodies
+
+isShiftTabCsiBody :: String -> Bool
+isShiftTabCsiBody body = body `elem` shiftTabCsiBodies
 
 parseKittyKey :: String -> Maybe KittyKey
 parseKittyKey body = do

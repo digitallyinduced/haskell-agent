@@ -26,6 +26,7 @@ module Agent.CLI.Input
     , isClipboardPasteCsiBody
     , isClipboardPasteKey
     , isShiftEnterCsiBody
+    , isShiftTabCsiBody
     , submissionPromptText
     , appendReplHistory
     , readReplHistory
@@ -498,6 +499,7 @@ readCsiKey =
         Left err -> pure (EditorInputError err)
         Right body
             | isShiftEnterCsiBody body -> pure (EditorChar '\n')
+            | isShiftTabCsiBody body -> pure EditorCycleMode
             | isClipboardPasteCsiBody body -> readClipboardEditorKey
             | Just key <- decodeKittyEditorKey body -> pure key
             | otherwise -> case body of

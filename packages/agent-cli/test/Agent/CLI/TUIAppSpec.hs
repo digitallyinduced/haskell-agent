@@ -1124,6 +1124,18 @@ spec = do
                   , "\ESC[13;2u"
                   , V.EvKey V.KEnter [V.MShift]
                   )
+                , ( Nothing
+                  , "\ESC[27;2;9~"
+                  , V.EvKey V.KBackTab []
+                  )
+                , ( Nothing
+                  , "\ESC[9;2u"
+                  , V.EvKey V.KBackTab []
+                  )
+                , ( Nothing
+                  , "\ESC[9;2:1u"
+                  , V.EvKey V.KBackTab []
+                  )
                 ]
             mapM_
                 (\mapping -> mappings `shouldContain` [mapping])

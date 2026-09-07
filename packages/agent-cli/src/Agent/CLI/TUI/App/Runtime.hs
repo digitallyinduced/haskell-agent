@@ -82,6 +82,7 @@ import Agent.CLI.Terminal ( TerminalCapabilities(..)
     , kittyKeyboardPop
     , kittySuperCsiBodies
     , shiftEnterCsiBodies
+    , shiftTabCsiBodies
     )
 import qualified Agent.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
@@ -835,6 +836,13 @@ fullscreenVtyConfig =
               , V.EvKey V.KEnter [V.MShift]
               )
             | body <- shiftEnterCsiBodies
+            ]
+            <>
+            [ ( Nothing
+              , "\ESC[" <> body
+              , V.EvKey V.KBackTab []
+              )
+            | body <- shiftTabCsiBodies
             ]
             <> [ ( Nothing
                  , "\ESC[" <> body
