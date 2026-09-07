@@ -12,7 +12,7 @@ spec = describe "validateNativeTurnRequest" do
             request { nativeTurnSession = NativeResumeSession "session-1" }
             `shouldBe` Right ()
 
-    it "accepts ask and plan interaction with every shell mode" do
+    it "accepts every interaction and shell mode" do
         mapM_ (\mode ->
             mapM_ (\shell ->
                 validateNativeTurnRequest request
@@ -21,12 +21,7 @@ spec = describe "validateNativeTurnRequest" do
                     }
                     `shouldBe` Right ())
                 [NativeShellNone, NativeShellBash, NativeShellGhci, NativeShellBoth])
-            [NativeAsk, NativePlan]
-
-    it "rejects auto-approval before execution" do
-        validateNativeTurnRequest
-            request { nativeTurnInteractionMode = NativeYolo }
-            `shouldBe` Left "typed native turns do not support auto-approval"
+            [NativeAsk, NativePlan, NativeYolo]
 
     it "rejects empty and whitespace-only resume identifiers" do
         mapM_ (\sessionId ->
@@ -35,12 +30,12 @@ spec = describe "validateNativeTurnRequest" do
                 `shouldBe` Left "native resume session id must not be empty")
             ["", " \n\t"]
 
-    it "preserves auto-approval error precedence for invalid resume requests" do
+    it "rejects invalid resume requests in auto-approval mode" do
         validateNativeTurnRequest request
             { nativeTurnInteractionMode = NativeYolo
             , nativeTurnSession = NativeResumeSession ""
             }
-            `shouldBe` Left "typed native turns do not support auto-approval"
+            `shouldBe` Left "native resume session id must not be empty"
 
 request :: NativeTurnRequest
 request = NativeTurnRequest

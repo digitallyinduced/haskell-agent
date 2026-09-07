@@ -97,6 +97,7 @@ data ServerConfig = ServerConfig
     , serverTenantRegistry :: !(Maybe FilePath)
     , serverTenantStateRoot :: !(Maybe FilePath)
     , serverSandboxRunner :: !(Maybe FilePath)
+    , serverYolo :: !Bool
     , serverCorsOrigins :: ![String]
     , serverWorkspaceRoots :: ![FilePath]
     , serverMaxConcurrentTurns :: !Int
@@ -130,6 +131,7 @@ data ResolvedServerConfig = ResolvedServerConfig
     , resolvedHome :: !FilePath
     , resolvedStateDirectory :: !FilePath
     , resolvedServerMode :: !ResolvedServerMode
+    , resolvedYolo :: !Bool
     , resolvedMaxConcurrentTurns :: !Int
     , resolvedMaxConcurrentTurnsPerTenant :: !Int
     , resolvedMaxQueuedTurns :: !Int
@@ -150,6 +152,7 @@ defaultServerConfig = ServerConfig
     , serverTenantRegistry = Nothing
     , serverTenantStateRoot = Nothing
     , serverSandboxRunner = Nothing
+    , serverYolo = False
     , serverCorsOrigins = []
     , serverWorkspaceRoots = []
     , serverMaxConcurrentTurns = 3
@@ -228,6 +231,10 @@ serverConfigParser =
                     <> help
                         "Prebuilt per-tenant microVM runner executable"
                 ))
+        <*> switch
+            ( long "yolo"
+                <> help "Auto-approve mutating tools for server turns"
+            )
         <*> manyStringOption
             "cors-origin"
             "ORIGIN"
@@ -376,6 +383,7 @@ resolveServerConfigWithTrustPolicy trustPolicy config
                 , resolvedHome = home
                 , resolvedStateDirectory = home </> ".haskell-agent"
                 , resolvedServerMode = mode
+                , resolvedYolo = config.serverYolo
                 , resolvedMaxConcurrentTurns =
                     config.serverMaxConcurrentTurns
                 , resolvedMaxConcurrentTurnsPerTenant =

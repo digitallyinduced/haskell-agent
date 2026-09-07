@@ -120,9 +120,8 @@ nativeProcessIntegrationSupervisor = (.nativeIntegrationSupervisor)
 -- | Execute one typed native turn without reconstructing command-line
 -- arguments.
 --
--- Auto-approval is deliberately unavailable through this entry point. Native
--- HTTP and embedding transports must surface approval requests through hooks
--- instead of silently inheriting the CLI's non-interactive yolo behavior.
+-- Approval behavior is explicit on the typed request and is carried through
+-- native hooks rather than inferred from CLI flags.
 runNativeTurn
     :: NativeProcessRuntime
     -> Handle
