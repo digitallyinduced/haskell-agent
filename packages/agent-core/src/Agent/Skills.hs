@@ -73,12 +73,14 @@ import System.FilePath
     , (</>)
     )
 
--- | Filesystem skill tree owned by this harness.
--- Other coding harnesses keep skills under vendor directories such as
--- @.codex/skills@, @.grok/skills@, and @.claude/skills@; those are not
--- discovered.
+-- | Filesystem skill tree.
+-- @HaskellAgentSkills@ is this product's home (@.haskell-agent/skills@).
+-- @AgentSkills@ is the shared Agent Skills location (@.agents/skills@).
+-- Vendor trees such as @.codex/skills@, @.grok/skills@, and @.claude/skills@
+-- are not discovered.
 data SkillOrigin
     = AgentSkills
+    | HaskellAgentSkills
     deriving (Eq, Ord, Show)
 
 data SkillScope
@@ -316,21 +318,27 @@ skillRoots options = do
                 directoryChain (unsafeEncodeUtf projectRoot) (unsafeEncodeUtf cwd)
         projectRoots =
             [ ( RepositorySkill depth (dir == cwd)
-              , AgentSkills
-              , dir </> agentSkillsRelativeRoot
+              , origin
+              , dir </> relativeRoot
               )
             | (depth, dir) <- zip [0..] dirs
+            , (origin, relativeRoot) <- filesystemSkillRoots
             ]
         userRoots =
-            [(UserSkill, AgentSkills, home </> agentSkillsRelativeRoot)]
+            [ (UserSkill, origin, home </> relativeRoot)
+            | (origin, relativeRoot) <- filesystemSkillRoots
+            ]
         builtinRoots =
             [ (BuiltinSkill, origin, unsafeToFilePath root)
             | (origin, root) <- options.skillsBuiltinRoots
             ]
     pure (projectRoots <> userRoots <> builtinRoots)
 
-agentSkillsRelativeRoot :: FilePath
-agentSkillsRelativeRoot = ".agents" </> "skills"
+filesystemSkillRoots :: [(SkillOrigin, FilePath)]
+filesystemSkillRoots =
+    [ (HaskellAgentSkills, ".haskell-agent" </> "skills")
+    , (AgentSkills, ".agents" </> "skills")
+    ]
 
 findSkillFiles :: Int -> FilePath -> IO ([FilePath], [SkillWarning])
 findSkillFiles maxDepth root = do
@@ -639,6 +647,7 @@ skillSortKey skill =
                     UserSkill -> (0, 0)
                     RepositorySkill d _ -> (1, d)
                 sourceOriginRank = case origin of
+                    HaskellAgentSkills -> 2
                     AgentSkills -> 1
             in (rank, sourceDepth, sourceOriginRank)
 
@@ -736,6 +745,7 @@ scopeQualifier skill = case skill.skillSource of
 
 originSlug :: SkillOrigin -> Text
 originSlug = \case
+    HaskellAgentSkills -> "haskell-agent"
     AgentSkills -> "agents"
 
 sourceSlug :: Skill -> Text

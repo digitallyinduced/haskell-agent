@@ -418,6 +418,11 @@ The built-in `learn-about-user` skill can derive consent-reviewed technical
 defaults from a confirmed public GitHub profile. Invoke it with
 `/learn-about-user`, `$learn-about-user`, or a natural-language request.
 
+The built-in `skill-installer` skill installs Agent Skills from a GitHub
+repository, gist, URL, or local path into `~/.haskell-agent/skills` or the
+project's `.haskell-agent/skills` directory. Invoke it with `/skill-installer`,
+`$skill-installer`, or a natural-language request such as “install this skill”.
+
 ### Authentication
 
 Works with your Codex, Grok, Google, and Claude accounts, plus provider API

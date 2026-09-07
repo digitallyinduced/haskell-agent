@@ -61,6 +61,27 @@ spec = describe "Agent.Skills" do
             map (.skillName) catalog.catalogSkills `shouldBe` ["ours"]
             catalog.catalogWarnings `shouldBe` []
 
+    it "discovers haskell-agent skills and prefers them over same-named agents skills" do
+        withTempDir \dir -> do
+            let home = dir </> "home"
+                repo = dir </> "repo"
+            writeSkill (home </> ".agents" </> "skills" </> "commit")
+                "commit" "agents commit" []
+            writeSkill (home </> ".haskell-agent" </> "skills" </> "commit")
+                "commit" "harness commit" []
+            writeSkill (home </> ".haskell-agent" </> "skills" </> "review")
+                "review" "harness review" []
+            writeSkill (repo </> ".haskell-agent" </> "skills" </> "deploy")
+                "deploy" "repo harness deploy" []
+            catalog <- discoverSkills (options home repo repo)
+            map (.skillDescription) catalog.catalogSkills
+                `shouldBe`
+                    [ "repo harness deploy"
+                    , "harness commit"
+                    , "harness review"
+                    , "agents commit"
+                    ]
+
     it "parses Grok fields and Codex invocation policy" do
         withTempDir \dir -> do
             let home = dir </> "home"

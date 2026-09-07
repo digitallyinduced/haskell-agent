@@ -459,6 +459,7 @@ skillSourceLabel skill =
         RepositorySkill _ True -> "local"
         RepositorySkill _ False -> "repo"
     originLabel = \case
+        HaskellAgentSkills -> "haskell-agent"
         AgentSkills -> "agents"
 
 formatSkillsListing

@@ -20,6 +20,7 @@ data-files:         data/CHANGELOG.md
                   , skills/resume-cursor/SKILL.md
                   , skills/resume-grok/SKILL.md
                   , skills/shared/resume-session/CORE.md
+                  , skills/skill-installer/SKILL.md
                   , skills/telegram-agent/SKILL.md
                   , skills/wait-for-ci/SKILL.md
 
