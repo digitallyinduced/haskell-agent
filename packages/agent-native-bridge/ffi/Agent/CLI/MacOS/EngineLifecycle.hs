@@ -10,7 +10,12 @@ import Agent.CLI.MacOS.EngineState
 import Agent.CLI.MacOS.EngineStore (closeEngineStore)
 import Agent.CLI.MacOS.InteractionState
 import Agent.CLI.MacOS.McpAdminBridge (invokeMcpResultCallback)
-import Agent.CLI.MacOS.NativeSupervisor (supervisorLoop, shutdownRunningTurns)
+import Agent.CLI.MacOS.NativeSupervisor
+    ( newIntegrationWorkerRegistry
+    , shutdownIntegrationWorkers
+    , shutdownRunningTurns
+    , supervisorLoop
+    )
 import Agent.CLI.MacOS.TurnState
 import Agent.CLI.MacOS.Marshalling (withText)
 import Agent.CLI.NativeRuntime
@@ -47,8 +52,10 @@ workerLifecycle
         store <- newMVar Nothing
         processRuntime <- newNativeProcessRuntime root
         workerRegistry <- newTVarIO Map.empty
+        integrationWorkers <- newIntegrationWorkerRegistry
         let cleanup =
                 shutdownRunningTurns workerRegistry
+                    `finally` shutdownIntegrationWorkers integrationWorkers
                     `finally` closeNativeProcessRuntime processRuntime
                     `finally` closeEngineStore store
         supervisorLoop
@@ -59,6 +66,7 @@ workerLifecycle
             root
             processRuntime
             commands
+            integrationWorkers
             stagedImages
             browser
             computer

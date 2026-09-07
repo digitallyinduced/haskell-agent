@@ -10,6 +10,11 @@ import Agent.CLI.MacOS.Bridge
     , nativeTurnRouteMatchesBoundary
     , nativeTurnArguments
     )
+import Agent.CLI.MacOS.NativeSupervisor
+    ( launchIntegrationWorkerWith
+    , newIntegrationWorkerRegistry
+    , shutdownIntegrationWorkers
+    )
 import Agent.CLI.NativeRuntime (StartupFailure(..))
 import Control.Concurrent
     ( newEmptyMVar
@@ -31,6 +36,7 @@ import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.IORef
     ( atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef )
 import Data.Maybe (isNothing)
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
@@ -42,6 +48,47 @@ spec = do
     nativeSessionBoundarySpec
     nativeTurnBoundarySpec
     nativeFailureSpec
+    integrationWorkerSpec
+
+integrationWorkerSpec :: Spec
+integrationWorkerSpec =
+    describe "native integration worker supervision" do
+        it "keeps the mailbox launch nonblocking and completes once on shutdown" do
+            registry <- newIntegrationWorkerRegistry
+            started <- newEmptyMVar
+            callbacks <- newIORef ([] :: [String])
+            launched <- timeout 1000000 $
+                launchIntegrationWorkerWith
+                    registry
+                    (\result ->
+                        atomicModifyIORef' callbacks \current ->
+                            ( current
+                                <> [either show (const "success") result]
+                            , ()
+                            ))
+                    do
+                        putMVar started ()
+                        threadDelay maxBound
+                        pure (Left "unexpected")
+            launched `shouldBe` Just ()
+            takeMVar started
+            timeout 1000000 (shutdownIntegrationWorkers registry)
+                `shouldReturn` Just ()
+            readIORef callbacks
+                `shouldReturn`
+                    [ "\"engine stopped before integration operation completed\""
+                    ]
+
+        it "turns operation exceptions into one terminal failure" do
+            registry <- newIntegrationWorkerRegistry
+            callback <- newEmptyMVar
+            launchIntegrationWorkerWith
+                registry
+                (putMVar callback . either id (const "success"))
+                (throwString "boom")
+            timeout 1000000 (takeMVar callback)
+                `shouldReturn` Just "integration admin operation failed"
+            shutdownIntegrationWorkers registry
 
 computerUseSpec :: Spec
 computerUseSpec = describe "native computer-use turn propagation" do

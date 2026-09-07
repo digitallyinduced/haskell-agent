@@ -821,37 +821,43 @@
                                 pkgs.zstd
                             ]);
                         agent-native-bridge = localPackage
-                            ((pkgs.haskell.lib.overrideSrc
-                                (final.callPackage
-                                    ./packages/agent-native-bridge/package.nix
-                                    { })
-                                {
-                                    src =
-                                        if packageMode != "production"
-                                            then agentNativeBridgeCheckSource
-                                            else agentNativeBridgeProductionSource;
-                                }).overrideAttrs (old: {
-                                    # Keep revision volatility in this final
-                                    # frontend instead of agent-core, where it
-                                    # would invalidate every dependent package.
-                                    configureFlags =
-                                        (old.configureFlags or [ ])
-                                        ++ pkgs.lib.optionals
-                                            (packageMode != "check")
-                                            [
-                                                "--ghc-option=-optc-DAGENT_BUILD_COMMIT=${agentBuildCommit}"
-                                            ];
-                                    # GHC's Darwin native-shared output is
-                                    # already linked for runtime loading.
-                                    # Stripping it in the package can turn it
-                                    # into an object file, so exclude only the
-                                    # bridge dylib.
-                                    stripExclude =
-                                        (old.stripExclude or [ ])
-                                        ++ pkgs.lib.optionals
-                                            pkgs.stdenv.hostPlatform.isDarwin
-                                            [ "lib/libhaskell-agent-bridge.dylib" ];
-                                }));
+                            (pkgs.haskell.lib.addBuildDepends
+                                ((pkgs.haskell.lib.overrideSrc
+                                    (final.callPackage
+                                        ./packages/agent-native-bridge/package.nix
+                                        { })
+                                    {
+                                        src =
+                                            if packageMode != "production"
+                                                then agentNativeBridgeCheckSource
+                                                else agentNativeBridgeProductionSource;
+                                    }).overrideAttrs (old: {
+                                        # Keep revision volatility in this final
+                                        # frontend instead of agent-core, where it
+                                        # would invalidate every dependent package.
+                                        configureFlags =
+                                            (old.configureFlags or [ ])
+                                            ++ pkgs.lib.optionals
+                                                (packageMode != "check")
+                                                [
+                                                    "--ghc-option=-optc-DAGENT_BUILD_COMMIT=${agentBuildCommit}"
+                                                ];
+                                        # GHC's Darwin native-shared output is
+                                        # already linked for runtime loading.
+                                        # Stripping it in the package can turn it
+                                        # into an object file, so exclude only the
+                                        # bridge dylib.
+                                        stripExclude =
+                                            (old.stripExclude or [ ])
+                                            ++ pkgs.lib.optionals
+                                                pkgs.stdenv.hostPlatform.isDarwin
+                                                [ "lib/libhaskell-agent-bridge.dylib" ];
+                                    }))
+                                # cabal2nix does not include foreign-library
+                                # dependencies in libraryHaskellDepends.
+                                [ final.agent-repository
+                                  final.agent-runtime-daemon
+                                ]);
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
                                 src =
