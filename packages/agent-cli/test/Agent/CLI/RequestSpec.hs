@@ -190,6 +190,48 @@ spec = describe "requestParams" do
                         map Just ["lookup", "exec", "existing", "last"]
             _ -> expectationFailure "expected three top-level Lite tools"
 
+    it "omits async tool declarations from GPT-6 Astra Responses Lite" do
+        let params =
+                requestParams
+                    OpenAIProvider
+                    "gpt-6-astra"
+                    "base instructions"
+                    [ setToolAsync (functionTool "lookup")
+                    , setToolAsync (customTool "exec")
+                    , namespaceTool
+                        "editor"
+                        Nothing
+                        [setToolAsync (functionTool "edit")]
+                    ]
+                    "high"
+            tools = additionalToolValues params
+            functions = functionsNamespaceTools tools
+            editor = maybe [] (jsonArrayField "tools") $
+                findValue
+                    (\value -> toolIdentity value
+                        == (Just "namespace", Just "editor"))
+                    tools
+
+        map (jsonValueField "async") functions
+            `shouldBe` [Nothing, Nothing]
+        map (jsonValueField "async") editor
+            `shouldBe` [Nothing]
+
+    it "keeps async tool declarations on conventional Responses requests" do
+        let asyncFunction = setToolAsync (functionTool "lookup")
+            params =
+                requestParams
+                    OpenRouterProvider
+                    "gpt-6-astra"
+                    "base instructions"
+                    [asyncFunction]
+                    "high"
+
+        params.tools `shouldBe` Just [asyncFunction]
+        map (jsonValueField "async")
+            (jsonArrayField "tools" (Aeson.toJSON params))
+            `shouldBe` [Just (Aeson.Bool True)]
+
     it "refreshes the Lite prefix without dropping pending input" do
         let computerTool = functionTool computerFunctionName
             pending = userMessage "keep me"
@@ -407,6 +449,14 @@ namespaceTool namespaceName namespaceDescription nestedTools =
         , tools = nestedTools
         }
 
+setToolAsync :: ResponseTool -> ResponseTool
+setToolAsync = \case
+    FunctionToolValue tool ->
+        FunctionToolValue tool { async = Just True }
+    CustomToolValue tool ->
+        CustomToolValue tool { async = Just True }
+    tool -> tool
+
 userMessage :: Text -> ResponseItem
 userMessage value = MessageItem ResponseMessage
     { messageId = Nothing
@@ -464,6 +514,11 @@ toolIdentity value =
     ( jsonTextField "type" value
     , jsonTextField "name" value
     )
+
+jsonValueField :: Text -> Aeson.Value -> Maybe Aeson.Value
+jsonValueField fieldName = \case
+    Aeson.Object object -> KeyMap.lookup (Key.fromText fieldName) object
+    _ -> Nothing
 
 jsonTextField :: Text -> Aeson.Value -> Maybe Text
 jsonTextField fieldName = \case
