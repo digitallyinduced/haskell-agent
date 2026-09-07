@@ -10,12 +10,15 @@ import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
     ( initialFullscreenAppState
+    , conversationScrollbarRenderer
     , drawBlock
     , drawConversationBlocks
     , drawTranscript
+    , drawTranscriptChunks
     , newFullscreenInputBuffer
     , newFullscreenRuntimeWithSyntaxLoader
     )
+import Agent.CLI.TUI.MeasuredViewport (measuredViewport)
 import Agent.CLI.TUI.History
     ( HistoryCursor(..)
     , HistoryGeneration(..)
@@ -40,10 +43,13 @@ import Agent.TUI.Model
 import Agent.TUI.Motion (MotionMode(..))
 import Brick
     ( Padding(..)
+    , Location(..)
     , ViewportType(..)
+    , VScrollBarOrientation(..)
     , Widget
     , attrMap
     , cached
+    , emptyWidget
     , hBox
     , padBottom
     , padLeftRight
@@ -51,7 +57,10 @@ import Brick
     , txt
     , txtWrap
     , vBox
+    , visibleRegion
     , viewport
+    , withVScrollBars
+    , withVScrollBarRenderer
     )
 import Brick.Types (RenderState)
 import Control.DeepSeq (force)
@@ -63,10 +72,12 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Lazy as LazyText
 import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Stats (RTSStats(..), getRTSStats)
 import qualified Graphics.Vty as V
 import Graphics.Vty.PictureToSpans (displayOpsForPic)
+import Graphics.Vty.Span (SpanOp(..))
 import System.CPUTime (getCPUTime)
 import System.Environment (getArgs)
 import System.Mem (performGC)
@@ -74,8 +85,12 @@ import System.Mem (performGC)
 data Workload
     = HistoryPerBlock
     | HistoryChunkCache
+    | HistoryMeasuredViewport
+    | HistoryChunkCacheTrace
+    | HistoryMeasuredViewportTrace
     | PerBlockCache
     | ChunkCache
+    deriving (Eq)
 
 data Sample = Sample
     { elapsedMillis :: !Double
@@ -95,24 +110,30 @@ main = do
             rawState <- benchmarkState blockCount bodyLines
             let state = prepareHistory workload rawState 0
             let widgetForFrame = productionWidget workload state
-            initialState <- warmCache (widgetForFrame 0)
+            initialState <- warmCache
+                (regionForFrame workload 0)
+                (widgetForFrame 0)
             stateRef <- newIORef initialState
             samples <-
                 replicateM sampleCount $
-                    measure redrawsPerSample widgetForFrame stateRef
+                    measure workload redrawsPerSample widgetForFrame stateRef
             printSample workloadText blockCount bodyLines sampleCount redrawsPerSample
                 (median samples)
             coldSamples <- mapM
                 (\frame -> measureAction $
-                    warmCache (productionWidget workload
-                        (prepareHistory workload rawState frame) frame))
+                    warmCache
+                        (regionForFrame workload frame)
+                        (productionWidget workload
+                            (prepareHistory workload rawState frame)
+                            frame))
                 [1 .. sampleCount]
             printSample (workloadText <> "-setup-first-render")
                 blockCount bodyLines sampleCount 1 (median coldSamples)
         _ ->
             error
                 "usage: transcript-scrolling-bench \
-                \(history-per-block|history-chunk-cache|\
+                \(history-per-block|history-chunk-cache|history-measured-viewport|\
+                \history-chunk-cache-trace|history-measured-viewport-trace|\
                 \per-block-cache|chunk-cache) \
                 \BLOCKS BODY_LINES SAMPLES"
 
@@ -120,6 +141,9 @@ parseWorkload :: String -> IO Workload
 parseWorkload = \case
     "history-per-block" -> pure HistoryPerBlock
     "history-chunk-cache" -> pure HistoryChunkCache
+    "history-measured-viewport" -> pure HistoryMeasuredViewport
+    "history-chunk-cache-trace" -> pure HistoryChunkCacheTrace
+    "history-measured-viewport-trace" -> pure HistoryMeasuredViewportTrace
     "per-block-cache" -> pure PerBlockCache
     "chunk-cache" -> pure ChunkCache
     other -> error ("unknown workload: " <> other)
@@ -127,12 +151,37 @@ parseWorkload = \case
 {-# NOINLINE productionWidget #-}
 productionWidget :: Workload -> AppState -> Int -> Widget Name
 productionWidget workload state frame =
-    viewport ConversationViewport Vertical $ padLeftRight 2 $
-        case workload of
-            HistoryPerBlock -> oldHistoryWidget framedState
-            HistoryChunkCache -> drawTranscript framedState
-            PerBlockCache -> syntheticTranscriptWidget PerBlockCache framedState
-            ChunkCache -> syntheticTranscriptWidget ChunkCache framedState
+    case workload of
+        HistoryMeasuredViewport ->
+            measuredViewport ConversationViewport 0 $
+                map (padLeftRight 2) (drawTranscriptChunks framedState)
+        HistoryChunkCacheTrace ->
+            withVScrollBarRenderer conversationScrollbarRenderer $
+            withVScrollBars OnRight $
+                viewport ConversationViewport Vertical $
+                    vBox
+                        [ traceMarker frame
+                        , padLeftRight 2 (drawTranscript framedState)
+                        ]
+        HistoryMeasuredViewportTrace ->
+            withVScrollBarRenderer conversationScrollbarRenderer $
+            withVScrollBars OnRight $
+                measuredViewport ConversationViewport 1 $
+                    traceMarker frame
+                        : map (padLeftRight 2)
+                            (drawTranscriptChunks framedState)
+        _ ->
+            viewport ConversationViewport Vertical $ padLeftRight 2 $
+                case workload of
+                    HistoryPerBlock -> oldHistoryWidget framedState
+                    HistoryChunkCache -> drawTranscript framedState
+                    HistoryMeasuredViewport -> error "unreachable"
+                    HistoryChunkCacheTrace -> error "unreachable"
+                    HistoryMeasuredViewportTrace -> error "unreachable"
+                    PerBlockCache ->
+                        syntheticTranscriptWidget PerBlockCache framedState
+                    ChunkCache ->
+                        syntheticTranscriptWidget ChunkCache framedState
   where
     framedState = state
         { appUi = state.appUi{uiElapsedMillis = frame} }
@@ -146,6 +195,9 @@ prepareHistory workload state frame =
         { appUi = state.appUi{uiElapsedMillis = frame}
         , appHistoryWindow = case workload of
             HistoryChunkCache -> setHistoryWindowTurns turns window
+            HistoryMeasuredViewport -> setHistoryWindowTurns turns window
+            HistoryChunkCacheTrace -> setHistoryWindowTurns turns window
+            HistoryMeasuredViewportTrace -> setHistoryWindowTurns turns window
             HistoryPerBlock -> window
                 { historyWindowTurnsByCursor = Map.fromList
                     [(turn.historyTurnCursor, turn) | turn <- toList turns]
@@ -311,47 +363,83 @@ redrawsPerSample = 25
 benchmarkRegion :: V.DisplayRegion
 benchmarkRegion = (100, 32)
 
-warmCache :: Widget Name -> IO (RenderState Name)
-warmCache widget = do
+warmCache :: V.DisplayRegion -> Widget Name -> IO (RenderState Name)
+warmCache region widget = do
     let (renderState, picture, _, _) =
             renderFinal
                 (attrMap V.defAttr [])
                 [widget]
-                benchmarkRegion
+                region
                 (const Nothing)
                 emptyRenderState
-    let !_ = force (show (displayOpsForPic picture benchmarkRegion))
+    let !_ = force (pictureScore region picture)
     pure renderState
 
+-- Force one visibility request per frame. Moving this request through the
+-- content exercises Brick's real viewport scroll-resolution path.
+traceMarker :: Int -> Widget n
+traceMarker frame =
+    visibleRegion
+        (Location (0, traceRows !! (frame `mod` length traceRows)))
+        (1, 1)
+        emptyWidget
+  where
+    traceRows = [0, 400, 1200, 80, 2400, 600, 3600, 160]
+
+regionForFrame :: Workload -> Int -> V.DisplayRegion
+regionForFrame workload frame
+    | workload `elem` [HistoryChunkCacheTrace, HistoryMeasuredViewportTrace] =
+        traceRegions !! (frame `mod` length traceRegions)
+    | otherwise = benchmarkRegion
+  where
+    traceRegions = [(100, 32), (76, 24), (120, 40), (92, 28)]
+
 measure
-    :: Int
+    :: Workload
+    -> Int
     -> (Int -> Widget Name)
     -> IORef (RenderState Name)
     -> IO Sample
-measure iterations widgetForFrame stateRef =
+measure workload iterations widgetForFrame stateRef =
     measureAction (redraw iterations 0)
   where
     redraw remaining checksum
         | remaining <= 0 = pure $! checksum
         | otherwise = do
             renderState <- readIORef stateRef
-            let widget = widgetForFrame (iterations - remaining)
+            let frame = iterations - remaining
+                region = regionForFrame workload frame
+                widget = widgetForFrame frame
                 (nextState, picture, _, extents) =
                     renderFinal
                         (attrMap V.defAttr [])
                         [widget]
-                        benchmarkRegion
+                        region
                         (const Nothing)
                         renderState
                 !rendered =
                     force
-                        ( show (displayOpsForPic picture benchmarkRegion)
+                        ( pictureScore region picture
                         , length extents
                         )
             writeIORef stateRef $! nextState
             redraw
                 (remaining - 1)
-                (checksum + length (fst rendered) + snd rendered)
+                (checksum + fst rendered + snd rendered)
+
+pictureScore :: V.DisplayRegion -> V.Picture -> Int
+pictureScore region picture =
+    sum
+        [ spanScore span
+        | row <- toList (displayOpsForPic picture region)
+        , span <- toList row
+        ]
+  where
+    spanScore (TextSpan attr outputWidth charWidth text) =
+        length (show attr) + outputWidth + charWidth
+            + fromIntegral (LazyText.length text)
+    spanScore (Skip width) = width
+    spanScore (RowEnd width) = width
 
 measureAction :: IO a -> IO Sample
 measureAction action = do

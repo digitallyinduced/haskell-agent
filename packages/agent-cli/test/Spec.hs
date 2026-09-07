@@ -108,6 +108,7 @@ import qualified Agent.CLI.TUIHistorySpec as TUIHistorySpec
 import qualified Agent.CLI.TUIPropertySpec as TUIPropertySpec
 import qualified Agent.CLI.TUIScrollSpec as TUIScrollSpec
 import qualified Agent.CLI.TUITranscriptSpec as TUITranscriptSpec
+import qualified Agent.CLI.TUIMeasuredViewportSpec as TUIMeasuredViewportSpec
 import qualified Agent.CLI.UsageSpec as UsageSpec
 import qualified Agent.CLI.WebLspSpec as WebLspSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
@@ -239,6 +240,7 @@ specs = do
     TUIPropertySpec.spec
     TUIScrollSpec.spec
     TUITranscriptSpec.spec
+    TUIMeasuredViewportSpec.spec
     UsageSpec.spec
     WebLspSpec.spec
     WorktreeSpec.spec

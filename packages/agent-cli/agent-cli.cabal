@@ -270,6 +270,7 @@ library
                     , Agent.CLI.TUI.ImagePreview
                     , Agent.CLI.TUI.Scroll
                     , Agent.CLI.TUI.Transcript
+                    , Agent.CLI.TUI.MeasuredViewport
                     , Agent.CLI.TUI.Types
                     , Agent.CLI.Turn
                     , Agent.CLI.TurnState
@@ -591,6 +592,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TUIHistorySpec
                     , Agent.CLI.TUIScrollSpec
                     , Agent.CLI.TUITranscriptSpec
+                    , Agent.CLI.TUIMeasuredViewportSpec
                     , Agent.CLI.UsageSpec
                     , Agent.CLI.WebLspSpec
                     , Agent.CLI.WorktreeSpec

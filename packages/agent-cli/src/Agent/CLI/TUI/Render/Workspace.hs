@@ -40,8 +40,10 @@ import Agent.CLI.TUI.History ( HistoryWindow(historyWindowTurns) )
 import Agent.CLI.TUI.ImagePreview ()
 import Agent.CLI.TUI.LambdaArt ()
 import Agent.CLI.TUI.Motion ( isBackgroundAgentActive )
+import Agent.CLI.TUI.MeasuredViewport ( measuredViewport )
 import Agent.CLI.TUI.Render.Transcript
     ( drawTranscript,
+      drawTranscriptChunks,
       historyRangeWidgets,
       drawEmptyConversation,
       drawConversationBlocks )
@@ -210,9 +212,9 @@ drawConversationPane state =
                                 withVScrollBarRenderer
                                     conversationScrollbarRenderer $
                                     withVScrollBars OnRight $
-                                        viewport ConversationViewport Vertical $
-                                            padLeftRight 2
-                                                (drawTranscript state)
+                                        measuredViewport ConversationViewport 1 $
+                                            map (padLeftRight 2)
+                                                (drawTranscriptChunks state)
                            ]
 
 selectedChildEntry :: AppState -> Maybe AgentEntry
