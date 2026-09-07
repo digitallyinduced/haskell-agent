@@ -1,6 +1,10 @@
--- | macOS clipboard readers backed by pbpaste and AppleScript.
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
+
+-- | macOS clipboard metadata and readers backed by pbpaste and AppleScript.
 module Agent.CLI.Clipboard.MacOS
     ( readMacClipboardImage
+    , readMacClipboardMayContainImages
     , readMacClipboardPaths
     , readMacClipboardText
     ) where
@@ -23,6 +27,22 @@ import System.IO
     , withBinaryFile
     )
 import System.Process (readProcessWithExitCode)
+
+#if defined(darwin_HOST_OS)
+import Foreign.C.Types (CInt(..))
+
+foreign import ccall safe "agent_cli_clipboard_may_contain_images"
+    clipboardMayContainImages :: IO CInt
+#endif
+
+-- | Check advertised types without coercing or reading clipboard payloads.
+-- Inspection failures conservatively retain the existing image readers.
+readMacClipboardMayContainImages :: IO Bool
+#if defined(darwin_HOST_OS)
+readMacClipboardMayContainImages = (/= 0) <$> clipboardMayContainImages
+#else
+readMacClipboardMayContainImages = pure True
+#endif
 
 readMacClipboardImage :: IO (Either Text ImageAttachment)
 readMacClipboardImage = do
@@ -52,23 +72,25 @@ readMacClipboardPaths = do
     result <- tryAny $
         readProcessWithExitCode "osascript"
             [ "-e"
-            , "try\n\
-              \  set theFiles to the clipboard as list\n\
-              \  set paths to {}\n\
-              \  repeat with f in theFiles\n\
-              \    try\n\
-              \      set end of paths to POSIX path of f\n\
-              \    end try\n\
-              \  end repeat\n\
-              \  set AppleScript's text item delimiters to linefeed\n\
-              \  return paths as text\n\
-              \on error\n\
-              \  try\n\
-              \    return POSIX path of (the clipboard as «class furl»)\n\
-              \  on error\n\
-              \    return \"\"\n\
-              \  end try\n\
-              \end try"
+            , unlines
+                [ "try"
+                , "  set theFiles to the clipboard as list"
+                , "  set paths to {}"
+                , "  repeat with f in theFiles"
+                , "    try"
+                , "      set end of paths to POSIX path of f"
+                , "    end try"
+                , "  end repeat"
+                , "  set AppleScript's text item delimiters to linefeed"
+                , "  return paths as text"
+                , "on error"
+                , "  try"
+                , "    return POSIX path of (the clipboard as «class furl»)"
+                , "  on error"
+                , "    return \"\""
+                , "  end try"
+                , "end try"
+                ]
             ]
             ""
     pure $ case result of

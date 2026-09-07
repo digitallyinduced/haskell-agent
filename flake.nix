@@ -311,6 +311,7 @@
                     root = ./packages/agent-cli;
                     include = [
                         "app"
+                        "cbits"
                         "data"
                         "eval"
                         "skills"
@@ -324,6 +325,7 @@
                     root = ./packages/agent-cli;
                     include = [
                         "app"
+                        "cbits"
                         "data"
                         "eval"
                         "skills"

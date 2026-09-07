@@ -5,6 +5,7 @@ module Agent.CLI.Clipboard
     , readClipboardImage
     , readClipboardImages
     , readClipboardImagesImageFirst
+    , readClipboardImagesImageFirstWith
     , readClipboardImagesForPaste
     , readClipboardText
     , nonEmptyClipboardImages
@@ -23,6 +24,7 @@ import Agent.CLI.Clipboard.Linux
     )
 import Agent.CLI.Clipboard.MacOS
     ( readMacClipboardImage
+    , readMacClipboardMayContainImages
     , readMacClipboardPaths
     , readMacClipboardText
     )
@@ -79,21 +81,40 @@ readClipboardImages = do
 -- images usually expose bitmap data directly; checking Finder file coercions
 -- first is especially expensive on macOS because AppleScript may spend close
 -- to a second attempting to turn the bitmap into a file list.
+-- Inspect native macOS type metadata first so ordinary text does not attempt
+-- either image or file-list coercion. Image/file candidates and inspection
+-- failures retain the existing bitmap-first readers.
 readClipboardImagesImageFirst :: IO (Either Text [ImageAttachment])
-readClipboardImagesImageFirst = do
-    bitmap <- readClipboardImageBytes
-    case bitmap of
-        Right image -> pure (Right [image])
-        Left bitmapError -> do
-            paths <- readClipboardPaths
-            imagePaths <- filterM isImageFile paths
-            case imagePaths of
-                [] -> pure (Left bitmapError)
-                ps ->
-                    readImageFilesBounded ps >>= \case
-                        Right images@(_:_) -> pure (Right images)
-                        Right [] -> pure (Left bitmapError)
-                        Left err -> pure (Left err)
+readClipboardImagesImageFirst =
+    readClipboardImagesImageFirstWith $
+        if os == "darwin"
+        then readMacClipboardMayContainImages
+        else pure True
+
+-- | Supply metadata inspection independently of the payload readers. This
+-- permits deterministic reader tests and benchmarks without replacing the
+-- user's system clipboard. Return 'True' when inspection is unavailable.
+readClipboardImagesImageFirstWith
+    :: IO Bool
+    -> IO (Either Text [ImageAttachment])
+readClipboardImagesImageFirstWith inspectClipboardTypes = do
+    mayContainImages <- inspectClipboardTypes
+    if not mayContainImages
+        then pure (Left "no image found on the clipboard")
+        else do
+            bitmap <- readClipboardImageBytes
+            case bitmap of
+                Right image -> pure (Right [image])
+                Left bitmapError -> do
+                    paths <- readClipboardPaths
+                    imagePaths <- filterM isImageFile paths
+                    case imagePaths of
+                        [] -> pure (Left bitmapError)
+                        ps ->
+                            readImageFilesBounded ps >>= \case
+                                Right images@(_:_) -> pure (Right images)
+                                Right [] -> pure (Left bitmapError)
+                                Left err -> pure (Left err)
 
 -- | Read images for an explicit image-paste action and produce the richer
 -- text/path diagnostics without probing the clipboard a second time.
