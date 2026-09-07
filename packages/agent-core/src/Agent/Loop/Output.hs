@@ -48,6 +48,9 @@ emptyTurnOutput responseId toolCalls assistantText = TurnOutput
 
 data LoopEvent
     = TextDelta Text
+    -- | Plan markdown separated from ordinary assistant text by a
+    -- protocol-aware stream parser. Renderers never receive provider tags.
+    | PlanDelta Text
     | ReasoningDelta Text
     -- | Ephemeral transport/tool activity for the live CLI status line.
     | ActivityUpdated Text
@@ -104,6 +107,7 @@ data NativeAgentStatus
 visibleResponseActivity :: LoopEvent -> Bool
 visibleResponseActivity = \case
     TextDelta _ -> True
+    PlanDelta _ -> True
     ReasoningDelta _ -> True
     ToolStarted _ -> True
     ToolUpdated _ -> True

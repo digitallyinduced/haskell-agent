@@ -67,6 +67,22 @@ spec = describe "fullscreen UI reducer" do
             `shouldBe` ["hello", "checking", "answer"]
         state.uiRunning `shouldBe` False
 
+    it "renders typed plan content without provider protocol markup" do
+        let state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (PlanDelta "# Plan\n\n- Update the parser")
+                    , UiLoop
+                        (TurnFinished
+                            (emptyTurnOutput "r1" [] (Just "# Plan")))
+                    ]
+            blocks = Foldable.toList state.uiBlocks
+        map (.blockKind) blocks `shouldBe` [BlockAssistant]
+        map (.blockBody) blocks
+            `shouldBe` ["# Plan\n\n- Update the parser"]
+        Text.concat (map (.blockBody) blocks)
+            `shouldNotSatisfy` Text.isInfixOf "<proposed_plan>"
+
     it "shows compact provider telemetry in the completion status" do
         let telemetry = TurnTelemetry
                 { telemetryDurationMs = Just 1250

@@ -19,10 +19,15 @@ import Agent.CLI.MacOS.ComputerBridge
     , resetComputerSessionAccessibility
     )
 import Agent.ComputerUse.Protocol
-    ( SemanticComputerAction(..)
+    ( ComputerUseVerdict
+    , SemanticComputerAction(..)
     , SemanticComputerRequest(..)
     , SemanticComputerScalar(..)
+    , computerUseVerdictField
+    , observationComputerUseVerdict
+    , suspectedNoopComputerUseVerdict
     , semanticComputerRequestWireValue
+    , unverifiedComputerUseVerdict
     )
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -51,6 +56,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import Data.Either (isRight)
 import Data.IORef
     ( IORef
@@ -234,6 +240,89 @@ spec = describe "native AX-first computer bridge" do
                     ("unexpected screenshot result: " <> show value)
             closeComputerSession session
 
+    it "adds honest action verdicts and validates host verdict context" do
+        withHost
+            (fixedCallback "{\"ok\":true}" Nothing False)
+            \host -> do
+                Right session <- newComputerSession host
+                result <- invokeComputerSessionRequest session
+                    fixtureSemanticActRequest
+                resultVerdict result `shouldBe`
+                    Just (unverifiedComputerUseVerdict True)
+                closeComputerSession session
+        withHost
+            (fixedCallback "{\"ok\":false}" Nothing False)
+            \host -> do
+                Right session <- newComputerSession host
+                result <- invokeComputerSessionRequest session
+                    fixtureSemanticActRequest
+                resultVerdict result `shouldBe`
+                    Just (suspectedNoopComputerUseVerdict True)
+                closeComputerSession session
+        let hostVerdict = suspectedNoopComputerUseVerdict False
+            hostResult = Aeson.encode
+                (Aeson.object
+                    [ "ok" Aeson..= True
+                    , Key.fromText computerUseVerdictField
+                        Aeson..= hostVerdict
+                    ])
+        withHost
+            (fixedCallback (LBS.toStrict hostResult) Nothing False)
+            \host -> do
+                Right session <- newComputerSession host
+                result <- invokeComputerSessionRequest session
+                    fixtureSemanticActRequest
+                resultVerdict result `shouldBe` Just hostVerdict
+                closeComputerSession session
+        withHost
+            (fixedCallback
+                "{\"ok\":true,\"verdict\":{\"effect\":\"unknown\"}}"
+                Nothing
+                False)
+            \host -> do
+                Right session <- newComputerSession host
+                result <- invokeComputerSessionRequest session
+                    fixtureSemanticActRequest
+                result `shouldSatisfy` either
+                    (Text.isInfixOf "invalid verdict")
+                    (const False)
+                closeComputerSession session
+        let observationResult = Aeson.encode
+                (Aeson.object
+                    [ "ok" Aeson..= True
+                    , Key.fromText computerUseVerdictField
+                        Aeson..= observationComputerUseVerdict
+                    ])
+        withHost
+            (fixedCallback (LBS.toStrict observationResult) Nothing False)
+            \host -> do
+                Right session <- newComputerSession host
+                result <- invokeComputerSessionRequest session
+                    fixtureSemanticActRequest
+                result `shouldSatisfy` either
+                    (Text.isInfixOf
+                        "cannot classify an input request as an observation")
+                    (const False)
+                closeComputerSession session
+        let unsupportedFreshResult = Aeson.encode
+                (Aeson.object
+                    [ "ok" Aeson..= True
+                    , Key.fromText computerUseVerdictField
+                        Aeson..= unverifiedComputerUseVerdict True
+                    ])
+        withHost
+            (fixedCallbackWithoutAccessibility
+                (LBS.toStrict unsupportedFreshResult))
+            \host -> do
+                Right session <- newComputerSession host
+                result <- invokeComputerSessionRequest session
+                    fixtureSemanticActRequest
+                result `shouldSatisfy` either
+                    (Text.isInfixOf
+                        "without returning fresh accessibility or image evidence")
+                    (const False)
+                closeComputerSession session
+
     it "rejects malformed screenshots and embedded image data" do
         withHost
             (fixedCallback
@@ -375,6 +464,12 @@ spec = describe "native AX-first computer bridge" do
 observeRequest :: SemanticComputerRequest
 observeRequest = ObserveComputerTarget False
 
+fixtureSemanticActRequest :: SemanticComputerRequest
+fixtureSemanticActRequest =
+    ActOnComputerTarget
+        (PerformComputerAction "element-1" "AXPress" NonEmpty.:| [])
+        False
+
 runTool :: AppTool -> ToolCall -> IO ToolDispatchOutcome
 runTool tool =
     dispatchToolHandlerDetailed
@@ -409,6 +504,17 @@ resultHost (Right result) =
                 _ -> Nothing
         _ -> Nothing
 resultHost _ = Nothing
+
+resultVerdict
+    :: Either Text NativeComputerResult
+    -> Maybe ComputerUseVerdict
+resultVerdict (Right result) = do
+    Aeson.Object object <- pure result.nativeComputerResultValue
+    value <- KeyMap.lookup (Key.fromText computerUseVerdictField) object
+    case Aeson.fromJSON value of
+        Aeson.Success verdict -> Just verdict
+        Aeson.Error _ -> Nothing
+resultVerdict _ = Nothing
 
 recordingCallback
     :: Text
@@ -516,12 +622,35 @@ fixedCallback resultBytes imageBytes =
         resultBytes
         (fmap (\bytes -> (1, bytes)) imageBytes)
 
+fixedCallbackWithoutAccessibility
+    :: BS.ByteString
+    -> ComputerCallback
+fixedCallbackWithoutAccessibility resultBytes =
+    fixedImageCallbackWithAccessibility
+        False
+        resultBytes
+        Nothing
+        False
+
 fixedImageCallback
     :: BS.ByteString
     -> Maybe (CInt, BS.ByteString)
     -> Bool
     -> ComputerCallback
-fixedImageCallback resultBytes imageBytes reportImageWithoutBuffer
+fixedImageCallback =
+    fixedImageCallbackWithAccessibility True
+
+fixedImageCallbackWithAccessibility
+    :: Bool
+    -> BS.ByteString
+    -> Maybe (CInt, BS.ByteString)
+    -> Bool
+    -> ComputerCallback
+fixedImageCallbackWithAccessibility
+        includeAccessibility
+        resultBytes
+        imageBytes
+        reportImageWithoutBuffer
         _context abi operation _token _request _requestLength
         result resultCapacity resultLength
         accessibility accessibilityCapacity accessibilityLength
@@ -541,7 +670,7 @@ fixedImageCallback resultBytes imageBytes reportImageWithoutBuffer
         resultStatus <-
             writeBytes resultBytes result resultCapacity resultLength
         accessibilityStatus <-
-            if operation == 2
+            if operation == 2 || not includeAccessibility
                 then poke accessibilityLength 0 >> pure 0
                 else writeBytes snapshotBytes accessibility
                     accessibilityCapacity accessibilityLength
@@ -665,8 +794,16 @@ expectedComputerParameters = strictObjectSchema
         [ "type" Aeson..= ("string" :: Text)
         , "enum" Aeson..=
             (["list_targets", "bind", "observe", "act"] :: [Text])
+        , "description" Aeson..=
+            ( "Use list_targets, bind one returned target_id, observe the "
+            <> "bound target, then act on element_id values from the fresh "
+            <> "accessibility state."
+            :: Text
+            )
         ])
-    , ("target_id", nullableStringSchema 1024)
+    , ("target_id", describedSchema
+        "Required only for bind; use an exact ID returned by list_targets."
+        (nullableStringSchema 1024))
     , ("actions", Aeson.object
         [ "type" Aeson..= (["array", "null"] :: [Text])
         , "minItems" Aeson..= (1 :: Int)
@@ -680,17 +817,33 @@ expectedComputerParameters = strictObjectSchema
                       , "replace_selected_text"
                       ] :: [Text]
                     )
+                , "description" Aeson..=
+                    ("Accessibility operation to apply." :: Text)
                 ])
-            , ("element_id", boundedStringSchema False 1024)
-            , ("action", nullableStringSchema 1024)
+            , ("element_id", describedSchema
+                "Exact stable element ID from the current bound target observation."
+                (boundedStringSchema False 1024))
+            , ("action", describedSchema
+                "Accessibility action name for perform; otherwise null."
+                (nullableStringSchema 1024))
             , ("value", Aeson.object
                 [ "type" Aeson..=
                     (["string", "number", "boolean", "null"] :: [Text])
                 , "maxLength" Aeson..= (65536 :: Int)
+                , "description" Aeson..=
+                    ("Scalar value for set_value; otherwise null." :: Text)
                 ])
-            , ("text", nullableStringSchema 65536)
+            , ("text", describedSchema
+                "Replacement for replace_selected_text; otherwise null."
+                (nullableStringSchema 65536))
             ]
             ["type", "element_id", "action", "value", "text"]
+        , "description" Aeson..=
+            ( "Required only for act. Use element IDs from the latest "
+            <> "observation and inspect the returned fresh state before "
+            <> "retrying."
+            :: Text
+            )
         ])
     , ("include_screenshot", Aeson.object
         [ "type" Aeson..= ("boolean" :: Text)
@@ -724,3 +877,10 @@ boundedStringSchema allowEmpty maximumLength = Aeson.object $
     , "maxLength" Aeson..= maximumLength
     ]
     <> [ "minLength" Aeson..= (1 :: Int) | not allowEmpty ]
+
+describedSchema :: Text -> Aeson.Value -> Aeson.Value
+describedSchema description = \case
+    Aeson.Object object ->
+        Aeson.Object
+            (KeyMap.insert "description" (Aeson.String description) object)
+    value -> value

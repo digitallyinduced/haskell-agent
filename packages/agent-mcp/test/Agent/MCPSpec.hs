@@ -2,7 +2,10 @@ module Agent.MCPSpec (spec) where
 
 import Agent.Loop (defaultLoopDispatch)
 import Agent.MCP
-import Agent.MCP.Fleet (spawnFleetWorker)
+import Agent.MCP.Fleet
+    ( mcpFleetWaitForSkillRegistrations
+    , spawnFleetWorker
+    )
 import Agent.MCP.Supervisor (acquireMcpFleetWith)
 import Agent.MCP.Client
     ( ProbeOutcome(..)
@@ -94,6 +97,7 @@ import Data.IORef
 import Data.List (find)
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Text as Text
+import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Directory
     ( createDirectory
     , getTemporaryDirectory
@@ -102,7 +106,14 @@ import System.Directory
     , removeFile
     , withCurrentDirectory
     )
-import System.IO (hClose, openTempFile)
+import System.IO
+    ( SeekMode(AbsoluteSeek)
+    , hClose
+    , hFlush
+    , hSeek
+    , openTempFile
+    , stderr
+    )
 import System.Posix.Files (setFileMode)
 import System.Timeout (timeout)
 import Test.Hspec
@@ -199,6 +210,26 @@ spec = describe "Agent.MCP" do
                                         "stdio stderr reader was not started"
                         _ ->
                             expectationFailure "expected a stdio transport"
+
+        it "bounds shutdown of an uncooperative stdio server" $
+            withBodyServer
+                "agent-mcp-stubborn.sh"
+                stubbornFakeServer
+                \script ->
+                    bracket
+                        ( startMcpFleetProgressive
+                            (const (pure ()))
+                            [baseConfig "stubborn" script]
+                        )
+                        closeMcpFleet
+                        \fleet -> do
+                            waitForServerReady fleet "stubborn"
+                            (closed, capturedStderr) <-
+                                captureStandardError $
+                                    timeout 500000 (closeMcpFleet fleet)
+                            closed `shouldBe` Just ()
+                            capturedStderr `shouldBe`
+                                "MCP server 'stubborn' is slow to stop; terminating it...\n"
 
     describe "client worker lifecycle" do
         it "does not start owned workers after the client is closed" $
@@ -474,6 +505,21 @@ spec = describe "Agent.MCP" do
                                     ]
                     other -> expectationFailure
                         ("unexpected skill registrations: " <> show other)
+
+    it "notifies progressive callers when the skill catalog changes" $
+        withSkillsFakeServer \script -> do
+            fleet <- startMcpFleetProgressive
+                (const (pure ()))
+                [baseConfig "skills" script]
+            bracket (pure fleet) closeMcpFleet \_ -> do
+                changed <- timeout 5000000 $
+                    mcpFleetWaitForSkillRegistrations fleet []
+                case changed of
+                    Just [McpSkillRegistration "skills" entry] ->
+                        entry.mcpSkillUri
+                            `shouldBe` "skill://demo/SKILL.md"
+                    other -> expectationFailure
+                        ("unexpected skill catalog update: " <> show other)
 
     it "keeps discovered tools when optional Skills discovery fails" $
         withBodyServer "agent-mcp-skills-warning.sh" skillsWarningServer \script -> do
@@ -1513,6 +1559,24 @@ withBodyServer template body action = do
         removeFile
         action
 
+captureStandardError :: IO value -> IO (value, BS.ByteString)
+captureStandardError action = do
+    temporary <- getTemporaryDirectory
+    bracket
+        (openTempFile temporary "agent-mcp-stderr")
+        (\(path, handle) -> hClose handle `finally` removeFile path)
+        \(_, capturedHandle) ->
+            bracket (hDuplicate stderr) hClose \originalStderr -> do
+                hDuplicateTo capturedHandle stderr
+                value <-
+                    action `finally` do
+                        hFlush stderr
+                        hDuplicateTo originalStderr stderr
+                hFlush capturedHandle
+                hSeek capturedHandle AbsoluteSeek 0
+                captured <- BS.hGetContents capturedHandle
+                BS.length captured `seq` pure (value, captured)
+
 withCountingFakeServer :: (FilePath -> FilePath -> IO a) -> IO a
 withCountingFakeServer = withCountingServer countingFakeServer
 
@@ -1755,6 +1819,27 @@ paginationCycleServer =
     \    *'\"method\":\"notifications/initialized\"'*) ;;\n\
     \    *'\"method\":\"tools/list\"'*)\n\
     \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"tools\":[],\"nextCursor\":\"same\"}}'\n\
+    \      ;;\n\
+    \  esac\n\
+    \done\n"
+
+stubbornFakeServer :: LBS.ByteString
+stubbornFakeServer =
+    "#!/bin/sh\n\
+    \trap '' INT TERM\n\
+    \while IFS= read -r line; do\n\
+    \  id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p')\n\
+    \  case \"$line\" in\n\
+    \    *'\"method\":\"server/discover\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"initialize\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"stubborn\",\"version\":\"1\"}}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"notifications/initialized\"'*) ;;\n\
+    \    *'\"method\":\"tools/list\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":'\"$id\"',\"result\":{\"tools\":[]}}'\n\
+    \      while :; do sleep 1; done\n\
     \      ;;\n\
     \  esac\n\
     \done\n"

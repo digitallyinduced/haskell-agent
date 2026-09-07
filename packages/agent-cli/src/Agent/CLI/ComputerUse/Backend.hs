@@ -16,8 +16,9 @@ data ScreenshotEncoding
     deriving (Eq, Show)
 
 -- | A complete identity for the coordinate space exposed to the model.
--- Backends include any physical frame dimensions needed to detect a
--- mid-call scale or mode change.
+-- Physical frame dimensions detect scale and mode changes. Rotation records
+-- the native coordinate transform when the platform exposes one; backends
+-- whose API already reports canonical logical coordinates use zero.
 data ComputerDisplay = ComputerDisplay
     { computerDisplayId :: !Text
     , computerDisplayOriginX :: !Int
@@ -26,6 +27,7 @@ data ComputerDisplay = ComputerDisplay
     , computerDisplayHeight :: !Int
     , computerDisplayFrameWidth :: !Int
     , computerDisplayFrameHeight :: !Int
+    , computerDisplayRotationDegrees :: !Int
     } deriving (Eq, Show)
 
 data CapturedDisplay = CapturedDisplay

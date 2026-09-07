@@ -4,6 +4,7 @@ module Agent.Process
     , terminateThenKillPolicy
     , terminateProcessGroup
     , terminateProcessGroupWith
+    , terminateProcessGroupWithEscalation
     ) where
 
 import Control.Concurrent (threadDelay)
@@ -65,7 +66,19 @@ terminateProcessGroupWith
     -> Maybe ProcessGroupID
     -> ProcessHandle
     -> IO ()
-terminateProcessGroupWith policy groupId processHandle = do
+terminateProcessGroupWith policy =
+    terminateProcessGroupWithEscalation policy (pure ())
+
+-- | Stop a child process and its descendants, running an action when the
+-- first grace period expires and escalation begins. Exceptions from the
+-- notification action are ignored so diagnostics cannot prevent cleanup.
+terminateProcessGroupWithEscalation
+    :: ProcessTerminationPolicy
+    -> IO ()
+    -> Maybe ProcessGroupID
+    -> ProcessHandle
+    -> IO ()
+terminateProcessGroupWithEscalation policy onEscalation groupId processHandle = do
     alive <- processGroupAlive groupId processHandle
     whenAlive alive do
         signalGroup (firstSignal policy)
@@ -74,6 +87,7 @@ terminateProcessGroupWith policy groupId processHandle = do
             processHandle
             (firstWaitMilliseconds policy)
         unless interrupted do
+            void $ try @_ @SomeException onEscalation
             mapM_ signalGroup (secondSignal policy)
             void $ try @_ @SomeException (terminateProcess processHandle)
             terminated <- waitForProcessGroupExit

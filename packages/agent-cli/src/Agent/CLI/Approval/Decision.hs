@@ -14,10 +14,12 @@ module Agent.CLI.Approval.Decision
     , resolveApprovalPromptWith
     ) where
 
+import Agent.CLI.ComputerUse
+    ( computerToolCallBlocked
+    , computerToolCallHasPendingSafetyChecks
+    )
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Permission (PermissionChoice(..))
-import Agent.CLI.ComputerUse
-    ( computerToolCallHasPendingSafetyChecks )
 import Agent.CLI.Style (glyphOk, glyphWarn)
 import Agent.JsonText (jsonTextFieldDefault)
 import Agent.OsPath (fromText)
@@ -31,6 +33,7 @@ import Agent.Tools.PlanMode
     ( isPlanFileEditTarget
     , planModeBlockedEditMessage
     )
+import Control.Applicative ((<|>))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.OsPath (OsPath)
@@ -55,7 +58,7 @@ data ApprovalAction
 -- Read-only classification and the session allow-list are deliberately
 -- requested separately. This preserves the security-sensitive precedence:
 --
--- 1. catastrophic shell hard-deny
+-- 1. catastrophic shell or session-destructive computer hard-deny
 -- 2. dynamic read-only classification
 -- 3. plan-mode restrictions
 -- 4. per-invocation confirmation
@@ -86,7 +89,10 @@ data ApprovalFacts = ApprovalFacts
 
 planApproval :: ApprovalFacts -> ApprovalPlan
 planApproval facts =
-    case shellCommandBlocked toolName facts.call.arguments of
+    case
+        shellCommandBlocked toolName facts.call.arguments
+            <|> computerToolCallBlocked facts.call
+    of
         Just message ->
             CompleteApproval
                 (Left message)

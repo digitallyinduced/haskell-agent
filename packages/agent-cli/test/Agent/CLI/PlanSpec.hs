@@ -66,6 +66,67 @@ spec = do
             extractProposedPlan "no plan here" `shouldBe` Nothing
             extractProposedPlan "<proposed_plan>\nunclosed" `shouldBe` Nothing
 
+    describe "proposed plan stream protocol" do
+        it "separates assistant text from a typed plan stream" do
+            let segments =
+                    parsePlanChunks
+                        [ "intro\n<proposed"
+                        , "_plan>\n# Plan\n"
+                        , "</proposed_"
+                        , "plan>\nout"
+                        ]
+            proposedPlanVisibleText segments `shouldBe` "intro\nout"
+            [text | ProposedPlanDelta text <- segments]
+                `shouldBe` ["# Plan\n"]
+            segments `shouldSatisfy` elem ProposedPlanStart
+            segments `shouldSatisfy` elem ProposedPlanEnd
+
+        it "handles every split point without exposing protocol tags" do
+            let source =
+                    "before\n<proposed_plan>\nplan\n</proposed_plan>\nafter"
+                expectedVisible = "before\nafter"
+                expectedPlan = "plan\n"
+                splits =
+                    [ [Text.take index source, Text.drop index source]
+                    | index <- [0 .. Text.length source]
+                    ]
+            map (proposedPlanVisibleText . parsePlanChunks) splits
+                `shouldBe` replicate (length splits) expectedVisible
+            map
+                ( Text.concat
+                    . map (\case ProposedPlanDelta text -> text; _ -> "")
+                    . parsePlanChunks
+                )
+                splits
+                `shouldBe` replicate (length splits) expectedPlan
+
+        it "preserves tag-like text that is not alone on a line" do
+            let source = "literal <proposed_plan> text\n"
+            parsePlanChunks [source] `shouldBe` [AssistantText source]
+
+        it "releases ordinary text before the line ends" do
+            let (_, segments) =
+                    feedProposedPlanStream
+                        initialProposedPlanStream
+                        "ordinary text"
+            proposedPlanVisibleText segments `shouldBe` "ordinary text"
+
+        it "allows whitespace around a protocol tag" do
+            parsePlanChunks ["  <proposed_plan> \nbody\n </proposed_plan>  \n"]
+                `shouldBe`
+                    [ ProposedPlanStart
+                    , ProposedPlanDelta "body\n"
+                    , ProposedPlanEnd
+                    ]
+
+        it "closes an unterminated plan when the stream finishes" do
+            parsePlanChunks ["<proposed_plan>\nbody"]
+                `shouldBe`
+                    [ ProposedPlanStart
+                    , ProposedPlanDelta "body"
+                    , ProposedPlanEnd
+                    ]
+
     describe "resumedPlanNeedsApproval" do
         it "restores approval when the latest assistant turn is a proposal" do
             resumedPlanNeedsApproval
@@ -89,7 +150,7 @@ spec = do
         it "removes the tagged block and keeps surrounding text" do
             stripProposedPlan
                 "before\n<proposed_plan>\nplan\n</proposed_plan>\nafter"
-                `shouldBe` "before\n\nafter"
+                `shouldBe` "before\nafter"
 
     describe "renderPlanMarkdown" do
         it "leaves plan Markdown unchanged when color is off" do
@@ -122,3 +183,13 @@ spec = do
 
         it "does not continue after cancellation" do
             planDecisionFollowUp PlanCancel `shouldBe` Nothing
+
+parsePlanChunks :: [Text.Text] -> [ProposedPlanSegment]
+parsePlanChunks chunks =
+    reverse reversed <> finishProposedPlanStream finalState
+  where
+    (finalState, reversed) =
+        foldl' feed (initialProposedPlanStream, []) chunks
+    feed (state, accumulated) chunk =
+        let (next, segments) = feedProposedPlanStream state chunk
+        in (next, reverse segments <> accumulated)

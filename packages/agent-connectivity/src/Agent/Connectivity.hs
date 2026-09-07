@@ -273,6 +273,7 @@ maxTransientRetries = 2
 isStreamOutput :: LoopEvent -> Bool
 isStreamOutput = \case
     TextDelta _ -> True
+    PlanDelta _ -> True
     ReasoningDelta _ -> True
     -- A tool call announced from the stream is already a visible running
     -- block; the replayed attempt must close it with the same restart

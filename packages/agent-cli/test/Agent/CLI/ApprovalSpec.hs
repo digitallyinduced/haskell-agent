@@ -69,6 +69,27 @@ spec = do
                                 && message `Text.isInfixOf` notice
                     _ -> False
 
+        it "hard-denies session-destructive computer shortcuts before prompting" do
+            let call = ToolCall
+                    "call-computer"
+                    computerToolName
+                    "{\"actions\":[{\"type\":\"keypress\",\"keys\":[\"ctrl\",\"alt\",\"delete\"]}]}"
+                    ComputerFunctionCallKind
+                    False
+                facts = (approvalFacts call)
+                    { policy = ApproveAll
+                    , allowedForSession = Just True
+                    }
+            planApproval facts
+                `shouldSatisfy` \case
+                    CompleteApproval
+                        (Left message)
+                        [ReportApprovalNotice (ApprovalWarning notice)] ->
+                            "Computer key combination is blocked"
+                                `Text.isInfixOf` message
+                                && message `Text.isInfixOf` notice
+                    _ -> False
+
         it "rejects hardcoded system temp paths before prompting" do
             let call = functionToolCall
                     "call-shell"

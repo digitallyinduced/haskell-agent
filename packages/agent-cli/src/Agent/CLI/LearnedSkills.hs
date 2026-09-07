@@ -21,10 +21,13 @@ module Agent.CLI.LearnedSkills
     ) where
 
 import Agent.CLI.Database (DatabaseScope(..), databaseScopeDecoder)
-import Agent.OsPath (toText)
+import Agent.CLI.Skills (resolveSkillContent)
+import Agent.MCP.Types (McpFleet)
 import Agent.Skills
     ( Skill(..)
+    , SkillContent(..)
     , SkillInvocation(..)
+    , SkillSource(..)
     , resolveSkillInvocation
     )
 import Agent.Store.Postgres.Scope
@@ -185,7 +188,8 @@ data LearnedSkillView = LearnedSkillView
     } deriving (Eq, Show)
 
 data FilesystemSkillView = FilesystemSkillView
-    { filesystemName :: !Text
+    { filesystemKind :: !Text
+    , filesystemName :: !Text
     , filesystemTitle :: !(Maybe Text)
     , filesystemDescription :: !Text
     , filesystemWhenToUse :: !(Maybe Text)
@@ -299,7 +303,7 @@ renderLearnedSkillView view = Text.intercalate "\n\n"
 
 renderFilesystemSkillView :: FilesystemSkillView -> Text
 renderFilesystemSkillView skill = Text.intercalate "\n" $
-    [ "kind: filesystem"
+    [ textField "kind" skill.filesystemKind
     , textField "name" skill.filesystemName
     ]
         <> maybe [] (pure . textField "title") skill.filesystemTitle
@@ -421,10 +425,14 @@ learnedSkillRollbackRequestDecoder = Hermes.object $
             <*> Hermes.atKey "change_summary" Hermes.text
             <*> Hermes.atKey "evidence" Hermes.text
 
-learnedSkillTools :: IORef [SkillInvocation] -> LearnedSkillToolsEnv -> [AppTool]
-learnedSkillTools invocationsRef env =
+learnedSkillTools
+    :: IORef [SkillInvocation]
+    -> Maybe McpFleet
+    -> LearnedSkillToolsEnv
+    -> [AppTool]
+learnedSkillTools invocationsRef mcpFleet env =
     [ searchTool env
-    , viewTool invocationsRef env
+    , viewTool invocationsRef mcpFleet env
     , createTool env
     , updateTool env
     , archiveTool env
@@ -452,8 +460,12 @@ searchTool env = jsonTool
             Left err -> pure (Left err)
             Right () -> fmap renderLearnedSkillSearchResponse <$> env.learnedSkillSearch query limit)
 
-viewTool :: IORef [SkillInvocation] -> LearnedSkillToolsEnv -> AppTool
-viewTool invocationsRef env = jsonTool
+viewTool
+    :: IORef [SkillInvocation]
+    -> Maybe McpFleet
+    -> LearnedSkillToolsEnv
+    -> AppTool
+viewTool invocationsRef mcpFleet env = jsonTool
     "view_skill"
     ( "Load one skill's complete instructions on demand. For filesystem skills, "
         <> "pass its catalog name without a scope. For learned skills, pass the "
@@ -482,12 +494,23 @@ viewTool invocationsRef env = jsonTool
                                 "revision requires a learned-skill scope")
                     Nothing -> do
                         invocations <- readIORef invocationsRef
-                        pure $
-                            fmap renderFilesystemSkillView $
-                                filesystemSkillView
-                                    <$> resolveSkillInvocation
-                                        invocations
-                                        (normalizeFilesystemSkillName name)
+                        case resolveSkillInvocation
+                            invocations
+                            (normalizeFilesystemSkillName name) of
+                            Left err -> pure (Left err)
+                            Right invocation ->
+                                resolveSkillContent
+                                    mcpFleet
+                                    invocation.invocationSkill
+                                    >>= \case
+                                        Left err -> pure (Left err)
+                                        Right content ->
+                                            pure $
+                                                Right $
+                                                    renderFilesystemSkillView
+                                                        (filesystemSkillView
+                                                            invocation
+                                                            content)
             Just selected ->
                 case do
                     validateSlug name
@@ -501,17 +524,22 @@ viewTool invocationsRef env = jsonTool
                         fmap renderLearnedSkillView
                             <$> env.learnedSkillRead selected name revision)
 
-filesystemSkillView :: SkillInvocation -> FilesystemSkillView
-filesystemSkillView invocation =
+filesystemSkillView :: SkillInvocation -> SkillContent -> FilesystemSkillView
+filesystemSkillView invocation content =
     let skill = invocation.invocationSkill
     in FilesystemSkillView
-        { filesystemName = invocation.invocationName
+        { filesystemKind =
+            case skill.skillSource of
+                FilesystemSkillSource{} -> "filesystem"
+                McpSkillSource{} -> "mcp"
+        , filesystemName = invocation.invocationName
         , filesystemTitle = skill.skillDisplayName
         , filesystemDescription = skill.skillDescription
         , filesystemWhenToUse = skill.skillWhenToUse
-        , filesystemInstructions = skill.skillBody
-        , filesystemSkillFile = toText skill.skillPath
-        , filesystemSkillDirectory = toText skill.skillDirectory
+        , filesystemInstructions = content.skillContentBody
+        , filesystemSkillFile = content.skillContentFile
+        , filesystemSkillDirectory =
+            fromMaybe "(none)" content.skillContentDirectory
         }
 
 normalizeFilesystemSkillName :: Text -> Text

@@ -12,6 +12,7 @@ import Agent.Skills
     , SkillContextMode(..)
     , SkillInvocation(..)
     , SkillOrigin(..)
+    , SkillSource(..)
     , SkillScope(..)
     )
 import Agent.Store.Postgres.Scope
@@ -49,7 +50,7 @@ spec = do
     describe "learnedSkillTools" do
         it "registers read-only search/read and approved sequential mutations" do
             invocationsRef <- newIORef []
-            let tools = learnedSkillTools invocationsRef testEnv
+            let tools = learnedSkillTools invocationsRef Nothing testEnv
             map (.appToolName) tools `shouldBe`
                 [ "skill_search"
                 , "view_skill"
@@ -88,11 +89,11 @@ spec = do
                         pure (Right testMutationResponse)
                     }
             searchResult <- dispatchToolCall dispatchConfig
-                (appToolHandlers (learnedSkillTools invocationsRef env))
+                (appToolHandlers (learnedSkillTools invocationsRef Nothing env))
                 (functionToolCall "call-1" "skill_search"
                     "{\"query\":\"postgres session\",\"limit\":4}")
             createResult <- dispatchToolCall dispatchConfig
-                (appToolHandlers (learnedSkillTools invocationsRef env))
+                (appToolHandlers (learnedSkillTools invocationsRef Nothing env))
                 (functionToolCall "call-2" "skill_create"
                     "{\"scope\":\"repository\",\
                         \\"slug\":\"postgres-session\",\
@@ -119,7 +120,7 @@ spec = do
                         pure (Right testLearnedSkillView)
                     }
                 handlers =
-                    appToolHandlers (learnedSkillTools invocationsRef env)
+                    appToolHandlers (learnedSkillTools invocationsRef Nothing env)
             filesystemResult <- dispatchToolCall dispatchConfig handlers
                 (functionToolCall "call-view-file" "view_skill"
                     "{\"name\":\"$deploy\"}")
@@ -147,7 +148,7 @@ spec = do
                         pure (Right testMutationResponse)
                     }
             badSlug <- dispatchToolCall dispatchConfig
-                (appToolHandlers (learnedSkillTools invocationsRef env))
+                (appToolHandlers (learnedSkillTools invocationsRef Nothing env))
                 (functionToolCall "call-3" "skill_create"
                     "{\"scope\":\"user\",\
                     \\"slug\":\"Bad Slug\",\
@@ -161,7 +162,7 @@ spec = do
             badSlug.output `shouldContainText` "lowercase ASCII"
 
             emptyEvidence <- dispatchToolCall dispatchConfig
-                (appToolHandlers (learnedSkillTools invocationsRef env))
+                (appToolHandlers (learnedSkillTools invocationsRef Nothing env))
                 (functionToolCall "call-4" "skill_create"
                     "{\"scope\":\"user\",\
                     \\"slug\":\"valid-skill\",\
@@ -175,7 +176,7 @@ spec = do
             emptyEvidence.output `shouldContainText` "evidence must not be empty"
 
             noOp <- dispatchToolCall dispatchConfig
-                (appToolHandlers (learnedSkillTools invocationsRef env))
+                (appToolHandlers (learnedSkillTools invocationsRef Nothing env))
                 (functionToolCall "call-5" "skill_update"
                     "{\"scope\":\"user\",\
                     \\"slug\":\"valid-skill\",\
@@ -406,13 +407,15 @@ filesystemSkill = Skill
     , skillLicense = Nothing
     , skillCompatibility = Nothing
     , skillMetadata = mempty
-    , skillPath = unsafeEncodeUtf "/tmp/deploy/SKILL.md"
-    , skillDirectory = unsafeEncodeUtf "/tmp/deploy"
-    , skillBody = "Deploy carefully."
-    , skillFileText =
-        "---\nname: deploy\ndescription: Deploy the service\n---\nDeploy carefully."
-    , skillScope = UserSkill
-    , skillOrigin = AgentSkills
+    , skillSource = FilesystemSkillSource
+        { skillPath = unsafeEncodeUtf "/tmp/deploy/SKILL.md"
+        , skillDirectory = unsafeEncodeUtf "/tmp/deploy"
+        , skillBody = "Deploy carefully."
+        , skillFileText =
+            "---\nname: deploy\ndescription: Deploy the service\n---\nDeploy carefully."
+        , skillScope = UserSkill
+        , skillOrigin = AgentSkills
+        }
     }
 
 shouldContainText :: Text -> Text -> Expectation

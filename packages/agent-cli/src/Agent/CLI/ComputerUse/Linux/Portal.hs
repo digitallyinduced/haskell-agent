@@ -2399,6 +2399,7 @@ portalDisplayForFrame sessionPath stream (frameWidth, frameHeight) =
         , computerDisplayHeight = stream.portalStreamHeight
         , computerDisplayFrameWidth = frameWidth
         , computerDisplayFrameHeight = frameHeight
+        , computerDisplayRotationDegrees = 0
         }
 
 parsePortalStartResults

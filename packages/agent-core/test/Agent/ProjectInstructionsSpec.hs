@@ -95,7 +95,7 @@ spec = describe "Agent.ProjectInstructions" do
                 map (.instructionContent) (loadedInstructionFiles loaded)
                     `shouldBe` ["global agents\n", "project agents\n"]
 
-        it "loads Grok, Claude, and Cursor home instructions before project files" do
+        it "loads Grok, Claude, Cursor, and haskell-agent home instructions before project files" do
             withTempDir \dir -> do
                 let home = dir </> "home"
                     grokHome = home </> ".grok"
@@ -103,11 +103,14 @@ spec = describe "Agent.ProjectInstructions" do
                 createDirectoryIfMissing True (grokHome </> "rules")
                 createDirectoryIfMissing True (home </> ".claude" </> "rules")
                 createDirectoryIfMissing True (home </> ".cursor" </> "rules")
+                createDirectoryIfMissing True (home </> ".haskell-agent" </> "rules")
                 writeFile (grokHome </> "AGENTS.md") "grok agents\n"
                 writeFile (grokHome </> "rules" </> "a.md") "grok rule\n"
                 writeFile (home </> ".claude" </> "Claude.md") "claude agents\n"
                 writeFile (home </> ".claude" </> "rules" </> "b.md") "claude rule\n"
                 writeFile (home </> ".cursor" </> "rules" </> "c.md") "cursor rule\n"
+                writeFile (home </> ".haskell-agent" </> "AGENTS.md") "harness agents\n"
+                writeFile (home </> ".haskell-agent" </> "rules" </> "d.md") "harness rule\n"
                 writeFile (dir </> "AGENTS.md") "project\n"
                 let options = defaultDiscoverOptions
                         { discoverGlobalDir = Just (fromFilePath grokHome) }
@@ -119,6 +122,71 @@ spec = describe "Agent.ProjectInstructions" do
                         , "claude agents\n"
                         , "claude rule\n"
                         , "cursor rule\n"
+                        , "harness agents\n"
+                        , "harness rule\n"
+                        , "project\n"
+                        ]
+
+        it "loads a sibling haskell-agent home from a Claude compatibility home" do
+            withTempDir \dir -> do
+                let home = dir </> "home"
+                    claudeHome = home </> ".claude"
+                createDirectoryIfMissing True (dir </> ".git")
+                createDirectoryIfMissing True (claudeHome </> "rules")
+                createDirectoryIfMissing True (home </> ".haskell-agent")
+                writeFile (claudeHome </> "Claude.md") "claude home\n"
+                writeFile (home </> ".haskell-agent" </> "AGENTS.md") "harness agents\n"
+                writeFile (dir </> "AGENTS.md") "project\n"
+                let options = defaultDiscoverOptions
+                        { discoverGlobalDir = Just (fromFilePath claudeHome) }
+                loaded <- discoverProjectInstructions options (fromFilePath dir)
+                map (.instructionContent) (loadedInstructionFiles loaded)
+                    `shouldBe`
+                        [ "claude home\n"
+                        , "harness agents\n"
+                        , "project\n"
+                        ]
+
+        it "loads a sibling haskell-agent AGENTS.md from a Codex home" do
+            withTempDir \dir -> do
+                let home = dir </> "home"
+                    codexHome = home </> ".codex"
+                createDirectoryIfMissing True (dir </> ".git")
+                createDirectoryIfMissing True codexHome
+                createDirectoryIfMissing True (home </> ".haskell-agent")
+                writeFile (codexHome </> "AGENTS.md") "codex agents\n"
+                writeFile (codexHome </> "Claude.md") "codex claude\n"
+                writeFile (home </> ".haskell-agent" </> "AGENTS.md") "harness agents\n"
+                writeFile (home </> ".haskell-agent" </> "Claude.md") "harness claude\n"
+                writeFile (dir </> "AGENTS.md") "project agents\n"
+                let options = defaultDiscoverOptions
+                        { discoverGlobalDir = Just (fromFilePath codexHome) }
+                loaded <- discoverProjectInstructions options (fromFilePath dir)
+                map (.instructionContent) (loadedInstructionFiles loaded)
+                    `shouldBe`
+                        [ "codex agents\n"
+                        , "harness agents\n"
+                        , "project agents\n"
+                        ]
+
+        it "does not inspect Claude or Cursor homes when the global home is .haskell-agent" do
+            withTempDir \dir -> do
+                let home = dir </> "home"
+                    harnessHome = home </> ".haskell-agent"
+                createDirectoryIfMissing True (dir </> ".git")
+                createDirectoryIfMissing True harnessHome
+                createDirectoryIfMissing True (home </> ".claude")
+                createDirectoryIfMissing True (home </> ".cursor")
+                writeFile (harnessHome </> "AGENTS.md") "harness agents\n"
+                writeFile (home </> ".claude" </> "Claude.md") "claude agents\n"
+                writeFile (home </> ".cursor" </> "AGENTS.md") "cursor agents\n"
+                writeFile (dir </> "AGENTS.md") "project\n"
+                let options = defaultDiscoverOptions
+                        { discoverGlobalDir = Just (fromFilePath harnessHome) }
+                loaded <- discoverProjectInstructions options (fromFilePath dir)
+                map (.instructionContent) (loadedInstructionFiles loaded)
+                    `shouldBe`
+                        [ "harness agents\n"
                         , "project\n"
                         ]
 

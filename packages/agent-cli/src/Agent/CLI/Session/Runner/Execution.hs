@@ -42,6 +42,14 @@ import Agent.CLI.Notification
     )
 import Agent.CLI.Approval
 import Agent.CLI.Permission (promptPermission, promptRootAccess)
+import Agent.CLI.Plan
+    ( ProposedPlanSegment(..)
+    , ProposedPlanStream
+    , feedProposedPlanStream
+    , finishProposedPlanStream
+    , initialProposedPlanStream
+    , stripProposedPlan
+    )
 import Agent.CLI.ProviderTransition (PendingTurn)
 import Agent.CLI.Recap
 import Agent.CLI.CancelWatch
@@ -100,6 +108,7 @@ import Agent.CLI.WindowTitle
 import Agent.CLI.Turn
 import Agent.Cancel
 import Agent.Loop
+import qualified Agent.MCP.Fleet as MCP
 import Agent.Dialect
 import Agent.Error (ApiError)
 import Agent.Provider (Provider)
@@ -579,11 +588,7 @@ buildSkillContextRuntime
                     newIORef
                         ((.catalogEnvironmentContext)
                             <$> codexCatalogSession)
-        freshSkills <-
-            if loadsHostWorkspaceContext
-                then loadSkillsCatalogQuiet
-                    options workspace.home workspace.projectRoot workspace.cwd
-                else pure (SkillCatalog [] [])
+        freshSkills <- loadAvailableSkills
         (omitted, _) <-
             installSkills freshAgents True freshSkills
         reportSkillCatalog True freshSkills omitted
@@ -615,15 +620,27 @@ buildSkillContextRuntime
         readIORef toolEnv.toolSessionTmp >>= mapM_ resetToolSessionTemp
         reloadGeneratedContext
     refreshSkills queueContext = do
-        refreshed <-
+        refreshed <- loadAvailableSkills
+        current <- readIORef skillsRef
+        when (refreshed /= current) do
+            (omitted, _) <-
+                installSkills startupContext queueContext refreshed
+            when queueContext $
+                reportSkillCatalog True refreshed omitted
+    loadAvailableSkills = do
+        local <-
             if loadsHostWorkspaceContext
                 then loadSkillsCatalogQuiet
                     options workspace.home workspace.projectRoot workspace.cwd
                 else pure (SkillCatalog [] [])
-        (omitted, _) <-
-            installSkills startupContext queueContext refreshed
-        when queueContext $
-            reportSkillCatalog True refreshed omitted
+        remote <-
+            if options.optSkills
+                then maybe
+                    (pure (SkillCatalog [] []))
+                    loadMcpSkillsCatalog
+                    mcpFleet
+                else pure (SkillCatalog [] [])
+        pure (mergeSkillCatalogs local remote)
     contextLength = maybe 0 Text.length
     formatSkillWarning warning =
         "skill ignored: "
@@ -716,10 +733,12 @@ buildSessionLoopEventRuntime
     :: SessionHostRuntime
     -> SessionControlRuntime
     -> SessionRequest
+    -> IORef (Maybe ProposedPlanStream)
     -> (LoopEvent -> IO ())
     -> SessionLoopEventRuntime
 buildSessionLoopEventRuntime
-        host controls SessionRequest{..} managedLoopPublisher =
+        host controls SessionRequest{..}
+        proposedPlanStreamRef managedLoopPublisher =
     SessionLoopEventRuntime
         { loopEventRender = render
         , loopEventEmit = emitLoop
@@ -745,7 +764,9 @@ buildSessionLoopEventRuntime
         , renderMotionMode = options.optMotionMode
         , renderWorkspace = toText workspace.cwd
         }
-    emitLoop event = do
+    emitLoop event =
+        projectPlanProtocol event >>= mapM_ emitPresentedLoop
+    emitPresentedLoop event = do
         recordAgentViewportEvent agentViewportRuntime event
         forM_ startup.startupNativeHooks \hooks ->
             hooks.nativeOnLoopEvent event
@@ -766,6 +787,9 @@ buildSessionLoopEventRuntime
                     case event of
                         TurnStarted -> beginRenderTurn now state
                         TextDelta delta ->
+                            countGenerationChars delta
+                                state{statePrintedText = True}
+                        PlanDelta delta ->
                             countGenerationChars delta
                                 state{statePrintedText = True}
                         ReasoningDelta delta ->
@@ -793,6 +817,55 @@ buildSessionLoopEventRuntime
                                         history))
                                 contextWindow
                     _ -> pure ()
+    projectPlanProtocol = \case
+        TurnStarted -> do
+            planActive <-
+                if dialectId dialect == CodexDialect
+                    then isPlanModeActive planMode
+                    else pure False
+            writeIORef proposedPlanStreamRef $
+                if planActive
+                    then Just initialProposedPlanStream
+                    else Nothing
+            pure [TurnStarted]
+        TextDelta delta ->
+            atomicModifyIORef' proposedPlanStreamRef \case
+                Nothing -> (Nothing, [TextDelta delta])
+                Just stream ->
+                    let (next, segments) =
+                            feedProposedPlanStream stream delta
+                    in ( Just next
+                       , concatMap proposedPlanSegmentEvents segments
+                       )
+        ResponseRestarted message -> do
+            modifyIORef' proposedPlanStreamRef $
+                fmap (const initialProposedPlanStream)
+            pure [ResponseRestarted message]
+        ResponseAttemptDiscarded -> do
+            modifyIORef' proposedPlanStreamRef $
+                fmap (const initialProposedPlanStream)
+            pure [ResponseAttemptDiscarded]
+        TurnFinished output ->
+            atomicModifyIORef' proposedPlanStreamRef \case
+                Nothing -> (Nothing, [TurnFinished output])
+                Just stream ->
+                    let projectedOutput =
+                            output
+                                { assistantText =
+                                    stripProposedPlan <$> output.assistantText
+                                }
+                        tailEvents =
+                            concatMap
+                                proposedPlanSegmentEvents
+                                (finishProposedPlanStream stream)
+                    in (Nothing, tailEvents <> [TurnFinished projectedOutput])
+        event -> pure [event]
+
+    proposedPlanSegmentEvents = \case
+        AssistantText text -> [TextDelta text | not (Text.null text)]
+        ProposedPlanDelta text -> [PlanDelta text | not (Text.null text)]
+        ProposedPlanStart -> []
+        ProposedPlanEnd -> []
 
 data SessionApprovalRuntime = SessionApprovalRuntime
     { approvalApproveClassified
@@ -1244,11 +1317,12 @@ newSessionLoopRuntime host controls request@SessionRequest{..} sessionBackend = 
             (pure (const (pure ())))
             newManagedLoopEventPublisher
             promptRequest
+    proposedPlanStreamRef <- newIORef Nothing
     sessionDir <- readIORef planMode.planSessionDir
     forM_ sessionDir (writeIORef storeRoot . Just)
     let eventRuntime =
             buildSessionLoopEventRuntime
-                host controls request managedLoopPublisher
+                host controls request proposedPlanStreamRef managedLoopPublisher
         shellRuntime = buildSessionShellRuntime host controls request
         approvalRuntime =
             buildSessionApprovalRuntime host controls request
@@ -1753,13 +1827,29 @@ runSessionWorkers
                 RecapTurnSummary ->
                     callbacks.runnerRunSessionTurnSummary env
             recapWorker
+        withMcpSkillWatcher action =
+            case env.sessionMcpFleet of
+                Nothing -> action
+                Just fleet ->
+                    withAsync (watchMcpSkills fleet) (const action)
+        watchMcpSkills fleet = do
+            previous <- MCP.mcpFleetSkillRegistrations fleet
+            -- Close the gap between the startup snapshot and this watcher.
+            env.sessionRefreshSkills True
+            waitForChange fleet previous
+        waitForChange fleet previous = do
+            current <-
+                MCP.mcpFleetWaitForSkillRegistrations fleet previous
+            env.sessionRefreshSkills True
+            waitForChange fleet current
     result <- withAsync host.hostWindowTitle.windowTitleWorker \_ ->
-        case host.hostFullscreen of
-            Just _ ->
-                withAsync btwWorker \_ ->
+        withMcpSkillWatcher $
+            case host.hostFullscreen of
+                Just _ ->
+                    withAsync btwWorker \_ ->
+                        withAsync recapWorker (const sessionAction)
+                Nothing ->
                     withAsync recapWorker (const sessionAction)
-            Nothing ->
-                withAsync recapWorker (const sessionAction)
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
     pure result

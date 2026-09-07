@@ -97,7 +97,7 @@ import Control.Exception.Safe ( finally, mask_, onException )
 import Data.Text ( Text )
 import System.Directory.OsPath
     ( getCurrentDirectory, getHomeDirectory, makeAbsolute )
-import System.Environment ( getArgs )
+import System.Environment ( getArgs, setEnv )
 import System.Exit ( die )
 import System.IO ( stderr )
 
@@ -145,6 +145,7 @@ devMain = devMainResume Nothing
 -- reload state.
 devMainResume :: Maybe Text -> IO DevResult
 devMainResume resumeId = do
+    configureClientIdentity
     home <- getHomeDirectory
     underWorktree <- case resumeId of
         Just _ -> pure True
@@ -183,6 +184,7 @@ devMainResume resumeId = do
 
 run :: IO ()
 run = do
+    configureClientIdentity
     args <- getArgs
     case parseArgs args of
         Left err -> die err
@@ -208,6 +210,10 @@ run = do
                 DevQuit -> pure ()
                 DevReload _ ->
                     die ":reload is only available under `repl` (nix develop)"
+
+configureClientIdentity :: IO ()
+configureClientIdentity =
+    setEnv "AGENT_BUILD_COMMIT" (Text.unpack agentBuildInfo.buildCommit)
 
 -- | Tear down and rebuild provider-specific auth, tools, prompt, and transport.
 -- Automatic transitions carry the exact failed turn in memory and commit

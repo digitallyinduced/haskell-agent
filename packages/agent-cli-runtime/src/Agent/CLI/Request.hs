@@ -272,7 +272,8 @@ responsesLiteToolValues tools =
                 <> drop insertionIndex ungroupedValues
   where
     (firstGroupedPosition, groupedValues, namespaceDescription, ungroupedValues) =
-        foldl collect (Nothing, [], "", []) tools
+        foldl collect (Nothing, [], "", [])
+            (map withoutAsyncCapability tools)
 
     collect (firstPosition, grouped, description, ungrouped) tool =
         case groupedToolValues tool of
@@ -288,6 +289,20 @@ responsesLiteToolValues tools =
                 , description
                 , ungrouped <> [encodeTool tool]
                 )
+
+-- Responses Lite does not accept API-native async tool declarations. Keep
+-- async capability on the provider-neutral schemas so conventional Responses
+-- requests can use it, but remove it recursively at the Lite wire boundary.
+withoutAsyncCapability :: ResponseTool -> ResponseTool
+withoutAsyncCapability = \case
+    FunctionToolValue tool ->
+        FunctionToolValue tool { async = Nothing }
+    CustomToolValue tool ->
+        CustomToolValue tool { async = Nothing }
+    NamespaceToolValue namespace ->
+        NamespaceToolValue namespace
+            { tools = map withoutAsyncCapability namespace.tools }
+    tool -> tool
 
 groupedToolValues :: ResponseTool -> Maybe ([RawJson], Maybe Text)
 groupedToolValues tool = case tool of

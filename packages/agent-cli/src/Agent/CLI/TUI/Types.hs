@@ -213,6 +213,7 @@ data PendingAppEvent
 data PendingUiEvent
     = PendingExactUi !UiEvent
     | PendingTextDeltas !(Seq Text)
+    | PendingPlanDeltas !(Seq Text)
     | PendingReasoningDeltas !(Seq Text)
 
 data AppEventMailboxState = AppEventMailboxState
