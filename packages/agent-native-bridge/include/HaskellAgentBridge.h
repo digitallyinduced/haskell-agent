@@ -26,7 +26,10 @@ typedef void (*ha_event_callback)(
      * the card identified by call ID. Its flags use bit 0 for encrypted
      * arguments, bit 1 for truncation, and bit 2 for an asynchronous call;
      * tool-finish uses bit 1 for truncation and bit 2 for an asynchronous
-     * result. Consumers must ignore unknown flag bits for forward
+     * result. Tool-finish bit 3 indicates an additional third field after
+     * call ID and output: a complete versioned chart document (UTF-8 JSON,
+     * at most 256 KiB). The output field is its readable summary. The chart
+     * field is never truncated. Consumers must ignore unknown flag bits for forward
      * compatibility.
      * Turn IDs are stable task IDs for the lifetime of an engine. Events for
      * one task are delivered in order, but callbacks for different tasks may
@@ -328,6 +331,19 @@ typedef int32_t (*ha_computer_callback)(
     uint64_t *output_session_token,
     int32_t *output_image_format
 );
+
+/*
+ * Enables native chart presentation for subsequently starting turns. Disabled
+ * by default; only hosts that implement the versioned chart document should
+ * enable this capability. This does not depend on the operating system and
+ * does not change already running turns.
+ *
+ * Synchronous and thread-safe while the engine is alive. No buffers or
+ * callbacks are retained. The host must serialize engine destruction against
+ * this call. enabled is exactly 0 or 1.
+ * Status: 0 success, 1 null engine, 2 invalid enabled value, 3 runtime failure.
+ */
+int32_t ha_engine_set_chart_rendering_enabled(void *engine, int32_t enabled);
 
 /*
  * Installs native computer control for future turns. A turn replaces the

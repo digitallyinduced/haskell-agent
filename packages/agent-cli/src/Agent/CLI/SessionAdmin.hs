@@ -11,6 +11,7 @@ module Agent.CLI.SessionAdmin
     , sessionSummaryJSON
     , sessionSummaryWithStatusJSON
     , sessionToolEvent
+    , sessionToolEventWithChartCalls
     ) where
 
 import Agent.CLI.Database.Storage
@@ -56,6 +57,7 @@ import Agent.CLI.SessionLock
     )
 import Agent.Json (RawJson, rawJsonBytes)
 import Agent.OsPath (unsafeToFilePath)
+import Agent.Tools.RenderChart (chartResultDocument, chartResultSummary)
 import Agent.Provider (providerSlug)
 import Agent.Responses.LoopBackend (responseItemToToolCall)
 import Agent.Responses.Types
@@ -317,10 +319,19 @@ indexedSessionTurnJSON (index, turn) =
 
 sessionToolEvents :: SessionTurn -> [Aeson.Value]
 sessionToolEvents turn =
-    mapMaybe sessionToolEvent turn.turnItems
+    mapMaybe (sessionToolEventWithChartCalls chartCalls) turn.turnItems
+  where
+    chartCalls = Set.fromList
+        [ call.callId
+        | FunctionCallItem call <- turn.turnItems
+        , call.name == "render_chart"
+        ]
 
 sessionToolEvent :: ResponseItem -> Maybe Aeson.Value
-sessionToolEvent = \case
+sessionToolEvent = sessionToolEventWithChartCalls Set.empty
+
+sessionToolEventWithChartCalls :: Set.Set Text -> ResponseItem -> Maybe Aeson.Value
+sessionToolEventWithChartCalls chartCalls = \case
     item@(FunctionCallItem call)
         | ( call.name == computerFunctionName
                 && call.namespace `elem` [Nothing, Just "functions"]
@@ -355,6 +366,7 @@ sessionToolEvent = \case
     FunctionCallOutputItem result ->
         Just
             (toolFinishedJSON
+                (Set.member result.callId chartCalls)
                 result.callId
                 (if containsInputImage result.output
                     then "Screenshot captured"
@@ -363,6 +375,7 @@ sessionToolEvent = \case
     CustomToolCallOutputItem result ->
         Just
             (toolFinishedJSON
+                False
                 result.callId
                 (renderToolValue result.output)
                 (fromMaybe False result.async))
@@ -379,6 +392,7 @@ sessionToolEvent = \case
     ComputerCallOutputItem result ->
         Just
             (toolFinishedJSON
+                False
                 result.computerOutputCallId
                 "Screenshot captured"
                 False)
@@ -410,16 +424,19 @@ toolStartedJSON callId name arguments isAsync =
         , "truncated" Aeson..= truncated
         ]
 
-toolFinishedJSON :: Text -> Text -> Bool -> Aeson.Value
-toolFinishedJSON callId output isAsync =
-    let (visible, truncated) = boundedSessionToolText output
+toolFinishedJSON :: Bool -> Text -> Text -> Bool -> Aeson.Value
+toolFinishedJSON isChartCall callId output isAsync =
+    let (visible, truncated) = boundedSessionToolText
+            (if isChartCall then fromMaybe output (chartResultSummary output) else output)
+        chart = (if isChartCall then chartResultDocument output else Nothing)
+            >>= Aeson.decodeStrict' . TextEncoding.encodeUtf8
     in Aeson.object
-        [ "type" Aeson..= ("tool_finished" :: Text)
+        ([ "type" Aeson..= ("tool_finished" :: Text)
         , "callId" Aeson..= callId
         , "output" Aeson..= visible
         , "async" Aeson..= isAsync
         , "truncated" Aeson..= truncated
-        ]
+        ] <> maybe [] (\document -> ["chart" Aeson..= (document :: Aeson.Value)]) chart)
 
 renderToolValue :: RawJson -> Text
 renderToolValue raw =

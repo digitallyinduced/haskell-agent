@@ -12,7 +12,7 @@ import Agent.CLI.MacOS.EngineState (EngineCommand(..))
 import Agent.CLI.MacOS.InteractionState (InteractionRuntime)
 import Agent.CLI.MacOS.NativeInteraction
     ( nativePlanModeHooks, requestApproval, requestRootAccessFromClient )
-import Agent.CLI.MacOS.NativeLoopEvent (encodeNativeLoopEvent)
+import Agent.CLI.MacOS.NativeLoopEvent (encodeNativeLoopEventWithChartCalls)
 import Agent.CLI.MacOS.NativeRequest (TurnStart(..))
 import Agent.CLI.MacOS.TurnEvents (nativeLoopEvent)
 import Agent.CLI.MacOS.TurnInputs
@@ -28,14 +28,16 @@ import Agent.CLI.NativeRuntime
 import Agent.Loop
     ( ImageAttachment, LoopEvent(..), TurnOutput(..), emptyTokenUsage )
 import Agent.Runtime.StartupPolicy (hostNativeStartupPolicy)
+import Agent.ToolDispatch (ToolCall(..))
 import Agent.Tools.Types (AppTool(..), AppToolGroup(..), appToolsFromGroups)
 import Control.Concurrent.STM (atomically, writeTVar)
 import Control.Exception.Safe (SomeException, fromException, tryAny)
 import Control.Monad (forM_, void)
 import qualified Data.Aeson as Aeson
-import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef')
+import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef', atomicModifyIORef')
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Set as Set
 import Foreign.Ptr (FunPtr, Ptr)
 import System.IO (IOMode(WriteMode), withFile)
 import System.OsPath (unsafeEncodeUtf)
@@ -71,21 +73,26 @@ runNativeTurn
     -> InteractionRuntime
     -> IO TurnOutcome
 runNativeTurn
-        callback context commands processRuntime control nativeBrowserTools
+        callback context commands processRuntime control nativeHostTools
         nativeComputerSession start images turnOptions interactions = do
     sessionIdRef <- newIORef start.turnStartSessionId
     completedRef <- newIORef False
     usageRef <- newIORef emptyTokenUsage
+    chartCallsRef <- newIORef Set.empty
     let hooks = NativeRunHooks
             { nativeOnLoopEvent = \event -> do
                 case event of
+                    ToolStarted call | call.name == "render_chart" ->
+                        atomicModifyIORef' chartCallsRef \calls ->
+                            (Set.insert call.callId calls, ())
                     TurnFinished output -> do
                         writeIORef completedRef True
                         modifyIORef' usageRef (<> output.tokenUsage)
                     ModelContextReset ->
                         forM_ nativeComputerSession \(_, reset, _) -> reset
                     _ -> pure ()
-                case encodeNativeLoopEvent control.turnControlId event of
+                chartCalls <- readIORef chartCallsRef
+                case encodeNativeLoopEventWithChartCalls chartCalls control.turnControlId event of
                     Just bytes -> sendBinaryEvent callback context bytes
                     Nothing ->
                         forM_ (nativeLoopEvent control.turnControlId event)
@@ -114,7 +121,7 @@ runNativeTurn
                 requestApproval callback context control
             , nativeRequestRootAccess =
                 requestRootAccessFromClient callback context control
-            , nativeToolGroups = [HostToolGroup nativeBrowserTools]
+            , nativeToolGroups = [HostToolGroup nativeHostTools]
             , nativeComposeTools =
                 composeNativeTools
                     ((\(tool, _, _) -> tool) <$> nativeComputerSession)

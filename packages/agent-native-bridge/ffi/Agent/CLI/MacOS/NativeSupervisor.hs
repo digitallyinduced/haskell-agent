@@ -58,6 +58,7 @@ import Agent.Json (RawJson, rawJsonBytes)
 import Agent.Loop (ImageAttachment, emptyTokenUsage)
 import Agent.Runtime.Daemon.TaskScheduler (TaskIdentity(..), selectRunnableTasks)
 import Agent.Store.Postgres (ManagedPostgresConfig, Store)
+import Agent.Tools.RenderChart (renderChartTool)
 import Control.Concurrent.Async (Async, asyncWithUnmask, cancel, waitCatch)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, putMVar)
 import Control.Concurrent.STM
@@ -119,6 +120,7 @@ supervisorLoop
     -> TVar (Map Text [ImageAttachment])
     -> BrowserHost
     -> ComputerHost
+    -> TVar Bool
     -> TVar (Map Text NativeTurnOptions)
     -> InteractionRuntime
     -> TVar (Map Text RunningTurn)
@@ -126,7 +128,7 @@ supervisorLoop
     -> IO ()
 supervisorLoop
         callback context config store root processRuntime commands
-        integrationWorkers stagedImages browser computer
+        integrationWorkers stagedImages browser computer chartRenderingEnabled
         stagedTurnOptions interactions workerRegistry =
     go
   where
@@ -470,6 +472,8 @@ supervisorLoop
             start.turnStartSessionId
             interactions
         nativeBrowserTools <- browserToolsWhenEnabled browser start.turnStartId
+        chartsEnabled <- readTVarIO chartRenderingEnabled
+        let nativePresentationTools = [renderChartTool | chartsEnabled]
         worker <- launchTrackedWorker start.turnStartId $
             bracket
                 (if start.turnStartComputerUse
@@ -519,7 +523,7 @@ supervisorLoop
                                                 commands
                                                 processRuntime
                                                 control
-                                                nativeBrowserTools
+                                                (nativeBrowserTools <> nativePresentationTools)
                                                 nativeComputerTool
                                                 start
                                                 pending.pendingTurnImages
