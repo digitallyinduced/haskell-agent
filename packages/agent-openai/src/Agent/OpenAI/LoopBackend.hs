@@ -668,17 +668,21 @@ openAiBackendWithReasoningVisibility showRawReasoning =
         showRawReasoning
         transientStreamingResultPolicy
 
--- | Transient server errors are retried only until the loop has observed
--- output. Server error events themselves are not loop-visible, so transient
--- Codex failures can wait and retry without printing an error or duplicating
--- output.
+-- | Transient server errors are retried in place until the loop has observed
+-- output. Server error events themselves are not loop-visible, so a Codex
+-- failure before any sample can wait and retry without printing an error or
+-- duplicating output.
 --
--- A connection that dies mid-response is different: the dead socket committed
--- nothing on either side, so the same request is resubmitted even after
--- output streamed. Partial text or reasoning stays visible behind a restart
--- boundary and hidden activity is discarded, then the transport (a
--- reconnecting sender or a per-request dial) opens a fresh connection. Codex
--- retries its sampling request the same way before falling back to HTTPS.
+-- Overload and service-unavailable failures are retried the same way even
+-- after output streamed: the provider is asking the client to try later, so
+-- the sample was not completed. Partial text or reasoning stays visible
+-- behind a restart boundary and hidden activity is discarded.
+--
+-- A connection that dies mid-response is the other replay-safe case. The dead
+-- socket committed nothing on either side, so the same request is resubmitted
+-- even after output streamed. The transport (a reconnecting sender or a
+-- per-request dial) then opens a fresh connection. Codex retries its sampling
+-- request the same way before falling back to HTTPS.
 openAiBackendWithRetryPolicy
     :: RetryPolicyM IO
     -> (ResponseCreateParams
@@ -827,31 +831,33 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                     | emitted
                     , not observation.observedAsyncTool
                     , isReconnectableTransportFailure apiError ->
-                        applyPolicy reconnectPolicy reconnectStatus >>= \case
-                            Nothing -> settle observation apiError result
-                            Just nextStatus -> do
-                                let delayMicros =
-                                        fromMaybe 0 nextStatus.rsPreviousDelay
-                                    attempt = nextStatus.rsIterNumber
-                                callbacks.onLoopEvent $ ActivityUpdated $
-                                    formatReconnectScheduled
-                                        apiError attempt delayMicros
-                                threadDelay delayMicros
-                                -- Close the interrupted attempt in every
-                                -- renderer before the replay streams. Visible
-                                -- partial output stays on screen marked as
-                                -- failed; hidden activity such as an announced
-                                -- tool call is removed.
-                                if observation.observedVisibleOutput
-                                    then callbacks.onLoopEvent
-                                        (ResponseRestarted
-                                            connectionRestartMessage)
-                                    else callbacks.onLoopEvent
-                                        ResponseAttemptDiscarded
-                                callbacks.onLoopEvent $ ActivityUpdated $
-                                    "Reconnecting to Codex (attempt "
-                                        <> Text.pack (show attempt) <> ")…"
-                                go transientStatus nextStatus
+                        replayAfterOutput
+                            reconnectPolicy
+                            reconnectStatus
+                            formatReconnectScheduled
+                            connectionRestartMessage
+                            reconnectingAttemptMessage
+                            (\nextStatus -> go transientStatus nextStatus)
+                            observation
+                            apiError
+                            result
+                    -- Overload and unavailability mean the sample did not
+                    -- finish. Replay behind the same restart boundary used
+                    -- for a mid-response socket drop rather than ending the
+                    -- turn as replay-unsafe.
+                    | emitted
+                    , not observation.observedAsyncTool
+                    , isReplayableCapacityFailure apiError ->
+                        replayAfterOutput
+                            transientPolicy
+                            transientStatus
+                            formatRetryScheduled
+                            capacityRestartMessage
+                            retryingAttemptMessage
+                            (\nextStatus -> go nextStatus reconnectStatus)
+                            observation
+                            apiError
+                            result
                     | not emitted
                     , isInlineRetryableProviderResponseError apiError ->
                         applyPolicy transientPolicy transientStatus >>= \case
@@ -864,21 +870,57 @@ openAiBackendWithRetryPoliciesAndReasoningVisibility
                                     formatRetryScheduled apiError attempt delayMicros
                                 threadDelay delayMicros
                                 callbacks.onLoopEvent $ ActivityUpdated $
-                                    "Retrying Codex request (attempt "
-                                        <> Text.pack (show attempt) <> ")…"
+                                    retryingAttemptMessage attempt
                                 go nextStatus reconnectStatus
                     | emitted -> settle observation apiError result
                 _ -> pure result
           where
+            replayAfterOutput
+                    policy
+                    status
+                    formatScheduled
+                    restartMessage
+                    retryingMessage
+                    continue
+                    observation
+                    apiError
+                    result =
+                applyPolicy policy status >>= \case
+                    Nothing -> settle observation apiError result
+                    Just nextStatus -> do
+                        let delayMicros =
+                                fromMaybe 0 nextStatus.rsPreviousDelay
+                            attempt = nextStatus.rsIterNumber
+                        callbacks.onLoopEvent $ ActivityUpdated $
+                            formatScheduled apiError attempt delayMicros
+                        threadDelay delayMicros
+                        -- Close the interrupted attempt in every renderer
+                        -- before the replay streams. Visible partial output
+                        -- stays on screen marked as failed; hidden activity
+                        -- such as an announced tool call is removed.
+                        emitAttemptBoundary observation restartMessage
+                        callbacks.onLoopEvent $ ActivityUpdated $
+                            retryingMessage attempt
+                        continue nextStatus
+
+            emitAttemptBoundary observation restartMessage =
+                if observation.observedVisibleOutput
+                    then callbacks.onLoopEvent
+                        (ResponseRestarted restartMessage)
+                    else callbacks.onLoopEvent ResponseAttemptDiscarded
+
             -- The transport fallback may still replay a dropped connection
-            -- after this backend gives up; every other failure after output
-            -- is terminal because the provider may have committed the sample.
+            -- after this backend gives up. Capacity failures are also left
+            -- unwrapped so an outer recovery layer can wait and retry.
+            -- Every other failure after output is terminal because the
+            -- provider may have committed the sample.
             settle observation apiError result = do
                 pure $ if observation.observedAsyncTool
                         then Left (replayUnsafeError
                             "asynchronous tool call" apiError)
                     else if observation.observedVisibleOutput
                         || isReconnectableTransportFailure apiError
+                        || isReplayableCapacityFailure apiError
                     then result
                     else Left (replayUnsafeError "model output" apiError)
 
@@ -980,10 +1022,36 @@ isReconnectableTransportFailure = \case
     ProviderError WebSocketConnectionLimitReached _ _ -> True
     _ -> False
 
+-- | Failures that mean the provider did not complete the sample. These remain
+-- safe to resubmit after partial output, unlike a generic server error that
+-- may already have committed a response.
+isReplayableCapacityFailure :: ApiError -> Bool
+isReplayableCapacityFailure = \case
+    ProviderError OverloadedError _ _ -> True
+    ProviderError ServiceUnavailableError _ _ -> True
+    _ -> False
+
 connectionRestartMessage :: Text
 connectionRestartMessage =
     "Connection interrupted the response; restarting automatically. "
         <> "The new attempt may repeat partial output shown above."
+
+capacityRestartMessage :: Text
+capacityRestartMessage =
+    "Provider interrupted the response; restarting automatically. "
+        <> "The new attempt may repeat partial output shown above."
+
+reconnectingAttemptMessage :: Int -> Text
+reconnectingAttemptMessage attempt =
+    "Reconnecting to Codex (attempt "
+        <> Text.pack (show attempt)
+        <> ")…"
+
+retryingAttemptMessage :: Int -> Text
+retryingAttemptMessage attempt =
+    "Retrying Codex request (attempt "
+        <> Text.pack (show attempt)
+        <> ")…"
 
 fallbackRestartMessage :: Text
 fallbackRestartMessage =

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Retry Codex overload and service-unavailable failures after partial model
+  output instead of ending the turn as `replay_unsafe`. Visible text is kept
+  behind a restart boundary; hidden activity is discarded.
 - Surface dropped Codex WebSocket frames as loop warnings, including the
   decode error and a truncated payload, instead of swallowing them.
 - Remove the deprecated `Agent.OpenAI.Responses.Types`,
