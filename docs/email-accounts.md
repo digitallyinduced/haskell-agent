@@ -1,21 +1,18 @@
 # Connected email accounts
 
 Haskell Agent can keep connection metadata for Gmail, Microsoft 365/Outlook,
-and custom IMAP mailboxes. It reads mail and can save drafts, but it never
-sends email. The runtime has no send tool or send endpoint, and does not
-delete, move, or label messages.
+and custom IMAP mailboxes. It reads mail, saves drafts, and can send a
+freshly approved Gmail or Microsoft draft. It does not delete, move, or label
+messages.
 
 ## Security model
 
 - Gmail authorization requests `gmail.readonly` and `gmail.compose`;
-  Microsoft requests `Mail.ReadWrite` and `User.Read`, explicitly not
-  `Mail.Send`. Gmail's `gmail.compose` consent scope technically includes the
-  ability to send, so the product guarantee is enforced by the trusted
-  runtime: it exposes and implements only draft operations, never a send
-  operation. Both browser flows use a random PKCE verifier, state validation,
-  a short-lived loopback listener bound to `127.0.0.1`, and an opaque flow ID.
-  Accounts connected with the earlier read-only scopes must be reconnected
-  once before draft tools become available.
+  Microsoft requests `Mail.ReadWrite`, `Mail.Send`, and `User.Read`. Both
+  browser flows use a random PKCE verifier, state validation, a short-lived
+  loopback listener bound to `127.0.0.1`, and an opaque flow ID. Accounts
+  connected without the current write/send scopes must be reconnected before
+  the corresponding tools become available.
 - OAuth client IDs are public application identifiers supplied by the native
   application. No confidential OAuth client secret is embedded in this
   repository.
@@ -56,6 +53,7 @@ The provider-neutral tool contract is:
 - `email_create_draft`
 - `email_update_draft`
 - `email_reply_draft`
+- `email_send`
 
 The runtime integration registers tools only when an enabled, verified account
 exists. IDs are opaque and must come from a preceding email tool result. In
@@ -76,17 +74,30 @@ operation returns only a short-lived opaque descriptor; the runtime then
 fetches bytes from a bounded, authenticated same-origin gateway endpoint with
 redirects disabled.
 
-Gmail and Microsoft support all eight tools. Compatible custom IMAP servers
+Gmail and Microsoft support all nine tools. Compatible custom IMAP servers
 also support drafts when they advertise a Drafts mailbox and the UIDPLUS
 capability needed for safe updates; unsupported servers remain read-only.
 `email_create_draft`, `email_update_draft`, and `email_reply_draft` are
 turn-sequential mailbox writes that require an explicit approval every time.
-They save a provider-side draft only, return `sent: false`, and cannot send
-email. Reply drafts require the exact `reply_to` address returned by
+They save a provider-side draft only and return `sent: false`. Reply drafts
+require the exact `reply_to` address returned by
 `email_search` or `email_get`, verify the explicitly approved recipient
 against the source message's current provider metadata, and derive thread
 metadata from that message; changing recipients is a separate, explicitly
-approved `email_update_draft` call. Custom IMAP accounts otherwise support
+approved `email_update_draft` call.
+
+`email_send` is also turn-sequential and always requires a fresh approval. It
+requires an opaque draft ID plus the complete To, Cc, Bcc, subject, and
+plain-text body. The provider receives those exact approved values in one
+send request rather than being asked to send the mutable provider draft.
+Reply-thread metadata is captured when the reply draft is created and carried
+inside its opaque capability. The source draft is retained, and every later
+send still requires a new approval. A send response can be lost after the
+provider accepts the message, so an uncertain result tells the caller to check
+Sent before trying again. Custom IMAP accounts cannot use `email_send` because
+the account contract has no SMTP configuration.
+
+Custom IMAP accounts otherwise support
 account/mailbox listing, structured search, bounded MIME message retrieval,
 and bounded attachment-part downloads. The runtime checks RFC822 size before
 fetching, caps each raw message at 8 MiB, decodes MIME locally, and never
@@ -98,8 +109,9 @@ explicitly warn the model not to follow instructions found in messages or
 attachments and not to disclose secrets because an email asks it to.
 
 The built-in transport implements Gmail API, Microsoft Graph, and secure IMAP
-mailbox listing, structured search, bounded message reads, and draft-only
-writes. Gmail and Graph attachments retain their provider attachment IDs. For
+mailbox listing, structured search, bounded message reads, draft writes, and
+approved Gmail/Graph sends. Gmail and Graph attachments retain their provider
+attachment IDs. For
 custom IMAP, the runtime checks `RFC822.SIZE` before reading the message
 literal, parses that bounded MIME message locally, and returns only the
 requested decoded attachment part. Oversized messages or parts fail before a

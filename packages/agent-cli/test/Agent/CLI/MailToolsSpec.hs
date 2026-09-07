@@ -14,6 +14,7 @@ import Agent.Tools.Types
     , appToolHandlers
     , defaultToolEnv
     )
+import Control.Concurrent (threadDelay)
 import qualified Data.ByteString as BS
 import Data.Either (isLeft)
 import Data.IORef (newIORef, readIORef, writeIORef)
@@ -37,6 +38,7 @@ spec = describe "mail tools" do
                 , mailToolsCreateDraft = \_ -> pure (Left "not exercised")
                 , mailToolsUpdateDraft = \_ -> pure (Left "not exercised")
                 , mailToolsReplyDraft = \_ -> pure (Left "not exercised")
+                , mailToolsSend = \_ -> pure (Left "not exercised")
                 }
             connected = MailAccountSummary
                 { mailAccountId = "mail-1"
@@ -58,6 +60,7 @@ spec = describe "mail tools" do
             , "email_create_draft"
             , "email_update_draft"
             , "email_reply_draft"
+            , "email_send"
             ]
         all (isAlwaysReadOnly . (.appToolApproval)) (take 4 tools)
             `shouldBe` True
@@ -99,6 +102,16 @@ spec = describe "mail tools" do
                 openMailReference key DraftReference "account-a"
                     (reference <> "A")
                     `shouldSatisfy` isLeft
+        let largeProviderReference = Text.replicate 5500 "a"
+        case sealMailReference
+                key
+                DraftReference
+                "account-a"
+                [largeProviderReference] of
+            Left err -> expectationFailure (Text.unpack err)
+            Right reference ->
+                openMailReference key DraftReference "account-a" reference
+                    `shouldBe` Right [largeProviderReference]
 
     it "decodes search arguments and applies the default result limit" do
         seen <- newIORef Nothing
@@ -125,6 +138,7 @@ spec = describe "mail tools" do
                 , mailToolsCreateDraft = \_ -> pure (Left "not exercised")
                 , mailToolsUpdateDraft = \_ -> pure (Left "not exercised")
                 , mailToolsReplyDraft = \_ -> pure (Left "not exercised")
+                , mailToolsSend = \_ -> pure (Left "not exercised")
                 }
         tools <- mailTools env
         _ <- dispatchToolCall dispatchConfig
@@ -165,6 +179,7 @@ spec = describe "mail tools" do
         seen <- newIORef Nothing
         seenUpdate <- newIORef Nothing
         seenReply <- newIORef Nothing
+        seenSend <- newIORef Nothing
         toolEnv <- defaultToolEnv (fromText "/tmp")
         let connected = MailAccountSummary
                 { mailAccountId = "mail-1"
@@ -191,6 +206,9 @@ spec = describe "mail tools" do
                         , mailDraftThreadId = Just "provider-thread:raw"
                         , mailDraftWarning = Nothing
                         })
+                , mailToolsSend = \request -> do
+                    writeIORef seenSend (Just request)
+                    pure (Right MailSendResult)
                 , mailToolsUpdateDraft = \request -> do
                     writeIORef seenUpdate (Just request)
                     pure (Right MailDraft
@@ -255,6 +273,62 @@ spec = describe "mail tools" do
             , mailReplyDraftTo = ["sender@example.com"]
             , mailReplyDraftBody = "Reply body"
             }
+        sent <- dispatchToolCall dispatchConfig
+            (appToolHandlers tools)
+            (functionToolCall "call-send" "email_send"
+                "{\"account_id\":\"mail-1\",\"draft_id\":\"draft-reply\",\
+                \\"to\":[\"sender@example.com\"],\"subject\":\"Re: Hello\",\
+                \\"body\":\"Reply body\"}")
+        readIORef seenSend `shouldReturn` Just MailSendRequest
+            { mailSendAccountId = "mail-1"
+            , mailSendDraftId = "draft-reply"
+            , mailSendContent = MailDraftContent
+                { mailDraftTo = ["sender@example.com"]
+                , mailDraftCc = []
+                , mailDraftBcc = []
+                , mailDraftSubject = "Re: Hello"
+                , mailDraftBody = "Reply body"
+                }
+            }
+        sent.output `shouldSatisfy` Text.isInfixOf "\"sent\":true"
+
+    it "warns against retrying when a send times out" do
+        toolEnv <- defaultToolEnv (fromText "/tmp")
+        let connected = MailAccountSummary
+                { mailAccountId = "mail-1"
+                , mailAccountProvider = "gmail"
+                , mailAccountEmail = "person@example.com"
+                , mailAccountLabel = Nothing
+                , mailAccountEnabled = True
+                , mailAccountVerified = True
+                }
+            limits = defaultMailToolLimits
+                { mailRequestTimeoutMicros = 1000 }
+            env = MailToolsEnv
+                { mailToolsToolEnv = toolEnv
+                , mailToolsLimits = limits
+                , mailToolsListAccounts = pure (Right [connected])
+                , mailToolsListMailboxes = \_ _ -> pure (Right [])
+                , mailToolsSearch = \_ -> pure (Right [])
+                , mailToolsGetMessage = \_ _ -> pure (Left "not exercised")
+                , mailToolsDownloadAttachment = \_ _ ->
+                    pure (Left "not exercised")
+                , mailToolsCreateDraft = \_ -> pure (Left "not exercised")
+                , mailToolsUpdateDraft = \_ -> pure (Left "not exercised")
+                , mailToolsReplyDraft = \_ -> pure (Left "not exercised")
+                , mailToolsSend = \_ -> do
+                    threadDelay 100000
+                    pure (Right MailSendResult)
+                }
+        tools <- mailTools env
+        result <- dispatchToolCall dispatchConfig
+            (appToolHandlers tools)
+            (functionToolCall "call-send-timeout" "email_send"
+                "{\"account_id\":\"mail-1\",\"draft_id\":\"draft-1\",\
+                \\"to\":[\"person@example.com\"]}")
+        result.output `shouldSatisfy`
+            Text.isInfixOf
+                "Check the Sent mailbox before trying again."
 
 isAlwaysReadOnly :: ApprovalRule -> Bool
 isAlwaysReadOnly = \case

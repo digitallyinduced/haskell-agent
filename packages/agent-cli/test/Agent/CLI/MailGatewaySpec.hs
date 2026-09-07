@@ -4,14 +4,22 @@ import Agent.CLI.Mail.Gateway
 import Agent.Mail.Contract
 import Agent.Mail.Types
 import Agent.OsPath (fromText)
+import Agent.ToolDispatch
+    ( ToolCallResult(..)
+    , ToolDispatchConfig(..)
+    , dispatchToolCall
+    , functionToolCall
+    )
 import Agent.Tools.Types
     ( AppTool (..)
     , ApprovalRule (..)
+    , appToolHandlers
     , defaultToolEnv
     )
 import Data.Aeson (Value(..), object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -28,13 +36,14 @@ spec = describe "gateway-backed mail tools" do
                 , "email_create_draft"
                 , "email_update_draft"
                 , "email_reply_draft"
+                , "email_send"
                 ]
 
     it "fails closed when the gateway changes the contract" do
         let incompatible request
                 | request.gatewayMailRequestTool == "$email/tools/list" =
                     pure $ Right $ object
-                        [ "tools" .= take 7 mailMcpToolDefinitions ]
+                        [ "tools" .= take 8 mailMcpToolDefinitions ]
                 | otherwise = pure $ Left "unexpected request"
         tools <- gatewayTools incompatible
         expectLeft
@@ -56,7 +65,7 @@ spec = describe "gateway-backed mail tools" do
                         [ "tools" .=
                             (mailMcpToolDefinitions
                                 <> [object
-                                    [ "name" .= ("email_send" :: Text)
+                                    [ "name" .= ("email_delete" :: Text)
                                     , "description" .= ("Must never exist" :: Text)
                                     , "inputSchema" .= object []
                                     ]])
@@ -94,7 +103,7 @@ spec = describe "gateway-backed mail tools" do
                     pure $ Right $ object
                         [ "tools" .=
                             [object
-                                [ "name" .= ("email_send" :: Text)
+                                [ "name" .= ("email_delete" :: Text)
                                 , "description" .= ("Must never exist" :: Text)
                                 , "inputSchema" .= object []
                                 ]]
@@ -140,13 +149,32 @@ spec = describe "gateway-backed mail tools" do
                 else pure (Left "account list unavailable")
         expectLeft "account list unavailable" accountFailure
 
-    it "keeps all gateway draft writes at AlwaysConfirm" do
+    it "keeps every gateway mail write at AlwaysConfirm" do
         tools <- gatewayTools compatibleGateway
         case tools of
             Left err -> expectationFailure (show err)
             Right registered -> do
                 fmap (isAlwaysConfirm . (.appToolApproval)) (drop 5 registered)
-                    `shouldBe` replicate 3 True
+                    `shouldBe` replicate 4 True
+
+    it "warns against retrying every non-confirming gateway send" do
+        let lostResponse request
+                | request.gatewayMailRequestTool == mailSendToolName =
+                    pure (Left "response lost")
+                | otherwise = compatibleGateway request
+        tools <- gatewayTools lostResponse
+        case tools of
+            Left err -> expectationFailure (show err)
+            Right registered -> do
+                result <- dispatchToolCall dispatchConfig
+                    (appToolHandlers registered)
+                    (functionToolCall "send" mailSendToolName
+                        "{\"account_id\":\"gateway-account-1\",\
+                        \\"draft_id\":\"draft-1\",\
+                        \\"to\":[\"person@example.com\"]}")
+                result.output `shouldSatisfy`
+                    Text.isInfixOf
+                        "Check the Sent mailbox before trying again."
 
 gatewayTools
     :: (GatewayMailRequest -> IO (Either Text Value))
@@ -201,3 +229,13 @@ cursor request =
 incompatible :: Text
 incompatible =
     "The organization gateway does not provide a compatible email service."
+
+dispatchConfig :: ToolDispatchConfig
+dispatchConfig = ToolDispatchConfig
+    { toolDispatchUnknownTool = \name -> "unknown: " <> name
+    , toolDispatchFormatResult = either ("error: " <>) id
+    , toolDispatchFormatException = \name _ -> name <> ": exception"
+    , toolDispatchOnException = \_ _ -> pure ()
+    , toolDispatchOnOutput = \_ _ -> pure ()
+    , toolDispatchFinalizeOutput = \_ output -> pure output
+    }

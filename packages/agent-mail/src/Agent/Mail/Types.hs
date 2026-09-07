@@ -33,6 +33,9 @@ module Agent.Mail.Types
     , MailUpdateDraftRequest(..)
     , MailReplyDraftRequest(..)
     , MailDraft(..)
+    , MailSendRequest(..)
+    , MailSendResult(..)
+    , mailSendUncertainMessage
     , MailTransport(..)
     , MailTransportHooks(..)
     , normalizeMailEmail
@@ -772,6 +775,51 @@ instance FromJSON MailDraft where
             fail "email draft result violated the no-send contract"
         pure draft
 
+-- | Send exact content after fresh approval, authorized by an opaque draft
+-- capability. Provider transports submit a one-shot payload instead of
+-- sending the mutable provider draft, so external edits cannot change the
+-- outgoing message.
+data MailSendRequest = MailSendRequest
+    { mailSendAccountId :: !Text
+    , mailSendDraftId :: !Text
+    , mailSendContent :: !MailDraftContent
+    }
+    deriving (Eq)
+
+instance Show MailSendRequest where
+    show _ = "MailSendRequest { <redacted> }"
+
+instance ToJSON MailSendRequest where
+    toJSON request =
+        draftRequestValue
+            request.mailSendAccountId
+            request.mailSendContent
+            ["draft_id" .= request.mailSendDraftId]
+
+instance FromJSON MailSendRequest where
+    parseJSON = withObject "MailSendRequest" \value ->
+        MailSendRequest
+            <$> value .: "account_id"
+            <*> value .: "draft_id"
+            <*> parseJSON (Aeson.Object value)
+
+data MailSendResult = MailSendResult
+    deriving (Eq, Show)
+
+mailSendUncertainMessage :: Text
+mailSendUncertainMessage =
+    "The email send status could not be confirmed. Check the Sent mailbox before trying again."
+
+instance ToJSON MailSendResult where
+    toJSON MailSendResult = object ["sent" .= True]
+
+instance FromJSON MailSendResult where
+    parseJSON = withObject "MailSendResult" \value -> do
+        sent <- value .: "sent"
+        when (not sent) $
+            fail "email send result did not confirm delivery submission"
+        pure MailSendResult
+
 -- | Provider transport used by both standalone and gateway credential
 -- stores. The credential is selected and authorized before it reaches this
 -- layer.
@@ -797,6 +845,9 @@ data MailTransport = MailTransport
     , mailTransportReplyDraft
         :: !(MailCredential -> MailReplyDraftRequest
             -> IO (Either Text MailDraft))
+    , mailTransportSend
+        :: !(MailCredential -> MailSendRequest
+            -> IO (Either Text MailSendResult))
     }
 
 -- | Persistence hooks required by provider execution. Implementations must

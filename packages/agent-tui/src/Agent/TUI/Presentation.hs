@@ -129,8 +129,8 @@ permissionToolCallPromptRelative workspace call =
                 (mailDraftApprovalPreview call.arguments)
         "email_send" ->
             detailedPrompt
-                "Send this email now?"
-                (mailDraftApprovalPreview call.arguments)
+                "Send this email now? The source draft will remain in Drafts."
+                (mailSendApprovalPreview call.arguments)
         _ -> "Allow " <> summarizeToolCallRelative workspace call <> "?"
   where
     detailedPrompt question input
@@ -1247,6 +1247,37 @@ mailDraftApprovalPreview arguments =
     maximumApprovalRecipients = 10
     maximumApprovalLineCharacters = 320
     maximumApprovalBodyCharacters = 2000
+
+mailSendApprovalPreview :: Text -> Text
+mailSendApprovalPreview arguments =
+    fromMaybe "Email details could not be decoded." $
+        render <$> decodeMaybe sendPreviewDecoder arguments
+  where
+    sendPreviewDecoder =
+        Hermes.object $
+            (,,,,,,,)
+                <$> Hermes.atKeyOptional "account_id" Hermes.text
+                <*> Hermes.atKeyOptional "draft_id" Hermes.text
+                <*> Hermes.atKeyOptional "message_id" Hermes.text
+                <*> Hermes.defaultKey [] "to" (Hermes.list Hermes.text)
+                <*> Hermes.defaultKey [] "cc" (Hermes.list Hermes.text)
+                <*> Hermes.defaultKey [] "bcc" (Hermes.list Hermes.text)
+                <*> Hermes.atKeyOptional "subject" Hermes.text
+                <*> Hermes.defaultKey "" "body" Hermes.text
+    render (accountId, draftId, messageId, to, cc, bcc, subject, body) =
+        Text.intercalate "\n" . filter (not . Text.null) $
+            [ maybe "" ("Account: " <>) accountId
+            , maybe "" ("Draft: " <>) draftId
+            , maybe "" ("Reply to message: " <>) messageId
+            , recipientLine "To" to
+            , recipientLine "Cc" cc
+            , recipientLine "Bcc" bcc
+            , maybe "" ("Subject: " <>) subject
+            , "Body:\n" <> body
+            ]
+    recipientLine _ [] = ""
+    recipientLine label recipients =
+        label <> ": " <> Text.intercalate ", " recipients
 
 nonEmptyPartialJsonText :: Text -> Text -> Maybe Text
 nonEmptyPartialJsonText key input =

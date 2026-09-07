@@ -11,9 +11,10 @@ import Data.Aeson (Result(..), Value(..), object, (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Aeson.Types as AesonTypes
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import Data.Time (UTCTime(..), fromGregorian)
 import Test.Hspec
 
@@ -30,12 +31,13 @@ main = hspec do
                 , "email_create_draft"
                 , "email_update_draft"
                 , "email_reply_draft"
+                , "email_send"
                 ]
 
-        it "marks only draft mutations as requiring fresh approval" do
+        it "requires fresh approval for every mailbox mutation" do
             map (.mailMcpToolName)
                 (filter (.mailMcpToolRequiresFreshApproval) mailMcpTools)
-                `shouldBe` mailDraftMutationToolNames
+                `shouldBe` mailMutationToolNames
 
         it "round trips structured results only for the exact contract" do
             let accounts =
@@ -155,12 +157,23 @@ main = hspec do
                     Left _ -> True
                     Right _ -> False
 
+        it "accepts only an affirmative send result" do
+            decodeMailMcpResult (mailMcpSuccess MailSendResult)
+                `shouldBe` Right MailSendResult
+            let unconfirmed = mailMcpSuccess (object ["sent" .= False])
+            (decodeMailMcpResult unconfirmed :: Either Text MailSendResult)
+                `shouldSatisfy` isFailure
+
     describe "OAuth PKCE" do
         it "matches the RFC 7636 S256 example" do
             mailOAuthPkceChallenge
                 "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
                 `shouldBe`
                     "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+
+        it "requests the Microsoft permission needed to send approved drafts" do
+            Text.words (mailOAuthScopes MicrosoftProvider)
+                `shouldContain` ["Mail.Send"]
 
     describe "explicit secret storage codec" do
         it "round trips only through the opt-in codec and redacts Show" do
@@ -250,7 +263,131 @@ main = hspec do
                     (object ["parts" .= replicate 201 gmailAttachmentPart]))
                 `shouldSatisfy` isFailure
 
+        it "decodes RFC 2231 attachment filenames consistently" do
+            let raw = TextEncoding.encodeUtf8
+                    "Content-Type: application/octet-stream; name=\"\"; name*0*=utf-8''report%20; name*1*=final.pdf\r\n\
+                    \Content-Disposition: inline\r\n\
+                    \Content-Transfer-Encoding: 7bit\r\n\r\n\
+                    \attachment bytes"
+            case parseMailMime raw of
+                Left err -> expectationFailure (Text.unpack err)
+                Right parsed ->
+                    map (.parsedMailAttachmentFilename)
+                        (mailMimeAttachments parsed)
+                        `shouldBe` ["report final.pdf"]
+
     describe "injected IMAP socket connector" do
+        it "recursively includes bounded Microsoft child folders" do
+            requests <- newIORef []
+            let fetch endpoint remaining = do
+                    modifyIORef' requests (<> [(endpoint, remaining)])
+                    pure $ Right
+                        if endpoint
+                                == "https://graph.microsoft.com/v1.0/me/mailFolders"
+                            then
+                                ( [ (mailbox "inbox" "Inbox", False)
+                                  , (mailbox "archive" "Archive", True)
+                                  ]
+                                , Just
+                                    "https://graph.microsoft.com/v1.0/me/mailFolders?$skiptoken=next"
+                                )
+                            else if "$skiptoken=next" `Text.isSuffixOf` endpoint
+                                then
+                                    ([(mailbox "sent" "Sent", False)], Nothing)
+                            else if "/archive/childFolders" `Text.isSuffixOf` endpoint
+                                then ([(mailbox "year" "2026", True)], Nothing)
+                            else if "/year/childFolders" `Text.isSuffixOf` endpoint
+                                then
+                                    ( [ (mailbox
+                                            "september"
+                                            "September", False)
+                                      ]
+                                    , Nothing
+                                    )
+                            else ([], Nothing)
+            result <- graphListMailboxesWith 5 fetch
+            fmap (map (.mailMailboxId)) result
+                `shouldBe`
+                    Right ["inbox", "archive", "sent", "year", "september"]
+            fmap snd <$> readIORef requests `shouldReturn` [5, 3, 2, 1]
+
+        it "continues IMAP attachment filtering beyond the first 50 hits" do
+            fetched <- newIORef (0 :: Int)
+            let fetch uid = do
+                    modifyIORef' fetched (+ 1)
+                    pure (searchSummary uid (uid == (61 :: Int)))
+            found <- collectImapSearchMatches 100 1 fetch
+                (.mailMessageSummaryHasAttachments)
+                [1 .. 100 :: Int]
+            fmap (map (.mailMessageSummaryId)) found `shouldBe` Right ["61"]
+            readIORef fetched `shouldReturn` 61
+
+        it "reports an incomplete bounded IMAP attachment scan" do
+            fetched <- newIORef (0 :: Int)
+            let fetch uid = do
+                    modifyIORef' fetched (+ 1)
+                    pure (searchSummary uid False)
+            found <- collectImapSearchMatches 50 1 fetch
+                (.mailMessageSummaryHasAttachments)
+                [1 .. 100 :: Int]
+            found `shouldBe` Left
+                "The IMAP attachment-filtered search exceeded its bounded scan. Narrow the search and try again."
+            readIORef fetched `shouldReturn` 50
+
+        it "recognizes disposition and filename-only IMAP attachments" do
+            imapBodyStructureHasAttachment
+                "* 1 FETCH (BODYSTRUCTURE (\"APPLICATION\" \"PDF\" NIL NIL NIL \"BASE64\" 12 NIL (\"ATTACHMENT\" NIL)))"
+                `shouldBe` True
+            imapBodyStructureHasAttachment
+                "* 1 FETCH (BODYSTRUCTURE (\"APPLICATION\" \"PDF\" (\"NAME\" \"report.pdf\") NIL NIL \"BASE64\" 12 NIL \"INLINE\"))"
+                `shouldBe` True
+            imapBodyStructureHasAttachment
+                "* 1 FETCH (BODYSTRUCTURE (\"APPLICATION\" \"PDF\" (\"NAME*0*\" \"utf-8''report%20\") NIL NIL \"BASE64\" 12 NIL \"INLINE\"))"
+                `shouldBe` True
+            imapBodyStructureHasAttachment
+                "* 1 FETCH (BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 12 1))"
+                `shouldBe` False
+            imapBodyStructureHasAttachment
+                "* 1 FETCH (BODYSTRUCTURE (\"MESSAGE\" \"RFC822\" NIL NIL NIL \"7BIT\" 100 (NIL \"Subject\" ((\"Attachment\" NIL \"sender\" \"example.com\")) NIL NIL NIL NIL NIL NIL NIL) (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 12 1) 1 NIL NIL))"
+                `shouldBe` False
+
+        it "builds one-shot Microsoft send and reply payloads from approved content" do
+            let content = MailDraftContent
+                    { mailDraftTo = ["to@example.com"]
+                    , mailDraftCc = ["cc@example.com"]
+                    , mailDraftBcc = ["bcc@example.com"]
+                    , mailDraftSubject = "Approved subject"
+                    , mailDraftBody = "Approved body"
+                    }
+                message = object
+                    [ "toRecipients" .=
+                        [object
+                            [ "emailAddress" .= object
+                                ["address" .= ("to@example.com" :: Text)]
+                            ]]
+                    , "ccRecipients" .=
+                        [object
+                            [ "emailAddress" .= object
+                                ["address" .= ("cc@example.com" :: Text)]
+                            ]]
+                    , "bccRecipients" .=
+                        [object
+                            [ "emailAddress" .= object
+                                ["address" .= ("bcc@example.com" :: Text)]
+                            ]]
+                    , "subject" .= ("Approved subject" :: Text)
+                    , "body" .= object
+                        [ "contentType" .= ("text" :: Text)
+                        , "content" .= ("Approved body" :: Text)
+                        ]
+                    ]
+            graphSendMailPayload content `shouldBe` object
+                [ "message" .= message
+                , "saveToSentItems" .= True
+                ]
+            graphReplyMailPayload content `shouldBe` object
+                ["message" .= message]
+
         it "keeps IMAP draft replacement append-only" do
             let commands = imapUpdateDraftPostAppendCommands "42"
                 transcript = Text.unwords (map snd commands)
@@ -319,6 +456,29 @@ main = hspec do
             result `shouldBe`
                 (Left "The email account credential is invalid."
                     :: Either Text [MailboxSummary])
+
+        it "does not attempt SMTP for custom IMAP send requests" do
+            invoked <- newIORef False
+            let transport = mailTransportWithImapConnector
+                    (\_ -> do
+                        writeIORef invoked True
+                        ioError (userError "must not run"))
+                    noOpTransportHooks
+                request = MailSendRequest
+                    { mailSendAccountId = "account-1"
+                    , mailSendDraftId = "imap-draft"
+                    , mailSendContent = MailDraftContent
+                        { mailDraftTo = ["recipient@example.com"]
+                        , mailDraftCc = []
+                        , mailDraftBcc = []
+                        , mailDraftSubject = "Hello"
+                        , mailDraftBody = "Body"
+                        }
+                    }
+            result <- transport.mailTransportSend validImapCredential request
+            readIORef invoked `shouldReturn` False
+            result `shouldBe` Left
+                "Custom IMAP accounts cannot send email because no SMTP connection is configured."
 
         it "rejects a refreshed OAuth credential for another account" do
             let original = validOAuthCredential "account-1"
@@ -449,3 +609,25 @@ isFailure :: Either left value -> Bool
 isFailure = \case
     Left _ -> True
     Right _ -> False
+
+mailbox :: Text -> Text -> MailboxSummary
+mailbox identifier name = MailboxSummary
+    { mailMailboxId = identifier
+    , mailMailboxName = name
+    , mailMailboxRole = Nothing
+    , mailMailboxUnreadCount = Nothing
+    }
+
+searchSummary :: Int -> Bool -> MailMessageSummary
+searchSummary identifier hasAttachments = MailMessageSummary
+    { mailMessageSummaryId = Text.pack (show identifier)
+    , mailMessageSummaryThreadId = Nothing
+    , mailMessageSummarySubject = Nothing
+    , mailMessageSummaryFrom = Nothing
+    , mailMessageSummaryReplyTo = Nothing
+    , mailMessageSummaryTo = Nothing
+    , mailMessageSummaryReceivedAt = Nothing
+    , mailMessageSummarySnippet = Nothing
+    , mailMessageSummaryHasAttachments = hasAttachments
+    , mailMessageSummaryAttachmentCount = Nothing
+    }

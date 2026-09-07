@@ -21,6 +21,8 @@ module Agent.CLI.Mail.Tools
     , MailUpdateDraftRequest(..)
     , MailReplyDraftRequest(..)
     , MailDraft(..)
+    , MailSendRequest(..)
+    , MailSendResult(..)
     , MailToolsEnv(..)
     , MailTransport(..)
     , mailTools
@@ -42,6 +44,7 @@ import Agent.Mail.Contract
     , mailListMailboxesToolName
     , mailReplyDraftToolName
     , mailSearchToolName
+    , mailSendToolName
     , mailUpdateDraftToolName
     )
 import Agent.Mail.Types
@@ -50,6 +53,8 @@ import Agent.Mail.Types
     , MailMessageSummary(..), MailGetRequest(..), MailMessage(..), MailAttachment(..)
     , MailAttachmentRequest(..), MailAttachmentContent(..), MailDraftContent(..)
     , MailCreateDraftRequest(..), MailUpdateDraftRequest(..), MailReplyDraftRequest(..), MailDraft(..)
+    , MailSendRequest(..), MailSendResult(..)
+    , mailSendUncertainMessage
     , MailTransport(..)
     , validateMailAttachmentRequest, validateMailDraftContent, validateMailGetRequest
     , validateMailSearchRequest, validateOpaqueMailReference
@@ -120,6 +125,8 @@ data MailToolsEnv = MailToolsEnv
         :: !(MailUpdateDraftRequest -> IO (Either Text MailDraft))
     , mailToolsReplyDraft
         :: !(MailReplyDraftRequest -> IO (Either Text MailDraft))
+    , mailToolsSend
+        :: !(MailSendRequest -> IO (Either Text MailSendResult))
     }
 
 -- | Construct the first-party mail tools from the canonical mail store.
@@ -212,6 +219,17 @@ mailToolsForStore toolEnv transport =
                                     sealDraft
                                         referenceKey
                                         request.mailReplyDraftAccountId)
+        , mailToolsSend = \request ->
+            case openSingleReference referenceKey DraftReference
+                    request.mailSendAccountId request.mailSendDraftId of
+                Left err -> pure (Left err)
+                Right providerDraftId ->
+                    let providerRequest = request
+                            { mailSendDraftId = providerDraftId }
+                    in withStoredSendCredential
+                        request.mailSendAccountId \credential ->
+                            transport.mailTransportSend
+                                credential providerRequest
         }
 
 data MailReferenceKind
@@ -499,6 +517,51 @@ credentialCanSaveDrafts credential =
     hasOAuthScope expected =
         any ((== Text.toCaseFold expected) . Text.toCaseFold)
 
+withStoredSendCredential
+    :: Text
+    -> (Store.MailCredential -> IO (Either Text value))
+    -> IO (Either Text value)
+withStoredSendCredential accountId action =
+    withStoredCredential accountId \credential ->
+        if credentialCanSend credential
+            then action credential
+            else do
+                case credential.mailCredentialAccount.mailAccountProvider of
+                    Store.ImapProvider -> pure ()
+                    _ -> void $ Store.setMailAccountStateIfUnchanged
+                        credential.mailCredentialAccount
+                        Store.MailNeedsReauthorization
+                        (Just "provider_auth_failed")
+                pure (Left case
+                    credential.mailCredentialAccount.mailAccountProvider of
+                        Store.ImapProvider ->
+                            "Custom IMAP accounts cannot send email because no SMTP connection is configured."
+                        _ ->
+                            "This email account must be reconnected before it can send email.")
+
+credentialCanSend :: Store.MailCredential -> Bool
+credentialCanSend credential =
+    case
+        ( credential.mailCredentialAccount.mailAccountProvider
+        , credential.mailCredentialSecret
+        )
+    of
+        (Store.GmailProvider, secret@Store.MailOAuthSecret {}) ->
+            hasOAuthScope
+                "https://www.googleapis.com/auth/gmail.compose"
+                secret.mailOAuthScopes
+        (Store.MicrosoftProvider, secret@Store.MailOAuthSecret {}) ->
+            credentialCanSaveDrafts credential
+                && any
+                    (`hasOAuthScope` secret.mailOAuthScopes)
+                    [ "Mail.Send"
+                    , "https://graph.microsoft.com/Mail.Send"
+                    ]
+        _ -> False
+  where
+    hasOAuthScope expected =
+        any ((== Text.toCaseFold expected) . Text.toCaseFold)
+
 -- | Register email tools only when at least one connected account is both
 -- enabled and verified.  This prevents an unconfigured email surface from
 -- being advertised to a model.  A store failure is intentionally treated like
@@ -522,6 +585,7 @@ mailToolsForConnectedAccounts env accounts
         , createDraftTool env
         , updateDraftTool env
         , replyDraftTool env
+        , sendTool env
         ]
     | otherwise = []
   where
@@ -642,6 +706,19 @@ replyDraftArgsDecoder = Hermes.object $
         <*> Hermes.atKey "message_id" Hermes.text
         <*> Hermes.atKey "to" (Hermes.list Hermes.text)
         <*> Hermes.defaultKey "" "body" Hermes.text
+
+data SendArgs = SendArgs
+    { sendArgsAccountId :: !Text
+    , sendArgsDraftId :: !Text
+    , sendArgsContent :: !DraftContentArgs
+    }
+
+sendArgsDecoder :: Hermes.Decoder SendArgs
+sendArgsDecoder = Hermes.object $
+    SendArgs
+        <$> Hermes.atKey "account_id" Hermes.text
+        <*> Hermes.atKey "draft_id" Hermes.text
+        <*> draftContentArgsFields
 
 listAccountsTool :: MailToolsEnv -> AppTool
 listAccountsTool env = jsonTool
@@ -836,9 +913,8 @@ downloadAttachmentTool env = jsonTool
                                                 ]
     )
 
--- Draft tools deliberately remain mutation tools even though this runtime
--- exposes no send operation. 'AlwaysConfirm' requires a fresh confirmation
--- for every mailbox write, independent of the tool name.
+-- Draft tools remain mutation tools. 'AlwaysConfirm' requires a fresh
+-- confirmation for every mailbox write, independent of the tool name.
 createDraftTool :: MailToolsEnv -> AppTool
 createDraftTool env = jsonAppToolWithExecution
     mailCreateDraftToolName
@@ -931,12 +1007,59 @@ replyDraftTool env = jsonAppToolWithExecution
                                         draft { mailDraftThreadId = Nothing })
     )
 
+sendTool :: MailToolsEnv -> AppTool
+sendTool env = jsonAppToolWithExecution
+    mailSendToolName
+    ( "Send the exact recipients, subject, and plain-text body shown in this "
+        <> "call, using an existing email draft as the capability. The source "
+        <> "draft is retained. "
+        <> "This is an external side effect and always requires fresh "
+        <> "approval. Do not retry after an uncertain result; check the Sent "
+        <> "mailbox first. Custom IMAP accounts cannot send until SMTP is "
+        <> "configured. "
+        <> untrustedEmailWarning
+    )
+    ( PropertySchema "draft_id" PropertyString True
+        (Just "Opaque draft_id returned by an email draft tool.")
+        : sendContentProperties
+    )
+    AlwaysConfirm
+    TurnSequential
+    (typedTool mailSendToolName sendArgsDecoder \args ->
+        case sendRequest env.mailToolsLimits args of
+            Left err -> pure (Left err)
+            Right request -> do
+                ensureConnectedAccount env request.mailSendAccountId >>= \case
+                    Left err -> pure (Left err)
+                    Right () ->
+                        runMailSendRequest env (env.mailToolsSend request) >>= \case
+                            Left err -> pure (Left err)
+                            Right result ->
+                                renderMailResult env (Aeson.toJSON result)
+    )
+
 draftContentProperties :: [PropertySchema]
 draftContentProperties =
     [ PropertySchema "account_id" PropertyString True $ Just
         "Opaque account_id returned by email_list_accounts."
     , PropertySchema "to" (PropertyArray PropertyString) False $ Just
         "Optional To recipient addresses, as bare addr-spec values."
+    , PropertySchema "cc" (PropertyArray PropertyString) False $ Just
+        "Optional Cc recipient addresses, as bare addr-spec values."
+    , PropertySchema "bcc" (PropertyArray PropertyString) False $ Just
+        "Optional Bcc recipient addresses, as bare addr-spec values."
+    , PropertySchema "subject" PropertyString False $ Just
+        "Optional subject, up to 700 UTF-8 bytes and without line breaks."
+    , PropertySchema "body" PropertyString False $ Just
+        "Optional plain-text body, up to 128 KiB."
+    ]
+
+sendContentProperties :: [PropertySchema]
+sendContentProperties =
+    [ PropertySchema "account_id" PropertyString True $ Just
+        "Opaque account_id returned by email_list_accounts."
+    , PropertySchema "to" (PropertyArray PropertyString) True $ Just
+        "One or more bare To recipient addresses."
     , PropertySchema "cc" (PropertyArray PropertyString) False $ Just
         "Optional Cc recipient addresses, as bare addr-spec values."
     , PropertySchema "bcc" (PropertyArray PropertyString) False $ Just
@@ -1006,6 +1129,22 @@ replyDraftRequest limits args = do
         , mailReplyDraftBody = content.mailDraftBody
         }
 
+sendRequest
+    :: MailToolLimits
+    -> SendArgs
+    -> Either Text MailSendRequest
+sendRequest limits args = do
+    accountId <- validateOpaqueMailReference "account_id" args.sendArgsAccountId
+    draftId <- validateOpaqueMailReference "draft_id" args.sendArgsDraftId
+    content <- validateMailDraftContent limits (draftContent args.sendArgsContent)
+    if null content.mailDraftTo
+        then Left "an email requires at least one to recipient"
+        else Right MailSendRequest
+            { mailSendAccountId = accountId
+            , mailSendDraftId = draftId
+            , mailSendContent = content
+            }
+
 draftContent :: DraftContentArgs -> MailDraftContent
 draftContent args = MailDraftContent
     { mailDraftTo = args.draftContentArgsTo
@@ -1025,6 +1164,18 @@ runMailRequest env action
     | otherwise =
         timeout env.mailToolsLimits.mailRequestTimeoutMicros action >>= \case
             Nothing -> pure (Left "Email operation timed out.")
+            Just result -> pure result
+
+runMailSendRequest
+    :: MailToolsEnv
+    -> IO (Either Text value)
+    -> IO (Either Text value)
+runMailSendRequest env action
+    | env.mailToolsLimits.mailRequestTimeoutMicros <= 0 =
+        pure (Left "Email tools are unavailable because their timeout is invalid.")
+    | otherwise =
+        timeout env.mailToolsLimits.mailRequestTimeoutMicros action >>= \case
+            Nothing -> pure (Left mailSendUncertainMessage)
             Just result -> pure result
 
 -- | Recheck account state at call time.  Tool registration is intentionally
@@ -1212,7 +1363,7 @@ maximumOpaqueReferenceBytes :: Int
 maximumOpaqueReferenceBytes = 8192
 
 maximumProviderReferenceBytes :: Int
-maximumProviderReferenceBytes = 2048
+maximumProviderReferenceBytes = 6000
 
 mailReferenceKeyBytes, mailReferenceMacBytes :: Int
 mailReferenceKeyBytes = 32

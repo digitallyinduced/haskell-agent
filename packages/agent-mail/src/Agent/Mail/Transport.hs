@@ -17,8 +17,13 @@ module Agent.Mail.Transport
     , decodeImapDraftId
     , parseGmailDraftValue
     , parseGraphDraftValue
+    , graphSendMailPayload
+    , graphReplyMailPayload
+    , graphListMailboxesWith
     , parseImapAppendUid
     , parseImapMailboxListLine
+    , collectImapSearchMatches
+    , imapBodyStructureHasAttachment
     , parseMailReplyRecipient
     , imapUpdateDraftPostAppendCommands
     , imapUidHasFlag
@@ -118,6 +123,7 @@ mailTransportWithConnector connector hooks = MailTransport
     , mailTransportCreateDraft = createDraft connector hooks
     , mailTransportUpdateDraft = updateDraft connector hooks
     , mailTransportReplyDraft = replyDraft connector hooks
+    , mailTransportSend = sendDraft hooks
     }
 
 listMailboxes
@@ -252,6 +258,27 @@ replyDraft connector hooks credential request =
                         password
                         sender
                         checkedRequest)
+  where
+    sender = credential.mailCredentialAccount.mailAccountEmail
+
+sendDraft
+    :: MailTransportHooks
+    -> MailCredential
+    -> MailSendRequest
+    -> IO (Either Text MailSendResult)
+sendDraft hooks credential request =
+    case validateMailDraftContent defaultMailToolLimits request.mailSendContent of
+        Left err -> pure (Left err)
+        Right content
+            | null content.mailDraftTo ->
+                pure (Left "An email requires at least one To recipient.")
+            | otherwise ->
+                let checked = request { mailSendContent = content }
+                in dispatchOAuth hooks credential
+                    (\token -> gmailSendDraft token sender checked)
+                    (\token -> graphSendDraft token checked)
+                    (\_ _ -> pure (Left
+                        "Custom IMAP accounts cannot send email because no SMTP connection is configured."))
   where
     sender = credential.mailCredentialAccount.mailAccountEmail
 
@@ -419,9 +446,8 @@ providerJson token rawUrl query headers maximum =
                 Left _ -> Left "The email provider returned invalid JSON."
                 Right value -> Right value
 
--- | Bounded JSON mutation helper.  The mail transport deliberately has no
--- generic send endpoint: callers name only the draft-only provider paths
--- below, and OAuth scopes never include Graph Mail.Send.
+-- | Bounded JSON mutation helper. Callers name each fixed provider endpoint;
+-- model input can never supply a URL or HTTP method.
 providerJsonWrite
     :: BS.ByteString
     -> Text
@@ -517,6 +543,38 @@ decodeProviderDraftId prefix value = do
     if validProviderIdentifier decoded
         then Right decoded
         else Left "The email draft reference is invalid."
+
+encodeProviderDraftParts :: Text -> [Text] -> Text
+encodeProviderDraftParts prefix parts =
+    prefix
+        <> TextEncoding.decodeUtf8
+            (Base64URL.encodeUnpadded
+                (TextEncoding.encodeUtf8 (Text.intercalate "\NUL" parts)))
+
+decodeProviderDraftParts :: Text -> Int -> Text -> Either Text [Text]
+decodeProviderDraftParts prefix expectedCount value = do
+    encoded <- maybe
+        (Left "The email draft reference is invalid.")
+        Right
+        (Text.stripPrefix prefix value)
+    bytes <- either
+        (const (Left "The email draft reference is invalid."))
+        Right
+        (Base64URL.decodeUnpadded (TextEncoding.encodeUtf8 encoded))
+    decoded <- either
+        (const (Left "The email draft reference is invalid."))
+        Right
+        (TextEncoding.decodeUtf8' bytes)
+    let parts = Text.splitOn "\NUL" decoded
+    if length parts == expectedCount
+            && utf8Length decoded <= maximumCompoundDraftReferenceBytes
+        then Right parts
+        else Left "The email draft reference is invalid."
+
+checkedProviderDraftReference :: Text -> Either Text Text
+checkedProviderDraftReference value
+    | utf8Length value <= maximumTransportDraftReferenceBytes = Right value
+    | otherwise = Left "The email provider returned oversized draft metadata."
 
 validProviderIdentifier :: Text -> Bool
 validProviderIdentifier value =
@@ -630,11 +688,49 @@ graphCreateDraft token content =
         (graphDraftPayload content) jsonResponseMaximum
         >>= pure . (>>= parseGraphDraft)
 
+data GraphDraftReference
+    = GraphMessageDraft !Text
+    | GraphReplyDraft !Text !Text
+
+decodeGraphDraftReference :: Text -> Either Text GraphDraftReference
+decodeGraphDraftReference value
+    | "graph-reply-draft:" `Text.isPrefixOf` value = do
+        parts <- decodeProviderDraftParts "graph-reply-draft:" 2 value
+        case parts of
+            [draftId, sourceMessageId]
+                | validProviderIdentifier draftId
+                , validProviderIdentifier sourceMessageId ->
+                    Right (GraphReplyDraft draftId sourceMessageId)
+            _ -> Left "The email draft reference is invalid."
+    | otherwise =
+        GraphMessageDraft <$> decodeProviderDraftId "graph-draft:" value
+
+graphProviderDraftId :: GraphDraftReference -> Text
+graphProviderDraftId = \case
+    GraphMessageDraft draftId -> draftId
+    GraphReplyDraft draftId _ -> draftId
+
+preserveGraphDraftReference
+    :: GraphDraftReference -> MailDraft -> Either Text MailDraft
+preserveGraphDraftReference reference draft = do
+    draftId <- decodeProviderDraftId "graph-draft:" draft.mailDraftId
+    encoded <- checkedProviderDraftReference case reference of
+        GraphMessageDraft _ ->
+            encodeProviderDraftId "graph-draft:" draftId
+        GraphReplyDraft _ sourceMessageId ->
+            encodeProviderDraftParts
+                "graph-reply-draft:"
+                [draftId, sourceMessageId]
+    pure draft
+        { mailDraftId = encoded }
+
 graphUpdateDraft :: Text -> Text -> MailDraftContent -> IO (Either Text MailDraft)
 graphUpdateDraft token encodedDraftId content =
-    case decodeProviderDraftId "graph-draft:" encodedDraftId of
+    case decodeGraphDraftReference encodedDraftId of
         Left err -> pure (Left err)
-        Right draftId ->
+        Right reference ->
+            let draftId = graphProviderDraftId reference
+            in
             providerJson token (graphBase <> "/messages/" <> component draftId)
                 [("$select", Just "id,isDraft,conversationId")] []
                 jsonResponseMaximum >>= \case
@@ -649,7 +745,48 @@ graphUpdateDraft token encodedDraftId content =
                                 providerJsonWrite "PATCH" token
                                     (graphBase <> "/messages/" <> component draftId) []
                                     (graphDraftPayload content) jsonResponseMaximum
-                                    >>= pure . (>>= parseGraphDraft)
+                                    >>= pure
+                                        . (>>= \value ->
+                                            parseGraphDraft value
+                                                >>= preserveGraphDraftReference
+                                                    reference)
+
+graphSendDraft
+    :: Text -> MailSendRequest -> IO (Either Text MailSendResult)
+graphSendDraft token request =
+    case decodeGraphDraftReference request.mailSendDraftId of
+        Left err -> pure (Left err)
+        Right reference ->
+            let (endpoint, payload) = case reference of
+                    GraphMessageDraft _ ->
+                        ( graphBase <> "/sendMail"
+                        , graphSendMailPayload request.mailSendContent
+                        )
+                    GraphReplyDraft _ sourceMessageId ->
+                        ( graphBase <> "/messages/"
+                            <> component sourceMessageId
+                            <> "/reply"
+                        , graphReplyMailPayload request.mailSendContent
+                        )
+            in providerJsonWrite
+                "POST"
+                token
+                endpoint
+                []
+                payload
+                jsonResponseMaximum >>= \case
+                    Left _ -> pure (Left mailSendUncertainMessage)
+                    Right _ -> pure (Right MailSendResult)
+
+graphSendMailPayload :: MailDraftContent -> Aeson.Value
+graphSendMailPayload content = Aeson.object
+    [ "message" Aeson..= graphDraftPayload content
+    , "saveToSentItems" Aeson..= True
+    ]
+
+graphReplyMailPayload :: MailDraftContent -> Aeson.Value
+graphReplyMailPayload content = Aeson.object
+    ["message" Aeson..= graphDraftPayload content]
 
 graphReplyDraft :: Text -> MailReplyDraftRequest -> IO (Either Text MailDraft)
 graphReplyDraft token request =
@@ -666,7 +803,21 @@ graphReplyDraft token request =
                         [] (Aeson.object
                             ["comment" Aeson..= request.mailReplyDraftBody])
                         jsonResponseMaximum
-                        >>= pure . (>>= parseGraphDraft)
+                        >>= pure
+                            . (>>= \value -> do
+                                draft <- parseGraphDraft value
+                                draftId <- decodeProviderDraftId
+                                    "graph-draft:"
+                                    draft.mailDraftId
+                                encoded <- checkedProviderDraftReference
+                                    (encodeProviderDraftParts
+                                        "graph-reply-draft:"
+                                        [ draftId
+                                        , request.mailReplyDraftMessageId
+                                        ])
+                                pure draft
+                                    { mailDraftId = encoded }
+                              )
 
 graphReplyRecipient :: Text -> Text -> IO (Either Text Text)
 graphReplyRecipient token messageId =
@@ -734,7 +885,20 @@ gmailCreateDraft
     -> IO (Either Text MailDraft)
 gmailCreateDraft token sender content threadId replyHeaders =
     providerJsonWrite "POST" token (gmailBase <> "/drafts") [] payload
-        jsonResponseMaximum >>= pure . (>>= parseGmailDraft)
+        jsonResponseMaximum
+        >>= pure
+            . (>>= \value -> do
+                draft <- parseGmailDraft value
+                case (threadId, replyHeaders) of
+                    (Just thread, Just (inReplyTo, references)) ->
+                        preserveGmailDraftReference
+                            (GmailReplyDraft
+                                ""
+                                thread
+                                inReplyTo
+                                references)
+                            draft
+                    _ -> Right draft)
   where
     payload = Aeson.object
         [ "message" Aeson..= Aeson.object
@@ -744,12 +908,78 @@ gmailCreateDraft token sender content threadId replyHeaders =
              ] <> maybe [] (\value -> ["threadId" Aeson..= value]) threadId)
         ]
 
+data GmailDraftReference
+    = GmailMessageDraft !Text
+    | GmailReplyDraft !Text !Text !Text !(Maybe Text)
+
+decodeGmailDraftReference :: Text -> Either Text GmailDraftReference
+decodeGmailDraftReference value
+    | "gmail-reply-draft:" `Text.isPrefixOf` value = do
+        parts <- decodeProviderDraftParts "gmail-reply-draft:" 4 value
+        case parts of
+            [draftId, threadId, rawInReplyTo, rawReferences]
+                | validProviderIdentifier draftId
+                , validProviderIdentifier threadId -> do
+                    inReplyTo <- validateMessageIdHeader rawInReplyTo
+                    references <-
+                        if Text.null rawReferences
+                            then Right Nothing
+                            else maybe
+                                (Left "The email draft reference is invalid.")
+                                (Right . Just)
+                                (validateReferencesHeader rawReferences)
+                    Right
+                        (GmailReplyDraft
+                            draftId
+                            threadId
+                            inReplyTo
+                            references)
+            _ -> Left "The email draft reference is invalid."
+    | otherwise =
+        GmailMessageDraft <$> decodeProviderDraftId "gmail-draft:" value
+
+gmailProviderDraftId :: GmailDraftReference -> Text
+gmailProviderDraftId = \case
+    GmailMessageDraft draftId -> draftId
+    GmailReplyDraft draftId _ _ _ -> draftId
+
+gmailSendMetadata
+    :: GmailDraftReference -> (Maybe Text, Maybe (Text, Maybe Text))
+gmailSendMetadata = \case
+    GmailMessageDraft _ -> (Nothing, Nothing)
+    GmailReplyDraft _ threadId inReplyTo references ->
+        (Just threadId, Just (inReplyTo, references))
+
+preserveGmailDraftReference
+    :: GmailDraftReference -> MailDraft -> Either Text MailDraft
+preserveGmailDraftReference reference draft = do
+    draftId <- decodeProviderDraftId "gmail-draft:" draft.mailDraftId
+    encoded <- checkedProviderDraftReference case reference of
+        GmailMessageDraft _ ->
+            encodeProviderDraftId "gmail-draft:" draftId
+        GmailReplyDraft _ threadId inReplyTo references ->
+            encodeProviderDraftParts
+                "gmail-reply-draft:"
+                [ draftId
+                , threadId
+                , inReplyTo
+                , fromMaybe "" references
+                ]
+    pure draft
+        { mailDraftId = encoded }
+
 gmailUpdateDraft
     :: Text -> Text -> Text -> MailDraftContent -> IO (Either Text MailDraft)
 gmailUpdateDraft token sender encodedDraftId content =
-    case decodeProviderDraftId "gmail-draft:" encodedDraftId of
+    case decodeGmailDraftReference encodedDraftId of
         Left err -> pure (Left err)
-        Right draftId -> gmailUpdateRawDraft token sender draftId content
+        Right reference ->
+            gmailUpdateRawDraft
+                token
+                sender
+                (gmailProviderDraftId reference)
+                content
+                >>= pure . (>>= preserveGmailDraftReference reference)
 
 gmailUpdateRawDraft
     :: Text -> Text -> Text -> MailDraftContent -> IO (Either Text MailDraft)
@@ -778,6 +1008,33 @@ gmailUpdateRawDraft token sender draftId content =
                                      ] <> maybe [] (\value ->
                                         ["threadId" Aeson..= value]) threadId)])
                             jsonResponseMaximum >>= pure . (>>= parseGmailDraft)
+
+gmailSendDraft
+    :: Text -> Text -> MailSendRequest -> IO (Either Text MailSendResult)
+gmailSendDraft token sender request =
+    case decodeGmailDraftReference request.mailSendDraftId of
+        Left err -> pure (Left err)
+        Right reference ->
+            let (threadId, replyHeaders) = gmailSendMetadata reference
+            in providerJsonWrite
+                "POST"
+                token
+                (gmailBase <> "/messages/send")
+                []
+                (Aeson.object
+                    ([ "raw" Aeson..=
+                        TextEncoding.decodeUtf8
+                            (Base64URL.encodeUnpadded
+                                (renderMailDraftMime
+                                    sender
+                                    request.mailSendContent
+                                    replyHeaders))
+                     ] <> maybe [] (\value ->
+                        ["threadId" Aeson..= value])
+                        threadId))
+                jsonResponseMaximum >>= \case
+                    Left _ -> pure (Left mailSendUncertainMessage)
+                    Right _ -> pure (Right MailSendResult)
 
 gmailReplyDraft
     :: Text -> Text -> MailReplyDraftRequest -> IO (Either Text MailDraft)
@@ -1309,22 +1566,109 @@ graphBase = "https://graph.microsoft.com/v1.0/me"
 
 graphListMailboxes :: Text -> Int -> IO (Either Text [MailboxSummary])
 graphListMailboxes token maximum =
-    providerJson token (graphBase <> "/mailFolders")
-        [("$top", Just (BS8.pack (show maximum))),
-         ("$select", Just "id,displayName,unreadItemCount")]
-        [] jsonResponseMaximum
-        >>= pure . (>>= parseProvider
-            "Microsoft returned invalid mailbox data."
-            (Aeson.withObject "Graph folders" \object -> do
-                folders <- object .:? "value" Aeson..!= []
-                take maximum <$> traverse parseFolder folders))
+    graphListMailboxesWith maximum fetchFolders
   where
-    parseFolder = Aeson.withObject "Graph folder" \folder ->
-        MailboxSummary
+    fetchFolders endpoint remaining =
+        providerJson token endpoint
+            (if "?" `Text.isInfixOf` endpoint
+                then []
+                else
+                    [("$top", Just (BS8.pack (show (max 1 remaining)))),
+                     ("$select",
+                        Just "id,displayName,unreadItemCount,childFolderCount")])
+            [] jsonResponseMaximum
+            >>= pure . (>>= parseProvider
+                "Microsoft returned invalid mailbox data."
+                (Aeson.withObject "Graph folders" \object -> do
+                    folders <- object .:? "value" Aeson..!= []
+                    nextLink <- object .:? "@odata.nextLink"
+                    parsed <- take remaining <$> traverse parseFolder folders
+                    pure (parsed, nextLink)))
+
+    parseFolder = Aeson.withObject "Graph folder" \folder -> do
+        summary <- MailboxSummary
             <$> folder .: "id"
             <*> folder .: "displayName"
             <*> pure Nothing
             <*> folder .:? "unreadItemCount"
+        childCount <- folder .:? "childFolderCount" Aeson..!= (0 :: Int)
+        pure (summary, childCount > 0)
+
+graphListMailboxesWith
+    :: Int
+    -> (Text -> Int
+        -> IO (Either Text ([(MailboxSummary, Bool)], Maybe Text)))
+    -> IO (Either Text [MailboxSummary])
+graphListMailboxesWith maximum fetchFolders = do
+    roots <- fetchCollection (graphBase <> "/mailFolders") maximum
+    case roots of
+        Left err -> pure (Left err)
+        Right folders ->
+            collect
+                (map fst folders)
+                [(folder.mailMailboxId, hasChildren)
+                    | (folder, hasChildren) <- folders]
+  where
+    collect found pending
+        | length found >= maximum = pure (Right (take maximum found))
+        | otherwise =
+            case pending of
+                [] -> pure (Right found)
+                (_, False) : rest -> collect found rest
+                (parentId, True) : rest -> do
+                    let remaining = maximum - length found
+                    children <- fetchCollection
+                        ( graphBase <> "/mailFolders/" <> component parentId
+                            <> "/childFolders"
+                        )
+                        remaining
+                    case children of
+                        Left err -> pure (Left err)
+                        Right nested ->
+                            collect
+                                (found <> map fst nested)
+                                (rest <>
+                                    [(folder.mailMailboxId, hasChildren)
+                                        | (folder, hasChildren) <- nested])
+
+    fetchCollection initial remaining =
+        go [] [] initial
+      where
+        go seen found endpoint
+            | length found >= remaining =
+                pure (Right (take remaining found))
+            | length seen >= maximumGraphMailboxPages =
+                pure (Left invalidGraphMailboxPage)
+            | endpoint `elem` seen =
+                pure (Left invalidGraphMailboxPage)
+            | otherwise =
+                fetchFolders endpoint (remaining - length found) >>= \case
+                    Left err -> pure (Left err)
+                    Right (page, nextLink) -> do
+                        let found' =
+                                found <> take (remaining - length found) page
+                        case nextLink of
+                            Nothing -> pure (Right found')
+                            Just rawNext ->
+                                case validateGraphMailboxNextLink rawNext of
+                                    Left err -> pure (Left err)
+                                    Right next ->
+                                        go (endpoint : seen) found' next
+
+validateGraphMailboxNextLink :: Text -> Either Text Text
+validateGraphMailboxNextLink raw
+    | Text.length raw > maximumGraphNextLinkCharacters =
+        Left invalidGraphMailboxPage
+    | Text.any isControl raw =
+        Left invalidGraphMailboxPage
+    | (graphBase <> "/") `Text.isPrefixOf` raw =
+        Right raw
+    | otherwise =
+        Left invalidGraphMailboxPage
+
+invalidGraphMailboxPage :: Text
+invalidGraphMailboxPage =
+    "Microsoft returned invalid mailbox pagination data."
 
 graphSearch
     :: Text -> MailSearchRequest -> IO (Either Text [MailMessageSummary])
@@ -1574,20 +1918,58 @@ imapSearch connector settings password request =
                     (parseUidValidity selectedLines)
                 searched <- imapSearchCommand connection "m103"
                     ("UID SEARCH " <> imapSearchCriteria request)
-                let fetchLimit
-                        | isJust request.mailSearchHasAttachments = 50
-                        | otherwise = boundedCount 50 request.mailSearchLimit
-                    uids = take fetchLimit
-                        (reverse (concatMap searchUids searched))
-                summaries <- traverse
-                    (imapFetchSummary connection mailbox uidValidity) uids
-                pure $ take request.mailSearchLimit
-                    (filter matchesAttachmentFilter summaries)
+                let uids = reverse (concatMap searchUids searched)
+                    fetchSummary =
+                        imapFetchSummary connection mailbox uidValidity
+                case request.mailSearchHasAttachments of
+                    Nothing ->
+                        traverse fetchSummary
+                            (take (boundedCount 50 request.mailSearchLimit) uids)
+                    Just _ ->
+                        collectImapSearchMatches
+                            maximumImapAttachmentScanCandidates
+                            request.mailSearchLimit
+                            fetchSummary
+                            matchesAttachmentFilter
+                            uids
+                            >>= either failText pure
   where
     matchesAttachmentFilter summary =
         maybe True
             (== summary.mailMessageSummaryHasAttachments)
             request.mailSearchHasAttachments
+
+collectImapSearchMatches
+    :: Monad m
+    => Int
+    -> Int
+    -> (uid -> m MailMessageSummary)
+    -> (MailMessageSummary -> Bool)
+    -> [uid]
+    -> m (Either Text [MailMessageSummary])
+collectImapSearchMatches maximumCandidates requested fetch matches =
+    go 0 []
+  where
+    wanted = max 0 requested
+    boundedCandidates = max 0 maximumCandidates
+    go scanned found remaining
+        | length found >= wanted =
+            pure (Right (reverse found))
+        | scanned >= boundedCandidates =
+            pure case remaining of
+                [] -> Right (reverse found)
+                _ ->
+                    Left
+                        "The IMAP attachment-filtered search exceeded its bounded scan. Narrow the search and try again."
+        | otherwise =
+            case remaining of
+                [] -> pure (Right (reverse found))
+                uid : rest -> do
+                    summary <- fetch uid
+                    go
+                        (scanned + 1)
+                        (if matches summary then summary : found else found)
+                        rest
 
 imapGet
     :: Maybe MailImapSocketConnector
@@ -1965,9 +2347,8 @@ imapFetchSummary connection mailbox uidValidity uid = do
             <> " (BODY.PEEK[HEADER.FIELDS (SUBJECT FROM REPLY-TO TO DATE)] BODYSTRUCTURE)")
         maximumImapHeaderBytes
     let headers = parseHeaders (decodeUtf8Lenient headerBytes)
-        joined = Text.toCaseFold (Text.unwords responseLines)
-        hasAttachment = "\"attachment\"" `Text.isInfixOf` joined
-            || " attachment " `Text.isInfixOf` joined
+        hasAttachment =
+            imapBodyStructureHasAttachment (Text.unwords responseLines)
     pure MailMessageSummary
         { mailMessageSummaryId =
             encodeImapMessageId mailbox uidValidity uid
@@ -1985,6 +2366,151 @@ imapFetchSummary connection mailbox uidValidity uid = do
         , mailMessageSummaryAttachmentCount =
             if hasAttachment then Nothing else Just 0
         }
+
+imapBodyStructureHasAttachment :: Text -> Bool
+imapBodyStructureHasAttachment response =
+    case Text.breakOn "bodystructure" (Text.toCaseFold response) of
+        (_, bodyStructure)
+            | Text.null bodyStructure -> False
+            | otherwise ->
+                let (nodes, _) =
+                        parseImapBodyNodes
+                            (imapBodyStructureLexemes bodyStructure)
+                in case nodes of
+                    ImapBodyAtom "bodystructure" : body : _ ->
+                        imapBodyNodeHasAttachment body
+                    _ -> False
+
+data ImapBodyLexeme
+    = ImapBodyOpen
+    | ImapBodyClose
+    | ImapBodyValue !Text
+
+data ImapBodyNode
+    = ImapBodyList ![ImapBodyNode]
+    | ImapBodyAtom !Text
+
+imapBodyNodeHasAttachment :: ImapBodyNode -> Bool
+imapBodyNodeHasAttachment = \case
+    ImapBodyAtom _ -> False
+    ImapBodyList nodes ->
+        case nodes of
+            ImapBodyList _ : _ -> multipartHasAttachment nodes
+            ImapBodyAtom mediaType : ImapBodyAtom _ : _ ->
+                singlePartHasAttachment mediaType nodes
+            _ -> False
+  where
+    multipartHasAttachment nodes =
+        let (parts, extension) = span isBodyList nodes
+            afterSubtype = drop 1 extension
+        in any imapBodyNodeHasAttachment parts
+            || maybe False parameterNodeHasFilename
+                (nodeAt 0 afterSubtype)
+            || maybe False dispositionNodeHasAttachment
+                (nodeAt 1 afterSubtype)
+
+    singlePartHasAttachment mediaType nodes =
+        let extensionStart
+                | mediaType == "text" = 8
+                | mediaType == "message"
+                    && atomAt 1 nodes == Just "rfc822" = 10
+                | otherwise = 7
+            nestedMessage =
+                if mediaType == "message"
+                        && atomAt 1 nodes == Just "rfc822"
+                    then maybe False imapBodyNodeHasAttachment (nodeAt 8 nodes)
+                    else False
+        in maybe False parameterNodeHasFilename (nodeAt 2 nodes)
+            || maybe False dispositionNodeHasAttachment
+                (nodeAt (extensionStart + 1) nodes)
+            || nestedMessage
+
+    isBodyList = \case
+        ImapBodyList _ -> True
+        ImapBodyAtom _ -> False
+
+    dispositionNodeHasAttachment = \case
+        ImapBodyList (ImapBodyAtom disposition : parameters : _) ->
+            disposition == "attachment"
+                || parameterNodeHasFilename parameters
+        _ -> False
+
+    parameterNodeHasFilename = \case
+        ImapBodyList values ->
+            case traverse atomValue values of
+                Just atoms
+                    | even (length atoms) -> hasNamedPair atoms
+                _ -> False
+        _ -> False
+
+    atomValue = \case
+        ImapBodyAtom value -> Just value
+        ImapBodyList _ -> Nothing
+
+    atomAt index nodes =
+        nodeAt index nodes >>= atomValue
+
+    nodeAt index values =
+        case drop index values of
+            value : _ -> Just value
+            [] -> Nothing
+
+    hasNamedPair = \case
+        key : value : rest ->
+            ( isFilenameParameter key
+                && value /= "nil"
+                && not (Text.null value)
+            )
+                || hasNamedPair rest
+        _ -> False
+
+    isFilenameParameter key =
+        any
+            (\name -> key == name || (name <> "*") `Text.isPrefixOf` key)
+            ["filename", "name"]
+
+parseImapBodyNodes
+    :: [ImapBodyLexeme]
+    -> ([ImapBodyNode], [ImapBodyLexeme])
+parseImapBodyNodes = go []
+  where
+    go nodes = \case
+        [] -> (reverse nodes, [])
+        ImapBodyClose : rest -> (reverse nodes, rest)
+        ImapBodyOpen : rest ->
+            let (children, remaining) = go [] rest
+            in go (ImapBodyList children : nodes) remaining
+        ImapBodyValue value : rest ->
+            go (ImapBodyAtom value : nodes) rest
+
+imapBodyStructureLexemes :: Text -> [ImapBodyLexeme]
+imapBodyStructureLexemes = go . Text.unpack
+  where
+    go = \case
+        [] -> []
+        character : rest
+            | isSpace character || character `elem` ("()" :: String) ->
+                case character of
+                    '(' -> ImapBodyOpen : go rest
+                    ')' -> ImapBodyClose : go rest
+                    _ -> go rest
+            | character == '"' ->
+                let (token, remaining) = quoted [] rest
+                in ImapBodyValue (Text.pack (reverse token)) : go remaining
+            | otherwise ->
+                let (token, remaining) =
+                        span
+                            (\value ->
+                                not (isSpace value)
+                                    && value `notElem` ("()" :: String))
+                            (character : rest)
+                in ImapBodyValue (Text.pack token) : go remaining
+
+    quoted token = \case
+        [] -> (token, [])
+        '\\' : escaped : rest -> quoted (escaped : token) rest
+        '"' : rest -> (token, rest)
+        character : rest -> quoted (character : token) rest
 
 imapSimpleCommand :: Connection -> Text -> Text -> IO [Text]
 imapSimpleCommand =
@@ -2411,8 +2937,21 @@ maximumProviderIdentifierBytes = 700
 maximumMailboxHeaderBytes = 2048
 maximumReplyHeaderBytes = 700
 
+maximumCompoundDraftReferenceBytes, maximumGraphNextLinkCharacters :: Int
+maximumCompoundDraftReferenceBytes = 4096
+maximumGraphNextLinkCharacters = 8192
+
+maximumGraphMailboxPages :: Int
+maximumGraphMailboxPages = 200
+
+maximumTransportDraftReferenceBytes :: Int
+maximumTransportDraftReferenceBytes = 4000
+
 maximumImapRawMessageBytes :: Int
 maximumImapRawMessageBytes = 8 * 1024 * 1024
+
+maximumImapAttachmentScanCandidates :: Int
+maximumImapAttachmentScanCandidates = 500
 
 maximumImapLineBytes, maximumImapSearchLineBytes, maximumImapResponseLines :: Int
 maximumImapLineBytes = 16 * 1024

@@ -3,7 +3,7 @@
 --
 -- The gateway MCP catalog is consumed internally instead of being registered
 -- with the generic MCP fleet.  This preserves the canonical @email_*@ names
--- and the host's non-bypassable 'AlwaysConfirm' policy for draft writes.
+-- and the host's non-bypassable 'AlwaysConfirm' policy for mailbox writes.
 module Agent.CLI.Mail.Gateway
     ( GatewayMailRuntime(..)
     , gatewayMailTools
@@ -199,6 +199,17 @@ gatewayMailToolsVerified toolEnv call download = do
                 , gatewayMailRequestArguments = arguments
                 }
                 >>= pure . (>>= decodeMailMcpResult)
+        invokeSend arguments =
+            call GatewayMailRequest
+                { gatewayMailRequestTool = mailSendToolName
+                , gatewayMailRequestArguments = arguments
+                }
+                >>= \case
+                    Left _ -> pure (Left mailSendUncertainMessage)
+                    Right result ->
+                        pure case decodeMailMcpResult result of
+                            Left _ -> Left mailSendUncertainMessage
+                            Right sent -> Right sent
         listAccounts =
             invoke mailListAccountsToolName (object [])
                 >>= pure
@@ -248,6 +259,8 @@ gatewayMailToolsVerified toolEnv call download = do
                 invoke mailReplyDraftToolName
                     (Aeson.toJSON request)
                     >>= pure . (>>= validateGatewayDraft)
+            , mailToolsSend = \request ->
+                invokeSend (Aeson.toJSON request)
             }
     listAccounts >>= \case
         Left err -> pure (Left err)
@@ -721,7 +734,7 @@ maximumDownloadReferenceLength = 1024
 maximumDiscoveryPages, maximumDiscoveredTools
     , maximumDiscoveryCursorLength, maximumDiscoveryBytes :: Int
 maximumDiscoveryPages = 8
-maximumDiscoveredTools = 8
+maximumDiscoveredTools = length mailMcpTools
 maximumDiscoveryCursorLength = 1024
 maximumDiscoveryBytes = 16 * 1024 * 1024
 

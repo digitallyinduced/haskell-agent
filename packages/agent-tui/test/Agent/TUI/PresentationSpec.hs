@@ -377,6 +377,43 @@ spec = describe "tool presentation" do
                 \Subject: Quarterly update\n\
                 \Body:\nHello,\n\nHere is the update."
 
+    it "shows the complete outgoing content for send approval" do
+        permissionToolCallPrompt
+            (functionToolCall
+                "send"
+                "email_send"
+                "{\"account_id\":\"mail-1\",\"draft_id\":\"draft-1\",\
+                \\"to\":[\"person@example.com\"],\
+                \\"subject\":\"Quarterly update\",\
+                \\"body\":\"Send this now.\"}")
+            `shouldBe`
+                "Send this email now? The source draft will remain in Drafts.\n\n\
+                \Account: mail-1\n\
+                \Draft: draft-1\n\
+                \To: person@example.com\n\
+                \Subject: Quarterly update\n\
+                \Body:\nSend this now."
+
+    it "does not truncate send recipients or body text" do
+        let recipients =
+                [ "person" <> Text.pack (show number) <> "@example.com"
+                | number <- [1 .. 11 :: Int]
+                ]
+            body = Text.replicate 2001 "x" <> "visible-tail"
+            arguments =
+                "{\"account_id\":\"mail-1\",\"draft_id\":\"draft-1\",\"to\":[\""
+                    <> Text.intercalate "\",\"" recipients
+                    <> "\"],\"body\":\""
+                    <> body
+                    <> "\\rcontrol-visible\"}"
+            prompt = permissionToolCallPrompt
+                (functionToolCall "send" "email_send" arguments)
+        prompt `shouldSatisfy`
+            Text.isInfixOf "person11@example.com"
+        prompt `shouldSatisfy` Text.isInfixOf "visible-tail"
+        prompt `shouldSatisfy` Text.isInfixOf "↵control-visible"
+        prompt `shouldNotSatisfy` Text.isInfixOf "\r"
+
     it "falls back to the safe prompt text for ask_secret detail" do
         toolDetail
             (functionToolCall

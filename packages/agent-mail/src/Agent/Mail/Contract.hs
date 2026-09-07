@@ -14,7 +14,9 @@ module Agent.Mail.Contract
     , mailCreateDraftToolName
     , mailUpdateDraftToolName
     , mailReplyDraftToolName
+    , mailSendToolName
     , mailDraftMutationToolNames
+    , mailMutationToolNames
     , mailMcpSuccess
     , mailMcpFailure
     , decodeMailMcpResult
@@ -52,7 +54,7 @@ mailContractId :: Text
 mailContractId = "dev.haskell-agent.email"
 
 mailContractVersion :: Text
-mailContractVersion = "1"
+mailContractVersion = "2"
 
 mailContractMetadata :: Value
 mailContractMetadata = object
@@ -63,7 +65,7 @@ mailContractMetadata = object
 mailListAccountsToolName, mailListMailboxesToolName, mailSearchToolName
     , mailGetToolName, mailDownloadAttachmentToolName
     , mailCreateDraftToolName, mailUpdateDraftToolName
-    , mailReplyDraftToolName :: Text
+    , mailReplyDraftToolName, mailSendToolName :: Text
 mailListAccountsToolName = "email_list_accounts"
 mailListMailboxesToolName = "email_list_mailboxes"
 mailSearchToolName = "email_search"
@@ -72,6 +74,7 @@ mailDownloadAttachmentToolName = "email_download_attachment"
 mailCreateDraftToolName = "email_create_draft"
 mailUpdateDraftToolName = "email_update_draft"
 mailReplyDraftToolName = "email_reply_draft"
+mailSendToolName = "email_send"
 
 mailDraftMutationToolNames :: [Text]
 mailDraftMutationToolNames =
@@ -79,6 +82,10 @@ mailDraftMutationToolNames =
     , mailUpdateDraftToolName
     , mailReplyDraftToolName
     ]
+
+mailMutationToolNames :: [Text]
+mailMutationToolNames =
+    mailDraftMutationToolNames <> [mailSendToolName]
 
 mailMcpTools :: [MailMcpTool]
 mailMcpTools =
@@ -143,6 +150,15 @@ mailMcpTools =
             ]
             ["account_id", "message_id", "to"])
         draftResultSchema
+    , sendTool
+        mailSendToolName
+        ( "Send the exact approved recipients, subject, and body using an "
+            <> "existing draft capability."
+        )
+        (schema
+            sendProperties
+            ["account_id", "draft_id", "to"])
+        sendResultSchema
     ]
   where
     readTool name description inputSchema outputDataSchema =
@@ -161,6 +177,14 @@ mailMcpTools =
             (resultEnvelopeSchema outputDataSchema)
             False
             True
+    sendTool name description inputSchema outputDataSchema =
+        MailMcpTool
+            name
+            description
+            inputSchema
+            (resultEnvelopeSchema outputDataSchema)
+            False
+            True
 
 mailMcpToolDefinitions :: [Value]
 mailMcpToolDefinitions = fmap toolValue mailMcpTools
@@ -172,7 +196,8 @@ mailMcpToolDefinitions = fmap toolValue mailMcpTools
         , "outputSchema" .= tool.mailMcpToolOutputSchema
         , "annotations" .= object
             [ "readOnlyHint" .= tool.mailMcpToolReadOnly
-            , "destructiveHint" .= False
+            , "destructiveHint" .=
+                (tool.mailMcpToolName == mailSendToolName)
             , "idempotentHint" .= tool.mailMcpToolReadOnly
             , "openWorldHint" .= True
             ]
@@ -287,6 +312,17 @@ draftProperties =
     , ("bcc", stringArrayProperty "Bare Bcc recipient addresses." 0 100 320)
     , ("subject", boundedStringProperty "Draft subject." 700)
     , ("body", boundedStringProperty "Plain-text draft body." 131072)
+    ]
+
+sendProperties :: [(Text, Value)]
+sendProperties =
+    [ ("account_id", referenceProperty "Opaque account reference.")
+    , ("draft_id", referenceProperty "Opaque draft reference.")
+    , ("to", stringArrayProperty "Bare To recipient addresses." 1 100 320)
+    , ("cc", stringArrayProperty "Bare Cc recipient addresses." 0 100 320)
+    , ("bcc", stringArrayProperty "Bare Bcc recipient addresses." 0 100 320)
+    , ("subject", boundedStringProperty "Email subject." 700)
+    , ("body", boundedStringProperty "Plain-text email body." 131072)
     ]
 
 schema :: [(Text, Value)] -> [Text] -> Value
@@ -452,6 +488,11 @@ draftResultSchema = schema
     , ("sent", constBooleanProperty False)
     ]
     ["draft_id", "message_id", "thread_id", "warning", "saved", "sent"]
+
+sendResultSchema :: Value
+sendResultSchema = schema
+    [ ("sent", constBooleanProperty True) ]
+    ["sent"]
 
 arraySchema :: Value -> Int -> Value
 arraySchema items maximumItems = object

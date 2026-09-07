@@ -65,8 +65,8 @@ instance Show ParsedMailAttachment where
             <> show (BS.length attachment.parsedMailAttachmentBytes)
             <> " bytes> }"
 
--- | Render a deliberately small, text/plain RFC 5322 message for draft-only
--- mailbox APIs. Tool-layer validation has already restricted recipients to
+-- | Render a deliberately small, text/plain RFC 5322 message for provider
+-- draft preparation. Tool-layer validation has already restricted recipients to
 -- bare addresses and excluded header controls. Body bytes are base64 encoded
 -- so arbitrary Unicode and newlines cannot become headers.
 renderMailDraftMime
@@ -307,8 +307,8 @@ parseEntity depth nextIndex raw
                             parseHeaderValueWithParameters value
                     in (Just kind, parameters)) rawDisposition
             filename =
-                lookup "filename" dispositionParameters
-                    <|> lookup "name" contentParameters
+                lookupMimeParameter "filename" dispositionParameters
+                    <|> lookupMimeParameter "name" contentParameters
             charset = lookup "charset" contentParameters
         if "multipart/" `Text.isPrefixOf` contentType
             then do
@@ -415,6 +415,74 @@ parseHeaderValueWithParameters raw =
         in if Text.null rawValue || Text.null name
             then Nothing
             else Just (name, value)
+
+lookupMimeParameter :: Text -> [(Text, Text)] -> Maybe Text
+lookupMimeParameter name parameters =
+    (decodeContinuations 0 >>= nonEmptyText)
+        <|> (lookup (name <> "*") parameters
+            >>= nonEmptyText
+            . decodeExtended
+            . stripExtendedPrefix)
+        <|> (lookup name parameters >>= nonEmptyText)
+  where
+    decodeContinuations index
+        | index >= maximumMimeParameterSegments = Nothing
+        | otherwise =
+            case segment index of
+                Nothing -> Nothing
+                Just first ->
+                    Just . decodeBytes . BS.concat $
+                        segmentBytes True first : remaining (index + 1)
+
+    remaining index
+        | index >= maximumMimeParameterSegments = []
+        | otherwise =
+            case segment index of
+                Nothing -> []
+                Just value -> segmentBytes False value : remaining (index + 1)
+
+    segment index =
+        let suffix = Text.pack (show index)
+        in ((,) True <$> lookup (name <> "*" <> suffix <> "*") parameters)
+            <|> ((,) False <$> lookup (name <> "*" <> suffix) parameters)
+
+    segmentBytes first (encoded, value)
+        | encoded =
+            percentDecodeBytes
+                (if first then stripExtendedPrefix value else value)
+        | otherwise = TextEncoding.encodeUtf8 value
+
+    decodeExtended = decodeBytes . percentDecodeBytes
+    decodeBytes =
+        TextEncoding.decodeUtf8With TextEncodingError.lenientDecode
+
+stripExtendedPrefix :: Text -> Text
+stripExtendedPrefix value =
+    case Text.splitOn "'" value of
+        _charset : _language : rest@(_ : _) -> Text.intercalate "'" rest
+        _ -> value
+
+percentDecodeBytes :: Text -> BS.ByteString
+percentDecodeBytes = BS.pack . go . BS.unpack . TextEncoding.encodeUtf8
+  where
+    go = \case
+        37 : first : second : rest
+            | Just decoded <- decodePercentHex first second ->
+                decoded : go rest
+        byte : rest -> byte : go rest
+        [] -> []
+
+    decodePercentHex first second
+        | isHexDigit (chr (fromIntegral first))
+        , isHexDigit (chr (fromIntegral second)) =
+            Just (hex first * 16 + hex second)
+        | otherwise = Nothing
+
+    hex byte
+        | byte >= 48 && byte <= 57 = byte - 48
+        | otherwise =
+            fromIntegral
+                (ord (toLower (chr (fromIntegral byte))) - ord 'a' + 10)
 
 splitSemicolonAware :: Text -> [Text]
 splitSemicolonAware =
@@ -635,9 +703,11 @@ maximumMimeHeaderBytes = 256 * 1024
 maximumMimeHeaderLines = 2000
 maximumMimeBodyLines = 150 * 1024
 
-maximumBoundaryCharacters, maximumFilenameCharacters :: Int
+maximumBoundaryCharacters, maximumFilenameCharacters
+    , maximumMimeParameterSegments :: Int
 maximumBoundaryCharacters = 200
 maximumFilenameCharacters = 255
+maximumMimeParameterSegments = 32
 
 maximumTextDecodeBytes :: Int
 maximumTextDecodeBytes = 512 * 1024

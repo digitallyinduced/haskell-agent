@@ -3,7 +3,7 @@ module Agent.CLI.MailOAuthSpec (spec) where
 import Agent.CLI.Mail.OAuth
 import Agent.CLI.Mail.Store (MailProvider(GmailProvider, MicrosoftProvider))
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket, finally)
+import Control.Exception.Safe (bracket, finally)
 import qualified Data.ByteString as BS
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -27,7 +27,7 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "mail OAuth loopback callback" do
-    it "requests Gmail compose/read and Graph write scopes without separate send scopes" $ do
+    it "requests Gmail compose/read and the Graph send scope" $ do
         gmail <- requireChallenge GmailProvider "test-client.apps.googleusercontent.com"
         microsoft <- requireChallenge MicrosoftProvider "00000000-0000-0000-0000-000000000000"
         let cleanup = do
@@ -46,7 +46,7 @@ spec = describe "mail OAuth loopback callback" do
             microsoftScope <- requireQueryValue
                 "scope" microsoft.mailOAuthAuthorizationUrl
             microsoftScope `shouldSatisfy` Text.isInfixOf "Mail.ReadWrite"
-            microsoftScope `shouldNotSatisfy` Text.isInfixOf "Mail.Send"
+            microsoftScope `shouldSatisfy` Text.isInfixOf "Mail.Send"
          ) `finally` cleanup
 
     it "ignores a preconnection and accepts a fragmented matching callback" do

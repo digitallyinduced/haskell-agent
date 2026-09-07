@@ -176,7 +176,7 @@ mailOAuthScopes = \case
         "openid email https://www.googleapis.com/auth/gmail.readonly "
             <> "https://www.googleapis.com/auth/gmail.compose"
     MicrosoftProvider ->
-        "openid profile offline_access User.Read Mail.ReadWrite"
+        "openid profile offline_access User.Read Mail.ReadWrite Mail.Send"
     ImapProvider -> ""
 
 exchangeMailOAuthCode
