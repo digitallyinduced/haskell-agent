@@ -219,6 +219,39 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
         Json.decodeEither responseItemDecoder payload
             `shouldSatisfy` isLeft
 
+    it "preserves encryption for bare and namespaced collaboration calls" do
+        mapM_ (\(callName, callNamespace, encryptionMetadata) -> do
+            let call = FunctionCall
+                    { itemId = Nothing
+                    , callId = "collaboration-encryption"
+                    , name = callName
+                    , namespace = callNamespace
+                    , provider = Nothing
+                    , arguments = "{\"message\":\"opaque-payload\"}"
+                    , encryptedFunctionArgs = encryptionMetadata
+                    , status = Nothing
+                    , async = Nothing
+                    }
+            case responseItemToToolCall (FunctionCallItem call) of
+                Just projected ->
+                    projected.argumentsEncrypted
+                        `shouldBe` (encryptionMetadata /= Just [])
+                Nothing -> expectationFailure "collaboration call was not projected"
+            )
+            [ (callName, callNamespace, encryptionMetadata)
+            | bareName <- ["send_message", "spawn_agent", "followup_task"]
+            , (callName, callNamespace) <-
+                [ (bareName, Nothing)
+                , (bareName, Just "collaboration")
+                , ("collaboration." <> bareName, Nothing)
+                , ("collaboration" <> bareName, Nothing)
+                , (bareName, Just "multi_agent_v1")
+                , ("multi_agent_v1." <> bareName, Nothing)
+                , ("multi_agent_v1" <> bareName, Nothing)
+                ]
+            , encryptionMetadata <- [Nothing, Just ["message"], Just []]
+            ]
+
     it "routes the reserved ordinary computer function to the harness" do
         let call = FunctionCall
                 { itemId = Nothing
