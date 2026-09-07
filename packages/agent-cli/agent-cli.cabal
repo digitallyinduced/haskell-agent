@@ -192,6 +192,7 @@ library
                     , Agent.CLI.Database.Storage
                     , Agent.CLI.Desktop
                     , Agent.CLI.Dictation
+                    , Agent.CLI.Dictation.Capture
                     , Agent.CLI.Dialects
                     , Agent.CLI.ExternalProgram
                     , Agent.CLI.FileUri
@@ -505,6 +506,7 @@ test-suite agent-cli-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.CLI.ActiveAccountSpec
+                    , Agent.CLI.DictationCaptureSpec
                     , Agent.CLI.AccountSelectionSpec
                     , Agent.CLI.ApprovalSpec
                     , Agent.CLI.AgentSessionsSpec

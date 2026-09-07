@@ -24,6 +24,7 @@ import Agent.CLI.Auth
     , loadAuth
     , loadOpenAiDictationAuth
     )
+import Agent.CLI.Dictation.Capture (withBufferedCapture)
 import Agent.CLI.Transcription (transcribeAudio)
 import Agent.CLI.GatewayClient
     ( GatewayModelAccess
@@ -90,6 +91,7 @@ import System.Process
 
 data DictationControl = DictationControl
     { dictationWaitForStop :: IO ()
+    , dictationOnRecording :: IO ()
     , dictationOnTranscript :: Text -> IO ()
     }
 
@@ -274,10 +276,10 @@ dictateForTarget target = do
     result <-
         dictateWithTarget target
             DictationControl
-                { dictationWaitForStop = do
+                { dictationWaitForStop = waitForStopKey
+                , dictationOnRecording = do
                     Text.hPutStr stderr "● Listening… press Enter to stop"
                     hFlush stderr
-                    waitForStopKey
                 , dictationOnTranscript = renderLiveTranscript
                 }
             `finally` clearLiveTranscript
@@ -306,40 +308,60 @@ dictateWithTarget target control =
         requireExecutable "ffmpeg"
         case target of
             DirectDictation provider ->
-                selectDictationBackend provider loadDictationBackendAuth
-                    >>= \case
-                        Left err ->
-                            pure (DictationFailed err)
-                        Right (backend, loaded) ->
-                            runBackend backend loaded
+                case dictationBackendsForProvider provider of
+                    Left err ->
+                        pure (DictationFailed err)
+                    Right (backend :| []) ->
+                        capture (sampleRate backend) \produceAudio ->
+                            loadDictationBackendAuth backend >>= \case
+                                Left err ->
+                                    pure (DictationFailed (dictationAuthErrorText err))
+                                Right loaded ->
+                                    runBackend backend loaded produceAudio
+                    Right _ ->
+                        -- Borrowed backends use different PCM sample rates.
+                        -- Select the credential first, then start capture before
+                        -- token refresh and provider connection setup.
+                        selectDictationBackend provider loadDictationBackendAuth
+                            >>= \case
+                                Left err ->
+                                    pure (DictationFailed err)
+                                Right (backend, loaded) ->
+                                    capture (sampleRate backend)
+                                        (runBackend backend loaded)
             GatewayDictation gateway ->
-                transcribeGatewayPcm
-                    gateway
-                    (streamMicrophone
-                        openAITranscriptionSampleRate
-                        control.dictationWaitForStop)
-                    control.dictationOnTranscript >>= \case
-                        Left err -> pure (DictationFailed err)
-                        Right transcript ->
-                            pure
-                                (DictationTranscript
-                                    (Text.strip transcript))
-    runBackend backend loaded = case backend of
+                capture openAITranscriptionSampleRate \produceAudio ->
+                    transcribeGatewayPcm
+                        gateway
+                        produceAudio
+                        control.dictationOnTranscript >>= \case
+                            Left err -> pure (DictationFailed err)
+                            Right transcript ->
+                                pure
+                                    (DictationTranscript
+                                        (Text.strip transcript))
+    -- Retain up to 32 MiB for provider retries (~11 minutes of
+    -- 24 kHz mono PCM16), without unbounded startup buffering.
+    capture rate =
+        withBufferedCapture
+            (32 * 1024 * 1024)
+            control.dictationOnRecording
+            (streamMicrophone rate control.dictationWaitForStop)
+    sampleRate = \case
+        OpenAIDictation -> openAITranscriptionSampleRate
+        XAIDictation -> 16_000
+    runBackend backend loaded produceAudio = case backend of
         OpenAIDictation ->
             finish =<<
                 transcribePcmWithOpenAI
                     loaded.loadedTokenProvider
-                    (streamMicrophone
-                        openAITranscriptionSampleRate
-                        control.dictationWaitForStop)
+                    produceAudio
                     control.dictationOnTranscript
         XAIDictation ->
             finish =<<
                 transcribePcmWithXAI
                     loaded.loadedTokenProvider
-                    (streamMicrophone
-                        16_000
-                        control.dictationWaitForStop)
+                    produceAudio
                     control.dictationOnTranscript
     finish = \case
         Left err ->

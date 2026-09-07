@@ -38,7 +38,9 @@ import Agent.TUI.TextWidth
     , nextGraphemeBoundary
     , previousGraphemeBoundary
     )
+import Control.Concurrent (newEmptyMVar, readMVar)
 import Control.Concurrent.STM (atomically)
+import Data.IORef (newIORef)
 import qualified Data.ByteString as ByteString
 import Data.Char (isControl)
 import Data.Foldable (toList)
@@ -417,6 +419,31 @@ spec = describe "fullscreen composer" do
             `shouldBe` Just DictationAbort
         dictationKeyAction (V.EvKey (V.KChar 'x') [])
             `shouldBe` Nothing
+
+    it "does not claim to listen while the microphone is starting" do
+        dictationStartingNotice.noticeKind `shouldBe` NoticeProgress
+        dictationStartingNotice.noticeTransient `shouldBe` False
+        dictationStartingNotice.noticeText
+            `shouldBe` "Starting microphone… Enter to stop · Esc to cancel"
+
+    it "ignores readiness for stopped, aborted, finished, or replaced sessions" do
+        stop <- newEmptyMVar
+        abort <- newIORef False
+        let session = DictationSession stop abort
+        dictationSessionIsRecording stop (Just session) `shouldReturn` True
+        other <- newEmptyMVar
+        dictationSessionIsRecording other (Just session) `shouldReturn` False
+        dictationSessionIsRecording stop Nothing `shouldReturn` False
+        requestDictationStop session False
+        -- The worker must observe, not consume, the persistent stop signal.
+        readMVar stop
+        dictationSessionIsRecording stop (Just session) `shouldReturn` False
+        abortStop <- newEmptyMVar
+        aborted <- newIORef False
+        let abortSession = DictationSession abortStop aborted
+        requestDictationStop abortSession True
+        dictationSessionIsRecording abortStop (Just abortSession)
+            `shouldReturn` False
 
     it "renders a non-transient listening notice for live transcripts" do
         let idle = dictationProgressNotice ""

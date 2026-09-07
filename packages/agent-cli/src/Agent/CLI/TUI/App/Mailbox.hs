@@ -705,6 +705,7 @@ appEventLogicalBytes = \case
             (agentTargetLogicalBytes target)
             entries
     AppSetWindowTitle text -> logicalTextBytes text
+    AppDictationRecording _ -> 256
     AppDictationPartial text -> logicalTextBytes text
     AppDictationFinished result ->
         either logicalTextBytes logicalTextBytes result

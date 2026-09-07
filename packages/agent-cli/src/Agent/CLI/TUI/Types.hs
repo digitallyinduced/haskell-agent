@@ -185,6 +185,7 @@ data AppEvent
     | AppToolImage !Text !TuiImagePreview
       -- ^ An image the agent displayed through @show_image@, keyed by the
       -- originating tool call id.
+    | AppDictationRecording !(MVar ())
     | AppDictationPartial !Text
     | AppDictationFinished !(Either Text Text)
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
@@ -427,6 +428,7 @@ data FullscreenRuntime = FullscreenRuntime
 
 data DictationJob = DictationJob
     { dictationJobWaitForStop :: IO ()
+    , dictationJobRecordingSession :: !(MVar ())
     }
 
 data DictationSession = DictationSession

@@ -76,6 +76,7 @@ import Agent.CLI.TUI.Types
     , ChoiceSelection(..)
     , CommandPaletteAction(..)
     , CommandPaletteEntry(..)
+    , DictationSession(..)
     , FullscreenInput(..)
     , commandPaletteActionAt
     , commandPaletteEntries
@@ -151,6 +152,7 @@ import Agent.TUI.Presentation
     , TodoDisplayStatus(..)
     )
 import Agent.TUI.Motion
+import Control.Concurrent (newEmptyMVar)
 import Control.Concurrent.STM
     ( atomically
     , newEmptyTMVarIO
@@ -186,6 +188,26 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "dictation readiness" do
+        it "does not erase a transcript that arrives before the ready event" do
+            stop <- newEmptyMVar
+            abort <- newIORef False
+            let ui = reduceUi
+                    (UiSetNotice (Just Composer.dictationStartingNotice))
+                    initialUiState
+            runtime <- newScriptRuntime ui
+            let initialState =
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                        { appDictation = Just (DictationSession stop abort) }
+                script =
+                    [ FullscreenScriptApp (AppDictationPartial "opening words")
+                    , FullscreenScriptApp (AppDictationRecording stop)
+                    , FullscreenScriptHalt
+                    ]
+            (_, finalState) <- runFullscreenScriptWithState initialState script
+            finalState.appUi.uiNotice
+                `shouldBe` Just (Composer.dictationProgressNotice "opening words")
+
     describe "toolImageBlockId" do
         let started callId name =
                 reduceUi

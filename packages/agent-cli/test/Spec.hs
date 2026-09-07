@@ -26,6 +26,7 @@ import Test.Hspec.Runner
     , runSpec
     )
 import Text.Read (readMaybe)
+import qualified Agent.CLI.DictationCaptureSpec as DictationCaptureSpec
 
 import qualified Agent.CLI.ActiveAccountSpec as ActiveAccountSpec
 import qualified Agent.CLI.AccountSelectionSpec as AccountSelectionSpec
@@ -158,6 +159,7 @@ main = do
 specs :: Spec
 specs = do
     ActiveAccountSpec.spec
+    DictationCaptureSpec.spec
     AccountSelectionSpec.spec
     AgentViewportSpec.spec
     AgentViewportRuntimeSpec.spec

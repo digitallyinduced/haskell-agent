@@ -281,6 +281,7 @@ handleEvent event = do
             uiEventMaySkipUnfocusedRedraw uiEvent
         AppUiBatch uiEvents ->
             all uiEventMaySkipUnfocusedRedraw uiEvents
+        AppDictationRecording{} -> True
         AppDictationPartial{} -> True
         AppAgentSnapshot{} -> True
         AppSetWindowTitle{} -> True
@@ -405,6 +406,16 @@ handleAppEvent = \case
         handleCommitImagePreviewsEvent prepared
     AppToolImage callId preview ->
         handleToolImageEvent callId preview
+    AppDictationRecording stop -> do
+        state <- get
+        recording <-
+            liftIO (Composer.dictationSessionIsRecording stop state.appDictation)
+        -- A fast transcript can beat the readiness callback to the mailbox.
+        -- Only advance the startup notice; never erase an existing transcript.
+        when (recording
+            && state.appUi.uiNotice == Just Composer.dictationStartingNotice) $
+            applyLocalUiEvent
+                (UiSetNotice (Just (Composer.dictationProgressNotice "")))
     AppDictationPartial text ->
         handleDictationPartialEvent text
     AppDictationFinished result ->
@@ -609,7 +620,13 @@ handleDictationPartialEvent
     -> EventM Name AppState ()
 handleDictationPartialEvent text = do
     state <- get
-    when (isJust state.appDictation) $
+    recording <- liftIO $
+        case state.appDictation of
+            Nothing -> pure False
+            Just session ->
+                Composer.dictationSessionIsRecording
+                    session.dictationStop state.appDictation
+    when recording $
         applyLocalUiEvent
             (UiSetNotice (Just (Composer.dictationProgressNotice text)))
 
