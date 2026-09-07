@@ -45,7 +45,9 @@ import Agent.CLI.Lsp
 import Agent.CLI.ModelConfig (builtinConnectionId)
 import Agent.CLI.Models (ModelTarget(targetConnectionId, targetWireModelId))
 import Agent.CLI.Options
-    ( isOneShot, resolveComputerUseEnabled, CliOptions(optGhci, optBash) )
+    ( isOneShot, resolveComputerUseEnabled
+    , CliOptions(optGhci, optBash, optSkills)
+    )
 import Agent.CLI.Plan (resumedPlanNeedsApproval)
 import Agent.CLI.Runtime.Orchestration.Background
     ( runInProcessSessionTurn )
@@ -87,6 +89,7 @@ import Agent.CLI.SessionLock
       sessionLockPath )
 import Agent.CLI.Startup.Auth (startupDie)
 import Agent.CLI.StartupContext ( preloadAgentsContext )
+import Agent.CLI.Skills (loadMcpSkillsCatalog, mergeSkillCatalogs)
 import Agent.CLI.WebFetch
     ( WebFetchRuntime
     , closeWebFetchRuntime
@@ -107,7 +110,7 @@ import Agent.ResourceScope
     , withResourceScope
     )
 import Agent.Skills
-    ( SkillCatalog
+    ( SkillCatalog(..)
     , SkillInvocation
     )
 import Agent.Store.Postgres ( trustedPool )
@@ -265,13 +268,21 @@ runAgentTools request = withResourceScope \resourceScope -> do
         (reportStartupWarning request.startup)
         lspStartup.lspStartupWarnings
     installCollaborationCallbacks request collaborationRuntime
+    remoteInitialSkills <-
+        if request.options.optSkills
+            then loadMcpSkillsCatalog mcpRuntime.runtimeMcpFleet
+            else pure (SkillCatalog [] [])
+    let initialSkills =
+            mergeSkillCatalogs
+                localToolRuntime.localInitialSkills
+                remoteInitialSkills
     sessionControlRuntime <-
         newSessionControlRuntime
             request
             toolStartup
             toolModelRuntime
             collaborationRuntime
-            localToolRuntime.localInitialSkills
+            initialSkills
     sessionToolsRuntime <-
         assembleSessionToolsRuntime
             request
@@ -646,7 +657,10 @@ assembleSessionToolsRuntime AgentToolsRequest
         sessionGatewayTools = maybe [] managedGatewayTools promptRequest
         sessionDatabaseTools = databaseTools databaseToolsEnv
         sessionLearnedSkillTools =
-            learnedSkillTools skillInvocationsRef learnedSkillToolsEnv
+            learnedSkillTools
+                skillInvocationsRef
+                (if null mcpServerConfigs then Nothing else Just mcpFleet)
+                learnedSkillToolsEnv
         nativeToolGroups =
             maybe [] (.nativeToolGroups) startup.startupNativeHooks
         computerTools =

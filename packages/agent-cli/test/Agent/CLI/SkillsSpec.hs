@@ -3,13 +3,21 @@ module Agent.CLI.SkillsSpec (spec) where
 import Agent.CLI.Command (SkillCommand(..))
 import Agent.CLI.Options (CliOptions(..), defaultCliOptions)
 import Agent.CLI.Skills
+import Agent.Json (rawJsonFromEncoding)
+import Agent.MCP.Types
+    ( McpResourceContent(..)
+    , McpSkillEntry(..)
+    , McpSkillResource(..)
+    , McpSkillResources(..)
+    )
 import Agent.Skills
 import Agent.Tools.IO (resolveForRead, resolveUnderCwd)
 import Agent.Tools.Types (defaultToolEnv)
+import Data.Aeson qualified as Aeson
 import Data.Either (isLeft, isRight)
 import Data.IORef (newIORef, readIORef)
 import qualified Data.Text as Text
-import System.OsPath (takeDirectory, unsafeEncodeUtf, (</>))
+import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -35,7 +43,7 @@ spec = describe "Agent.CLI.Skills" do
         let matching =
                 filter ((== "telegram-agent") . (.skillName))
                     catalog.catalogSkills
-        map (.skillScope) matching `shouldBe` [BuiltinSkill]
+        map skillScopeOf matching `shouldBe` [BuiltinSkill]
         map (.skillModelInvocable) matching `shouldBe` [True]
 
     it "allows packaged skills and their shared resume guidance but not the parent directory" do
@@ -56,14 +64,15 @@ spec = describe "Agent.CLI.Skills" do
                     ("expected one packaged Telegram skill, got "
                         <> show (length skills))
                     >> fail "unreachable"
-        resolveForRead env telegram.skillPath
+        let (telegramPath, telegramDirectory) = filesystemPaths telegram
+        resolveForRead env telegramPath
             >>= (`shouldSatisfy` isRight)
-        resolveForRead env (takeDirectory telegram.skillDirectory)
+        resolveForRead env (takeDirectory telegramDirectory)
             >>= (`shouldSatisfy` isLeft)
-        resolveUnderCwd env telegram.skillPath
+        resolveUnderCwd env telegramPath
             >>= (`shouldSatisfy` isLeft)
         let sharedResumeDirectory =
-                takeDirectory telegram.skillDirectory
+                takeDirectory telegramDirectory
                     </> fromFilePath "shared/resume-session"
         resolveForRead env (sharedResumeDirectory </> fromFilePath "CORE.md")
             >>= (`shouldSatisfy` isRight)
@@ -78,7 +87,7 @@ spec = describe "Agent.CLI.Skills" do
         let matching =
                 filter ((== "add-model") . (.skillName))
                     catalog.catalogSkills
-        map (.skillScope) matching `shouldBe` [BuiltinSkill]
+        map skillScopeOf matching `shouldBe` [BuiltinSkill]
         map (.skillModelInvocable) matching `shouldBe` [True]
 
     it "loads the packaged wait-for-ci skill" do
@@ -91,7 +100,7 @@ spec = describe "Agent.CLI.Skills" do
         let matching =
                 filter ((== "wait-for-ci") . (.skillName))
                     catalog.catalogSkills
-        map (.skillScope) matching `shouldBe` [BuiltinSkill]
+        map skillScopeOf matching `shouldBe` [BuiltinSkill]
         map (.skillModelInvocable) matching `shouldBe` [True]
         map (.skillUserInvocable) matching `shouldBe` [True]
         map (.skillWhenToUse) matching `shouldBe`
@@ -109,7 +118,7 @@ spec = describe "Agent.CLI.Skills" do
         let matching =
                 filter ((== "learn-about-user") . (.skillName))
                     catalog.catalogSkills
-        map (.skillScope) matching `shouldBe` [BuiltinSkill]
+        map skillScopeOf matching `shouldBe` [BuiltinSkill]
         map (.skillModelInvocable) matching `shouldBe` [True]
         map (.skillUserInvocable) matching `shouldBe` [True]
 
@@ -130,7 +139,7 @@ spec = describe "Agent.CLI.Skills" do
                 filter ((`elem` resumeNames) . (.skillName))
                     catalog.catalogSkills
         map (.skillName) matching `shouldMatchList` resumeNames
-        map (.skillScope) matching `shouldBe` replicate 4 BuiltinSkill
+        map skillScopeOf matching `shouldBe` replicate 4 BuiltinSkill
         map (.skillModelInvocable) matching `shouldBe` replicate 4 True
         map (.skillUserInvocable) matching `shouldBe` replicate 4 True
         let commands =
@@ -151,7 +160,7 @@ spec = describe "Agent.CLI.Skills" do
         let matching =
                 filter ((== "post-task-learning-review") . (.skillName))
                     catalog.catalogSkills
-        map (.skillScope) matching `shouldBe` [BuiltinSkill]
+        map skillScopeOf matching `shouldBe` [BuiltinSkill]
         map (.skillContextMode) matching `shouldBe` [SkillContextAlways]
         case formatSkillCatalogContext 8000 catalog of
             (Just context, _) -> do
@@ -233,6 +242,73 @@ spec = describe "Agent.CLI.Skills" do
             Just text ->
                 text `shouldSatisfy` Text.isPrefixOf "agents\n\n## Skills"
 
+    it "keeps local bare-name precedence and qualifies MCP skills" do
+        let catalog =
+                mergeSkillCatalogs
+                    (SkillCatalog [fakeSkill] [])
+                    (SkillCatalog [remoteSkill] [])
+            invocations = buildSkillInvocations reservedSlashNames catalog
+        map (.invocationName) invocations
+            `shouldMatchList`
+                ["deploy", "user:deploy", "mcp-demo-server:deploy"]
+        map (.invocationName)
+            (filter (.invocationBare) invocations)
+            `shouldBe` ["deploy"]
+
+    it "does not resolve MCP skill instructions without a live fleet" do
+        resolveSkillContent Nothing remoteSkill
+            `shouldReturn` Left "MCP skill server is unavailable"
+
+    it "verifies MCP skill identity, size, digest, and complete document" do
+        case verifyMcpSkillContent
+                remoteSkill
+                "demo server"
+                remoteEntry
+                [remoteContent] of
+            Left err -> expectationFailure (Text.unpack err)
+            Right content -> do
+                content.skillContentBody `shouldBe` "Deploy remotely."
+                content.skillContentFile `shouldBe`
+                    "skill://demo/deploy/SKILL.md"
+                content.skillContentDirectory `shouldBe` Nothing
+                content.skillContentResourceUris `shouldBe`
+                    ["skill://demo/deploy/SKILL.md"]
+
+    it "rejects MCP skill content whose digest changed after discovery" do
+        verifyMcpSkillContent
+            remoteSkill
+            "demo server"
+            remoteEntry
+            [ remoteContent
+                { mcpResourceText =
+                    Just
+                        (Text.replace
+                            "Deploy remotely."
+                            "deploy remotely."
+                            remoteDocument)
+                }
+            ]
+            `shouldBe`
+                Left "MCP SKILL.md SHA-256 digest does not match its manifest"
+
+    it "rejects duplicate SKILL.md manifest entries" do
+        let duplicateEntry =
+                remoteEntry
+                    { mcpSkillResources =
+                        case remoteEntry.mcpSkillResources of
+                            McpSkillResourcesListed resources ->
+                                McpSkillResourcesListed (resources <> resources)
+                            McpSkillResourcesDynamic ->
+                                error "remoteEntry must use listed resources"
+                    }
+        verifyMcpSkillContent
+            remoteSkill
+            "demo server"
+            duplicateEntry
+            [remoteContent]
+            `shouldBe`
+                Left "MCP skill manifest contains duplicate SKILL.md entries"
+
 fakeSkill :: Skill
 fakeSkill = Skill
     { skillName = "deploy"
@@ -251,10 +327,69 @@ fakeSkill = Skill
     , skillLicense = Nothing
     , skillCompatibility = Nothing
     , skillMetadata = mempty
-    , skillPath = fromFilePath "/tmp/deploy/SKILL.md"
-    , skillDirectory = fromFilePath "/tmp/deploy"
-    , skillBody = "Deploy."
-    , skillFileText = "---\nname: deploy\ndescription: Deploy the service\n---\nDeploy."
-    , skillScope = UserSkill
-    , skillOrigin = AgentSkills
+    , skillSource = FilesystemSkillSource
+        { skillPath = fromFilePath "/tmp/deploy/SKILL.md"
+        , skillDirectory = fromFilePath "/tmp/deploy"
+        , skillBody = "Deploy."
+        , skillFileText =
+            "---\nname: deploy\ndescription: Deploy the service\n---\nDeploy."
+        , skillScope = UserSkill
+        , skillOrigin = AgentSkills
+        }
     }
+
+remoteSkill :: Skill
+remoteSkill =
+    fakeSkill
+        { skillArgumentHint = Nothing
+        , skillSource =
+            McpSkillSource
+                "demo server"
+                "skill://demo/deploy/SKILL.md"
+                ["skill://demo/deploy/SKILL.md"]
+        }
+
+remoteDocument :: Text.Text
+remoteDocument =
+    "---\nname: deploy\ndescription: Deploy the service\n---\nDeploy remotely.\n"
+
+remoteEntry :: McpSkillEntry
+remoteEntry = McpSkillEntry
+    { mcpSkillUri = "skill://demo/deploy/SKILL.md"
+    , mcpSkillFrontmatter =
+        rawJsonFromEncoding . Aeson.toEncoding $
+            Aeson.object
+                [ "name" Aeson..= ("deploy" :: Text.Text)
+                , "description" Aeson..= ("Deploy the service" :: Text.Text)
+                ]
+    , mcpSkillResources =
+        McpSkillResourcesListed
+            [ McpSkillResource
+                { mcpSkillResourceUri = "skill://demo/deploy/SKILL.md"
+                , mcpSkillResourceDigest =
+                    "sha256:8ca7544fd7ed7665f7a73f12e29664dc321b2d0e8bdb3a6c56d7869712e7368e"
+                , mcpSkillResourceSize = 70
+                }
+            ]
+    }
+
+remoteContent :: McpResourceContent
+remoteContent = McpResourceContent
+    { mcpResourceUri = "skill://demo/deploy/SKILL.md"
+    , mcpResourceMimeType = Just "text/markdown"
+    , mcpResourceText = Just remoteDocument
+    , mcpResourceBlob = Nothing
+    }
+
+skillScopeOf :: Skill -> SkillScope
+skillScopeOf skill =
+    case skill.skillSource of
+        FilesystemSkillSource{skillScope} -> skillScope
+        McpSkillSource{} -> error "expected filesystem skill"
+
+filesystemPaths :: Skill -> (OsPath, OsPath)
+filesystemPaths skill =
+    case skill.skillSource of
+        FilesystemSkillSource{skillPath, skillDirectory} ->
+            (skillPath, skillDirectory)
+        McpSkillSource{} -> error "expected filesystem skill"

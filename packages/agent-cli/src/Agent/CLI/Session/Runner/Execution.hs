@@ -100,6 +100,7 @@ import Agent.CLI.WindowTitle
 import Agent.CLI.Turn
 import Agent.Cancel
 import Agent.Loop
+import qualified Agent.MCP.Fleet as MCP
 import Agent.Dialect
 import Agent.Error (ApiError)
 import Agent.Provider (Provider)
@@ -579,11 +580,7 @@ buildSkillContextRuntime
                     newIORef
                         ((.catalogEnvironmentContext)
                             <$> codexCatalogSession)
-        freshSkills <-
-            if loadsHostWorkspaceContext
-                then loadSkillsCatalogQuiet
-                    options workspace.home workspace.projectRoot workspace.cwd
-                else pure (SkillCatalog [] [])
+        freshSkills <- loadAvailableSkills
         (omitted, _) <-
             installSkills freshAgents True freshSkills
         reportSkillCatalog True freshSkills omitted
@@ -615,15 +612,27 @@ buildSkillContextRuntime
         readIORef toolEnv.toolSessionTmp >>= mapM_ resetToolSessionTemp
         reloadGeneratedContext
     refreshSkills queueContext = do
-        refreshed <-
+        refreshed <- loadAvailableSkills
+        current <- readIORef skillsRef
+        when (refreshed /= current) do
+            (omitted, _) <-
+                installSkills startupContext queueContext refreshed
+            when queueContext $
+                reportSkillCatalog True refreshed omitted
+    loadAvailableSkills = do
+        local <-
             if loadsHostWorkspaceContext
                 then loadSkillsCatalogQuiet
                     options workspace.home workspace.projectRoot workspace.cwd
                 else pure (SkillCatalog [] [])
-        (omitted, _) <-
-            installSkills startupContext queueContext refreshed
-        when queueContext $
-            reportSkillCatalog True refreshed omitted
+        remote <-
+            if options.optSkills
+                then maybe
+                    (pure (SkillCatalog [] []))
+                    loadMcpSkillsCatalog
+                    mcpFleet
+                else pure (SkillCatalog [] [])
+        pure (mergeSkillCatalogs local remote)
     contextLength = maybe 0 Text.length
     formatSkillWarning warning =
         "skill ignored: "
@@ -1753,13 +1762,29 @@ runSessionWorkers
                 RecapTurnSummary ->
                     callbacks.runnerRunSessionTurnSummary env
             recapWorker
+        withMcpSkillWatcher action =
+            case env.sessionMcpFleet of
+                Nothing -> action
+                Just fleet ->
+                    withAsync (watchMcpSkills fleet) (const action)
+        watchMcpSkills fleet = do
+            previous <- MCP.mcpFleetSkillRegistrations fleet
+            -- Close the gap between the startup snapshot and this watcher.
+            env.sessionRefreshSkills True
+            waitForChange fleet previous
+        waitForChange fleet previous = do
+            current <-
+                MCP.mcpFleetWaitForSkillRegistrations fleet previous
+            env.sessionRefreshSkills True
+            waitForChange fleet current
     result <- withAsync host.hostWindowTitle.windowTitleWorker \_ ->
-        case host.hostFullscreen of
-            Just _ ->
-                withAsync btwWorker \_ ->
+        withMcpSkillWatcher $
+            case host.hostFullscreen of
+                Just _ ->
+                    withAsync btwWorker \_ ->
+                        withAsync recapWorker (const sessionAction)
+                Nothing ->
                     withAsync recapWorker (const sessionAction)
-            Nothing ->
-                withAsync recapWorker (const sessionAction)
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
     pure result

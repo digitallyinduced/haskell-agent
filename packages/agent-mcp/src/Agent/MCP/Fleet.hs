@@ -41,6 +41,7 @@ import Control.Concurrent.STM
     ( STM
     , TVar
     , atomically
+    , check
     , modifyTVar'
     , newTQueueIO
     , newTVarIO
@@ -109,6 +110,19 @@ mcpFleetTools = map (.mcpRegistrationTool) . (.mcpFleetRegistrations)
 -- unique within an MCP server.
 mcpFleetSkillRegistrations :: McpFleet -> IO [McpSkillRegistration]
 mcpFleetSkillRegistrations fleet = readTVarIO fleet.mcpFleetSkills
+
+-- | Wait until the fleet's advertised skill registrations differ from a
+-- previously observed snapshot.  The wait is interruptible, so callers can
+-- own it with their existing structured worker lifecycle.
+mcpFleetWaitForSkillRegistrations
+    :: McpFleet
+    -> [McpSkillRegistration]
+    -> IO [McpSkillRegistration]
+mcpFleetWaitForSkillRegistrations fleet previous =
+    atomically do
+        current <- readTVar fleet.mcpFleetSkills
+        check (current /= previous)
+        pure current
 
 mcpFleetGetSkill :: McpFleet -> Text -> Text -> IO (Either Text McpSkillEntry)
 mcpFleetGetSkill fleet server uri =
@@ -483,12 +497,11 @@ startMcpFleetProgressiveHooks hooks reportStatuses configs = mask \restore -> do
                 Left _ -> pure ()
                 Right _ -> do
                     entries <- readTVarIO client.clientDiscoveredSkills
-                    atomically $ modifyTVar' skillsVar \current ->
-                        current
-                            <> [ McpSkillRegistration
-                                    client.clientConfig.mcpServerName entry
-                                | entry <- entries
-                                ]
+                    atomically $
+                        replaceServerSkills
+                            skillsVar
+                            client.clientConfig.mcpServerName
+                            entries
             void (reportFleetStatuses reportStatuses fleet)
     atomically $
         writeTVar clientsVar $
@@ -547,6 +560,18 @@ publishCatalogEntries catalog client tools =
                     entries)
             (withoutServer client.clientConfig.mcpServerName current)
             tools
+
+replaceServerSkills
+    :: TVar [McpSkillRegistration]
+    -> Text
+    -> [McpSkillEntry]
+    -> STM ()
+replaceServerSkills skillsVar serverName entries =
+    modifyTVar' skillsVar \current ->
+        filter ((/= serverName) . (.mcpSkillServer)) current
+            <> [ McpSkillRegistration serverName entry
+               | entry <- entries
+               ]
 
 withoutServer :: Text -> Map.Map Text McpCatalogEntry -> Map.Map Text McpCatalogEntry
 withoutServer serverName =
@@ -920,6 +945,7 @@ reconnectCatalogEntry fleet qualifiedName failedEntry =
                         closeMcpClient replacementClient
                         pure (Left err)
                     Right (tools, _) -> do
+                        skills <- readTVarIO replacementClient.clientDiscoveredSkills
                         let replacementEntries =
                                 Map.fromList
                                     [ ( qualifiedMcpToolName
@@ -935,6 +961,10 @@ reconnectCatalogEntry fleet qualifiedName failedEntry =
                                 (Map.insert serverName replacementClient clients)
                             writeTVar fleet.mcpFleetCatalog
                                 (replacementEntries <> withoutServer serverName currentCatalog)
+                            replaceServerSkills
+                                fleet.mcpFleetSkills
+                                serverName
+                                skills
                             pure (Map.lookup serverName clients)
                         attachFleetEvents fleet replacementClient
                         mapM_ closeMcpClient previousClient

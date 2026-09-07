@@ -131,6 +131,7 @@ import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import Agent.CLI.Skills
     ( formatSkillsListing
     , resolvePromptSkillMentionsWithWarnings
+    , resolveSkillContent
     )
 import Agent.CLI.Status ( applyReplMode, cycleReplInteraction )
 import Agent.CLI.Style
@@ -960,29 +961,36 @@ submitSkillInvocation handlerContext finishTurn invocations next color line invo
                     Text.hPutStrLn stderr (roleError color err)
                 next
             Right invocation -> do
-                pendingImages <-
-                    modifyLiveAttachments conversationRef \imgs -> ([], imgs)
-                forM_ fullscreen \runtime ->
-                    commitFullscreenImagePreviews runtime pendingImages
-                let userText =
-                        if Text.null arguments
-                            then "Use the "
-                                <> invocation.invocationSkill.skillName
-                                <> " skill."
-                            else arguments
-                    userInput =
-                        userMessageWithAttachments
-                            userText
-                            (map ImageAttachmentItem pendingImages)
-                    skillInputs =
-                        [ UserMessage
-                            (formatSkillActivation invocation arguments)
-                        , userInput
-                        ]
-                resetRenderPrintedText render
-                fullscreenEvent (UiUserSubmitted line)
-                result <- runOneTurn env line skillInputs
-                finishTurn False result
+                resolveSkillContent env.sessionMcpFleet invocation.invocationSkill >>= \case
+                    Left err -> do
+                        let message = "Could not activate skill: " <> err
+                        displayError message $
+                            Text.hPutStrLn stderr (roleError color message)
+                        next
+                    Right content -> do
+                        pendingImages <-
+                            modifyLiveAttachments conversationRef \imgs -> ([], imgs)
+                        forM_ fullscreen \runtime ->
+                            commitFullscreenImagePreviews runtime pendingImages
+                        let userText =
+                                if Text.null arguments
+                                    then "Use the "
+                                        <> invocation.invocationSkill.skillName
+                                        <> " skill."
+                                    else arguments
+                            userInput =
+                                userMessageWithAttachments
+                                    userText
+                                    (map ImageAttachmentItem pendingImages)
+                            skillInputs =
+                                [ UserMessage
+                                    (formatSkillActivation invocation content arguments)
+                                , userInput
+                                ]
+                        resetRenderPrintedText render
+                        fullscreenEvent (UiUserSubmitted line)
+                        result <- runOneTurn env line skillInputs
+                        finishTurn False result
   where
     env = handlerContext.handlerSessionEnv
     conversationRef = env.sessionState.stateConversation
@@ -1011,24 +1019,25 @@ submitExpandedPrompt
     :: ReplHandlerContext -> (Bool -> TurnResult -> IO RunResult)
     -> Bool -> ExpandedTurn
 submitExpandedPrompt handlerContext finishTurn pasted next color original expanded = do
-        pendingImages <-
-            modifyLiveAttachments conversationRef \imgs -> ([], imgs)
-        forM_ fullscreen \runtime ->
-            commitFullscreenImagePreviews runtime pendingImages
-        let turnInputs =
-                [ userMessageWithAttachments
-                    expanded
-                    (map ImageAttachmentItem pendingImages)
-                ]
-        preparePromptSkillInputsWithPaste env pasted original turnInputs >>= \case
+        preparePromptSkillInputsWithPaste env pasted original [] >>= \case
             Left err -> do
                 displayError err $
                     Text.hPutStrLn stderr (roleError color err)
                 next
             Right skillInputs -> do
+                pendingImages <-
+                    modifyLiveAttachments conversationRef \imgs -> ([], imgs)
+                forM_ fullscreen \runtime ->
+                    commitFullscreenImagePreviews runtime pendingImages
+                let turnInputs =
+                        skillInputs <>
+                            [ userMessageWithAttachments
+                                expanded
+                                (map ImageAttachmentItem pendingImages)
+                            ]
                 resetRenderPrintedText render
                 fullscreenEvent (UiUserSubmitted original)
-                result <- runOneTurn env original skillInputs
+                result <- runOneTurn env original turnInputs
                 finishTurn False result
   where
     env = handlerContext.handlerSessionEnv
@@ -1063,25 +1072,26 @@ submitPrompt handlerContext finishTurn pasted next color text = do
                     (roleMuted color (glyphOk <> message))
             next
         _ -> do
-            pendingImages <-
-                modifyLiveAttachments conversationRef \imgs -> ([], imgs)
-            forM_ fullscreen \runtime ->
-                commitFullscreenImagePreviews runtime pendingImages
-            resetRenderPrintedText env.sessionRender
-            let turnInputs =
-                    [ userMessageWithAttachments
-                        text
-                        (map ImageAttachmentItem pendingImages)
-                    ]
             preparePromptSkillInputsWithPaste
-                env pasted text turnInputs >>= \case
+                env pasted text [] >>= \case
                     Left err -> do
                         displayReplError handlerContext err $
                             Text.hPutStrLn stderr (roleError color err)
                         next
                     Right skillInputs -> do
+                        pendingImages <-
+                            modifyLiveAttachments conversationRef \imgs -> ([], imgs)
+                        forM_ fullscreen \runtime ->
+                            commitFullscreenImagePreviews runtime pendingImages
+                        resetRenderPrintedText env.sessionRender
+                        let turnInputs =
+                                skillInputs <>
+                                    [ userMessageWithAttachments
+                                        text
+                                        (map ImageAttachmentItem pendingImages)
+                                    ]
                         emitReplEvent env (UiUserSubmitted text)
-                        result <- runOneTurn env text skillInputs
+                        result <- runOneTurn env text turnInputs
                         finishTurn False result
   where
     env = handlerContext.handlerSessionEnv
@@ -1608,12 +1618,19 @@ preparePromptSkillInputsWithPaste env pasted prompt inputs = do
     invocations <- readIORef env.sessionSkillInvocations
     let (warnings, selected) =
             resolvePromptSkillMentionsWithWarnings pasted invocations prompt
-        activations =
-            [ UserMessage (formatSkillActivation invocation prompt)
-            | invocation <- selected
-            ]
     mapM_ reportWarning warnings
-    pure (Right (activations <> inputs))
+    resolved <-
+        traverse
+            (\invocation ->
+                fmap
+                    (fmap \content ->
+                        UserMessage
+                            (formatSkillActivation invocation content prompt))
+                    (resolveSkillContent
+                        env.sessionMcpFleet
+                        invocation.invocationSkill))
+            selected
+    pure ((<> inputs) <$> sequence resolved)
   where
     reportWarning warning =
         let message = "Ignoring skill mention: " <> warning
