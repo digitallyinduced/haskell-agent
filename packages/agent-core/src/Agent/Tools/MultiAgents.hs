@@ -20,7 +20,6 @@ import Agent.Subagents
     , RootTurnId
     , SubagentStatus(..)
     , defaultWaitTimeoutMs
-    , encodeStatus
     , interruptSubagent
     , listAgents
     , queueMessageFromForTurn
@@ -71,18 +70,13 @@ import Agent.Tools.Types
 import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception.Safe (mask, onException)
 import Control.Monad (void)
-import Data.Aeson (Value(..), object, (.=))
+import Data.Aeson (object, (.=))
 import Data.List (sortOn)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.ByteString.Lazy as LBS
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 
 data SubagentWorktree = SubagentWorktree
     { subagentWorktreePath :: !OsPath
@@ -231,13 +225,15 @@ spawnAgentDescription =
     "Spawns an agent to work on the specified task. If your current task is \
     \/root/task1 and you spawn_agent with task_name \"task_3\" the agent will \
     \have canonical task name /root/task1/task_3. You may refer to this agent \
-    \as task_3 or /root/task1/task_3. Returns the canonical task_name."
+    \as task_3 or /root/task1/task_3. Returns labeled text with the canonical \
+    \task name."
 
 spawnAgentInWorktreeDescription :: Text
 spawnAgentInWorktreeDescription =
     "Creates a dedicated git worktree and spawns an agent inside it. The \
     \worktree is owned by the child agent and removed when that agent is \
-    \closed. Returns the canonical task_name and worktree path."
+    \closed. Returns labeled text with the canonical task name and worktree \
+    \path."
 
 data SpawnWorkspace
     = SharedWorkspace
@@ -345,13 +341,16 @@ spawnInWorkspace ctx call args resolvedModel childCwd worktree = mask \restore -
     case result of
         Left err -> cleanupFailedWorktree ownedWorktree err
         Right (_agentId, path) ->
-            pure $ Right $ encodeJson $ object $
-                [ "task_name" .= taskPathText path
-                , "nickname" .= Aeson.Null
-                ]
-                    <> maybe []
-                        (\lease -> ["worktree" .= toText lease.subagentWorktreePath])
-                        ownedWorktree
+            pure $ Right $ renderSpawnResult path ownedWorktree
+
+renderSpawnResult :: TaskPath -> Maybe SubagentWorktree -> Text
+renderSpawnResult path worktree =
+    Text.intercalate "\n" $
+        ("Agent: " <> taskPathText path)
+            : maybe
+                []
+                (\lease -> ["Worktree: " <> toText lease.subagentWorktreePath])
+                worktree
 
 resolveSpawnWorkspace
     :: MultiAgentContext
@@ -510,8 +509,8 @@ waitAgentTool ctx = jsonTool "wait_agent" waitAgentDescription
 waitAgentDescription :: Text
 waitAgentDescription =
     "Wait for a mailbox update from live agents, including final-status \
-    \notifications. Returns a summary of which agents have updates, or a \
-    \timeout summary if no activity arrives before the deadline."
+    \notifications. Returns labeled text summarizing which agents have \
+    \updates, or a timeout notice if no activity arrives before the deadline."
 
 runWait :: MultiAgentContext -> WaitAgentArgs -> IO (Either Text Text)
 runWait ctx args = do
@@ -520,10 +519,7 @@ runWait ctx args = do
         Nothing -> do
             (statuses, timedOut) <-
                 waitAnyLive ctx.multiRegistry ctx.multiSelfId timeoutMs
-            pure $ Right $ encodeJson $ object
-                [ "message" .= waitSummary timedOut statuses
-                , "timed_out" .= timedOut
-                ]
+            pure $ Right $ renderWaitResult timedOut statuses False
         Just [] -> pure (Left "targets must be non-empty when provided")
         Just targets -> do
             resolved <- mapM (resolveAgentTarget ctx.multiRegistry ctx.multiTaskPath) targets
@@ -533,11 +529,23 @@ runWait ctx args = do
                     (statuses, timedOut) <-
                         waitSubagentsFrom
                             ctx.multiRegistry ctx.multiSelfId ids timeoutMs
-                    pure $ Right $ encodeJson $ object
-                        [ "message" .= waitSummary timedOut statuses
-                        , "timed_out" .= timedOut
-                        , "status" .= statusObject statuses
-                        ]
+                    pure $ Right $ renderWaitResult timedOut statuses True
+
+renderWaitResult :: Bool -> Map SubagentId SubagentStatus -> Bool -> Text
+renderWaitResult timedOut statuses includeStatus =
+    Text.intercalate "\n" $
+        waitSummary timedOut statuses
+            : if includeStatus && not (Map.null statuses)
+                then "" : map renderWaitStatus (Map.toList statuses)
+                else []
+
+renderWaitStatus :: (SubagentId, SubagentStatus) -> Text
+renderWaitStatus (agentId, status) =
+    Text.intercalate "\n" $
+        [ agentId.unSubagentId
+        , "  Status: " <> agentListStatus status
+        ]
+            <> agentListDetails status
 
 waitSummary :: Bool -> Map SubagentId SubagentStatus -> Text
 waitSummary timedOut statuses
@@ -558,13 +566,6 @@ shortStatus = \case
     Running -> "running"
     Pending -> "pending"
     NotFound -> "not_found"
-
-statusObject :: Map SubagentId SubagentStatus -> Value
-statusObject =
-    Object
-        . KeyMap.fromList
-        . map (\(SubagentId tid, status) -> (Key.fromText tid, encodeStatus status))
-        . Map.toList
 
 --------------------------------------------------------------------------------
 -- send_message / followup_task
@@ -798,8 +799,9 @@ interruptAgentTool ctx = jsonTool "interrupt_agent" interruptDescription
 
 interruptDescription :: Text
 interruptDescription =
-    "Interrupt an agent's current turn, if any, and return its previous status. \
-    \The agent remains available for messages and follow-up tasks."
+    "Interrupt an agent's current turn, if any, and return its previous status \
+    \as labeled text. The agent remains available for messages and follow-up \
+    \tasks."
 
 encryptedString :: Text -> PropertyType
 encryptedString description = PropertyRaw $ object
@@ -817,10 +819,10 @@ runInterrupt ctx args = do
             result <- interruptSubagent ctx.multiRegistry agentId
             pure $ case result of
                 Left err -> Left err
-                Right previous ->
-                    Right $ encodeJson $ object
-                        [ "previous_status" .= encodeStatus previous
-                        ]
+                Right previous -> Right (renderInterruptStatus previous)
 
-encodeJson :: Value -> Text
-encodeJson = Text.decodeUtf8 . LBS.toStrict . Aeson.encode
+renderInterruptStatus :: SubagentStatus -> Text
+renderInterruptStatus previous =
+    Text.intercalate "\n" $
+        ("Previous status: " <> agentListStatus previous)
+            : agentListDetails previous

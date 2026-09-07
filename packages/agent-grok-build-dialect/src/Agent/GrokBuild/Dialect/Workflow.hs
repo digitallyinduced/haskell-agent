@@ -44,15 +44,13 @@ import Control.Concurrent.MVar
     , newMVar
     , readMVar
     )
-import Data.Aeson (Value, object, (.=))
-import qualified Data.Aeson.Text as Aeson
+import Data.Aeson (object)
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Lazy as LazyText
 import Data.Time (UTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.OsPath (OsPath)
@@ -175,15 +173,11 @@ runWorkflow runtime rawArgs =
         Left err -> pure (Left err)
         Right (workflowName, objective)
             | rawArgs.validateOnly ->
-                pure $ Right $ jsonText $ object
-                    [ "run_id" .= ("" :: Text)
-                    , "task_id" .= ("" :: Text)
-                    , "name" .= workflowName
-                    , "message" .=
-                        ("Smoke check passed for workflow '"
-                            <> workflowName
-                            <> "'. This did not launch the workflow or exercise live dependencies.")
-                    ]
+                pure $ Right $ renderWorkflowNotice
+                    workflowName
+                    ("Smoke check passed for workflow '"
+                        <> workflowName
+                        <> "'. This did not launch the workflow or exercise live dependencies.")
             | otherwise -> launchWorkflow runtime workflowName objective
 
 normalizeWorkflowArgs :: WorkflowArgs -> WorkflowArgs
@@ -322,15 +316,23 @@ launchWorkflow runtime workflowName objective = do
                                 Map.insert runId created store.workflowRuns
                             }
                     pure (updated, created)
-            pure $ Right $ jsonText $ object
-                [ "run_id" .= run.workflowInternalRunId
-                , "task_id" .= run.workflowInternalRunId
-                , "name" .= run.workflowDisplayName
-                , "message" .=
-                    ("Workflow '"
-                        <> run.workflowDisplayName
-                        <> "' started in the background. Completion is reported automatically. The display name is user-facing; keep the structured run id internal.")
-                ]
+            pure $ Right $ renderWorkflowLaunch run
+
+renderWorkflowLaunch :: WorkflowRun -> Text
+renderWorkflowLaunch run =
+    renderWorkflowNotice
+        run.workflowDisplayName
+        ("Workflow '"
+            <> run.workflowDisplayName
+            <> "' started in the background. Completion is reported automatically. The display name is user-facing; keep the structured run id internal.")
+        <> "\n  Run ID: "
+        <> run.workflowInternalRunId
+        <> "\n  Task ID: "
+        <> run.workflowInternalRunId
+
+renderWorkflowNotice :: Text -> Text -> Text
+renderWorkflowNotice name message =
+    message <> "\n  Name: " <> name
 
 workflowRunSnapshots
     :: WorkflowRuntime
@@ -421,6 +423,3 @@ nonBlank = (>>= keep)
     keep value =
         let stripped = Text.strip value
         in if Text.null stripped then Nothing else Just stripped
-
-jsonText :: Value -> Text
-jsonText = LazyText.toStrict . Aeson.encodeToLazyText

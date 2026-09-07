@@ -42,14 +42,7 @@ import Control.Exception.Safe
     , tryIO
     )
 import Control.Monad (void)
-import Data.Aeson
-    ( Value
-    , object
-    , (.=)
-    )
-import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (readIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -145,7 +138,8 @@ askSecretDescription :: Text
 askSecretDescription =
     "Ask the user for a secret without placing it in chat or tool arguments. "
         <> "The harness writes the exact value to a private temporary file and "
-        <> "returns only its path. Never read, print, or echo the file contents."
+        <> "returns labeled text with only its path. Never read, print, or echo "
+        <> "the file contents."
 
 runAskSecret :: SecretStore -> AskSecretArgs -> IO (Either Text Text)
 runAskSecret store args
@@ -179,15 +173,12 @@ storeSecret store secret =
                 then do
                     removeSecretArtifact artifact
                     pure (Left "Secret storage is already closed.")
-                else pure $ Right $ encodeJson $ object
-                    [ "secret_file" .= Text.pack artifact.artifactFile
-                    , "message" .=
-                        ( "Secret saved to a private temporary file. Pass this "
-                            <> "path directly to the consuming program without "
-                            <> "reading or echoing the contents. Delete the file "
-                            <> "as soon as it has been consumed."
-                            :: Text
-                        )
+                else pure $ Right $ Text.intercalate "\n"
+                    [ "Secret file: " <> Text.pack artifact.artifactFile
+                    , "Secret saved to a private temporary file. Pass this \
+                      \path directly to the consuming program without \
+                      \reading or echoing the contents. Delete the file \
+                      \as soon as it has been consumed."
                     ]
 
 createSecretArtifact
@@ -249,6 +240,3 @@ closeAndRemove handle artifact = do
 
 exceptionText :: SomeException -> Text
 exceptionText = Text.pack . displayException
-
-encodeJson :: Value -> Text
-encodeJson = Text.decodeUtf8 . LBS.toStrict . Aeson.encode
