@@ -45,7 +45,11 @@ import Agent.MCP.Types
       projectRawOr,
       emptyInputSchema )
 import Agent.ToolDispatch ()
-import Agent.Tools.IO ( terminateProcessGroup )
+import Agent.Process
+    ( ProcessTerminationPolicy(..)
+    , defaultProcessTerminationPolicy
+    , terminateProcessGroupWithEscalation
+    )
 import Agent.Tools.Types ()
 import Control.Concurrent ( threadDelay )
 import Control.Concurrent.Async
@@ -99,7 +103,7 @@ import Network.HTTP.Client
 import Network.HTTP.Client.TLS ( newTlsManager )
 import Network.HTTP.Types ( Header, statusCode )
 import System.Environment ( getEnvironment )
-import System.IO ( Handle, hClose, hFlush )
+import System.IO ( Handle, hClose, hFlush, hPutStrLn, stderr )
 import System.IO.Unsafe ( unsafePerformIO )
 import System.Process ( ProcessHandle )
 import System.Timeout ( timeout )
@@ -1454,7 +1458,9 @@ closeMcpClient client =
                 case client.clientTransport of
                     McpClientStdio transport -> do
                         void $ tryAny (hClose transport.stdioInput)
-                        terminateProcessGroup
+                        terminateProcessGroupWithEscalation
+                            mcpProcessTerminationPolicy
+                            (reportSlowMcpShutdown client.clientConfig.mcpServerName)
                             transport.stdioGroupId
                             transport.stdioProcess
                         readIORef transport.stdioReader >>= mapM_ stopWorker
@@ -1464,6 +1470,24 @@ closeMcpClient client =
                 failClient client.clientRequestRegistry client.clientFailure
                     "MCP server closed"
                 pure True
+
+-- Stdio MCP servers are disposable session helpers, so quitting the CLI should
+-- not inherit the longer grace periods used by shells and other user jobs.
+-- We still escalate through INT, TERM, and KILL and wait for the whole process
+-- group, but bound the cooperative stages to keep Ctrl-C shutdown responsive.
+mcpProcessTerminationPolicy :: ProcessTerminationPolicy
+mcpProcessTerminationPolicy =
+    defaultProcessTerminationPolicy
+        { firstWaitMilliseconds = 50
+        , secondWaitMilliseconds = 100
+        }
+
+reportSlowMcpShutdown :: Text -> IO ()
+reportSlowMcpShutdown serverName = do
+    hPutStrLn stderr $
+        "MCP server '" <> Text.unpack serverName
+            <> "' is slow to stop; terminating it..."
+    hFlush stderr
 
 -- Legacy Streamable HTTP sessions are explicitly terminated with DELETE when
 -- the server assigned a session id.  Failure is intentionally ignored during
