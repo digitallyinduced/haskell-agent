@@ -526,6 +526,17 @@ renderEventUnlocked config = \case
                     (state{statePrintedText = True}, ())
                 Text.hPutStr config.renderStdout delta
                 hFlush config.renderStdout
+    PlanDelta delta -> do
+        modifyRenderState config \state ->
+            (countGenerationChars delta state, ())
+        commitThinkingUnlocked config
+        if config.renderColor
+            then streamAssistantDelta config delta
+            else do
+                modifyRenderState config \state ->
+                    (state{statePrintedText = True}, ())
+                Text.hPutStr config.renderStdout delta
+                hFlush config.renderStdout
     ReasoningDelta delta -> do
         modifyRenderState config \state ->
             (countGenerationChars delta state, ())

@@ -41,6 +41,8 @@ projectLoopEvent :: LoopEvent -> (Text, Value)
 projectLoopEvent = \case
     TextDelta delta ->
         ("response.text.delta", textPayload delta)
+    PlanDelta delta ->
+        ("response.text.delta", textPayload delta)
     ReasoningDelta delta ->
         ("response.reasoning.delta", textPayload delta)
     ActivityUpdated message ->

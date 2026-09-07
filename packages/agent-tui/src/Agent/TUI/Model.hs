@@ -400,6 +400,11 @@ reduceLoop event state = case event of
             appendGenerationChars delta state
                 { uiActivity = "Writing…"
                 }
+    PlanDelta delta ->
+        appendOrExtend BlockAssistant "Plan" delta BlockStreaming $
+            appendGenerationChars delta state
+                { uiActivity = "Writing plan…"
+                }
     ActivityUpdated activity ->
         state { uiActivity = activity }
     ModelContextReset -> state

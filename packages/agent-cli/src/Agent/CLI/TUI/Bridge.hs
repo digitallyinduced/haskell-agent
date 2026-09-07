@@ -66,6 +66,8 @@ mergeUiEvents :: UiEvent -> UiEvent -> Maybe UiEvent
 mergeUiEvents older newer = case (older, newer) of
     (UiLoop (TextDelta left), UiLoop (TextDelta right)) ->
         Just (UiLoop (TextDelta (left <> right)))
+    (UiLoop (PlanDelta left), UiLoop (PlanDelta right)) ->
+        Just (UiLoop (PlanDelta (left <> right)))
     (UiLoop (ReasoningDelta left), UiLoop (ReasoningDelta right)) ->
         Just (UiLoop (ReasoningDelta (left <> right)))
     (UiLoop (ActivityUpdated _), UiLoop (ActivityUpdated latest)) ->

@@ -42,6 +42,14 @@ import Agent.CLI.Notification
     )
 import Agent.CLI.Approval
 import Agent.CLI.Permission (promptPermission, promptRootAccess)
+import Agent.CLI.Plan
+    ( ProposedPlanSegment(..)
+    , ProposedPlanStream
+    , feedProposedPlanStream
+    , finishProposedPlanStream
+    , initialProposedPlanStream
+    , stripProposedPlan
+    )
 import Agent.CLI.ProviderTransition (PendingTurn)
 import Agent.CLI.Recap
 import Agent.CLI.CancelWatch
@@ -716,10 +724,12 @@ buildSessionLoopEventRuntime
     :: SessionHostRuntime
     -> SessionControlRuntime
     -> SessionRequest
+    -> IORef (Maybe ProposedPlanStream)
     -> (LoopEvent -> IO ())
     -> SessionLoopEventRuntime
 buildSessionLoopEventRuntime
-        host controls SessionRequest{..} managedLoopPublisher =
+        host controls SessionRequest{..}
+        proposedPlanStreamRef managedLoopPublisher =
     SessionLoopEventRuntime
         { loopEventRender = render
         , loopEventEmit = emitLoop
@@ -745,7 +755,9 @@ buildSessionLoopEventRuntime
         , renderMotionMode = options.optMotionMode
         , renderWorkspace = toText workspace.cwd
         }
-    emitLoop event = do
+    emitLoop event =
+        projectPlanProtocol event >>= mapM_ emitPresentedLoop
+    emitPresentedLoop event = do
         recordAgentViewportEvent agentViewportRuntime event
         forM_ startup.startupNativeHooks \hooks ->
             hooks.nativeOnLoopEvent event
@@ -766,6 +778,9 @@ buildSessionLoopEventRuntime
                     case event of
                         TurnStarted -> beginRenderTurn now state
                         TextDelta delta ->
+                            countGenerationChars delta
+                                state{statePrintedText = True}
+                        PlanDelta delta ->
                             countGenerationChars delta
                                 state{statePrintedText = True}
                         ReasoningDelta delta ->
@@ -793,6 +808,55 @@ buildSessionLoopEventRuntime
                                         history))
                                 contextWindow
                     _ -> pure ()
+    projectPlanProtocol = \case
+        TurnStarted -> do
+            planActive <-
+                if dialectId dialect == CodexDialect
+                    then isPlanModeActive planMode
+                    else pure False
+            writeIORef proposedPlanStreamRef $
+                if planActive
+                    then Just initialProposedPlanStream
+                    else Nothing
+            pure [TurnStarted]
+        TextDelta delta ->
+            atomicModifyIORef' proposedPlanStreamRef \case
+                Nothing -> (Nothing, [TextDelta delta])
+                Just stream ->
+                    let (next, segments) =
+                            feedProposedPlanStream stream delta
+                    in ( Just next
+                       , concatMap proposedPlanSegmentEvents segments
+                       )
+        ResponseRestarted message -> do
+            modifyIORef' proposedPlanStreamRef $
+                fmap (const initialProposedPlanStream)
+            pure [ResponseRestarted message]
+        ResponseAttemptDiscarded -> do
+            modifyIORef' proposedPlanStreamRef $
+                fmap (const initialProposedPlanStream)
+            pure [ResponseAttemptDiscarded]
+        TurnFinished output ->
+            atomicModifyIORef' proposedPlanStreamRef \case
+                Nothing -> (Nothing, [TurnFinished output])
+                Just stream ->
+                    let projectedOutput =
+                            output
+                                { assistantText =
+                                    stripProposedPlan <$> output.assistantText
+                                }
+                        tailEvents =
+                            concatMap
+                                proposedPlanSegmentEvents
+                                (finishProposedPlanStream stream)
+                    in (Nothing, tailEvents <> [TurnFinished projectedOutput])
+        event -> pure [event]
+
+    proposedPlanSegmentEvents = \case
+        AssistantText text -> [TextDelta text | not (Text.null text)]
+        ProposedPlanDelta text -> [PlanDelta text | not (Text.null text)]
+        ProposedPlanStart -> []
+        ProposedPlanEnd -> []
 
 data SessionApprovalRuntime = SessionApprovalRuntime
     { approvalApproveClassified
@@ -1244,11 +1308,12 @@ newSessionLoopRuntime host controls request@SessionRequest{..} sessionBackend = 
             (pure (const (pure ())))
             newManagedLoopEventPublisher
             promptRequest
+    proposedPlanStreamRef <- newIORef Nothing
     sessionDir <- readIORef planMode.planSessionDir
     forM_ sessionDir (writeIORef storeRoot . Just)
     let eventRuntime =
             buildSessionLoopEventRuntime
-                host controls request managedLoopPublisher
+                host controls request proposedPlanStreamRef managedLoopPublisher
         shellRuntime = buildSessionShellRuntime host controls request
         approvalRuntime =
             buildSessionApprovalRuntime host controls request

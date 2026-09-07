@@ -463,6 +463,13 @@ updateManagedActivity event state =
                 , accumulatorResponse =
                     appendTextBuffer delta state.accumulatorResponse
                 }
+        PlanDelta delta ->
+            state
+                { accumulatorKind = "writing"
+                , accumulatorMessage = "Writing plan…"
+                , accumulatorResponse =
+                    appendTextBuffer delta state.accumulatorResponse
+                }
         ActivityUpdated message ->
             state
                 { accumulatorKind = "activity"

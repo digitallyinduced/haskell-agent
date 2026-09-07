@@ -891,6 +891,55 @@ spec = describe "bounded fullscreen history window" do
                   )
                 ]
 
+    it "reprojects stored proposed plans without protocol tags" do
+        let raw =
+                "<proposed_plan>\n# Plan\n\n- edit parser\n</proposed_plan>"
+            turnValue =
+                (sessionTurn
+                        TranscriptAppend
+                        "plan this"
+                        [ userMessage "plan this"
+                        , assistantMessage raw
+                        ])
+                    { turnAssistantText = Just ""
+                    }
+            projected = sessionHistoryTurn (22 :: Int) turnValue
+            blocks = toList projected.historyTurnBlocks
+        map (.blockKind) blocks `shouldBe` [BlockUser, BlockAssistant]
+        map (.blockBody) blocks `shouldBe` ["plan this", "# Plan\n- edit parser\n"]
+        Text.concat (map (.blockBody) blocks)
+            `shouldNotSatisfy` Text.isInfixOf "<proposed_plan>"
+
+    it "preserves literal proposed-plan examples without protocol provenance" do
+        let raw =
+                "<proposed_plan>\n# Example\n</proposed_plan>"
+            turnValue =
+                (sessionTurn
+                    TranscriptAppend
+                    "show the format"
+                    [userMessage "show the format", assistantMessage raw])
+                    { turnAssistantText = Just raw
+                    }
+            blocks = toList $
+                (sessionHistoryTurn (23 :: Int) turnValue).historyTurnBlocks
+        map (.blockBody) blocks `shouldBe` ["show the format", raw]
+
+    it "does not duplicate a failed stored proposed plan" do
+        let raw =
+                "<proposed_plan>\n# Plan\n\n- edit parser\n</proposed_plan>"
+            turnValue =
+                (sessionTurn
+                    TranscriptAppend
+                    "plan this"
+                    [userMessage "plan this", assistantMessage raw])
+                    { turnAssistantText = Just ""
+                    , turnError = Just "connection interrupted"
+                    }
+            blocks = toList $
+                (sessionHistoryTurn (24 :: Int) turnValue).historyTurnBlocks
+        map (.blockBody) blocks
+            `shouldBe` ["plan this", "# Plan\n- edit parser\n", "connection interrupted"]
+
     it "does not rematerialise the compacted prefix of replacement turns" do
         let projected =
                 sessionHistoryTurn

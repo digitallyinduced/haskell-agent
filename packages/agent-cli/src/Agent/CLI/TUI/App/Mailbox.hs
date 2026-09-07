@@ -217,14 +217,20 @@ uiFrameBatchLimit = 256
 enqueueAppEvent :: FullscreenRuntime -> AppEvent -> IO ()
 enqueueAppEvent runtime = \case
     AppUi (UiLoop (TextDelta text)) ->
-        enqueueStreamingText runtime False text
+        enqueueStreamingText runtime TextDelta text
+    AppUi (UiLoop (PlanDelta text)) ->
+        enqueueStreamingText runtime PlanDelta text
     AppUi (UiLoop (ReasoningDelta text)) ->
-        enqueueStreamingText runtime True text
+        enqueueStreamingText runtime ReasoningDelta text
     event ->
         atomically (enqueueMailboxEvent runtime.runtimeMailbox event)
 
-enqueueStreamingText :: FullscreenRuntime -> Bool -> Text -> IO ()
-enqueueStreamingText runtime reasoning = go
+enqueueStreamingText
+    :: FullscreenRuntime
+    -> (Text -> LoopEvent)
+    -> Text
+    -> IO ()
+enqueueStreamingText runtime toLoopEvent = go
   where
     go text
         | Text.null text =
@@ -242,9 +248,7 @@ enqueueStreamingText runtime reasoning = go
                 runtime.runtimeMailbox
                 (AppUi
                     (UiLoop
-                        (if reasoning
-                            then ReasoningDelta text
-                            else TextDelta text))))
+                        (toLoopEvent text))))
 
 enqueueMotionTick :: FullscreenRuntime -> IO ()
 enqueueMotionTick runtime =
@@ -339,6 +343,8 @@ appendAppEventAccounted event pending oldBytes =
         bytes = case event of
             AppUi (UiLoop (TextDelta delta)) ->
                 saturatingAdd oldBytes (logicalTextChunkBytes delta)
+            AppUi (UiLoop (PlanDelta delta)) ->
+                saturatingAdd oldBytes (logicalTextChunkBytes delta)
             AppUi (UiLoop (ReasoningDelta delta)) ->
                 saturatingAdd oldBytes (logicalTextChunkBytes delta)
             _ ->
@@ -362,6 +368,14 @@ appendAppEvent event pending = case event of
             _ ->
                 pending |> PendingUi
                     (PendingTextDeltas (Seq.singleton delta))
+    AppUi (UiLoop (PlanDelta delta)) ->
+        case Seq.viewr pending of
+            rest :> PendingUi (PendingPlanDeltas deltas) ->
+                rest |> PendingUi
+                    (PendingPlanDeltas (deltas |> delta))
+            _ ->
+                pending |> PendingUi
+                    (PendingPlanDeltas (Seq.singleton delta))
     AppUi (UiLoop (ReasoningDelta delta)) ->
         case Seq.viewr pending of
             rest :> PendingUi (PendingReasoningDeltas deltas) ->
@@ -474,10 +488,12 @@ pendingEventBarrier :: PendingAppEvent -> Bool
 pendingEventBarrier event =
     case event of
         PendingUi (PendingTextDeltas _) -> False
+        PendingUi (PendingPlanDeltas _) -> False
         PendingUi (PendingReasoningDeltas _) -> False
         PendingUi (PendingExactUi (UiLoop loopEvent)) ->
             case loopEvent of
                 TextDelta _ -> False
+                PlanDelta _ -> False
                 ReasoningDelta _ -> False
                 ActivityUpdated _ -> False
                 ToolUpdated _ -> False
@@ -544,6 +560,8 @@ pendingUiEvent = \case
     PendingExactUi event -> event
     PendingTextDeltas deltas ->
         UiLoop (TextDelta (Text.concat (toList deltas)))
+    PendingPlanDeltas deltas ->
+        UiLoop (PlanDelta (Text.concat (toList deltas)))
     PendingReasoningDeltas deltas ->
         UiLoop (ReasoningDelta (Text.concat (toList deltas)))
 
@@ -563,6 +581,8 @@ pendingUiEventLogicalBytes :: PendingUiEvent -> Int
 pendingUiEventLogicalBytes = \case
     PendingTextDeltas deltas ->
         foldl' (\size text -> saturatingAdd size (logicalTextChunkBytes text)) 0 deltas
+    PendingPlanDeltas deltas ->
+        foldl' (\size text -> saturatingAdd size (logicalTextChunkBytes text)) 0 deltas
     PendingReasoningDeltas deltas ->
         foldl' (\size text -> saturatingAdd size (logicalTextChunkBytes text)) 0 deltas
     PendingExactUi event ->
@@ -573,6 +593,7 @@ uiEventLogicalBytes = \case
     UiLoop event ->
         case event of
             TextDelta text -> logicalTextBytes text
+            PlanDelta text -> logicalTextBytes text
             ReasoningDelta text -> logicalTextBytes text
             ActivityUpdated text -> logicalTextBytes text
             ProviderLimitUpdated
@@ -1056,6 +1077,7 @@ isControlAppEvent = \case
     AppUi (UiLoop event) ->
         case event of
             TextDelta _ -> False
+            PlanDelta _ -> False
             ReasoningDelta _ -> False
             ActivityUpdated _ -> False
             ToolUpdated _ -> False
