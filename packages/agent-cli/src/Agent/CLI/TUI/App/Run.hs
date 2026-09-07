@@ -24,7 +24,11 @@ import Agent.CLI.AgentViewport ( AgentEntry(..)
     , agentStatusGlyph
     , lookupAgentEntry
     )
-import Agent.CLI.Interrupt (CtrlCDecision(..))
+import Agent.CLI.Interrupt
+    ( CtrlCDecision(..)
+    , catchUserInterrupt
+    , isWrappedUserInterrupt
+    )
 import Agent.CLI.ImagePreview ( ImagePreviewProtocol(..)
     , detectImagePreviewProtocol
     , kittyDeleteImageSequence
@@ -137,15 +141,26 @@ import Brick.Widgets.Border.Style (unicodeRounded)
 import Brick.Widgets.Center (center, centerLayer, hCenter)
 import Codec.Picture (pixelAt)
 import Control.Applicative ((<|>))
-import Control.Concurrent.Async (wait, waitCatch, withAsync)
-import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async
+    ( Async
+    , AsyncCancelled(..)
+    , asyncThreadId
+    , asyncWithUnmask
+    , waitCatch
+    , withAsync
+    )
+import Control.Concurrent (threadDelay, throwTo)
 import Control.Monad (forever, unless, void, when, (>=>))
 import Control.Concurrent.STM ( STM , atomically , check , flushTQueue , newEmptyTMVarIO , newTQueueIO , newTVarIO , orElse , putTMVar , readTVar , readTMVar , readTQueue , registerDelay , retry , takeTMVar , writeTQueue , writeTVar )
 import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoRecapRetryInterval )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Control.Exception.Safe (finally, mask, onException, throwIO, tryAny)
-import Control.Exception (AsyncException(UserInterrupt))
+import Control.Exception.Safe (SomeException, finally, mask, onException, throwIO, tryAny)
+import Control.Exception
+    ( AsyncException(UserInterrupt)
+    , fromException
+    , toException
+    )
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
 import Data.IORef ( atomicModifyIORef' , modifyIORef' , newIORef , readIORef , writeIORef )
@@ -153,6 +168,7 @@ import Data.List ( find , findIndex , intersperse , nub , sort , sortOn )
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe, maybeToList)
+import System.Timeout (timeout)
 import Data.Sequence (Seq, ViewL(..), ViewR(..), (|>))
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
@@ -229,55 +245,97 @@ runFullscreen runtime workerAction = do
             writeTVar
                 runtime.runtimeMotionSchedule
                 (initialDemand, initialDelay, 0)
-        withAsync workerAction \worker ->
-            withAsync uiTicker \_uiTicker ->
-                withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
-                    withAsync (eventPump runtime) \_eventPump ->
-                        withAsync (recapTicker runtime) \_recapTicker ->
-                            withAsync
-                                historyLoader
-                                \_historyLoader ->
-                                withAsync
-                                    dictationWorker
-                                    \_dictationWorker ->
-                                    withAsync
-                                        (runSyntaxHighlighterForRuntime runtime)
-                                        \_syntaxLoader ->
-                                            withAsync
-                                                (void (waitCatch worker)
-                                                    >> enqueueAppEvent runtime AppStop)
-                                                \_notifier -> do
-                                                    finalState <-
-                                                        customMain
-                                                            initialVty
-                                                            buildVty
-                                                            (Just runtime.runtimeEvents)
-                                                            fullscreenApp
-                                                            initialState
-                                                        `finally`
-                                                            runtime.runtimeNativeProgress False
-                                                    mapM_
-                                                        (`Composer.requestDictationStop` True)
-                                                        finalState.appDictation
-                                                    when (not finalState.appWorkerStopped) $
-                                                        atomically do
-                                                            queued <-
-                                                                Composer.appendFullscreenInput
-                                                                    runtime.runtimeInput
-                                                                    FullscreenInput
-                                                                        { fullscreenInputLine =
-                                                                            ReplEof
-                                                                        , fullscreenInputQueued =
-                                                                            False
-                                                                        , fullscreenInputDisplay =
-                                                                            Nothing
-                                                                        }
-                                                            either
-                                                                (const retry)
-                                                                pure
-                                                                queued
-                                                    wait worker
+        -- Own the worker explicitly: withAsync's exception path waits
+        -- unbounded for cancellation, which is how Ctrl-C left GHCi sessions
+        -- stuck after the TUI had already died.
+        mask \restore -> do
+            worker <- asyncWithUnmask \unmask -> unmask workerAction
+            interrupted <- restore $
+                catchUserInterrupt
+                    (runFullscreenUi
+                        runtime
+                        worker
+                        initialVty
+                        buildVty
+                        initialState
+                        initialAgent
+                        initialAgents
+                        >> pure False)
+                    (pure True)
+            shutdownFullscreenWorker runtime worker >>= \case
+                Right value -> pure value
+                Left err
+                    | interrupted || isFullscreenQuitException err ->
+                        throwIO UserInterrupt
+                    | otherwise -> throwIO err
   where
+    runFullscreenUi
+            runtime worker initialVty buildVty initialState
+            initialAgent initialAgents =
+        withAsync uiTicker \_uiTicker ->
+            withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
+                withAsync (eventPump runtime) \_eventPump ->
+                    withAsync (recapTicker runtime) \_recapTicker ->
+                        withAsync
+                            historyLoader
+                            \_historyLoader ->
+                            withAsync
+                                dictationWorker
+                                \_dictationWorker ->
+                                withAsync
+                                    (runSyntaxHighlighterForRuntime runtime)
+                                    \_syntaxLoader ->
+                                    withAsync
+                                        (void (waitCatch worker)
+                                            >> enqueueAppEvent runtime AppStop)
+                                        \_notifier -> do
+                                            finalState <-
+                                                customMain
+                                                    initialVty
+                                                    buildVty
+                                                    (Just runtime.runtimeEvents)
+                                                    fullscreenApp
+                                                    initialState
+                                                `finally`
+                                                    runtime.runtimeNativeProgress False
+                                            mapM_
+                                                (`Composer.requestDictationStop` True)
+                                                finalState.appDictation
+                                            when (not finalState.appWorkerStopped) $
+                                                enqueueFullscreenEof runtime
+
+    enqueueFullscreenEof currentRuntime =
+        void $ atomically $
+            Composer.appendFullscreenInput
+                currentRuntime.runtimeInput
+                FullscreenInput
+                    { fullscreenInputLine = ReplEof
+                    , fullscreenInputQueued = False
+                    , fullscreenInputDisplay = Nothing
+                    }
+
+    shutdownFullscreenWorker currentRuntime worker = do
+        enqueueFullscreenEof currentRuntime
+        waitCatchWithTimeout worker >>= \case
+            Just result -> pure result
+            Nothing -> do
+                throwTo (asyncThreadId worker) AsyncCancelled
+                waitCatchWithTimeout worker >>= \case
+                    Just result -> pure result
+                    Nothing ->
+                        pure (Left (toException UserInterrupt))
+
+    waitCatchWithTimeout worker =
+        timeout fullscreenWorkerJoinMicros (waitCatch worker)
+
+    fullscreenWorkerJoinMicros = 2_000_000
+
+    isFullscreenQuitException err =
+        isJust (fromException err :: Maybe AsyncCancelled)
+            || case fromException err of
+                Just UserInterrupt -> True
+                _ -> isWrappedUserInterrupt err
+
     recapTicker _runtime = forever do
         threadDelay 20_000_000
         enqueueAppEvent runtime AppRecapPoll

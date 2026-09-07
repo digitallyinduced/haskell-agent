@@ -23,6 +23,24 @@ spec = do
         it "force-exits when Ctrl-C arrives after the turn is already cancelled" do
             decideCtrlC (TurnActive True) False `shouldBe` ForceExit
 
+        it "stays on force-exit once a confirmed quit is in flight" do
+            decideCtrlC Exiting False `shouldBe` ForceExit
+            decideCtrlC Exiting True `shouldBe` ForceExit
+
+    describe "noteIdleCtrlC" do
+        it "keeps quitting after the first confirmed idle Ctrl-C" do
+            state <- newInterruptState (const (pure ()))
+            noteIdleCtrlC state `shouldReturn` ContinuePrompt
+            noteIdleCtrlC state `shouldReturn` QuitProcess
+            noteIdleCtrlC state `shouldReturn` QuitProcess
+
+    describe "noteFullscreenCtrlC" do
+        it "keeps force-exiting after a confirmed fullscreen quit" do
+            state <- newInterruptState (const (pure ()))
+            noteFullscreenCtrlC state `shouldReturn` WarnExit
+            noteFullscreenCtrlC state `shouldReturn` ForceExit
+            noteFullscreenCtrlC state `shouldReturn` ForceExit
+
     describe "isWrappedUserInterrupt" do
         it "recognizes a synchronously wrapped UserInterrupt" do
             isWrappedUserInterrupt (toSyncException UserInterrupt) `shouldBe` True

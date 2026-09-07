@@ -1492,5 +1492,7 @@ handleCtrlC = do
                         warningNotice
                             "Press Ctrl-C again to exit."
         ForceExit ->
-            liftIO (throwIO UserInterrupt)
+            -- Halt Brick so runFullscreen can EOF the worker. Throwing from
+            -- EventM skips the bounded worker join and can leave GHCi stuck.
+            halt
     pure decision

@@ -18,7 +18,9 @@ module Agent.CLI.Interrupt
     ) where
 
 import Agent.Cancel (CancelFlag, isCancelled, requestCancel)
-import Control.Concurrent (ThreadId, myThreadId, throwTo)
+import Control.Concurrent (ThreadId, myThreadId, threadDelay, throwTo)
+import Control.Concurrent.Async (withAsync)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, tryPutMVar)
 import Control.Exception
     ( AsyncException(UserInterrupt)
     , fromException
@@ -36,13 +38,17 @@ import Control.Exception.Safe
     , throwIO
     )
 import Control.Monad (void)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime)
+import System.Exit (ExitCode(ExitFailure))
+import System.Posix.Process (exitImmediately)
 import System.Posix.Signals
     ( Handler(..)
     , installHandler
+    , sigHUP
     , sigINT
+    , sigTERM
     )
 
 -- | How long after a warning a second Ctrl-C still means exit.
@@ -53,6 +59,9 @@ data CtrlCContext
     = Idle
     -- | @True@ when the active turn's cancel flag is already latched.
     | TurnActive Bool
+    -- | A confirmed quit is already in flight; further signals stay ForceExit
+    -- instead of returning to the idle warning.
+    | Exiting
     deriving (Eq, Show)
 
 data CtrlCDecision
@@ -75,10 +84,18 @@ decideCtrlC Idle withinWindow
 decideCtrlC (TurnActive alreadyCancelled) _
     | alreadyCancelled = ForceExit
     | otherwise = SoftCancel
+decideCtrlC Exiting _ = ForceExit
+
+-- | How long a confirmed quit may spend in teardown before the process is
+-- killed. Uninterruptible MCP/store joins must not outlive this window.
+exitWatchdogMicros :: Int
+exitWatchdogMicros = 5_000_000
 
 data InterruptState = InterruptState
     { interruptActiveCancel :: !(IORef (Maybe CancelFlag))
     , interruptLastWarn :: !(IORef (Maybe UTCTime))
+    , interruptExiting :: !(IORef Bool)
+    , interruptKillRequest :: !(MVar ())
     , interruptOnMessage :: !(Text -> IO ())
     }
 
@@ -87,26 +104,48 @@ newInterruptState :: (Text -> IO ()) -> IO InterruptState
 newInterruptState onMessage = do
     active <- newIORef Nothing
     lastWarn <- newIORef Nothing
+    exiting <- newIORef False
+    killRequest <- newEmptyMVar
     pure InterruptState
         { interruptActiveCancel = active
         , interruptLastWarn = lastWarn
+        , interruptExiting = exiting
+        , interruptKillRequest = killRequest
         , interruptOnMessage = onMessage
         }
 
--- | Install a SIGINT handler for the dynamic extent of @action@.
--- Restores the previous handler afterward. Force-exit rethrows
--- 'UserInterrupt' on the thread that entered this wrapper.
+-- | Install SIGINT/SIGHUP/SIGTERM handlers for the dynamic extent of @action@.
+-- Restores the previous handlers afterward. Force-exit rethrows
+-- 'UserInterrupt' on the thread that entered this wrapper. A second force-exit
+-- (or a hung teardown after the watchdog) terminates the process so Ctrl-C
+-- cannot leave an orphaned agent session.
 --
 -- The inline editor reads Ctrl-C directly while a prompt is active; use
--- 'noteIdleCtrlC' from that path instead.
+-- 'noteIdleCtrlC' from that path instead. Fullscreen raw mode uses
+-- 'noteFullscreenCtrlC'.
 withCtrlCHandler :: InterruptState -> IO a -> IO a
 withCtrlCHandler state action = do
     mainTid <- myThreadId
-    let handler = Catch (onSigInt mainTid state)
+    let sigint = Catch (onSigInt mainTid state)
+        hangup = Catch (onHangup mainTid state)
     bracket
-        (installHandler sigINT handler Nothing)
-        (\previous -> void (installHandler sigINT previous Nothing))
-        (\_ -> action)
+        (do
+            previousInt <- installHandler sigINT sigint Nothing
+            previousHup <- installHandler sigHUP hangup Nothing
+            previousTerm <- installHandler sigTERM hangup Nothing
+            pure (previousInt, previousHup, previousTerm))
+        (\(previousInt, previousHup, previousTerm) -> do
+            void (installHandler sigINT previousInt Nothing)
+            void (installHandler sigHUP previousHup Nothing)
+            void (installHandler sigTERM previousTerm Nothing))
+        (\_ ->
+            -- The watchdog is blocked on the kill latch until force-exit.
+            -- Cancelling it on the normal path is interruptible.
+            withAsync
+                (takeMVar state.interruptKillRequest
+                    >> threadDelay exitWatchdogMicros
+                    >> exitImmediately (ExitFailure 130))
+                (\_ -> action))
 
 -- | Mark @cancel@ as the in-flight turn target for soft Ctrl-C.
 withTurnCancel :: InterruptState -> CancelFlag -> IO a -> IO a
@@ -119,14 +158,15 @@ withTurnCancel state cancel =
 noteIdleCtrlC :: InterruptState -> IO IdleCtrlCResult
 noteIdleCtrlC state = do
     now <- getCurrentTime
+    context <- ctrlCContext state
     withinWindow <- isWithinWarnWindow state now
-    case decideCtrlC Idle withinWindow of
+    case decideCtrlC context withinWindow of
         WarnExit -> do
             writeIORef state.interruptLastWarn (Just now)
             notify state "Press Ctrl-C again to exit"
             pure ContinuePrompt
         ForceExit -> do
-            writeIORef state.interruptLastWarn Nothing
+            armForceExit state
             pure QuitProcess
         SoftCancel ->
             pure ContinuePrompt
@@ -138,10 +178,7 @@ noteFullscreenCtrlC state = do
     now <- getCurrentTime
     mCancel <- readIORef state.interruptActiveCancel
     withinWindow <- isWithinWarnWindow state now
-    context <- case mCancel of
-        Nothing -> pure Idle
-        Just cancel ->
-            TurnActive <$> isCancelled cancel
+    context <- ctrlCContext state
     let decision = decideCtrlC context withinWindow
     case decision of
         SoftCancel -> do
@@ -152,7 +189,7 @@ noteFullscreenCtrlC state = do
         WarnExit ->
             writeIORef state.interruptLastWarn (Just now)
         ForceExit ->
-            writeIORef state.interruptLastWarn Nothing
+            armForceExit state
     pure decision
 
 onSigInt :: ThreadId -> InterruptState -> IO ()
@@ -160,11 +197,7 @@ onSigInt mainTid state = do
     now <- getCurrentTime
     mCancel <- readIORef state.interruptActiveCancel
     withinWindow <- isWithinWarnWindow state now
-    ctx <- case mCancel of
-        Nothing -> pure Idle
-        Just cancel -> do
-            already <- isCancelled cancel
-            pure (TurnActive already)
+    ctx <- ctrlCContext state
     case decideCtrlC ctx withinWindow of
         SoftCancel -> do
             case mCancel of
@@ -175,9 +208,40 @@ onSigInt mainTid state = do
         WarnExit -> do
             writeIORef state.interruptLastWarn (Just now)
             notify state "Press Ctrl-C again to exit"
-        ForceExit -> do
-            writeIORef state.interruptLastWarn Nothing
-            throwTo mainTid UserInterrupt
+        ForceExit ->
+            requestForceExit mainTid state
+
+-- | Closing the terminal or SIGTERM is a confirmed quit: there is no second
+-- keypress, and GHCi ignores SIGHUP by default so the agent must handle it.
+onHangup :: ThreadId -> InterruptState -> IO ()
+onHangup = requestForceExit
+
+ctrlCContext :: InterruptState -> IO CtrlCContext
+ctrlCContext state = do
+    exiting <- readIORef state.interruptExiting
+    if exiting
+        then pure Exiting
+        else do
+            mCancel <- readIORef state.interruptActiveCancel
+            case mCancel of
+                Nothing -> pure Idle
+                Just cancel ->
+                    TurnActive <$> isCancelled cancel
+
+armForceExit :: InterruptState -> IO ()
+armForceExit state = do
+    writeIORef state.interruptExiting True
+    writeIORef state.interruptLastWarn Nothing
+    void $ tryPutMVar state.interruptKillRequest ()
+
+requestForceExit :: ThreadId -> InterruptState -> IO ()
+requestForceExit mainTid state = do
+    already <- atomicModifyIORef' state.interruptExiting \was -> (True, was)
+    writeIORef state.interruptLastWarn Nothing
+    void $ tryPutMVar state.interruptKillRequest ()
+    if already
+        then exitImmediately (ExitFailure 130)
+        else throwTo mainTid UserInterrupt
 
 isWithinWarnWindow :: InterruptState -> UTCTime -> IO Bool
 isWithinWarnWindow state now = do

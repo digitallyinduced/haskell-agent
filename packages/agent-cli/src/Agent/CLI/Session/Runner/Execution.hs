@@ -1783,6 +1783,10 @@ runSessionInteraction
                                 , isNothing host.hostInitialPrevious ->
                                     runInteractiveInitialPrompt
                                         onboardingPrompt
+                            _ | startup.startupBackground ->
+                                -- Background turns are one-shot. Do not inherit
+                                -- the parent's stdin by opening an idle REPL.
+                                pure RunQuit
                             _ ->
                                 readIORef
                                     startup.startupSessionState.sessionDraft

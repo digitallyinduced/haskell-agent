@@ -56,7 +56,7 @@ import Agent.CLI.Turn (retryCheckpointedTurn, runOneTurn)
 import Agent.Tools.PlanMode (PlanModeEnv(..))
 import Agent.TUI.Model (UiEvent(..))
 import Control.Exception.Safe (throwIO)
-import Control.Monad (unless, when)
+import Control.Monad (when)
 import Data.IORef
     ( readIORef
     , writeIORef
@@ -170,14 +170,14 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
         case env.sessionFullscreen of
             Nothing -> putTrailingNewline env.sessionRender
             Just _ -> pure ()
-        if exitAfter
+        if shouldQuitAfterTurn env exitAfter
             then pure RunQuit
             else continueAfterTurn continuation env
     TurnCancelled -> do
         case env.sessionFullscreen of
             Nothing -> putTrailingNewline env.sessionRender
             Just _ -> pure ()
-        if exitAfter
+        if shouldQuitAfterTurn env exitAfter
             then pure RunQuit
             else continuation.resumeSession env
     TurnFailed pending -> do
@@ -245,20 +245,30 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
                                             (StartupFailure
                                                 "agent provider unavailable")
                                         else exitFailure
-                                else do
-                                    unless env.sessionBackground $
+                                else if env.sessionBackground
+                                    then pure RunQuit
+                                    else do
                                         notifyAttention
                                             env.sessionRender.renderStderr
                                             InputRequested
-                                    continuation.resumeSessionWithDraft
-                                        env
-                                        pending.pendingPromptText
+                                        continuation.resumeSessionWithDraft
+                                            env
+                                            pending.pendingPromptText
+
+-- | One-shot and in-process background turns must not fall through to the
+-- interactive REPL. Background sessions share the parent's stdin, so a stray
+-- prompt would steal the TTY and ignore Ctrl-C installed on the child path.
+shouldQuitAfterTurn :: SessionEnv -> Bool -> Bool
+shouldQuitAfterTurn env exitAfter =
+    exitAfter || env.sessionBackground
 
 continueAfterTurn
     :: SessionContinuation
     -> SessionEnv
     -> IO RunResult
-continueAfterTurn continuation env = do
+continueAfterTurn continuation env
+    | env.sessionBackground = pure RunQuit
+    | otherwise = do
     queued <- case env.sessionFullscreen of
         Nothing -> pure False
         Just runtime -> hasQueuedFullscreenInput runtime

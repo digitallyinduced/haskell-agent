@@ -1005,5 +1005,5 @@ handleCtrlC = do
             Just $ warningNotice "Interrupted; press Ctrl-C again to exit."
         WarnExit -> applyLocalUiEvent $ UiSetNotice $
             Just $ warningNotice "Press Ctrl-C again to exit."
-        ForceExit -> liftIO (throwIO UserInterrupt)
+        ForceExit -> halt
     pure decision
