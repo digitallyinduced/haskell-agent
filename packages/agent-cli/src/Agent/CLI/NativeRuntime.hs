@@ -30,6 +30,7 @@ import Agent.Integration.API
     , newIntegrationSupervisor
     , IntegrationProvider
     , emptyIntegrationProvider
+    , integrationSupervisorArtifactDirectory
     )
 import Agent.Runtime.StartupPolicy
     ( NativeStartupPolicy(..)
@@ -70,6 +71,7 @@ import Agent.Runtime.Request
     )
 import Agent.TUI.Motion (MotionMode(..))
 import Agent.Tools.Types (defaultToolEnv)
+import qualified Agent.MCP as MCP
 import Control.Exception.Safe (finally, mask, onException)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -90,11 +92,14 @@ newNativeProcessRuntime = newNativeProcessRuntimeWithIntegrations emptyIntegrati
 newNativeProcessRuntimeWithIntegrations
     :: IntegrationProvider -> OsPath -> IO NativeProcessRuntime
 newNativeProcessRuntimeWithIntegrations provider root = mask \restore -> do
-    core <- restore (NativeProcess.newNativeProcessRuntime root)
     integrationToolEnv <- restore (defaultToolEnv root)
     integrations <-
         restore (newIntegrationSupervisor provider integrationToolEnv)
-            `onException` NativeProcess.closeNativeProcessRuntime core
+    core <- restore (NativeProcess.newNativeProcessRuntimeWithMcpHooks
+        MCP.defaultMcpHostHooks
+            { MCP.mcpHostArtifactDirectory =
+                Just (integrationSupervisorArtifactDirectory integrations) }
+        root) `onException` closeIntegrationSupervisor integrations
     pure NativeProcessRuntime
         { nativeProcessCore = core
         , nativeIntegrationSupervisor = integrations

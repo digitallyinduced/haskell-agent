@@ -25,8 +25,9 @@ main = hspec do
                             (OrganizationIntegrationAuthority remoteConfig)
                         case acquired of
                             Left _ -> expectationFailure "remote runtime unavailable"
-                            Right runtime ->
-                                integrationRuntimeRemoteServer runtime `shouldBe` Just remoteConfig
+                            Right runtime -> case integrationRuntimeEndpoint runtime of
+                                RemoteIntegrationEndpoint config -> config `shouldBe` remoteConfig
+                                _ -> expectationFailure "wrong endpoint authority"
         it "removes scratch even when provider cleanup fails" $
             withEnvironment \env -> do
                 let provider toolEnv = emptyIntegrationProvider toolEnv >>= \case
@@ -89,8 +90,9 @@ main = hspec do
                             (OrganizationIntegrationAuthority remoteConfig)
                         case acquired of
                             Left _ -> expectationFailure "local failure affected remote"
-                            Right runtime ->
-                                integrationRuntimeRemoteServer runtime `shouldBe` Just remoteConfig
+                            Right runtime -> case integrationRuntimeEndpoint runtime of
+                                RemoteIntegrationEndpoint config -> config `shouldBe` remoteConfig
+                                _ -> expectationFailure "wrong endpoint authority"
 
 withEnvironment :: (ToolEnv -> IO a) -> IO a
 withEnvironment action = withSystemTempDirectory "integration-api-test" \root ->

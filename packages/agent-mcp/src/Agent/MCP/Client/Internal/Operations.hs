@@ -7,7 +7,7 @@ import Agent.Json
     ( rawJsonBytes, rawJsonDecoder, rawJsonEncoding, rawJsonFromEncoding, RawJson )
 import Agent.MCP.Client.Internal.Runtime
     ( McpRequest(requestName, requestHeaderParams, requestOnProgress,
-                 requestAllowReissue),
+                 requestAllowReissue, requestArtifactResource),
       decodeMcpPayload,
       requestAndDecode,
       renderTextMcpResult,
@@ -373,11 +373,17 @@ getMcpSkill client uri = do
 -- method.  This does not activate a skill; callers must perform their own
 -- approval, frontmatter, and manifest verification.
 readMcpResource :: McpClient -> Text -> IO (Either Text [McpResourceContent])
-readMcpResource client uri = do
+readMcpResource = readMcpResourceWithArtifactLimit False
+
+readMcpResourceWithArtifactLimit
+    :: Bool -> McpClient -> Text -> IO (Either Text [McpResourceContent])
+readMcpResourceWithArtifactLimit artifact client uri = do
     result <- runExceptT do
         raw <- invokeWithInputRoundsT client
             (clientRequest client "resources/read" ("uri" .= uri))
-                { requestName = Just uri }
+                { requestName = Just uri
+                , requestArtifactResource = artifact
+                }
         decodeMcpPayload "resources/read response"
             (Json.object
                 (Json.defaultKey [] "contents"
@@ -653,7 +659,8 @@ callDiscoveredToolWith client tool arguments onProgress = do
             Right rendered -> case client.clientHooks.mcpHostArtifactDirectory of
                 Nothing -> pure (Right rendered)
                 Just directory ->
-                    materializeArtifacts directory (readMcpResource client) result
+                    materializeArtifacts directory
+                        (readMcpResourceWithArtifactLimit True client) result
                         >>= pure . fmap (\paths -> Text.intercalate "\n" (rendered : paths))
 
 toolAllowsAutomaticReissue :: McpTool -> Bool

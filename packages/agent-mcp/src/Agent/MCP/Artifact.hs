@@ -1,6 +1,6 @@
 -- | Bounded, explicit artifact handling. Resource URIs are sent back only to
 -- the originating MCP client; they are never interpreted as HTTP URLs.
-module Agent.MCP.Artifact (materializeArtifacts) where
+module Agent.MCP.Artifact (materializeArtifacts, maximumArtifactBytes) where
 
 import Agent.Json (RawJson, rawJsonBytes, rawJsonDecoder)
 import qualified Agent.Json.Decode as Json
@@ -80,7 +80,7 @@ descriptors = Json.object do
     failed <- Json.defaultKey False "isError" Json.bool
     if failed then pure [] else do
         values <- concat <$> Json.defaultKey [] "content" (Json.list descriptor)
-        when (length values > 8 || sum (map (\(_, _, n) -> toInteger n) values) > 16777216) $
+        when (length values > 8 || sum (map (\(_, _, n) -> toInteger n) values) > toInteger maximumArtifactBytes) $
             fail "artifact aggregate limit"
         pure values
 
@@ -108,5 +108,8 @@ descriptor = Json.object do
                 && not (Text.any (\c -> c == '/' || c == '\\' || isControl c) name)) $
                 fail "artifact filename"
             size <- Json.atKey "size" Json.int
-            unless (size >= 0 && size <= 16777216) (fail "artifact size")
+            unless (size >= 0 && size <= maximumArtifactBytes) (fail "artifact size")
             pure [(uri, name, size)]
+
+maximumArtifactBytes :: Int
+maximumArtifactBytes = 20 * 1024 * 1024

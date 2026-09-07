@@ -26,12 +26,15 @@ import Agent.MCP.Client
     , listMcpTasks
     , mcpResourceSubscriptions
     , readBounded
+    , readBoundedWithLimit
+    , responseBodyLimitFor
     , remainingHardDeadlineMicros
     , retryUnauthorizedOnce
     , emptyRequestRegistry
     , registerPending
     , spawnClientWorker
     , splitSseChunk
+    , splitSseChunkWithLimit
     , splitLines
     , startMcpClient
     , toolAllowsAutomaticReissue
@@ -1080,6 +1083,17 @@ spec = describe "Agent.MCP" do
             result <- readBounded reader
             result `shouldSatisfy` isLeft
 
+        it "widens only explicitly tagged artifact resource responses" do
+            responseBodyLimitFor "resources/read" True `shouldBe` 32 * 1024 * 1024
+            responseBodyLimitFor "resources/read" False `shouldBe` 16 * 1024 * 1024
+            responseBodyLimitFor "tools/call" True `shouldBe` 16 * 1024 * 1024
+            let limit = responseBodyLimitFor "resources/read" True
+            reader <- scriptedBodyReader [BS.replicate limit 97]
+            readBoundedWithLimit limit reader
+                `shouldReturn` Right (BS.replicate limit 97)
+            oversized <- scriptedBodyReader [BS.replicate limit 97, "b"]
+            readBoundedWithLimit limit oversized `shouldReturn` Left limit
+
         it "accepts large reader chunks made of bounded SSE lines" do
             let chunk = BS.concat
                     (replicate 70000 "data: xxxxxxxx\n")
@@ -1087,6 +1101,15 @@ spec = describe "Agent.MCP" do
                 Right (lines_, rest) ->
                     length lines_ == 70000 && BS.null rest
                 Left _ -> False
+
+        it "uses the tagged artifact cap for SSE without weakening ordinary lines" do
+            let bytes = BS.replicate (17 * 1024 * 1024) 97
+                limit = responseBodyLimitFor "resources/read" True
+            splitSseChunk "" bytes `shouldSatisfy` isLeft
+            fmap (BS.length . snd) (splitSseChunkWithLimit limit "" bytes)
+                `shouldBe` Right (BS.length bytes)
+            splitSseChunkWithLimit limit (BS.replicate limit 97) "b"
+                `shouldSatisfy` isLeft
 
         it "rejects an oversized unterminated SSE line" do
             splitSseChunk

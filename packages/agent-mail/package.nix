@@ -1,6 +1,7 @@
-{ mkDerivation, aeson, async, base, base64-bytestring, bytestring, crypton
-, crypton-connection, hspec, http-client, http-client-tls, http-types, lib
-, network, safe-exceptions, tagsoup, text, time, tls
+{ mkDerivation, aeson, async, base, base64-bytestring, bytestring
+, crypton, crypton-connection, hspec, http-client, http-client-tls
+, http-types, lib, network, safe-exceptions, tagsoup, text, time
+, tls
 }:
 mkDerivation {
   pname = "agent-mail";
@@ -12,6 +13,6 @@ mkDerivation {
     safe-exceptions tagsoup text time tls
   ];
   testHaskellDepends = [ aeson base hspec text time ];
-  description = "Provider-neutral email contract for Haskell Agent";
+  description = "Low-level email types and provider transports";
   license = lib.meta.getLicenseFromSpdxId "MIT";
 }

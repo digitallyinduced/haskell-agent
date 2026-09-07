@@ -2,6 +2,7 @@
 -- the distribution, never discovered or loaded from an untrusted plugin.
 module Agent.Integration.API
     ( IntegrationError(..)
+    , IntegrationEndpoint(..)
     , IntegrationRuntime(..)
     , IntegrationProvider
     , IntegrationAuthority(..)
@@ -33,9 +34,13 @@ data IntegrationError
 
 -- | The provider transfers ownership of its runtime to the supervisor.
 -- Cleanup must unsubscribe its MCP host and cancel/join its owned workers.
+data IntegrationEndpoint
+    = NoIntegrationEndpoint
+    | LocalIntegrationEndpoint !McpToolServer
+    | RemoteIntegrationEndpoint !McpServerConfig
+
 data IntegrationRuntime = IntegrationRuntime
-    { integrationRuntimeMcpServer :: !(Maybe McpToolServer)
-    , integrationRuntimeRemoteServer :: !(Maybe McpServerConfig)
+    { integrationRuntimeEndpoint :: !IntegrationEndpoint
     , integrationRuntimeAdminDefinitions :: !RawJson
     , callIntegrationRuntimeAdmin
         :: !(Text -> RawJson -> IO (Either IntegrationError RawJson))
@@ -64,8 +69,7 @@ emptyIntegrationProvider _ = pure (Right emptyRuntime)
 
 emptyRuntime :: IntegrationRuntime
 emptyRuntime = IntegrationRuntime
-    { integrationRuntimeMcpServer = Nothing
-    , integrationRuntimeRemoteServer = Nothing
+    { integrationRuntimeEndpoint = NoIntegrationEndpoint
     , integrationRuntimeAdminDefinitions =
         rawJsonFromEncoding (Aeson.toEncoding ([] :: [Aeson.Value]))
     , callIntegrationRuntimeAdmin = \_ _ ->
@@ -98,7 +102,7 @@ acquireIntegrationRuntime supervisor authority =
         state@(Open local) -> case authority of
             OrganizationIntegrationAuthority config ->
                 pure (state, Right emptyRuntime
-                    { integrationRuntimeRemoteServer = Just config
+                    { integrationRuntimeEndpoint = RemoteIntegrationEndpoint config
                     , callIntegrationRuntimeAdmin = \_ _ ->
                         pure (Left (IntegrationUnavailable
                             "Manage organization integrations through the gateway."))

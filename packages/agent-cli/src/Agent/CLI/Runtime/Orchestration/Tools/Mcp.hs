@@ -26,7 +26,7 @@ import Agent.CLI.Session.Runtime.Types (StartupRuntime(..))
 import Agent.CLI.Startup.Auth (setStartupNotice, startupDie)
 import Agent.CLI.TUI.App (emitUiEvent)
 import Agent.Integration.API
-    (IntegrationRuntime(..))
+    (IntegrationRuntime(..), IntegrationEndpoint(..), integrationSupervisorArtifactDirectory)
 import Agent.Loop (TurnInput(..))
 import qualified Agent.MCP as MCP
 import Agent.OsPath (unsafeToFilePath)
@@ -133,11 +133,12 @@ acquireMcpRuntime request@AgentToolsRequest
     let (configuredServers, configuredProgressive) =
             mcpConfiguration request toolStartup
         remoteServers =
-            maybe [] (maybeToList . integrationRuntimeRemoteServer) integrationRuntime
+            [config | runtime <- maybeToList integrationRuntime
+            , RemoteIntegrationEndpoint config <- [integrationRuntimeEndpoint runtime]]
         inMemoryServers =
             [(integrationsMcpConfig, server)
             | runtime <- maybeToList integrationRuntime
-            , server <- maybeToList (integrationRuntimeMcpServer runtime)]
+            , LocalIntegrationEndpoint server <- [integrationRuntimeEndpoint runtime]]
         -- Include the in-memory name in the reported configuration too: callers
         -- use this list to decide whether MCP tools exist at all.
         runtimeMcpServerConfigs = configuredServers <> remoteServers
@@ -262,6 +263,9 @@ acquireMcpRuntime request@AgentToolsRequest
                                 readIORef processRuntime.processMcpRoots
                             , MCP.mcpHostSample =
                                 readIORef processRuntime.processMcpSampling
+                            , MCP.mcpHostArtifactDirectory = Just
+                                (integrationSupervisorArtifactDirectory
+                                    processRuntime.processIntegrationSupervisor)
                             }
                         (\names ->
                             setStartupNotice startup.startupFullscreen

@@ -1,13 +1,16 @@
 module Agent.MCP.ArtifactSpec (spec) where
 
 import Agent.Json (rawJsonFromEncoding)
-import Agent.MCP.Artifact (materializeArtifacts)
+import Agent.MCP.Artifact (materializeArtifacts, maximumArtifactBytes)
 import Agent.MCP.Types (McpResourceContent(..))
 import Control.Exception.Safe (bracket)
 import Data.Aeson (Value, object, (.=), toEncoding)
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.Bits ((.&.))
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Base64 as Base64
 import System.Directory (getTemporaryDirectory, removeDirectoryRecursive, listDirectory, createDirectory, removeFile)
 import System.IO (openTempFile, hClose)
 import System.Posix.Files (getFileStatus, fileMode, setFileMode)
@@ -29,6 +32,10 @@ spec = describe "MCP artifact materialization" do
                     status <- getFileStatus filename
                     (fileMode status .&. 0o777) `shouldBe` 0o600
                 _ -> expectationFailure (show result)
+            tooLarge <- materializeArtifacts directory
+                (\_ -> expectationFailure "unexpected fetch" >> pure (Right []))
+                (payload [link "one.bin" maximumArtifactBytes True, link "two.bin" 1 True])
+            tooLarge `shouldSatisfy` isLeft
     it "does not fetch ordinary resource links" $
         withDirectory \directory ->
             materializeArtifacts directory (\_ -> expectationFailure "unexpected fetch" >> pure (Right []))
@@ -39,8 +46,20 @@ spec = describe "MCP artifact materialization" do
             mapM_ (\value -> do
                 result <- materializeArtifacts directory fetch (payload [value])
                 result `shouldSatisfy` isLeft)
-                [link "../secret" 3 True, link "note.txt" 16777217 True]
+                [link "../secret" 3 True, link "note.txt" (maximumArtifactBytes + 1) True]
             listDirectory directory `shouldReturn` []
+    it "preserves the exact 20 MiB decoded attachment boundary" $
+        withDirectory \directory -> do
+            maximumArtifactBytes `shouldBe` 20 * 1024 * 1024
+            let bytes = BS.replicate maximumArtifactBytes 97
+                encoded = Text.decodeUtf8 (Base64.encode bytes)
+            result <- materializeArtifacts directory
+                (\uri -> pure (Right [resource uri encoded]))
+                (payload [link "large.bin" maximumArtifactBytes True])
+            case result of
+                Right [path] ->
+                    BS.readFile (Text.unpack (Text.drop 11 path)) `shouldReturn` bytes
+                _ -> expectationFailure (show result)
     it "rejects mismatched resource URIs and actual lengths without files" $
         withDirectory \directory -> do
             mapM_ (\value -> do

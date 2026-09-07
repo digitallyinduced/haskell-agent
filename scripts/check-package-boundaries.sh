@@ -21,6 +21,8 @@ done
 # Public builds must remain usable without any proprietary integration source.
 [[ ! -e "$root/packages/agent-integrations" ]] \
   || fail "concrete integrations returned to the public tree"
+[[ ! -e "$root/packages/agent-mail/src/Agent/Mail/Contract.hs" ]] \
+  || fail "product integration catalog returned to the low-level mail library"
 if rg --line-number '^import[[:space:]]+(qualified[[:space:]]+)?Agent\.Integrations(\.|[[:space:]])' \
     "$root/packages" --glob '*.hs'; then
   fail "public source imports a private integration implementation"

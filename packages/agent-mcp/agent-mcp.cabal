@@ -98,6 +98,7 @@ test-suite agent-mcp-test
                     , hspec
                     , network
                     , QuickCheck >= 2.14 && < 2.16
+                    , base64-bytestring
                     , safe-exceptions
                     , stm
                     , text
