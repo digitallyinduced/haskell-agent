@@ -9,6 +9,7 @@ module Agent.Tools.Types
     , BackgroundTaskNotice(..)
     , ToolSchema(..)
     , ApprovalRule(..)
+    , ApprovalRequirement(..)
     , ToolExecutionPolicy(..)
     , ToolRegistry
     , ToolEnv(..)
@@ -40,7 +41,10 @@ module Agent.Tools.Types
     , dispatchRegisteredToolCallDetailed
     , jsonToolParameters
     , appToolHandlers
+    , toolApprovalRequirement
     , toolAllowsWithoutPrompt
+    , toolRequiresExplicitApproval
+    , toolCallRequiresExplicitApproval
     , toolAutoApproves
     , toolSupportsAsync
     ) where
@@ -110,14 +114,29 @@ data ToolAsyncCapability
     | AsyncCapable
     deriving (Eq, Show)
 
--- | Whether a call may run without generic user approval.
+-- | Approval needed for one concrete tool invocation.
+data ApprovalRequirement
+    = ApprovalNotRequired
+    | ApprovalPromptRequired
+    | FreshApprovalRequired
+    deriving (Eq, Show)
+
+-- | How to determine whether a call may run without generic user approval.
 data ApprovalRule
     = AlwaysReadOnly
     -- | Host-authorized effect that is intentionally exempt from the generic
     -- mutation prompt (for example a paid provider capability).
     | AlwaysAllowed
     | AlwaysPrompt
+    -- | Sensitive mutation that requires a fresh parent-user confirmation for
+    -- every call. Global auto-approval and remembered per-tool approval do not
+    -- bypass this rule.
+    | AlwaysConfirm
     | ClassifyReadOnly !(ToolCall -> IO Bool)
+    -- | Classify the complete approval requirement for each invocation.
+    -- This is intended for multiplexing tools whose selected operation can
+    -- require a fresh confirmation even when broader approval is enabled.
+    | ClassifyApproval !(ToolCall -> IO ApprovalRequirement)
     -- | Host-scoped auto-approval, retaining the original classification for
     -- plan mode and explicit deny-mutating policies. Never set from tool input.
     | AutoApprove !ApprovalRule
@@ -555,14 +574,42 @@ appToolHandlers :: [AppTool] -> [ToolHandler]
 appToolHandlers = map (.appToolHandler)
 
 toolAllowsWithoutPrompt :: AppTool -> ToolCall -> IO Bool
-toolAllowsWithoutPrompt tool call = classifyRule tool.appToolApproval
+toolAllowsWithoutPrompt tool call =
+    (== ApprovalNotRequired) <$> toolApprovalRequirement tool call
+
+-- | Resolve the approval requirement for one concrete invocation.
+toolApprovalRequirement :: AppTool -> ToolCall -> IO ApprovalRequirement
+toolApprovalRequirement tool call = classifyRule tool.appToolApproval
   where
     classifyRule = \case
-        AlwaysReadOnly -> pure True
-        AlwaysAllowed -> pure True
-        AlwaysPrompt -> pure False
-        ClassifyReadOnly classify -> classify call
+        AlwaysReadOnly -> pure ApprovalNotRequired
+        AlwaysAllowed -> pure ApprovalNotRequired
+        AlwaysPrompt -> pure ApprovalPromptRequired
+        AlwaysConfirm -> pure FreshApprovalRequired
+        ClassifyReadOnly classify -> do
+            readOnly <- classify call
+            pure $ if readOnly
+                then ApprovalNotRequired
+                else ApprovalPromptRequired
+        ClassifyApproval classify -> classify call
         AutoApprove original -> classifyRule original
+
+-- | Whether every invocation must be confirmed by the parent user. This is
+-- deliberately separate from read-only classification so provider-native
+-- metadata cannot accidentally downgrade a sensitive mutation.
+toolRequiresExplicitApproval :: AppTool -> Bool
+toolRequiresExplicitApproval tool = requiresExplicit tool.appToolApproval
+  where
+    requiresExplicit = \case
+        AlwaysConfirm -> True
+        AutoApprove original -> requiresExplicit original
+        _ -> False
+
+-- | Whether this invocation requires a fresh parent-user confirmation.
+-- Unlike 'toolRequiresExplicitApproval', this evaluates call-sensitive rules.
+toolCallRequiresExplicitApproval :: AppTool -> ToolCall -> IO Bool
+toolCallRequiresExplicitApproval tool call =
+    (== FreshApprovalRequired) <$> toolApprovalRequirement tool call
 
 toolAutoApproves :: AppTool -> Bool
 toolAutoApproves tool = case tool.appToolApproval of

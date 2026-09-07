@@ -11,6 +11,7 @@ module Agent.CLI.Approval.Decision
     , ApprovalPlan(..)
     , planApproval
     , resolveApprovalPrompt
+    , resolveApprovalPromptWith
     ) where
 
 import Agent.CLI.ComputerUse
@@ -60,9 +61,10 @@ data ApprovalAction
 -- 1. catastrophic shell or session-destructive computer hard-deny
 -- 2. dynamic read-only classification
 -- 3. plan-mode restrictions
--- 4. plan-file exception
--- 5. remembered tool approval
--- 6. session policy or user prompt
+-- 4. per-invocation confirmation
+-- 5. plan-file exception
+-- 6. remembered tool approval
+-- 7. session policy or user prompt
 data ApprovalPlan
     = CompleteApproval !(Either Text Bool) ![ApprovalAction]
     | NeedReadOnlyClassification
@@ -80,6 +82,7 @@ data ApprovalFacts = ApprovalFacts
     , planPath :: !OsPath
     , readOnly :: !(Maybe Bool)
     , allowedForSession :: !(Maybe Bool)
+    , requiresExplicitApproval :: !Bool
     , call :: !ToolCall
     }
     deriving (Eq, Show)
@@ -106,6 +109,11 @@ planApproval facts =
                             (Left message)
                             [ReportApprovalNotice
                                 (ApprovalWarning message)]
+                | facts.requiresExplicitApproval ->
+                    case facts.policy of
+                        DenyMutating -> CompleteApproval (Right False) []
+                        PromptMutating -> NeedPermissionPrompt
+                        ApproveAll -> NeedPermissionPrompt
                 | isPlanFileWrite
                     facts.planActive facts.planPath facts.call ->
                         approved
@@ -125,7 +133,22 @@ planApproval facts =
     approved = CompleteApproval (Right True) []
 
 resolveApprovalPrompt :: ToolCall -> Maybe PermissionChoice -> ApprovalPlan
-resolveApprovalPrompt call choice
+resolveApprovalPrompt = resolveApprovalPromptWith False
+
+-- | Resolve an interactive decision. Sensitive calls accept only a one-call
+-- approval: broader choices are treated as approval for this invocation
+-- without changing global or session policy.
+resolveApprovalPromptWith
+    :: Bool
+    -> ToolCall
+    -> Maybe PermissionChoice
+    -> ApprovalPlan
+resolveApprovalPromptWith requiresExplicitApproval call choice
+    | requiresExplicitApproval =
+        case choice of
+            Nothing -> denied
+            Just PermissionDeny -> denied
+            Just _ -> approved
     | isComputerToolCallKind call.callKind =
         case choice of
             Nothing -> denied

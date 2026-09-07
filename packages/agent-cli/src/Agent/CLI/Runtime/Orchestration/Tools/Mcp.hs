@@ -24,6 +24,7 @@ import Agent.CLI.Runtime.Orchestration.Types (AgentProcessRuntime(..), NativeRun
 import Agent.CLI.Session.Runtime.Types (StartupRuntime(..))
 import Agent.CLI.Startup.Auth (setStartupNotice, startupDie)
 import Agent.CLI.TUI.App (emitUiEvent)
+import Agent.Integrations (IntegrationRuntime, integrationRuntimeMcpServer)
 import Agent.Loop (TurnInput(..))
 import qualified Agent.MCP as MCP
 import Agent.OsPath (unsafeToFilePath)
@@ -104,6 +105,7 @@ acquireMcpRuntime
     -> ToolModelRuntime
     -> CollaborationRuntime
     -> ScratchRuntime
+    -> Maybe IntegrationRuntime
     -> IO McpRuntime
 acquireMcpRuntime request@AgentToolsRequest
     { processRuntime
@@ -120,9 +122,13 @@ acquireMcpRuntime request@AgentToolsRequest
     { collaborationPendingNotices = pendingNotices
     } ScratchRuntime
     { scratchSessionTmp = sessionTmp
-    } = do
+    } integrationRuntime = do
     let (runtimeMcpServerConfigs, runtimeProgressiveMcp) =
             mcpConfiguration request toolStartup
+        inMemoryServers = maybe [] (\runtime ->
+            let config = integrationsMcpConfig
+            in [(config, integrationRuntimeMcpServer runtime)])
+            integrationRuntime
     startStaleResourceCleanup request sessionTmp
     mcpStatusPhaseRef <- newIORef (Nothing :: Maybe Bool)
     mcpFleetRef <- newIORef (Nothing :: Maybe MCP.McpFleet)
@@ -159,39 +165,7 @@ acquireMcpRuntime request@AgentToolsRequest
                 atomicModifyIORef' mcpStatusPhaseRef \previous ->
                     (Just isConnecting, previous == Just True && not isConnecting)
             when settled (enqueueMcpSnapshot statuses)
-    let acquireMcpLease =
-            try @_ @SomeException
-                (if runtimeProgressiveMcp
-                    then
-                        MCP.acquireMcpFleetProgressive
-                            mcpSupervisor
-                            reportProgressiveMcp
-                            runtimeMcpServerConfigs
-                    else
-                        MCP.acquireMcpFleetWithProgress
-                            mcpSupervisor
-                            (\names ->
-                                setStartupNotice startup.startupFullscreen
-                                    (if null names
-                                        then "Loading built-in tools…"
-                                        else
-                                            "Loading tools: "
-                                                <> Text.intercalate ", " names
-                                                <> "…"))
-                            runtimeMcpServerConfigs)
-                >>= \case
-                    Left exception ->
-                        startupDie startup
-                            ("Failed to initialize MCP tools: "
-                                <> Text.pack (show exception))
-                    Right lease -> pure lease
-    bracketOnError
-        acquireMcpLease
-        MCP.releaseMcpFleetLease
-        \runtimeMcpLease -> do
-            let runtimeMcpFleet = runtimeMcpLease.mcpLeaseFleet
-                runtimeCloseMcp =
-                    MCP.releaseMcpFleetLease runtimeMcpLease
+        finishRuntime runtimeMcpFleet runtimeCloseMcp = do
             writeIORef mcpFleetRef (Just runtimeMcpFleet)
             when runtimeProgressiveMcp $
                 MCP.mcpFleetStatuses runtimeMcpFleet >>= enqueueMcpSnapshot
@@ -205,3 +179,74 @@ acquireMcpRuntime request@AgentToolsRequest
                 runtimeMcpFleet.mcpFleetWarnings
             setStartupNotice startup.startupFullscreen "Loading built-in tools…"
             pure McpRuntime{..}
+    if null inMemoryServers
+        then do
+            let acquireMcpLease =
+                    try @_ @SomeException
+                        (if runtimeProgressiveMcp
+                            then
+                                MCP.acquireMcpFleetProgressive
+                                    mcpSupervisor
+                                    reportProgressiveMcp
+                                    runtimeMcpServerConfigs
+                            else
+                                MCP.acquireMcpFleetWithProgress
+                                    mcpSupervisor
+                                    (\names ->
+                                        setStartupNotice startup.startupFullscreen
+                                            (if null names
+                                                then "Loading built-in tools…"
+                                                else
+                                                    "Loading tools: "
+                                                        <> Text.intercalate ", " names
+                                                        <> "…"))
+                                    runtimeMcpServerConfigs)
+                        >>= \case
+                            Left exception ->
+                                startupDie startup
+                                    ("Failed to initialize MCP tools: "
+                                        <> Text.pack (show exception))
+                            Right lease -> pure lease
+            bracketOnError
+                acquireMcpLease
+                MCP.releaseMcpFleetLease
+                \runtimeMcpLease -> finishRuntime runtimeMcpLease.mcpLeaseFleet
+                    (MCP.releaseMcpFleetLease runtimeMcpLease)
+        else do
+            fleet <-
+                try @_ @SomeException
+                    (MCP.startMcpFleetWithInMemory
+                        MCP.defaultMcpHostHooks
+                            { MCP.mcpHostElicit =
+                                readIORef processRuntime.processMcpElicitation
+                            }
+                        (\names ->
+                            setStartupNotice startup.startupFullscreen
+                                (if null names
+                                    then "Loading built-in tools…"
+                                    else
+                                        "Loading tools: "
+                                            <> Text.intercalate ", " names
+                                            <> "…"))
+                        runtimeMcpServerConfigs
+                        inMemoryServers)
+                    >>= \case
+                        Left exception ->
+                            startupDie startup
+                                ("Failed to initialize MCP tools: "
+                                    <> Text.pack (show exception))
+                        Right value -> pure value
+            finishRuntime fleet (MCP.closeMcpFleet fleet)
+
+integrationsMcpConfig :: MCP.McpServerConfig
+integrationsMcpConfig = MCP.McpServerConfig
+    { MCP.mcpServerName = "integrations"
+    , MCP.mcpServerUrl = Nothing
+    , MCP.mcpServerCommand = ""
+    , MCP.mcpServerArgs = []
+    , MCP.mcpServerCwd = Nothing
+    , MCP.mcpServerEnv = []
+    , MCP.mcpServerStartupTimeoutSeconds = 10
+    , MCP.mcpServerRequestTimeoutSeconds = 60
+    , MCP.mcpServerProtocol = MCP.McpProtocolModern
+    }

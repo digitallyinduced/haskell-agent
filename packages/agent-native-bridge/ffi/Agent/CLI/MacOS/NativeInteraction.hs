@@ -4,6 +4,7 @@ module Agent.CLI.MacOS.NativeInteraction
     ( nativePlanModeHooks
     , requestApproval
     , requestApprovalFromClient
+    , boundedApprovalArguments
     , requestRootAccessFromClient
     , resolveApproval
     ) where
@@ -246,9 +247,7 @@ requestApprovalFromClient callback context control call = do
             control.turnControlApprovals
             (Map.insert approvalId waiter)
         pure approvalId
-    let (arguments, truncated) =
-            boundedEventText
-                (if call.argumentsEncrypted then "" else call.arguments)
+    let (arguments, truncated) = boundedApprovalArguments call
     sendEvent callback context $
         Aeson.object
             [ "event" Aeson..= ("approval.requested" :: Text)
@@ -278,6 +277,20 @@ requestApprovalFromClient callback context control call = do
                     (Set.insert call.name)
         _ -> pure ()
     pure (Just choice)
+
+boundedApprovalArguments :: ToolCall -> (Text, Bool)
+boundedApprovalArguments call
+    | call.argumentsEncrypted = ("", False)
+    | call.name == "mcp_call" =
+        boundedText maximumMcpApprovalCharacters call.arguments
+    | otherwise = boundedEventText call.arguments
+  where
+    boundedText maximum value =
+        let (visible, remainder) = Text.splitAt maximum value
+        in (visible, not (Text.null remainder))
+
+maximumMcpApprovalCharacters :: Int
+maximumMcpApprovalCharacters = 1024 * 1024
 
 requestRootAccessFromClient
     :: FunPtr EventCallback

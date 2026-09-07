@@ -8,9 +8,11 @@ import Agent.CLI.Approval
     , approveFilesystemRootAccess
     , approveToolDecisionWithReporter
     , approveToolDecisionWithReporterAndPersistence
+    , approveToolDecisionWithReporterAndPersistenceClassified
     , childApprove
     , planApproval
     , resolveApprovalPrompt
+    , resolveApprovalPromptWith
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.ComputerUse (computerToolName, computerUseTool)
@@ -23,6 +25,7 @@ import Agent.ToolDispatch
     )
 import Agent.Tools.Types
     ( AppTool(..)
+    , ApprovalRequirement(..)
     , ApprovalRule(..)
     , ToolRegistry
     , jsonAppTool
@@ -205,6 +208,20 @@ spec = do
             planApproval (facts PromptMutating)
                 `shouldBe` CompleteApproval (Right True) []
 
+        it "requires fresh confirmation despite yolo or remembered approval" do
+            let facts policy = (approvalFacts mutatingCall)
+                    { policy
+                    , readOnly = Just False
+                    , allowedForSession = Just True
+                    , requiresExplicitApproval = True
+                    }
+            planApproval (facts ApproveAll)
+                `shouldBe` NeedPermissionPrompt
+            planApproval (facts PromptMutating)
+                `shouldBe` NeedPermissionPrompt
+            planApproval (facts DenyMutating)
+                `shouldBe` CompleteApproval (Right False) []
+
     describe "resolveApprovalPrompt" do
         it "maps cancellation and explicit denial to an in-band denial" do
             resolveApprovalPrompt mutatingCall Nothing
@@ -241,6 +258,13 @@ spec = do
                             "✓ always allow run_terminal_command this session")
                     ]
 
+        it "never persists broader approval for an explicit-confirmation call" do
+            resolveApprovalPromptWith True mutatingCall
+                (Just PermissionAllowAll)
+                `shouldBe` CompleteApproval (Right True) []
+            resolveApprovalPromptWith True mutatingCall
+                (Just PermissionAllowTool)
+                `shouldBe` CompleteApproval (Right True) []
         it "preserves project-wide approval semantics for a computer workflow" do
             let call = ToolCall
                     { callId = "computer-1"
@@ -448,6 +472,82 @@ spec = do
                     "Blocked dangerous shell command"
                         `Text.isInfixOf` message
                 _ -> False
+
+        it "prompts for every explicit-confirmation call under ApproveAll" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef (Set.singleton "sensitive")
+            plan <- newPlanModeEnv
+                (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let request _ = do
+                    modifyIORef' permissionRequests (+ 1)
+                    pure (Just PermissionAllowAll)
+                sensitiveTool = tool "sensitive" AlwaysConfirm
+                sensitiveCall =
+                    functionToolCall "call-sensitive" "sensitive" "{}"
+                approve = approveToolDecisionWithReporter
+                    request (\_ -> pure ()) policy allowed
+                    (registry [sensitiveTool]) plan sensitiveCall
+            approve `shouldReturn` Right True
+            approve `shouldReturn` Right True
+            readIORef permissionRequests `shouldReturn` 2
+            readIORef policy `shouldReturn` ApproveAll
+            readIORef allowed `shouldReturn` Set.singleton "sensitive"
+
+        it "cannot bypass a call-sensitive fresh confirmation with yolo or remembered approval" do
+            policy <- newIORef ApproveAll
+            allowed <- newIORef (Set.singleton "multiplexer")
+            plan <- newPlanModeEnv
+                (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let request _ = do
+                    modifyIORef' permissionRequests (+ 1)
+                    pure (Just PermissionAllowAll)
+                approve call = approveToolDecisionWithReporter
+                    request (\_ -> pure ()) policy allowed
+                    (registry [callSensitiveTool]) plan call
+
+            approve callSensitiveReadCall `shouldReturn` Right True
+            approve callSensitiveWriteCall `shouldReturn` Right True
+            approve callSensitiveFreshCall `shouldReturn` Right True
+            approve callSensitiveFreshCall `shouldReturn` Right True
+
+            writeIORef policy PromptMutating
+            approve callSensitiveFreshCall `shouldReturn` Right True
+
+            readIORef permissionRequests `shouldReturn` 3
+            readIORef policy `shouldReturn` PromptMutating
+            readIORef allowed `shouldReturn` Set.singleton "multiplexer"
+
+        it "never downgrades wrapped sensitive rules with host auto-approval or native read-only metadata" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef (Set.fromList ["sensitive", "multiplexer"])
+            plan <- newPlanModeEnv
+                (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            permissionRequests <- newIORef (0 :: Int)
+            let sensitiveTool = tool "sensitive" (AutoApprove AlwaysConfirm)
+                wrappedMultiplexer = callSensitiveTool
+                    { appToolApproval = AutoApprove callSensitiveTool.appToolApproval }
+                sensitiveCall =
+                    functionToolCall "call-sensitive" "sensitive" "{}"
+                tools = registry [sensitiveTool, wrappedMultiplexer]
+                approve = approveToolDecisionWithReporterAndPersistenceClassified
+                    (const (pure (Just True)))
+                    (\_ -> modifyIORef' permissionRequests (+ 1)
+                        >> pure (Just PermissionAllowAll))
+                    (\_ -> pure ())
+                    (pure ())
+                    policy allowed tools plan
+            approve sensitiveCall `shouldReturn` Right True
+            approve callSensitiveFreshCall `shouldReturn` Right True
+            readIORef permissionRequests `shouldReturn` 2
+            readIORef policy `shouldReturn` PromptMutating
+            childApprove ApproveAll tools sensitiveCall
+                `shouldReturn` Left
+                    "This sensitive tool requires an explicit parent approval for every call."
+            childApprove ApproveAll tools callSensitiveFreshCall
+                `shouldReturn` Left
+                    "This sensitive tool requires an explicit parent approval for every call."
 
         it "reports plan-mode denials without requiring terminal output" do
             policy <- newIORef ApproveAll
@@ -735,6 +835,29 @@ spec = do
                 [ApprovalSuccess
                     "✓ computer use approved until disabled"]
 
+        it "never lets a child bypass explicit confirmation under ApproveAll" do
+            let sensitiveTool = tool "sensitive" AlwaysConfirm
+                sensitiveCall =
+                    functionToolCall "call-sensitive" "sensitive" "{}"
+            childApprove ApproveAll
+                (registry [sensitiveTool]) sensitiveCall
+                `shouldReturn`
+                    Left
+                        "This sensitive tool requires an explicit parent approval for every call."
+
+        it "rejects only fresh calls from a call-sensitive child tool" do
+            childApprove ApproveAll
+                (registry [callSensitiveTool]) callSensitiveFreshCall
+                `shouldReturn`
+                    Left
+                        "This sensitive tool requires an explicit parent approval for every call."
+            childApprove ApproveAll
+                (registry [callSensitiveTool]) callSensitiveWriteCall
+                `shouldReturn` Right True
+            childApprove DenyMutating
+                (registry [callSensitiveTool]) callSensitiveReadCall
+                `shouldReturn` Right True
+
         it "prompts for each computer call after an Allow once choice" do
             policy <- newIORef ApproveAll
             allowed <- newIORef Set.empty
@@ -914,6 +1037,18 @@ dynamicReadCall = functionToolCall "call-dynamic-read" "dynamic" "read"
 dynamicWriteCall :: ToolCall
 dynamicWriteCall = functionToolCall "call-dynamic-write" "dynamic" "write"
 
+callSensitiveReadCall :: ToolCall
+callSensitiveReadCall =
+    functionToolCall "call-multiplexer-read" "multiplexer" "read"
+
+callSensitiveWriteCall :: ToolCall
+callSensitiveWriteCall =
+    functionToolCall "call-multiplexer-write" "multiplexer" "write"
+
+callSensitiveFreshCall :: ToolCall
+callSensitiveFreshCall =
+    functionToolCall "call-multiplexer-fresh" "multiplexer" "fresh"
+
 namespacedReadOnlyCall :: ToolCall
 namespacedReadOnlyCall =
     functionToolCall "call-list-agents" "collaboration.list_agents" "{}"
@@ -929,6 +1064,13 @@ autoApproveMutatingTool = tool "write" (AutoApprove AlwaysPrompt)
 
 dynamicTool :: AppTool
 dynamicTool = tool "dynamic" (ClassifyReadOnly (\call -> pure (call == dynamicReadCall)))
+
+callSensitiveTool :: AppTool
+callSensitiveTool = tool "multiplexer" $
+    ClassifyApproval \call -> pure $ case call.arguments of
+        "read" -> ApprovalNotRequired
+        "fresh" -> FreshApprovalRequired
+        _ -> ApprovalPromptRequired
 
 namespacedReadOnlyTool :: AppTool
 namespacedReadOnlyTool = tool "list_agents" AlwaysReadOnly
@@ -952,5 +1094,6 @@ approvalFacts call = ApprovalFacts
     , planPath = unsafeEncodeUtf "/tmp/approval-test/plan.md"
     , readOnly = Nothing
     , allowedForSession = Nothing
+    , requiresExplicitApproval = False
     , call
     }

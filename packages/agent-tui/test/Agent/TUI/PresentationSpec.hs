@@ -190,7 +190,8 @@ spec = describe "tool presentation" do
         toolCallTitle call
             `shouldBe` "seo-mcp: search_performance"
         permissionToolCallPrompt call
-            `shouldBe` "Allow seo-mcp: search_performance?"
+            `shouldBe`
+                "Allow seo-mcp: search_performance?\n\n{\n    \"days\": 90\n}"
         summarizeToolCall
             (functionToolCall
                 "mcp"
@@ -358,6 +359,43 @@ spec = describe "tool presentation" do
                 "{\"command\":\"printf '\\u001b]0;owned\\u0007'\"}")
             `shouldBe`
                 "Run this shell command?\n\nprintf '␛]0;owned␇'"
+
+    it "shows complete nested arguments for integration approval" do
+        let prompt = permissionToolCallPrompt
+                (functionToolCall
+                    "send"
+                    "mcp_call"
+                    "{\"name\":\"integrations__email_send\",\"arguments\":\
+                    \{\"account_id\":\"mail-1\",\"draft_id\":\"draft-1\",\
+                    \\"to\":[\"person@example.com\"],\
+                    \\"subject\":\"Quarterly update\",\
+                    \\"body\":\"Send this now.\"}}")
+        prompt `shouldSatisfy` Text.isPrefixOf
+            "Allow integrations: email_send?"
+        prompt `shouldSatisfy` Text.isInfixOf "\"account_id\": \"mail-1\""
+        prompt `shouldSatisfy` Text.isInfixOf "\"draft_id\": \"draft-1\""
+        prompt `shouldSatisfy` Text.isInfixOf "\"body\": \"Send this now.\""
+
+    it "does not truncate integration mutation arguments" do
+        let recipients =
+                [ "person" <> Text.pack (show number) <> "@example.com"
+                | number <- [1 .. 11 :: Int]
+                ]
+            body = Text.replicate 2001 "x" <> "visible-tail"
+            arguments =
+                "{\"name\":\"integrations__email_send\",\"arguments\":\
+                \{\"account_id\":\"mail-1\",\"draft_id\":\"draft-1\",\"to\":[\""
+                    <> Text.intercalate "\",\"" recipients
+                    <> "\"],\"body\":\""
+                    <> body
+                    <> "\\rcontrol-visible\"}}"
+            prompt = permissionToolCallPrompt
+                (functionToolCall "send" "mcp_call" arguments)
+        prompt `shouldSatisfy`
+            Text.isInfixOf "person11@example.com"
+        prompt `shouldSatisfy` Text.isInfixOf "visible-tail"
+        prompt `shouldSatisfy` Text.isInfixOf "\\rcontrol-visible"
+        prompt `shouldNotSatisfy` Text.isInfixOf "\r"
 
     it "falls back to the safe prompt text for ask_secret detail" do
         toolDetail

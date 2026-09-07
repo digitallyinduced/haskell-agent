@@ -1,9 +1,11 @@
 module Agent.MCP.Client.Internal.Operations where
 
+import Agent.MCP.Types (McpToolServer(..), McpCallToolRequest(..), McpCallToolResult(..))
 import Agent.Json
-    ( rawJsonBytes, rawJsonDecoder, rawJsonEncoding, RawJson )
+    ( rawJsonBytes, rawJsonDecoder, rawJsonEncoding, rawJsonFromEncoding, RawJson )
 import Agent.MCP.Client.Internal.Runtime
-    ( McpRequest(requestName, requestHeaderParams, requestOnProgress),
+    ( McpRequest(requestName, requestHeaderParams, requestOnProgress,
+                 requestAllowReissue),
       decodeMcpPayload,
       requestAndDecode,
       renderTextMcpResult,
@@ -16,7 +18,7 @@ import Agent.MCP.Client.Internal.Runtime
 import Agent.MCP.Types
     ( McpTool(discoveredReadOnly, discoveredHeaderParams,
               discoveredName, discoveredTitle, discoveredDescription,
-              discoveredInputSchema),
+              discoveredInputSchema, discoveredRequiresFreshApproval),
       McpHeaderParam(..),
       McpCompletion,
       McpPromptResult(promptResultMessages, promptResultDescription),
@@ -29,10 +31,11 @@ import Agent.MCP.Types
       McpSkillEntry,
       McpSkillsCapability,
       McpClient(clientConfig, clientDiscoveredSkills, clientTransport,
-                clientServerInfo),
-      McpClientTransport(McpClientStdio, McpClientHttp),
+                clientServerInfo, clientLifecycle),
+      McpClientLifecycle(ClientReady, ClientClosed),
+      McpClientTransport(McpClientStdio, McpClientHttp, McpClientInMemory),
       McpProgress(progressMessage, progressValue, progressTotal),
-      McpError,
+      McpError(..),
       McpServerCapabilities(capabilitySkills),
       McpServerInfo(serverInfoCapabilities),
       McpServerConfig(mcpServerName),
@@ -59,7 +62,7 @@ import Control.Concurrent.Async ()
 import Control.Concurrent.MVar ()
 import Control.Concurrent.STM
     ( atomically, readTVarIO, modifyTVar' )
-import Control.Exception.Safe ()
+import Control.Exception.Safe (tryAny)
 import Control.Monad ( forM )
 import Control.Monad.Trans.Class ()
 import Control.Monad.Trans.Except ( runExceptT )
@@ -70,7 +73,7 @@ import Data.Aeson
       ToJSON(toJSON) )
 import Data.Char ( isAlphaNum, isAscii )
 import Data.IORef ( atomicModifyIORef', newIORef )
-import Data.List ()
+import Data.List ( find )
 import Data.Maybe ( catMaybes, fromMaybe, isJust, mapMaybe )
 import Data.Scientific ( floatingOrInteger )
 import Data.String ()
@@ -87,11 +90,11 @@ import System.IO ()
 import System.IO.Unsafe ()
 import System.Process ()
 import System.Timeout ()
-import qualified Data.Aeson as Aeson ( decodeStrict )
+import qualified Data.Aeson as Aeson ( decodeStrict, pairs )
 import qualified Data.Aeson.Encoding as AesonEncoding ( pair )
 import qualified Data.Aeson.Encoding.Internal as AesonEncodingInternal
     ()
-import qualified Data.ByteString as BS ()
+import qualified Data.ByteString as BS ( length )
 import qualified Data.ByteString.Char8 as BS8 ()
 import qualified Data.ByteString.Base64 as Base64 ()
 import qualified Network.HTTP.Client as HC ()
@@ -130,11 +133,14 @@ import qualified Data.Text.Encoding as TextEncoding ()
 
 discoverMcpTools :: McpClient -> IO ([McpTool], [Text])
 discoverMcpTools client = do
-    tools <- paginate client "tools/list" "tools" mcpToolDecoder
+    tools <- (case client.clientTransport of
+        McpClientInMemory server _ -> server.toolServerListTools
+        _ -> paginate client "tools/list" "tools" mcpToolDecoder)
         >>= either (ioError . userError . Text.unpack . renderMcpError) pure
     let isHttp = case client.clientTransport of
             McpClientHttp _ -> True
             McpClientStdio _ -> False
+            McpClientInMemory _ _ -> False
         annotated =
             [ (tool.discoveredName, annotateHeaderParams isHttp tool)
             | tool <- tools
@@ -147,32 +153,96 @@ discoverMcpTools client = do
             ]
     pure (accepted, warnings)
 
--- | Fetch every page of a list request.
+maximumPaginationPages, maximumPaginationItems
+    , maximumPaginationCursorBytes, maximumPaginationBytes :: Int
+maximumPaginationPages = 100
+maximumPaginationItems = 10000
+maximumPaginationCursorBytes = 8 * 1024
+maximumPaginationBytes = 16 * 1024 * 1024
+
+-- | Fetch every page of a list request. Catalogs are untrusted server input,
+-- so bound both traversal and accumulation and reject cursor cycles.
 paginate
     :: McpClient
     -> Text
     -> Text
     -> Json.Decoder a
     -> IO (Either McpError [a])
-paginate client method key itemDecoder = runExceptT (go Nothing [])
+paginate client method key itemDecoder = go 0 [] Nothing [] 0 0
   where
-    go cursor collected = do
-        let parameters = maybe mempty
-                (\value -> AesonEncoding.pair "cursor" (rawJsonEncoding value))
-                cursor
-        (items, nextCursor) <-
-            requestAndDecode client
+    go pageCount seenCursors cursor pages itemCount byteCount
+        | pageCount >= maximumPaginationPages =
+            pure (Left (paginationError "too many pages"))
+        | otherwise = do
+            let parameters = maybe mempty
+                    (\value ->
+                        AesonEncoding.pair "cursor" (rawJsonEncoding value))
+                    cursor
+            requestMcpFull
+                client
                 (clientRequest client method parameters)
-                (method <> " response")
-                pageDecoder
-        case nextCursor of
-            Just next -> go (Just next) (collected <> items)
-            Nothing -> pure (collected <> items)
+                >>= \case
+                    Left err -> pure (Left err)
+                    Right result -> do
+                        let resultBytes = rawJsonBytes result
+                            byteCount' = byteCount + BS.length resultBytes
+                        if byteCount' > maximumPaginationBytes
+                            then
+                                pure
+                                    (Left
+                                        (paginationError
+                                            "catalog is too large"))
+                            else
+                                case Json.decodeEither pageDecoder resultBytes of
+                                    Left err ->
+                                        pure . Left . McpTransportError $
+                                            "invalid " <> method <> " response: "
+                                                <> err.jsonErrorMessage
+                                    Right (items, nextCursor) -> do
+                                        let itemCount' = itemCount + length items
+                                            pages' = items : pages
+                                        if itemCount' > maximumPaginationItems
+                                            then
+                                                pure
+                                                    (Left
+                                                        (paginationError
+                                                            "too many items"))
+                                            else case nextCursor of
+                                                Nothing ->
+                                                    pure
+                                                        (Right
+                                                            (concat
+                                                                (reverse
+                                                                    pages')))
+                                                Just next
+                                                    | BS.length
+                                                        (rawJsonBytes next)
+                                                            > maximumPaginationCursorBytes ->
+                                                        pure
+                                                            (Left
+                                                                (paginationError
+                                                                    "cursor is too large"))
+                                                    | next `elem` seenCursors ->
+                                                        pure
+                                                            (Left
+                                                                (paginationError
+                                                                    "cursor cycle"))
+                                                    | otherwise ->
+                                                        go
+                                                            (pageCount + 1)
+                                                            (next : seenCursors)
+                                                            (Just next)
+                                                            pages'
+                                                            itemCount'
+                                                            byteCount'
 
     pageDecoder = Json.object $
         (,)
             <$> Json.defaultKey [] key (Json.list itemDecoder)
             <*> Json.optionalKey "nextCursor" rawJsonDecoder
+    paginationError reason =
+        McpTransportError
+            ("invalid " <> method <> " pagination: " <> reason)
 
 -- | Enumerate skill metadata only.  Skill resources are intentionally not
 -- fetched here; hosts retrieve and verify SKILL.md when the user activates a
@@ -182,39 +252,23 @@ discoverMcpSkills client = do
     capability <- clientSkillsCapability client
     case capability of
         Nothing -> pure []
-        Just _ -> go Nothing []
+        Just _ ->
+            paginate client "skills/list" "skills" rawJsonDecoder >>= \case
+                Left err -> pure
+                    [ "MCP server " <> client.clientConfig.mcpServerName
+                        <> " skills/list failed: " <> renderMcpError err
+                    ]
+                Right rawSkills -> do
+                    let skills = mapMaybe decodeSkill rawSkills
+                        invalid = length skills /= length rawSkills
+                    atomically $ modifyTVar' client.clientDiscoveredSkills
+                        (<> skills)
+                    pure
+                        [ "MCP server " <> client.clientConfig.mcpServerName
+                            <> " returned invalid skills/list entry"
+                        | invalid
+                        ]
   where
-    -- Skill discovery is deliberately not expressed as one McpCall: catalog
-    -- failures are warnings and already decoded pages remain usable.
-    go cursor warnings = do
-        let parameters = maybe mempty
-                (\value -> AesonEncoding.pair "cursor" (rawJsonEncoding value))
-                cursor
-        requestMcpFull client (clientRequest client "skills/list" parameters) >>= \case
-            Left err -> pure ["MCP server " <> client.clientConfig.mcpServerName
-                <> " skills/list failed: " <> renderMcpError err]
-            Right result ->
-                case Json.decodeEither pageDecoder (rawJsonBytes result) of
-                    Left err -> pure ["MCP server "
-                        <> client.clientConfig.mcpServerName
-                        <> " returned invalid skills/list response: " <> err.jsonErrorMessage]
-                    Right (rawSkills, nextCursor) -> do
-                        let skills = mapMaybe decodeSkill rawSkills
-                            invalid = length skills /= length rawSkills
-                        atomically $ modifyTVar' client.clientDiscoveredSkills
-                            (<> skills)
-                        let pageWarnings =
-                                [ "MCP server " <> client.clientConfig.mcpServerName
-                                    <> " returned invalid skills/list entry"
-                                | invalid
-                                ]
-                        case nextCursor of
-                            Nothing -> pure (warnings <> pageWarnings)
-                            Just next -> go (Just next) (warnings <> pageWarnings)
-
-    pageDecoder = Json.object $
-        (,) <$> Json.defaultKey [] "skills" (Json.list rawJsonDecoder)
-            <*> Json.optionalKey "nextCursor" rawJsonDecoder
     decodeSkill value =
         case Json.decodeEither mcpSkillEntryDecoder (rawJsonBytes value) of
             Left _ -> Nothing
@@ -333,18 +387,44 @@ appToolFor client tool = AppTool
         RawJsonFunctionSchema (toJSON tool.discoveredInputSchema)
     , appToolHandler =
         typedStreamingTool qualifiedName rawObjectDecoder \publish arguments -> do
-            -- Snapshots accumulate: each progress line is appended to the
-            -- text already shown for this call.
-            shown <- newIORef Text.empty
-            callDiscoveredToolWith client tool arguments $ Just \progress -> do
-                snapshot <- atomicModifyIORef' shown \current ->
-                    let next = current <> formatProgress progress
-                    in (next, next)
-                publish snapshot
+            current <- readTVarIO client.clientLifecycle
+            case current of
+                ClientReady tools _
+                    | Just live <-
+                        find
+                            ((== tool.discoveredName) . (.discoveredName))
+                            tools
+                    , live == tool -> do
+                        -- Snapshots accumulate: each progress line is
+                        -- appended to the text already shown for this call.
+                        shown <- newIORef Text.empty
+                        callDiscoveredToolWith
+                            client
+                            tool
+                            arguments
+                            (Just \progress -> do
+                                snapshot <-
+                                    atomicModifyIORef' shown \accumulated ->
+                                        let next =
+                                                accumulated
+                                                    <> formatProgress progress
+                                        in (next, next)
+                                publish snapshot)
+                _ ->
+                    pure
+                        (Left
+                            "MCP tool changed after registration; discover and approve it again")
     , appToolApproval =
-        if tool.discoveredReadOnly then AlwaysReadOnly else AlwaysPrompt
+        if tool.discoveredRequiresFreshApproval
+            then AlwaysConfirm
+            else if tool.discoveredReadOnly
+                then AlwaysReadOnly
+                else AlwaysPrompt
     , appToolExecution =
-        if tool.discoveredReadOnly then ParallelSafe else TurnSequential
+        if tool.discoveredReadOnly
+                && not tool.discoveredRequiresFreshApproval
+            then ParallelSafe
+            else TurnSequential
     , appToolResourceClaims = Nothing
     , appToolAsyncCapability = BlockingOnly
     }
@@ -406,6 +486,17 @@ callDiscoveredToolWith
     -> RawJson
     -> Maybe (McpProgress -> IO ())
     -> IO (Either Text Text)
+callDiscoveredToolWith client tool arguments _
+    | McpClientInMemory server _ <- client.clientTransport = do
+        state <- readTVarIO client.clientLifecycle
+        case state of
+            ClientClosed -> pure (Left "MCP server closed")
+            _ -> do
+                outcome <- tryAny $
+                    server.toolServerCallTool (McpCallToolRequest tool.discoveredName arguments Nothing)
+                pure $ case outcome of
+                    Left _ -> Left "Internal MCP tool error"
+                    Right result -> either (Left . renderMcpError) renderInMemoryToolResult result
 callDiscoveredToolWith client tool arguments onProgress = do
     let parameters =
             "name" .= tool.discoveredName
@@ -415,12 +506,31 @@ callDiscoveredToolWith client tool arguments onProgress = do
             { requestName = Just tool.discoveredName
             , requestHeaderParams = headerParamValues tool arguments
             , requestOnProgress = onProgress
+            , requestAllowReissue = toolAllowsAutomaticReissue tool
             }
         >>= \case
         Left err -> pure (Left (renderMcpError err))
         Right result -> pure (normalizeMcpToolResult result)
 
+toolAllowsAutomaticReissue :: McpTool -> Bool
+toolAllowsAutomaticReissue =
+    not . (.discoveredRequiresFreshApproval)
+
 -- | Render a @CallToolResult@ for the model.
+renderInMemoryToolResult :: McpCallToolResult -> Either Text Text
+renderInMemoryToolResult result =
+    let output = case result.callToolStructuredContent of
+            Just value | not (null result.callToolText) ->
+                compactRawJson $ rawJsonFromEncoding $ Aeson.pairs $
+                    "isError" .= result.callToolIsError
+                    <> "content" .=
+                        [object ["type" .= ("text" :: Text), "text" .= text]
+                        | text <- result.callToolText]
+                    <> AesonEncoding.pair "structuredContent" (rawJsonEncoding value)
+            Just value -> compactRawJson value
+            Nothing -> Text.intercalate "\n" result.callToolText
+    in if result.callToolIsError then Left output else Right output
+
 normalizeMcpToolResult :: RawJson -> Either Text Text
 normalizeMcpToolResult result =
     case Json.decodeEither mcpToolResultDecoder (rawJsonBytes result) of
@@ -499,7 +609,7 @@ mcpToolResultDecoder = Json.object do
     rawError <- Json.optionalKey "isError" rawJsonDecoder
     structured <- Json.optionalKey "structuredContent" rawJsonDecoder
     rawContent <- Json.optionalKey "content" rawJsonDecoder
-    let isError = maybe False (projectRawOr False Json.bool) rawError
+    let isError = maybe False (projectRawOr True Json.bool) rawError
         blocks = maybe [] (projectRawOr [] (Json.list contentBlockDecoder)) rawContent
     pure (isError, structured, blocks)
 

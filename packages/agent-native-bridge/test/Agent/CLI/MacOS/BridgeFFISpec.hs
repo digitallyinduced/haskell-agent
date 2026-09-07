@@ -12,6 +12,7 @@ import Agent.CLI.MacOS.Bridge
     , cancelPendingInteractions
     , discardStagedTurn
     , discardStagedTurnById
+    , integrationABISynchronousValidationSmoke
     , resolvePendingInteraction
     , turnStartCleanupId
     )
@@ -73,6 +74,13 @@ spec = describe "native bridge FFI" do
     it "does not self-deadlock when a callback destroys its check" do
 #ifdef darwin_HOST_OS
         repositoryCheckDestroyReentrancySmoke `shouldReturn` True
+#else
+        pendingWith "the native bridge smoke test only links on macOS"
+#endif
+
+    it "rejects invalid integration ABI calls before launching workers" do
+#ifdef darwin_HOST_OS
+        integrationABISynchronousValidationSmoke `shouldReturn` True
 #else
         pendingWith "the native bridge smoke test only links on macOS"
 #endif

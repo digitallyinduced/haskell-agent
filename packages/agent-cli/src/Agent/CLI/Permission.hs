@@ -7,6 +7,7 @@ module Agent.CLI.Permission
     , applyPermissionKey
     , initialPermissionState
     , promptPermission
+    , promptPermissionOnce
     , promptRootAccess
     , renderPermissionFrame
     , ApprovalPolicyChoice(..)
@@ -224,6 +225,48 @@ promptPermission color workspace call = do
                     applyPermissionKey
                     (initialPermissionState summary)
             pure (Just (fromMaybe PermissionDeny result))
+
+-- | Approval UI for effects which can never be approved beyond the current
+-- invocation. It intentionally offers no project-wide or per-tool choice.
+promptPermissionOnce :: Bool -> Text -> ToolCall -> IO (Maybe PermissionChoice)
+promptPermissionOnce color workspace call = do
+    isTty <- hIsTerminalDevice stdin
+    let summary = approvalToolCallPromptRelative workspace call
+        labels = ["Allow once", "Deny"]
+        render state =
+            let rows = zipWith
+                    (\i label -> renderRow color (i == state) label)
+                    [0 ..] labels
+            in Text.intercalate "\n"
+                (roleWarn color (glyphWarn <> summary) : rows
+                    <> [roleMuted color
+                        "Approval applies once · ↑↓/jk · enter/click · y allow · n/esc deny"])
+        step key state = case key of
+            PickerKeyCancel -> Left PermissionDeny
+            PickerKeyConfirm ->
+                Left
+                    (if state == 0
+                        then PermissionAllowOnce
+                        else PermissionDeny)
+            PickerKeyUp -> Right ((state - 1) `mod` length labels)
+            PickerKeyDown -> Right ((state + 1) `mod` length labels)
+            PickerKeyChar c
+                | Text.toLower (Text.singleton c) == "y" ->
+                    Left PermissionAllowOnce
+                | Text.toLower (Text.singleton c) == "n" ->
+                    Left PermissionDeny
+            _ -> Right state
+    if not isTty
+        then readApprovalLine
+            (roleWarn color (glyphWarn <> summary <> " [y/N, once only] "))
+            >>= \case
+                Just raw
+                    | Text.toLower (Text.strip raw) `elem` ["y", "yes"] ->
+                        pure (Just PermissionAllowOnce)
+                _ -> pure (Just PermissionDeny)
+        else do
+            notifyAttention stderr PermissionRequested
+            fmap (Just . fromMaybe PermissionDeny) (runOverlay render step 0)
 
 -- | Ask whether an additional directory may be used for this session.
 -- This is intentionally separate from tool permission: granting a directory

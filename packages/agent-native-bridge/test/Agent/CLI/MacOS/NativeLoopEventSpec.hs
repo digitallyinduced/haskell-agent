@@ -4,6 +4,7 @@ import Agent.CLI.MacOS.NativeLoopEvent
     ( encodeNativeLoopEvent
     , encodeNativeUsageEvent
     )
+import Agent.CLI.MacOS.NativeInteraction (boundedApprovalArguments)
 import Agent.Loop
     ( LoopEvent(..)
     , TokenUsage(..)
@@ -101,6 +102,20 @@ spec = describe "native loop event binary encoding" do
         case encodeNativeLoopEvent "turn" (ToolFinished result) of
             Nothing -> expectationFailure "native tool event failed to encode"
             Just encoded -> BS.take 8 encoded `shouldBe` header 5 2
+
+    it "keeps complete bounded integration arguments for native approval" do
+        let arguments = Text.replicate 100000 "x"
+            integrationCall = ToolCall
+                { callId = "integration-1"
+                , name = "mcp_call"
+                , arguments
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+            ordinaryCall = integrationCall { name = "other_tool" }
+        boundedApprovalArguments integrationCall `shouldBe` (arguments, False)
+        boundedApprovalArguments ordinaryCall
+            `shouldBe` (Text.take 8192 arguments, True)
 
     it "redacts computer screenshots from tool-finish frames" do
         let secret = "data:image/png;base64,private-screenshot" :: Text.Text

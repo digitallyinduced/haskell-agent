@@ -115,6 +115,10 @@ permissionToolCallPromptRelative workspace call =
             "Archive learned skill " <> skillIdentity call.arguments <> "?"
         "skill_rollback" ->
             "Restore learned skill " <> skillIdentity call.arguments <> "?"
+        "mcp_call" ->
+            detailedPrompt
+                ("Allow " <> mcpCallDisplayName call.arguments <> "?")
+                (mcpCallApprovalArguments call.arguments)
         _ -> "Allow " <> summarizeToolCallRelative workspace call <> "?"
   where
     detailedPrompt question input
@@ -1054,6 +1058,16 @@ mcpCallDisplayName arguments =
             Nothing ->
                 nonEmptyPartialJsonText "name" arguments
                     <|> nonEmptyPartialJsonText "tool_name" arguments
+
+mcpCallApprovalArguments :: Text -> Text
+mcpCallApprovalArguments arguments =
+    case decodeJsonValue arguments of
+        Just (Aeson.Object object)
+            | Just toolArguments <- KeyMap.lookup "arguments" object ->
+                TextEncoding.decodeUtf8
+                    . LazyByteString.toStrict
+                    $ AesonPretty.encodePretty toolArguments
+        _ -> arguments
 
 qualifiedMcpDisplayName :: Text -> Text
 qualifiedMcpDisplayName name =

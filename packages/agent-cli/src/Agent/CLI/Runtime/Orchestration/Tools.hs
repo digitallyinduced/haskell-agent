@@ -42,6 +42,12 @@ import Agent.CLI.LearnedSkills.Store
     )
 import Agent.CLI.Lsp
     ( LspStartup(..), closeLspRuntime, lspRuntimeTool, newLspRuntime )
+import Agent.Integrations
+    ( IntegrationAuthority(..)
+    , IntegrationRuntime
+    , acquireIntegrationRuntime
+    , prepareIntegrationSupervisorForSession
+    )
 import Agent.CLI.ModelConfig (builtinConnectionId)
 import Agent.CLI.Models (ModelTarget(targetConnectionId, targetWireModelId))
 import Agent.CLI.Options
@@ -128,7 +134,7 @@ import Agent.Tools.Types
     )
 import Control.Concurrent.Async ( concurrently, concurrently_ )
 import Control.Exception.Safe
-    ( SomeException, bracketOnError, finally, throwIO, try )
+    ( SomeException, bracketOnError, finally, mask_, throwIO, try )
 import Control.Monad ( forM_, join, when, void )
 import Data.IORef
     (IORef, newIORef, readIORef, writeIORef)
@@ -200,6 +206,7 @@ runAgentTools request = withResourceScope \resourceScope -> do
     let scratchRuntime =
             acquiredScratchRuntime
                 { scratchCleanup = releaseResource scratchKey }
+    integrationRuntime <- acquireSessionIntegrationRuntime request
     ( (acquiredResources, (computerUseKey, runtimeComputerUse))
       , (initialContext, initialContextPreload)
       ) <-
@@ -212,7 +219,8 @@ runAgentTools request = withResourceScope \resourceScope -> do
                         toolStartup
                         toolModelRuntime
                         collaborationRuntime
-                        scratchRuntime)
+                        scratchRuntime
+                        integrationRuntime)
                     (.runtimeCloseMcp)
                     (acquireLocalToolRuntime
                         request
@@ -246,7 +254,9 @@ runAgentTools request = withResourceScope \resourceScope -> do
           ) = acquiredResources
         mcpRuntime =
             acquiredMcpRuntime
-                { runtimeCloseMcp = releaseResource mcpKey }
+                { runtimeCloseMcp =
+                    releaseResource mcpKey
+                }
         localToolRuntime =
             acquiredLocalToolRuntime
                 { localCoding =
@@ -307,6 +317,28 @@ runAgentTools request = withResourceScope \resourceScope -> do
         initialContextPreload
         sessionControlRuntime
         sessionToolsRuntime
+
+-- The connected gateway is authoritative: an unavailable organization
+-- integration does not fall back to local account data.
+acquireSessionIntegrationRuntime
+    :: AgentToolsRequest windowTitleResult
+    -> IO (Maybe IntegrationRuntime)
+acquireSessionIntegrationRuntime request =
+    prepareIntegrationSupervisorForSession
+        request.processRuntime.processIntegrationSupervisor
+        request.baseToolEnv
+        >> acquireIntegrationRuntime
+            request.processRuntime.processIntegrationSupervisor
+            authority >>= \case
+        Left err -> do
+            reportStartupWarning request.startup err
+            pure Nothing
+        Right runtime -> pure (Just runtime)
+  where
+    authority = maybe
+        LocalIntegrationAuthority
+        OrganizationIntegrationAuthority
+        request.connectedGateway
 
 acquireLocalToolRuntime
     :: AgentToolsRequest windowTitleResult
@@ -501,7 +533,7 @@ newSessionControlRuntime AgentToolsRequest
     controlSkillsRef <- newIORef initialSkills
     controlSkillInvocationsRef <- newIORef []
     controlCodeModeCloseRef <- newIORef (pure ())
-    let controlClaimCurrentSession handle = do
+    let controlClaimCurrentSession handle = mask_ do
             let desired = sessionLockPath handle.sessionDir
             readIORef activeSessionLock >>= \case
                 Just current

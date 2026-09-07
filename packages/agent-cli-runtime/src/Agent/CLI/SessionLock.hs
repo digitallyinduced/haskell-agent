@@ -19,7 +19,7 @@ import Agent.CLI.Error (formatException)
 import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.OsPath (unsafeToFilePath)
-import Control.Exception.Safe (SomeException, bracketOnError, try, tryAny)
+import Control.Exception.Safe (SomeException, bracketOnError, mask_, try, tryAny)
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Text (Text)
@@ -106,7 +106,9 @@ activityAdmissionPath sessionDir =
     sessionDir </> unsafeEncodeUtf ".agent-turn-admission.lock"
 
 acquireLockAt :: FilePath -> Text -> IO (Either Text SessionLock)
-acquireLockAt path sessionId = do
+acquireLockAt path sessionId = mask_ do
+    -- Do not expose a successfully acquired lock to async interruption before
+    -- it has been wrapped in the value whose owner will release it.
     try @_ @SomeException
         (FileLock.tryLockFile path FileLock.Exclusive) >>= \case
             Left err -> pure $ Left
@@ -126,7 +128,7 @@ releaseSessionLock lock = do
     pure ()
 
 sessionLockIsActive :: FilePath -> IO Bool
-sessionLockIsActive path =
+sessionLockIsActive path = mask_ $
     try @_ @SomeException
         (FileLock.tryLockFile path FileLock.Exclusive) >>= \case
             Left _ -> pure True

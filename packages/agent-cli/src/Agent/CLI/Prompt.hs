@@ -433,6 +433,7 @@ browserControlGuidance available
         , "browser_list_downloads"
         ]
 
+
 -- | Prefer GHCI as the general-purpose scripting environment.
 ghciGuidance :: Text
 ghciGuidance =

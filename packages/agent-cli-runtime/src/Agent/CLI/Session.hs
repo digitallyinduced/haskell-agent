@@ -305,10 +305,14 @@ requestToolAsyncCapabilities = concatMap \case
 
 
 newPendingPersistence :: SessionCreate -> IO Persistence
-newPendingPersistence spec = do
+newPendingPersistence spec = mask \restore -> do
     validateSessionCreateGatewayBoundary spec
-    (sessionId, tempDir) <- allocateSessionTemp spec.createRoot
-    newPendingPersistenceReserved spec sessionId tempDir
+    (sessionId, tempDir) <-
+        restore (allocateSessionTemp spec.createRoot)
+    restore (newPendingPersistenceReserved spec sessionId tempDir)
+        `onException` do
+            _ <- removeSessionTemp spec.createRoot sessionId
+            pure ()
 
 newPendingPersistenceReserved
     :: SessionCreate

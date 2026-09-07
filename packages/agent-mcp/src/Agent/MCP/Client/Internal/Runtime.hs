@@ -8,11 +8,12 @@ import Agent.Json
       rawJsonFromEncoding )
 import Agent.MCP.Types
     ( CapturedStderr(..),
-      McpClientLifecycle(ClientClosed, ClientInitializing),
+      McpClientLifecycle(ClientClosed, ClientInitializing, ClientReady),
       McpClient(clientHooks, clientEventHandler, clientClosed,
                 clientRequestRegistry, clientFailure, clientLifecycle,
-                clientWorkers, clientTransport, clientServerInfo, clientConfig),
-      McpClientTransport(McpClientHttp, McpClientStdio),
+                clientWorkers, clientTransport, clientServerInfo, clientConfig,
+                clientToolsRevision, clientReadyToolsRevision),
+      McpClientTransport(McpClientHttp, McpClientStdio, McpClientInMemory),
       McpHttpTransport(httpUrl, httpSession),
       McpStdioTransport(stdioStderrReader, stdioWriteLock, stdioInput,
                         stdioGroupId, stdioProcess, stdioReader),
@@ -133,7 +134,8 @@ import qualified Network.HTTP.Client as HC
       responseTimeoutNone,
       httpNoBody,
       BodyReader,
-      Request(responseTimeout, method, requestBody, requestHeaders) )
+      Request(responseTimeout, method, requestBody, requestHeaders,
+              redirectCount) )
 import qualified Data.IntMap.Strict as IntMap
     ( delete, elems, empty, lookup, insert )
 import qualified Agent.Json.Decode as Json
@@ -203,6 +205,16 @@ maxInputRounds = 8
 -- longer than the configured request timeout.
 hardTimeoutMultiplier :: Int
 hardTimeoutMultiplier = 10
+
+-- | Keep server-selected task polling responsive even when requests have no
+-- configured hard deadline. The hard-deadline remainder is an additional,
+-- tighter cap when a timeout is configured.
+maximumTaskPollIntervalMs :: Int
+maximumTaskPollIntervalMs = 30 * 1000
+
+minimumTaskPollIntervalMs :: Int
+minimumTaskPollIntervalMs = 100
+
 mcpHttpManager :: Manager
 mcpHttpManager = unsafePerformIO newTlsManager
 {-# NOINLINE mcpHttpManager #-}
@@ -320,6 +332,10 @@ data McpRequest = McpRequest
     , requestMeta :: !Bool
     -- ^ Whether to attach @_meta@ at all (@initialize@ carries none).
     , requestOnProgress :: !(Maybe (McpProgress -> IO ()))
+    , requestAllowReissue :: !Bool
+    -- ^ Whether the exact request may automatically be sent again (for
+    -- input-required continuation or OAuth refresh). Sensitive tools whose
+    -- approval is explicitly one-shot disable this.
     }
 
 clientRequest :: McpClient -> Text -> Series -> McpRequest
@@ -333,6 +349,7 @@ clientRequest client method parameters = McpRequest
     , requestEra = Nothing
     , requestMeta = True
     , requestOnProgress = Nothing
+    , requestAllowReissue = True
     }
 
 -- | Compatibility entry point: one request, rendered error.
@@ -347,6 +364,23 @@ requestMcp client timeoutMicros method parameters =
         <$> requestMcpFull client
             (clientRequest client method parameters)
                 { requestTimeoutMicros = timeoutMicros }
+
+-- | Issue exactly one request. Unlike 'requestMcp', this never transparently
+-- resends after an OAuth refresh. Use it when a higher layer has granted
+-- one-shot approval for a potentially mutating operation.
+requestMcpOnce
+    :: McpClient
+    -> Int
+    -> Text
+    -> Series
+    -> IO (Either Text RawJson)
+requestMcpOnce client timeoutMicros method parameters =
+    either (Left . renderMcpError) Right
+        <$> requestMcpFull client
+            (clientRequest client method parameters)
+                { requestTimeoutMicros = timeoutMicros
+                , requestAllowReissue = False
+                }
 
 requestMcpFull :: McpClient -> McpRequest -> IO (Either McpError RawJson)
 requestMcpFull client request = do
@@ -375,6 +409,10 @@ requestMcpFull client request = do
                 message = requestEnvelope (Just requestId) request.requestMethod
                     (request.requestParams <> meta)
             case client.clientTransport of
+                McpClientInMemory _ _ ->
+                    pure (Left (McpRpcError errorCodeMethodNotFound
+                        "Operation is unavailable on this typed tool server" Nothing))
+                        `finally` unregister requestId
                 McpClientHttp transport ->
                     httpExchange client transport era request
                         (Just (requestId, pending)) message
@@ -488,8 +526,38 @@ awaitResponse client requestId pending request
 
 pastHardDeadline :: Word64 -> Word64 -> Int -> Bool
 pastHardDeadline start now sliceMicros =
-    now - start
-        >= fromIntegral sliceMicros * fromIntegral hardTimeoutMultiplier * 1000
+    remainingHardDeadlineMicros start now sliceMicros <= 0
+
+-- | Remaining request hard deadline, rounded up to microseconds. Arithmetic
+-- is performed as unbounded Integer so a configured timeout near maxBound
+-- cannot wrap the deadline.
+remainingHardDeadlineMicros :: Word64 -> Word64 -> Int -> Int
+remainingHardDeadlineMicros start now sliceMicros =
+    fromInteger
+        (min
+            (toInteger (maxBound :: Int))
+            ((remainingNanoseconds + 999) `div` 1000))
+  where
+    elapsedNanoseconds = toInteger (now - start)
+    hardDeadlineNanoseconds =
+        toInteger (max 1 sliceMicros)
+            * toInteger hardTimeoutMultiplier
+            * 1000
+    remainingNanoseconds =
+        max 0 (hardDeadlineNanoseconds - elapsedNanoseconds)
+
+-- | Normalize an untrusted task interval before converting milliseconds to
+-- microseconds. Non-positive values use the minimum; huge values use the
+-- finite polling cap. Applying the optional remaining-deadline cap after the
+-- safe conversion prevents both Int overflow and sleeping past the deadline.
+boundedTaskPollDelayMicros :: Int -> Maybe Int -> Int
+boundedTaskPollDelayMicros intervalMs remainingMicros =
+    maybe normalizedMicros (min normalizedMicros . max 0) remainingMicros
+  where
+    normalizedMs =
+        max minimumTaskPollIntervalMs
+            (min maximumTaskPollIntervalMs intervalMs)
+    normalizedMicros = normalizedMs * 1000
 
 timeoutError :: Text -> Int -> McpError
 timeoutError method sliceMicros =
@@ -537,6 +605,9 @@ invokeWithInputRoundsT client request = go (0 :: Int) mempty
                 throwE (McpTransportError
                     ("unrecognized resultType \"" <> kind <> "\""))
             ResultInputRequired
+                | not request.requestAllowReissue ->
+                    throwE (McpTransportError
+                        "MCP tool requires fresh approval before continuing an input_required response")
                 | rounds >= maxInputRounds ->
                     throwE (McpTransportError
                         ("MCP server kept requesting input after "
@@ -652,9 +723,16 @@ awaitTaskT client request raw = do
                         <> maybe "" (": " <>) task.taskStatusMessage)
                 }
     poll' start count intervalMs = do
-        lift (threadDelay (max 100 intervalMs * 1000))
-        now <- lift getMonotonicTimeNSec
-        if request.requestTimeoutMicros > 0 && pastHardDeadline start now slice
+        beforeSleep <- lift getMonotonicTimeNSec
+        let remaining
+                | request.requestTimeoutMicros > 0 =
+                    Just
+                        (remainingHardDeadlineMicros
+                            start
+                            beforeSleep
+                            slice)
+                | otherwise = Nothing
+        if maybe False (<= 0) remaining
             then do
                 -- Cancellation is best-effort; preserve the timeout as the
                 -- primary error if the server rejects the cancel request.
@@ -662,33 +740,73 @@ awaitTaskT client request raw = do
                     (clientRequest client "tasks/cancel" ("taskId" .= taskIdOf))
                 throwE (timeoutError (request.requestMethod <> " task") slice)
             else do
-                task <- requestAndDecode client
-                    (clientRequest client "tasks/get" ("taskId" .= taskIdOf))
-                    "tasks/get result"
-                    taskDecoder
-                lift (report count task)
-                case task.taskStatus of
-                    "completed" -> case task.taskResult of
-                        Just result -> pure result
-                        Nothing -> legacyTaskResult
-                    "failed" ->
-                        throwE $ fromMaybe
-                            (McpTransportError "MCP task failed")
-                            (task.taskError >>= decodeRpcError)
-                    "cancelled" ->
-                        throwE (McpTransportError "MCP task was cancelled")
-                    "input_required" -> do
-                        responses <-
-                            ExceptT (fulfilInputRequests client task.taskInputRequests)
-                        -- tasks/update is best-effort: its successful response
-                        -- body is only an acknowledgement, and RPC errors are
-                        -- deliberately ignored. The next tasks/get is canonical.
+                lift
+                    (threadDelay
+                        (boundedTaskPollDelayMicros intervalMs remaining))
+                now <- lift getMonotonicTimeNSec
+                if request.requestTimeoutMicros > 0
+                        && pastHardDeadline start now slice
+                    then do
                         _ <- lift $ requestMcpFull client
-                            (clientRequest client "tasks/update"
-                                ("taskId" .= taskIdOf
-                                    <> inputResponsesSeries responses))
-                        poll' start (count + 1) task.taskPollIntervalMs
-                    _ -> poll' start (count + 1) task.taskPollIntervalMs
+                            (clientRequest
+                                client
+                                "tasks/cancel"
+                                ("taskId" .= taskIdOf))
+                        throwE
+                            (timeoutError
+                                (request.requestMethod <> " task")
+                                slice)
+                    else do
+                        task <- requestAndDecode client
+                            (clientRequest
+                                client
+                                "tasks/get"
+                                ("taskId" .= taskIdOf))
+                            "tasks/get result"
+                            taskDecoder
+                        lift (report count task)
+                        case task.taskStatus of
+                            "completed" -> case task.taskResult of
+                                Just result -> pure result
+                                Nothing -> legacyTaskResult
+                            "failed" ->
+                                throwE $ fromMaybe
+                                    (McpTransportError "MCP task failed")
+                                    (task.taskError >>= decodeRpcError)
+                            "cancelled" ->
+                                throwE
+                                    (McpTransportError
+                                        "MCP task was cancelled")
+                            "input_required"
+                                | not request.requestAllowReissue ->
+                                    throwE
+                                        (McpTransportError
+                                            "MCP tool requires fresh approval before continuing an input_required task")
+                                | otherwise -> do
+                                    responses <-
+                                        ExceptT
+                                            (fulfilInputRequests
+                                                client
+                                                task.taskInputRequests)
+                                    -- tasks/update is best-effort: its
+                                    -- response is only an acknowledgement,
+                                    -- and the next tasks/get is canonical.
+                                    -- Do not replay this mutation on OAuth
+                                    -- refresh even for an otherwise retryable
+                                    -- tool call.
+                                    _ <- lift $ requestMcpFull client
+                                        ( (clientRequest
+                                            client
+                                            "tasks/update"
+                                            ("taskId" .= taskIdOf
+                                                <> inputResponsesSeries
+                                                    responses))
+                                            { requestAllowReissue = False }
+                                        )
+                                    poll' start (count + 1)
+                                        task.taskPollIntervalMs
+                            _ -> poll' start (count + 1)
+                                task.taskPollIntervalMs
       where
         taskIdOf = initialTaskId
     initialTaskId =
@@ -750,6 +868,7 @@ decodeRpcError raw =
 -- | Open a @subscriptions/listen@ stream for the list-change notifications
 -- the server can emit. Legacy servers deliver list changes unsolicited.
 startSubscriptions :: McpClient -> IO ()
+startSubscriptions client | McpClientInMemory _ _ <- client.clientTransport = pure ()
 startSubscriptions client = do
     info <- readTVarIO client.clientServerInfo
     case info of
@@ -797,6 +916,7 @@ sendNotification
     -> IO (Either McpError ())
 sendNotification client method parameters =
     case client.clientTransport of
+        McpClientInMemory _ _ -> pure (Right ())
         McpClientHttp transport -> do
             era <- mcpClientEra client
             void <$> httpExchange client transport era
@@ -928,6 +1048,7 @@ handleServerRequest client requestId method params =
 sendResponse :: McpClient -> Aeson.Encoding -> IO (Either McpError ())
 sendResponse client message =
     case client.clientTransport of
+        McpClientInMemory _ _ -> pure (Left (McpTransportError "In-memory servers use typed responses"))
         McpClientHttp transport -> do
             era <- mcpClientEra client
             void <$> httpExchange client transport era
@@ -947,7 +1068,21 @@ handleNotification client method params =
                 forM_ pending \entry -> do
                     atomically $ modifyTVar' entry.pendingActivity (+ 1)
                     void (tryAny (entry.pendingOnProgress progress))
-        "notifications/tools/list_changed" -> emit McpToolsListChanged
+        "notifications/tools/list_changed" -> do
+            -- This invalidation is deliberately client-local and precedes
+            -- the replaceable fleet handler. It therefore also covers
+            -- notifications received during initialization, startup before
+            -- a fleet exists, and reconnect before the replacement client is
+            -- installed in the fleet.
+            atomically do
+                modifyTVar' client.clientToolsRevision (+ 1)
+                writeTVar client.clientReadyToolsRevision Nothing
+                readTVar client.clientLifecycle >>= \case
+                    ClientReady _ warnings ->
+                        writeTVar client.clientLifecycle
+                            (ClientReady [] warnings)
+                    _ -> pure ()
+            emit McpToolsListChanged
         "notifications/prompts/list_changed" -> emit McpPromptsListChanged
         "notifications/resources/list_changed" -> emit McpResourcesListChanged
         "notifications/resources/updated" ->
@@ -1078,6 +1213,10 @@ httpExchange client transport era request pending message = do
                     { HC.method = "POST"
                     , HC.requestBody = RequestBodyLBS body
                     , HC.requestHeaders = headersFor token
+                    -- Never forward an MCP bearer or session capability to a
+                    -- redirect target. Servers must expose their canonical
+                    -- Streamable HTTP endpoint directly.
+                    , HC.redirectCount = 0
                     , HC.responseTimeout =
                         if slice <= 0
                             then HC.responseTimeoutNone
@@ -1143,13 +1282,44 @@ httpExchange client transport era request pending message = do
         Left err -> pure (Left (McpTransportError err))
         Right configuredToken ->
             perform configuredToken >>= \case
-                Right (HttpUnauthorized 401 _)
-                    | Just path <- lookup "MCP_OAUTH_TOKEN_FILE" client.clientConfig.mcpServerEnv ->
-                        OAuth.refreshOAuthTokenFile mcpHttpManager path >>= \case
-                            Left err -> pure (Left (McpTransportError ("MCP OAuth refresh failed: " <> err)))
-                            Right (OAuth.OAuthTokenFile _ _ token _ _) ->
-                                perform (Just token) >>= settle
+                outcome@(Right (HttpUnauthorized 401 _)) ->
+                    retryUnauthorizedOnce
+                        request.requestAllowReissue
+                        (lookup "MCP_OAUTH_TOKEN_FILE"
+                            client.clientConfig.mcpServerEnv)
+                        (\path ->
+                            fmap
+                                (fmap accessToken)
+                                (OAuth.refreshOAuthTokenFile
+                                    mcpHttpManager path))
+                        (perform . Just)
+                        >>= \case
+                            Left err ->
+                                pure (Left (McpTransportError
+                                    ("MCP OAuth refresh failed: " <> err)))
+                            Right Nothing -> settle outcome
+                            Right (Just retried) -> settle retried
                 outcome -> settle outcome
+  where
+    accessToken (OAuth.OAuthTokenFile _ _ token _ _) = token
+
+-- | Run the OAuth refresh and exact-request replay at most once. Keeping the
+-- allow bit at this boundary makes it impossible for one-shot tools to invoke
+-- either effect after a 401.
+retryUnauthorizedOnce
+    :: Bool
+    -> Maybe path
+    -> (path -> IO (Either err token))
+    -> (token -> IO outcome)
+    -> IO (Either err (Maybe outcome))
+retryUnauthorizedOnce allowReissue path refresh replay
+    | not allowReissue = pure (Right Nothing)
+    | otherwise = case path of
+        Nothing -> pure (Right Nothing)
+        Just tokenPath ->
+            refresh tokenPath >>= \case
+                Left err -> pure (Left err)
+                Right token -> Right . Just <$> replay token
 
 -- | Read a whole response body with a size cap.  The over-limit case is
 -- reported before retaining any further bytes, so an unexpectedly large
@@ -1467,6 +1637,7 @@ closeMcpClient client =
                         readIORef transport.stdioStderrReader >>= mapM_ stopWorker
                     McpClientHttp transport ->
                         closeHttpSession client transport
+                    McpClientInMemory _ release -> readIORef release >>= id
                 failClient client.clientRequestRegistry client.clientFailure
                     "MCP server closed"
                 pure True
@@ -1510,6 +1681,7 @@ closeHttpSession client transport = do
                             <> maybe [] (\token ->
                                 [ ("Authorization", "Bearer " <> TextEncoding.encodeUtf8 token) ])
                                 bearer
+                        , HC.redirectCount = 0
                         }
                 void $ timeout (secondsToMicros client.clientConfig.mcpServerRequestTimeoutSeconds)
                     (HC.httpNoBody request' mcpHttpManager)

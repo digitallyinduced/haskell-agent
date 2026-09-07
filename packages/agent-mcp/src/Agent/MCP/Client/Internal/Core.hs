@@ -20,6 +20,7 @@ import Agent.MCP.Client.Internal.Runtime
       stderrLoop,
       capturedStderrText,
       closeMcpClient,
+      handleNotification,
       closeOptionalHandles,
       mergedEnvironment,
       secondsToMicros,
@@ -31,6 +32,7 @@ import Agent.MCP.Types
                          ClientInitializing, ClientFailed),
       McpClient(..),
       McpClientTransport(..),
+      McpToolServer(..),
       McpHttpTransport(McpHttpTransport),
       McpStdioTransport(stdioReader, McpStdioTransport, stdioInput,
                         stdioProcess, stdioGroupId, stdioWriteLock, stdioStderr,
@@ -140,6 +142,16 @@ import qualified Data.Text.Encoding as TextEncoding ()
 startMcpClient :: McpServerConfig -> IO McpClient
 startMcpClient = startMcpClientWith defaultMcpHostHooks Nothing
 
+-- | Connect directly to a typed server. There are no sockets or worker threads.
+startInMemoryMcpClient :: McpHostHooks -> McpServerConfig -> McpToolServer -> IO McpClient
+startInMemoryMcpClient hooks config server = mask \_ -> do
+    unsubscribe <- newIORef (pure ())
+    client <- newClientRecord hooks Nothing config (McpClientInMemory server unsubscribe)
+    release <- server.toolServerSubscribe
+        (handleNotification client "notifications/tools/list_changed" Nothing)
+    writeIORef unsubscribe release
+    pure client
+
 startMcpClientWith
     :: McpHostHooks
     -> Maybe McpProtocolEra
@@ -227,6 +239,8 @@ newClientRecord hooks eraHint config transport = do
     lifecycle <- newTVarIO ClientPending
     serverInfo <- newTVarIO Nothing
     discoveredSkills <- newTVarIO []
+    toolsRevision <- newTVarIO 0
+    readyToolsRevision <- newTVarIO Nothing
     workers <- newTVarIO []
     eventHandler <- newIORef (const (pure ()))
     pure McpClient
@@ -240,6 +254,8 @@ newClientRecord hooks eraHint config transport = do
         , clientLifecycle = lifecycle
         , clientServerInfo = serverInfo
         , clientDiscoveredSkills = discoveredSkills
+        , clientToolsRevision = toolsRevision
+        , clientReadyToolsRevision = readyToolsRevision
         , clientEventHandler = eventHandler
         , clientEraHint = eraHint
         }
@@ -310,39 +326,87 @@ ensureMcpClientReadyWith publishReady client = mask \restore -> do
                     closeMcpClient client
                 initialize = do
                     negotiateProtocol client
-                    (tools, warnings) <- discoverMcpTools client
                     skillWarnings <- discoverMcpSkills client
                     startSubscriptions client
-                    pure (tools, warnings <> skillWarnings)
+                    discoverStableTools skillWarnings 0
+                discoverStableTools skillWarnings attempt = do
+                    revision <- readTVarIO client.clientToolsRevision
+                    (tools, warnings) <- discoverMcpTools client
+                    published <- atomically do
+                        state <- readTVar client.clientLifecycle
+                        currentRevision <- readTVar client.clientToolsRevision
+                        case state of
+                            ClientInitializing current
+                                | current == completion
+                                , currentRevision == revision -> do
+                                    let ready =
+                                            (tools, warnings <> skillWarnings)
+                                    publishReady tools
+                                    writeTVar
+                                        client.clientReadyToolsRevision
+                                        (Just revision)
+                                    writeTVar client.clientLifecycle
+                                        (uncurry ClientReady ready)
+                                    void (tryPutTMVar completion (Right ready))
+                                    pure (Just (Right ready))
+                                | current == completion ->
+                                    pure Nothing
+                            ClientClosed -> do
+                                let closed = Left "MCP server closed"
+                                void (tryPutTMVar completion closed)
+                                pure (Just closed)
+                            ClientFailed err -> do
+                                let failed = Left err
+                                void (tryPutTMVar completion failed)
+                                pure (Just failed)
+                            _ -> do
+                                let changed =
+                                        Left "MCP client lifecycle changed during initialization"
+                                void (tryPutTMVar completion changed)
+                                pure (Just changed)
+                    case published of
+                        Just result -> pure result
+                        Nothing
+                            | attempt < maximumInitializationRelists ->
+                                discoverStableTools skillWarnings (attempt + 1)
+                            | otherwise -> do
+                                let message =
+                                        "MCP tools changed repeatedly during initialization"
+                                    changed = Left message
+                                atomically do
+                                    state <- readTVar client.clientLifecycle
+                                    case state of
+                                        ClientInitializing current
+                                            | current == completion ->
+                                                writeTVar
+                                                    client.clientLifecycle
+                                                    (ClientFailed message)
+                                        _ -> pure ()
+                                    void (tryPutTMVar completion changed)
+                                pure changed
             outcome <-
                 restore (tryAny initialize)
                     `onException` cancelled
-            let result = case outcome of
-                    Left exception ->
-                        Left
-                            (redactConfiguredValues client.clientConfig
-                                (exceptionSummary exception))
-                    Right ready -> Right ready
-            atomically do
-                state <- readTVar client.clientLifecycle
-                case state of
-                    ClientClosed ->
-                        void $
-                            tryPutTMVar completion
-                                (Left "MCP server closed")
-                    ClientInitializing current
-                        | current == completion -> do
-                            case result of
-                                Left err ->
+            case outcome of
+                Right result -> pure result
+                Left exception -> do
+                    let err =
+                            redactConfiguredValues client.clientConfig
+                                (exceptionSummary exception)
+                        result = Left err
+                    atomically do
+                        state <- readTVar client.clientLifecycle
+                        case state of
+                            ClientInitializing current
+                                | current == completion ->
                                     writeTVar client.clientLifecycle
                                         (ClientFailed err)
-                                Right (tools, warnings) -> do
-                                    publishReady tools
-                                    writeTVar client.clientLifecycle
-                                        (ClientReady tools warnings)
-                            void (tryPutTMVar completion result)
-                    _ -> void (tryPutTMVar completion result)
-            pure result
+                            _ -> pure ()
+                        void (tryPutTMVar completion result)
+                    pure result
+
+maximumInitializationRelists :: Int
+maximumInitializationRelists = 8
 
 mcpClientStatus :: McpClient -> IO McpServerStatus
 mcpClientStatus client = do
@@ -365,6 +429,9 @@ mcpClientStatus client = do
 -- | Decide which protocol era the server speaks and complete the handshake
 -- that era requires.
 negotiateProtocol :: McpClient -> IO ()
+negotiateProtocol client | McpClientInMemory server _ <- client.clientTransport = do
+    info <- server.toolServerInitialize
+    atomically $ writeTVar client.clientServerInfo (Just info)
 negotiateProtocol client =
     case (client.clientConfig.mcpServerProtocol, client.clientEraHint) of
         (McpProtocolLegacy, _) -> legacyInitialize client preferredLegacyVersion
@@ -546,6 +613,8 @@ startupFailure client err = do
         McpClientStdio transport ->
             capturedStderrText <$> readIORef transport.stdioStderr
         McpClientHttp _ ->
+            pure ""
+        McpClientInMemory _ _ ->
             pure ""
     ioError . userError . Text.unpack $
         redactConfiguredValues client.clientConfig

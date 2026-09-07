@@ -30,17 +30,15 @@ import Agent.CLI.Models
     , modelCatalog
     )
 import Agent.CLI.NativeRuntime
-    ( NativeDiscoveryContext(..)
+    ( NativeProcessRuntime
+    , NativeDiscoveryContext(..)
     , NativeWorkspaceDiscovery(..)
     , NativeRunCapabilities(..)
     , NativeRunHooks(..)
     , fullNativeRunCapabilities
-    , runNativeTurn
-    )
-import Agent.CLI.NativeProcess
-    ( NativeProcessRuntime
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
+    , runNativeTurn
     )
 import Agent.Runtime.Request
     ( NativeInteractionMode(..)

@@ -38,11 +38,12 @@ import Agent.CLI.Worktree.Provenance (loadWorktreeActivity)
 import Agent.OpenAI.ImageGeneration
     ( ImageGenerationHistory, newImageGenerationHistory, recordImageGenerationResponseItems )
 import Agent.OsPath (unsafeToFilePath)
+import Agent.ResourceScope (allocateResource, closeResourceScope, newResourceScope)
 import Agent.Store.Postgres (trustedPool)
 import Agent.Tools.TaskPlan (TaskPlanEnv, newTaskPlanEnv)
 import Agent.Tools.Types (AppTool, setToolSessionTmp)
 import Control.Concurrent.Async (concurrently)
-import Control.Exception.Safe (SomeException, finally, onException, try)
+import Control.Exception.Safe (SomeException, bracketOnError, try)
 import Control.Monad (forM_)
 import Data.IORef (writeIORef)
 import Data.Maybe (isNothing)
@@ -84,23 +85,25 @@ prepareScratchRuntime AgentToolsRequest
     , toolEffortText = effortText
     } CollaborationRuntime
     { collaborationPersistSlotRef = persistSlotRef
-    } = do
+    } = bracketOnError newResourceScope closeResourceScope \scratchScope -> do
     scratchPromptRequest <- loadPrompt options
     let promptText =
             fmap (\request -> request.managedTurnText) scratchPromptRequest
-    scratchPersistence <-
-        preparePersistence
-            (trustedPool startup.startupDatabaseStore)
-            startup
-            options
-            root
-            inferredTarget { targetDialect = dialectId }
-            gatewayIdentity
-            (isNothing transition)
-            cwd
-            effortText
-            promptText
-            resumed
+    (_, scratchPersistence) <-
+        allocateResource scratchScope
+            (preparePersistence
+                (trustedPool startup.startupDatabaseStore)
+                startup
+                options
+                root
+                inferredTarget { targetDialect = dialectId }
+                gatewayIdentity
+                (isNothing transition)
+                cwd
+                effortText
+                promptText
+                resumed)
+            cleanupPendingPersistence
     writeIORef persistSlotRef scratchPersistence
     initialTaskPlan <-
         loadCurrentTaskPlan scratchPersistence >>= \case
@@ -126,12 +129,17 @@ prepareScratchRuntime AgentToolsRequest
                         sessionId)
                     (emptyFullscreenHistoryPage
                         (HistoryGeneration 0))
-    (scratchSessionTmp, ephemeralSessionId) <-
+    scratchSessionTmp <-
         persistenceTempDir scratchPersistence >>= \case
-            Just tempDir -> pure (tempDir, Nothing)
+            Just tempDir -> pure tempDir
             Nothing -> do
-                (sessionId, tempDir) <- allocateSessionTemp root
-                pure (tempDir, Just sessionId)
+                (_, (_, tempDir)) <-
+                    allocateResource scratchScope
+                        (allocateSessionTemp root)
+                        (\(sessionId, _) -> do
+                            _ <- removeSessionTemp root sessionId
+                            pure ())
+                pure tempDir
     setToolSessionTmp baseToolEnv (Just scratchSessionTmp)
     scratchImageGenerationHistory <- newImageGenerationHistory
     forM_ resumed \(_, turns) ->
@@ -150,32 +158,17 @@ prepareScratchRuntime AgentToolsRequest
                         (unsafeToFilePath home)
                 pure [externalSessionTool env]
             else pure []
-    let cleanupAllocatedScratch = do
-            cleanupPendingPersistence scratchPersistence
-            forM_ ephemeralSessionId \sessionId -> do
-                _ <- removeSessionTemp root sessionId
-                pure ()
-    worktreeLease <-
-        acquireWorktreeLease (worktreeRoot home) cwd >>= \case
-            Left err -> do
-                cleanupAllocatedScratch
-                startupDie startup err
-            Right lease -> pure lease
-    sessionTempLease <-
-        (acquireSessionTempLease root scratchSessionTmp
-            `onException`
-                (mapM_ releaseWorktreeLease worktreeLease
-                    >> cleanupAllocatedScratch)) >>= \case
-                Left err -> do
-                    mapM_ releaseWorktreeLease worktreeLease
-                    cleanupAllocatedScratch
-                    startupDie startup err
-                Right lease -> pure lease
-    let scratchCleanup =
-            mapM_ releaseSessionTempLease sessionTempLease
-                `finally`
-                    (mapM_ releaseWorktreeLease worktreeLease
-                        `finally` cleanupAllocatedScratch)
+    _ <- allocateResource scratchScope
+        (acquireWorktreeLease (worktreeRoot home) cwd >>= \case
+            Left err -> startupDie startup err
+            Right lease -> pure lease)
+        (mapM_ releaseWorktreeLease)
+    _ <- allocateResource scratchScope
+        (acquireSessionTempLease root scratchSessionTmp >>= \case
+            Left err -> startupDie startup err
+            Right lease -> pure lease)
+        (mapM_ releaseSessionTempLease)
+    let scratchCleanup = closeResourceScope scratchScope
     pure ScratchRuntime{..}
 
 startStaleResourceCleanup

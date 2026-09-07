@@ -910,6 +910,19 @@ typedef void (*ha_account_oauth_start_callback)(
 );
 
 /*
+ * Generic integration administration returns one complete JSON result.
+ * Status is 0 for success and -1 for failure. Buffers are valid only during
+ * the callback and never contain stored credentials. Operation definitions
+ * identify sensitive input fields so native hosts can keep them out of logs.
+ */
+typedef void (*ha_integration_result_callback)(
+    void *context,
+    int32_t status,
+    const uint8_t *json, size_t json_length,
+    const uint8_t *error, size_t error_length
+);
+
+/*
  * Gateway operations are process-global and do not require an engine.
  * Accepted operations run asynchronously on a Haskell worker thread; that
  * thread is not the caller or the AppKit main thread. Every string is UTF-8
@@ -1771,6 +1784,25 @@ int32_t ha_account_delete(
     const uint8_t *managed_id,
     size_t managed_id_length,
     ha_account_result_callback callback,
+    void *context
+);
+
+/*
+ * Integration administration is scoped to an engine and shares its in-memory
+ * integration runtime with agent turns. A return of 0 means the command was
+ * accepted and exactly one callback will follow. Other return values reject
+ * synchronously and do not invoke the callback.
+ */
+int32_t ha_engine_integration_admin_list(
+    void *engine,
+    ha_integration_result_callback callback,
+    void *context
+);
+int32_t ha_engine_integration_admin_call(
+    void *engine,
+    const uint8_t *name, size_t name_length,
+    const uint8_t *arguments_json, size_t arguments_json_length,
+    ha_integration_result_callback callback,
     void *context
 );
 

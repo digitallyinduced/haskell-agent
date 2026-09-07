@@ -302,6 +302,7 @@ library
                     , agent-cli-runtime:Agent.CLI.SessionLock as Agent.CLI.SessionLock
     build-depends:    agent-cli-runtime >= 0.1 && < 0.2
                     , agent-external-session >= 0.1 && < 0.2
+                    , agent-integrations >= 0.1 && < 0.2
                     , agent-connectivity >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
                     , agent-mcp >= 0.1 && < 0.2
@@ -328,6 +329,7 @@ library
                     , bytestring
                     , colour >= 2.3
                     , containers
+                    , crypton-connection
                     , crypton
                     , directory
                     , dbus >= 1.4 && < 1.5
@@ -353,6 +355,7 @@ library
                     , tagsoup
                     , text >= 2.0 && < 2.2
                     , time
+                    , tls
                     , transformers
                     , unix
                     , vector
@@ -620,6 +623,7 @@ test-suite agent-cli-test
                     , ansi-terminal
                     , async
                     , base >= 4.17 && < 5
+                    , base64-bytestring
                     , brick >= 2.9 && < 3
                     , bytestring
                     , colour
@@ -634,6 +638,8 @@ test-suite agent-cli-test
                     , http-client
                     , http-types
                     , JuicyPixels
+                    , network
+                    , network-uri
                     , process
                     , QuickCheck >= 2.14 && < 2.16
                     , safe-exceptions

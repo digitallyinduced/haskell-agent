@@ -53,6 +53,12 @@ module Agent.MCP
     , startMcpFleet
     , startMcpFleetWithProgress
     , startMcpFleetWithProgressHooks
+    , startMcpFleetWithInMemory
+    , McpToolServer(..)
+    , McpTool(..)
+    , emptyServerCapabilities
+    , McpCallToolRequest(..)
+    , McpCallToolResult(..)
     , startMcpFleetProgressive
     , startMcpFleetProgressiveHooks
     , closeMcpFleet
@@ -81,6 +87,8 @@ module Agent.MCP
     , createInProcessMcpServer
     , inProcessMcpToolNames
     , handleInProcessMcpMessage
+    , inProcessMcpToolServer
+    , handleToolServerMessage
     ) where
 
 import Agent.MCP.Client
@@ -93,13 +101,16 @@ import Agent.MCP.Client
     )
 import Agent.MCP.InProcess
     ( InProcessMcpApproval
+    , inProcessMcpToolServer
+    , handleToolServerMessage
     , InProcessMcpServer
     , createInProcessMcpServer
     , handleInProcessMcpMessage
     , inProcessMcpToolNames
     )
 import Agent.MCP.Fleet
-    ( closeMcpFleet
+    ( startMcpFleetWithInMemory
+    , closeMcpFleet
     , mcpFleetComplete
     , mcpFleetGetPrompt
     , mcpFleetGetSkill
@@ -132,7 +143,12 @@ import Agent.MCP.Supervisor
     , restartMcpSupervisor
     )
 import Agent.MCP.Types
-    ( McpCompletion(..)
+    ( McpToolServer(..)
+    , McpTool(..)
+    , emptyServerCapabilities
+    , McpCallToolRequest(..)
+    , McpCallToolResult(..)
+    , McpCompletion(..)
     , McpElicitMode(..)
     , McpElicitRequest(..)
     , McpElicitResult(..)

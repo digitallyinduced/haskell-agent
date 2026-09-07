@@ -1,15 +1,27 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 
 -- | Synchronous validation and copying before commands enter the engine mailbox.
-module Agent.CLI.MacOS.EngineSubmission () where
+module Agent.CLI.MacOS.EngineSubmission
+    ( integrationABISynchronousValidationSmoke
+    ) where
 
 import Agent.CLI.MacOS.EngineCallbacks
-    (SearchCallback, SessionResultCallback, TaskSnapshotCallback)
+    ( IntegrationResultCallback
+    , SearchCallback
+    , SessionResultCallback
+    , TaskSnapshotCallback
+    )
 import Agent.CLI.MacOS.EngineMailbox (acceptEngineCommand)
 import Agent.CLI.MacOS.EngineState (Engine(..), EngineCommand(..), SessionMutation(..))
-import Agent.CLI.MacOS.Marshalling (anyNonEmptyNull, decodeInput)
+import Agent.CLI.MacOS.Marshalling
+    ( anyNonEmptyNull
+    , decodeInput
+    , decodeUtf8Input
+    )
 import Agent.CLI.MacOS.McpAdminBridge (McpResultCallback, maxMcpTextBytes, decodeMcpInput)
 import Agent.CLI.MacOS.NativeRequest (BridgeRequest)
+import Agent.Json (rawJsonDecoder)
+import qualified Agent.Json.Decode as Json
 import Control.Concurrent.STM (atomically, writeTVar)
 import Control.Exception.Safe (tryAny)
 import qualified Data.Aeson as Aeson
@@ -53,6 +65,13 @@ foreign export ccall ha_engine_mcp_server_restart
     :: Ptr () -> Word64 -> Ptr Word8 -> CSize
     -> FunPtr McpResultCallback -> Ptr () -> IO CInt
 
+foreign export ccall ha_engine_integration_admin_list
+    :: Ptr () -> FunPtr IntegrationResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_engine_integration_admin_call
+    :: Ptr () -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr IntegrationResultCallback -> Ptr () -> IO CInt
+
 ha_engine_send_json :: Ptr () -> Ptr Word8 -> CSize -> IO CInt
 ha_engine_send_json pointer bytes (CSize length)
     | pointer == nullPtr = pure 1
@@ -79,6 +98,93 @@ ha_engine_send_json pointer bytes (CSize length)
             Right Nothing -> 4
             Right (Just False) -> 3
             Right (Just True) -> 0
+
+ha_engine_integration_admin_list
+    :: Ptr ()
+    -> FunPtr IntegrationResultCallback
+    -> Ptr ()
+    -> IO CInt
+ha_engine_integration_admin_list pointer callback context
+    | pointer == nullPtr = pure 1
+    | callback == nullFunPtr = pure 2
+    | otherwise =
+        enqueueIntegrationCommand
+            pointer
+            (EngineIntegrationAdminList callback context)
+
+ha_engine_integration_admin_call
+    :: Ptr ()
+    -> Ptr Word8
+    -> CSize
+    -> Ptr Word8
+    -> CSize
+    -> FunPtr IntegrationResultCallback
+    -> Ptr ()
+    -> IO CInt
+ha_engine_integration_admin_call
+    pointer
+    nameBytes
+    (CSize nameLength)
+    argumentsBytes
+    (CSize argumentsLength)
+    callback
+    context
+    | pointer == nullPtr = pure 1
+    | callback == nullFunPtr = pure 2
+    | nameBytes == nullPtr
+        || nameLength == 0
+        || nameLength > maximumIntegrationAdminNameBytes = pure 2
+    | argumentsBytes == nullPtr
+        || argumentsLength == 0
+        || argumentsLength > maximumIntegrationAdminArgumentsBytes = pure 2
+    | otherwise = do
+        decodedName <- decodeUtf8Input nameBytes nameLength
+        arguments <- BS.packCStringLen
+            (castPtr argumentsBytes, fromIntegral argumentsLength)
+        case
+            ( decodedName
+            , Json.decodeEither rawJsonDecoder arguments
+            ) of
+            (Right name, Right rawArguments)
+                | not (Text.null (Text.strip name)) ->
+                    enqueueIntegrationCommand
+                        pointer
+                        (EngineIntegrationAdminCall
+                            (Text.strip name)
+                            rawArguments
+                            callback
+                            context)
+            _ -> pure 2
+
+enqueueIntegrationCommand
+    :: Ptr ()
+    -> EngineCommand
+    -> IO CInt
+enqueueIntegrationCommand pointer command = do
+    accepted <- tryAny do
+        let stable = castPtrToStablePtr pointer :: StablePtr Engine
+        engine <- deRefStablePtr stable
+        atomically $
+            acceptEngineCommand engine.engineCommands command
+    pure case accepted of
+        Left _ -> 3
+        Right False -> 3
+        Right True -> 0
+
+-- | Null handles and callbacks must fail synchronously without touching
+-- integration state or launching work.
+integrationABISynchronousValidationSmoke :: IO Bool
+integrationABISynchronousValidationSmoke = do
+    listStatus <-
+        ha_engine_integration_admin_list nullPtr nullFunPtr nullPtr
+    callStatus <-
+        ha_engine_integration_admin_call
+            nullPtr nullPtr 0 nullPtr 0 nullFunPtr nullPtr
+    pure (listStatus == 1 && callStatus == 1)
+
+maximumIntegrationAdminNameBytes, maximumIntegrationAdminArgumentsBytes :: Word64
+maximumIntegrationAdminNameBytes = 256
+maximumIntegrationAdminArgumentsBytes = 1024 * 1024
 
 ha_engine_search_conversations
     :: Ptr () -> Ptr Word8 -> CSize -> CSize

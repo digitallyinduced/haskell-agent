@@ -1,13 +1,23 @@
 -- | Mailbox-driven task admission, worker supervision, and cancellation/join.
 -- Gateway leases and terminal callback checks remain within their owning scopes.
 module Agent.CLI.MacOS.NativeSupervisor
-    ( supervisorLoop, shutdownRunningTurns ) where
+    ( IntegrationWorkerRegistry
+    , launchIntegrationWorkerWith
+    , newIntegrationWorkerRegistry
+    , shutdownIntegrationWorkers
+    , supervisorLoop
+    , shutdownRunningTurns
+    ) where
 
 import Agent.CLI.MacOS.AgentSnapshot (activeAgentSnapshot)
 import Agent.CLI.MacOS.BrowserBridge (BrowserHost, browserToolsWhenEnabled)
 import Agent.CLI.MacOS.ComputerBridge
     ( ComputerHost, computerToolSessionWhenEnabled )
-import Agent.CLI.MacOS.EngineCallbacks (invokeTaskSnapshotCallback)
+import Agent.CLI.MacOS.EngineCallbacks
+    ( IntegrationResultCallback
+    , invokeIntegrationResultCallback
+    , invokeTaskSnapshotCallback
+    )
 import Agent.CLI.MacOS.EngineEvents
 import Agent.CLI.MacOS.EngineMailbox
     ( EngineMailbox, acceptEngineCommand, readEngineCommand )
@@ -31,11 +41,24 @@ import Agent.CLI.GatewayClient
     ( withGatewayCredentialLease, withGatewayCredentialTurnLease )
 import Agent.CLI.McpAdmin
     ( McpAdminError, McpAdminSnapshot(..), restartMcpAdminServer )
-import Agent.CLI.NativeRuntime (NativeProcessRuntime, restartNativeMcpRuntime)
+import Agent.CLI.NativeRuntime
+    ( NativeProcessRuntime
+    , nativeProcessIntegrationSupervisor
+    , restartNativeMcpRuntime
+    )
+import Agent.Integrations
+    ( IntegrationAuthority(..)
+    , IntegrationError(..)
+    , IntegrationRuntime
+    , acquireIntegrationRuntime
+    , callIntegrationRuntimeAdmin
+    , integrationRuntimeAdminDefinitions
+    )
+import Agent.Json (RawJson, rawJsonBytes)
 import Agent.Loop (ImageAttachment, emptyTokenUsage)
 import Agent.Runtime.Daemon.TaskScheduler (TaskIdentity(..), selectRunnableTasks)
 import Agent.Store.Postgres (ManagedPostgresConfig, Store)
-import Control.Concurrent.Async (asyncWithUnmask, cancel, waitCatch)
+import Control.Concurrent.Async (Async, asyncWithUnmask, cancel, waitCatch)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, putMVar)
 import Control.Concurrent.STM
 import Control.Exception.Safe (bracket, finally, mask, tryAny)
@@ -54,11 +77,35 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import Data.Word (Word8)
+import Data.Word (Word8, Word64)
 import Foreign.C.Types (CSize)
 import Foreign.Ptr (FunPtr, Ptr, castPtr, nullPtr)
 import System.Directory.OsPath (getHomeDirectory)
 import System.OsPath (OsPath)
+
+-- | Integration administration can perform filesystem and network I/O. Keep
+-- its workers separate from turns so the mailbox remains available for
+-- cancellation, approvals, and shutdown, while still joining every callback
+-- owner before its engine is destroyed.
+data IntegrationWorkerRegistry = IntegrationWorkerRegistry
+    { integrationWorkerNextId :: !(TVar Word64)
+    , integrationWorkers :: !(TVar (Map Word64 (Async ())))
+    }
+
+newIntegrationWorkerRegistry :: IO IntegrationWorkerRegistry
+newIntegrationWorkerRegistry =
+    IntegrationWorkerRegistry
+        <$> newTVarIO 0
+        <*> newTVarIO Map.empty
+
+shutdownIntegrationWorkers :: IntegrationWorkerRegistry -> IO ()
+shutdownIntegrationWorkers registry = do
+    workers <- atomically do
+        current <- readTVar registry.integrationWorkers
+        writeTVar registry.integrationWorkers Map.empty
+        pure (Map.elems current)
+    mapM_ cancel workers
+    mapM_ waitCatch workers
 
 supervisorLoop
     :: FunPtr EventCallback
@@ -68,6 +115,7 @@ supervisorLoop
     -> OsPath
     -> NativeProcessRuntime
     -> EngineMailbox EngineCommand
+    -> IntegrationWorkerRegistry
     -> TVar (Map Text [ImageAttachment])
     -> BrowserHost
     -> ComputerHost
@@ -77,8 +125,8 @@ supervisorLoop
     -> TaskSupervisor
     -> IO ()
 supervisorLoop
-        callback context config store root processRuntime commands stagedImages
-        browser computer
+        callback context config store root processRuntime commands
+        integrationWorkers stagedImages browser computer
         stagedTurnOptions interactions workerRegistry =
     go
   where
@@ -140,6 +188,21 @@ supervisorLoop
                     withText "cannot restart MCP while tasks are active" $
                         invokeMcpResultCallback resultCallback resultContext
                             (-1) expected
+            go supervisor
+        EngineIntegrationAdminList resultCallback resultContext -> do
+            launchIntegrationWorker
+                integrationWorkers resultCallback resultContext $
+                runIntegrationAdmin processRuntime \runtime ->
+                    pure (Right (integrationRuntimeAdminDefinitions runtime))
+            go supervisor
+        EngineIntegrationAdminCall
+                name arguments resultCallback resultContext -> do
+            launchIntegrationWorker
+                integrationWorkers resultCallback resultContext $
+                runIntegrationAdmin processRuntime \runtime ->
+                    callIntegrationRuntimeAdmin runtime name arguments >>= \case
+                        Left err -> pure (Left (renderIntegrationError err))
+                        Right result -> pure (Right result)
             go supervisor
         EngineCancelTask taskId -> do
             next <- cancelTaskById supervisor taskId
@@ -534,6 +597,7 @@ supervisorLoop
 
     shutdownSupervisor _ =
         shutdownRunningTurns workerRegistry
+            `finally` shutdownIntegrationWorkers integrationWorkers
 
     sendTaskState :: Text -> Maybe Text -> Text -> IO ()
     sendTaskState taskId sessionId state =
@@ -605,6 +669,115 @@ shutdownRunningTurns workerRegistry = do
     forM_ running (cancelTurn . (.runningTurnControl))
     mapM_ (cancel . (.runningTurnWorker)) running
     mapM_ (waitCatch . (.runningTurnWorker)) running
+
+-- | Keep the gateway credential lease while selecting and using the runtime.
+-- A connected gateway is authoritative, matching turn startup; a direct
+-- engine uses local integrations.
+runIntegrationAdmin
+    :: NativeProcessRuntime
+    -> (IntegrationRuntime -> IO (Either Text RawJson))
+    -> IO (Either Text RawJson)
+runIntegrationAdmin processRuntime action =
+    withNativeGatewayCredentialBoundary \credential _ -> do
+        let authority = maybe
+                LocalIntegrationAuthority
+                OrganizationIntegrationAuthority
+                credential
+        acquireIntegrationRuntime
+            (nativeProcessIntegrationSupervisor processRuntime)
+            authority >>= \case
+                Left err -> pure (Left err)
+                Right runtime -> action runtime
+
+-- | A command is accepted only after the worker is registered. The gate keeps
+-- cancellation from racing registration. Normal completion and the shutdown
+-- finalizer share one claim, so every accepted command attempts one callback.
+launchIntegrationWorker
+    :: IntegrationWorkerRegistry
+    -> FunPtr IntegrationResultCallback
+    -> Ptr ()
+    -> IO (Either Text RawJson)
+    -> IO ()
+launchIntegrationWorker registry callback context action =
+    launchIntegrationWorkerWith
+        registry
+        (either
+            (sendIntegrationFailure callback context)
+            (sendIntegrationResult callback context))
+        action
+
+launchIntegrationWorkerWith
+    :: IntegrationWorkerRegistry
+    -> (Either Text RawJson -> IO ())
+    -> IO (Either Text RawJson)
+    -> IO ()
+launchIntegrationWorkerWith registry complete action =
+    mask \_ -> do
+        completionClaimed <- newTVarIO False
+        let finish outcome = do
+                claimed <- atomically do
+                    completed <- readTVar completionClaimed
+                    if completed
+                        then pure False
+                        else writeTVar completionClaimed True >> pure True
+                when claimed $ void (tryAny (complete outcome))
+        workerId <- atomically do
+            next <- readTVar registry.integrationWorkerNextId
+            writeTVar registry.integrationWorkerNextId (next + 1)
+            pure next
+        gate <- newEmptyMVar
+        worker <- asyncWithUnmask \unmask ->
+            (do
+                result <- tryAny do
+                    takeMVar gate
+                    unmask action
+                finish $
+                    case result of
+                        Left _ ->
+                            Left "integration admin operation failed"
+                        Right outcome -> outcome)
+                `finally` do
+                    finish
+                        (Left
+                            "engine stopped before integration operation completed")
+                    atomically
+                        (modifyTVar'
+                            registry.integrationWorkers
+                            (Map.delete workerId))
+        atomically $
+            modifyTVar' registry.integrationWorkers
+                (Map.insert workerId worker)
+        putMVar gate ()
+
+sendIntegrationResult
+    :: FunPtr IntegrationResultCallback
+    -> Ptr ()
+    -> RawJson
+    -> IO ()
+sendIntegrationResult callback context result =
+    BS.useAsCStringLen (rawJsonBytes result) \(pointer, length) ->
+        invokeIntegrationResultCallback
+            callback context 0
+            pointer (fromIntegral length)
+            nullPtr 0
+
+sendIntegrationFailure
+    :: FunPtr IntegrationResultCallback
+    -> Ptr ()
+    -> Text
+    -> IO ()
+sendIntegrationFailure callback context message =
+    withText message \pointer length ->
+        invokeIntegrationResultCallback
+            callback context (-1)
+            nullPtr 0
+            pointer length
+
+renderIntegrationError :: IntegrationError -> Text
+renderIntegrationError = \case
+    IntegrationInvalidInput message -> message
+    IntegrationUnavailable message -> message
+    IntegrationOperationFailed message -> message
 
 withTextBytes :: Text -> (Ptr Word8 -> CSize -> IO a) -> IO a
 withTextBytes value action =

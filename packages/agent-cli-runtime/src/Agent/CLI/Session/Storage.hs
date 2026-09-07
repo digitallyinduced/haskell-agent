@@ -52,7 +52,7 @@ import Agent.CLI.SessionLock
 import Agent.Store.Postgres.Connection (StorePool)
 import qualified Agent.Store.Postgres.Session as Store
 import Agent.Store.Types (StoreError, renderStoreError)
-import Control.Exception.Safe (displayException, finally, tryIO)
+import Control.Exception.Safe (displayException, finally, mask, tryIO)
 import Control.Monad (unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
@@ -380,17 +380,17 @@ loadSessionHandle pool root sessionId =
                     )
 
 deleteSession :: StorePool -> OsPath -> Text -> IO (Either Text ())
-deleteSession pool root sessionId = runExceptT do
+deleteSession pool root sessionId = mask \restore -> runExceptT do
     dir <- except (sessionDirForId root sessionId)
-    exists <- lift (doesDirectoryExist dir)
+    exists <- lift (restore (doesDirectoryExist dir))
+    now <- lift (restore getCurrentTime)
     lock <- if exists
         then lift (acquireSessionLock dir sessionId) >>= \case
             Left _ -> throwE "cannot delete a running session"
             Right lock -> pure (Just lock)
         else pure Nothing
-    now <- lift getCurrentTime
     deleted <- lift $
-        Store.deleteSession pool sessionId now
+        restore (Store.deleteSession pool sessionId now)
             `finally` maybe (pure ()) releaseSessionLock lock
     case deleted of
         Left err -> throwE (renderStoreError err)
@@ -398,13 +398,13 @@ deleteSession pool root sessionId = runExceptT do
         Right True
             | not exists -> pure ()
             | otherwise ->
-                lift (tryIO (removePathForcibly dir)) >>= \case
+                lift (restore (tryIO (removePathForcibly dir))) >>= \case
                     Left err ->
                         throwE
                             ("session deleted but artifacts could not be removed: "
                                 <> Text.pack (displayException err))
                     Right () -> pure ()
-    tempRemoved <- lift (removeSessionTemp root sessionId)
+    tempRemoved <- lift (restore (removeSessionTemp root sessionId))
     except tempRemoved
 
 renameSession
