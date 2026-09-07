@@ -606,6 +606,30 @@ spec = describe "Agent.Tools.MultiAgents" do
         atomically (writeTVar parentGate True)
         closeSubagentRegistry registry
 
+    it "returns labeled text for live agents instead of JSON" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure (resultWithText "review done"))
+            (\_ _ -> pure ())
+        Right (agentId, _) <-
+            spawnSubagentAt registry Nothing taskPathRoot 0 "reviewer"
+                (plainInterAgentContent "review") Nothing
+        _ <- waitSubagents registry [agentId] 15000
+        let handlers =
+                appToolHandlers (multiAgentTools (rootContext registry Nothing))
+        listed <- dispatchToolCall defaultLoopDispatch handlers
+            (ToolCall "list-live" "collaboration.list_agents" "{}"
+                FunctionCallKind False)
+        listed.output `shouldBe`
+            "Agent: /root/reviewer\n  ID: "
+                <> agentId.unSubagentId
+                <> "\n  Status: completed\n  Final: review done"
+        emptyListed <- dispatchToolCall defaultLoopDispatch handlers
+            (ToolCall "list-prefix" "collaboration.list_agents"
+                "{\"path_prefix\":\"/root/missing\"}"
+                FunctionCallKind False)
+        emptyListed.output `shouldBe` "(no live agents)"
+        closeSubagentRegistry registry
+
     it "accepts non-object input for optional-only collaboration tools" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure (resultWithText "child"))

@@ -609,6 +609,10 @@ spec = describe "tool presentation" do
         formatToolOutput call
             "{\"agents\":[{\"agent_status\":\"running\"},null]}"
             `shouldBe` "(no live agents)"
+        formatToolOutput call
+            "Agent: /root/reviewer\n  ID: agent-1\n  Status: running"
+            `shouldBe`
+                "Agent: /root/reviewer\n  ID: agent-1\n  Status: running"
         let worktreeSpawn = functionToolCall
                 "spawn" "collaboration.spawn_agent_in_worktree"
                 "{\"task_name\":\"worker\",\"message\":\"task\"}"
