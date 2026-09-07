@@ -588,16 +588,9 @@
                                 }));
                         agent-core = localPackage (
                             pkgs.haskell.lib.addTestToolDepends
-                            ((pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
+                            (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
                                 src = agentCoreSource;
-                            }).overrideAttrs (old: {
-                                # Match the CLI's production build identity,
-                                # while retaining stable check-package caches.
-                                configureFlags = (old.configureFlags or [ ])
-                                    ++ pkgs.lib.optionals (packageMode != "check") [
-                                        "--ghc-option=-DAGENT_BUILD_COMMIT=\"${agentBuildCommit}\""
-                                    ];
-                            }))
+                            })
                             [
                                 pkgs.git
                                 bun_1_4
@@ -806,6 +799,16 @@
                                             then agentNativeBridgeCheckSource
                                             else agentNativeBridgeProductionSource;
                                 }).overrideAttrs (old: {
+                                    # Keep revision volatility in this final
+                                    # frontend instead of agent-core, where it
+                                    # would invalidate every dependent package.
+                                    configureFlags =
+                                        (old.configureFlags or [ ])
+                                        ++ pkgs.lib.optionals
+                                            (packageMode != "check")
+                                            [
+                                                "--ghc-option=-optc-DAGENT_BUILD_COMMIT=${agentBuildCommit}"
+                                            ];
                                     # GHC's Darwin native-shared output is
                                     # already linked for runtime loading.
                                     # Stripping it in the package can turn it
