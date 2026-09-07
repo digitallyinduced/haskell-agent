@@ -24,6 +24,7 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallMode(..)
+    , canonicalToolName
     , toolCallMode
     , withToolCallMode
     )
@@ -196,10 +197,10 @@ isSensitiveComputerAction = \case
 
 encryptedCollaborationArguments :: Text -> Maybe [Text] -> Bool
 encryptedCollaborationArguments toolName encryptedFunctionArgs =
-    toolName `elem`
-        [ "collaboration.spawn_agent"
-        , "collaboration.send_message"
-        , "collaboration.followup_task"
+    canonicalToolName toolName `elem`
+        [ "spawn_agent"
+        , "send_message"
+        , "followup_task"
         ]
         && encryptedFunctionArgs /= Just []
 
