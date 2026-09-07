@@ -100,12 +100,12 @@
                     ];
                 };
 
-                agentIntegrationsSource = nix-filter.lib {
-                    root = ./packages/agent-integrations;
+                agentIntegrationApiSource = nix-filter.lib {
+                    root = ./packages/agent-integration-api;
                     include = [
                         "src"
                         "test"
-                        "agent-integrations.cabal"
+                        "agent-integration-api.cabal"
                         "package.nix"
                         "LICENSE"
                     ];
@@ -628,10 +628,10 @@
                             {
                                 src = agentMailSource;
                             });
-                        agent-integrations = localPackage (pkgs.haskell.lib.overrideSrc
-                            (final.callPackage ./packages/agent-integrations/package.nix { })
+                        agent-integration-api = localPackage (pkgs.haskell.lib.overrideSrc
+                            (final.callPackage ./packages/agent-integration-api/package.nix { })
                             {
-                                src = agentIntegrationsSource;
+                                src = agentIntegrationApiSource;
                             });
                         agent-process = localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-process/package.nix { })
@@ -857,6 +857,7 @@
                                 # dependencies in libraryHaskellDepends.
                                 [ final.agent-repository
                                   final.agent-runtime-daemon
+                                  final.agent-integration-api
                                 ]);
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
@@ -896,8 +897,8 @@
                 agentCorePackage = productionHaskellPackages.agent-core;
                 agentMcpPackage = productionHaskellPackages.agent-mcp;
                 agentMailPackage = productionHaskellPackages.agent-mail;
-                agentIntegrationsPackage =
-                    productionHaskellPackages.agent-integrations;
+                agentIntegrationApiPackage =
+                    productionHaskellPackages.agent-integration-api;
                 agentJsonPackage = productionHaskellPackages.agent-json;
                 agentProcessPackage = productionHaskellPackages.agent-process;
                 agentConnectivityPackage =
@@ -1352,6 +1353,12 @@
                 '';
             in
             {
+                # Embedders extend this package set instead of mixing separately
+                # built package databases. In particular the native composition
+                # module may be replaced and linked with distribution providers.
+                legacyPackages = productionHaskellPackages;
+                # Matching dynamic interfaces for downstream GHCi/dev shells.
+                devPackages = developmentHaskellPackages;
                 # Linux uses a statically linked musl harness, wrapped with the
                 # same runtime tools as the native build. The native build
                 # remains available as `agent-cli`.
@@ -1382,7 +1389,7 @@
                 packages.agent-core = agentCorePackage;
                 packages.agent-mcp = agentMcpPackage;
                 packages.agent-mail = agentMailPackage;
-                packages.agent-integrations = agentIntegrationsPackage;
+                packages.agent-integration-api = agentIntegrationApiPackage;
                 packages.agent-json = agentJsonPackage;
                 packages.agent-process = agentProcessPackage;
                 packages.agent-connectivity = agentConnectivityPackage;
@@ -1442,7 +1449,7 @@
                         packages.agent-core
                         packages.agent-mcp
                         packages.agent-mail
-                        packages.agent-integrations
+                        packages.agent-integration-api
                         packages.agent-json
                         packages.agent-process
                         packages.agent-connectivity
@@ -1505,6 +1512,7 @@
                         haskellPackages.agent-external-session;
                     agent-repository = haskellPackages.agent-repository;
                     agent-native-bridge = agentNativeBridgeCheckPackage;
+                    agent-integration-api = haskellPackages.agent-integration-api;
                     agent-cli = haskellPackages.agent-cli;
                     package-boundaries = pkgs.runCommand
                         "agent-package-boundaries"

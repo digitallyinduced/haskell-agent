@@ -1,7 +1,7 @@
 { mkDerivation, aeson, agent-claude, agent-cli-runtime
 , agent-codex-dialect, agent-connectivity, agent-core
 , agent-external-session, agent-gemini, agent-grok-build-dialect
-, agent-integrations, agent-json, agent-mcp, agent-openai
+, agent-integration-api, agent-json, agent-mcp, agent-openai
 , agent-openrouter, agent-process, agent-responses
 , agent-responses-types, agent-store, agent-syntax, agent-tui
 , agent-xai, ansi-terminal, async, base, base64-bytestring, brick
@@ -23,7 +23,7 @@ mkDerivation {
   libraryHaskellDepends = [
     aeson agent-claude agent-cli-runtime agent-codex-dialect
     agent-connectivity agent-core agent-external-session agent-gemini
-    agent-grok-build-dialect agent-integrations agent-json agent-mcp
+    agent-grok-build-dialect agent-integration-api agent-json agent-mcp
     agent-openai agent-openrouter agent-process agent-responses
     agent-responses-types agent-store agent-syntax agent-tui agent-xai
     ansi-terminal async base base64-bytestring brick bytestring colour

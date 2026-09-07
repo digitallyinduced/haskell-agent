@@ -45,9 +45,10 @@ import Agent.CLI.McpStatus
     , formatMcpProgress
     )
 import Agent.Connectivity.NetworkPath (withNetworkRecovery)
-import Agent.Integrations
+import Agent.Integration.API
     ( closeIntegrationSupervisor
     , newIntegrationSupervisor
+    , emptyIntegrationProvider
     )
 import Agent.CLI.Options
     ( CliOptions
@@ -243,7 +244,7 @@ runAgentWithRestarts options =
                                 }
                     integrationToolEnv <- defaultToolEnv root
                     integrationSupervisor <-
-                        newIntegrationSupervisor integrationToolEnv
+                        newIntegrationSupervisor emptyIntegrationProvider integrationToolEnv
                             `onException`
                                 MCP.closeMcpSupervisor mcpSupervisor
                     sessionThreads <-
@@ -276,11 +277,11 @@ runAgentWithRestarts options =
                         `finally`
                             (closeSessionThreadManager sessionThreads
                                 `finally`
-                                    (closeIntegrationSupervisor
-                                        integrationSupervisor
+                                    (MCP.closeMcpSupervisor
+                                        mcpSupervisor
                                         `finally`
-                                            MCP.closeMcpSupervisor
-                                                mcpSupervisor)))
+                                            closeIntegrationSupervisor
+                                                integrationSupervisor)))
         (pure DevQuit)
 
 loginMcpWithScopes :: [Text] -> Text -> IO ()

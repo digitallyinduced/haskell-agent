@@ -2,6 +2,7 @@
 module Agent.CLI.MacOS.EngineLifecycle (workerLifecycle) where
 
 import Agent.CLI.MacOS.BrowserBridge (BrowserHost)
+import Agent.CLI.MacOS.BundledIntegrations (bundledIntegrationProvider)
 import Agent.CLI.MacOS.ComputerBridge (ComputerHost)
 import Agent.CLI.MacOS.EngineEvents (EventCallback)
 import Agent.CLI.MacOS.EngineCallbacks (invokeIntegrationResultCallback)
@@ -50,7 +51,8 @@ workerLifecycle
         stagedTurnOptions interactions =
     (do
         store <- newMVar Nothing
-        processRuntime <- newNativeProcessRuntime root
+        processRuntime <- newNativeProcessRuntimeWithIntegrations
+            bundledIntegrationProvider root
         workerRegistry <- newTVarIO Map.empty
         integrationWorkers <- newIntegrationWorkerRegistry
         let cleanup =

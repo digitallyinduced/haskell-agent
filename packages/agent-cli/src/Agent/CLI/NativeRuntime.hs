@@ -14,6 +14,7 @@ module Agent.CLI.NativeRuntime
     , StartupFailure(..)
     , closeNativeProcessRuntime
     , newNativeProcessRuntime
+    , newNativeProcessRuntimeWithIntegrations
     , nativeProcessIntegrationSupervisor
     , nativeTurnOptions
     , applyNativeStartupPolicy
@@ -23,10 +24,12 @@ module Agent.CLI.NativeRuntime
     ) where
 
 import qualified Agent.CLI.NativeProcess as NativeProcess
-import Agent.Integrations
+import Agent.Integration.API
     ( IntegrationSupervisor
     , closeIntegrationSupervisor
     , newIntegrationSupervisor
+    , IntegrationProvider
+    , emptyIntegrationProvider
     )
 import Agent.Runtime.StartupPolicy
     ( NativeStartupPolicy(..)
@@ -82,11 +85,15 @@ data NativeProcessRuntime = NativeProcessRuntime
     }
 
 newNativeProcessRuntime :: OsPath -> IO NativeProcessRuntime
-newNativeProcessRuntime root = mask \restore -> do
+newNativeProcessRuntime = newNativeProcessRuntimeWithIntegrations emptyIntegrationProvider
+
+newNativeProcessRuntimeWithIntegrations
+    :: IntegrationProvider -> OsPath -> IO NativeProcessRuntime
+newNativeProcessRuntimeWithIntegrations provider root = mask \restore -> do
     core <- restore (NativeProcess.newNativeProcessRuntime root)
     integrationToolEnv <- restore (defaultToolEnv root)
     integrations <-
-        restore (newIntegrationSupervisor integrationToolEnv)
+        restore (newIntegrationSupervisor provider integrationToolEnv)
             `onException` NativeProcess.closeNativeProcessRuntime core
     pure NativeProcessRuntime
         { nativeProcessCore = core

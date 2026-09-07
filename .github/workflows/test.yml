@@ -37,6 +37,7 @@ jobs:
               .#checks.x86_64-linux.agent-external-session
               .#checks.x86_64-linux.agent-repository
               .#checks.x86_64-linux.agent-native-bridge
+              .#checks.x86_64-linux.agent-integration-api
               .#checks.x86_64-linux.package-boundaries
             # Repository integration tests deliberately exercise Git and gh
             # process timeouts; after their extraction they run in one suite.

@@ -46,9 +46,9 @@ import Agent.CLI.NativeRuntime
     , nativeProcessIntegrationSupervisor
     , restartNativeMcpRuntime
     )
-import Agent.Integrations
-    ( IntegrationAuthority(..)
-    , IntegrationError(..)
+import Agent.CLI.IntegrationGateway (gatewayIntegrationAuthority)
+import Agent.Integration.API
+    ( IntegrationError(..)
     , IntegrationRuntime
     , acquireIntegrationRuntime
     , callIntegrationRuntimeAdmin
@@ -679,10 +679,7 @@ runIntegrationAdmin
     -> IO (Either Text RawJson)
 runIntegrationAdmin processRuntime action =
     withNativeGatewayCredentialBoundary \credential _ -> do
-        let authority = maybe
-                LocalIntegrationAuthority
-                OrganizationIntegrationAuthority
-                credential
+        let authority = gatewayIntegrationAuthority credential
         acquireIntegrationRuntime
             (nativeProcessIntegrationSupervisor processRuntime)
             authority >>= \case
