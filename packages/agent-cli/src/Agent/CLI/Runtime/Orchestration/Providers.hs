@@ -18,7 +18,8 @@ withProviderRuntime
     -> IO a
 withProviderRuntime config host use = case config of
     OpenAiProviderConfig openAi -> withOpenAiProvider openAi host use
-    XaiProviderConfig tokens hostedTools -> withXaiProvider tokens hostedTools host use
+    XaiProviderConfig tokens hostedTools gateway ->
+        withXaiProvider tokens hostedTools gateway host use
     GeminiProviderConfig tokens -> withGeminiProvider tokens host use
     OpenRouterProviderConfig openRouter -> withOpenRouterProvider openRouter host use
     ClaudeProviderConfig claude -> withClaudeProvider claude host use

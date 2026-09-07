@@ -41,6 +41,52 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "createResponseWith" do
+        it "uses the native xAI request format and exact alias through a gateway" do
+            recorded <- newIORef []
+            let handler _request = pure $ sseResponse
+                    [ outputItemDone (assistantMessage "gateway response")
+                    , completedEvent "gateway-response" []
+                    ]
+            withMockGrok recorded handler \localOptions -> do
+                let options = (gatewayClientOptions "https://gateway.example")
+                        { baseUrl = localOptions.baseUrl }
+                    request = (helloRequest "hi" :: ResponseCreateParams)
+                        { model = Just "organization-research" }
+                response <- createResponseWith options
+                    (xaiCredential "gateway-token") request >>= expectRight
+                response.responseId `shouldBe` "gateway-response"
+            [sent] <- readIORef recorded
+            sent.path `shouldBe` "/v1/responses"
+            lookup "Authorization" sent.headers
+                `shouldBe` Just "Bearer gateway-token"
+            lookup "X-XAI-Token-Auth" sent.headers
+                `shouldBe` Just grokTokenAuthValue
+            requestModel sent `shouldBe` Just "organization-research"
+            requestInputRoles sent `shouldBe` Just ["system", "user"]
+
+        it "does not follow gateway redirects to another endpoint" do
+            redirectedRequests <- newIORef (0 :: Int)
+            let redirectedApplication _request respond = do
+                    modifyIORef' redirectedRequests (+ 1)
+                    respond (Wai.responseLBS HTTP.status200 [] "")
+            withLoopbackApplication (pure redirectedApplication) \port -> do
+                recorded <- newIORef []
+                let destination =
+                        "http://127.0.0.1:" <> Text.pack (show port) <> "/responses"
+                    handler _request = pure $
+                        Wai.responseLBS HTTP.status307
+                            [("Location", Text.encodeUtf8 destination)] ""
+                withMockGrok recorded handler \localOptions -> do
+                    let options = (gatewayClientOptions "https://gateway.example")
+                            { baseUrl = localOptions.baseUrl }
+                    result <- createResponseWith options
+                        (xaiCredential "gateway-token") (helloRequest "hi")
+                    case result of
+                        Left _ -> pure ()
+                        Right _ -> expectationFailure "gateway redirect was accepted"
+                length <$> readIORef recorded `shouldReturn` 1
+            readIORef redirectedRequests `shouldReturn` 0
+
         it "POSTs the mapped request with subscription headers and parses the SSE response" do
             recorded <- newIORef []
             let handler _request = do

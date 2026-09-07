@@ -33,6 +33,17 @@ spec = do
             mapModel options "grok-3" `shouldBe` "grok-3"
             mapModel options "gpt-5.6-terra" `shouldBe` "grok-4.6"
 
+        it "preserves authoritative gateway aliases instead of inferring models" do
+            let options = gatewayClientOptions "https://gateway.example/"
+            options.baseUrl `shouldBe` "https://gateway.example/v1"
+            options.requestRedirectCount `shouldBe` 0
+            mapModel options "organization-research"
+                `shouldBe` "organization-research"
+            mapModel options "x-ai/grok-4.6" `shouldBe` "x-ai/grok-4.6"
+            (buildRequest options
+                (setModel (Just "organization-research") sampleRequest)).model
+                `shouldBe` Just "organization-research"
+
     describe "buildRequest" do
         it "maps canonical Responses fields onto the Grok proxy dialect" do
             let value = requestValue defaultClientOptions sampleRequest

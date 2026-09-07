@@ -273,6 +273,24 @@ remote is selected from the current branch's configured remote, then
 fetch failure aborts worktree creation rather than falling back to a stale
 commit.
 
+### Organization gateway model routing
+
+Connected organization gateways must include `provider` and `protocol` for every
+entry in `/v1/models`. Supported pairs are `openai`/`responses`,
+`xai`/`responses`, and `anthropic`/`anthropic`. Upgrade the gateway before the
+client; missing or incompatible metadata fails closed.
+
+The catalog selects the native provider transport, not the model name or a local
+dialect override. OpenAI uses the OpenAI transport, Grok uses xAI with its native
+compaction, and Claude uses the Claude gateway integration. Requests retain the
+organization's model alias and gateway credential/endpoint; provider environment
+variables cannot redirect gateway xAI requests to a personal endpoint.
+
+Startup, resume, model switching, and child model selection use this catalog.
+Legacy top-level gateway sessions re-resolve their saved alias to its current
+provider. In-process subagents support OpenAI and xAI; Claude requires a separate
+child session.
+
 ### Worktree recovery and cleanup
 
 New managed worktrees are enrolled in snapshot-backed cleanup. After seven

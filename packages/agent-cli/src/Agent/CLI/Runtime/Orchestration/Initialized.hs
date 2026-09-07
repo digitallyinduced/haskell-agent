@@ -24,7 +24,7 @@ import Agent.CLI.Auth
                  loadedProvider, loadedTokenProvider, loadedSelectionId),
       gatewayAuthSelectionId,
       gatewayLoadedAuthForProvider,
-      gatewayRouterTokenProvider,
+      gatewayTokenProviderForProvider,
       isGatewayLoadedAuth,
       preferredOpenAiTokenProvider,
       loadAuth,
@@ -42,7 +42,8 @@ import Agent.CLI.GatewayClient
     , newGatewayModelAccess
     , refreshGatewayModels
     )
-import Agent.CLI.GatewayModels (gatewayProviderForStartup)
+import Agent.CLI.GatewayModels
+    ( modelOptionsForGatewayModels, selectGatewayModelOption )
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , catalogConnection,
@@ -57,7 +58,7 @@ import Agent.CLI.Models
       resolveSavedModelTarget,
       validateResumedGatewayBoundary,
       ModelOption(modelTarget),
-      ModelTarget(targetWireModelId, targetConnectionId, targetProvider,
+      ModelTarget(ModelTarget, targetWireModelId, targetConnectionId, targetProvider,
                   targetModelId, targetDialect) )
 import Agent.CLI.Options
     ( CliOptions(optModel, optProvider, optSkills, optYolo) )
@@ -148,7 +149,7 @@ import Control.Concurrent.MVar
 import Control.Exception.Safe ( onException )
 import Control.Monad ( forM_, void, when )
 import Data.IORef ( IORef, newIORef, writeIORef )
-import Data.Maybe ( isNothing, fromMaybe, isJust )
+import Data.Maybe ( isNothing, fromMaybe, isJust, catMaybes )
 import Data.Text ( Text )
 import System.Environment ( lookupEnv )
 import System.OsPath ( OsPath, (</>), decodeFS, unsafeEncodeUtf )
@@ -192,6 +193,7 @@ data InitializedWorkspace = InitializedWorkspace
 
 data InitializedTargets = InitializedTargets
     { initializedGatewayIdentity :: Maybe Text
+    , initializedGatewayModelAccess :: Maybe GatewayModelAccess
     , initializedTransitionTarget :: Maybe ModelTarget
     , initializedConfiguredTarget :: Maybe ModelTarget
     , initializedResumedTarget :: Maybe ModelTarget
@@ -468,14 +470,22 @@ resolveInitializedTargets request workspace = do
                                         Just option.modelTarget
                                 _ -> Nothing
                 Just meta ->
-                    Just <$> resolveSavedModelTarget
-                        catalog
-                        (isJust connectedGateway)
-                        meta.metaProvider
-                        meta.metaConnection
-                        meta.metaModel
-                        meta.metaTransportModel
-                        meta.metaDialect
+                    if isJust connectedGateway
+                    then Right $ Just ModelTarget
+                        { targetProvider = meta.metaProvider
+                        , targetConnectionId = meta.metaConnection
+                        , targetModelId = meta.metaModel
+                        , targetWireModelId = fromMaybe meta.metaModel meta.metaTransportModel
+                        , targetDialect = meta.metaDialect
+                        }
+                    else Just <$> resolveSavedModelTarget
+                            catalog
+                            False
+                            meta.metaProvider
+                            meta.metaConnection
+                            meta.metaModel
+                            meta.metaTransportModel
+                            meta.metaDialect
         projectTargetResult
             | isJust transitionTarget
                 || isJust options.optModel
@@ -526,7 +536,24 @@ resolveInitializedTargets request workspace = do
         either (startupDie startup) pure resumedTargetResult
     projectTarget <-
         either (startupDie startup) pure projectTargetResult
+    (gatewayModelAccess, gatewayTarget) <- case connectedGateway of
+        Nothing -> pure (Nothing, Nothing)
+        Just credential -> do
+            access <- newGatewayModelAccess credential
+            models <- refreshGatewayModels access
+                >>= either (startupDie startup) pure
+            selected <- either (startupDie startup) pure $
+                selectGatewayModelOption
+                    (modelOptionsForGatewayModels catalog models)
+                    options.optModel
+                    (if isJust transition then Nothing else options.optProvider)
+                    (catMaybes
+                        [ transitionTarget, configuredOptionTarget
+                        , resumedTarget, projectTarget
+                        ])
+            pure (Just access, Just selected.modelTarget)
     let targetHint =
+            gatewayTarget <|>
             transitionTarget
                 <|> configuredOptionTarget
                 <|> resumedTarget
@@ -534,12 +561,7 @@ resolveInitializedTargets request workspace = do
                     then projectTarget
                     else Nothing
         requestedProvider
-            | isJust connectedGateway =
-                Just $
-                    gatewayProviderForStartup
-                        targetHint
-                        options.optProvider
-                        ((.metaProvider) . fst <$> resumed)
+            | Just target <- gatewayTarget = Just target.targetProvider
             | otherwise =
                 (.targetProvider) <$> targetHint
                     <|> options.optProvider
@@ -567,6 +589,7 @@ resolveInitializedTargets request workspace = do
                 && isNothing options.optModel
     pure InitializedTargets
         { initializedGatewayIdentity = connectedGatewayIdentity
+        , initializedGatewayModelAccess = gatewayModelAccess
         , initializedTransitionTarget = transitionTarget
         , initializedConfiguredTarget = configuredOptionTarget
         , initializedResumedTarget = resumedTarget
@@ -824,18 +847,13 @@ validateInitializedAuth request targets loaded = do
 
 newInitializedAccountRefs
     :: InitializedRequest
+    -> InitializedTargets
     -> InitializedAuth
     -> IO InitializedAccountRefs
-newInitializedAccountRefs request auth = do
+newInitializedAccountRefs request targets auth = do
     let loaded = auth.initializedLoaded
         startupAccountIds = auth.initializedStartupAccountIds
-    initialGatewayModels <-
-        loadGatewayModelAccess
-            request.initializedConnectedGateway
-            loaded >>= either
-                (startupDie request.initializedStartup)
-                pure
-    gatewayModelsRef <- newIORef initialGatewayModels
+    gatewayModelsRef <- newIORef targets.initializedGatewayModelAccess
     activeAccountRef <- newActiveAccount ActiveAccount
         { activeAccountId = maybe "" snd startupAccountIds
         , activeSelectionId =
@@ -858,8 +876,11 @@ newInitializedAccountRefs request auth = do
                 Nothing ->
                     loaded.loadedTokenProvider
         selectableTokenProvider
-            | isGatewayLoadedAuth loaded =
-                gatewayRouterTokenProvider
+            | Just credential <- request.initializedConnectedGateway
+            , loaded.loadedProvider /= ClaudeCodeProvider =
+                gatewayTokenProviderForProvider
+                    loaded.loadedProvider
+                    credential
                     unguardedSelectableTokenProvider
             | otherwise =
                 unguardedSelectableTokenProvider
@@ -905,7 +926,9 @@ initializeActiveHttpAuth targets auth refs = do
                             , activeAccountLabel = label
                             }
                         pure
-                            ( usable.loadedTokenProvider
+                            ( if isGatewayLoadedAuth loaded
+                                then selectableTokenProvider
+                                else usable.loadedTokenProvider
                             , usable.loadedAccountLabel
                             , credential.accountId
                             )
@@ -1124,7 +1147,7 @@ runInitialized request = do
         request
         targets
         initializedAuth.initializedLoaded
-    accountRefs <- newInitializedAccountRefs request initializedAuth
+    accountRefs <- newInitializedAccountRefs request targets initializedAuth
     activeHttpAuth <-
         initializeActiveHttpAuth
             targets

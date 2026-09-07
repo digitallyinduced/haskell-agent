@@ -9,11 +9,11 @@ module Agent.CLI.Runtime.Orchestration.Tools.Model
 import Agent.CLI.Auth (LoadedAuth(..), isGatewayLoadedAuth)
 import Agent.CLI.Config (HarnessConfig)
 import Agent.CLI.GatewayClient (cachedGatewayModels, gatewayCredentialIdentity)
-import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
+import Agent.CLI.GatewayModels (modelOptionsForGatewayModels, selectGatewayModelOption)
 import Agent.CLI.ModelConfig (ResponsesConnection(..), builtinConnectionId)
 import Agent.CLI.Models
     ( ModelOption(..), ModelTarget(..), defaultModelFor, rawModelOption
-    , resolveConfiguredModel, resolveModelOptionById, resolvePersistedDialect )
+    , resolveConfiguredModel, resolvePersistedDialect )
 import Agent.CLI.Options
     ( ApprovalPolicy(..), CliOptions(..), defaultEffortFor
     , normalizeReasoningEffortForDialect, resolveApprovalPolicy )
@@ -30,10 +30,9 @@ import qualified Agent.OpenRouter as OpenRouter
 import Agent.Provider (Provider(..))
 import Agent.ReasoningEffort (parseReasoningEffort, reasoningEffortText)
 import Agent.Responses.GenericClient (GenericClientOptions(..))
-import Control.Applicative ((<|>))
 import Control.Monad (when)
 import Data.IORef (readIORef)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -124,27 +123,13 @@ selectGatewayModels AgentToolsRequest
                             "The organization gateway does not offer any models."
                     firstAvailable : remainingAvailable -> do
                         let available = firstAvailable : remainingAvailable
-                            resolveTarget target =
-                                resolveModelOptionById
-                                    available
-                                    target.targetModelId
-                        selected <- case options.optModel of
-                            Just requested ->
-                                case resolveModelOptionById available requested of
-                                    Nothing ->
-                                        startupDie startup $
-                                            "Model '"
-                                                <> requested
-                                                <> "' is not available through your organization gateway."
-                                    Just selected -> pure selected
-                            Nothing ->
-                                pure $
-                                    fromMaybe firstAvailable $
-                                        (transitionTarget >>= resolveTarget)
-                                            <|> (configuredOptionTarget >>= resolveTarget)
-                                            <|> (resumedTarget >>= resolveTarget)
-                                            <|> (projectTarget >>= resolveTarget)
-                                            <|> (targetHint >>= resolveTarget)
+                        selected <- either (startupDie startup) pure $
+                            selectGatewayModelOption available options.optModel
+                                (Just loaded.loadedProvider)
+                                (catMaybes
+                                    [ targetHint, transitionTarget, configuredOptionTarget
+                                    , resumedTarget, projectTarget
+                                    ])
                         pure
                             ( Just selected
                             , Just (map (.modelTarget.targetModelId) available)

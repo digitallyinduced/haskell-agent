@@ -2,6 +2,7 @@
 module Agent.XAI.Options
     ( ClientOptions(..)
     , defaultClientOptions
+    , gatewayClientOptions
     , clientOptionsFromEnv
     , defaultGrokClientVersion
     , grokAutoCompactThresholdPercent
@@ -107,6 +108,10 @@ data ClientOptions = ClientOptions
       -- ^ Exact-match request-model to xAI-model overrides.
     , defaultModel :: !Text
       -- ^ Target for non-Grok model names without an explicit override.
+    , preserveModelNames :: !Bool
+      -- ^ Preserve authoritative gateway aliases instead of mapping them.
+    , requestRedirectCount :: !Int
+      -- ^ Maximum redirects. Gateway requests must remain at their endpoint.
     , autoCompactTokenLimit :: !(Maybe Int)
       -- ^ Explicit automatic-compaction threshold. 'Nothing' uses the
       -- model-specific Grok Build default.
@@ -123,11 +128,24 @@ defaultClientOptions = ClientOptions
     { baseUrl = "https://cli-chat-proxy.grok.com/v1"
     , modelOverrides = Map.empty
     , defaultModel = "grok-4.6"
+    , preserveModelNames = False
+    , requestRedirectCount = 10
     , autoCompactTokenLimit = Nothing
     , requestTimeoutSeconds = 600
     , clientVersion = defaultGrokClientVersion
     , hostedXSearchEnabled = True
     }
+
+-- | Use the native xAI protocol through an organization gateway. Routing and
+-- model aliases are authoritative, so environment overrides and redirects
+-- must not select a different destination.
+gatewayClientOptions :: String -> ClientOptions
+gatewayClientOptions gatewayBaseUrl =
+    defaultClientOptions
+        { baseUrl = reverse (dropWhile (== '/') (reverse gatewayBaseUrl)) <> "/v1"
+        , preserveModelNames = True
+        , requestRedirectCount = 0
+        }
 
 -- | Load optional transport overrides from the environment.
 clientOptionsFromEnv :: IO ClientOptions
@@ -141,6 +159,8 @@ clientOptionsFromEnv = do
         { baseUrl = Maybe.fromMaybe defaultClientOptions.baseUrl baseUrl
         , modelOverrides = maybe Map.empty (parseModelOverrides . Text.pack) modelMap
         , defaultModel = maybe defaultClientOptions.defaultModel Text.pack defaultModel
+        , preserveModelNames = False
+        , requestRedirectCount = defaultClientOptions.requestRedirectCount
         , autoCompactTokenLimit = Nothing
         , requestTimeoutSeconds = Maybe.fromMaybe defaultClientOptions.requestTimeoutSeconds
             timeoutSeconds

@@ -129,6 +129,7 @@ newCollaborationRuntime AgentToolsRequest
     collaborationAgentTypes <- newIORef Map.empty
     collaborationOpenAiChild <-
         if not nativeCapabilities.nativeCollaboration
+            || isJust gatewayAllowedChildModels
             then pure Nothing
             else case provider of
                 XAIProvider -> do

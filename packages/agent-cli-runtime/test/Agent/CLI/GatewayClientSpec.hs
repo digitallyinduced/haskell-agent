@@ -63,14 +63,14 @@ spec = describe "gateway device authorization" do
                 putMVar received (Wai.requestHeaders request)
                 respond $ Wai.responseLBS status200
                     [(hContentType, "application/json")]
-                    "{\"data\":[{\"id\":\"company-model\",\"protocol\":\"responses\"}]}"
+                    "{\"data\":[{\"id\":\"company-model\",\"protocol\":\"responses\",\"provider\":\"openai\"}]}"
         Warp.testWithApplication (pure application) \port -> do
             let base = "http://127.0.0.1:" <> Text.pack (show port)
                 credential = GatewayCredential base
                     (Text.replace "http://" "ws://" base <> "/v1/responses")
                     "test-token"
             fetchGatewayModels credential `shouldReturn`
-                Right [GatewayModel "company-model" GatewayResponsesProtocol]
+                Right [GatewayModel "company-model" GatewayResponsesProtocol GatewayOpenAIProvider]
             headers <- takeMVar received
             lookup "User-Agent" headers `shouldBe` Just expected
             lookup "Authorization" headers `shouldBe` Just "Bearer test-token"
@@ -108,25 +108,47 @@ spec = describe "gateway device authorization" do
 
     it "decodes, trims, and deduplicates the typed gateway catalog" do
         decodeGatewayModels
-            "{\"object\":\"list\",\"data\":[{\"id\":\" gpt-5.6-sol \",\"protocol\":\"responses\"},{\"id\":\"\",\"protocol\":\"responses\"},{\"id\":\"gpt-5.6-sol\",\"protocol\":\"responses\"},{\"id\":\"sonnet\",\"protocol\":\"anthropic\"},{\"id\":\"bad id\",\"protocol\":\"responses\"}]}"
+            "{\"object\":\"list\",\"data\":[{\"id\":\" gpt-5.6-sol \",\"protocol\":\"responses\",\"provider\":\"openai\"},{\"id\":\"\",\"protocol\":\"responses\",\"provider\":\"openai\"},{\"id\":\"gpt-5.6-sol\",\"protocol\":\"responses\",\"provider\":\"openai\"},{\"id\":\"sonnet\",\"protocol\":\"anthropic\",\"provider\":\"anthropic\"},{\"id\":\"bad id\",\"protocol\":\"responses\",\"provider\":\"openai\"}]}"
             `shouldBe`
                 Right
-                    [ GatewayModel "gpt-5.6-sol" GatewayResponsesProtocol
-                    , GatewayModel "sonnet" GatewayAnthropicProtocol
+                    [ GatewayModel "gpt-5.6-sol" GatewayResponsesProtocol GatewayOpenAIProvider
+                    , GatewayModel "sonnet" GatewayAnthropicProtocol GatewayAnthropicProvider
                     ]
 
     it "rejects unknown gateway model protocols" do
         decodeGatewayModels
-            "{\"object\":\"list\",\"data\":[{\"id\":\"model\",\"protocol\":\"router\"}]}"
+            "{\"object\":\"list\",\"data\":[{\"id\":\"model\",\"protocol\":\"router\",\"provider\":\"openai\"}]}"
+            `shouldSatisfy` isLeft
+
+    it "decodes xAI identity independently of the Responses protocol" do
+        decodeGatewayModels
+            "{\"data\":[{\"id\":\"company-model\",\"protocol\":\"responses\",\"provider\":\"xai\"}]}"
+            `shouldBe`
+                Right [GatewayModel "company-model" GatewayResponsesProtocol GatewayXAIProvider]
+
+    it "rejects missing or unsupported provider identity instead of assuming OpenAI" do
+        decodeGatewayModels
+            "{\"data\":[{\"id\":\"grok-4.6\",\"protocol\":\"responses\"}]}"
+            `shouldSatisfy` isLeft
+        decodeGatewayModels
+            "{\"data\":[{\"id\":\"company-model\",\"protocol\":\"responses\",\"provider\":\"unknown\"}]}"
+            `shouldSatisfy` isLeft
+
+    it "rejects incompatible provider and protocol combinations" do
+        decodeGatewayModels
+            "{\"data\":[{\"id\":\"company-model\",\"protocol\":\"anthropic\",\"provider\":\"xai\"}]}"
+            `shouldSatisfy` isLeft
+        decodeGatewayModels
+            "{\"data\":[{\"id\":\"company-model\",\"protocol\":\"responses\",\"provider\":\"anthropic\"}]}"
             `shouldSatisfy` isLeft
 
     it "clears cached gateway models when refresh fails" do
         results <- newIORef
             [ Right
-                [ GatewayModel " gpt-5.6-sol " GatewayResponsesProtocol
-                , GatewayModel "" GatewayResponsesProtocol
-                , GatewayModel "gpt-5.6-sol" GatewayResponsesProtocol
-                , GatewayModel "sonnet" GatewayAnthropicProtocol
+                [ GatewayModel " gpt-5.6-sol " GatewayResponsesProtocol GatewayOpenAIProvider
+                , GatewayModel "" GatewayResponsesProtocol GatewayOpenAIProvider
+                , GatewayModel "gpt-5.6-sol" GatewayResponsesProtocol GatewayOpenAIProvider
+                , GatewayModel "sonnet" GatewayAnthropicProtocol GatewayAnthropicProvider
                 ]
             , Left "gateway unavailable"
             ]
@@ -138,14 +160,14 @@ spec = describe "gateway device authorization" do
         refreshGatewayModels access
             `shouldReturn`
                 Right
-                    [ GatewayModel "gpt-5.6-sol" GatewayResponsesProtocol
-                    , GatewayModel "sonnet" GatewayAnthropicProtocol
+                    [ GatewayModel "gpt-5.6-sol" GatewayResponsesProtocol GatewayOpenAIProvider
+                    , GatewayModel "sonnet" GatewayAnthropicProtocol GatewayAnthropicProvider
                     ]
         cachedGatewayModels access
             `shouldReturn`
                 Just
-                    [ GatewayModel "gpt-5.6-sol" GatewayResponsesProtocol
-                    , GatewayModel "sonnet" GatewayAnthropicProtocol
+                    [ GatewayModel "gpt-5.6-sol" GatewayResponsesProtocol GatewayOpenAIProvider
+                    , GatewayModel "sonnet" GatewayAnthropicProtocol GatewayAnthropicProvider
                     ]
         refreshGatewayModels access
             `shouldReturn` Left "gateway unavailable"
@@ -181,7 +203,8 @@ spec = describe "gateway device authorization" do
                 (pure (Right
                     [GatewayModel
                         "company-model"
-                        GatewayResponsesProtocol]))
+                        GatewayResponsesProtocol
+                        GatewayOpenAIProvider]))
                 (\produceAudio onTranscript -> do
                     produceAudio \chunk ->
                         atomicModifyIORef' events \current ->
@@ -215,12 +238,13 @@ spec = describe "gateway device authorization" do
                                 [ GatewayModel
                                     "company-model"
                                     GatewayResponsesProtocol
+                                    GatewayOpenAIProvider
                                 ])
                     else throwString "transport details"
         refreshGatewayModels access
             `shouldReturn`
                 Right
-                    [GatewayModel "company-model" GatewayResponsesProtocol]
+                    [GatewayModel "company-model" GatewayResponsesProtocol GatewayOpenAIProvider]
         refreshGatewayModels access
             `shouldReturn`
                 Left "Could not refresh organization gateway models."

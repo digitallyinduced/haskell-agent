@@ -296,15 +296,15 @@ connectionBuiltinProvider connection = case connection.connectionKind of
     OrganizationGatewayConnection -> Nothing
 
 -- | Validate persisted model-facing protocol identity against its routing
--- connection. Organization gateways use the OpenAI transport while supporting
--- any Responses-hostable agent dialect.
+-- connection. Older gateway sessions stored every Responses model as OpenAI;
+-- keep those records readable so startup can resolve their current provider
+-- from the authoritative gateway catalog before opening a transport.
 connectionSupportsDialect :: Text -> Provider -> DialectId -> Bool
-connectionSupportsDialect connection provider dialect
-    | connection == organizationGatewayConnectionId =
-        (provider == OpenAIProvider && gatewaySupportsDialect dialect)
-            || (provider == ClaudeCodeProvider
-                && dialect == ClaudeCodeDialect)
-    | otherwise = providerSupportsDialect provider dialect
+connectionSupportsDialect connection provider dialect =
+    providerSupportsDialect provider dialect
+        || (connection == organizationGatewayConnectionId
+            && provider == OpenAIProvider
+            && dialect /= ClaudeCodeDialect)
 
 catalogDefaultForProvider :: ModelCatalog -> Provider -> CatalogModel
 catalogDefaultForProvider catalog = \case
@@ -846,13 +846,6 @@ modelMergeKey model =
 allBuiltinProviders :: [Provider]
 allBuiltinProviders =
     [OpenAIProvider, XAIProvider, OpenRouterProvider, GeminiProvider, ClaudeCodeProvider]
-
-gatewaySupportsDialect :: DialectId -> Bool
-gatewaySupportsDialect = \case
-    CodexDialect -> True
-    GrokBuildDialect -> True
-    GenericResponsesDialect -> True
-    ClaudeCodeDialect -> False
 
 nonEmptyText :: Text -> Maybe Text
 nonEmptyText value

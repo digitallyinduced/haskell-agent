@@ -41,6 +41,7 @@ import Control.Retry
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Text.Encoding as Text
 import Network.HTTP.Simple hiding (Response)
+import qualified Network.HTTP.Client as HttpClient
 
 type StreamEventCallback = HttpSSE.StreamEventCallback
 
@@ -139,7 +140,9 @@ xaiProviderConfig options credential request = ProviderClientConfig
     , providerRequestTimeoutSeconds = options.requestTimeoutSeconds
     , providerBuildRequest = buildRequest options
     , providerConfigureRequest =
-        configureCompactionHeaders
+        (\httpRequest -> httpRequest
+            { HttpClient.redirectCount = options.requestRedirectCount })
+            . configureCompactionHeaders
             options
             (projectXaiOrLegacyCompactionHistory request)
             . setRequestHeader "Authorization"

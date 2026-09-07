@@ -7,7 +7,8 @@ module Agent.CLI.Subagents.Runtime
     , pinSubagentSession, unpinSubagentSession
     , persistSubagentSnapshotWithStatus, prepareCollaborationSpawn
     , restoreAgentFromDisk, resolveChildModelAndEffort, runCodexSubagent
-    , runHttpSubagent, runXaiParentSubagent, grokSpawnedChildIdentity
+    , runHttpSubagent, runXaiParentSubagent, runGatewaySubagent
+    , runXaiSubagent, resolveGatewaySubagentTarget, grokSpawnedChildIdentity
     , usesOpenAiChildTransport, validatePersistedSubagentTarget
     ) where
 import Agent.CLI.Session.Request
@@ -65,7 +66,8 @@ import Agent.CLI.SteeringInputs
     , newSteeringInputs
     , readSteeringInputs
     )
-import Agent.CLI.ModelConfig (connectionSupportsDialect)
+import Agent.CLI.ModelConfig
+    (connectionSupportsDialect, organizationGatewayConnectionId)
 import Agent.CLI.Tools
     (hostedSearchToolNames, requireToolRegistry, schemasFromAppTools)
 import Agent.CLI.Dialects
@@ -78,7 +80,8 @@ import Agent.CLI.Dialects
 import Agent.Codex.Dialect.Subagent (codexSubagentSuffix)
 import Agent.Dialect
     (ChildAgentProtocol(..), Dialect, DialectId, codexDialect,
-     dialectChildAgentProtocol, dialectForId, dialectId, dialectIdForModel)
+     dialectChildAgentProtocol, dialectForId, dialectId, dialectIdForModel,
+     providerSupportsDialect)
 import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
 import Agent.Loop
     (Backend(..), BackendMiddleware, BackendSnapshot(..),
@@ -446,6 +449,102 @@ restoreAgentFromDisk
             Left err -> Left err
             Right _ -> Right ()
 
+-- | Select the organization alias before choosing a child transport. Persisted
+-- and inherited aliases are looked up again in the authoritative catalog; a
+-- provider name or a model-name prefix is never a transport-routing input.
+resolveGatewaySubagentTarget
+    :: (Text -> IO (Maybe CollaborationModelTarget))
+    -> Maybe Text
+    -> Maybe Text
+    -> Maybe Text
+    -> Text
+    -> IO (Either Text CollaborationModelTarget)
+resolveGatewaySubagentTarget
+        resolve requestedModel childModel parentModel rootModel =
+    resolve selectedModel >>= \case
+        Nothing ->
+            pure (Left "The child model is not allowed by this organization.")
+        Just target
+            | target.collaborationTargetConnection
+                /= organizationGatewayConnectionId ->
+                    pure (Left "The child model does not use the organization gateway.")
+            | not (providerSupportsDialect
+                target.collaborationTargetProvider
+                target.collaborationTargetDialect) ->
+                    pure (Left "The child model has an incompatible provider dialect.")
+            | otherwise -> pure (Right target)
+  where
+    selectedModel = fromMaybe rootModel
+        (requestedModel <|> childModel <|> parentModel)
+
+-- | Dispatch every child invocation, including follow-ups and descendants,
+-- through its catalog-selected provider. Runners supplied by the gateway owner
+-- must capture that owner's immutable credential and endpoint snapshot.
+runGatewaySubagent
+    :: SubagentRuntime
+    -> (CollaborationModelTarget -> SubagentRuntime -> RunSubagent)
+    -> RunSubagent
+runGatewaySubagent runtime runner env previous prompt onEvent =
+    case runtime.subagentResolveChildModel of
+        Nothing ->
+            pure (Left (LoopUnexpected
+                "The organization gateway model catalog is unavailable."))
+        Just resolve -> do
+            requestedModel <- lookupAgentModel runtime.subagentTypes env.subId
+            sessions <- readIORef runtime.subagentSessions
+            identity <- getSubagentIdentity runtime.subagentRegistry env.subId
+            rootParams <- readSessionRequestParams runtime.subagentParams
+            let childSession = Map.lookup env.subId sessions
+                parentSession = do
+                    parentId <- identity >>= (.identityParent)
+                    Map.lookup parentId sessions
+            resolveGatewaySubagentTarget
+                resolve
+                requestedModel
+                ((.subSessionEffectiveModel) <$> childSession)
+                ((.subSessionEffectiveModel) <$> parentSession)
+                (fromMaybe "" rootParams.model) >>= \case
+                    Left err -> pure (Left (LoopUnexpected err))
+                    Right target -> do
+                        session <- lookupOrCreateSubagentSession
+                            runtime.subagentSessions
+                            runtime.subagentStoreRoot
+                            runtime.subagentTypes
+                            target.collaborationTargetProvider
+                            target.collaborationTargetConnection
+                            runtime.subagentLegacyTarget
+                            target.collaborationTargetEffectiveModel
+                            target.collaborationTargetDialect
+                            env.subId
+                        case activeSubagentTargetError
+                                target.collaborationTargetProvider
+                                target.collaborationTargetConnection
+                                target.collaborationTargetEffectiveModel
+                                session of
+                            Just err -> pure (Left (LoopUnexpected err))
+                            Nothing ->
+                                runner target
+                                    runtime
+                                        { subagentConnection =
+                                            target.collaborationTargetConnection
+                                        , subagentMapModel = id
+                                        }
+                                    env previous prompt onEvent
+
+runXaiSubagent
+    :: SubagentRuntime
+    -> Dialect
+    -> Maybe (InterAgentMessage -> IO (Either Text Text))
+    -> (ResponseCreateParams -> Int)
+    -> (ResponseCreateParams -> Int)
+    -> (ResponseCreateParams -> Backend)
+    -> RunSubagent
+runXaiSubagent runtime dialect sendToRoot contextWindowFor compactThresholdFor
+        makeBackend =
+    runHttpSubagentWith
+        runtime dialect XAIProvider sendToRoot makeBackend
+        (compactXaiChildBackend contextWindowFor compactThresholdFor makeBackend)
+
 -- | XAI parent runner: Grok children stay on xAI; Luna and its descendants
 -- use Codex/OpenAI.
 runXaiParentSubagent
@@ -493,16 +592,13 @@ runXaiParentSubagent
                         prompt
                         onEvent
             else
-                runHttpSubagentWith
+                runXaiSubagent
                     runtime
                     dialect
-                    XAIProvider
                     sendToRoot
+                    contextWindowFor
+                    compactThresholdFor
                     mkBackend
-                    (compactXaiChildBackend
-                        contextWindowFor
-                        compactThresholdFor
-                        mkBackend)
                     env
                     previous
                     prompt
