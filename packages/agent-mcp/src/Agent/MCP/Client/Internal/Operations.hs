@@ -522,7 +522,18 @@ completeMcpArgument client ref argumentName partial context = do
 -- * Tools
 
 appToolFor :: McpClient -> McpTool -> AppTool
-appToolFor client tool = AppTool
+appToolFor client =
+    appToolForArtifactDirectory client.clientHooks.mcpHostArtifactDirectory client
+
+-- | Project a discovered tool into one caller-owned artifact directory.
+-- Fleets can outlive sessions, so the destination belongs to the projected
+-- handler rather than the cached client.
+appToolForArtifactDirectory
+    :: Maybe FilePath
+    -> McpClient
+    -> McpTool
+    -> AppTool
+appToolForArtifactDirectory artifactDirectory client tool = AppTool
     { appToolName = qualifiedName
     , appToolDescription = describeTool tool
     -- Tool schemas enter the legacy Aeson-valued tool API here. Their wire
@@ -543,6 +554,7 @@ appToolFor client tool = AppTool
                         -- appended to the text already shown for this call.
                         shown <- newIORef Text.empty
                         callDiscoveredToolWith
+                            artifactDirectory
                             client
                             tool
                             arguments
@@ -622,26 +634,37 @@ qualifiedMcpToolName serverName toolName =
 
 callDiscoveredTool :: McpClient -> McpTool -> RawJson -> IO (Either Text Text)
 callDiscoveredTool client tool arguments =
-    callDiscoveredToolWith client tool arguments Nothing
+    callDiscoveredToolWith
+        client.clientHooks.mcpHostArtifactDirectory
+        client
+        tool
+        arguments
+        Nothing
 
 callDiscoveredToolWith
-    :: McpClient
+    :: Maybe FilePath
+    -> McpClient
     -> McpTool
     -> RawJson
     -> Maybe (McpProgress -> IO ())
     -> IO (Either Text Text)
-callDiscoveredToolWith client tool arguments _
+callDiscoveredToolWith artifactDirectory client tool arguments _
     | McpClientInMemory server _ <- client.clientTransport = do
         state <- readTVarIO client.clientLifecycle
         case state of
             ClientClosed -> pure (Left "MCP server closed")
             _ -> do
                 outcome <- tryAny $
-                    server.toolServerCallTool (McpCallToolRequest tool.discoveredName arguments Nothing)
+                    server.toolServerCallTool
+                        (McpCallToolRequest
+                            tool.discoveredName
+                            arguments
+                            Nothing
+                            artifactDirectory)
                 pure $ case outcome of
                     Left _ -> Left "Internal MCP tool error"
                     Right result -> either (Left . renderMcpError) renderInMemoryToolResult result
-callDiscoveredToolWith client tool arguments onProgress = do
+callDiscoveredToolWith artifactDirectory client tool arguments onProgress = do
     let parameters =
             "name" .= tool.discoveredName
                 <> AesonEncoding.pair "arguments" (rawJsonEncoding arguments)
@@ -656,7 +679,7 @@ callDiscoveredToolWith client tool arguments onProgress = do
         Left err -> pure (Left (renderMcpError err))
         Right result -> case normalizeMcpToolResult result of
             Left err -> pure (Left err)
-            Right rendered -> case client.clientHooks.mcpHostArtifactDirectory of
+            Right rendered -> case artifactDirectory of
                 Nothing -> pure (Right rendered)
                 Just directory ->
                     materializeArtifacts directory

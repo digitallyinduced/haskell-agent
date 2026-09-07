@@ -20,7 +20,7 @@ library
     hs-source-dirs: src
     exposed-modules: Agent.Integration.API
     build-depends: base >= 4.17 && < 5, agent-core, agent-json, agent-mcp,
-                   aeson, directory, filepath, safe-exceptions, temporary, text
+                   aeson, text
 
 test-suite agent-integration-api-test
     import: options
@@ -28,5 +28,5 @@ test-suite agent-integration-api-test
     hs-source-dirs: test
     main-is: Spec.hs
     build-depends: base >= 4.17 && < 5, agent-integration-api, agent-core,
-                   agent-mcp, async, directory, filepath, hspec >= 2.11 && < 2.12,
+                   agent-mcp, async, filepath, hspec >= 2.11 && < 2.12,
                    safe-exceptions, temporary

@@ -30,7 +30,6 @@ import Agent.Integration.API
     , newIntegrationSupervisor
     , IntegrationProvider
     , emptyIntegrationProvider
-    , integrationSupervisorArtifactDirectory
     )
 import Agent.Runtime.StartupPolicy
     ( NativeStartupPolicy(..)
@@ -97,8 +96,6 @@ newNativeProcessRuntimeWithIntegrations provider root = mask \restore -> do
         restore (newIntegrationSupervisor provider integrationToolEnv)
     core <- restore (NativeProcess.newNativeProcessRuntimeWithMcpHooks
         MCP.defaultMcpHostHooks
-            { MCP.mcpHostArtifactDirectory =
-                Just (integrationSupervisorArtifactDirectory integrations) }
         root) `onException` closeIntegrationSupervisor integrations
     pure NativeProcessRuntime
         { nativeProcessCore = core

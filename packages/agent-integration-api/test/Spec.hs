@@ -2,11 +2,10 @@ module Main (main) where
 
 import Agent.Integration.API
 import Agent.MCP (McpServerConfig(..), McpProtocolPreference(..))
-import Agent.Tools.Types (ToolEnv(..), defaultToolEnv)
+import Agent.Tools.Types (ToolEnv, defaultToolEnv)
 import Control.Concurrent.Async (mapConcurrently_)
 import Control.Exception.Safe (bracket)
-import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
-import System.Directory.OsPath (doesDirectoryExist)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
@@ -28,7 +27,7 @@ main = hspec do
                             Right runtime -> case integrationRuntimeEndpoint runtime of
                                 RemoteIntegrationEndpoint config -> config `shouldBe` remoteConfig
                                 _ -> expectationFailure "wrong endpoint authority"
-        it "removes scratch even when provider cleanup fails" $
+        it "closes idempotently even when provider cleanup fails" $
             withEnvironment \env -> do
                 let provider toolEnv = emptyIntegrationProvider toolEnv >>= \case
                         Left err -> pure (Left err)
@@ -37,8 +36,6 @@ main = hspec do
                 supervisor <- newIntegrationSupervisor provider env
                 _ <- acquireIntegrationRuntime supervisor LocalIntegrationAuthority
                 closeIntegrationSupervisor supervisor `shouldThrow` anyIOException
-                doesDirectoryExist (unsafeEncodeUtf
-                    (integrationSupervisorArtifactDirectory supervisor)) `shouldReturn` False
                 closeIntegrationSupervisor supervisor
         it "shares one local runtime and closes it exactly once" $
             withEnvironment \env -> do
@@ -62,24 +59,6 @@ main = hspec do
                 case acquired of
                     Left _ -> pure ()
                     Right _ -> expectationFailure "closed supervisor accepted acquisition"
-        it "authorizes its stable scratch root without redirecting session writes" $
-            withEnvironment \env ->
-                bracket
-                    (newIntegrationSupervisor emptyIntegrationProvider env)
-                    closeIntegrationSupervisor \supervisor -> do
-                        session <- defaultToolEnv (unsafeEncodeUtf ".")
-                        writeIORef session.toolSessionTmp (Just (unsafeEncodeUtf "session-only"))
-                        prepareIntegrationSupervisorForSession supervisor session
-                        readIORef session.toolSessionTmp
-                            `shouldReturn` Just (unsafeEncodeUtf "session-only")
-                        root <- readIORef env.toolSessionTmp
-                        roots <- readIORef session.toolAllowedRoots
-                        case root of
-                            Nothing -> expectationFailure "missing process scratch"
-                            Just path -> do
-                                roots `shouldContain` [path]
-                                closeIntegrationSupervisor supervisor
-                                doesDirectoryExist path `shouldReturn` False
         it "does not let a failed local provider affect remote acquisition" $
             withEnvironment \env ->
                 bracket

@@ -1207,12 +1207,16 @@ spec = describe "Agent.MCP" do
         withDistinctWorkingDirectories \directory _ ->
             withCountingServer artifactFakeServer \script log -> do
                 setFileMode directory 0o700
-                let hooks = defaultMcpHostHooks { mcpHostArtifactDirectory = Just directory }
                 bracket
-                    (startMcpFleetWithProgressHooks hooks (const (pure ()))
+                    (startMcpFleetWithProgressHooks defaultMcpHostHooks (const (pure ()))
                         [(baseConfig "artifacts" script) { mcpServerArgs = [log] }])
                     closeMcpFleet \fleet -> do
-                        result <- callFleetTool fleet "artifacts__download" "{}"
+                        result <- callFleetTools
+                            (mcpFleetToolsForArtifactDirectory
+                                (Just directory)
+                                fleet)
+                            "artifacts__download"
+                            "{}"
                         result.output `shouldSatisfy` Text.isInfixOf "[artifact] "
                         files <- listDirectory directory
                         length files `shouldBe` 1
@@ -1766,9 +1770,13 @@ schemaTool properties = McpTool
 
 callFleetTool :: McpFleet -> Text.Text -> Text.Text -> IO ToolCallResult
 callFleetTool fleet name arguments =
+    callFleetTools (mcpFleetTools fleet) name arguments
+
+callFleetTools :: [AppTool] -> Text.Text -> Text.Text -> IO ToolCallResult
+callFleetTools tools name arguments =
     dispatchToolCall
         defaultLoopDispatch
-        (appToolHandlers (mcpFleetTools fleet))
+        (appToolHandlers tools)
         (functionToolCall "call" name arguments)
 
 dispatchApprovedTool :: [AppTool] -> ToolCall -> IO ToolCallResult

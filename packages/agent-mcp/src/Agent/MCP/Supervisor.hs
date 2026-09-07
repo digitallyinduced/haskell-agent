@@ -4,6 +4,8 @@ module Agent.MCP.Supervisor
     , acquireMcpFleet
     , acquireMcpFleetWithProgress
     , acquireMcpFleetProgressive
+    , acquireMcpFleetWithInMemory
+    , acquireMcpFleetProgressiveWithInMemory
     , acquireMcpFleetWith
     , releaseMcpFleetLease
     , closeMcpSupervisor
@@ -18,6 +20,8 @@ import Agent.MCP.Fleet
     , resolveEffectiveCwds
     , sameServerConfigs
     , startMcpFleetProgressiveHooks
+    , startMcpFleetProgressiveWithInMemoryHooks
+    , startMcpFleetWithInMemory
     , startMcpFleetWithProgressHooks
     )
 import Agent.MCP.Types
@@ -53,6 +57,7 @@ import Data.IORef
 import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import GHC.StableName (StableName, makeStableName)
 
 newMcpSupervisor :: IO McpSupervisor
 newMcpSupervisor = newMcpSupervisorWith defaultMcpHostHooks
@@ -98,10 +103,64 @@ acquireMcpFleetProgressive supervisor report configs =
     resolveEffectiveCwds configs >>= acquireMcpFleetWith supervisor True
         (startMcpFleetProgressiveHooks supervisor.supervisorHooks report)
 
+acquireMcpFleetWithInMemory
+    :: McpSupervisor
+    -> ([Text] -> IO ())
+    -> [McpServerConfig]
+    -> [(McpServerConfig, McpToolServer)]
+    -> IO McpFleetLease
+acquireMcpFleetWithInMemory supervisor report external inMemory = do
+    resolvedExternal <- resolveEffectiveCwds external
+    resolvedConfigs <- resolveEffectiveCwds (map fst inMemory)
+    let resolvedInMemory = zip resolvedConfigs (map snd inMemory)
+        configs = resolvedExternal <> resolvedConfigs
+    identities <- mapM
+        (\(_, server) -> makeStableName $! server)
+        resolvedInMemory
+    acquireMcpFleetWithIdentity
+        supervisor
+        False
+        identities
+        (const
+            (startMcpFleetWithInMemory
+                supervisor.supervisorHooks
+                report
+                resolvedExternal
+                resolvedInMemory))
+        configs
+
+acquireMcpFleetProgressiveWithInMemory
+    :: McpSupervisor
+    -> ([McpServerStatus] -> IO ())
+    -> [McpServerConfig]
+    -> [(McpServerConfig, McpToolServer)]
+    -> IO McpFleetLease
+acquireMcpFleetProgressiveWithInMemory
+    supervisor report external inMemory = do
+        resolvedExternal <- resolveEffectiveCwds external
+        resolvedConfigs <- resolveEffectiveCwds (map fst inMemory)
+        let resolvedInMemory = zip resolvedConfigs (map snd inMemory)
+            configs = resolvedExternal <> resolvedConfigs
+        identities <- mapM
+            (\(_, server) -> makeStableName $! server)
+            resolvedInMemory
+        acquireMcpFleetWithIdentity
+            supervisor
+            True
+            identities
+            (const
+                (startMcpFleetProgressiveWithInMemoryHooks
+                    supervisor.supervisorHooks
+                    report
+                    resolvedExternal
+                    resolvedInMemory))
+            configs
+
 data McpAcquireRequest = McpAcquireRequest
     { acquireProgressive :: Bool
     , acquireStart :: [McpServerConfig] -> IO McpFleet
     , acquireConfigs :: [McpServerConfig]
+    , acquireInMemoryIdentities :: ![StableName McpToolServer]
     }
 
 data McpAcquirePlan = McpAcquirePlan
@@ -116,11 +175,23 @@ acquireMcpFleetWith
     -> [McpServerConfig]
     -> IO McpFleetLease
 acquireMcpFleetWith supervisor progressive start configs =
+    acquireMcpFleetWithIdentity supervisor progressive [] start configs
+
+acquireMcpFleetWithIdentity
+    :: McpSupervisor
+    -> Bool
+    -> [StableName McpToolServer]
+    -> ([McpServerConfig] -> IO McpFleet)
+    -> [McpServerConfig]
+    -> IO McpFleetLease
+acquireMcpFleetWithIdentity
+    supervisor progressive identities start configs =
   mask \restore -> do
     let request = McpAcquireRequest
             { acquireProgressive = progressive
             , acquireStart = start
             , acquireConfigs = configs
+            , acquireInMemoryIdentities = identities
             }
     plan <- prepareMcpAcquire supervisor request
     case plan.acquireDecision of
@@ -220,6 +291,8 @@ preparePendingMcpAcquire request state healthyEntries failedIdle =
                     , supervisorPendingProgressive =
                         request.acquireProgressive
                     , supervisorPendingConfigs = request.acquireConfigs
+                    , supervisorPendingInMemoryIdentities =
+                        request.acquireInMemoryIdentities
                     , supervisorPendingResult = completion
                     , supervisorPendingWorker = workerSlot
                     , supervisorPendingLeases = 1
@@ -349,7 +422,10 @@ findPendingMcpAcquire request = go
             == request.acquireProgressive
         , sameServerConfigs
             pending.supervisorPendingConfigs request.acquireConfigs =
-            Just pending
+            if pending.supervisorPendingInMemoryIdentities
+                == request.acquireInMemoryIdentities
+                then Just pending
+                else go rest
         | otherwise = go rest
 
 replaceMcpPending
@@ -416,6 +492,8 @@ publishMcpPending supervisor request entryId completion fleet =
                                 request.acquireProgressive
                             , supervisorEntryConfigs =
                                 request.acquireConfigs
+                            , supervisorEntryInMemoryIdentities =
+                                request.acquireInMemoryIdentities
                             , supervisorEntryFleet = fleet
                             , supervisorEntryLeases =
                                 pending.supervisorPendingLeases
@@ -446,7 +524,9 @@ findMatchingMcpEntry request = go
         | entry.supervisorEntryProgressive /= request.acquireProgressive
             || not
                 (sameServerConfigs
-                    entry.supervisorEntryConfigs request.acquireConfigs) =
+                    entry.supervisorEntryConfigs request.acquireConfigs)
+            || entry.supervisorEntryInMemoryIdentities
+                /= request.acquireInMemoryIdentities =
                 go rest
         | otherwise = do
             statuses <- mcpFleetStatuses entry.supervisorEntryFleet
