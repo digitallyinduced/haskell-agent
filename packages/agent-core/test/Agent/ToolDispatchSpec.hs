@@ -104,6 +104,29 @@ spec = describe "dispatchToolCall" do
             _ <- dispatchToolCall testConfig [handler] call
             readIORef observed `shouldReturn` [True, False, False]
 
+        it "preserves default and approved authorization through handler wrappers" do
+            observed <- newIORef []
+            wrappedCalls <- newIORef []
+            let handler = typedAuthorizedStreamingRichTool "echo" echoArgsDecoder $
+                    \authorization _ args -> do
+                        approved <- case authorization of
+                            Nothing -> pure False
+                            Just capability -> consumeToolInvocationAuthorization capability
+                        modifyIORef' observed (<> [approved])
+                        pure (Right (ToolHandlerResult args.message []))
+                wrapped = wrapToolHandler
+                    (\call run -> modifyIORef' wrappedCalls (<> [call]) >> run)
+                    handler
+                call = functionToolCall "wrapped-authorization" "echo" "{\"message\":\"done\"}"
+            handlerName wrapped `shouldBe` "echo"
+            defaultResult <- dispatchToolCall testConfig [wrapped] call
+            approvedResult <- dispatchApprovedToolHandler testConfig (Just wrapped) call
+            nextResult <- dispatchToolCall testConfig [wrapped] call
+            map (.output) [defaultResult, approvedResult, nextResult]
+                `shouldBe` ["done", "done", "done"]
+            readIORef observed `shouldReturn` [False, True, False]
+            readIORef wrappedCalls `shouldReturn` [call, call, call]
+
         it "expires retained authority when the approved invocation ends" do
             retained <- newIORef Nothing
             let handler = typedAuthorizedStreamingRichTool "echo" echoArgsDecoder $

@@ -370,11 +370,13 @@ wrapToolHandler
         -> IO (Either Text ToolHandlerResult))
     -> ToolHandler
     -> ToolHandler
-wrapToolHandler wrap handler =
-    handler
-        { toolHandlerRun = \emit call input ->
-            wrap call (handler.toolHandlerRun emit call input)
-        }
+wrapToolHandler wrap = \case
+    ToolHandler name run ->
+        ToolHandler name \emit call input ->
+            wrap call (run emit call input)
+    AuthorizedToolHandler name run ->
+        AuthorizedToolHandler name \authorization emit call input ->
+            wrap call (run authorization emit call input)
 
 typedTool :: Text -> Decoder args -> (args -> IO (Either Text Text)) -> ToolHandler
 typedTool name decoder run =
