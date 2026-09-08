@@ -1195,8 +1195,8 @@ emitInitialEvents backend boundary subscription write flush = do
             else pure True
     if not resetOk
         then pure False
-        else
-            foldM
+        else do
+            replayOk <- foldM
                 (\continue event ->
                     if not continue
                         then pure False
@@ -1211,6 +1211,17 @@ emitInitialEvents backend boundary subscription write flush = do
                                     flush)
                 True
                 subscription.subscriptionReplay
+            if replayOk
+                -- A quiet subscription must flush its response before waiting
+                -- for live events or the first 15-second keepalive. A comment
+                -- opens the transport without changing the replay cursor.
+                then emitUnderBoundary
+                    backend
+                    boundary
+                    (byteString ": connected\n\n")
+                    write
+                    flush
+                else pure False
 
 eventLoop
     :: Backend
