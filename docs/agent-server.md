@@ -211,6 +211,13 @@ curl -X POST \
   -d '{"input":"Inspect this project and run its focused tests."}'
 ```
 
+Human requests retain their complete prompt and options, including plaintext
+tool arguments and plans (encrypted arguments remain redacted). Requests
+exceeding 64 KiB of encoded JSON or 100 options
+are rejected rather than truncated: approving a preview must not authorize
+an unseen suffix. Tool/plan approval adapters fail closed when such a request
+cannot be published.
+
 Watch lifecycle, streaming, tool, and approval events:
 
 ```console

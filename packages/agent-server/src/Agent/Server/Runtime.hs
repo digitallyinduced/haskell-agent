@@ -1409,13 +1409,13 @@ requestToolApproval control call =
         { humanRequestSpecKind = ToolApprovalRequest
         , humanRequestSpecPrompt =
             "Allow mutating tool "
-                <> fst (boundedPublicText call.name)
+                <> call.name
                 <> " (call "
-                <> fst (boundedPublicText call.callId)
+                <> call.callId
                 <> ")?\nArguments: "
                 <> if call.argumentsEncrypted
                     then "<encrypted>"
-                    else fst (boundedPublicText call.arguments)
+                    else call.arguments
         , humanRequestSpecOptions =
             [ "allow_once"
             , "allow_tool"
@@ -1467,8 +1467,7 @@ planHooks control = PlanModeHooks
     , planDecideExit = \planBody ->
         control.turnControlRequestInput HumanRequestSpec
             { humanRequestSpecKind = PlanExitRequest
-            , humanRequestSpecPrompt =
-                fst (boundedPublicText planBody)
+            , humanRequestSpecPrompt = planBody
             , humanRequestSpecOptions =
                 ["approve", "request_changes", "cancel"]
             } >>= \case

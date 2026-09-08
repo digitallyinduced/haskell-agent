@@ -1605,17 +1605,9 @@ requestTurnInput supervisor turnId spec requestSpec =
         now <- getCurrentTime
         requestId <- RequestId <$> newUUIDv7Text
         reply <- atomically newEmptyTMVar
-        let boundedRequestSpec = HumanRequestSpec
-                { humanRequestSpecKind =
-                    requestSpec.humanRequestSpecKind
-                , humanRequestSpecPrompt =
-                    boundedSupervisorText
-                        requestSpec.humanRequestSpecPrompt
-                , humanRequestSpecOptions =
-                    map boundedSupervisorText
-                        (take 100 requestSpec.humanRequestSpecOptions)
-                }
-            request = HumanRequest
+        -- Approval text is authorization data, not a log preview. Never
+        -- truncate it: the omitted suffix can change what is being approved.
+        let request = HumanRequest
                 { humanRequestId = requestId
                 , humanRequestTurnId = turnId
                 , humanRequestSessionId =
@@ -1623,15 +1615,17 @@ requestTurnInput supervisor turnId spec requestSpec =
                 , humanRequestBoundary =
                     spec.turnSpecBoundary
                 , humanRequestKind =
-                    boundedRequestSpec.humanRequestSpecKind
+                    requestSpec.humanRequestSpecKind
                 , humanRequestPrompt =
-                    boundedRequestSpec.humanRequestSpecPrompt
+                    requestSpec.humanRequestSpecPrompt
                 , humanRequestOptions =
-                    boundedRequestSpec.humanRequestSpecOptions
+                    requestSpec.humanRequestSpecOptions
                 , humanRequestCreatedAt = now
                 }
-        if LazyByteString.length (encode request)
-            > maximumHumanRequestBytes
+        if length (take 101 requestSpec.humanRequestSpecOptions) > 100
+            || LazyByteString.length
+                (LazyByteString.take (maximumHumanRequestBytes + 1) (encode request))
+                > maximumHumanRequestBytes
             then
                 pure
                     ( Left
