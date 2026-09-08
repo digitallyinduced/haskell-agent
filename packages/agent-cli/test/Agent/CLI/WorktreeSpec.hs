@@ -3,6 +3,7 @@ module Agent.CLI.WorktreeSpec (spec) where
 import Agent.CLI.Config
 import Agent.CLI.Worktree
 import Agent.CLI.Worktree.Registry
+import qualified Agent.CLI.Worktree.Snapshot as Snapshot
 import Control.Concurrent.Async (mapConcurrently)
 import Control.Exception.Safe (bracket)
 import Control.Monad (void)
@@ -436,24 +437,26 @@ spec = describe "Agent.CLI.Worktree" do
     describe "merged worktree inactivity" do
         it "uses the exact inclusive 24-hour inactivity boundary for incorporated HEADs" do
             now <- getCurrentTime
-            worktreeInactive 7 True now (addUTCTime (-86400 + 0.001) now) `shouldBe` False
-            worktreeInactive 7 True now (addUTCTime (-86400) now) `shouldBe` True
-            worktreeInactive 7 True now (addUTCTime (-86400 - 0.001) now) `shouldBe` True
-            worktreeInactive 7 True now (addUTCTime 1 now) `shouldBe` False
+            worktreeInactive 1 True now (addUTCTime (-86400 + 0.001) now) `shouldBe` False
+            worktreeInactive 1 True now (addUTCTime (-86400) now) `shouldBe` True
+            worktreeInactive 1 True now (addUTCTime (-86400 - 0.001) now) `shouldBe` True
+            worktreeInactive 1 True now (addUTCTime 1 now) `shouldBe` False
+            worktreeInactive 0 True now (addUTCTime (-3600) now) `shouldBe` False
 
-        it "uses configured inactivity for unproven HEADs without a commit-date clock" do
+        it "never expires unproven HEADs and honors longer configured inactivity" do
             now <- getCurrentTime
             worktreeInactive 7 False now (addUTCTime (-86400) now) `shouldBe` False
             worktreeInactive 7 False now (addUTCTime (-7 * 86400 + 0.001) now) `shouldBe` False
-            worktreeInactive 7 False now (addUTCTime (-7 * 86400) now) `shouldBe` True
+            worktreeInactive 7 False now (addUTCTime (-30 * 86400) now) `shouldBe` False
             worktreeInactive 14 False now (addUTCTime (-8 * 86400) now) `shouldBe` False
-            worktreeInactive 14 True now (addUTCTime (-86400) now) `shouldBe` True
+            worktreeInactive 14 True now (addUTCTime (-86400) now) `shouldBe` False
+            worktreeInactive 14 True now (addUTCTime (-14 * 86400) now) `shouldBe` True
 
         mapM_ (\branch ->
             it ("recognizes a normal merge into the resolved " <> branch <> " default branch") $
                 withMergedWorktree branch \_ root path -> do
                     activity <- savedActivityDaysAgo path 2
-                    report <- gcWorktreesWithActivity activity root 7 True []
+                    report <- gcWorktreesWithActivity activity root 1 True []
                     map fst report.cleanupEligible `shouldBe` [path]
                     report.cleanupRetained `shouldBe` []
                     readRecord root path `shouldReturn` Right Nothing
@@ -463,41 +466,41 @@ spec = describe "Agent.CLI.Worktree" do
             withMergedWorktree "main" \_ root path -> do
                 now <- getCurrentTime
                 let activity = pure (Right (Map.singleton path (Right (addUTCTime (-23 * 3600) now))))
-                report <- gcWorktreesWithActivity activity root 7 True []
+                report <- gcWorktreesWithActivity activity root 1 True []
                 report.cleanupEligible `shouldBe` []
-                report.cleanupRetained `shouldBe` [(path, "recent activity")]
+                map fst report.cleanupRetained `shouldBe` [path]
 
-        it "new commits after the merged head disqualify the short expiry" $
+        it "new commits after the merged head prevent collection" $
             withMergedWorktree "main" \_ root path -> do
                 _ <- git path ["commit", "--allow-empty", "-m", "after merge"]
                 activity <- savedActivityDaysAgo path 2
-                report <- gcWorktreesWithActivity activity root 7 True []
+                report <- gcWorktreesWithActivity activity root 1 True []
                 report.cleanupEligible `shouldBe` []
-                report.cleanupRetained `shouldBe` [(path, "recent activity")]
+                map fst report.cleanupRetained `shouldBe` [path]
 
-        it "an absent default-branch target keeps the normal expiry" $
+        it "accepts incorporation into a surviving local branch without a remote target" $
             withMergedWorktree "main" \repo root path -> do
                 _ <- git repo ["update-ref", "-d", "refs/remotes/origin/main"]
                 activity <- savedActivityDaysAgo path 2
-                report <- gcWorktreesWithActivity activity root 7 True []
-                report.cleanupEligible `shouldBe` []
-                report.cleanupRetained `shouldBe` [(path, "recent activity")]
+                report <- gcWorktreesWithActivity activity root 1 True []
+                map fst report.cleanupEligible `shouldBe` [path]
+                report.cleanupRetained `shouldBe` []
 
-        it "does not guess a default branch from local branch names" $
+        it "accepts incorporation into another branch without a default-branch symbolic ref" $
             withMergedWorktree "master" \repo root path -> do
                 _ <- git repo ["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]
                 activity <- savedActivityDaysAgo path 2
-                report <- gcWorktreesWithActivity activity root 7 True []
-                report.cleanupEligible `shouldBe` []
-                report.cleanupRetained `shouldBe` [(path, "recent activity")]
+                report <- gcWorktreesWithActivity activity root 1 True []
+                map fst report.cleanupEligible `shouldBe` [path]
+                report.cleanupRetained `shouldBe` []
 
-        it "keeps the normal expiry when legacy grafts make ancestry uncertain" $
+        it "retains work when legacy grafts make ancestry uncertain" $
             withMergedWorktree "main" \repo root path -> do
                 writeFile (toFilePath (repo </> fromFilePath ".git/info/grafts")) ""
                 activity <- savedActivityDaysAgo path 2
-                report <- gcWorktreesWithActivity activity root 7 True []
+                report <- gcWorktreesWithActivity activity root 1 True []
                 report.cleanupEligible `shouldBe` []
-                report.cleanupRetained `shouldBe` [(path, "recent activity")]
+                map fst report.cleanupRetained `shouldBe` [path]
 
         it "does not mistake squash-equivalent content for an incorporated HEAD" $
             withTempGitRepo \repo ->
@@ -512,14 +515,15 @@ spec = describe "Agent.CLI.Worktree" do
                 _ <- git repo ["commit", "-m", "squashed feature"]
                 configureDefaultRef repo "main"
                 activity <- savedActivityDaysAgo path 2
-                report <- gcWorktreesWithActivity activity root 7 True []
+                report <- gcWorktreesWithActivity activity root 1 True []
                 report.cleanupEligible `shouldBe` []
-                report.cleanupRetained `shouldBe` [(path, "recent activity")]
+                map fst report.cleanupRetained `shouldBe` [path]
                 oldActivity <- savedActivityDaysAgo path 8
                 oldReport <- gcWorktreesWithActivity oldActivity root 7 True []
-                map fst oldReport.cleanupEligible `shouldBe` [path]
+                oldReport.cleanupEligible `shouldBe` []
+                map fst oldReport.cleanupRetained `shouldBe` [path]
 
-        it "snapshots dirty merged checkouts before collecting at two days" $
+        it "retains dirty merged checkouts instead of snapshotting them" $
             withMergedWorktree "main" \_ root path -> do
                 let file name = toFilePath (path </> fromFilePath name)
                 writeFile (file "README") "staged\n"
@@ -530,20 +534,20 @@ spec = describe "Agent.CLI.Worktree" do
                 writeFile (file "cache") "discarded\n"
                 headBefore <- git path ["rev-parse", "HEAD"]
                 activity <- savedActivityDaysAgo path 2
-                report <- gcWorktreesWithActivity activity root 7 False []
-                report.cleanupRemoved `shouldBe` [path]
-                restoreManagedWorktree root path `shouldReturn` Right ()
+                report <- gcWorktreesWithActivity activity root 1 False []
+                report.cleanupRemoved `shouldBe` []
+                map fst report.cleanupRetained `shouldBe` [path]
                 git path ["rev-parse", "HEAD"] `shouldReturn` headBefore
                 git path ["show", ":README"] `shouldReturn` "staged"
                 readFile (file "README") `shouldReturn` "unstaged\n"
                 readFile (file "notes") `shouldReturn` "untracked\n"
-                Directory.doesFileExist (file "cache") `shouldReturn` False
+                Directory.doesFileExist (file "cache") `shouldReturn` True
 
         it "keeps active merged checkouts even after 24 hours" $
             withMergedWorktree "main" \_ root path -> do
                 activity <- savedActivityDaysAgo path 2
                 bracket (acquireWorktreeLease root path) releaseLease $ \_ -> do
-                    report <- gcWorktreesWithActivity activity root 7 True []
+                    report <- gcWorktreesWithActivity activity root 1 True []
                     report.cleanupEligible `shouldBe` []
                     map snd report.cleanupRetained `shouldSatisfy` any (Text.isInfixOf "existing lock is busy")
                 doesDirectoryExist path `shouldReturn` True
@@ -557,7 +561,7 @@ spec = describe "Agent.CLI.Worktree" do
                     `shouldReturn` Right ()
                 protectWorktree root path True `shouldReturn` Right ()
                 activity <- savedActivityDaysAgo path 2
-                report <- gcWorktreesWithActivity activity root 7 False []
+                report <- gcWorktreesWithActivity activity root 1 False []
                 report.cleanupRemoved `shouldBe` []
                 report.cleanupRetained `shouldBe` [(path, "protected")]
 
@@ -573,13 +577,28 @@ spec = describe "Agent.CLI.Worktree" do
                                 then void (git path ["commit", "--allow-empty", "-m", "concurrent new commit"])
                                 else pure ()
                             saved
-                    report <- gcWorktreesWithActivity activity root 7 False []
+                    report <- gcWorktreesWithActivity activity root 1 False []
                     report.cleanupRemoved `shouldBe` []
-                    report.cleanupRetained `shouldBe` [(path, "recent activity")]
+                    map fst report.cleanupRetained `shouldBe` [path]
                     doesDirectoryExist path `shouldReturn` True
             ) [2, 3]
 
-    describe "snapshot-backed worktree GC" do
+        it "retains files that appear after recovery preservation" $
+            withMergedWorktree "main" \_ root path -> do
+                saved <- savedActivityDaysAgo path 2
+                reads <- newIORef (0 :: Int)
+                let file = toFilePath (path </> fromFilePath "concurrent-notes")
+                    activity = do
+                        modifyIORef' reads (+1)
+                        count <- readIORef reads
+                        if count == 3 then writeFile file "preserve concurrent work\n" else pure ()
+                        saved
+                report <- gcWorktreesWithActivity activity root 1 False []
+                report.cleanupRemoved `shouldBe` []
+                map fst report.cleanupRetained `shouldBe` [path]
+                readFile file `shouldReturn` "preserve concurrent work\n"
+
+    describe "merged-only worktree GC and legacy recovery" do
         it "simulates verified legacy adoption without registry or lock writes" $
             withTempGitRepo \repo ->
             withTempDir "agent-home-" \home -> do
@@ -587,8 +606,7 @@ spec = describe "Agent.CLI.Worktree" do
                 path <- addManagedWorktree repo root "2026-08-20-00000001"
                 now <- getCurrentTime
                 let activity = pure (Right (Map.singleton path (Right (addUTCTime (-8 * 86400) now))))
-                writeFile (toFilePath (path </> fromFilePath ".gitignore")) "cache\n"
-                writeFile (toFilePath (path </> fromFilePath "cache")) (replicate 10000 'x')
+                addIgnoredBuildDirectory repo path
                 before <- git repo ["show-ref"]
                 report <- gcWorktreesWithActivity activity root 7 True []
                 report.cleanupRetained `shouldBe` []
@@ -601,7 +619,7 @@ spec = describe "Agent.CLI.Worktree" do
                 doesFileExist (repo </> fromFilePath ".git/haskell-agent-worktree.lock") `shouldReturn` False
                 git repo ["show-ref"] `shouldReturn` before
 
-        it "adopts and collects legacy dirty work with its original activity and restores it" $
+        it "retains legacy dirty work without adopting or modifying it" $
             withTempGitRepo \repo ->
             withTempDir "agent-home-" \home -> do
                 let root = worktreeRoot home
@@ -617,17 +635,13 @@ spec = describe "Agent.CLI.Worktree" do
                 writeFile (file ".gitignore") "cache\n"
                 writeFile (file "cache") "excluded\n"
                 report <- gcWorktreesWithActivity activity root 7 False []
-                report.cleanupRemoved `shouldBe` [path]
-                readRecord root path >>= \case
-                    Right (Just record) -> do
-                        record.recordLastActivity `shouldBe` old
-                        record.recordState `shouldBe` "collected"
-                    other -> expectationFailure (show other)
-                restoreManagedWorktree root path `shouldReturn` Right ()
+                report.cleanupRemoved `shouldBe` []
+                map fst report.cleanupRetained `shouldBe` [path]
+                readRecord root path `shouldReturn` Right Nothing
                 git path ["show", ":README"] `shouldReturn` "staged"
                 readFile (file "README") `shouldReturn` "unstaged\n"
                 readFile (file "notes") `shouldReturn` "untracked\n"
-                Directory.doesFileExist (file "cache") `shouldReturn` False
+                Directory.doesFileExist (file "cache") `shouldReturn` True
 
         it "retains legacy unknown activity and recent session activity without adoption" $
             withTempGitRepo \repo ->
@@ -716,7 +730,7 @@ spec = describe "Agent.CLI.Worktree" do
                 restoreManagedWorktree root path `shouldReturn` Right ()
                 doesDirectoryExist path `shouldReturn` True
 
-        it "bounds eligible attempts even when every candidate fails preflight" $
+        it "bounds background eligible attempts even when activity revalidation fails" $
             withTempGitRepo \repo ->
             withTempDir "agent-home-" \home -> do
                 let root = worktreeRoot home
@@ -724,12 +738,50 @@ spec = describe "Agent.CLI.Worktree" do
                     path <- addManagedWorktree repo root ("2026-08-20-0000000" <> show n)
                     enrollWorktree root path `shouldReturn` Right ()
                     ageRecord root path
-                    _ <- git path ["update-index", "--assume-unchanged", "README"]
                     pure path) [1 :: Int .. 9]
-                report <- gcWorktrees root 7 False []
+                reads <- newIORef (0 :: Int)
+                let activity = do
+                        count <- readIORef reads
+                        modifyIORef' reads (+1)
+                        pure (if count == 0 then Right Map.empty else Left "activity unavailable")
+                report <- gcWorktreesWithActivity activity root 7 False []
                 report.cleanupRemoved `shouldBe` []
-                length (filter ((== "pass budget exhausted") . snd) report.cleanupRetained) `shouldBe` 1
+                length report.cleanupNotExamined `shouldBe` 1
                 mapM_ (\path -> doesDirectoryExist path `shouldReturn` True) paths
+
+        it "manual collection examines every candidate and reports progress beyond eight attempts" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                let root = worktreeRoot home
+                paths <- mapM (\number -> do
+                    path <- addManagedWorktree repo root ("2026-08-20-0000000" <> show number)
+                    enrollWorktree root path `shouldReturn` Right ()
+                    ageRecord root path
+                    pure path) [1 :: Int .. 9]
+                progress <- newIORef []
+                report <- gcWorktreesManuallyWithActivity
+                    (pure (Right Map.empty)) root 7 False []
+                    (\path -> modifyIORef' progress (path :))
+                report.cleanupRemoved `shouldMatchList` paths
+                report.cleanupNotExamined `shouldBe` []
+                report.cleanupFailures `shouldBe` []
+                readIORef progress >>= (`shouldMatchList` paths)
+
+        it "retains unique committed work even after the former seven-day expiry" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                let root = worktreeRoot home
+                path <- addManagedWorktree repo root "2026-08-20-00000001"
+                writeFile (toFilePath (path </> fromFilePath "unique")) "unmerged work\n"
+                _ <- git path ["add", "unique"]
+                _ <- git path ["commit", "-m", "Unmerged work"]
+                activity <- savedActivityDaysAgo path 30
+                report <- gcWorktreesWithActivity activity root 7 False []
+                report.cleanupRemoved `shouldBe` []
+                report.cleanupEligible `shouldBe` []
+                map fst report.cleanupRetained `shouldBe` [path]
+                readFile (toFilePath (path </> fromFilePath "unique"))
+                    `shouldReturn` "unmerged work\n"
 
         it "enrollment starts a fresh inactivity window" $
             withTempGitRepo \repo ->
@@ -770,13 +822,26 @@ spec = describe "Agent.CLI.Worktree" do
                 report <- gcWorktrees root 7 False []
                 report.cleanupRetained `shouldBe` [(path, "recent activity")]
 
+        it "collects merged clean checkouts containing only recognized ignored build output" $
+            withTempGitRepo \repo ->
+            withTempDir "agent-home-" \home -> do
+                let root = worktreeRoot home
+                path <- addManagedWorktree repo root "2026-08-20-00000001"
+                addIgnoredBuildDirectory repo path
+                enrollWorktree root path `shouldReturn` Right ()
+                ageRecord root path
+                report <- gcWorktrees root 7 False []
+                report.cleanupFailures `shouldBe` []
+                report.cleanupRetained `shouldBe` []
+                report.cleanupRemoved `shouldBe` [path]
+                doesDirectoryExist path `shouldReturn` False
+
         it "dry runs preserve refs, registry, index, and checkout while estimating ignored bytes" $
             withTempGitRepo \repo ->
             withTempDir "agent-home-" \home -> do
                 let root = worktreeRoot home
                 path <- addManagedWorktree repo root "2026-08-20-00000001"
-                writeFile (toFilePath (path </> fromFilePath ".gitignore")) "cache\n"
-                writeFile (toFilePath (path </> fromFilePath "cache")) (replicate 10000 'x')
+                addIgnoredBuildDirectory repo path
                 enrollWorktree root path `shouldReturn` Right ()
                 ageRecord root path
                 before <- readRecord root path
@@ -790,7 +855,7 @@ spec = describe "Agent.CLI.Worktree" do
                 git path ["status", "--porcelain"] `shouldReturn` status
                 doesDirectoryExist path `shouldReturn` True
 
-        it "collects dirty unique work and restores staged, unstaged and untracked files, not ignored data" $
+        it "restores a legacy snapshot with staged, unstaged and untracked files, not ignored data" $
             withTempGitRepo \repo ->
             withTempDir "agent-home-" \home -> do
                 let root = worktreeRoot home
@@ -809,9 +874,12 @@ spec = describe "Agent.CLI.Worktree" do
                 status <- git path ["status", "--porcelain", "--untracked-files=all"]
                 enrollWorktree root path `shouldReturn` Right ()
                 ageRecord root path
-                report <- gcWorktrees root 7 False []
-                report.cleanupRetained `shouldBe` []
-                report.cleanupRemoved `shouldBe` [path]
+                snapshot <- Snapshot.createSnapshot path >>= either
+                    (fail . Text.unpack) pure
+                modifyRecord root path (Right . fmap (\record ->
+                    record { recordSnapshot = Just snapshot, recordState = "collected" }))
+                    `shouldReturn` Right ()
+                _ <- git repo ["worktree", "remove", "--force", toFilePath path]
                 doesDirectoryExist path `shouldReturn` False
                 let originalBranch = toFilePath (takeFileName path)
                 _ <- git repo ["branch", "-f", originalBranch, "HEAD"]
@@ -957,6 +1025,16 @@ ageRecord root path = do
     modifyRecord root path (Right . fmap (\record ->
         record { recordLastActivity = addUTCTime (-8 * 86400) now }))
         `shouldReturn` Right ()
+
+addIgnoredBuildDirectory :: OsPath -> OsPath -> IO ()
+addIgnoredBuildDirectory repo path = do
+    writeFile (toFilePath (path </> fromFilePath ".gitignore")) "dist-newstyle/\n"
+    _ <- git path ["add", ".gitignore"]
+    _ <- git path ["commit", "-m", "Exclude generated build directory"]
+    _ <- git repo ["merge", "--ff-only", toFilePath (takeFileName path)]
+    let directory = path </> fromFilePath "dist-newstyle"
+    createDirectoryIfMissing True directory
+    writeFile (toFilePath (directory </> fromFilePath "output")) (replicate 10000 'x')
 
 releaseLease :: Either Text (Maybe WorktreeLease) -> IO ()
 releaseLease (Right (Just lease)) = releaseWorktreeLease lease

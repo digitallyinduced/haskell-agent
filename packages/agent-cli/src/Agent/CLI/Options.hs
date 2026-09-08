@@ -351,8 +351,8 @@ worktreeParser = Worktree <$> Options.hsubparser
                     (Options.long "dry-run" <> Options.help "Simulate adoption and report eligibility, reasons and estimated bytes without writing or collecting")
                 <*> Options.optional (Options.option (positiveIntReader "--inactivity-days")
                     (Options.long "inactivity-days" <> Options.metavar "DAYS"
-                        <> Options.help "Override normal inactivity expiry (default 7 days; incorporated HEADs expire after 24h idle)")))
-            (Options.progDesc "Adopt verified agent worktrees, then snapshot and collect inactive checkouts; ignored files are NOT recovered"))
+                        <> Options.help "Minimum inactivity for merged, clean checkouts (default 1 day; unmerged work never expires)")))
+            (Options.progDesc "Collect stale, clean worktrees whose work is incorporated into another branch or verified merged PR"))
     <> pathCommand "enroll" WorktreeEnroll "Explicitly enroll an existing checkout in automatic collection"
     <> pathCommand "restore" WorktreeRestore "Restore a collected checkout without overwriting existing paths"
     <> pathCommand "protect" WorktreeProtect "Protect an enrolled checkout from collection"

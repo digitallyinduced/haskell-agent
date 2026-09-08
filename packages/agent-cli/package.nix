@@ -2,17 +2,17 @@
 , agent-codex-dialect, agent-connectivity, agent-core
 , agent-external-session, agent-gemini, agent-grok-build-dialect
 , agent-integration-api, agent-json, agent-mcp, agent-openai
-, agent-openrouter, agent-process
-, agent-responses, agent-responses-types, agent-store, agent-syntax
-, agent-tui, agent-xai, ansi-terminal, async, base
-, base64-bytestring, brick, bytestring, colour, containers, crypton
-, crypton-connection, dbus, deepseq, directory, entropy, filelock
-, filepath, haskeline, hasql-pool, hspec, http-client
-, http-client-tls, http-types, JuicyPixels, lib, memory, mtl
-, network, network-uri, optparse-applicative, process, QuickCheck
-, retry, safe-exceptions, scientific, stm, tagsoup, temporary
-, terminfo, text, time, tls, transformers, unix, vector, vty
-, vty-crossplatform, vty-unix, wai, warp
+, agent-openrouter, agent-process, agent-responses
+, agent-responses-types, agent-store, agent-syntax, agent-tui
+, agent-xai, ansi-terminal, async, base, base64-bytestring, brick
+, bytestring, colour, containers, crypton, crypton-connection, dbus
+, deepseq, directory, entropy, filelock, filepath, haskeline
+, hasql-pool, hspec, http-client, http-client-tls, http-types
+, JuicyPixels, lib, memory, mtl, network, network-uri
+, optparse-applicative, process, QuickCheck, retry, safe-exceptions
+, scientific, stm, tagsoup, temporary, terminfo, text, time, tls
+, transformers, unix, vector, vty, vty-crossplatform, vty-unix, wai
+, warp
 }:
 mkDerivation {
   pname = "agent-cli";
@@ -25,15 +25,15 @@ mkDerivation {
     aeson agent-claude agent-cli-runtime agent-codex-dialect
     agent-connectivity agent-core agent-external-session agent-gemini
     agent-grok-build-dialect agent-integration-api agent-json agent-mcp
-    agent-openai agent-openrouter agent-process
-    agent-responses agent-responses-types agent-store agent-syntax
-    agent-tui agent-xai ansi-terminal async base base64-bytestring
-    brick bytestring colour containers crypton crypton-connection dbus
-    directory entropy filelock filepath haskeline hasql-pool
-    http-client http-client-tls http-types JuicyPixels memory mtl
-    network network-uri optparse-applicative process retry
-    safe-exceptions scientific stm tagsoup terminfo text time tls
-    transformers unix vector vty vty-crossplatform vty-unix wai warp
+    agent-openai agent-openrouter agent-process agent-responses
+    agent-responses-types agent-store agent-syntax agent-tui agent-xai
+    ansi-terminal async base base64-bytestring brick bytestring colour
+    containers crypton crypton-connection dbus directory entropy
+    filelock filepath haskeline hasql-pool http-client http-client-tls
+    http-types JuicyPixels memory mtl network network-uri
+    optparse-applicative process retry safe-exceptions scientific stm
+    tagsoup terminfo text time tls transformers unix vector vty
+    vty-crossplatform vty-unix wai warp
   ];
   executableHaskellDepends = [
     aeson agent-cli-runtime agent-responses agent-responses-types

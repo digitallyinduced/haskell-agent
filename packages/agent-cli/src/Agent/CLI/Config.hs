@@ -397,7 +397,7 @@ defaultHarnessConfig = HarnessConfig
         }
     , configWorktree = WorktreeConfig
         { worktreeFetchLatestUpstream = True
-        , worktreeInactiveDays = 7
+        , worktreeInactiveDays = 1
         }
     , configMaxConcurrentAgents = Nothing
     }
@@ -524,7 +524,7 @@ worktreeConfigDecoder =
     Hermes.object $
         WorktreeConfig
             <$> defaultKey True "fetchLatestUpstream" Hermes.bool
-            <*> defaultKey 7 "inactivityDays" Hermes.int
+            <*> defaultKey 1 "inactivityDays" Hermes.int
 
 harnessConfigDecoder :: Hermes.Decoder HarnessConfig
 harnessConfigDecoder =
