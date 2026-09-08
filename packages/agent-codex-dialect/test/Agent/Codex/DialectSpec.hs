@@ -556,6 +556,46 @@ spec = describe "Codex dialect" do
                 Left _ -> False
             Text.readFile path `shouldReturn` "after\n"
 
+    it "applies update chunks in order within one hunk" do
+        withTempDir \dir -> do
+            let path = dir </> "chunks.txt"
+            Text.writeFile path "before\n"
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            result <- applyPatch env $
+                "*** Begin Patch\n\
+                \*** Update File: chunks.txt\n\
+                \@@\n\
+                \-before\n\
+                \+middle\n\
+                \@@\n\
+                \-middle\n\
+                \+after\n\
+                \*** End Patch"
+            result `shouldSatisfy` \case
+                Right _ -> True
+                Left _ -> False
+            Text.readFile path `shouldReturn` "after\n"
+
+    it "does not commit earlier chunks when a later chunk fails" do
+        withTempDir \dir -> do
+            let path = dir </> "chunks.txt"
+            Text.writeFile path "before\n"
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            result <- applyPatch env $
+                "*** Begin Patch\n\
+                \*** Update File: chunks.txt\n\
+                \@@\n\
+                \-before\n\
+                \+middle\n\
+                \@@\n\
+                \-missing\n\
+                \+after\n\
+                \*** End Patch"
+            result `shouldSatisfy` \case
+                Left message -> "Failed to find expected lines" `Text.isInfixOf` message
+                Right _ -> False
+            Text.readFile path `shouldReturn` "before\n"
+
     it "waits instead of hot-polling an empty write_stdin call" do
         withTempDir \dir -> do
             env <- defaultToolEnv (unsafeEncodeUtf dir)
