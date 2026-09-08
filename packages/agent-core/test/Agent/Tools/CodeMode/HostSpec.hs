@@ -33,8 +33,8 @@ import Control.Concurrent
     , threadDelay
     , tryPutMVar
     )
-import Control.Concurrent.Async (async, cancel, wait, withAsync)
-import Control.Exception.Safe (bracket, finally, uninterruptibleMask_)
+import Control.Concurrent.Async (cancel, wait, withAsync)
+import Control.Exception.Safe (bracket, finally, throwIO, uninterruptibleMask_)
 import Control.Monad (void)
 import Data.Aeson (Value(..))
 import qualified Data.Aeson as Aeson
@@ -55,6 +55,24 @@ spec = describe "code-mode Bun host" do
                 "data/code-mode/worker.mjs"
                 (\_ _ -> pure $ Left "no tools")
         config.workerPoolSize `shouldBe` 2
+
+    describe "withCodeModeHost" do
+        it "closes running cells before returning the action result" do
+            checkScopedHostCleanup \run ->
+                run (pure (42 :: Int)) `shouldReturn` 42
+
+        it "closes running cells when the action throws" do
+            checkScopedHostCleanup \run ->
+                run (throwIO (userError "host action failed") :: IO ())
+                    `shouldThrow` anyIOException
+
+        it "closes running cells when the action is cancelled" do
+            checkScopedHostCleanup \run -> do
+                entered <- newEmptyMVar
+                blocked <- newEmptyMVar
+                withAsync (run (putMVar entered () >> takeMVar blocked)) \running -> do
+                    timeout 5000000 (readMVar entered) `shouldReturn` Just ()
+                    cancel running
 
     it "resolves the bundled worker independently of the current directory" do
         worker <- bundledCodeModeWorkerPath
@@ -114,13 +132,12 @@ spec = describe "code-mode Bun host" do
             config = defaultCodeModeConfig
                 "data/code-mode/worker.mjs"
                 handler
-        host <- newCodeModeHost config
-        result <- execCodeCell
-            host
-            "text(await tools.math.double({ value: 21 }));"
-            ["math.double"]
-            3000
-        closeCodeModeHost host
+        result <- withCodeModeHost config \host ->
+            execCodeCell
+                host
+                "text(await tools.math.double({ value: 21 }));"
+                ["math.double"]
+                3000
         result `shouldBe`
             Right CodeModeFinished
                 { cellId = "1"
@@ -184,7 +201,7 @@ spec = describe "code-mode Bun host" do
             config = defaultCodeModeConfig
                 "data/code-mode/worker.mjs"
                 handler
-        bracket (newCodeModeHost config) closeCodeModeHost \host ->
+        withCodeModeHost config \host ->
             (do
                 started <- execCodeCell
                     host
@@ -241,26 +258,34 @@ spec = describe "code-mode Bun host" do
                 }
         closeCodeModeHost host
 
-    it "rejects a second observer without racing cell output queues" do
+    it "rejects competing observers and releases observation on cancellation" do
         let config = defaultCodeModeConfig
                 "data/code-mode/worker.mjs"
                 (\_ _ -> pure $ Left "no tools")
-        host <- newCodeModeHost config
-        started <- execCodeCell
-            host
-            "await new Promise(() => {});"
-            []
-            1
-        started `shouldSatisfy` \case
-            Right CodeModeRunning { cellId = "1" } -> True
-            _ -> False
-        first <- async (waitCodeCell host "1" 200)
-        threadDelay 20000
-        waitCodeCell host "1" 200 `shouldReturn`
-            Left (CodeModeBusyObserver "1")
-        _ <- wait first
-        _ <- terminateCodeCell host "1"
-        closeCodeModeHost host
+        withCodeModeHost config \host -> do
+            let running = Right CodeModeRunning
+                    { cellId = "1", cellOutput = emptyContent }
+                awaitObserver =
+                    waitCodeCell host "1" 1 >>= \case
+                        Left (CodeModeBusyObserver "1") -> pure ()
+                        Right CodeModeRunning{} -> threadDelay 1000 >> awaitObserver
+                        unexpected -> expectationFailure $
+                            "unexpected observer state: " <> show unexpected
+                observe =
+                    waitCodeCell host "1" 60000 >>= \case
+                        Left (CodeModeBusyObserver "1") -> threadDelay 1000 >> observe
+                        result -> pure result
+            execCodeCell host "await new Promise(() => {});" [] 1
+                `shouldReturn` running
+            withAsync observe \first -> do
+                timeout 5000000 awaitObserver `shouldReturn` Just ()
+                terminateCodeCell host "1" `shouldReturn`
+                    Left (CodeModeBusyObserver "1")
+                cancel first
+            waitCodeCell host "1" 1 `shouldReturn` running
+            terminateCodeCell host "1" `shouldReturn`
+                Right CodeModeTerminated
+                    { cellId = "1", cellValue = emptyContent }
 
     it "returns queued explicit yields when a cell is terminated" do
         let config = defaultCodeModeConfig
@@ -298,7 +323,7 @@ spec = describe "code-mode Bun host" do
             config = defaultCodeModeConfig
                 "data/code-mode/worker.mjs"
                 handler
-        bracket (newCodeModeHost config) closeCodeModeHost \host -> do
+        withCodeModeHost config \host -> do
             started <- execCodeCell
                 host
                 "await tools.gate({}); store(\"completion-marker\", true); text(\"done\");"
@@ -382,7 +407,7 @@ spec = describe "code-mode Bun host" do
                 (defaultCodeModeConfig "data/code-mode/worker.mjs" handler)
                     { notifyHandler = putMVar notification
                     }
-        bracket (newCodeModeHost config) closeCodeModeHost \host -> do
+        withCodeModeHost config \host -> do
             started <- execCodeCell
                 host
                 "await tools.gate({}); text(\"late\"); notify(\"late-content-observed\"); await new Promise(() => {});"
@@ -902,6 +927,30 @@ newtype DoubleArgs = DoubleArgs { value :: Int }
 doubleArgsDecoder :: Json.Decoder DoubleArgs
 doubleArgsDecoder = objectArgsExact ["value"] \object_ ->
         DoubleArgs <$> reqInt object_ "value"
+
+-- Each runner chooses how to leave the host scope. The nested tool is still
+-- running after exec yields, so its finalizer proves host teardown joined it.
+checkScopedHostCleanup :: ((IO value -> IO value) -> IO ()) -> IO ()
+checkScopedHostCleanup exercise = do
+    started <- newEmptyMVar
+    stopped <- newEmptyMVar
+    blocked <- newEmptyMVar
+    worker <- codeModeWorkerPath
+    let handler _ _ =
+            (putMVar started () >> takeMVar blocked >> pure (Right Null))
+                `finally` putMVar stopped ()
+        config = defaultCodeModeConfig worker handler
+        run action = withCodeModeHost config \host -> do
+            result <- execCodeCell host "await tools.slow({});" ["slow"] 1
+            result `shouldBe`
+                Right CodeModeRunning
+                    { cellId = "1"
+                    , cellOutput = emptyContent
+                    }
+            timeout 5000000 (readMVar started) `shouldReturn` Just ()
+            action
+    exercise run
+    timeout 5000000 (readMVar stopped) `shouldReturn` Just ()
 
 emptyObjectDecoder :: Json.Decoder ()
 emptyObjectDecoder = Json.object (pure ())

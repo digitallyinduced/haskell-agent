@@ -20,6 +20,7 @@ module Agent.Tools.CodeMode.Host
     , newCodeModeHost
     , terminateCodeCell
     , waitCodeCell
+    , withCodeModeHost
     ) where
 
 import Agent.Tools.CodeMode.Protocol
@@ -92,8 +93,10 @@ import Control.Concurrent.STM
     )
 import Control.Exception.Safe
     ( SomeException
+    , bracket
+    , bracketOnError
     , displayException
-    , finally
+    , mask_
     , onException
     , try
     )
@@ -129,19 +132,34 @@ import System.Process
     , waitForProcess
     )
 newCodeModeHost :: CodeModeConfig -> IO CodeModeHost
-newCodeModeHost config = do
-    host <- CodeModeHost config
-        <$> newMVar Map.empty
-        <*> newIORef 0
-        <*> newMVar Map.empty
-        <*> newMVar (WorkerPool [] Nothing False)
-    if config.workerPoolSize > 0
-        then spawnIdleWorker config >>= \case
-            Right worker -> modifyMVar_ host.hostWorkerPool \pool ->
-                pure pool { poolIdle = [worker] }
-            Left _ -> pure ()
-        else pure ()
-    pure host
+newCodeModeHost config =
+    bracketOnError
+        (CodeModeHost config
+            <$> newMVar Map.empty
+            <*> newIORef 0
+            <*> newMVar Map.empty
+            <*> newMVar (WorkerPool [] Nothing False))
+        closeCodeModeHost
+        \host -> do
+            if config.workerPoolSize > 0
+                -- Complete the ownership handoff before leaving the worker's
+                -- rollback scope, so cancellation cannot close it both here
+                -- and through the host's newly populated pool.
+                then mask_ $ bracketOnError
+                    (spawnIdleWorker config)
+                    (either (const (pure ())) stopIdleWorker)
+                    \case
+                        Right worker -> modifyMVar_ host.hostWorkerPool \pool ->
+                            pure pool { poolIdle = [worker] }
+                        Left _ -> pure ()
+                else pure ()
+            pure host
+
+-- | Keep a host, its cells, and its retained workers within an action's
+-- lifetime. Use 'newCodeModeHost' only when transferring ownership to a
+-- longer-lived resource manager.
+withCodeModeHost :: CodeModeConfig -> (CodeModeHost -> IO a) -> IO a
+withCodeModeHost config = bracket (newCodeModeHost config) closeCodeModeHost
 
 closeCodeModeHost :: CodeModeHost -> IO ()
 closeCodeModeHost host = do
@@ -266,32 +284,33 @@ terminateCodeCell host identifier =
     lookupCell host identifier >>= \case
         Nothing -> pure $ Left $ CodeModeUnknownCell identifier
         Just cell ->
-            beginTermination cell >>= \case
+            bracket (beginTermination cell) (releaseTermination cell) \case
                 Left err -> pure (Left err)
-                Right () ->
-                    (do
-                        observed <- atomically $ tryReadTMVar cell.cellResult
-                        case observed of
-                            Just result -> do
-                                releaseCell host cell
-                                pure $ fmap (cellOutcomeResult identifier) result
-                            Nothing -> do
-                                beforeStop <- atomically $
-                                    (,) <$> drainTQueue cell.cellYields
-                                        <*> drainTQueue cell.cellContent
-                                stopCell cell
-                                afterStop <- atomically $
-                                    (,) <$> drainTQueue cell.cellYields
-                                        <*> drainTQueue cell.cellContent
-                                pure $ Right CodeModeTerminated
-                                    { cellId = identifier
-                                    , cellValue = combineCellOutput
-                                        (fst beforeStop <> fst afterStop)
-                                        (snd beforeStop <> snd afterStop)
-                                    })
-                    `finally` do
-                        markCellClosed cell
-                        void $ takeCell host identifier
+                Right () -> do
+                    observed <- atomically $ tryReadTMVar cell.cellResult
+                    case observed of
+                        Just result -> do
+                            releaseCell host cell
+                            pure $ fmap (cellOutcomeResult identifier) result
+                        Nothing -> do
+                            beforeStop <- atomically $
+                                (,) <$> drainTQueue cell.cellYields
+                                    <*> drainTQueue cell.cellContent
+                            stopCell cell
+                            afterStop <- atomically $
+                                (,) <$> drainTQueue cell.cellYields
+                                    <*> drainTQueue cell.cellContent
+                            pure $ Right CodeModeTerminated
+                                { cellId = identifier
+                                , cellValue = combineCellOutput
+                                    (fst beforeStop <> fst afterStop)
+                                    (snd beforeStop <> snd afterStop)
+                                }
+  where
+    releaseTermination _ (Left _) = pure ()
+    releaseTermination cell (Right ()) = do
+        markCellClosed cell
+        void $ takeCell host identifier
 
 startCell
     :: CodeModeHost
@@ -405,6 +424,8 @@ spawnIdleWorker config =
                                 , processHandle
                                 ) -> do
                             mapM_ configurePipe [input, output, stderr]
+                                `onException` stopIncompleteProcess
+                                    input output stderr processHandle
                             writer <- newMVar ()
                             stderrReader <- asyncWithUnmask
                                 (\unmask -> unmask (readAll stderr))
@@ -748,11 +769,19 @@ observeCell
     -> Int
     -> IO (Either CodeModeError CodeModeResult)
 observeCell host cell yieldMs =
-    beginObservation cell >>= \case
+    withCellObservation cell (waitForCell host cell yieldMs)
+
+withCellObservation
+    :: Cell
+    -> IO (Either CodeModeError a)
+    -> IO (Either CodeModeError a)
+withCellObservation cell action =
+    bracket (beginObservation cell) release \case
         Left err -> pure (Left err)
-        Right () ->
-            waitForCell host cell yieldMs
-                `finally` endObservation cell
+        Right () -> action
+  where
+    release (Left _) = pure ()
+    release (Right ()) = endObservation cell
 
 beginObservation :: Cell -> IO (Either CodeModeError ())
 beginObservation cell =
