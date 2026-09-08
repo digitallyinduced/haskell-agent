@@ -142,3 +142,31 @@ for repetition in 1 2; do
     done
 done
 ```
+
+Measured on 2026-09-08 with the same macOS arm64/GHC 9.10.3 settings
+above; seven samples, medians in milliseconds:
+
+| Models | Delay | Workload | Target ready | Ready CPU | Complete refresh | Complete CPU |
+|---:|---:|---|---:|---:|---:|---:|
+| 4 | 100 | Startup baseline | 101.059 | 0.135 | 101.061 | 0.139 |
+| 4 | 100 | Startup cached | 0.032 | 0.038 | 101.072 | 0.159 |
+| 4 | 100 | Startup cold | 101.053 | 0.142 | 101.054 | 0.146 |
+| 16 | 100 | Startup baseline | 101.062 | 0.123 | 101.064 | 0.128 |
+| 16 | 100 | Startup cached | 0.031 | 0.039 | 101.083 | 0.164 |
+| 16 | 100 | Startup cold | 100.648 | 0.140 | 100.649 | 0.144 |
+| 64 | 100 | Startup baseline | 101.089 | 0.149 | 101.092 | 0.153 |
+| 64 | 100 | Startup cached | 0.030 | 0.035 | 101.083 | 0.161 |
+| 64 | 100 | Startup cold | 101.088 | 0.150 | 101.091 | 0.155 |
+| 16 | 250 | Startup baseline | 251.061 | 0.247 | 251.063 | 0.253 |
+| 16 | 250 | Startup cached | 0.046 | 0.056 | 250.796 | 0.289 |
+| 16 | 250 | Startup cold | 251.071 | 0.220 | 251.073 | 0.225 |
+| 16 | 250 | Startup baseline, repeat | 250.788 | 0.230 | 250.790 | 0.234 |
+| 16 | 250 | Startup cached, repeat | 0.047 | 0.057 | 251.089 | 0.270 |
+| 16 | 250 | Startup cold, repeat | 251.064 | 0.235 | 251.066 | 0.238 |
+
+Warm startup removes the injected catalog wait from target selection:
+approximately 251 ms becomes 0.046 ms in the representative case, with a
+consistent repeat. Complete refresh remains approximately 251 ms, as expected;
+the work still occurs within the runtime-owned background scope. The modest
+CPU overhead of that scope does not grow sharply across the tested catalog
+sizes. Cold startup retains the baseline network wait.
