@@ -676,7 +676,11 @@ assertOptionalShellSchema tools =
             shell.description `shouldSatisfy`
                 maybe False (Text.isInfixOf "`workdir` is optional")
             propertyNames shell `shouldMatchList`
-                ["command", "workdir", "timeout_ms", "yield_time_ms"]
+                [ "command", "workdir", "timeout_ms", "yield_time_ms"
+                , "sandbox_permissions", "justification"
+                ]
             propertyType "workdir" shell `shouldBe` Just "string"
+            propertyType "sandbox_permissions" shell `shouldBe` Just "string"
+            propertyType "justification" shell `shouldBe` Just "string"
         other -> expectationFailure
             ("expected one shell_command function schema, got " <> show other)
