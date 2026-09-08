@@ -105,7 +105,7 @@ executable agent-sandbox-worker
 test-suite agent-server-attachment-test
     import:           common-options
     type:             exitcode-stdio-1.0
-    hs-source-dirs:   test-internal, src
+    hs-source-dirs:   test/internal, src
     main-is:          AttachmentScopeCheck.hs
     other-modules:    Agent.Server.Identifier
                     , Agent.Server.Runtime.Attachments
