@@ -18,7 +18,7 @@ import Agent.Tools.IO
     , writeTextFile
     )
 import Agent.Tools.Types (ToolEnv(..))
-import Control.Monad (unless)
+import Control.Monad (foldM, unless)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
@@ -324,10 +324,7 @@ resolvePath env path =
 
 applyChunks :: [UpdateChunk] -> [Text] -> Either Text (Seq Text)
 applyChunks chunks start =
-    foldl applyOne (Right (Seq.fromList start)) chunks
-  where
-    applyOne (Left err) _ = Left err
-    applyOne (Right lines_) chunk = applyChunk chunk lines_
+    foldM (flip applyChunk) (Seq.fromList start) chunks
 
 applyChunk :: UpdateChunk -> Seq Text -> Either Text (Seq Text)
 applyChunk chunk fileLines =
