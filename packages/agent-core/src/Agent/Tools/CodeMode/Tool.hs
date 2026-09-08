@@ -56,6 +56,7 @@ import Agent.Tools.CodeMode.Host
     , newCodeModeHost
     , terminateCodeCell
     , waitCodeCell
+    , withCodeModeHost
     )
 import Agent.Tools.CodeMode.Protocol (CodeModeToolMetadata(..))
 import Agent.Tools.Types
@@ -68,7 +69,6 @@ import Agent.Tools.Types
     , withAsyncToolCalls
     )
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (finally)
 import Control.Monad (foldM)
 import Data.Aeson (Value(..), encode)
 import qualified Data.Aeson as Aeson
@@ -187,14 +187,12 @@ newCodeModeToolSet mode detailVisibility workerPath invoke specs =
 
 probeCodeModeConfig :: CodeModeConfig -> IO (Either Text ())
 probeCodeModeConfig config = do
-    host <- newCodeModeHost config
-    result <-
+    result <- withCodeModeHost config \host ->
         execCodeCellWithTools
             host
             ""
             []
             config.startupTimeoutMs
-        `finally` closeCodeModeHost host
     pure $ case result of
         Right CodeModeFinished{} -> Right ()
         Right unexpected ->
