@@ -822,9 +822,9 @@ readFullscreenLineOrWithCatalog
                         Nothing -> UiSetAwaitingInput False
             pure (Right input.fullscreenInputLine)
 
--- | Fullscreen Vty configuration, including enhanced-keyboard encodings that
--- are not present in the default terminfo input table. Without these entries,
--- Vty emits the payload of modified-key sequences as printable characters.
+-- | Fullscreen Vty configuration, including legacy terminal overrides.
+-- 'Agent.CLI.TUI.Keyboard' decodes CSI-u before this compatibility table,
+-- so enhanced keys are not limited to the characters and modifiers below.
 fullscreenVtyConfig :: V.VtyUserConfig
 fullscreenVtyConfig =
     V.defaultConfig
@@ -850,6 +850,16 @@ fullscreenVtyConfig =
               )
             | body <- shiftTabCsiBodies
             ]
+            -- Backspace is not a printable character: register its modified
+            -- CSI-u encodings explicitly rather than leaking their payload.
+            <> [ (Nothing, "\ESC[" <> body, V.EvKey V.KBS [modifier])
+               | (encode, modifier) <-
+                    [ (kittyAltCsiBodies, V.MAlt)
+                    , (kittyCtrlCsiBodies, V.MCtrl)
+                    , (kittySuperCsiBodies, V.MMeta)
+                    ]
+               , body <- encode '\DEL'
+               ]
             <> [ ( Nothing
                  , "\ESC[" <> body
                  , V.EvKey (V.KChar character) [V.MCtrl]
@@ -857,12 +867,8 @@ fullscreenVtyConfig =
                | character <- ['a'..'z']
                , body <- kittyCtrlCsiBodies character
                ]
-            -- The Kitty disambiguation mode reports every Command-modified
-            -- printable key as CSI-u, not only shortcuts we handle. Vty
-            -- otherwise emits an unknown sequence's body as literal text
-            -- (for example Cmd+ß appeared as "[223;9u"). Decode the
-            -- characters available on ASCII and Latin-1 keyboard layouts;
-            -- Composer will act on supported shortcuts and ignore the rest.
+            -- Compatibility mappings for callers using stock Vty. The live
+            -- fullscreen input decoder handles all Unicode scalar values.
             <> [ ( Nothing
                  , "\ESC[" <> body
                  , V.EvKey (V.KChar character) [V.MMeta]

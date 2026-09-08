@@ -26,10 +26,11 @@ import Agent.CLI.Input.Editor
     , initialEditorState
     , reduceEditorKey
     )
-import Agent.CLI.Input.KeyDecoder (decodeKittyEditorKey)
+import Agent.CLI.Input.KeyDecoder (decodeKittyEditorKey, decodeModifiedArrowKey, parseKittyKey, readDecimal)
 import Agent.CLI.Input.Types
     ( EditorKey(..)
     , EditorState(..)
+    , KittyKey(..)
     , ReplLine(..)
     )
 import Data.Char (isControl)
@@ -235,11 +236,94 @@ spec = do
             decodeKittyEditorKey "114;5:3u" `shouldBe` Just EditorIgnore
             decodeKittyEditorKey "117;5u" `shouldBe` Just EditorKillStart
 
+    describe "Kitty key parsing" do
+        it "rejects signed, whitespace-padded, and overflowing decimal fields" do
+            mapM_ (\value -> readDecimal value `shouldBe` Nothing)
+                ["-1", "+1", " 1", "1 ", "", "18446744073709551617"]
+
+        it "rejects invalid modifiers, event types, codepoints, and extra fields" do
+            mapM_ (\body -> fmap (\key -> (key.kittyCodepoint, key.kittyModifiers, key.kittyEvent)) (parseKittyKey body) `shouldBe` Nothing)
+                [ "127;0u", "127;-1u", "127;257u"
+                , "127;3:0u", "127;3:4u", "127;3:1:1u"
+                , "-1;3u", "1114112;3u", "55296;3u"
+                , "127:bad;3u", "127;3;bad u", "127;3;1;2u"
+                ]
+
+        it "accepts optional alternate keycodes and default modifier fields" do
+            let fields body = fmap (\key -> (key.kittyCodepoint, key.kittyModifiers, key.kittyEvent)) (parseKittyKey body)
+            fields "127::127;3u" `shouldBe` fields "127;3u"
+            fields "127;:1u" `shouldBe` fields "127u"
+
+    describe "Option+Backspace" do
+        it "decodes Kitty press and repeat events as previous-word deletion" do
+            mapM_
+                (\body -> decodeKittyEditorKey body `shouldBe` Just EditorKillWord)
+                ["127;3u", "127;3:1u", "127;3:2u"]
+
+        it "ignores Kitty release events" do
+            decodeKittyEditorKey "127;3:3u" `shouldBe` Just EditorIgnore
+
+        it "preserves unmodified Kitty Backspace as single-character deletion" do
+            decodeKittyEditorKey "127u" `shouldBe` Just EditorBackspace
+            decodeKittyEditorKey "127;1u" `shouldBe` Just EditorBackspace
+
+        it "decodes Ctrl and Command Backspace with either lock bit set" do
+            mapM_
+                (\modifier ->
+                    decodeKittyEditorKey ("127;" <> show modifier <> "u")
+                        `shouldBe` Just EditorKillWord)
+                [5, 9, 67, 69, 73, 131, 133, 137, 195, 197, 201 :: Int]
+            mapM_
+                (\modifier ->
+                    decodeKittyEditorKey ("127;" <> show modifier <> "u")
+                        `shouldBe` Just EditorBackspace)
+                [65, 129, 193 :: Int]
+            decodeKittyEditorKey "127;5:3u" `shouldBe` Just EditorIgnore
+
+    describe "modified arrow keys" do
+        it "decodes Option and Ctrl arrows including repeat and lock modifiers" do
+            mapM_
+                (\modifier -> mapM_
+                    (\event -> do
+                        decodeModifiedArrowKey ("1;" <> show modifier <> event <> "D")
+                            `shouldBe` Just EditorWordLeft
+                        decodeModifiedArrowKey ("1;" <> show modifier <> event <> "C")
+                            `shouldBe` Just EditorWordRight)
+                    ["", ":1", ":2"])
+                [3, 5, 67, 69, 131, 133, 195, 197 :: Int]
+
+        it "ignores releases and leaves ordinary arrows to the legacy decoder" do
+            decodeModifiedArrowKey "1;3:3D" `shouldBe` Just EditorIgnore
+            decodeModifiedArrowKey "1;5:3C" `shouldBe` Just EditorIgnore
+            decodeModifiedArrowKey "D" `shouldBe` Nothing
+            decodeModifiedArrowKey "1;1C" `shouldBe` Nothing
+            decodeModifiedArrowKey "1;3A" `shouldBe` Nothing
+
+        it "also decodes Kitty Option+b/f word navigation" do
+            decodeKittyEditorKey "98;3u" `shouldBe` Just EditorWordLeft
+            decodeKittyEditorKey "102;67u" `shouldBe` Just EditorWordRight
+
+        it "moves over words and whitespace without changing the text" do
+            let initial = initialEditorState defaultSlashCatalog False "alpha  beta"
+                left = (reduceEditorKey [] initial EditorWordLeft).editorStepState
+                start = (reduceEditorKey [] left EditorWordLeft).editorStepState
+                right = (reduceEditorKey [] start EditorWordRight).editorStepState
+                end = (reduceEditorKey [] right EditorWordRight).editorStepState
+            left.editorCursor `shouldBe` 7
+            start.editorCursor `shouldBe` 0
+            right.editorCursor `shouldBe` 5
+            end.editorCursor `shouldBe` 11
+            end.editorText `shouldBe` initial.editorText
+            (reduceEditorKey [] start EditorWordLeft).editorStepState.editorCursor `shouldBe` 0
+            (reduceEditorKey [] end EditorWordRight).editorStepState.editorCursor `shouldBe` 11
+
     describe "Shift+Enter" do
         it "recognizes xterm modifyOtherKeys and Kitty CSI-u encodings" do
             isShiftEnterCsiBody "27;2;13~" `shouldBe` True
             isShiftEnterCsiBody "13;2u" `shouldBe` True
             isShiftEnterCsiBody "13u" `shouldBe` False
+            isShiftEnterCsiBody "13;66:2u" `shouldBe` True
+            isShiftEnterCsiBody "13;194:3u" `shouldBe` False
 
     describe "Shift+Tab" do
         it "recognizes xterm modifyOtherKeys and Kitty CSI-u encodings" do
@@ -248,6 +332,8 @@ spec = do
             isShiftTabCsiBody "9;2:1u" `shouldBe` True
             isShiftTabCsiBody "9u" `shouldBe` False
             isShiftTabCsiBody "13;2u" `shouldBe` False
+            isShiftTabCsiBody "9;130:2u" `shouldBe` True
+            isShiftTabCsiBody "9;194:3u" `shouldBe` False
 
         it "decodes Kitty press events as mode cycle and ignores releases" do
             decodeKittyEditorKey "9;2u" `shouldBe` Just EditorCycleMode
@@ -458,6 +544,8 @@ genPureEditorKey =
         , EditorChar '\x0301'
         , EditorChar '🙂'
         , EditorBackspace
+        , EditorWordLeft
+        , EditorWordRight
         , EditorDelete
         , EditorLeft
         , EditorRight
