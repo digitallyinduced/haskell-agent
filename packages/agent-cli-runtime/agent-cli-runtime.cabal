@@ -90,6 +90,7 @@ library
                     , Agent.CLI.Session.Threads
                     , Agent.CLI.Session.Types
                     , Agent.CLI.Session.Activity
+                    , Agent.CLI.Session.Observation
                     , Agent.CLI.Session.Request
                     , Agent.CLI.SessionLock
                     , Agent.CLI.Transcription
@@ -160,6 +161,7 @@ test-suite agent-cli-runtime-test
                     , Agent.CLI.ModelsSpec
                     , Agent.CLI.NativeProcessSpec
                     , Agent.CLI.SessionActivitySpec
+                    , Agent.CLI.SessionObservationSpec
                     , Agent.CLI.SessionRequestSpec
                     , Agent.CLI.SessionThreadsSpec
                     , Agent.CLI.SessionSpec
