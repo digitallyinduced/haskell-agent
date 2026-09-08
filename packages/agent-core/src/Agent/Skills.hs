@@ -29,6 +29,7 @@ import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.OsPath (directoryChain, toText, unsafeToFilePath)
 import Control.Applicative ((<|>))
+import Control.Concurrent.Async (Concurrently(..))
 import Control.Concurrent.STM
     ( atomically
     , modifyTVar'
@@ -305,14 +306,11 @@ discoverSkills options = do
 
 skillRoots :: SkillDiscoverOptions -> IO [(SkillScope, SkillOrigin, FilePath)]
 skillRoots options = do
-    canonical <- mapConcurrentlyBounded 3 canonicalizePath
-        [ unsafeToFilePath options.skillsProjectRoot
-        , unsafeToFilePath options.skillsCwd
-        , unsafeToFilePath options.skillsHome
-        ]
-    let (projectRoot, cwd, home) = case canonical of
-            [project, current, userHome] -> (project, current, userHome)
-            _ -> error "skillRoots: canonical path count changed"
+    (projectRoot, cwd, home) <- runConcurrently $
+        (,,)
+            <$> Concurrently (canonicalizePath (unsafeToFilePath options.skillsProjectRoot))
+            <*> Concurrently (canonicalizePath (unsafeToFilePath options.skillsCwd))
+            <*> Concurrently (canonicalizePath (unsafeToFilePath options.skillsHome))
     let dirs =
             map unsafeToFilePath $
                 directoryChain (unsafeEncodeUtf projectRoot) (unsafeEncodeUtf cwd)
