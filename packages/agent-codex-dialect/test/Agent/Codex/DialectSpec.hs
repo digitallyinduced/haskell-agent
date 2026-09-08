@@ -45,14 +45,17 @@ import Agent.Tools.TaskPlan
     )
 import Agent.Tools.Types
     ( AppTool(..)
+    , ApprovalRequirement(..)
     , BackgroundTaskHooks(..)
     , BackgroundTaskNotice(..)
     , ToolEnv(..)
     , appToolHandlers
     , defaultToolEnv
+    , dispatchApprovedRegisteredToolCall
     , mkToolRegistry
     , setToolSessionTmp
     , toolSchedulingPlanFor
+    , toolApprovalRequirement
     )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
@@ -83,6 +86,89 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Codex dialect" do
+    it "requires approval for default shell commands regardless of resource classification" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newCodexCodingTools env Nothing Nothing) (.codexClose) \coding -> do
+                case filter ((== "shell_command") . (.appToolName)) coding.codexAppTools of
+                    [tool] -> mapM_ (\arguments ->
+                        toolApprovalRequirement tool (functionToolCall "default" "shell_command" arguments)
+                            `shouldReturn` ApprovalPromptRequired)
+                        [ "{\"command\":\"ls\"}"
+                        , "{\"command\":\"ls\",\"sandbox_permissions\":\"use_default\"}"
+                        , "{\"command\":\"git -c diff.external=/workspace/repo/external-diff diff\"}"
+                        ]
+                    _ -> expectationFailure "missing shell tool"
+
+    it "requires fresh approval for escalation and rejects unapproved dispatch" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newCodexCodingTools env Nothing Nothing) (.codexClose) \coding -> do
+                let call = functionToolCall "escalate" "shell_command"
+                        "{\"command\":\"printf approved\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Test exact command approval\",\"timeout_ms\":1000}"
+                case filter ((== "shell_command") . (.appToolName)) coding.codexAppTools of
+                    [tool] -> toolApprovalRequirement tool call `shouldReturn` FreshApprovalRequired
+                    _ -> expectationFailure "missing shell tool"
+                denied <- dispatchToolCall testDispatchConfig (appToolHandlers coding.codexAppTools) call
+                denied.output `shouldSatisfy` Text.isInfixOf "fresh user approval"
+                registry <- either (fail . Text.unpack) pure (mkToolRegistry coding.codexAppTools)
+                approved <- dispatchApprovedRegisteredToolCall testDispatchConfig
+                    registry call
+                toolCallResultOutcome approved `shouldBe` Just (ShellExited 0)
+                again <- dispatchToolCall testDispatchConfig (appToolHandlers coding.codexAppTools) call
+                again.output `shouldSatisfy` Text.isInfixOf "fresh user approval"
+
+    it "rejects malformed sandbox permission requests before running a command" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newCodexCodingTools env Nothing Nothing) (.codexClose) \coding -> do
+                let check arguments = do
+                        result <- dispatchToolCall testDispatchConfig
+                            (appToolHandlers coding.codexAppTools)
+                            (functionToolCall "invalid" "shell_command" arguments)
+                        toolCallResultOutcome result `shouldBe` Just ToolFailed
+                        doesFileExist (dir </> "launched") `shouldReturn` False
+                check "{\"command\":\"touch launched\",\"sandbox_permissions\":\"disable\"}"
+                check "{\"command\":\"touch launched\",\"sandbox_permissions\":\"require_escalated\"}"
+                check "{\"command\":\"touch launched\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"  \"}"
+
+    it "requires a new approval for each input to an escalated managed shell" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newCodexCodingTools env Nothing Nothing) (.codexClose) \coding -> do
+                registry <- either (fail . Text.unpack) pure (mkToolRegistry coding.codexAppTools)
+                let handlers = appToolHandlers coding.codexAppTools
+                started <- dispatchApprovedRegisteredToolCall testDispatchConfig registry
+                    (functionToolCall "start" "shell_command"
+                        "{\"command\":\"cat\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Test interactive approval\",\"yield_time_ms\":1}")
+                case toolCallResultOutcome started of
+                    Just (ShellRunning sessionId) -> do
+                        let input = functionToolCall "input" "write_stdin"
+                                ("{\"session_id\":" <> Text.pack (show sessionId) <> ",\"chars\":\"approved input\\n\",\"yield_time_ms\":1}")
+                        case filter ((== "write_stdin") . (.appToolName)) coding.codexAppTools of
+                            [tool] -> do
+                                toolApprovalRequirement tool input `shouldReturn` FreshApprovalRequired
+                                toolApprovalRequirement tool
+                                    (functionToolCall "snapshot" "write_stdin"
+                                        ("{\"session_id\":" <> Text.pack (show sessionId) <> "}"))
+                                    `shouldReturn` ApprovalNotRequired
+                                toolApprovalRequirement tool
+                                    (functionToolCall "mixed-cancel" "write_stdin"
+                                        ("{\"session_id\":" <> Text.pack (show sessionId) <> ",\"chars\":\"\\u0003whoami\\n\"}"))
+                                    `shouldReturn` FreshApprovalRequired
+                            _ -> expectationFailure "missing stdin tool"
+                        denied <- dispatchToolCall testDispatchConfig handlers input
+                        denied.output `shouldSatisfy` Text.isInfixOf "fresh user approval"
+                        approved <- dispatchApprovedRegisteredToolCall testDispatchConfig registry input
+                        toolCallResultOutcome approved `shouldBe` Just (ShellRunning sessionId)
+                        again <- dispatchToolCall testDispatchConfig handlers input
+                        again.output `shouldSatisfy` Text.isInfixOf "fresh user approval"
+                        interrupted <- dispatchToolCall testDispatchConfig handlers
+                            (functionToolCall "cancel" "write_stdin"
+                                ("{\"session_id\":" <> Text.pack (show sessionId) <> ",\"chars\":\"\\u0003\",\"yield_time_ms\":1000}"))
+                        interrupted.output `shouldNotSatisfy` Text.isInfixOf "fresh user approval"
+                    _ -> expectationFailure (Text.unpack started.output)
+
     it "renders the Codex tool contract" do
         let prompt =
                 codexSystemPrompt

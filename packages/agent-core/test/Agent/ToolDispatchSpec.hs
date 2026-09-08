@@ -3,9 +3,13 @@ module Agent.ToolDispatchSpec (spec) where
 import qualified Agent.Json.Decode as Json
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
+import Agent.Tools.ShellPermission
+import Agent.Tools.IO (CommandResult(..), runShellCommandStreamingAuthorized)
+import Agent.OsPath (fromText)
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ApprovalRequirement(..)
     , ToolAsyncCapability(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
@@ -16,13 +20,21 @@ import Agent.Tools.Types
     , toolAcceptsCall
     , appToolSupportsAsync
     , withAsyncToolCalls
+    , defaultToolEnv
+    , setToolSessionTmp
     )
 import qualified Control.Exception as Exception
+import Control.Concurrent.Async (concurrently)
 import qualified Data.Aeson as Aeson
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
+import Data.Either (isLeft)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
+import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
+import System.FilePath ((</>))
+import System.Posix.Temp (mkdtemp)
+import Control.Exception.Safe (bracket)
 
 newtype EchoArgs = EchoArgs
     { message :: Text
@@ -34,6 +46,146 @@ echoArgsDecoder = objectArgs $ \object -> EchoArgs
 
 spec :: Spec
 spec = describe "dispatchToolCall" do
+    describe "shell escalation authorization" do
+        let decode = decodeToolArguments (Json.object shellPermissionFieldsDecoder)
+            escalation = RequireEscalatedSandbox "Compile the local application"
+        it "defaults to isolation and accepts an explicit escalation justification" do
+            decode "{}" `shouldBe` Right UseDefaultSandbox
+            decode "{\"sandbox_permissions\":\"use_default\"}"
+                `shouldBe` Right UseDefaultSandbox
+            decode "{\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Compile the local application\"}"
+                `shouldBe` Right escalation
+
+        it "rejects malformed permissions and missing or blank justification" do
+            mapM_ (\input -> decode input `shouldSatisfy` isLeft)
+                [ "{\"sandbox_permissions\":\"unknown\"}"
+                , "{\"sandbox_permissions\":true}"
+                , "{\"sandbox_permissions\":null}"
+                , "{\"sandbox_permissions\":\"require_escalated\"}"
+                , "{\"sandbox_permissions\":\"require_escalated\",\"justification\":\"  \"}"
+                , "{\"sandbox_permissions\":\"require_escalated\",\"justification\":42}"
+                ]
+
+        it "requires approval for default shell commands without weakening escalation" do
+            let approval args = shellPermissionApproval (functionToolCall "classification" "shell_command" args)
+            approval "{\"command\":\"ls\"}" `shouldReturn` ApprovalPromptRequired
+            approval "{\"cmd\":\"ls\",\"sandbox_permissions\":\"use_default\"}" `shouldReturn` ApprovalPromptRequired
+            approval "{\"command\":\"git -c diff.external=/workspace/repo/external-diff diff\"}"
+                `shouldReturn` ApprovalPromptRequired
+            approval "{\"command\":\"touch file\"}" `shouldReturn` ApprovalPromptRequired
+            approval "{\"command\":\"ls\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Inspect outside sandbox\"}"
+                `shouldReturn` FreshApprovalRequired
+            approval "{\"command\":\"ls\",\"sandbox_permissions\":\"unknown\"}"
+                `shouldReturn` FreshApprovalRequired
+
+        it "does not grant authority through ordinary dispatch" do
+            let handler = typedAuthorizedStreamingRichTool "echo" echoArgsDecoder $
+                    \authorization _ _ ->
+                        pure $ case shellExecutionAuthorization authorization escalation of
+                            Left err -> Left err
+                            Right _ -> Right (ToolHandlerResult "unexpected authority" [])
+            result <- dispatchToolCall testConfig [handler]
+                (functionToolCall "authorization-1" "echo" "{\"message\":\"test\"}")
+            result.output `shouldSatisfy` Text.isInfixOf "requires fresh user approval"
+
+        it "consumes approved authority once and does not authorize the next dispatch" do
+            observed <- newIORef []
+            let handler = typedAuthorizedStreamingRichTool "echo" echoArgsDecoder $
+                    \authorization _ _ -> do
+                        case authorization of
+                            Nothing -> modifyIORef' observed (<> [False])
+                            Just capability -> do
+                                first <- consumeToolInvocationAuthorization capability
+                                second <- consumeToolInvocationAuthorization capability
+                                modifyIORef' observed (<> [first, second])
+                        pure (Right (ToolHandlerResult "done" []))
+                call = functionToolCall "authorization-2" "echo" "{\"message\":\"test\"}"
+            _ <- dispatchApprovedToolHandler testConfig (Just handler) call
+            _ <- dispatchToolCall testConfig [handler] call
+            readIORef observed `shouldReturn` [True, False, False]
+
+        it "preserves default and approved authorization through handler wrappers" do
+            observed <- newIORef []
+            wrappedCalls <- newIORef []
+            let handler = typedAuthorizedStreamingRichTool "echo" echoArgsDecoder $
+                    \authorization _ args -> do
+                        approved <- case authorization of
+                            Nothing -> pure False
+                            Just capability -> consumeToolInvocationAuthorization capability
+                        modifyIORef' observed (<> [approved])
+                        pure (Right (ToolHandlerResult args.message []))
+                wrapped = wrapToolHandler
+                    (\call run -> modifyIORef' wrappedCalls (<> [call]) >> run)
+                    handler
+                call = functionToolCall "wrapped-authorization" "echo" "{\"message\":\"done\"}"
+            handlerName wrapped `shouldBe` "echo"
+            defaultResult <- dispatchToolCall testConfig [wrapped] call
+            approvedResult <- dispatchApprovedToolHandler testConfig (Just wrapped) call
+            nextResult <- dispatchToolCall testConfig [wrapped] call
+            map (.output) [defaultResult, approvedResult, nextResult]
+                `shouldBe` ["done", "done", "done"]
+            readIORef observed `shouldReturn` [False, True, False]
+            readIORef wrappedCalls `shouldReturn` [call, call, call]
+
+        it "expires retained authority when the approved invocation ends" do
+            retained <- newIORef Nothing
+            let handler = typedAuthorizedStreamingRichTool "echo" echoArgsDecoder $
+                    \authorization _ _ -> do
+                        writeIORef retained authorization
+                        pure (Right (ToolHandlerResult "done" []))
+            _ <- dispatchApprovedToolHandler testConfig (Just handler)
+                (functionToolCall "authorization-3" "echo" "{\"message\":\"test\"}")
+            readIORef retained >>= \case
+                Nothing -> expectationFailure "Approved dispatch did not supply authority"
+                Just capability -> consumeToolInvocationAuthorization capability `shouldReturn` False
+
+        it "cannot consume one invocation capability concurrently twice" do
+            observed <- newIORef (False, False)
+            let handler = typedAuthorizedStreamingRichTool "echo" echoArgsDecoder $
+                    \authorization _ _ -> do
+                        case authorization of
+                            Nothing -> expectationFailure "Missing approved capability"
+                            Just capability ->
+                                concurrently
+                                    (consumeToolInvocationAuthorization capability)
+                                    (consumeToolInvocationAuthorization capability)
+                                    >>= writeIORef observed
+                        pure (Right (ToolHandlerResult "done" []))
+            _ <- dispatchApprovedToolHandler testConfig (Just handler)
+                (functionToolCall "authorization-4" "echo" "{\"message\":\"test\"}")
+            result <- readIORef observed
+            result `shouldSatisfy` (\(left, right) -> left /= right)
+
+        it "preserves session TMPDIR on an authorized launch and rejects a second launch" do
+            temporaryRoot <- getTemporaryDirectory
+            bracket
+                (mkdtemp (temporaryRoot </> "shell-authorization-XXXXXX"))
+                removeDirectoryRecursive \directory -> do
+                    let path = fromText (Text.pack directory)
+                    environment <- defaultToolEnv path
+                    setToolSessionTmp environment (Just path)
+                    observed <- newIORef []
+                    let handler = typedAuthorizedStreamingRichTool "echo" echoArgsDecoder $
+                            \authorization _ _ ->
+                                case shellExecutionAuthorization authorization escalation of
+                                    Left err -> pure (Left err)
+                                    Right permission -> do
+                                        first <- runShellCommandStreamingAuthorized permission environment path
+                                            "printf '%s' \"$TMPDIR\"" 5000 (\_ _ -> pure ())
+                                        second <- runShellCommandStreamingAuthorized permission environment path
+                                            "printf unexpected" 5000 (\_ _ -> pure ())
+                                        writeIORef observed [first, second]
+                                        pure (Right (ToolHandlerResult "done" []))
+                    _ <- dispatchApprovedToolHandler testConfig (Just handler)
+                        (functionToolCall "authorization-5" "echo" "{\"message\":\"test\"}")
+                    readIORef observed >>= \case
+                        [first, second] -> do
+                            first.commandExitCode `shouldBe` Just 0
+                            first.commandStdout `shouldBe` Text.pack directory
+                            second.commandExitCode `shouldBe` Just 127
+                            second.commandStderr `shouldSatisfy` Text.isInfixOf "consumed or has expired"
+                        _ -> expectationFailure "Authorized process handler did not complete"
+
     it "defaults constructed calls to blocking and compares call mode" do
         let blocking = functionToolCall "call-1" "echo" "{}"
             asynchronous = withToolCallMode AsyncToolCall blocking

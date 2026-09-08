@@ -97,6 +97,7 @@ library
                     , Agent.Tools.ResourceArbiter
                     , Agent.Tools.ShowImage
                     , Agent.Tools.ShellReadOnly
+                    , Agent.Tools.ShellPermission
                     , Agent.Tools.Types
                     , Agent.Tools.ViewImage
                     , Agent.Tools.RenderChart

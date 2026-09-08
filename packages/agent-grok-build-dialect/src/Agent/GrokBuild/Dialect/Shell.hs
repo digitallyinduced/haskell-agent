@@ -10,7 +10,9 @@ module Agent.GrokBuild.Dialect.Shell
     , resetGrokSessionTemp
     , closeGrokSession
     , runForegroundStreaming
+    , runForegroundStreamingAuthorized
     , startBackground
+    , startBackgroundAuthorized
     , startMonitor
     , readTaskOutput
     , ShellTaskSnapshot(..)
@@ -29,6 +31,11 @@ import Agent.ResourceScope
     , newResourceScope
     , releaseResource
     )
+import Agent.Tools.ShellPermission
+    ( ShellExecutionAuthorization
+    , defaultShellExecutionAuthorization
+    , shellExecutionIsEscalated
+    )
 import Agent.Tools.Dangerous (blockedShellCommandReasonIn)
 import Agent.Tools.Background
     ( CompletionGate
@@ -46,9 +53,9 @@ import Agent.Tools.IO
     , combineCommandOutput
     , formatCommandResult
     , resolveUnderCwd
-    , runShellCommandStreaming
+    , runShellCommandStreamingAuthorized
     , runningLiveOutput
-    , startShellCommandWithCompletion
+    , startShellCommandWithCompletionAuthorized
     , stopShellCommand
     )
 import Agent.Tools.Types
@@ -236,19 +243,27 @@ runForegroundStreaming
     -> Int
     -> (Text -> Text -> IO ())
     -> IO (Either Text CommandResult)
-runForegroundStreaming session command timeoutMs onSnapshot =
+runForegroundStreaming = runForegroundStreamingAuthorized defaultShellExecutionAuthorization
+
+runForegroundStreamingAuthorized
+    :: ShellExecutionAuthorization
+    -> GrokSession
+    -> Text
+    -> Int
+    -> (Text -> Text -> IO ())
+    -> IO (Either Text CommandResult)
+runForegroundStreamingAuthorized authorization session command timeoutMs onSnapshot =
     withMVar session.grokLifecycle \() ->
         modifyMVar session.grokShell \shell -> do
             sessionTmp <- readIORef session.grokEnv.toolSessionTmp
             blockedShellCommandReasonIn
-                sessionTmp shell.shellCwd command >>= \case
+                sessionTmp (executionCwd authorization session shell) command >>= \case
                     Just reason -> pure (shell, Left reason)
                     Nothing -> do
                         let wrapped =
-                                bashWrap
-                                    (wrapScript shell True
-                                        (Text.unpack command))
-                        result <- runShellCommandStreaming
+                                executionScript authorization shell True command
+                        result <- runShellCommandStreamingAuthorized
+                            authorization
                             session.grokEnv
                             session.grokEnv.toolCwd
                             (Text.pack wrapped)
@@ -256,25 +271,43 @@ runForegroundStreaming session command timeoutMs onSnapshot =
                             onSnapshot
                         next <- if result.commandTimedOut
                                 || result.commandCancelled
+                                || shellExecutionIsEscalated authorization
                             then pure shell
                             else refreshCwd session.grokEnv shell
                         pure (next, Right result)
 
 startBackground :: GrokSession -> Text -> IO (Either Text Text)
-startBackground session command =
-    startBackgroundCommand session command
+startBackground = startBackgroundAuthorized defaultShellExecutionAuthorization
+
+startBackgroundAuthorized
+    :: ShellExecutionAuthorization -> GrokSession -> Text -> IO (Either Text Text)
+startBackgroundAuthorized = startBackgroundCommand
 
 startMonitor :: GrokSession -> Text -> Maybe Int -> IO (Either Text Text)
 startMonitor session command timeoutMs =
-    startBackgroundCommand session (monitorCommand command timeoutMs)
+    startBackgroundCommand defaultShellExecutionAuthorization session (monitorCommand command timeoutMs)
 
-startBackgroundCommand :: GrokSession -> Text -> IO (Either Text Text)
-startBackgroundCommand session command =
+-- Escalated calls must not source mutable shell state produced by an earlier
+-- sandboxed command. They also leave the default terminal's state untouched.
+executionScript :: ShellExecutionAuthorization -> PersistentShell -> Bool -> Text -> String
+executionScript authorization shell persist command =
+    bashWrap $
+        if shellExecutionIsEscalated authorization
+            then Text.unpack command
+            else wrapScript shell persist (Text.unpack command)
+
+executionCwd :: ShellExecutionAuthorization -> GrokSession -> PersistentShell -> OsPath
+executionCwd authorization session shell
+    | shellExecutionIsEscalated authorization = session.grokEnv.toolCwd
+    | otherwise = shell.shellCwd
+
+startBackgroundCommand :: ShellExecutionAuthorization -> GrokSession -> Text -> IO (Either Text Text)
+startBackgroundCommand authorization session command =
     withMVar session.grokLifecycle \() ->
         modifyMVar session.grokShell \shell -> do
             sessionTmp <- readIORef session.grokEnv.toolSessionTmp
             blockedShellCommandReasonIn
-                sessionTmp shell.shellCwd command >>= \case
+                sessionTmp (executionCwd authorization session shell) command >>= \case
                     Just reason -> pure (shell, Left reason)
                     Nothing -> do
                         (stale, reservation) <-
@@ -292,9 +325,7 @@ startBackgroundCommand session command =
                                 -- not write them back; a later foreground
                                 -- command owns the persistent session.
                                 let wrapped =
-                                        bashWrap
-                                            (wrapScript shell False
-                                                (Text.unpack command))
+                                        executionScript authorization shell False command
                                     publish result =
                                         publishCompletion completion $
                                             publishBackgroundTaskNotice
@@ -308,7 +339,8 @@ startBackgroundCommand session command =
                                                 (grokCompletionKey taskId)
                                 started <- tryAny $
                                     allocateResource session.grokResources
-                                        (startShellCommandWithCompletion
+                                        (startShellCommandWithCompletionAuthorized
+                                            authorization
                                             session.grokEnv
                                             session.grokEnv.toolCwd
                                             (Text.pack wrapped)

@@ -698,11 +698,16 @@ spec = describe "Agent.CLI.AgentSessions" do
         withTempStoreDir "agent-session-runtime-" \pool root -> do
             let marker = toFilePath root FilePath.</> "stopped"
                 started = toFilePath root FilePath.</> "started"
+            -- Start the child before publishing readiness and use the shell's
+            -- interruptible wait builtin. A foreground sleep can defer the TERM
+            -- trap until after the manager's escalation deadline.
             script <- writeFakeAgentBody root
-                ("trap 'printf stopped > " <> shellQuote marker
+                ("sleep 30 &\nchild=$!\n"
+                    <> "trap 'kill \"$child\" 2>/dev/null; wait \"$child\" 2>/dev/null; printf stopped > "
+                    <> shellQuote marker
                     <> "; exit 0' TERM INT\nprintf started > "
                     <> shellQuote started
-                    <> "\nsleep 30\n")
+                    <> "\nwait \"$child\"\n")
             withExecutableOverride script do
                 handle <- createSession (testCreateAt pool root root)
                 manager <-
