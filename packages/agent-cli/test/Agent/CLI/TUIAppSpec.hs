@@ -1,5 +1,9 @@
 module Agent.CLI.TUIAppSpec (spec) where
 
+import Agent.CLI.TUI.Keyboard (decodeKeyboardBody, classifyKeyboard, runKeyboardInput)
+import Control.Monad (forM_, when)
+import Graphics.Vty.Platform.Unix.Input.Classify.Types (KClass(..))
+
 import Agent.CLI.TUIAppSpec.AgentFixtures
 import qualified Agent.CLI.TUIAppSpec.Motion as Motion
 import Agent.CLI.AgentViewport
@@ -154,7 +158,7 @@ import Agent.TUI.Presentation
     , TodoDisplayStatus(..)
     )
 import Agent.TUI.Motion
-import Control.Concurrent (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (waitCatch)
 import Control.Exception.Safe (bracket_)
 import Control.Exception (AsyncException(UserInterrupt))
@@ -170,7 +174,8 @@ import Control.Monad (replicateM_, void)
 import qualified Data.ByteString as ByteString
 import Data.Foldable (find, toList)
 import Data.IORef
-    ( modifyIORef'
+    ( atomicModifyIORef'
+    , modifyIORef'
     , newIORef
     , readIORef
     , writeIORef
@@ -1262,6 +1267,97 @@ spec = do
             after.uiCursor `shouldBe` 7
             after.uiPrompt.promptModel `shouldBe` "gpt-5.6-sol"
             after.uiPrompt.promptAccount `shouldBe` "OpenAI account"
+
+    describe "enhanced fullscreen keyboard decoding" do
+        it "preserves every existing CSI-u input-map binding" do
+            let normalizeAlt event = case event of
+                    V.EvKey key modifiers ->
+                        V.EvKey key [if modifier == V.MAlt then V.MMeta else modifier | modifier <- modifiers]
+                    _ -> event
+            forM_ (V.configInputMap fullscreenVtyConfig) \(_, bytes, expected) ->
+                when (take 2 bytes == "\ESC[" && last bytes == 'u') $
+                    fmap normalizeAlt (decodeKeyboardBody (drop 2 bytes))
+                        `shouldBe` Just (normalizeAlt expected)
+        it "inserts shifted letters and punctuation as text" do
+            decodeKeyboardBody "97:65;2u"
+                `shouldBe` Just (V.EvKey (V.KChar 'A') [])
+            decodeKeyboardBody "49:33;2u"
+                `shouldBe` Just (V.EvKey (V.KChar '!') [])
+            decodeKeyboardBody "13;2u"
+                `shouldBe` Just (V.EvKey V.KEnter [V.MShift])
+
+        it "preserves cancel behavior for modified Escape" do
+            decodeKeyboardBody "27;3u"
+                `shouldBe` Just (V.EvKey V.KEsc [])
+
+        it "decodes Command+Shift without discarding either modifier" do
+            decodeKeyboardBody "118;10u"
+                `shouldBe` Just (V.EvKey (V.KChar 'v') [V.MShift, V.MMeta])
+
+        it "preserves alternate-key Ctrl+underscore encodings" do
+            decodeKeyboardBody "45:95;5u"
+                `shouldBe` Just (V.EvKey (V.KChar '_') [V.MCtrl])
+
+        it "ignores lock-state bits for shortcuts and Backspace" do
+            forM_ [0, 64, 128, 192 :: Int] \locks -> do
+                decodeKeyboardBody ("118;" <> show (9 + locks) <> "u")
+                    `shouldBe` Just (V.EvKey (V.KChar 'v') [V.MMeta])
+                decodeKeyboardBody ("127;" <> show (3 + locks) <> "u")
+                    `shouldBe` Just (V.EvKey V.KBS [V.MAlt])
+
+        it "decodes Unicode beyond Latin-1 and preserves trailing input" do
+            classifyKeyboard "\ESC[955;9ux"
+                `shouldBe` Just (Valid (V.EvKey (V.KChar 'λ') [V.MMeta]) "x")
+            decodeKeyboardBody "128512;9u"
+                `shouldBe` Just (V.EvKey (V.KChar '😀') [V.MMeta])
+
+        it "retains fragmented CSI-u packets without interpreting ordinary text" do
+            classifyKeyboard "\ESC[955;9" `shouldBe` Just Prefix
+            classifyKeyboard "[955;9u" `shouldBe` Nothing
+            classifyKeyboard "\ESC[A" `shouldBe` Nothing
+            classifyKeyboard "\ESC[200~text\ESC[201~" `shouldBe` Nothing
+            classifyKeyboard "\ESC[<0;1;1M" `shouldBe` Nothing
+
+        it "decodes repeat events and consumes release and invalid Unicode events" do
+            decodeKeyboardBody "127:127:127;3:2u"
+                `shouldBe` Just (V.EvKey V.KBS [V.MAlt])
+            decodeKeyboardBody "127;3:3u"
+                `shouldBe` Just (V.EvKey (V.KFun 0) [])
+            forM_ ["\ESC[1114112;9u", "\ESC[55296;9u"] \bytes ->
+                classifyKeyboard bytes
+                    `shouldBe` Just (Valid (V.EvKey (V.KFun 0) []) "")
+
+        it "decodes every transport split of enhanced keys, arrows, mouse and focus" do
+            forM_
+                [ ("\ESC[955;9u", V.EvKey (V.KChar 'λ') [V.MMeta])
+                , ("\ESC[127;67u", V.EvKey V.KBS [V.MAlt])
+                , ("\ESC[A", V.EvKey V.KUp [])
+                , ("\ESC[<0;1;1M", V.EvMouseDown 0 0 V.BLeft [])
+                , ("\ESC[I", V.EvGainedFocus)
+                ] \(bytes, expected) ->
+                    forM_ [1 .. ByteString.length bytes - 1] \offset -> do
+                        let (prefix, suffix) = ByteString.splitAt offset bytes
+                        keyboardEventsForReads [pure prefix, pure (suffix <> "x")]
+                            `shouldReturn` [expected, V.EvKey (V.KChar 'x') []]
+
+        it "keeps paste contents literal across every transport split" do
+            let content = "literal \ESC[955;9u"
+                bytes = "\ESC[200~" <> content <> "\ESC[201~"
+            forM_ [1 .. ByteString.length bytes - 1] \offset -> do
+                let (prefix, suffix) = ByteString.splitAt offset bytes
+                keyboardEventsForReads [pure prefix, pure (suffix <> "x")]
+                    `shouldReturn` [V.EvPaste content, V.EvKey (V.KChar 'x') []]
+
+        it "times out Escape and incomplete CSI without swallowing the next key" do
+            keyboardEventsForReads [pure "\ESC", threadDelay 200000 >> pure "unused", pure "x"]
+                `shouldReturn` [V.EvKey V.KEsc [], V.EvKey (V.KChar 'x') []]
+            keyboardEventsForReads [pure "\ESC[955;", threadDelay 200000 >> pure "unused", pure "x"]
+                `shouldReturn` [V.EvKey (V.KChar 'x') []]
+
+        it "discards oversized fragmented CSI parameters but preserves subsequent text" do
+            keyboardEventsForReads
+                [pure ("\ESC[" <> ByteString.replicate 1100 49), pure "111;9ux"]
+                `shouldReturn` [V.EvKey (V.KChar 'x') []]
 
     describe "fullscreenVtyConfig" do
         it "maps modified Backspace CSI-u sequences to word deletion keys" do
@@ -3058,6 +3154,23 @@ choiceOverlay closeOnTurnEnd = ChoiceOverlay
     , choiceAdjustmentIndices = []
     , choiceCloseOnTurnEnd = closeOnTurnEnd
     }
+
+keyboardEventsForReads :: [IO ByteString.ByteString] -> IO [V.Event]
+keyboardEventsForReads reads = do
+    pending <- newIORef reads
+    events <- newIORef []
+    let readNext = do
+            action <- atomicModifyIORef' pending \remaining ->
+                case remaining of
+                    [] -> ([], pure ByteString.empty)
+                    next : rest -> (rest, next)
+            action
+        table =
+            [("\ESC", V.EvKey V.KEsc []), ("\ESC[A", V.EvKey V.KUp [])]
+                <> [([character], V.EvKey (V.KChar character) []) | character <- [' '..'~']]
+    runKeyboardInput table readNext (\event -> modifyIORef' events (event :))
+        `shouldThrow` anyIOException
+    reverse <$> readIORef events
 
 textOverlay :: Text -> Int -> TextOverlay
 textOverlay draft cursor = TextOverlay

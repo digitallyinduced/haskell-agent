@@ -10,9 +10,9 @@
 , filepath, haskeline, hasql-pool, hspec, http-client
 , http-client-tls, http-types, JuicyPixels, lib, memory, mtl
 , network, network-uri, optparse-applicative, process, QuickCheck
-, retry, safe-exceptions, scientific, stm, tagsoup, temporary, text
-, time, tls, transformers, unix, vector, vty, vty-crossplatform
-, wai, warp
+, retry, safe-exceptions, scientific, stm, tagsoup, temporary
+, terminfo, text, time, tls, transformers, unix, vector, vty
+, vty-crossplatform, vty-unix, wai, warp
 }:
 mkDerivation {
   pname = "agent-cli";
@@ -32,8 +32,8 @@ mkDerivation {
     directory entropy filelock filepath haskeline hasql-pool
     http-client http-client-tls http-types JuicyPixels memory mtl
     network network-uri optparse-applicative process retry
-    safe-exceptions scientific stm tagsoup text time tls transformers
-    unix vector vty vty-crossplatform wai warp
+    safe-exceptions scientific stm tagsoup terminfo text time tls
+    transformers unix vector vty vty-crossplatform vty-unix wai warp
   ];
   executableHaskellDepends = [
     aeson agent-cli-runtime agent-responses agent-responses-types
@@ -48,8 +48,8 @@ mkDerivation {
     async base base64-bytestring brick bytestring colour containers
     dbus directory filelock filepath haskeline hspec http-client
     http-types JuicyPixels network network-uri process QuickCheck
-    safe-exceptions stm temporary text time transformers unix vty wai
-    warp
+    safe-exceptions stm temporary text time transformers unix vty
+    vty-unix wai warp
   ];
   benchmarkHaskellDepends = [
     aeson agent-core agent-json agent-mcp agent-responses

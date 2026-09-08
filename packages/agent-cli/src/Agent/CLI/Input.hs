@@ -493,6 +493,8 @@ readEscapeKey = do
                 '\r' -> pure (EditorChar '\n')
                 '\DEL' -> pure EditorKillWord
                 '\BS' -> pure EditorKillWord
+                'b' -> pure EditorWordLeft
+                'f' -> pure EditorWordRight
                 _ -> pure EditorIgnore
 
 readCsiKey :: IO EditorKey
@@ -504,6 +506,7 @@ readCsiKey =
             | isShiftTabCsiBody body -> pure EditorCycleMode
             | isClipboardPasteCsiBody body -> readClipboardEditorKey
             | Just key <- decodeKittyEditorKey body -> pure key
+            | Just key <- decodeModifiedArrowKey body -> pure key
             | otherwise -> case body of
                 "A" -> pure EditorUp
                 "B" -> pure EditorDown
