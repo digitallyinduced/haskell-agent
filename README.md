@@ -273,6 +273,15 @@ remote is selected from the current branch's configured remote, then
 fetch failure aborts worktree creation rather than falling back to a stale
 commit.
 
+Default-branch discovery first uses Git's local
+`refs/remotes/<remote>/HEAD` symbolic reference, shared across linked worktrees.
+The server is queried only when that reference is missing or invalid, or when
+fetching the cached branch reports that it no longer exists. Successful
+discovery and fetching refresh the local reference; unrelated fetch failures
+are not retried. If the server changes its default but retains the old branch,
+refresh explicitly with `git remote set-head origin --auto` (substitute the
+selected remote name).
+
 ### Organization gateway model routing
 
 Connected organization gateways must include `provider` and `protocol` for every

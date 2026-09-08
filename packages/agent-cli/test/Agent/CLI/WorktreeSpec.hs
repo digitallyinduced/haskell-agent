@@ -125,6 +125,8 @@ spec = describe "Agent.CLI.Worktree" do
         it "fetches and branches from the remote's latest default commit by default" $
             withTempRemoteRepo \repo updater ->
             withTempDir "agent-home-" \home -> do
+                _ <- git repo
+                    ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master"]
                 stale <- git repo ["rev-parse", "refs/remotes/origin/master"]
                 latest <- git updater ["rev-parse", "HEAD"]
                 stale `shouldNotBe` latest
@@ -150,16 +152,111 @@ spec = describe "Agent.CLI.Worktree" do
                 progress <- readIORef progressRef
                 progress `shouldBe`
                     [ WorktreeInspectingRepository
-                    , WorktreeCheckingRemote "origin"
                     , WorktreeFetchingRemote "origin" "refs/heads/master"
                     , WorktreeCreating
                     ]
                 map worktreeProgressMessage progress `shouldBe`
                     [ "Inspecting Git repository…"
-                    , "Checking Git remote origin…"
                     , "Fetching latest from origin/master…"
                     , "Creating worktree…"
                     ]
+
+        it "discovers a missing default-branch reference and reuses it on the next creation" $
+            withTempRemoteRepo \repo updater ->
+            withTempDir "agent-home-" \home -> do
+                latest <- git updater ["rev-parse", "HEAD"]
+                progressRef <- newIORef []
+                let report progress = modifyIORef' progressRef (<> [progress])
+                first <- expectRight
+                    =<< createManagedWorktreeWithProgress report home repo
+                git first ["rev-parse", "HEAD"] `shouldReturn` latest
+                git repo ["symbolic-ref", "refs/remotes/origin/HEAD"]
+                    `shouldReturn` "refs/remotes/origin/master"
+                readIORef progressRef `shouldReturn`
+                    [ WorktreeInspectingRepository
+                    , WorktreeCheckingRemote "origin"
+                    , WorktreeFetchingRemote "origin" "refs/heads/master"
+                    , WorktreeCreating
+                    ]
+                modifyIORef' progressRef (const [])
+                second <- expectRight
+                    =<< createManagedWorktreeWithProgress report home repo
+                git second ["rev-parse", "HEAD"] `shouldReturn` latest
+                readIORef progressRef `shouldReturn`
+                    [ WorktreeInspectingRepository
+                    , WorktreeFetchingRemote "origin" "refs/heads/master"
+                    , WorktreeCreating
+                    ]
+                temporaryFetchRefs repo `shouldReturn` ""
+
+        it "rediscovers the default branch when the cached branch was deleted" $
+            withTempRemoteRepo \repo updater ->
+            withTempDir "agent-home-" \home -> do
+                _ <- git repo
+                    ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master"]
+                remotePath <- fromFilePath <$> git repo ["remote", "get-url", "origin"]
+                _ <- git updater ["push", "origin", "HEAD:refs/heads/main"]
+                _ <- git remotePath ["symbolic-ref", "HEAD", "refs/heads/main"]
+                _ <- git updater ["push", "origin", "--delete", "master"]
+                latest <- git updater ["rev-parse", "HEAD"]
+                progressRef <- newIORef []
+                path <- expectRight =<< createManagedWorktreeWithProgress
+                    (\progress -> modifyIORef' progressRef (<> [progress]))
+                    home repo
+                git path ["rev-parse", "HEAD"] `shouldReturn` latest
+                git repo ["symbolic-ref", "refs/remotes/origin/HEAD"]
+                    `shouldReturn` "refs/remotes/origin/main"
+                readIORef progressRef `shouldReturn`
+                    [ WorktreeInspectingRepository
+                    , WorktreeFetchingRemote "origin" "refs/heads/master"
+                    , WorktreeCheckingRemote "origin"
+                    , WorktreeFetchingRemote "origin" "refs/heads/main"
+                    , WorktreeCreating
+                    ]
+                temporaryFetchRefs repo `shouldReturn` ""
+
+        it "rejects a cached default-branch reference pointing outside the selected remote" $
+            withTempRemoteRepo \repo updater ->
+            withTempDir "agent-home-" \home -> do
+                _ <- git repo
+                    ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/other/master"]
+                latest <- git updater ["rev-parse", "HEAD"]
+                progressRef <- newIORef []
+                path <- expectRight =<< createManagedWorktreeWithProgress
+                    (\progress -> modifyIORef' progressRef (<> [progress]))
+                    home repo
+                git path ["rev-parse", "HEAD"] `shouldReturn` latest
+                git repo ["symbolic-ref", "refs/remotes/origin/HEAD"]
+                    `shouldReturn` "refs/remotes/origin/master"
+                readIORef progressRef `shouldReturn`
+                    [ WorktreeInspectingRepository
+                    , WorktreeCheckingRemote "origin"
+                    , WorktreeFetchingRemote "origin" "refs/heads/master"
+                    , WorktreeCreating
+                    ]
+
+        it "does not rediscover the cached default branch after an unrelated fetch failure" $
+            withTempRemoteRepo \repo _ ->
+            withTempDir "agent-home-" \home -> do
+                _ <- git repo
+                    ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master"]
+                _ <- git repo
+                    ["remote", "set-url", "origin", toFilePath (repo </> fromFilePath "missing.git")]
+                progressRef <- newIORef []
+                result <- createManagedWorktreeWithProgress
+                    (\progress -> modifyIORef' progressRef (<> [progress]))
+                    home repo
+                result `shouldSatisfy` \case
+                    Left err -> "failed to fetch" `Text.isInfixOf` err
+                    Right _ -> False
+                readIORef progressRef `shouldReturn`
+                    [ WorktreeInspectingRepository
+                    , WorktreeFetchingRemote "origin" "refs/heads/master"
+                    ]
+                git repo ["symbolic-ref", "refs/remotes/origin/HEAD"]
+                    `shouldReturn` "refs/remotes/origin/master"
+                temporaryFetchRefs repo `shouldReturn` ""
+                doesDirectoryExist (worktreeRoot home) `shouldReturn` False
 
         it "uses local HEAD when latest-upstream fetching is disabled" $
             withTempRemoteRepo \repo updater ->
