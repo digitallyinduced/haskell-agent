@@ -64,12 +64,14 @@ import Agent.CLI.Session
     , ensureSession
     , ensureSessionWithPromptSnapshot
     , loadRecentSessionTurns
+    , loadSessionHistorySnapshot
     , sessionConversationText
     , sessionsRoot
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
     )
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
+import qualified Agent.CLI.Session.Observation as Observation
 import Agent.CLI.SessionEnv
     ( PreparedWorkspaceEnvironment(..)
     , SessionEnv(..)
@@ -153,7 +155,7 @@ import Agent.Tools.TaskPlan
     , taskPlanReminderText
     )
 import Agent.OsPath (toText, unsafeToFilePath)
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, void, when)
 import Control.Exception.Safe (bracket_, finally, onException, tryAny)
 import Data.IORef
     ( IORef
@@ -258,8 +260,75 @@ runOneTurnBusy includeTurnContext env@SessionEnv{}
         then id
         else withEscCancel config.loopCancel env.sessionStdinControl) do
     prepared <- prepareBusyTurn request
-    executed <- executeBusyTurn request prepared
-    finishBusyTurn executed
+    withObservedBusyTurn env promptText do
+        executed <- executeBusyTurn request prepared
+        finishBusyTurn executed
+
+-- | Start publication only after prompt preparation has made the session
+-- durable. Recursive plan follow-ups and reasoning-effort restarts share the
+-- same service, but receive a fresh live-turn identity and history boundary.
+-- The renderer reads the shared reference after plan-protocol projection, so
+-- this does not wrap loopOnEvent or duplicate events on recursive execution.
+withObservedBusyTurn :: SessionEnv -> Text -> IO a -> IO a
+withObservedBusyTurn env _ action
+    | not env.sessionObservationEnabled = action
+withObservedBusyTurn env promptText action =
+    case env.sessionPersist of
+        PersistenceDisabled -> action
+        PersistenceEnabled slotRef -> do
+            -- Observation is ancillary: isolate setup, never the turn action.
+            boundary <- tryAny do
+                handle <- ensureSession slotRef
+                snapshot <- loadSessionHistorySnapshot
+                    handle.sessionPool
+                    (System.OsPath.takeDirectory handle.sessionDir)
+                    handle.sessionMeta.metaId
+                pure (handle, snapshot)
+            case boundary of
+                Right (handle, Right (_, generationStart, totalTurns)) -> do
+                    existing <- readIORef env.sessionObservationPublisher
+                    let runObserved publisher = do
+                            started <- tryAny $ Observation.beginObservedTurn
+                                publisher generationStart totalTurns promptText
+                            case started of
+                                Left _ -> runUnobserved
+                                Right () -> action
+                    case existing of
+                        Just publisher -> runObserved publisher
+                        Nothing ->
+                            Observation.withOptionalSessionObservationPublisher
+                                handle.sessionMeta.metaId \publisher ->
+                                    bracket_
+                                        (writeIORef
+                                            env.sessionObservationPublisher
+                                            publisher)
+                                        (writeIORef
+                                            env.sessionObservationPublisher
+                                            Nothing)
+                                        (maybe action runObserved publisher)
+                _ -> runUnobserved
+  where
+    -- A failed nested-turn setup must not publish into the preceding turn.
+    runUnobserved = do
+        previous <- readIORef env.sessionObservationPublisher
+        bracket_
+            (writeIORef env.sessionObservationPublisher Nothing)
+            (writeIORef env.sessionObservationPublisher previous)
+            action
+
+-- | Read the history boundary after the append committed. Neither a model
+-- TurnFinished event nor an input-wait transition is a durable completion.
+completeObservedSessionTurn :: SessionEnv -> SessionHandle -> Bool -> IO ()
+completeObservedSessionTurn env handle interrupted = void $ tryAny do
+    publisher <- readIORef env.sessionObservationPublisher
+    forM_ publisher \observer -> do
+        boundary <- loadSessionHistorySnapshot
+            handle.sessionPool
+            (System.OsPath.takeDirectory handle.sessionDir)
+            handle.sessionMeta.metaId
+        forM_ boundary \(_, generationStart, totalTurns) ->
+            Observation.completeObservedTurn
+                observer generationStart totalTurns interrupted
 
 data BusyTurnRequest = BusyTurnRequest
     { busyIncludeTurnContext :: Bool
@@ -586,6 +655,7 @@ persistIncompleteTurn
                 appendTurnWithMetaUpdateIndexed handle turn \meta ->
                     meta { metaLastResponseId = Nothing }
             writeIORef slotRef (PersistenceActive handle')
+            completeObservedSessionTurn env handle' True
             forM_ env.sessionFullscreen \runtime ->
                 commitFullscreenHistoryTurn
                     runtime
@@ -914,6 +984,7 @@ persistSuccessfulTurn
             writeIORef env.sessionTitleTurnCount titleTurns
             let countedMeta = countedHandle.sessionMeta
             writeIORef slotRef (PersistenceActive countedHandle)
+            completeObservedSessionTurn env countedHandle False
             forM_ env.sessionFullscreen \runtime ->
                 commitFullscreenHistoryTurn
                     runtime

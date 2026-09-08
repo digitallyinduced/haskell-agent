@@ -1,6 +1,7 @@
 module Main (main) where
 
 import qualified Agent.CLI.SessionActivitySpec as SessionActivitySpec
+import qualified Agent.CLI.SessionObservationSpec as SessionObservationSpec
 import qualified Agent.CLI.SessionRequestSpec as SessionRequestSpec
 import qualified Agent.CLI.SessionThreadsSpec as SessionThreadsSpec
 import Agent.CLI.Session.TitlePolicy (titleRefreshIndex)
@@ -27,6 +28,7 @@ import Test.Hspec
 main :: IO ()
 main = hspec do
     SessionActivitySpec.spec
+    SessionObservationSpec.spec
     SessionRequestSpec.spec
     SessionThreadsSpec.spec
     describe "titleRefreshIndex" do

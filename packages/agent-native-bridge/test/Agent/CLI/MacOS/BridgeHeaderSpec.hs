@@ -17,6 +17,9 @@ foreign import ccall "ha_mcp_admin_abi_smoke"
 foreign import ccall "ha_session_continuity_abi_smoke"
     sessionContinuityAbiSmoke :: IO CInt
 
+foreign import ccall "ha_session_observation_validation_smoke"
+    sessionObservationValidationSmoke :: IO CInt
+
 foreign import ccall "ha_learned_skill_admin_abi_smoke"
     learnedSkillAdminAbiSmoke :: IO CInt
 
@@ -49,3 +52,5 @@ spec = do
     describe "native session continuity ABI" do
         it "matches callback signatures and rejects invalid UTF-8 safely" do
             sessionContinuityAbiSmoke `shouldReturn` 0
+        it "validates observation inputs and joins one terminal callback on cancellation" do
+            sessionObservationValidationSmoke `shouldReturn` 0

@@ -40,6 +40,103 @@ typedef void (*ha_event_callback)(
     const uint8_t *bytes,
     size_t length
 );
+
+/*
+ * Read-only observation of a session owned by a separate agent-cli process.
+ * This never acquires the execution lock or permits steering/approval.
+ *
+ * All text is callback-scoped UTF-8; copy before returning. Optional empty
+ * fields may be NULL/zero. Callbacks for one observation are serial on a
+ * runtime worker thread, never necessarily the main thread. Return promptly.
+ *
+ * A reset begins replacement of the current live turn. Its text is the user
+ * input. Catch-up events follow it and READY commits that catch-up atomically.
+ * Every subsequent event batch also ends with READY. All callbacks in one
+ * batch share its sequence number. owner_id identifies the CLI
+ * process instance, turn_id its current execution. generation_start identifies
+ * the saved-history compaction generation. durable_turn_count is the
+ * saved-history boundary preceding that execution; PERSISTED advances it only
+ * after the durable write. Sequence numbers may skip, but never decrease
+ * within an owner instance. A new RESET replaces the previous live projection.
+ *
+ * TEXT, REASONING and STATUS use text. TOOL_STARTED uses text for arguments,
+ * call_id, tool_name and tool_summary. TOOL_FINISHED uses text for output and
+ * call_id. Tool flags: bit 0 encrypted arguments, bit 1 truncated, bit 2 async.
+ * Unknown bits must be ignored. Other event kinds leave tool fields empty.
+ *
+ * RESET/READY flags: low two bits are 0 running, 1 waiting, 2 completed,
+ * 3 interrupted; bit 8 means catch-up history was truncated. PERSISTED uses
+ * the same flags. TOOL_OUTPUT replaces the call's provisional output;
+ * TOOL_RETRACTED removes its provisional card.
+ * RESPONSE_RESTARTED begins a response attempt. RESPONSE_DISCARDED removes all
+ * display items since the most recent RESPONSE_RESTARTED (or RESET).
+ * RESPONSE_FAILED reports attempt failure without discarding its display.
+ *
+ * UNAVAILABLE (older/non-running CLI) and DISCONNECTED are nonterminal:
+ * observation keeps attempting reconnection. CANCELLED and FAILURE are
+ * terminal: exactly one terminal callback follows an accepted start, and no callbacks
+ * follow it. It is then safe to release context (but the handle still requires
+ * destroy). Terminal text describes the reason; identity may be empty.
+ */
+enum {
+    HA_SESSION_OBSERVATION_RESET = 1,
+    HA_SESSION_OBSERVATION_READY = 2,
+    HA_SESSION_OBSERVATION_TEXT = 3,
+    HA_SESSION_OBSERVATION_REASONING = 4,
+    HA_SESSION_OBSERVATION_STATUS = 5,
+    HA_SESSION_OBSERVATION_TOOL_STARTED = 6,
+    HA_SESSION_OBSERVATION_TOOL_FINISHED = 7,
+    HA_SESSION_OBSERVATION_PERSISTED = 8,
+    HA_SESSION_OBSERVATION_TOOL_OUTPUT = 9,
+    HA_SESSION_OBSERVATION_TOOL_RETRACTED = 10,
+    HA_SESSION_OBSERVATION_RESPONSE_RESTARTED = 11,
+    HA_SESSION_OBSERVATION_RESPONSE_DISCARDED = 12,
+    HA_SESSION_OBSERVATION_RESPONSE_FAILED = 13,
+    HA_SESSION_OBSERVATION_UNAVAILABLE = 100,
+    HA_SESSION_OBSERVATION_DISCONNECTED = 101,
+    HA_SESSION_OBSERVATION_CANCELLED = 102,
+    HA_SESSION_OBSERVATION_FAILURE = 103
+};
+
+typedef void (*ha_session_observation_callback)(
+    void *context,
+    int32_t kind,
+    const uint8_t *owner_id, size_t owner_id_length,
+    const uint8_t *turn_id, size_t turn_id_length,
+    uint64_t sequence,
+    int64_t generation_start,
+    int64_t durable_turn_count,
+    const uint8_t *text, size_t text_length,
+    const uint8_t *call_id, size_t call_id_length,
+    const uint8_t *tool_name, size_t tool_name_length,
+    const uint8_t *tool_summary, size_t tool_summary_length,
+    uint32_t flags
+);
+
+/*
+ * Copies session_id before returning. Requires nonempty valid UTF-8 ID,
+ * nonnull callback, and nonnull out_observation. Returns 0 on acceptance,
+ * 1 for invalid input, 2 for synchronous initialization failure. On failure
+ * *out_observation is NULL (when supplied), and no callback is invoked.
+ * On success the caller owns the nonnull handle, even after terminal delivery.
+ * Callbacks may begin before start returns.
+ */
+int32_t ha_session_observation_start(
+    const uint8_t *session_id, size_t session_id_length,
+    ha_session_observation_callback callback, void *context,
+    void **out_observation
+);
+
+/* Requests cancellation without waiting. Safe from callbacks; NULL is a no-op.
+ * Cancellation stops only observation, never the owning CLI execution. */
+void ha_session_observation_cancel(void *observation);
+
+/* Cancels, joins the worker, and frees the handle. NULL is a no-op.
+ * Call exactly once, outside any observation callback. Do not race destroy
+ * with other calls using this handle. No callbacks can occur after return.
+ * Destroy all observation handles before ha_runtime_exit. */
+void ha_session_observation_destroy(void *observation);
+
 enum {
     HA_BROWSER_NAVIGATE = 1,
     HA_BROWSER_SNAPSHOT = 2,
