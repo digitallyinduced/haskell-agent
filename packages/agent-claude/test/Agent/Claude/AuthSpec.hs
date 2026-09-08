@@ -4,12 +4,16 @@ module Agent.Claude.AuthSpec (spec) where
 
 import Agent.Claude.Auth
 import Agent.Claude.Transport
-import Control.Exception.Safe (bracket, finally, onException)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (cancel, withAsync)
+import Control.Exception.Safe (bracket, finally, onException, tryAny)
 import Control.Monad (void)
 import qualified Data.ByteString.Char8 as ByteString
+import Data.Either (isLeft)
 import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
+    , doesFileExist
     , getTemporaryDirectory
     , removeDirectoryRecursive
     , removeFile
@@ -31,6 +35,7 @@ import System.Posix.IO
     , dupTo
     , stdInput
     )
+import System.Posix.Signals (nullSignal, signalProcess)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -92,6 +97,33 @@ spec = do
                         }
 
     describe "loadClaudeCodeAuth" do
+        it "stops the auth subprocess when its scope is cancelled" $
+            withScratchDirectory "agent-claude-auth-cancel" \root -> do
+                let executable = root </> "fake-claude"
+                    pidFile = root </> "pid"
+                    waitForPid = do
+                        exists <- doesFileExist pidFile
+                        contents <- if exists then ByteString.readFile pidFile else pure ""
+                        case reads (ByteString.unpack contents) of
+                            [(pid, _)] -> pure pid
+                            _ -> threadDelay 10_000 >> waitForPid
+                writeFile executable $
+                    "#!/bin/sh\necho $$ > " <> show pidFile <> "\nexec sleep 30\n"
+                setFileMode executable $
+                    ownerReadMode
+                        `unionFileModes` ownerWriteMode
+                        `unionFileModes` ownerExecuteMode
+                withEnvironmentVariables
+                    [("CLAUDE_CODE_EXECUTABLE", Just executable)]
+                    $ withAsync loadClaudeCodeAuth \probe -> do
+                        pid <- timeout 2_000_000 waitForPid
+                        case pid of
+                            Nothing -> expectationFailure "auth subprocess did not start"
+                            Just processId -> do
+                                cancel probe
+                                alive <- tryAny (signalProcess nullSignal processId)
+                                alive `shouldSatisfy` isLeft
+
         it "does not inherit caller stdin for the auth subprocess" $
             withScratchDirectory "agent-claude-auth-stdin" \root -> do
                 let executable = root </> "fake-claude"

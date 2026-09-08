@@ -17,10 +17,9 @@ import Agent.Process (terminateProcessGroup)
 import qualified Agent.Json.Decode as Json
 import Control.Concurrent.Async (poll, waitBoth, withAsync)
 import Control.Exception.Safe
-    ( displayException
+    ( bracket
+    , displayException
     , finally
-    , mask
-    , onException
     , tryAny
     )
 import Control.Monad (void)
@@ -36,6 +35,7 @@ import System.Environment (lookupEnv)
 import System.Exit (ExitCode(..))
 import System.Process
     ( CreateProcess(..)
+    , ProcessHandle
     , StdStream(CreatePipe)
     , createProcess
     , getPid
@@ -110,64 +110,52 @@ runAuthStatusProbe
     -> [(String, String)]
     -> IO (ExitCode, String, String)
 runAuthStatusProbe executablePath cleanEnvironment =
-    mask \restore -> do
-        let spec =
-                (proc executablePath ["auth", "status", "--json"])
-                    { env = Just cleanEnvironment
-                    -- Claude Code inspects an inherited TTY even for this
-                    -- non-interactive status command. Give it a closed pipe
-                    -- instead of the full-screen UI's raw-mode terminal.
-                    , std_in = CreatePipe
-                    , std_out = CreatePipe
-                    , std_err = CreatePipe
-                    , close_fds = True
-                    , create_group = True
-                    , new_session = True
-                    }
-        (mIn, mOut, mErr, processHandle) <- createProcess spec
+    withAuthStatusProcess spec \(mIn, mOut, mErr, processHandle) -> do
         mapM_ hCloseQuiet mIn
         case (mOut, mErr) of
             (Just out, Just err) -> do
                 mapM_ setupHandle [out, err]
-                let stop = do
-                        group <- getPid processHandle
-                        terminateProcessGroup group processHandle
-                    awaitProbe =
-                        withAsync (safeDrain out) \outReader ->
-                            withAsync (safeDrain err) \errReader -> do
-                                result <- restore
-                                    (timeout authProbeTimeoutMicros
-                                        (waitForProcess processHandle))
-                                    `onException` stop
-                                case result of
-                                    Nothing -> do
-                                        stop
-                                        pure
-                                            ( ExitFailure 124
-                                            , ""
-                                            , "authentication probe timed out"
-                                            )
-                                    Just code -> do
-                                        streams <- restore $
-                                            timeout readerDrainTimeoutMicros
-                                                (waitBoth outReader errReader)
-                                        (stdoutText, stderrText) <-
-                                            case streams of
-                                                Just completed ->
-                                                    pure completed
-                                                Nothing ->
-                                                    (,)
-                                                        <$> completedOutput outReader
-                                                        <*> completedOutput errReader
-                                        pure (code, stdoutText, stderrText)
-                awaitProbe `finally` mapM_ hCloseQuiet [out, err]
+                withAsync (safeDrain out) \outReader ->
+                    withAsync (safeDrain err) \errReader -> do
+                        result <- timeout authProbeTimeoutMicros
+                            (waitForProcess processHandle)
+                        case result of
+                            Nothing -> do
+                                stopAuthStatusProcess processHandle
+                                pure
+                                    ( ExitFailure 124
+                                    , ""
+                                    , "authentication probe timed out"
+                                    )
+                            Just code -> do
+                                streams <- timeout readerDrainTimeoutMicros
+                                    (waitBoth outReader errReader)
+                                (stdoutText, stderrText) <-
+                                    case streams of
+                                        Just completed ->
+                                            pure completed
+                                        Nothing ->
+                                            (,)
+                                                <$> completedOutput outReader
+                                                <*> completedOutput errReader
+                                pure (code, stdoutText, stderrText)
             _ -> do
-                mapM_ (maybe (pure ()) hCloseQuiet) [mOut, mErr]
-                group <- getPid processHandle
-                terminateProcessGroup group processHandle
+                stopAuthStatusProcess processHandle
                 pure (ExitFailure 1, "", "Claude Code did not provide output pipes")
   where
-    hCloseQuiet = void . tryAny . hClose
+    spec =
+        (proc executablePath ["auth", "status", "--json"])
+            { env = Just cleanEnvironment
+            -- Claude Code inspects an inherited TTY even for this
+            -- non-interactive status command. Give it a closed pipe
+            -- instead of the full-screen UI's raw-mode terminal.
+            , std_in = CreatePipe
+            , std_out = CreatePipe
+            , std_err = CreatePipe
+            , close_fds = True
+            , create_group = True
+            , new_session = True
+            }
     safeDrain handle =
         either (const "") id <$> tryAny (drainCapped handle)
     completedOutput reader =
@@ -177,6 +165,28 @@ runAuthStatusProbe executablePath cleanEnvironment =
     setupHandle handle = do
         hSetBinaryMode handle True
         hSetBuffering handle NoBuffering
+
+-- | Own the process and all pipes from creation, including while setting modes
+-- and starting readers. Release stops a still-running process before closing
+-- its pipes; a process already reaped by the caller needs no further stopping.
+withAuthStatusProcess
+    :: CreateProcess
+    -> ((Maybe Handle, Maybe Handle, Maybe Handle, ProcessHandle) -> IO a)
+    -> IO a
+withAuthStatusProcess spec =
+    bracket (createProcess spec) release
+  where
+    release (input, output, err, processHandle) =
+        stopAuthStatusProcess processHandle
+            `finally` mapM_ hCloseQuiet (catMaybes [input, output, err])
+
+stopAuthStatusProcess :: ProcessHandle -> IO ()
+stopAuthStatusProcess processHandle = do
+    group <- getPid processHandle
+    terminateProcessGroup group processHandle
+
+hCloseQuiet :: Handle -> IO ()
+hCloseQuiet = void . tryAny . hClose
 
 authProbeTimeoutMicros :: Int
 authProbeTimeoutMicros = 5 * 1_000_000

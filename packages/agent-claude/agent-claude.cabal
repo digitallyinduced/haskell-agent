@@ -85,6 +85,7 @@ test-suite agent-claude-test
                     , agent-responses-types
                     , claude-agent-sdk-haskell
                     , aeson
+                    , async
                     , bytestring
                     , directory
                     , filepath

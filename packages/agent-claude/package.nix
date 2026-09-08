@@ -16,8 +16,8 @@ mkDerivation {
   ];
   testHaskellDepends = [
     aeson agent-core agent-json agent-responses agent-responses-types
-    base bytestring claude-agent-sdk-haskell directory filepath hspec
-    safe-exceptions text unix
+    async base bytestring claude-agent-sdk-haskell directory filepath
+    hspec safe-exceptions text unix
   ];
   description = "Claude Code subscription adapter for Agent.Loop";
   license = lib.meta.getLicenseFromSpdxId "MIT";
