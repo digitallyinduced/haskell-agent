@@ -70,7 +70,7 @@ import Agent.ToolDispatch ()
 import Agent.Tools.IO ( terminateProcessGroup )
 import Agent.Tools.Types ()
 import Control.Concurrent ()
-import Control.Concurrent.Async ( asyncWithUnmask )
+import Control.Concurrent.Async ( asyncWithUnmask, cancel )
 import Control.Concurrent.MVar ( newMVar )
 import Control.Concurrent.STM
     ( atomically,
@@ -84,7 +84,7 @@ import Control.Concurrent.STM
       tryPutTMVar,
       TMVar )
 import Control.Exception.Safe
-    ( finally, onException, tryAny, MonadMask(mask) )
+    ( bracketOnError, finally, onException, tryAny, MonadMask(mask) )
 import Control.Monad ( void )
 import Control.Monad.Trans.Class ()
 import Control.Monad.Trans.Except ()
@@ -176,8 +176,9 @@ startMcpClientWith hooks eraHint config = case config.mcpServerUrl of
                     , std_err = CreatePipe
                     , create_group = True
                     }
-        created <- createProcess processSpec
-        case created of
+        -- Keep startup masked through the handoff to the long-lived client.
+        -- Every intermediate owner has rollback before the next setup step.
+        bracketOnError (createProcess processSpec) rollbackProcess \case
             (Just input, Just output, Just errOutput, processHandle) -> do
                 groupId <- getPid processHandle
                 hSetBinaryMode input True
@@ -200,21 +201,28 @@ startMcpClientWith hooks eraHint config = case config.mcpServerUrl of
                 client <-
                     newClientRecord hooks eraHint config
                         (McpClientStdio transport)
-                stderrReader <- asyncWithUnmask \unmask ->
-                    unmask (stderrLoop errOutput transport.stdioStderr)
-                        `finally` void (tryAny (hClose errOutput))
-                writeIORef transport.stdioStderrReader (Just stderrReader)
-                reader <- asyncWithUnmask \unmask ->
-                    unmask (readerLoop client output)
-                        `finally` void (tryAny (hClose output))
-                writeIORef transport.stdioReader (Just reader)
-                pure client
-            _ -> do
-                let (_, _, _, processHandle) = created
-                groupId <- getPid processHandle
-                terminateProcessGroup groupId processHandle
-                closeOptionalHandles created
+                bracketOnError
+                    (asyncWithUnmask \unmask ->
+                        unmask (stderrLoop errOutput transport.stdioStderr)
+                            `finally` void (tryAny (hClose errOutput)))
+                    cancel
+                    \stderrReader -> do
+                        writeIORef transport.stdioStderrReader (Just stderrReader)
+                        bracketOnError
+                            (asyncWithUnmask \unmask ->
+                                unmask (readerLoop client output)
+                                    `finally` void (tryAny (hClose output)))
+                            cancel
+                            \reader -> do
+                                writeIORef transport.stdioReader (Just reader)
+                                pure client
+            _ ->
                 ioError (userError "MCP server did not provide all stdio pipes")
+  where
+    rollbackProcess created@(_, _, _, processHandle) =
+        (getPid processHandle >>= \groupId ->
+            terminateProcessGroup groupId processHandle)
+            `finally` closeOptionalHandles created
 
 startMcpHttpClient
     :: McpHostHooks
