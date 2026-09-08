@@ -34,6 +34,8 @@ import Agent.Responses.LoopBackend
     , statelessResponsesBackend
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
+    , tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
+    , tokenProviderStatelessResponsesBackendPreservingHistory
     , turnInputsToItems
     , responseItemToToolCall
     , toolResultToItem
@@ -78,6 +80,7 @@ import Agent.Responses.Types.Items (responseItemDecoder)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
+import Control.Monad (forM_)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import System.Timeout (timeout)
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -106,7 +109,98 @@ spec :: Spec
 spec = do
     wireAsyncSpec
     backendSpec
+    accountReplaySpec
     streamProjectionSpec
+
+accountReplaySpec :: Spec
+accountReplaySpec = describe "stateless Responses account replay boundary" $
+    forM_
+        [ ("default", tokenProviderStatelessResponsesBackend)
+        , ("preserving checkpoints",
+            tokenProviderStatelessResponsesBackendPreservingCheckpointHistory)
+        , ("preserving history",
+            tokenProviderStatelessResponsesBackendPreservingHistory)
+        ] \(label, makeBackend) -> describe label do
+        it "still fails over after a lifecycle-only pre-output rejection" do
+            attempts <- newIORef (0 :: Int)
+            let provider = tokenProvider SubscriptionBilled
+                    (const (pure (Right (credential "test"))))
+                send _ _ emit = do
+                    attempt <- atomicModifyIORef' attempts (\n -> (n + 1, n))
+                    emit (ResponseCreatedEvent (responseWithOutput []) Nothing)
+                    pure $ if attempt == 0
+                        then Left (HttpError 401 "rejected")
+                        else Right (responseWithOutput [])
+                backend = makeBackend provider send
+                    (pure defaultResponseCreateParams)
+            result <- backend.submitTurn emptyBackendSnapshot Nothing
+                [UserMessage "hello"] (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef attempts `shouldReturn` 2
+
+        forM_ replayBoundaryEvents \(eventLabel, event, expectedAsync) ->
+            it ("does not replay an account error after " <> eventLabel) do
+                attempts <- newIORef (0 :: Int)
+                admissions <- newIORef (0 :: Int)
+                events <- newIORef []
+                let rejected = HttpError 429 "limited after output"
+                    provider = tokenProvider SubscriptionBilled
+                        (const (pure (Right (credential "test"))))
+                    send _ _ emit = do
+                        modifyIORef' attempts (+ 1)
+                        emit event
+                        pure (Left rejected)
+                    backend = makeBackend provider send
+                        (pure defaultResponseCreateParams)
+                result <- backend.submitTurnWithCallbacks
+                    emptyBackendSnapshot Nothing [UserMessage "hello"]
+                    BackendCallbacks
+                        { onLoopEvent = \value -> modifyIORef' events (<> [value])
+                        , onRecoveryCheckpoint = const (pure ())
+                        , onAsyncToolCall = \_ -> modifyIORef' admissions (+ 1)
+                        }
+                result `shouldBe` Left rejected
+                readIORef attempts `shouldReturn` 1
+                readIORef admissions `shouldReturn` expectedAsync
+                if eventLabel == "visible text"
+                    then readIORef events `shouldReturn` [TextDelta "partial"]
+                    else pure ()
+
+replayBoundaryEvents :: [(String, ResponseStreamEvent, Int)]
+replayBoundaryEvents =
+    [ ("visible text", OtherResponseStreamEvent
+        { otherEventType = EventOutputTextDelta
+        , sequenceNumber = Nothing
+        , eventDelta = Just "partial"
+        , streamItemId = Nothing
+        , streamOutputIndex = Nothing
+        , summaryIndex = Nothing
+        , turnState = Nothing
+        }, 0)
+    , ("an opaque checkpoint", ResponseOutputItemDoneEvent
+        { item = CompactionItemValue CompactionItem
+            { itemId = Just "checkpoint"
+            , encryptedContent = Just "opaque"
+            }
+        , outputIndex = Nothing
+        , sequenceNumber = Nothing
+        }, 0)
+    , ("async tool admission", ResponseOutputItemDoneEvent
+        { item = FunctionCallItem FunctionCall
+            { itemId = Just "effect-item"
+            , callId = "effect-call"
+            , name = "shell_command"
+            , namespace = Nothing
+            , provider = Nothing
+            , arguments = "{\"command\":\"effect\"}"
+            , encryptedFunctionArgs = Nothing
+            , status = Just ItemCompleted
+            , async = Just True
+            }
+        , outputIndex = Just 0
+        , sequenceNumber = Just 1
+        }, 1)
+    ]
 
 wireAsyncSpec :: Spec
 wireAsyncSpec = describe "Responses async wire fields" do

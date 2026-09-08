@@ -92,6 +92,12 @@ classifies only account-scoped failures, reports the rejected credential, and
 reruns the supplied operation with the provider's replacement. Generic network
 or server failures do not poison account health.
 
+That compatibility API requires replay-safe actions. Streaming adapters use
+`runWithTokenProviderStreaming`, and actions with uncertain effects can return
+explicit `ProviderAttemptFailure` metadata through
+`runWithTokenProviderAttempt`. Account classification cannot override an unsafe
+or unknown replay decision. See [the replay contract](../../docs/provider-replay-safety.md).
+
 For replay-safe WebSocket operations, `withCodexWsRetrying` applies that same
 loop to both handshake and in-band 401/403/usage-limit failures. Its callback
 can be executed again from the beginning, so callers must keep externally
