@@ -14,13 +14,14 @@ import Control.Exception.Safe (mask, tryAny)
 import Agent.CLI.MacOS.NativeGatewayBoundary (withNativeSessionBoundary, validateNativeSessionBoundary)
 import Agent.CLI.MacOS.SessionTransferBridge (withNativeSessionStore)
 import Agent.CLI.Session
-    ( SessionMeta(..), SessionTurn(..), SessionTurnPage(..), isValidSessionId
+    ( SessionMeta(..), SessionTurnPage(..), isValidSessionId
     , loadSessionHistorySnapshot, loadSessionHistoryTurnsRangeBounded )
+import Agent.CLI.Session.PullRequest (sessionTurnPullRequestURL, sessionTurnPullRequestURLs)
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Types (renderStoreError)
 import qualified Agent.Store.Postgres.Session as PRStore
-import qualified Data.Aeson as Aeson
 import qualified Data.List as PRList
+import Data.Maybe (mapMaybe)
 import System.OsPath (OsPath, decodeFS)
 import Control.Monad (when)
 import Data.Text (Text)
@@ -524,8 +525,25 @@ indexSessionPullRequests pool root sessionId =
                 let (cursor, urls) = case cached of
                         Just value@(next, _) | next <= total -> value
                         _ -> (0, [])
-                scan total cursor urls
+                scan total cursor urls >>= \case
+                    Left err -> pure (Left err)
+                    Right associated -> prioritizeLatest total associated
   where
+    -- Old caches contain all associations, but ordered prompt evidence before
+    -- newly created PRs. Re-read the latest associated turn even when the
+    -- cursor is already current, skipping unrelated turns in bounded pages.
+    prioritizeLatest _ [] = pure (Right [])
+    prioritizeLatest end urls
+        | end <= 0 = pure (Right urls)
+        | otherwise =
+            let start = max 0 (end - 32)
+            in loadSessionHistoryTurnsRangeBounded pool root sessionId start end 32 >>= \case
+                Left err -> pure (Left err)
+                Right page -> case page.pageTurns of
+                    [] -> pure (Left "incomplete PR association history")
+                    turns -> case mapMaybe (sessionTurnPullRequestURL . snd) (reverse turns) of
+                        url : _ -> pure (Right (PRList.nub (url : urls)))
+                        [] -> prioritizeLatest start urls
     scan total cursor urls
         | cursor >= total = pure (Right urls)
         | otherwise = loadSessionHistoryTurnsRangeBounded pool root sessionId cursor total 32 >>= \case
@@ -534,9 +552,7 @@ indexSessionPullRequests pool root sessionId =
                 [] -> pure (Left "incomplete PR association history")
                 turns -> do
                     let next = 1 + maximum (map fst turns)
-                        discovered = concatMap (\(_, turn) ->
-                            RepositoryDelivery.conversationPullRequestURLs turn.turnUserText turn.turnAssistantText
-                                (map Aeson.toJSON (turn.turnItems <> turn.turnDisplayItems))) (reverse turns)
+                        discovered = concatMap (sessionTurnPullRequestURLs . snd) (reverse turns)
                         associated = PRList.nub (discovered <> urls)
                     PRStore.saveSessionPullRequests pool sessionId next associated >>= \case
                         Left err -> pure (Left (renderStoreError err))
