@@ -13,6 +13,9 @@ module Agent.GrokBuild.Dialect.Shell
     , startBackground
     , startMonitor
     , readTaskOutput
+    , ShellTaskSnapshot(..)
+    , readTaskSnapshot
+    , formatTaskSnapshot
     , killTask
     , hasUnwaitedBackgroundOp
     ) where
@@ -396,11 +399,32 @@ insertBackgroundTask session task =
             , ()
             )
 
+-- | Keep process state separate from its presentation for task coordination.
+data ShellTaskSnapshot
+    = ShellTaskUnknown
+    | ShellTaskRunning !Text !Text
+    | ShellTaskCompleted !CommandResult
+    deriving (Eq, Show)
+
+formatTaskSnapshot :: Text -> ShellTaskSnapshot -> Text
+formatTaskSnapshot taskId = \case
+    ShellTaskUnknown -> "Unknown task_id: " <> taskId
+    ShellTaskCompleted result -> formatCommandResult result
+    ShellTaskRunning out err ->
+        let body = combineCommandOutput out err
+        in if Text.null body
+            then "still running"
+            else "still running\n" <> body
+
 readTaskOutput :: GrokSession -> Text -> Maybe Int -> IO Text
-readTaskOutput session taskId timeoutMs = do
+readTaskOutput session taskId timeoutMs =
+    formatTaskSnapshot taskId <$> readTaskSnapshot session taskId timeoutMs
+
+readTaskSnapshot :: GrokSession -> Text -> Maybe Int -> IO ShellTaskSnapshot
+readTaskSnapshot session taskId timeoutMs = do
     store <- readMVar session.grokTasks
     case Map.lookup taskId store.backgroundTasks of
-        Nothing -> pure $ "Unknown task_id: " <> taskId
+        Nothing -> pure ShellTaskUnknown
         Just task -> do
             case timeoutMs of
               Nothing -> snapshotTask session task
@@ -412,7 +436,7 @@ readTaskOutput session taskId timeoutMs = do
                     Left () -> snapshotTask session task
                     Right result -> do
                         consumeTaskCompletion session task
-                        pure (formatCommandResult result)
+                        pure (ShellTaskCompleted result)
 
 -- The watchdog is part of the spawned process tree, so it outlives the tool
 -- call without requiring an untracked Haskell thread. The outer shell waits
@@ -444,18 +468,15 @@ monitorCommand command = \case
     timeoutSeconds ms =
         Text.pack (show (fromIntegral (max 1 ms) / 1000 :: Double))
 
-snapshotTask :: GrokSession -> BackgroundTask -> IO Text
+snapshotTask :: GrokSession -> BackgroundTask -> IO ShellTaskSnapshot
 snapshotTask session task =
     tryReadMVar task.backgroundRunning.runningResult >>= \case
         Just result -> do
             consumeTaskCompletion session task
-            pure (formatCommandResult result)
+            pure (ShellTaskCompleted result)
         Nothing -> do
             (out, err) <- runningLiveOutput task.backgroundRunning
-            let body = combineCommandOutput out err
-            pure $ if Text.null body
-                then "still running"
-                else "still running\n" <> body
+            pure (ShellTaskRunning out err)
 
 killTask :: GrokSession -> Text -> IO Text
 killTask session taskId = do
