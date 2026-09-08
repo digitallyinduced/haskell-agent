@@ -1370,6 +1370,7 @@
                 packages.agent-telegram = agentTelegramExecutable;
                 packages.agent-server = agentServerExecutable;
                 packages.agent-server-client = agentServerClientPackage;
+                packages.pdf-inspector = pkgs.callPackage ./nix/pdf-inspector.nix { };
                 packages.${if pkgs.stdenv.hostPlatform.isLinux
                     then "agent-sandbox-runner" else null} = agentSandboxRunner;
                 packages.${if pkgs.stdenv.hostPlatform.isLinux
@@ -1506,6 +1507,7 @@
                 };
 
                 checks = {
+                    pdf-inspector = import ./nix/tests/pdf-inspector.nix { inherit pkgs; };
                     # The package check does not exercise the wrapped
                     # justStaticExecutables output or its requisite assertions.
                     agent-cli-executable = agentCliExecutable;
