@@ -8,7 +8,7 @@ module Agent.CLI.ChartImage
     ) where
 
 import Agent.Loop (ImageAttachment(..))
-import Agent.Tools.RenderChart (chartResultDocument, renderChartTool)
+import Agent.Tools.RenderChart (chartResultDocument, chartResultFallback, renderChartTool)
 import Agent.Tools.ShowImage (ImageDisplayHooks(..), ImageDisplayRequest(..))
 import Agent.Tools.Types (AppTool(..))
 import Agent.ToolDispatch (ToolCall(..), ToolHandlerResult(..), wrapToolHandler)
@@ -89,12 +89,6 @@ chartResultImage output = do
         , imageBytes = LBS.toStrict (encodePng (drawChart chart))
         }
 
--- | Plain-text presentation for terminals without graphics. Text is also
--- retained outside the image so Unicode labels are accessible: the embedded
--- bitmap lettering deliberately covers ASCII only.
-chartResultFallback :: Text -> Maybe Text
-chartResultFallback output = either (const Nothing) (Just . describeChart) (parseResult output)
-
 parseResult :: Text -> Either Text Chart
 parseResult output = do
     document <- maybe (Left "Invalid chart presentation document.") Right
@@ -138,26 +132,6 @@ axisDescription :: Axis -> Text
 axisDescription axis =
     safeText axis.label
         <> if Text.null axis.unit then "" else " (" <> safeText axis.unit <> ")"
-
-describeChart :: Chart -> Text
-describeChart chart = Text.intercalate "\n" $
-    filter (not . Text.null)
-        [ safeText chart.title <> " [" <> chart.kind <> " chart]"
-        , safeText chart.subtitle
-        , "X: " <> axisDescription chart.xAxis <> "; Y: " <> axisDescription chart.yAxis
-        , let categories = nub [safeText text | series <- chart.series, (Category text, _) <- series.points]
-          in if null categories then "" else
-              "Categories: " <> Text.intercalate ", " (take 8 categories)
-                  <> if length categories > 8 then " (first 8 shown)" else ""
-        ]
-        <> map describeSeries chart.series
-  where
-    describeSeries series =
-        safeText series.name <> ": "
-            <> Text.pack (show (length series.points))
-            <> (if length series.points == 1 then " point; range " else " points; range ")
-            <> numberText (minimum (map snd series.points)) <> " to "
-            <> numberText (maximum (map snd series.points))
 
 imageWidth, imageHeight, plotLeft, plotRight, plotTop, plotBottom :: Int
 imageWidth = 960

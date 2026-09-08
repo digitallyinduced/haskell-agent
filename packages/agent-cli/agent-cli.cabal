@@ -679,6 +679,22 @@ benchmark image-preview-latency-bench
                     , bytestring
                     , JuicyPixels
 
+benchmark history-chart-restoration-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          HistoryChartRestoration.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , agent-core
+                    , agent-tui
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , stm
+                    , text
+
 benchmark clipboard-latency-bench
     import:           common-options
     type:             exitcode-stdio-1.0

@@ -758,6 +758,8 @@ appEventLogicalBytes = \case
         saturatingAdd 256 (maybe 0 logicalTextBytes url)
     AppHistoryReset page ->
         saturatingAdd 256 (historyPageLogicalBytes page)
+    AppHistoryChartPrepared _ _ preview ->
+        saturatingAdd 256 (imagePreviewLogicalBytes preview)
     AppHistoryLoaded _ result ->
         saturatingAdd 256 $
             either logicalTextBytes historyPageLogicalBytes result

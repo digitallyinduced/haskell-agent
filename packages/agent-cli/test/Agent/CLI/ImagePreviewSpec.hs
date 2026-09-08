@@ -2,6 +2,8 @@ module Agent.CLI.ImagePreviewSpec (spec) where
 
 import Agent.CLI.ImagePreview
 import Agent.Loop (ImageAttachment(..))
+import Control.Exception.Safe (bracket)
+import Control.Monad (forM_)
 import Codec.Picture
     ( PixelYCbCr8(..)
     , encodeJpegAtQuality
@@ -10,10 +12,32 @@ import Codec.Picture
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text as Text
+import qualified Data.Text.IO as TextIO
+import System.Directory (getTemporaryDirectory, removeFile)
+import System.IO (Handle, SeekMode(..), hClose, hFileSize, hSeek, openTempFile)
 import Test.Hspec
+
+withCaptureHandle :: (Handle -> IO a) -> IO a
+withCaptureHandle action = do
+    directory <- getTemporaryDirectory
+    bracket (openTempFile directory "chart-output")
+        (\(path, handle) -> hClose handle >> removeFile path)
+        (action . snd)
 
 spec :: Spec
 spec = do
+    describe "chart output routing" do
+        forM_ [False, True] \oneShot ->
+            it ("keeps redirected stdout clean with one-shot mode " <> show oneShot) do
+                withCaptureHandle \output ->
+                    withCaptureHandle \diagnostics -> do
+                        routeChartPresentation oneShot output diagnostics
+                            (Just "Revenue: 東京")
+                            (expectationFailure "Unexpected bitmap output")
+                        hFileSize output `shouldReturn` 0
+                        hSeek diagnostics AbsoluteSeek 0
+                        TextIO.hGetLine diagnostics `shouldReturn` "Revenue: 東京"
+
     describe "parseImagePreviewProtocol" do
         it "detects Kitty, Ghostty, and WezTerm" do
             parseImagePreviewProtocol (Just "xterm-kitty") Nothing (Just "1") Nothing

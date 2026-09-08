@@ -541,6 +541,7 @@ eventMayExposeSyntax = \case
         any uiEventMayExposeSyntax uiEvents
     AppEvent AppSyntaxHighlighterChanged -> True
     AppEvent (AppHistoryReset _) -> True
+    AppEvent (AppHistoryChartPrepared _ _ _) -> True
     AppEvent (AppHistoryLoaded _ _) -> True
     AppEvent (AppHistoryCommitted _ _ _) -> True
     AppEvent AppHistoryLiveStarted -> True

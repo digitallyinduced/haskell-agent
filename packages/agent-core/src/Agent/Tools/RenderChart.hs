@@ -5,24 +5,28 @@ module Agent.Tools.RenderChart
     , renderChartResult
     , chartResultDocument
     , chartResultSummary
+    , chartResultFallback
     ) where
 
 import Agent.ToolDispatch (textTool)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools.Types (AppTool, ToolExecutionPolicy(..), jsonTool)
 import Control.Monad (unless, when)
-import Data.Aeson (Value(..), Object, eitherDecodeStrict', encode, object, (.=), (.:), (.:?))
+import Data.Aeson (Value(..), Object, eitherDecodeStrict', encode, object, (.=), (.:), (.:?), (.!=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (Parser, parseEither, parseMaybe, withObject)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
+import Data.Char (isControl)
+import Data.List (nub)
 import Data.Scientific (toRealFloat)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Time (UTCTime, defaultTimeLocale, parseTimeM)
+import Numeric (showGFloat)
 
 renderChartToolName :: Text
 renderChartToolName = "render_chart"
@@ -92,6 +96,53 @@ chartResultDocument = fmap (encodeText . fst) . parseChartResult
 
 chartResultSummary :: Text -> Maybe Text
 chartResultSummary = fmap snd . parseChartResult
+
+-- | Accessible plain-text presentation shared by terminal views. Derive every
+-- label from the validated document, never from stored summary prose. Preserve
+-- Unicode even when a client's bitmap font cannot display it.
+chartResultFallback :: Text -> Maybe Text
+chartResultFallback input = do
+    (document, _) <- parseChartResult input
+    parseMaybe describeChart document
+  where
+    describeChart = withObject "chart" \fields -> do
+        title <- fields .: "title"
+        kind <- fields .: "kind"
+        subtitle <- fields .:? "subtitle" .!= ""
+        xAxis <- fields .: "x_axis"
+        yAxis <- fields .: "y_axis"
+        xDescription <- describeAxis xAxis
+        yDescription <- describeAxis yAxis
+        axisType <- withObject "axis" (.: "type") xAxis
+        series <- fields .: "series" >>= traverse (describeSeries axisType)
+        let categories = nub (concatMap fst series)
+        pure (Text.intercalate "\n" $
+            filter (not . Text.null)
+                [ safeLabel title <> " [" <> kind <> " chart]"
+                , safeLabel subtitle
+                , "X: " <> xDescription <> "; Y: " <> yDescription
+                , if null categories then "" else
+                    "Categories: " <> Text.intercalate ", " categories
+                ] <> map snd series)
+    describeAxis = withObject "axis" \fields -> do
+        label <- fields .:? "label" .!= ""
+        unit <- fields .:? "unit" .!= ""
+        pure (safeLabel label <> if Text.null unit then "" else " (" <> safeLabel unit <> ")")
+    describeSeries axisType = withObject "series" \fields -> do
+        name <- fields .: "name"
+        points <- fields .: "points" :: Parser [Value]
+        categories <- if axisType == ("category" :: Text)
+            then traverse (withObject "point" (fmap safeLabel . (.: "x"))) points
+            else pure []
+        ordinates <- traverse (withObject "point" (\point -> point .: "y" >>= finiteNumber)) points
+        pure (categories, safeLabel name <> ": " <> Text.pack (show (length points))
+            <> (if length points == 1 then " point; range " else " points; range ")
+            <> numberText (minimum ordinates) <> " to " <> numberText (maximum ordinates))
+    safeLabel = Text.unwords . Text.words . Text.map \character ->
+        if isControl character then ' ' else character
+    numberText value
+        | value == 0 = "0"
+        | otherwise = Text.pack (showGFloat (Just 3) value "")
 
 parseChartResult :: Text -> Maybe (Value, Text)
 parseChartResult input = do

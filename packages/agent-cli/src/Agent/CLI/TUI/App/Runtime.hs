@@ -302,6 +302,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
         motionSchedule <- newTVarIO (MotionNone, 1000000, 0)
         motionTickQueued <- newTVarIO False
         historyRequests <- newTQueueIO
+        historyChartRequests <- newTVarIO []
         syntaxRequests <- newTQueueIO
         syntaxHighlighter <-
             newIORef (SyntaxHighlighterUnloaded 0)
@@ -384,6 +385,7 @@ newFullscreenRuntimeWithSyntaxLoaderAndTheme
             , runtimeInitial = initial
             , runtimeSessionActions = sessionActions
             , runtimeHistoryRequests = historyRequests
+            , runtimeHistoryChartRequests = historyChartRequests
             , runtimeHistorySource = historySource
             , runtimeHistoryGeneration = historyGeneration
             , runtimeDictationJobs = dictationJobs

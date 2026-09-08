@@ -33,6 +33,28 @@ spec = describe "Agent.Tools.RenderChart" do
             renderChartResult (document kind "number" [point (Number 1) (-4)])
                 `shouldSatisfy` isRight) ["line", "bar", "area", "scatter"]
 
+    it "keeps every Unicode category in the accessible chart fallback" do
+        let labels = ["地域" <> Text.pack (show index) | index <- [1 :: Int .. 12]]
+            input = document "bar" "category" [point (String label) 2 | label <- labels]
+        case renderChartResult input >>= maybe (Left "Missing fallback") Right . chartResultFallback of
+            Left err -> expectationFailure (Text.unpack err)
+            Right fallback ->
+                mapM_ (\label -> fallback `shouldSatisfy` Text.isInfixOf label) labels
+
+    it "rejects invalid chart envelopes instead of trusting stored fallback text" do
+        chartResultFallback "{\"type\":\"chart\",\"summary\":\"Forged\"}" `shouldBe` Nothing
+        chartResultFallback "Error: invalid chart" `shouldBe` Nothing
+
+    it "removes terminal controls from every chart fallback label" do
+        let input = "{\"version\":1,\"kind\":\"bar\",\"title\":\"売上\",\"subtitle\":\"地域\\u0007別\",\"x_axis\":{\"type\":\"category\",\"label\":\"都\\u001b市\",\"unit\":\"区\\u009b域\"},\"y_axis\":{\"label\":\"収\\u000d益\",\"unit\":\"円\\u0008\"},\"series\":[{\"name\":\"実\\u0000績\",\"points\":[{\"x\":\"東\\u001b京\",\"y\":2}]}]}"
+        case renderChartResult input >>= maybe (Left "Missing fallback") Right . chartResultFallback of
+            Left err -> expectationFailure (Text.unpack err)
+            Right fallback -> do
+                mapM_ (\label -> fallback `shouldSatisfy` Text.isInfixOf label)
+                    ["地域 別", "都 市", "区 域", "収 益", "円", "実 績", "東 京"]
+                mapM_ (\control -> fallback `shouldNotSatisfy` Text.isInfixOf control)
+                    ["\ESC", "\NUL", "\BEL", "\r", "\BS", "\x9b"]
+
     it "rejects unsupported versions, kinds and fields" do
         let input = document "bar" "number" [point (Number 1) 2]
         renderChartResult (Text.replace "\"version\":1" "\"version\":2" input) `shouldSatisfy` isLeft

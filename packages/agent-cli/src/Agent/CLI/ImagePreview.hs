@@ -19,6 +19,7 @@ module Agent.CLI.ImagePreview
     , previewRowsFor
     , previewColumnsFor
     , renderImagePreview
+    , routeChartPresentation
     ) where
 
 import Agent.Loop (ImageAttachment(..))
@@ -32,8 +33,19 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
+import qualified Data.Text.IO as TextIO
 import System.Environment (lookupEnv)
 import System.IO (Handle, hIsTerminalDevice)
+
+-- | Keep one-shot results and redirected stdout free of presentation output.
+-- The diagnostic stream still receives the complete text fallback. Inspect the
+-- output handle, not stdin: a redirected command can retain terminal input.
+routeChartPresentation :: Bool -> Handle -> Handle -> Maybe Text -> IO () -> IO ()
+routeChartPresentation oneShot output diagnostics caption preview = do
+    interactive <- if oneShot then pure False else hIsTerminalDevice output
+    let destination = if interactive then output else diagnostics
+    mapM_ (TextIO.hPutStrLn destination) caption
+    if interactive then preview else pure ()
 
 -- | How (if at all) this terminal can draw inline images.
 data ImagePreviewProtocol

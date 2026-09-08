@@ -87,6 +87,9 @@ module Agent.CLI.TUI.App
     , resetHistoryPage
     , applyLoadedHistoryPage
     , remapHistoryPage
+    , queueHistoryChartPreviews
+    , runHistoryChartWorker
+    , applyHistoryChartPreview
     , beginFullscreenLiveHistory
     , clearFullscreenHistorySource
     , reloadFullscreenHistorySource

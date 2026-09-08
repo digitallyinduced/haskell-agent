@@ -76,6 +76,9 @@ import Agent.CLI.TUI.App
 import Agent.CLI.WindowTitle (oscWindowTitleBytes)
 import Agent.CLI.TUI.Types
     ( AppEvent(..)
+    , AppEventMailbox(..)
+    , AppEventMailboxState(..)
+    , PendingAppEvent(..)
     , AppState(..)
     , ChoiceOverlay(..)
     , ChoicePresentation(..)
@@ -160,13 +163,14 @@ import Agent.TUI.Presentation
     )
 import Agent.TUI.Motion
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Concurrent.Async (waitCatch)
+import Control.Concurrent.Async (waitCatch, withAsync)
 import Control.Exception.Safe (bracket, bracket_)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Control.Exception (AsyncException(UserInterrupt))
 import qualified Control.Exception as Exception
 import Control.Concurrent.STM
     ( atomically
+    , readTVar
     , newEmptyTMVarIO
     , newTChanIO
     , retry
@@ -204,7 +208,7 @@ import Agent.Tools.RenderChart (renderChartResult)
 spec :: Spec
 spec = do
     describe "durable chart previews" do
-        it "restores previews on history reset and page load and clears them on replacement" do
+        it "queues history charts without rasterizing on reset or page load" do
             runtime <- newScriptRuntime initialUiState
             envelope <- either (fail . Text.unpack) pure (renderChartResult
                 "{\"version\":1,\"kind\":\"bar\",\"title\":\"Requests\",\"x_axis\":{\"type\":\"category\",\"label\":\"Region\"},\"y_axis\":{\"label\":\"Count\"},\"series\":[{\"name\":\"Requests\",\"points\":[{\"x\":\"EU\",\"y\":4}]}]}")
@@ -219,9 +223,60 @@ spec = do
                 reset = History.resetHistoryPage (page [durable 0]) initial
                 loaded = History.applyLoadedHistoryPage (page [durable 1]) reset
                 cleared = History.resetHistoryPage (page []) loaded
-            Map.size reset.appSubmittedImagePreviews `shouldBe` 1
-            Map.size loaded.appSubmittedImagePreviews `shouldBe` 2
+            Map.null reset.appSubmittedImagePreviews `shouldBe` True
+            Map.null loaded.appSubmittedImagePreviews `shouldBe` True
+            History.queueHistoryChartPreviews reset
+            first <- atomically (readTVar runtime.runtimeHistoryChartRequests)
+            length first `shouldBe` 1
+            History.queueHistoryChartPreviews loaded
+            second <- atomically (readTVar runtime.runtimeHistoryChartRequests)
+            length second `shouldBe` 2
+            let chartHeavy = History.resetHistoryPage
+                    (page (map durable [0 .. 69])) initial
+            History.queueHistoryChartPreviews chartHeavy
+            bounded <- atomically (readTVar runtime.runtimeHistoryChartRequests)
+            length bounded `shouldBe` 64
+            History.queueHistoryChartPreviews cleared
+            atomically (readTVar runtime.runtimeHistoryChartRequests) `shouldReturn` []
             Map.null cleared.appSubmittedImagePreviews `shouldBe` True
+        it "publishes prepared charts on a scoped worker and rejects stale results" do
+            runtime <- newScriptRuntime initialUiState
+            envelope <- either (fail . Text.unpack) pure (renderChartResult
+                "{\"version\":1,\"kind\":\"bar\",\"title\":\"Requests\",\"x_axis\":{\"type\":\"category\"},\"y_axis\":{},\"series\":[{\"name\":\"Requests\",\"points\":[{\"x\":\"EU\",\"y\":4}]}]}")
+            let durable = HistoryTurn (HistoryCursor 0)
+                    (Seq.singleton (markerBlock (BlockId 1) "Requests"))
+                    (Map.singleton (BlockId 1) envelope)
+                page = HistoryPage (HistoryGeneration 0) HistoryNewer
+                    (Seq.singleton durable) (HistoryCursor 0) 1 False False
+                initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+            (_, reset) <- runFullscreenScriptWithState initial
+                [FullscreenScriptApp (AppHistoryReset page), FullscreenScriptHalt]
+            result <- withAsync (History.runHistoryChartWorker runtime) \_ ->
+                timeout 10_000_000 $ atomically do
+                    let AppEventMailbox mailbox = runtime.runtimeMailbox
+                    pending <- readTVar mailbox
+                    case
+                        [ (generation, blockId, preview)
+                        | PendingEvent (AppHistoryChartPrepared generation blockId preview) <-
+                            toList pending.mailboxPendingEvents
+                        ] of
+                        prepared : _ -> pure prepared
+                        _ -> retry
+            case result of
+                Nothing -> expectationFailure "History chart worker did not publish a preview"
+                Just (generation, blockId, preview) -> do
+                    preview.previewSourceWidth `shouldBe` 960
+                    preview.previewSourceHeight `shouldBe` 600
+                    let restored = History.applyHistoryChartPreview generation blockId preview reset
+                        stale = History.applyHistoryChartPreview (HistoryGeneration 99) blockId preview reset
+                        removed = History.resetHistoryPage
+                            (page { historyPageTurns = Seq.empty }) reset
+                        rejected = History.applyHistoryChartPreview generation blockId preview removed
+                    Map.size restored.appSubmittedImagePreviews `shouldBe` 1
+                    History.queueHistoryChartPreviews restored
+                    atomically (readTVar runtime.runtimeHistoryChartRequests) `shouldReturn` []
+                    Map.null stale.appSubmittedImagePreviews `shouldBe` True
+                    Map.null rejected.appSubmittedImagePreviews `shouldBe` True
     describe "pull request event state" do
         let url = "https://github.com/owner/repository/pull/42"
             association generation =

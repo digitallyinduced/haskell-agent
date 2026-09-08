@@ -438,6 +438,10 @@ handleAppEvent = \case
             modify' \current -> current { appPullRequestURL = url }
     AppHistoryReset page ->
         handleHistoryResetEvent page
+    AppHistoryChartPrepared generation blockId preview -> do
+        modify' (applyHistoryChartPreview generation blockId preview)
+        invalidateCache
+        queueConversationReflow
     AppHistoryLoaded request result ->
         handleHistoryLoadedEvent request result
     AppHistoryLiveStarted ->
@@ -707,6 +711,7 @@ handleHistoryResetEvent page = do
     state <- get
     clearSubmittedImagePlacements state.appRuntime
     modify' (resetHistoryPage page)
+    get >>= liftIO . queueHistoryChartPreviews
     invalidateCache
     resolveConversationFollow
     queueConversationReflow
@@ -738,6 +743,7 @@ handleHistoryLoadedEvent request result = do
                     do
                         clearSubmittedImagePlacements state.appRuntime
                         modify' (applyLoadedHistoryPage page)
+                        get >>= liftIO . queueHistoryChartPreviews
             invalidateCache
             case anchorBlock of
                 Nothing -> pure ()
@@ -776,6 +782,7 @@ handleHistoryCommittedEvent generation turn commit = do
         modify'
             (commitLiveHistoryTurn turn commit
                 . setHistoryGeneration generation)
+        get >>= liftIO . queueHistoryChartPreviews
         invalidateCache
         resolveConversationFollow
         queueConversationReflow

@@ -53,7 +53,7 @@ import Agent.JsonText
 import qualified Agent.Json.Decode as Hermes
 import Agent.OsPath (fromText, relativeDisplayPath)
 import Agent.TUI.TextWidth (displayTerminalText)
-import Agent.Tools.RenderChart (chartResultSummary)
+import Agent.Tools.RenderChart (chartResultFallback)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , canonicalToolName
@@ -590,7 +590,7 @@ searchReplaceLineStart output =
 formatToolOutput :: ToolCall -> Text -> Text
 formatToolOutput call output = case canonicalToolName call.name of
     "render_chart" ->
-        displayTerminalText (fromMaybe output (chartResultSummary output))
+        displayTerminalText (fromMaybe output (chartResultFallback output))
     "computer" -> "Screenshot captured"
     "exec" -> completedExecOutput output
     "mcp_call" -> formatMcpOutput output
