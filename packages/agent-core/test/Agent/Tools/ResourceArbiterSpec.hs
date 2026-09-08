@@ -118,6 +118,16 @@ spec = describe "shared tool resource arbiter" do
                         cancel writer
                         timeout 1000000 (wait reader) `shouldReturn` Just ()
 
+    it "releases the lease after a synchronous handler exception or error result" do
+        arbiter <- newToolResourceArbiter 8
+        withToolResources arbiter [writeA] (ioError (userError "handler failed"))
+            `shouldThrow` anyIOException
+        withToolResources arbiter [writeA] (pure (Left "handler failed" :: Either String ()))
+            `shouldReturn` Left "handler failed"
+        timeout 1000000 (withToolResources arbiter [writeA] (pure ()))
+            `shouldReturn` Just ()
+        atomically (toolResourceArbiterCounts arbiter) `shouldReturn` (0, 0)
+
     it "rejects full admission without retaining another waiter" do
         arbiter <- newToolResourceArbiter 1
         withHeld arbiter [writeA] do
