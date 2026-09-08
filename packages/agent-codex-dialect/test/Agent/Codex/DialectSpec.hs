@@ -86,6 +86,20 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Codex dialect" do
+    it "requires approval for default shell commands regardless of resource classification" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newCodexCodingTools env Nothing Nothing) (.codexClose) \coding -> do
+                case filter ((== "shell_command") . (.appToolName)) coding.codexAppTools of
+                    [tool] -> mapM_ (\arguments ->
+                        toolApprovalRequirement tool (functionToolCall "default" "shell_command" arguments)
+                            `shouldReturn` ApprovalPromptRequired)
+                        [ "{\"command\":\"ls\"}"
+                        , "{\"command\":\"ls\",\"sandbox_permissions\":\"use_default\"}"
+                        , "{\"command\":\"git -c diff.external=/workspace/repo/external-diff diff\"}"
+                        ]
+                    _ -> expectationFailure "missing shell tool"
+
     it "requires fresh approval for escalation and rejects unapproved dispatch" do
         withTempDir \dir -> do
             env <- defaultToolEnv (unsafeEncodeUtf dir)

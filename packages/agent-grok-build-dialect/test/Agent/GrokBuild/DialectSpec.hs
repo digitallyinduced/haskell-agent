@@ -82,6 +82,19 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Grok Build dialect" do
+    it "requires approval for default terminal commands regardless of resource classification" do
+        withGrokRegistry \registry close -> do
+            let tool = maybe (error "missing terminal") id $
+                    lookupRegisteredTool "run_terminal_cmd" registry
+            mapM_ (\arguments ->
+                toolApprovalRequirement tool (functionToolCall "default" "run_terminal_cmd" arguments)
+                    `shouldReturn` ApprovalPromptRequired)
+                [ "{\"command\":\"ls\"}"
+                , "{\"command\":\"ls\",\"sandbox_permissions\":\"use_default\"}"
+                , "{\"command\":\"git -c diff.external=/workspace/repo/external-diff diff\"}"
+                ]
+            close
+
     it "requires fresh approval and rejects unapproved terminal escalation" do
         withGrokRegistry \registry close -> do
             let call = escalatedTerminalCall "printf approved" False

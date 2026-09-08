@@ -19,7 +19,6 @@ import Agent.ToolDispatch
     , decodeToolArguments
     )
 import Agent.Tools.Types (ApprovalRequirement(..))
-import Agent.Tools.ShellReadOnly (shellCommandIsReadOnly)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -45,21 +44,11 @@ shellPermissionFieldsDecoder = do
 shellPermissionApproval :: ToolCall -> IO ApprovalRequirement
 shellPermissionApproval call =
     pure $ case decodeToolArguments (Json.object shellPermissionFieldsDecoder) call.arguments of
-        Right UseDefaultSandbox ->
-            case decodeToolArguments commandDecoder call.arguments of
-                Right command | not (Text.null command) && shellCommandIsReadOnly command ->
-                    ApprovalNotRequired
-                _ -> ApprovalPromptRequired
+        -- Resource-claim classification is not an authorization boundary:
+        -- apparently read-only commands can execute configured programs.
+        Right UseDefaultSandbox -> ApprovalPromptRequired
         -- Malformed requests fail closed and are rejected again by the handler.
         _ -> FreshApprovalRequired
-  where
-    commandDecoder = Json.object do
-        command <- Json.atKeyOptional "command" Json.text
-        cmd <- Json.atKeyOptional "cmd" Json.text
-        case (command, cmd) of
-            (Just value, Nothing) -> pure value
-            (Nothing, Just value) -> pure value
-            _ -> fail "Expected exactly one shell command field"
 
 data ShellExecutionAuthorization
     = DefaultShellExecution

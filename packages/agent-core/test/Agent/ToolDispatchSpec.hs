@@ -66,10 +66,12 @@ spec = describe "dispatchToolCall" do
                 , "{\"sandbox_permissions\":\"require_escalated\",\"justification\":42}"
                 ]
 
-        it "preserves read-only approval classification without weakening escalation" do
+        it "requires approval for default shell commands without weakening escalation" do
             let approval args = shellPermissionApproval (functionToolCall "classification" "shell_command" args)
-            approval "{\"command\":\"ls\"}" `shouldReturn` ApprovalNotRequired
-            approval "{\"cmd\":\"ls\",\"sandbox_permissions\":\"use_default\"}" `shouldReturn` ApprovalNotRequired
+            approval "{\"command\":\"ls\"}" `shouldReturn` ApprovalPromptRequired
+            approval "{\"cmd\":\"ls\",\"sandbox_permissions\":\"use_default\"}" `shouldReturn` ApprovalPromptRequired
+            approval "{\"command\":\"git -c diff.external=/workspace/repo/external-diff diff\"}"
+                `shouldReturn` ApprovalPromptRequired
             approval "{\"command\":\"touch file\"}" `shouldReturn` ApprovalPromptRequired
             approval "{\"command\":\"ls\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Inspect outside sandbox\"}"
                 `shouldReturn` FreshApprovalRequired
