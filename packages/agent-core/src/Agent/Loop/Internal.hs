@@ -308,7 +308,7 @@ exceptionSummary =
 data LoopRuntime = LoopRuntime
     { loopRuntimeConfig :: LoopConfig
     , loopRuntimeEventPump :: LoopEventPump
-    , loopRuntimeAsyncToolManager :: Maybe AsyncToolManager
+    , loopRuntimeAsyncToolManager :: AsyncToolManager
     , loopRuntimeProgressRef :: IORef (BackendSnapshot, LoopProgress)
     , loopRuntimePendingRef :: IORef [TurnInput]
     , loopRuntimePendingSteeringRef :: IORef Int
@@ -340,6 +340,9 @@ initializeLoopRuntime
     -> IO LoopRuntime
 initializeLoopRuntime config0 initialState firstInputs = do
     eventPump <- newEventPump config0.loopOnEvent
+    -- Allocate only STM state here; the manager's workers remain scoped to
+    -- runLoopWithEventPump.
+    manager <- newAsyncToolManager
     eventAdmissionLock <- newMVar ()
     progressRef <- newIORef (initialState, NoResponseCommitted)
     uncommittedTextRef <- newIORef ([], [])
@@ -365,7 +368,7 @@ initializeLoopRuntime config0 initialState firstInputs = do
     pure LoopRuntime
         { loopRuntimeConfig = config
         , loopRuntimeEventPump = eventPump
-        , loopRuntimeAsyncToolManager = Nothing
+        , loopRuntimeAsyncToolManager = manager
         , loopRuntimeProgressRef = progressRef
         , loopRuntimePendingRef = pendingRef
         , loopRuntimePendingSteeringRef = pendingSteeringRef
@@ -800,12 +803,10 @@ runLoopWithEventPump
     -> IO LoopExecution
 runLoopWithEventPump runtime initialState previousResponseId firstInputs =
     withAsync (runEventPump runtime.loopRuntimeEventPump) \eventWorker -> do
-        manager <- newAsyncToolManager
-        let managedRuntime =
-                runtime { loopRuntimeAsyncToolManager = Just manager }
-            initialSteering = managedRuntime.loopRuntimeInitialSteering
+        let manager = asyncToolManager runtime
+            initialSteering = runtime.loopRuntimeInitialSteering
             run =
-                runLoopCursor managedRuntime LoopCursor
+                runLoopCursor runtime LoopCursor
                     { cursorState = initialState
                     , cursorProgress = NoResponseCommitted
                     , cursorPreviousResponseId = previousResponseId
@@ -821,16 +822,16 @@ runLoopWithEventPump runtime initialState previousResponseId firstInputs =
                     Exception.throwIO exception
                 | otherwise = do
                     (state, progress) <-
-                        readIORef managedRuntime.loopRuntimeProgressRef
+                        readIORef runtime.loopRuntimeProgressRef
                     unexpectedLoopExecution
-                        managedRuntime
+                        runtime
                         state
                         progress
                         exception
         execution <-
             withAsync
                 (runAsyncToolManager
-                    managedRuntime.loopRuntimeConfig
+                    runtime.loopRuntimeConfig
                     manager)
                 \managerWorker -> do
                     raced <-
@@ -838,7 +839,7 @@ runLoopWithEventPump runtime initialState previousResponseId firstInputs =
                             (race
                                 (waitEventPumpFailure
                                     eventWorker
-                                    managedRuntime.loopRuntimeEventPump)
+                                    runtime.loopRuntimeEventPump)
                                 (waitAsyncToolManagerFailure
                                     managerWorker
                                     manager))
@@ -847,9 +848,9 @@ runLoopWithEventPump runtime initialState previousResponseId firstInputs =
                         Left (Left failure) -> do
                             (state, progress) <-
                                 readIORef
-                                    managedRuntime.loopRuntimeProgressRef
+                                    runtime.loopRuntimeProgressRef
                             handleLoopEventFailure
-                                (unexpectedLoopExecution managedRuntime)
+                                (unexpectedLoopExecution runtime)
                                 state
                                 progress
                                 failure
@@ -864,7 +865,7 @@ runLoopWithEventPump runtime initialState previousResponseId firstInputs =
         -- Only inspect outcomes once the manager scope has cancelled and
         -- joined every worker. A result waiter can lose its race while some
         -- of its sibling tools have already finished successfully.
-        recovered <- tryAny (recoverManagedTools managedRuntime manager execution) >>= \case
+        recovered <- tryAny (recoverManagedTools runtime manager execution) >>= \case
             Right recovered -> pure recovered
             Left exception -> do
                 (state, progress) <- readIORef runtime.loopRuntimeProgressRef
@@ -1086,11 +1087,7 @@ newAsyncToolManager =
         <*> newTVarIO Map.empty
 
 asyncToolManager :: LoopRuntime -> AsyncToolManager
-asyncToolManager runtime =
-    case runtime.loopRuntimeAsyncToolManager of
-        Just manager -> manager
-        Nothing ->
-            error "async tool manager used outside runLoopWithEventPump"
+asyncToolManager runtime = runtime.loopRuntimeAsyncToolManager
 
 admitAsyncToolCall :: AsyncToolManager -> ToolCall -> IO ()
 admitAsyncToolCall manager call
