@@ -15,13 +15,15 @@ import Control.Concurrent.STM
     , takeTMVar
     , writeTQueue
     )
-import Control.Exception.Safe (bracket, finally, isAsyncException, uninterruptibleMask_)
+import Control.Exception.Safe (bracket, finally, isAsyncException, tryIO, uninterruptibleMask_)
+import Control.Monad (when)
 import Data.Aeson (Result (..), Value (..), encode, fromJSON, object, toJSON, (.=))
 import Data.Bits ((.&.))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
+import Data.List (isPrefixOf)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -30,7 +32,9 @@ import Network.Socket
 import qualified Network.Socket.ByteString as Socket
 import System.Directory
     ( createDirectory
+    , doesDirectoryExist
     , doesFileExist
+    , listDirectory
     , removeFile
     , renamePath
     )
@@ -40,6 +44,7 @@ import System.Posix.Files
     ( createSymbolicLink
     , fileMode
     , getFileStatus
+    , readSymbolicLink
     , setFileMode
     )
 import System.Timeout (timeout)
@@ -88,6 +93,30 @@ main = hspec $ do
             negotiateVersion [ProtocolVersion 99] `shouldBe` Nothing
 
     describe "durable journal" $ do
+        it "closes recovery descriptors when a snapshot exceeds its limit" $
+            withSystemTempDirectory "daemon-read-cleanup" $ \directory -> do
+                BS.writeFile (directory </> "snapshot.json") "{}"
+                let config =
+                        (defaultJournalConfig directory) {maximumSnapshotBytes = 1}
+                openJournal config `shouldThrow` \case
+                    JournalFileTooLarge _ 2 1 -> True
+                    _ -> False
+                assertNoOpenDescriptorsWithin directory
+
+        it "closes journal descriptors and removes the temporary snapshot after a failed rename" $
+            withSystemTempDirectory "daemon-write-cleanup" $ \directory -> do
+                let config = (defaultJournalConfig directory) {maximumEvents = 0}
+                journal <- openJournal config
+                -- The snapshot write and fsync succeed, but a directory cannot
+                -- be replaced by the temporary regular file.
+                createDirectory (directory </> "snapshot.json")
+                appendEvent journal "first" Null `shouldThrow` anyException
+                doesFileExist (directory </> "snapshot.json.tmp") `shouldReturn` False
+                assertNoOpenDescriptorsWithin directory
+                appendEvent journal "second" Null `shouldThrow` \case
+                    JournalPoisoned _ -> True
+                    _ -> False
+
         it "keeps sequence numbers monotonic and replays after a cursor" $
             withSystemTempDirectory "daemon-journal" $ \directory -> do
                 journal <- openJournal (defaultJournalConfig directory)
@@ -506,6 +535,28 @@ main = hspec $ do
                         _ -> False
 
     describe "secure Unix socket" $ do
+        it "releases the listener and setup descriptors when its callback is cancelled" $
+            withSystemTempDirectory "ds" $ \directory -> do
+                let config = SocketConfig {path = directory </> "s", backlog = 1}
+                entered <- newEmptyTMVarIO
+                blocked <- newEmptyTMVarIO :: IO (TMVar ())
+                withAsync
+                    (withUnixListener config $ \_ -> do
+                        atomically (putTMVar entered ())
+                        atomically (takeTMVar blocked))
+                    $ \worker -> do
+                        timeout 1_000_000 (atomically (takeTMVar entered))
+                            `shouldReturn` Just ()
+                        cancel worker
+                        waitCatch worker >>= (`shouldSatisfy` \case
+                            Left exception -> isAsyncException exception
+                            Right () -> False)
+                doesFileExist config.path `shouldReturn` False
+                assertNoOpenDescriptorsWithin directory
+                -- Cancellation releases the file lock as well as the socket.
+                withUnixListener config (const (pure ()))
+                assertNoOpenDescriptorsWithin directory
+
         it "uses private modes and authenticates the same-user peer" $
             withTempDirectory "/tmp" "daemon-socket" $ \directory -> do
                 let path = directory </> "private" </> "daemon.sock"
@@ -1383,3 +1434,18 @@ waitForStatus journal taskId status =
         case Map.lookup taskId saved.tasks of
             Just task | task.status == status -> pure ()
             _ -> threadDelay 10_000 >> loop
+
+-- Linux CI can inspect descriptors for these particular fixtures without
+-- relying on a process-wide descriptor count (other test threads may open
+-- unrelated files). Other platforms still exercise the failure semantics.
+assertNoOpenDescriptorsWithin :: FilePath -> Expectation
+assertNoOpenDescriptorsWithin directory = do
+    let descriptors = "/proc/self/fd"
+    available <- doesDirectoryExist descriptors
+    when available $ do
+        entries <- listDirectory descriptors
+        targets <- traverse (tryIO . readSymbolicLink . (descriptors </>)) entries
+        [ target
+            | Right target <- targets
+            , target == directory || (directory <> "/") `isPrefixOf` target
+            ] `shouldBe` []

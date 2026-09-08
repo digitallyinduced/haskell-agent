@@ -20,8 +20,8 @@ import Control.Concurrent.STM
 import Control.Exception.Safe
     ( Exception
     , IOException
+    , bracket
     , catch
-    , finally
     , onException
     , throwIO
     , tryIO
@@ -221,14 +221,10 @@ normaliseRecoveredTasks config recoveredTasks =
 
 synchronisePath :: FilePath -> IO ()
 synchronisePath path =
-    bracketFd
+    bracket
         (openFd path ReadOnly defaultFileFlags {nofollow = True, cloexec = True, directory = True})
+        closeFd
         fileSynchronise
-  where
-    bracketFd acquire use = do
-        descriptor <- acquire
-        _ <- use descriptor `onException` closeFd descriptor
-        closeFd descriptor
 
 appendEvent :: Journal -> Text -> Value -> IO EventEnvelope
 appendEvent journal eventType payload =
@@ -419,17 +415,17 @@ nextSequenceAfter sequenceNumber@(Sequence value)
 
 verifyPrivateDirectory :: FilePath -> IO ()
 verifyPrivateDirectory path =
-    tryIO (openFd path ReadOnly defaultFileFlags {nofollow = True, cloexec = True, directory = True}) >>= \case
-        Left (_ :: IOException) -> throwIO (JournalInsecurePath path)
-        Right descriptor ->
-            ( do
-                status <- getFdStatus descriptor
-                effectiveUser <- getEffectiveUserID
-                unless (isDirectory status && fileOwner status == effectiveUser) $
-                    throwIO (JournalInsecurePath path)
-                setFdMode descriptor 0o700
-            )
-                `finally` closeFd descriptor
+    bracket acquire closeFd $ \descriptor -> do
+        status <- getFdStatus descriptor
+        effectiveUser <- getEffectiveUserID
+        unless (isDirectory status && fileOwner status == effectiveUser) $
+            throwIO (JournalInsecurePath path)
+        setFdMode descriptor 0o700
+  where
+    acquire =
+        tryIO (openFd path ReadOnly defaultFileFlags {nofollow = True, cloexec = True, directory = True}) >>= \case
+            Left (_ :: IOException) -> throwIO (JournalInsecurePath path)
+            Right descriptor -> pure descriptor
 
 redactValue :: Value -> Value
 redactValue = \case
@@ -530,15 +526,17 @@ decodeLine (lineNumber, bytes) =
 
 readPrivateFile :: FilePath -> Integer -> IO (Maybe BS.ByteString)
 readPrivateFile path maximumBytes =
-    tryIO (openFd path ReadOnly defaultFileFlags {nofollow = True, cloexec = True}) >>= \case
-        Left exception
-            | isDoesNotExistError exception -> pure Nothing
-            | otherwise -> throwIO (JournalInsecurePath path)
-        Right descriptor ->
-            Just
-                <$> ( (verifyPrivateDescriptor path descriptor >> setFdMode descriptor 0o600 >> readDescriptorBounded path maximumBytes descriptor)
-                        `finally` closeFd descriptor
-                    )
+    bracket
+        (tryIO (openFd path ReadOnly defaultFileFlags {nofollow = True, cloexec = True}))
+        (either (const (pure ())) closeFd)
+        $ \case
+            Left exception
+                | isDoesNotExistError exception -> pure Nothing
+                | otherwise -> throwIO (JournalInsecurePath path)
+            Right descriptor -> do
+                verifyPrivateDescriptor path descriptor
+                setFdMode descriptor 0o600
+                Just <$> readDescriptorBounded path maximumBytes descriptor
 
 readDescriptorBounded :: FilePath -> Integer -> Fd -> IO BS.ByteString
 readDescriptorBounded path maximumBytes descriptor = do
@@ -560,9 +558,9 @@ readDescriptorBounded path maximumBytes descriptor = do
                 go total (chunk : chunks)
 
 appendEventFile :: JournalConfig -> EventEnvelope -> IO ()
-appendEventFile config event = do
-    descriptor <-
-        openFd
+appendEventFile config event =
+    bracket
+        (openFd
             (eventsPath config)
             WriteOnly
             defaultFileFlags
@@ -570,12 +568,13 @@ appendEventFile config event = do
                 , creat = Just 0o600
                 , nofollow = True
                 , cloexec = True
-                }
-    verifyPrivateDescriptor (eventsPath config) descriptor `onException` closeFd descriptor
-    setFdMode descriptor 0o600 `onException` closeFd descriptor
-    writeDescriptor descriptor (encodeLine event) `onException` closeFd descriptor
-    fileSynchronise descriptor `onException` closeFd descriptor
-    closeFd descriptor
+                })
+        closeFd
+        $ \descriptor -> do
+            verifyPrivateDescriptor (eventsPath config) descriptor
+            setFdMode descriptor 0o600
+            writeDescriptor descriptor (encodeLine event)
+            fileSynchronise descriptor
 
 verifyPrivateDescriptor :: FilePath -> Fd -> IO ()
 verifyPrivateDescriptor path descriptor = do
@@ -606,8 +605,8 @@ atomicWrite config destination bytes = do
         cleanup = removeFile temporary `catch` \(_ :: IOException) -> pure ()
     verifyTemporaryPath temporary
     (do
-            descriptor <-
-                openFd
+            bracket
+                (openFd
                     temporary
                     WriteOnly
                     defaultFileFlags
@@ -615,11 +614,12 @@ atomicWrite config destination bytes = do
                         , exclusive = True
                         , nofollow = True
                         , cloexec = True
-                        }
-            setFdMode descriptor 0o600 `onException` closeFd descriptor
-            writeDescriptor descriptor bytes `onException` closeFd descriptor
-            fileSynchronise descriptor `onException` closeFd descriptor
-            closeFd descriptor
+                        })
+                closeFd
+                $ \descriptor -> do
+                    setFdMode descriptor 0o600
+                    writeDescriptor descriptor bytes
+                    fileSynchronise descriptor
             renameFile temporary destination
             synchronisePath config.directory
         )
