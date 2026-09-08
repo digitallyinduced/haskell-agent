@@ -28,6 +28,9 @@ annotations, forcing every intermediate update. It does not measure terminal
 drawing or PostgreSQL startup/hydration. This is a latency benchmark, not an
 allocation-reduction claim. Workloads must finish all usage requests within the
 production two-second deadline; the documented dimensions satisfy that bound.
+Confirming a row performs an additional authoritative catalog lookup before
+committing its routing. That confirmation cost is outside these presentation
+measurements; the benchmark dismisses the picker instead.
 
 Build and run from the repository root:
 
@@ -109,24 +112,30 @@ measurement.
 
 ## Startup catalog selection
 
+Startup must refresh the authoritative catalog before initializing the provider
+runtime, even when a persisted catalog contains the requested alias. An alias
+can change provider or protocol between launches, and updating the display cache
+does not rebuild the initialized runtime's routing. Cached-first presentation
+therefore applies to the picker, not startup routing.
+
 The `startup-baseline` workload reproduces synchronous catalog refresh followed
 by the production gateway model-option selection. `startup-cached` invokes
 `withGatewayModelsForStartup` with a seeded cache, using the same production
-selector. `startup-cold` invokes that helper without a cache. Every workload
+selector and an authoritative synchronous refresh. `startup-cold` invokes that
+helper without a cache. Every workload
 selects the same explicit alias and forces the complete selected model target.
 The reported `first-list` columns mean **selected startup target readiness** for
 these workloads, not picker publication or terminal readiness.
 
 The refreshed catalog reverses its original order so the benchmark can detect
-actual cache publication. After target readiness, the observer waits for a
-transport-completion signal, then cooperatively yields until the changed cache
-is visible, forces every catalog identifier, and records complete elapsed/CPU
-time. It does not poll during the injected network wait. The background worker
-is cancelled and joined outside the timed interval when its scope closes.
+actual cache publication. After target readiness, the observer consumes the
+transport-completion signal, verifies the changed cache is visible, forces every
+catalog identifier, and records complete elapsed/CPU time. Refresh and cache
+publication now complete before target selection in all three workloads.
 Catalog construction, successful cache seeding, and GC occur before timing;
 PostgreSQL hydration, authentication, repository discovery, and terminal setup
-are excluded. This measures removal of the catalog network barrier, not a
-reduction in complete-refresh work, allocation, or total CLI startup duration.
+are excluded. These workloads compare the authoritative routing boundary with
+and without a populated cache; they do not demonstrate a startup speedup.
 
 Use the optimized build and executable lookup above, then:
 
@@ -143,30 +152,7 @@ for repetition in 1 2; do
 done
 ```
 
-Measured on 2026-09-08 with the same macOS arm64/GHC 9.10.3 settings
-above; seven samples, medians in milliseconds:
-
-| Models | Delay | Workload | Target ready | Ready CPU | Complete refresh | Complete CPU |
-|---:|---:|---|---:|---:|---:|---:|
-| 4 | 100 | Startup baseline | 101.059 | 0.135 | 101.061 | 0.139 |
-| 4 | 100 | Startup cached | 0.032 | 0.038 | 101.072 | 0.159 |
-| 4 | 100 | Startup cold | 101.053 | 0.142 | 101.054 | 0.146 |
-| 16 | 100 | Startup baseline | 101.062 | 0.123 | 101.064 | 0.128 |
-| 16 | 100 | Startup cached | 0.031 | 0.039 | 101.083 | 0.164 |
-| 16 | 100 | Startup cold | 100.648 | 0.140 | 100.649 | 0.144 |
-| 64 | 100 | Startup baseline | 101.089 | 0.149 | 101.092 | 0.153 |
-| 64 | 100 | Startup cached | 0.030 | 0.035 | 101.083 | 0.161 |
-| 64 | 100 | Startup cold | 101.088 | 0.150 | 101.091 | 0.155 |
-| 16 | 250 | Startup baseline | 251.061 | 0.247 | 251.063 | 0.253 |
-| 16 | 250 | Startup cached | 0.046 | 0.056 | 250.796 | 0.289 |
-| 16 | 250 | Startup cold | 251.071 | 0.220 | 251.073 | 0.225 |
-| 16 | 250 | Startup baseline, repeat | 250.788 | 0.230 | 250.790 | 0.234 |
-| 16 | 250 | Startup cached, repeat | 0.047 | 0.057 | 251.089 | 0.270 |
-| 16 | 250 | Startup cold, repeat | 251.064 | 0.235 | 251.066 | 0.238 |
-
-Warm startup removes the injected catalog wait from target selection:
-approximately 251 ms becomes 0.046 ms in the representative case, with a
-consistent repeat. Complete refresh remains approximately 251 ms, as expected;
-the work still occurs within the runtime-owned background scope. The modest
-CPU overhead of that scope does not grow sharply across the tested catalog
-sizes. Cold startup retains the baseline network wait.
+The previous cached-startup measurements were removed because they measured an
+unsafe implementation that committed potentially stale routing. No replacement
+startup measurements are reported here. Both warm and cold startup retain the
+catalog network wait; the picker measurements above remain applicable.

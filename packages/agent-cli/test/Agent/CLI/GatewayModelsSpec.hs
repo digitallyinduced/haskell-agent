@@ -102,6 +102,34 @@ awaitPickerEvent runtime project =
 pickerModel :: Text -> GatewayModel
 pickerModel model = GatewayModel model GatewayResponsesProtocol GatewayOpenAIProvider
 
+confirmCachedGatewayModel
+    :: Either Text [GatewayModel]
+    -> IO (Either Text (Maybe ModelPickerSelection))
+confirmCachedGatewayModel authoritative = do
+    runtime <- newPickerRuntime
+    let models = [pickerModel "company-a"]
+    fetch <- newIORef (pure (Right models))
+    started <- newEmptyMVar
+    gate <- newEmptyMVar
+    access <- newGatewayModelAccessWithUsage
+        (readIORef fetch >>= id)
+        (const (pure (Left "usage unavailable")))
+    refreshGatewayModels access `shouldReturn` Right models
+    writeIORef fetch (putMVar started () >> takeMVar gate)
+    withAsync (openGatewayPicker runtime access) \worker -> do
+        (rows, reply) <- awaitPickerEvent runtime \case
+            AppAskDynamicAdjustableFilterChoice _ _ _ rows reply -> Just (rows, reply)
+            _ -> Nothing
+        awaitPickerAction (takeMVar started)
+        -- The displayed selection is stale; the picker worker will cancel its
+        -- blocked presentation refresh before fetching at confirmation.
+        writeIORef fetch (pure authoritative)
+        case rows of
+            (key, _, _, _, effort) : _ -> do
+                atomically (putTMVar reply (Just (key, effort)))
+                awaitPickerAction (wait worker)
+            _ -> fail "Expected a cached model row"
+
 pickerUsage :: UsageSnapshot
 pickerUsage = UsageSnapshot
     { planType = "plus"
@@ -121,24 +149,48 @@ pickerUsage = UsageSnapshot
 
 spec :: Spec
 spec = describe "Agent.CLI.GatewayModels" do
-    describe "cached gateway startup" do
-        it "enters the runtime before warm refresh completes and joins it on exit" do
+    describe "authoritative gateway startup" do
+        it "waits for warm refresh and routes a reassigned alias with its current provider and dialect" do
             let models = [pickerModel "company-a"]
+                updated = [GatewayModel "company-a" GatewayAnthropicProtocol GatewayAnthropicProvider]
+                select available =
+                    fmap (\option -> (option.modelTarget.targetProvider, option.modelTarget.targetDialect)) $
+                        selectGatewayModelOption
+                            (modelOptionsForGatewayModels testCatalog available)
+                            (Just "company-a") Nothing []
             fetch <- newIORef (pure (Right models))
             started <- newEmptyMVar
-            stopped <- newEmptyMVar
+            entered <- newEmptyMVar
             gate <- newEmptyMVar
             access <- newGatewayModelAccessWith (readIORef fetch >>= id)
             refreshGatewayModels access `shouldReturn` Right models
-            writeIORef fetch $
-                (putMVar started () >> takeMVar gate)
-                    `finally` putMVar stopped ()
-            awaitPickerAction $
-                withGatewayModelsForStartup access Right \selected -> do
-                    selected `shouldBe` Right models
-                    takeMVar started
-                    tryTakeMVar stopped `shouldReturn` Nothing
-            tryTakeMVar stopped `shouldReturn` Just ()
+            select models `shouldBe` Right (OpenAIProvider, CodexDialect)
+            writeIORef fetch (putMVar started () >> takeMVar gate)
+            withAsync
+                (withGatewayModelsForStartup access select \selected ->
+                    putMVar entered selected >> pure selected) \worker -> do
+                    awaitPickerAction (takeMVar started)
+                    tryTakeMVar entered `shouldReturn` Nothing
+                    putMVar gate (Right updated)
+                    awaitPickerAction (wait worker)
+                        `shouldReturn` Right (ClaudeCodeProvider, ClaudeCodeDialect)
+                    takeMVar entered `shouldReturn` Right (ClaudeCodeProvider, ClaudeCodeDialect)
+            cachedGatewayModels access `shouldReturn` Just updated
+
+        it "rejects an explicit alias removed from the authoritative catalog" do
+            let models = [pickerModel "company-a"]
+                select available =
+                    fmap (.modelTarget.targetModelId) $
+                        selectGatewayModelOption
+                            (modelOptionsForGatewayModels testCatalog available)
+                            (Just "company-a") Nothing []
+            fetch <- newIORef (pure (Right models))
+            access <- newGatewayModelAccessWith (readIORef fetch >>= id)
+            refreshGatewayModels access `shouldReturn` Right models
+            writeIORef fetch (pure (Right []))
+            withGatewayModelsForStartup access select pure
+                `shouldReturn` Left "Model company-a is not offered by the organization gateway."
+            cachedGatewayModels access `shouldReturn` Just []
 
         it "waits for the first authoritative catalog on a cold start" do
             let models = [pickerModel "company-a"]
@@ -191,20 +243,37 @@ spec = describe "Agent.CLI.GatewayModels" do
                 `shouldReturn` Left "gateway unavailable"
             cachedGatewayModels access `shouldReturn` Nothing
 
-        it "keeps the warm selection and cache when background transport fails" do
+        it "reports warm-start transport failure without selecting stale routing and retains the display cache" do
             let models = [pickerModel "company-a"]
             fetch <- newIORef (pure (Right models))
-            started <- newEmptyMVar
             access <- newGatewayModelAccessWith (readIORef fetch >>= id)
             refreshGatewayModels access `shouldReturn` Right models
-            writeIORef fetch (putMVar started () >> pure (Left "gateway unavailable"))
-            awaitPickerAction
-                (withGatewayModelsForStartup access Right \selected ->
-                    takeMVar started >> pure selected)
-                `shouldReturn` Right models
+            writeIORef fetch (pure (Left "gateway unavailable"))
+            withGatewayModelsForStartup access Right pure
+                `shouldReturn` Left "gateway unavailable"
             cachedGatewayModels access `shouldReturn` Just models
 
     describe "cached model picker" do
+        it "validates a confirmed cached alias and preserves effort when its provider and dialect changed" do
+            selected <- confirmCachedGatewayModel
+                (Right [GatewayModel "company-a" GatewayAnthropicProtocol GatewayAnthropicProvider])
+            fmap (fmap (\selection ->
+                ( selection.modelPickerOption.modelTarget.targetProvider
+                , selection.modelPickerOption.modelTarget.targetDialect
+                , selection.modelPickerEffort
+                ))) selected
+                `shouldBe` Right (Just (ClaudeCodeProvider, ClaudeCodeDialect, EffortHigh))
+
+        it "rejects confirmation of a cached alias removed from the gateway" do
+            selected <- confirmCachedGatewayModel (Right [])
+            fmap (fmap (.modelPickerOption.modelTarget.targetModelId)) selected
+                `shouldBe` Left "Model company-a is not offered by the organization gateway."
+
+        it "returns no stale selection when confirmation refresh fails" do
+            selected <- confirmCachedGatewayModel (Left "gateway unavailable")
+            fmap (fmap (.modelPickerOption.modelTarget.targetModelId)) selected
+                `shouldBe` Left "gateway unavailable"
+
         it "preserves minimal-picker filter, focus, and effort during a catalog update" do
             let options = modelOptionsForGatewayModels testCatalog
                     [pickerModel "company-a", pickerModel "company-b"]
@@ -307,6 +376,7 @@ spec = describe "Agent.CLI.GatewayModels" do
                 case rows of
                     (key, _, _, _, effort) : _ -> do
                         atomically (putTMVar reply (Just (key, effort)))
+                        putMVar gate (Right [pickerModel "company-new"])
                         selected <- awaitPickerAction (wait worker)
                         fmap (fmap (.modelPickerOption.modelTarget.targetModelId)) selected
                             `shouldBe` Right (Just "company-new")

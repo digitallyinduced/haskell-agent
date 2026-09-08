@@ -17,7 +17,6 @@ import Agent.CLI.GatewayClient
     , loadGatewayCredentialAt
     , newGatewayModelAccess
     , refreshGatewayModels
-    , cachedGatewayModels
     )
 import Agent.CLI.ModelConfig
     ( ModelCatalog
@@ -32,31 +31,23 @@ import Agent.CLI.Models
     )
 import Agent.Provider
     ( Provider (ClaudeCodeProvider, OpenAIProvider, XAIProvider) )
-import Control.Concurrent.Async (withAsync)
-import Control.Monad (void)
 import Data.List (find, nubBy)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import System.OsPath (OsPath)
 
--- | Start from a credential-scoped cached catalog when it satisfies selection.
--- Cache misses, including a newly requested alias absent from the snapshot,
--- retain authoritative synchronous selection. The warm refresh belongs to the
--- continuation's lifetime and is cancelled and joined when that runtime exits.
--- Cached metadata does not grant access: the gateway authorizes every request.
+-- | Resolve authoritative routing before initializing the provider runtime.
+-- Cached catalogs are suitable for immediate picker presentation, but an alias
+-- may have changed provider or dialect since the snapshot was persisted.
+-- Refreshing only the cache after initialization cannot rebuild that runtime.
 withGatewayModelsForStartup
     :: GatewayModelAccess
     -> ([GatewayModel] -> Either Text selection)
     -> (Either Text selection -> IO result)
     -> IO result
 withGatewayModelsForStartup access select continue =
-    cachedGatewayModels access >>= \case
-        Just models | Right selected <- select models ->
-            withAsync (void (refreshGatewayModels access)) \_ ->
-                continue (Right selected)
-        _ ->
-            refreshGatewayModels access >>= continue . (>>= select)
+    refreshGatewayModels access >>= continue . (>>= select)
 
 -- | Select from a credential-scoped gateway catalog before authentication.
 -- Saved targets supply an alias preference, never provider identity: older

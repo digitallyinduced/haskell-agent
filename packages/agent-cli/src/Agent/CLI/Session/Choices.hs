@@ -16,7 +16,10 @@ import Agent.CLI.GatewayClient
     , fetchGatewayUsage
     , refreshGatewayModels
     )
-import Agent.CLI.GatewayModels (modelOptionsForGatewayModels)
+import Agent.CLI.GatewayModels
+    ( modelOptionsForGatewayModels
+    , selectGatewayModelOption
+    )
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , builtinConnectionId
@@ -140,7 +143,22 @@ modelChoiceWithEffort
         currentDialect
         currentEffort =
     case gatewayAccess of
-        Just access -> chooseGateway access
+        Just access -> chooseGateway access >>= \case
+            Right (Just selection) ->
+                -- Cached rows are presentation hints, not routing authority.
+                -- Validate only after confirmation so opening and cancelling
+                -- remain immediate, even while catalog requests are blocked.
+                refreshGatewayModels access >>= \case
+                    Left err -> pure (Left err)
+                    Right models ->
+                        pure $ do
+                            option <- selectGatewayModelOption
+                                (modelOptionsForGatewayModels catalog models)
+                                (Just selection.modelPickerOption.modelTarget.targetModelId)
+                                Nothing
+                                []
+                            Right (Just selection { modelPickerOption = option })
+            result -> pure result
         Nothing -> do
             discovered <- discoverModelOptions connectionId provider
             picker <-
