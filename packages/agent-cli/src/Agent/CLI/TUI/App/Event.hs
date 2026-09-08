@@ -915,6 +915,8 @@ handleAskChoiceEvent presentation title body initial rows reply = do
             , appAgentHover = Nothing
             }
     vScrollToBeginning (viewportScroll OverlayViewport)
+    -- The inline panel reduces the transcript viewport on the next render.
+    when (presentation == ChoicePlanning) resolveConversationFollow
 
 handleAskFilterChoiceEvent
     :: Text
@@ -1047,6 +1049,7 @@ handleAskTextEvent mode title body initial reply = do
             , appAgentHover = Nothing
             }
     vScrollToBeginning (viewportScroll OverlayViewport)
+    when (mode == TextInputPlanning) resolveConversationFollow
 
 handleSuspendEvent
     :: IO a
