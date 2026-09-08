@@ -216,6 +216,7 @@ openServerRuntime config = mask \restore -> do
                 Right store ->
                     restore
                         (TurnStore.openTurnStoreOwner store instanceId)
+                        `onException` closeStore store
                         >>= \case
                             Left err -> do
                                 closeStore store

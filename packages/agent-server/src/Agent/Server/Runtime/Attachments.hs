@@ -5,7 +5,7 @@ module Agent.Server.Runtime.Attachments
 
 import Agent.Server.Identifier (newUUIDv7Text)
 import Agent.Server.Types (FileAttachment(..), TurnSpec(..))
-import Control.Exception.Safe (finally, onException, tryAny)
+import Control.Exception.Safe (bracket, tryAny)
 import Control.Monad (void)
 import Data.ByteString qualified as ByteString
 import Data.Char (isAlphaNum)
@@ -33,13 +33,28 @@ withMaterializedTurnFiles
 withMaterializedTurnFiles cwd spec action
     | null spec.turnSpecFiles = action (turnBasePrompt spec)
     | otherwise =
-        tryAny writeFiles >>= \case
-            Left _ -> pure (Left "could not materialize the uploaded files")
-            Right (uploadRoot, prompt) ->
-                action prompt
-                    `finally` void (tryAny (removePathForcibly uploadRoot))
+        bracket (tryAny allocateRoot) cleanup \case
+            Left _ -> materializationFailed
+            Right (canonicalCwd, uploadRoot) -> do
+                written <- tryAny $
+                    traverse
+                        (writeFileAttachment canonicalCwd uploadRoot)
+                        (zip [1 :: Int ..] spec.turnSpecFiles)
+                case written of
+                    Left _ -> materializationFailed
+                    Right paths ->
+                        action (attachmentPrompt (turnBasePrompt spec) paths)
   where
-    writeFiles = do
+    materializationFailed =
+        pure (Left "could not materialize the uploaded files")
+    cleanup = \case
+        Left _ -> pure ()
+        Right (_, uploadRoot) ->
+            void (tryAny (removePathForcibly uploadRoot))
+
+    -- Acquire only the directory; writes and the callback run in the bracket
+    -- body so cancellation during either cannot orphan a partial upload.
+    allocateRoot = do
         canonicalCwd <- canonicalizePath cwd
         let agentRoot = canonicalCwd </> ".haskell-agent"
         createDirectoryIfMissing True agentRoot
@@ -56,18 +71,7 @@ withMaterializedTurnFiles cwd spec action
                         uploadId <- Text.unpack <$> newUUIDv7Text
                         let uploadRoot = canonicalAttachmentsRoot </> uploadId
                         createDirectory uploadRoot
-                        ( do
-                            paths <-
-                                traverse
-                                    (writeFileAttachment canonicalCwd uploadRoot)
-                                    (zip [1 :: Int ..] spec.turnSpecFiles)
-                            pure
-                                ( uploadRoot
-                                , attachmentPrompt (turnBasePrompt spec) paths
-                                )
-                            )
-                            `onException` void
-                                (tryAny (removePathForcibly uploadRoot))
+                        pure (canonicalCwd, uploadRoot)
 
 writeFileAttachment
     :: FilePath
