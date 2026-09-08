@@ -57,8 +57,8 @@ import Agent.Tools.Types
     )
 import Control.Applicative ((<|>))
 import Control.Exception.Safe
-    ( bracketOnError
-    , finally
+    ( bracket
+    , bracketOnError
     , tryAny
     )
 import Control.Monad (unless)
@@ -588,19 +588,24 @@ saveGeneratedImage env fileName bytes = do
                     then pure $ Left
                         "generated image destination already exists"
                     else do
-                        handle <- bracketOnError
-                            (openFd
-                                (unsafeToFilePath destination)
-                                WriteOnly
-                                defaultFileFlags
-                                    { creat = Just 0o600
-                                    , exclusive = True
-                                    , nofollow = True
-                                    , cloexec = True
-                                    })
-                            closeFd
-                            fdToHandle
-                        BS.hPut handle bytes `finally` hClose handle
+                        -- Keep descriptor-to-handle ownership transfer inside
+                        -- acquisition, so cancellation cannot strand the handle
+                        -- before its cleanup is installed.
+                        bracket
+                            (bracketOnError
+                                (openFd
+                                    (unsafeToFilePath destination)
+                                    WriteOnly
+                                    defaultFileFlags
+                                        { creat = Just 0o600
+                                        , exclusive = True
+                                        , nofollow = True
+                                        , cloexec = True
+                                        })
+                                closeFd
+                                fdToHandle)
+                            hClose
+                            (\handle -> BS.hPut handle bytes)
                         pure (Right ())
 
 displayGeneratedImage

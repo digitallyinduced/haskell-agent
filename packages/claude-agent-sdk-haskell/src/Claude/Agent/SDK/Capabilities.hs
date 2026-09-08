@@ -21,7 +21,9 @@ import Agent.Process (terminateProcessGroup)
 import Control.Concurrent.Async (withAsync, waitCatch)
 import Control.Exception.Safe
     ( SomeException
+    , bracket
     , catchAny
+    , finally
     , mask
     , onException
     , tryAny
@@ -230,7 +232,9 @@ capabilityCache = unsafePerformIO (newIORef Map.empty)
 runProbe :: FilePath -> FilePath -> [String] -> IO (Either Text (ExitCode, Text, Text))
 runProbe executable cwd args =
     mask \restore -> do
-        created <- tryAny $ createProcess
+        -- Own the process and pipes even before reader setup finishes. Readers
+        -- may finish by cancellation or a read error, not just EOF or the cap.
+        bracket (tryAny $ createProcess
             (proc executable args)
                 { cwd = Just cwd
                 -- Claude Code inspects inherited terminals even for
@@ -243,8 +247,7 @@ runProbe executable cwd args =
                 , close_fds = True
                 , create_group = True
                 , new_session = True
-                }
-        case created of
+                }) releaseCreated \case
             Left exception -> pure (Left (Text.pack (show (exception :: SomeException))))
             Right (Just input, Just output, Just error, processHandle) -> do
                 voidClose input
@@ -296,6 +299,11 @@ runProbe executable cwd args =
                 terminateProcessGroup Nothing processHandle
                 pure (Left "Claude Code probe returned incomplete output handles.")
   where
+    releaseCreated (Left _) = pure ()
+    releaseCreated (Right (input, output, error, processHandle)) =
+        (getPid processHandle >>= \groupId ->
+            terminateProcessGroup groupId processHandle)
+            `finally` mapM_ (maybe (pure ()) voidClose) [input, output, error]
     probeTimeoutMicros = 3_000_000
     waitBounded stream reader = do
         result <- timeout 1_000_000 (waitCatch reader)
@@ -325,13 +333,13 @@ readBounded handle = do
     go acc = do
         chunk <- ByteString.hGetSome handle 8192
         if ByteString.null chunk
-            then do
-                voidClose handle
-                pure (decode acc)
+            then pure (decode acc)
             else
                 let next = ByteString.take limit (acc <> chunk)
                 in if ByteString.length next >= limit
                     then do
+                        -- Deliberately stop the producer at the output cap;
+                        -- ordinary cleanup belongs to the probe's bracket.
                         voidClose handle
                         pure (decode next)
                     else go next

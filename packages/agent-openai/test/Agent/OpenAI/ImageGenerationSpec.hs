@@ -54,6 +54,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.Wai as Wai
+import System.Directory (createDirectory)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
@@ -129,6 +130,32 @@ spec = describe "image generation tool" do
                 , "quality" .= ("auto" :: Text)
                 , "size" .= ("auto" :: Text)
                 ]
+
+    it "leaves an existing destination unchanged and still returns the generated image" do
+        withSystemTempDirectory "agent-imagegen-existing" \cwd -> do
+            let destination = cwd </> "generated_images" </> "call-existing.png"
+            createDirectory (cwd </> "generated_images")
+            BS.writeFile destination "original"
+            recorded <- newIORef []
+            withImageServer recorded generatedPng \baseUrl -> do
+                env <- defaultToolEnv (fromText (Text.pack cwd))
+                history <- newImageGenerationHistory
+                let tool = imageGenerationToolAt baseUrl openAiProvider env history Nothing
+                result <- dispatchToolCall
+                    defaultLoopDispatch
+                    (appToolHandlers [tool])
+                    (functionToolCall
+                        "call-existing"
+                        "image_gen.imagegen"
+                        "{\"prompt\":\"paint a moonlit lake\"}")
+                BS.readFile destination `shouldReturn` "original"
+                result.output `shouldSatisfy` (not . Text.isInfixOf "Generated images are saved")
+                toolCallResultImages result `shouldBe`
+                    [ ToolResultImage
+                        { imageUrl = pngDataUrl generatedPng
+                        , imageDetail = Just "high"
+                        }
+                    ]
 
     it "edits the requested number of recent images in chronological order" do
         withSystemTempDirectory "agent-imagegen-edit" \cwd -> do
