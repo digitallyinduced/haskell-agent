@@ -694,6 +694,78 @@ spec = describe "turn supervisor" do
                         , humanResponseValue = Just "add tests"
                         }
 
+    it "requires fresh approval for a repeated identical request" do
+        resolved <- newEmptyMVar
+        let runner control _ = do
+                forM_ [1 :: Int, 2] \_ -> do
+                    answer <- control.turnControlRequestInput HumanRequestSpec
+                        { humanRequestSpecKind = ToolApprovalRequest
+                        , humanRequestSpecPrompt = "Run the same tool call?"
+                        , humanRequestSpecOptions = ["allow_once", "deny"]
+                        }
+                    putMVar resolved answer
+                pure (Right testOutput)
+            response = HumanResponse "allow_once" Nothing
+        withSupervisor runner \supervisor -> do
+            void (submitTurn supervisor (turnSpec "session-a"))
+            first <- awaitRequest supervisor
+            resolveHumanRequest supervisor localAccessBoundary
+                first.humanRequestId response `shouldReturn` Right first
+            takeWithin resolved `shouldReturn` Right response
+            second <- awaitRequest supervisor
+            second.humanRequestId `shouldNotBe` first.humanRequestId
+            resolveHumanRequest supervisor localAccessBoundary
+                first.humanRequestId response
+                `shouldReturn` Left HumanRequestResolutionNotFound
+            resolveHumanRequest supervisor localAccessBoundary
+                second.humanRequestId response `shouldReturn` Right second
+            takeWithin resolved `shouldReturn` Right response
+
+    it "retains exact approval text and options beyond the log preview limit" do
+        resolved <- newEmptyMVar
+        let prompt = Text.replicate 17000 "x" <> "; also remove the backup"
+            option = Text.replicate 17000 "y" <> "-deny"
+            runner control _ = do
+                answer <- control.turnControlRequestInput HumanRequestSpec
+                    { humanRequestSpecKind = ToolApprovalRequest
+                    , humanRequestSpecPrompt = prompt
+                    , humanRequestSpecOptions = [option]
+                    }
+                putMVar resolved answer
+                pure (Right testOutput)
+        withSupervisor runner \supervisor -> do
+            void (submitTurn supervisor (turnSpec "session-a"))
+            request <- awaitRequest supervisor
+            request.humanRequestPrompt `shouldBe` prompt
+            request.humanRequestOptions `shouldBe` [option]
+            let response = HumanResponse option Nothing
+            resolveHumanRequest supervisor localAccessBoundary
+                request.humanRequestId response
+                `shouldReturn` Right request
+            takeWithin resolved `shouldReturn` Right response
+
+    forM_
+        [ ("oversized prompt", Text.replicate (64 * 1024) "x", ["allow"])
+        , ("UTF-8 oversized prompt", Text.replicate 22000 "界", ["allow"])
+        , ("excess options", "Choose", replicate 101 "allow")
+        ] \(label, prompt, options) ->
+            it ("rejects rather than truncates " <> label) do
+                result <- newEmptyMVar
+                let runner control _ = do
+                        answer <- control.turnControlRequestInput HumanRequestSpec
+                            { humanRequestSpecKind = ToolApprovalRequest
+                            , humanRequestSpecPrompt = prompt
+                            , humanRequestSpecOptions = options
+                            }
+                        putMVar result answer
+                        pure (Right testOutput)
+                withSupervisor runner \supervisor -> do
+                    void (submitTurn supervisor (turnSpec "session-a"))
+                    takeWithin result
+                        `shouldReturn` Left "human request exceeds the public size limit"
+                    listHumanRequests supervisor localAccessBoundary Nothing
+                        `shouldReturn` Right []
+
     it "rejects human input too large for the public transport" do
         result <- newEmptyMVar
         let runner control _ = do
