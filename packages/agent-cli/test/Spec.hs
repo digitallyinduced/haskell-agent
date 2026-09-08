@@ -57,6 +57,7 @@ import qualified Agent.CLI.GatewayModelsSpec as GatewayModelsSpec
 import qualified Agent.CLI.IntegrationGatewaySpec as IntegrationGatewaySpec
 import qualified Agent.CLI.GitDiffSpec as GitDiffSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
+import qualified Agent.CLI.ChartImageSpec as ChartImageSpec
 import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
 import qualified Agent.CLI.LoginSpec as LoginSpec
@@ -192,6 +193,7 @@ specs = do
     IntegrationGatewaySpec.spec
     GitDiffSpec.spec
     ImagePreviewSpec.spec
+    ChartImageSpec.spec
     InputSpec.spec
     InterruptSpec.spec
     LoginSpec.spec

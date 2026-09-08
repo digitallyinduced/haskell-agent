@@ -201,6 +201,7 @@ library
                     , Agent.CLI.ExternalProgram
                     , Agent.CLI.FileUri
                     , Agent.CLI.ImagePreview
+                    , Agent.CLI.ChartImage
                     , Agent.CLI.GatewayModels
                     , Agent.CLI.GitDiff
                     , Agent.CLI.Input
@@ -552,6 +553,7 @@ test-suite agent-cli-test
                     , Agent.CLI.IntegrationGatewaySpec
                     , Agent.CLI.GitDiffSpec
                     , Agent.CLI.ImagePreviewSpec
+                    , Agent.CLI.ChartImageSpec
                     , Agent.CLI.InputSpec
                     , Agent.CLI.InterruptSpec
                     , Agent.CLI.LoginSpec
@@ -677,6 +679,22 @@ benchmark image-preview-latency-bench
                     , base >= 4.17 && < 5
                     , bytestring
                     , JuicyPixels
+
+benchmark history-chart-restoration-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          HistoryChartRestoration.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , agent-core
+                    , agent-tui
+                    , async
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , stm
+                    , text
 
 benchmark clipboard-latency-bench
     import:           common-options

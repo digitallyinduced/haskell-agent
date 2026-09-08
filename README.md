@@ -521,6 +521,15 @@ WezTerm, and iTerm2 draw the bitmap natively, other terminals get a
 true-colour text approximation. The image is shown to the user only; it is
 not added to the model context.
 
+### Inline charts
+
+In interactive terminal sessions, `render_chart` displays static line, bar,
+area, and scatter charts from the same validated chart documents used by the
+macOS app. Ghostty and Kitty display PNGs directly; other terminals retain a
+readable text summary. No plotting program or browser is required.
+Fullscreen conversation history recreates cached previews from saved chart
+documents. Hover and zoom are not supported in the terminal.
+
 ## Ideas and direction
 
 Why an independent harness matters, why code and Haskell are useful

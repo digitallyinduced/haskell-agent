@@ -3,6 +3,7 @@
 module Agent.CLI.TUI.App.History where
 
 import Agent.CLI.Clipboard ( formatImageSize )
+import Agent.CLI.ChartImage (chartResultImage)
 import Agent.CLI.Dictation ( DictationControl(..)
     , DictationResult(..)
     , dictateWith
@@ -99,6 +100,7 @@ import Agent.CLI.TUI.ImagePreview ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
     , nativePreviewPlacements
     , prepareTuiImagePreview
+    , prepareNativeTuiImagePreview
     , previewCountForWidth
     , previewCellSize
     , renderTuiImagePreview
@@ -132,7 +134,7 @@ import Brick.Widgets.Border (borderWithLabel)
 import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
 import Brick.Widgets.Center (center, centerLayer, hCenter)
-import Codec.Picture (pixelAt)
+import Codec.Picture (pixelAt, imageData)
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
@@ -142,7 +144,7 @@ import Agent.CLI.Recap ( autoRecapAwayThreshold , autoRecapIdleThreshold , autoR
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (finally, mask, onException, throwIO, tryAny)
-import Control.Exception (AsyncException(UserInterrupt))
+import Control.Exception (AsyncException(UserInterrupt), evaluate)
 import Data.Char (isControl, isSpace)
 import qualified Data.ByteString as BS
 import Data.Foldable (toList)
@@ -203,17 +205,18 @@ resetHistoryPage page state =
             remapHistoryPage state.appNextHistoryBlockId page
         window =
             either (const empty) id (applyHistoryPage remapped empty)
-    in state
-        { appUi = reduceUi UiConversationCleared state.appUi
-        , appPullRequestURL = Nothing
-        , appHistoryWindow = window
-        , appHistorySelectedBlock = Nothing
-        , appHistoryLiveStart = Nothing
-        , appNextHistoryBlockId = nextBlockId
-        , appCompletionFlashes = Map.empty
-        , appConversationAnchor = Nothing
-        , appSubmittedImagePreviews = Map.empty
-        }
+        nextState = state
+            { appUi = reduceUi UiConversationCleared state.appUi
+            , appPullRequestURL = Nothing
+            , appHistoryWindow = window
+            , appHistorySelectedBlock = Nothing
+            , appHistoryLiveStart = Nothing
+            , appNextHistoryBlockId = nextBlockId
+            , appCompletionFlashes = Map.empty
+            , appConversationAnchor = Nothing
+            , appSubmittedImagePreviews = Map.empty
+            }
+    in nextState
 
 setHistoryGeneration :: HistoryGeneration -> AppState -> AppState
 setHistoryGeneration generation state =
@@ -300,7 +303,11 @@ commitLiveHistoryTurn durableTurn commit state =
                 state.appNextHistoryBlockId
                 (precedingBlocks <> durableTurn.historyTurnBlocks)
         remappedTurn =
-            durableTurn { historyTurnBlocks = remappedBlocks }
+            durableTurn
+                { historyTurnBlocks = remappedBlocks
+                , historyTurnCharts =
+                    remapHistoryCharts blockIdRemap durableTurn.historyTurnCharts
+                }
         baseWindow =
             case commit of
                 HistoryCommitReset ->
@@ -394,15 +401,94 @@ remapHistoryPage nextId page =
         (remaining, turns) =
             foldl'
                 (\(current, accumulated) turn ->
-                    let (next, blocks, _) =
+                    let (next, blocks, identifiers) =
                             remapHistoryBlocks
                                 current
                                 turn.historyTurnBlocks
                     in (next, accumulated |> turn
-                        { historyTurnBlocks = blocks }))
+                        { historyTurnBlocks = blocks
+                        , historyTurnCharts =
+                            remapHistoryCharts identifiers turn.historyTurnCharts
+                        }))
                 (nextId, Seq.empty)
                 page.historyPageTurns
     in (remaining, page { historyPageTurns = turns })
+
+remapHistoryCharts :: Map.Map BlockId BlockId -> Map.Map BlockId Text -> Map.Map BlockId Text
+remapHistoryCharts identifiers charts =
+    Map.fromList
+        [ (newId, envelope)
+        | (oldId, envelope) <- Map.toList charts
+        , Just newId <- [Map.lookup oldId identifiers]
+        ]
+
+-- | Only select envelopes on the event thread. The replaceable request list
+-- prevents obsolete paging requests from accumulating while a chart is prepared.
+queueHistoryChartPreviews :: AppState -> IO ()
+queueHistoryChartPreviews state =
+    atomically $ writeTVar state.appRuntime.runtimeHistoryChartRequests
+        [ (state.appHistoryWindow.historyWindowGeneration, blockId, envelope)
+        | (blockId, envelope) <- historyChartPreviewCandidates state
+        , Map.notMember blockId state.appSubmittedImagePreviews
+        ]
+
+historyChartPreviewCandidates :: AppState -> [(BlockId, Text)]
+historyChartPreviewCandidates state =
+    take submittedImagePreviewCountBudget candidates
+  where
+    candidates = reverse
+        [ (block.blockId, envelope)
+        | turn <- toList state.appHistoryWindow.historyWindowTurns
+        , block <- toList turn.historyTurnBlocks
+        , Just envelope <- [Map.lookup block.blockId turn.historyTurnCharts]
+        ]
+
+-- | Scoped by the fullscreen runtime. Publish individual, fully prepared
+-- previews so input remains responsive and later pages can replace pending work.
+runHistoryChartWorker :: FullscreenRuntime -> IO ()
+runHistoryChartWorker runtime = forever do
+    (generation, blockId, envelope) <- atomically do
+        requests <- readTVar runtime.runtimeHistoryChartRequests
+        case requests of
+            [] -> retry
+            request : remaining -> do
+                writeTVar runtime.runtimeHistoryChartRequests remaining
+                pure request
+    current <- HistoryGeneration <$> readIORef runtime.runtimeHistoryGeneration
+    when (generation == current) do
+        result <- tryAny (prepareHistoryChartPreview runtime.runtimeNativeImagePreviews envelope)
+        case result of
+            Right (Right preview) ->
+                enqueueAppEvent runtime
+                    (AppHistoryChartPrepared generation blockId preview)
+            _ -> pure ()
+
+prepareHistoryChartPreview :: Bool -> Text -> IO (Either Text TuiImagePreview)
+prepareHistoryChartPreview native envelope =
+    case chartResultImage envelope >>= preparePreview of
+        Left err -> pure (Left err)
+        Right preview -> do
+            -- Force encoded bytes and the fallback sample on this worker.
+            -- Merely evaluating the Either would leave image work for Brick.
+            _ <- evaluate (BS.length preview.previewKittyAttachment.imageBytes)
+            unless native $ void $ evaluate (imageData preview.previewSample)
+            pure (Right preview)
+  where
+    preparePreview
+        | native = prepareNativeTuiImagePreview
+        | otherwise = prepareTuiImagePreview
+
+applyHistoryChartPreview
+    :: HistoryGeneration -> BlockId -> TuiImagePreview -> AppState -> AppState
+applyHistoryChartPreview generation blockId preview state
+    | generation /= state.appHistoryWindow.historyWindowGeneration = state
+    | blockId `notElem` map fst (historyChartPreviewCandidates state) = state
+    | otherwise = state
+        { appSubmittedImagePreviews =
+            retainSubmittedImagePreviews state $
+                Map.insertWith (\_ existing -> existing)
+                    blockId [preview] state.appSubmittedImagePreviews
+        }
 
 remapHistoryBlocks
     :: Int

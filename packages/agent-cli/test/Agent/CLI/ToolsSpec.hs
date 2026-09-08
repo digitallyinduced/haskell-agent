@@ -1,6 +1,7 @@
 module Agent.CLI.ToolsSpec (spec) where
 
 import Agent.CLI.Tools
+import Agent.CLI.ChartImage (terminalChartTool)
 import Agent.CLI.ComputerUse (computerUseTool)
 import Agent.CLI.CodeModeRuntime
     ( CodeModeProjectionStrategy(..)
@@ -10,12 +11,14 @@ import Agent.CLI.CodeModeRuntime
     , projectCodeModeTools
     , projectCodeModeToolsFor
     )
+import Agent.Tools.RenderChart (renderChartResult)
+import Agent.Tools.ShowImage (ImageDisplayHooks(..), ImageDisplayRequest(..))
 import Agent.Dialect
     ( claudeCodeDialect
     , codexDialect
     , grokBuildDialect
     )
-import Agent.Loop (LoopError(..))
+import Agent.Loop (LoopError(..), ImageAttachment(..))
 import Agent.Json (RawJson, rawJsonBytes, rawJsonFromEncoding)
 import Agent.Json.Decode qualified as Hermes
 import Agent.Responses.Types
@@ -29,6 +32,10 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolDispatchConfig(..)
+    , ToolDispatchOutcome(..)
+    , dispatchToolHandlerDetailed
+    , functionToolCall
     , noArgsTool
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
@@ -54,6 +61,8 @@ import Agent.Tools.Types
 import Control.Exception.Safe (bracket)
 import Control.Monad (join)
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as BS
+import Data.IORef (newIORef, readIORef, modifyIORef')
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Info (os)
@@ -62,6 +71,50 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
+    describe "terminalChartTool" do
+        let input = "{\"version\":1,\"kind\":\"line\",\"title\":\"Revenue\",\"x_axis\":{\"type\":\"number\"},\"y_axis\":{},\"series\":[{\"name\":\"Sales\",\"points\":[{\"x\":1,\"y\":2},{\"x\":2,\"y\":3}]}]}"
+            config = ToolDispatchConfig
+                { toolDispatchUnknownTool = id
+                , toolDispatchFormatResult = either id id
+                , toolDispatchFormatException = \_ exception -> Text.pack (show exception)
+                , toolDispatchOnException = \_ _ -> pure ()
+                , toolDispatchOnOutput = \_ _ -> pure ()
+                , toolDispatchFinalizeOutput = \_ -> pure
+                }
+            invoke hooks arguments =
+                dispatchToolHandlerDetailed config
+                    (Just (terminalChartTool hooks).appToolHandler)
+                    (functionToolCall "chart-call" "render_chart" arguments)
+        it "displays a PNG for the original call while preserving the durable document" do
+            requests <- newIORef []
+            result <- invoke (ImageDisplayHooks \request -> do
+                modifyIORef' requests (request :)
+                pure (Right ())) input
+            result.toolDispatchSucceeded `shouldBe` True
+            Right result.toolDispatchResult.output `shouldBe` renderChartResult input
+            result.toolDispatchResult.toolResultImages `shouldBe` []
+            readIORef requests >>= \case
+                [request] -> do
+                    request.displayCallId `shouldBe` "chart-call"
+                    request.displayImage.imageMime `shouldBe` "image/png"
+                    BS.take 8 request.displayImage.imageBytes
+                        `shouldBe` BS.pack [137, 80, 78, 71, 13, 10, 26, 10]
+                    request.displayCaption `shouldSatisfy`
+                        maybe False (Text.isInfixOf "Revenue")
+                _ -> expectationFailure "expected exactly one chart display"
+        it "rejects invalid chart input before calling the display hook" do
+            calls <- newIORef (0 :: Int)
+            result <- invoke (ImageDisplayHooks \_ -> do
+                modifyIORef' calls (+ 1)
+                pure (Right ())) "{}"
+            result.toolDispatchSucceeded `shouldBe` False
+            readIORef calls `shouldReturn` 0
+        it "propagates display failures without attaching image bytes to the result" do
+            result <- invoke (ImageDisplayHooks \_ -> pure (Left "display unavailable")) input
+            result.toolDispatchSucceeded `shouldBe` False
+            result.toolDispatchResult.output `shouldBe` "display unavailable"
+            result.toolDispatchResult.toolResultImages `shouldBe` []
+
     it "emits async only when both the model and tool opt in" do
         let capable = withAsyncToolCalls jsonTool
             project modelCapability tool =

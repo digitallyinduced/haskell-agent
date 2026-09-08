@@ -52,6 +52,16 @@ systemPromptForToolsWithHostedSearch includeHostedSearch dialect =
 
 spec :: Spec
 spec = describe "systemPrompt" do
+    it "adds chart guidance only when render_chart is registered, independently of show_image" do
+        let prompt tools = systemPromptForTools codexDialect tools
+                (fromFilePath "/workspace") Nothing (fromGregorian 2026 9 8) False
+            withCharts = prompt ["render_chart"]
+        withCharts `shouldSatisfy` Text.isInfixOf "Use render_chart"
+        withCharts `shouldSatisfy` Text.isInfixOf "Do not promise hover or zoom"
+        withCharts `shouldNotSatisfy` Text.isInfixOf "Use show_image"
+        prompt ["show_image"] `shouldNotSatisfy` Text.isInfixOf "Chart display:"
+        prompt ["render_chart", "show_image"] `shouldSatisfy` Text.isInfixOf "Use show_image"
+
     it "keeps ownership guidance after bundled catalog instructions" do
         catalog <- loadBundledModelsOrThrow
         catalog.models `shouldSatisfy` (not . null)

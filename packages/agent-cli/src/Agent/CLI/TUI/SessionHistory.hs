@@ -13,6 +13,8 @@ import Agent.CLI.Session
     ( SessionTurn(..)
     , SessionTurnPage(..)
     )
+import Agent.Tools.RenderChart (chartResultDocument, renderChartToolName)
+import qualified Data.Map.Strict as Map
 import Agent.CLI.Session.Types (TranscriptEffect(..))
 import Agent.CLI.Render (renderToolOutputValue)
 import Agent.CLI.Session.PullRequest (sessionTurnPullRequestURL)
@@ -98,9 +100,37 @@ sessionHistoryTurn cursor turn =
     HistoryTurn
         { historyTurnCursor =
             HistoryCursor (fromIntegral cursor)
-        , historyTurnBlocks =
-            (projectTurn turn).uiBlocks
+        , historyTurnBlocks = blocks
+        , historyTurnCharts = Map.fromList
+            [ (block.blockId, envelope)
+            | block <- toList blocks
+            , Just callId <- [block.blockCallId]
+            , Just envelope <- [Map.lookup callId charts]
+            ]
         }
+  where
+    blocks = (projectTurn turn).uiBlocks
+    charts = snd (foldl' collect (Map.empty, Map.empty)
+        (turn.turnItems <> turn.turnDisplayItems))
+    collect (calls, results) = \case
+        FunctionCallItem call ->
+            (Map.insert call.callId call.name calls, results)
+        CustomToolCallItem call ->
+            (Map.insert call.callId call.name calls, results)
+        FunctionCallOutputItem output ->
+            finish calls results output.callId (renderToolOutputValue output.output)
+        CustomToolCallOutputItem output ->
+            finish calls results output.callId (renderToolOutputValue output.output)
+        _ -> (calls, results)
+    finish calls results callId envelope =
+        ( Map.delete callId calls
+        , case Map.lookup callId calls of
+            Just name
+                | name == renderChartToolName
+                , Just _ <- chartResultDocument envelope ->
+                    Map.insert callId envelope results
+            _ -> Map.delete callId results
+        )
 
 projectTurn :: SessionTurn -> UiState
 projectTurn turn =

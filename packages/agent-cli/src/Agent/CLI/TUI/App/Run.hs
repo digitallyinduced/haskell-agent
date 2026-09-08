@@ -141,6 +141,7 @@ import Codec.Picture (pixelAt)
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async
     ( Async
+    , concurrently_
     , poll
     , wait
     , waitCatch
@@ -286,7 +287,7 @@ runFullscreen runtime workerAction = do
                 withAsync (eventPump runtime) \_eventPump ->
                     withAsync (recapTicker runtime) \_recapTicker ->
                         withAsync
-                            historyLoader
+                            (concurrently_ historyLoader (runHistoryChartWorker runtime))
                             \_historyLoader ->
                             withAsync
                                 dictationWorker

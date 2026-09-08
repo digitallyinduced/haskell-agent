@@ -2,9 +2,12 @@
 module Agent.CLI.Runtime.Orchestration.Tools.HostHooks
     ( ToolHostHooks(..)
     , buildToolHostHooks
+    , terminalChartTool
     ) where
 
 import Agent.CLI.Options (isOneShot)
+import Agent.CLI.ChartImage (terminalChartTool)
+import Agent.CLI.ImagePreview (routeChartPresentation)
 import Agent.CLI.Plan (cliPlanHooks)
 import Agent.CLI.PromptHooks
     ( fullscreenAwareImageHooks, fullscreenAwarePlanHooks, fullscreenAwareSecretHooks )
@@ -12,13 +15,14 @@ import Agent.CLI.Runtime.Orchestration.Tools.Model
 import Agent.CLI.Runtime.Orchestration.Tools.Request
 import Agent.CLI.Runtime.Orchestration.Types (NativeRunCapabilities(..), NativeRunHooks(..))
 import Agent.CLI.Secret (promptSecretLine)
-import Agent.CLI.Session.Attachments (putImagePreview)
+import Agent.CLI.Session.Attachments (putImagePreview, putChartPreview)
 import Agent.CLI.Session.Runtime.Types (StartupRuntime(..))
 import Agent.CLI.SessionState (SessionState(..))
 import Agent.CLI.Terminal (resolveColor)
 import Agent.Tools.PlanMode (PlanModeHooks(..), PlanDecision(..))
 import Agent.Tools.Secret (SecretPrompt(..), SecretPromptHooks(..))
 import Agent.Tools.ShowImage (ImageDisplayHooks(..), ImageDisplayRequest(..))
+import System.IO (stdout)
 
 data ToolHostHooks = ToolHostHooks
     { toolPlanHooks :: PlanModeHooks
@@ -73,10 +77,17 @@ buildToolHostHooks AgentToolsRequest
     -- same graphics path as pasted attachments.
     baseImageHooks = ImageDisplayHooks \request -> do
         color <- resolveColor stderrHandle
-        putImagePreview
-            startup.startupSessionState.sessionPreviewId
-            color
-            [request.displayImage]
+        if request.displayPath == "render_chart"
+            then routeChartPresentation (isOneShot options) stdout stderrHandle
+                request.displayCaption
+                (putChartPreview
+                    startup.startupSessionState.sessionPreviewId
+                    color
+                    [request.displayImage])
+            else putImagePreview
+                startup.startupSessionState.sessionPreviewId
+                color
+                [request.displayImage]
         pure (Right ())
     toolImageHooks
         | not nativeCapabilities.nativeHostExtensions || not isTty =

@@ -293,6 +293,7 @@ benchmarkState blockCount bodyLines = do
             Seq.fromList
                 [ HistoryTurn
                     { historyTurnCursor = HistoryCursor (fromIntegral cursor)
+                    , historyTurnCharts = Map.empty
                     , historyTurnBlocks = Seq.fromList turnBlocks
                     }
                 | (cursor, turnBlocks) <-

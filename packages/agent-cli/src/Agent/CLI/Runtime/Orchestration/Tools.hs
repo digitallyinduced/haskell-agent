@@ -701,6 +701,10 @@ assembleSessionToolsRuntime AgentToolsRequest
                 learnedSkillToolsEnv
         nativeToolGroups =
             maybe [] (.nativeToolGroups) startup.startupNativeHooks
+        terminalChartTools =
+            case (startup.startupNativeHooks, imageHooks) of
+                (Nothing, Just hooks) -> [terminalChartTool hooks]
+                _ -> []
         computerTools =
             maybe [] (pure . ComputerUse.computerUseRuntimeTool)
                 computerUseRuntime
@@ -732,6 +736,7 @@ assembleSessionToolsRuntime AgentToolsRequest
             , HostToolGroup sessionDatabaseTools
             , HostToolGroup sessionLearnedSkillTools
             , HostToolGroup externalSessionAppTools
+            , HostToolGroup terminalChartTools
             ]
                 <> nativeToolGroups
                 <> [ HostToolGroup imageGenerationTools

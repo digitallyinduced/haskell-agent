@@ -84,6 +84,12 @@ module Agent.CLI.TUI.App
     , withFullscreenWorker
     , commitFullscreenImagePreviews
     , commitFullscreenHistoryTurn
+    , resetHistoryPage
+    , applyLoadedHistoryPage
+    , remapHistoryPage
+    , queueHistoryChartPreviews
+    , runHistoryChartWorker
+    , applyHistoryChartPreview
     , beginFullscreenLiveHistory
     , clearFullscreenHistorySource
     , reloadFullscreenHistorySource

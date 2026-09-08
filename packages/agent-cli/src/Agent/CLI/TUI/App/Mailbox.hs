@@ -758,6 +758,8 @@ appEventLogicalBytes = \case
         saturatingAdd 256 (maybe 0 logicalTextBytes url)
     AppHistoryReset page ->
         saturatingAdd 256 (historyPageLogicalBytes page)
+    AppHistoryChartPrepared _ _ preview ->
+        saturatingAdd 256 (imagePreviewLogicalBytes preview)
     AppHistoryLoaded _ result ->
         saturatingAdd 256 $
             either logicalTextBytes historyPageLogicalBytes result
@@ -927,7 +929,8 @@ historyTurnLogicalBytes turn =
         foldl'
             (\size block ->
                 saturatingAdd size (uiBlockLogicalBytes block))
-            0
+            (foldl' (\size envelope -> saturatingAdd size (logicalTextBytes envelope))
+                0 turn.historyTurnCharts)
             turn.historyTurnBlocks
 
 historyPageLogicalBytes :: HistoryPage -> Int

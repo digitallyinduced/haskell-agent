@@ -193,6 +193,7 @@ data AppEvent
     | AppSetPullRequestURL !HistoryGeneration !(Maybe Text)
     | AppSyntaxHighlighterChanged
     | AppHistoryReset !HistoryPage
+    | AppHistoryChartPrepared !HistoryGeneration !BlockId !TuiImagePreview
     | AppHistoryLoaded
         !HistoryRequest
         !(Either Text HistoryPage)
@@ -425,6 +426,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeInitial :: !UiState
     , runtimeSessionActions :: !(IORef FullscreenSessionActions)
     , runtimeHistoryRequests :: !(TQueue HistoryRequest)
+    , runtimeHistoryChartRequests :: !(TVar [(HistoryGeneration, BlockId, Text)])
     , runtimeHistorySource :: !(IORef (Maybe FullscreenHistorySource))
     , runtimeHistoryGeneration :: !(IORef Int64)
     , runtimeDictationJobs :: !(TQueue DictationJob)

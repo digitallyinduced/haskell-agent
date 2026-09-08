@@ -15,6 +15,8 @@ import Agent.CLI.TUI.History
 import Agent.Json (rawJsonFromEncoding)
 import Agent.CLI.TUI.Composer (composerScrollbackAvailable)
 import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn, sessionTurnPullRequestURL)
+import Agent.CLI.TUI.App (remapHistoryPage)
+import Agent.Tools.RenderChart (renderChartResult)
 import Agent.CLI.Session.PullRequest (sessionTurnPullRequestURLs)
 import Agent.Responses.LoopBackend (toolResultToItem)
 import Agent.Responses.Types
@@ -46,6 +48,41 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "bounded fullscreen history window" do
+    it "retains complete validated chart results separately from display summaries" do
+        let projected = sessionHistoryTurn (0 :: Int)
+                (sessionTurn TranscriptAppend "" (chartItems "render_chart" chartEnvelope))
+        Map.elems projected.historyTurnCharts `shouldBe` [chartEnvelope]
+        let chartBlocks =
+                [ block.blockId
+                | block <- toList projected.historyTurnBlocks
+                , block.blockCallId == Just "chart-call"
+                ]
+        Map.keys projected.historyTurnCharts `shouldBe` chartBlocks
+
+    it "rejects chart envelopes from other tools and malformed chart results" do
+        let project name output = (sessionHistoryTurn (0 :: Int)
+                (sessionTurn TranscriptAppend "" (chartItems name output))).historyTurnCharts
+        project "shell_command" chartEnvelope `shouldBe` Map.empty
+        project "render_chart" "{}" `shouldBe` Map.empty
+
+    it "remaps chart documents with their history blocks and accounts for document bytes" do
+        let projected = sessionHistoryTurn (0 :: Int)
+                (sessionTurn TranscriptAppend "" (chartItems "render_chart" chartEnvelope))
+            page = HistoryPage (HistoryGeneration 1) HistoryNewer
+                (Seq.singleton projected) (HistoryCursor 0) 1 False False
+            (_, remapped) = remapHistoryPage (-1) page
+            window = emptyHistoryWindow (HistoryGeneration 1) 10 100 1000000
+        restored <- case toList remapped.historyPageTurns of
+            [value] -> pure value
+            _ -> expectationFailure "expected one remapped history turn" >> fail "missing history turn"
+        Map.elems restored.historyTurnCharts `shouldBe` [chartEnvelope]
+        Map.keys restored.historyTurnCharts `shouldSatisfy`
+            all (`elem` map (.blockId) (toList restored.historyTurnBlocks))
+        let withChart = appendHistoryTurn restored window
+            withoutChart = appendHistoryTurn (restored { historyTurnCharts = Map.empty }) window
+        historyWindowLoadedBytes withChart - historyWindowLoadedBytes withoutChart
+            `shouldBe` 2 * Text.length chartEnvelope
+
     it "projects history in order, coalescing within turns but not across turn boundaries" do
         let regular = Seq.fromList [block identifier | identifier <- [1 .. 31]]
             readBlock = inspectionBlock 32 "Read a.hs"
@@ -54,11 +91,12 @@ spec = describe "bounded fullscreen history window" do
             fetchedBlock = inspectionBlock 35 "Fetched docs"
             turns =
                 Seq.fromList
-                    [ HistoryTurn (HistoryCursor 1) (regular Seq.|> readBlock)
-                    , HistoryTurn (HistoryCursor 2) (Seq.singleton listedBlock)
+                    [ HistoryTurn (HistoryCursor 1) (regular Seq.|> readBlock) Map.empty
+                    , HistoryTurn (HistoryCursor 2) (Seq.singleton listedBlock) Map.empty
                     , HistoryTurn
                         (HistoryCursor 3)
                         (Seq.fromList [searchedBlock, fetchedBlock])
+                        Map.empty
                     ]
             window =
                 setHistoryWindowTurns turns $
@@ -122,6 +160,7 @@ spec = describe "bounded fullscreen history window" do
                         [ inspectionBlock 70 "Searched first"
                         , inspectionBlock 71 "Searched second"
                         ])
+                    Map.empty
             original =
                 setHistoryWindowTurns (Seq.singleton historyTurn) $
                     emptyHistoryWindow
@@ -1135,12 +1174,33 @@ turn :: Int64 -> Int -> HistoryTurn
 turn cursor blocks =
     HistoryTurn
         { historyTurnCursor = HistoryCursor cursor
+        , historyTurnCharts = Map.empty
         , historyTurnBlocks =
             Seq.fromList
                 [ block (fromIntegral cursor * 10 + index)
                 | index <- [0 .. blocks - 1]
                 ]
         }
+
+chartEnvelope :: Text.Text
+chartEnvelope =
+    either (error . Text.unpack) id (renderChartResult
+        "{\"version\":1,\"kind\":\"line\",\"title\":\"Requests\",\"x_axis\":{\"type\":\"number\",\"label\":\"Time\"},\"y_axis\":{\"label\":\"Count\"},\"series\":[{\"name\":\"Requests\",\"points\":[{\"x\":1,\"y\":2},{\"x\":2,\"y\":4}]}]}")
+
+chartItems :: Text.Text -> Text.Text -> [ResponseItem]
+chartItems name envelope =
+    [ FunctionCallItem FunctionCall
+        { itemId = Nothing, callId = "chart-call", name
+        , namespace = Nothing, provider = Nothing, arguments = "{}"
+        , encryptedFunctionArgs = Nothing, status = Just ItemCompleted, async = Nothing
+        }
+    , FunctionCallOutputItem FunctionCallOutput
+        { localOutcome = Nothing, itemId = Nothing, callId = "chart-call"
+        , name = Nothing, namespace = Nothing, provider = Nothing
+        , output = rawJsonFromEncoding (Aeson.toEncoding envelope)
+        , status = Just ItemCompleted, async = Nothing
+        }
+    ]
 
 block :: Int -> UiBlock
 block identifier =

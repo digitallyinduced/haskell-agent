@@ -1,6 +1,7 @@
 module Agent.TUI.PresentationSpec (spec) where
 
 import Agent.TUI.Presentation
+import Agent.Tools.RenderChart (renderChartResult)
 import Agent.ToolDispatch
     ( customToolCall
     , functionToolCall
@@ -10,6 +11,28 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "tool presentation" do
+    it "summarizes chart results without leaking the document or terminal controls" do
+        let call = functionToolCall "chart" "render_chart" "{}"
+            input = "{\"version\":1,\"kind\":\"line\",\"title\":\"Revenue\\u001b[2J\",\"x_axis\":{\"type\":\"number\"},\"y_axis\":{},\"series\":[{\"name\":\"Sales\",\"points\":[{\"x\":1,\"y\":2}]}]}"
+        case renderChartResult input of
+            Left err -> expectationFailure (Text.unpack err)
+            Right output -> do
+                let presented = formatToolOutput call output
+                presented `shouldSatisfy` Text.isInfixOf "Revenue"
+                presented `shouldNotSatisfy` Text.isInfixOf "\"points\""
+                presented `shouldNotSatisfy` Text.isInfixOf "\ESC"
+
+    it "retains Unicode chart axis, unit, category and series labels in fullscreen text" do
+        let call = functionToolCall "chart" "render_chart" "{}"
+            input = "{\"version\":1,\"kind\":\"bar\",\"title\":\"売上\",\"subtitle\":\"地域別\",\"x_axis\":{\"type\":\"category\",\"label\":\"都市\"},\"y_axis\":{\"label\":\"収益\",\"unit\":\"円\"},\"series\":[{\"name\":\"実績\",\"points\":[{\"x\":\"東京\",\"y\":2},{\"x\":\"大阪\",\"y\":3}]}]}"
+        case renderChartResult input of
+            Left err -> expectationFailure (Text.unpack err)
+            Right output -> do
+                let presented = formatToolOutput call output
+                mapM_ (\label -> presented `shouldSatisfy` Text.isInfixOf label)
+                    ["売上", "地域別", "都市", "収益", "円", "実績", "東京", "大阪"]
+                presented `shouldNotSatisfy` Text.isInfixOf "\"points\""
+
     it "separates only real filesystem paths from tool actions" do
         let readFile =
                 functionToolCall
