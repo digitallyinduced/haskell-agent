@@ -33,12 +33,27 @@ foreign export ccall ha_engine_set_browser_callback
 foreign export ccall ha_engine_set_computer_callback
     :: Ptr () -> FunPtr ComputerCallback -> Ptr () -> IO CInt
 
+foreign export ccall ha_engine_set_chart_rendering_enabled
+    :: Ptr () -> CInt -> IO CInt
+
 foreign export ccall ha_engine_set_interaction_callback
     :: Ptr () -> FunPtr InteractionCallback -> Ptr () -> IO CInt
 
 foreign export ccall ha_engine_resolve_interaction
     :: Ptr () -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
     -> CInt -> Ptr Word8 -> CSize -> IO CInt
+
+ha_engine_set_chart_rendering_enabled :: Ptr () -> CInt -> IO CInt
+ha_engine_set_chart_rendering_enabled pointer enabled
+    | pointer == nullPtr = pure 1
+    | enabled /= 0 && enabled /= 1 = pure 2
+    | otherwise = do
+        updated <- tryAny do
+            engine <- deRefStablePtr
+                (castPtrToStablePtr pointer :: StablePtr Engine)
+            atomically $
+                writeTVar engine.engineChartRenderingEnabled (enabled == 1)
+        pure $ either (const 3) (const 0) updated
 
 ha_engine_set_browser_callback
     :: Ptr () -> FunPtr BrowserCallback -> FunPtr BrowserCancelCallback -> Ptr () -> IO CInt

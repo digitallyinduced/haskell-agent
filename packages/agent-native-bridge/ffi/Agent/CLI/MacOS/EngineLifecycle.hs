@@ -46,11 +46,12 @@ workerLifecycle
     -> TVar (Map Text [ImageAttachment])
     -> BrowserHost
     -> ComputerHost
+    -> TVar Bool
     -> TVar (Map Text NativeTurnOptions)
     -> InteractionRuntime
     -> IO ()
 workerLifecycle
-        callback context config root commands stagedImages browser computer
+        callback context config root commands stagedImages browser computer chartRenderingEnabled
         stagedTurnOptions interactions =
     (do
         store <- newMVar Nothing
@@ -81,6 +82,7 @@ workerLifecycle
             stagedImages
             browser
             computer
+            chartRenderingEnabled
             stagedTurnOptions
             interactions
             workerRegistry

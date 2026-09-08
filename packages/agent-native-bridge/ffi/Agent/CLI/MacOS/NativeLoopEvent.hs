@@ -2,17 +2,20 @@
 
 module Agent.CLI.MacOS.NativeLoopEvent
     ( encodeNativeLoopEvent
+    , encodeNativeLoopEventWithChartCalls
     , encodeNativeUsageEvent
     ) where
 
 import Agent.CLI.Render (summarizeToolCall)
 import Agent.Loop (LoopEvent(..), TokenUsage(..), TurnOutput(..))
+import Agent.Tools.RenderChart (chartResultDocument, chartResultSummary)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallMode(..)
     , toolCallMode
     , toolCallResultMode
     , ToolCallResult(..)
+    , ToolOutcome(..)
     , isComputerToolCallKind
     )
 import qualified Data.Aeson as Aeson
@@ -22,6 +25,8 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
+import Data.Maybe (fromMaybe, isJust)
+import qualified Data.Set as Set
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Word (Word16, Word8)
@@ -37,7 +42,10 @@ import Data.Word (Word16, Word8)
 -- already supplies the complete frame length, so no outer payload length is
 -- needed.
 encodeNativeLoopEvent :: Text -> LoopEvent -> Maybe BS.ByteString
-encodeNativeLoopEvent turnId event =
+encodeNativeLoopEvent = encodeNativeLoopEventWithChartCalls Set.empty
+
+encodeNativeLoopEventWithChartCalls :: Set.Set Text -> Text -> LoopEvent -> Maybe BS.ByteString
+encodeNativeLoopEventWithChartCalls chartCalls turnId event =
     case event of
         ReasoningDelta text -> textEvent 1 turnId text
         TextDelta text -> textEvent 2 turnId text
@@ -54,14 +62,24 @@ encodeNativeLoopEvent turnId event =
             eventOutput
                 | isComputerToolCallKind result.callKind =
                     redactComputerScreenshot result.output
+                | isJust chart =
+                    fromMaybe result.output (chartResultSummary result.output)
                 | otherwise = result.output
+            chart
+                | Set.member result.callId chartCalls
+                    && maybe True (== ToolSucceeded) result.toolResultOutcome =
+                    chartResultDocument result.output
+                | otherwise = Nothing
             (output, truncated) = boundedEventText eventOutput
             flags =
                 (if truncated then 2 else 0)
                     + (if toolCallResultMode result == AsyncToolCall
                         then 4
                         else 0)
-            finishedFields = [Just result.callId, Just output]
+                    + (if isJust chart then 8 else 0)
+            finishedFields =
+                [Just result.callId, Just output]
+                    <> [chart | isJust chart]
         TurnFinished output ->
             encodeNativeUsageEvent
                 False
