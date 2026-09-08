@@ -11,7 +11,11 @@ handles and OS processes do not coordinate with one another.
 `withSharedToolResourceClaims` opts a handler into shared arbitration while
 retaining its existing turn-local claims. Production consumers are `read_file`,
 `list_dir`, `grep`, local image readers, and the Codex-dialect `apply_patch`
-implementation. Their existing resolvers produce canonical allowed paths.
+implementation. Their existing resolvers produce absolute allowed paths:
+existing paths are canonicalized, while missing suffixes remain lexical beneath
+a canonical existing ancestor. Root and child relative paths use their own
+canonical workspace cwd; private temporary-path aliases resolve to the owning
+session's actual temporary directory.
 An entire claim set is acquired together; overlapping reads may run together,
 and unrelated worktrees remain independent.
 
@@ -53,6 +57,8 @@ This is not a claim that all tool effects are serialized:
   boundary. External editors, other processes, hard-link aliases, and filesystem
   mutations outside participating handlers are not fenced. Existing handler
   path authorization remains authoritative and is not bypassed by a lease.
+  Missing-path lexical aliases and path topology changes between claim resolution
+  and handler execution are not a physical-identity exclusion guarantee either.
 - For isolated execution hosts, resources must refer to the actual host/path
   identity rather than a coincidentally equal path inside two sandboxes.
   The current opt-in wrappers are host tool implementations; replacement
