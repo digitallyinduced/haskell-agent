@@ -1264,6 +1264,19 @@ spec = do
             after.uiPrompt.promptAccount `shouldBe` "OpenAI account"
 
     describe "fullscreenVtyConfig" do
+        it "maps modified Backspace CSI-u sequences to word deletion keys" do
+            let mappings = V.configInputMap fullscreenVtyConfig
+            mapM_
+                (\(encodedModifier, modifier) ->
+                    mapM_
+                        (\body -> mappings `shouldContain`
+                            [(Nothing, "\ESC[" <> body, V.EvKey V.KBS [modifier])])
+                        [ code <> ";" <> encodedModifier <> event <> "u"
+                        | code <- ["127", "127:127:127"]
+                        , event <- ["", ":1"]
+                        ])
+                [("3", V.MAlt), ("5", V.MCtrl), ("9", V.MMeta)]
+
         it "maps the Kitty-encoded Esc key so its payload cannot leak" do
             let mappings = V.configInputMap fullscreenVtyConfig
             mapM_

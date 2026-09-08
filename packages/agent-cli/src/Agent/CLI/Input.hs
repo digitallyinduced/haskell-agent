@@ -491,6 +491,8 @@ readEscapeKey = do
                                 _ -> EditorIgnore
                 '\n' -> pure (EditorChar '\n')
                 '\r' -> pure (EditorChar '\n')
+                '\DEL' -> pure EditorKillWord
+                '\BS' -> pure EditorKillWord
                 _ -> pure EditorIgnore
 
 readCsiKey :: IO EditorKey

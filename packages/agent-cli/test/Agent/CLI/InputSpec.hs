@@ -235,6 +235,19 @@ spec = do
             decodeKittyEditorKey "114;5:3u" `shouldBe` Just EditorIgnore
             decodeKittyEditorKey "117;5u" `shouldBe` Just EditorKillStart
 
+    describe "Option+Backspace" do
+        it "decodes Kitty press and repeat events as previous-word deletion" do
+            mapM_
+                (\body -> decodeKittyEditorKey body `shouldBe` Just EditorKillWord)
+                ["127;3u", "127;3:1u", "127;3:2u"]
+
+        it "ignores Kitty release events" do
+            decodeKittyEditorKey "127;3:3u" `shouldBe` Just EditorIgnore
+
+        it "preserves unmodified Kitty Backspace as single-character deletion" do
+            decodeKittyEditorKey "127u" `shouldBe` Just EditorBackspace
+            decodeKittyEditorKey "127;1u" `shouldBe` Just EditorBackspace
+
     describe "Shift+Enter" do
         it "recognizes xterm modifyOtherKeys and Kitty CSI-u encodings" do
             isShiftEnterCsiBody "27;2;13~" `shouldBe` True

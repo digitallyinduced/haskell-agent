@@ -25,8 +25,9 @@ import Data.Bits ((.&.))
 import Data.Char (ord)
 import Data.Maybe (fromMaybe)
 
-kittyShift, kittyCtrl, kittySuper, kittyRelease :: Int
+kittyShift, kittyAlt, kittyCtrl, kittySuper, kittyRelease :: Int
 kittyShift = 1
+kittyAlt = 2
 kittyCtrl = 4
 kittySuper = 8
 kittyRelease = 3
@@ -85,6 +86,8 @@ decodeKittyEditorKey body
 decodeKittyControl :: Int -> Int -> EditorKey
 decodeKittyControl modifiers codepoint
     | codepoint == 9 && hasModifier kittyShift modifiers = EditorCycleMode
+    | codepoint == 127 && hasModifier kittyAlt modifiers = EditorKillWord
+    | codepoint == 127 && modifiers == 0 = EditorBackspace
     | hasModifier kittyCtrl modifiers = case codepoint of
         97 -> EditorHome
         98 -> EditorLeft

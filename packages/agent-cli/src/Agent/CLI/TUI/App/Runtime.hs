@@ -850,6 +850,16 @@ fullscreenVtyConfig =
               )
             | body <- shiftTabCsiBodies
             ]
+            -- Backspace is not a printable character: register its modified
+            -- CSI-u encodings explicitly rather than leaking their payload.
+            <> [ (Nothing, "\ESC[" <> body, V.EvKey V.KBS [modifier])
+               | (encode, modifier) <-
+                    [ (kittyAltCsiBodies, V.MAlt)
+                    , (kittyCtrlCsiBodies, V.MCtrl)
+                    , (kittySuperCsiBodies, V.MMeta)
+                    ]
+               , body <- encode '\DEL'
+               ]
             <> [ ( Nothing
                  , "\ESC[" <> body
                  , V.EvKey (V.KChar character) [V.MCtrl]
