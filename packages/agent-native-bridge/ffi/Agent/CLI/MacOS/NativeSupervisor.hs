@@ -3,11 +3,14 @@
 module Agent.CLI.MacOS.NativeSupervisor
     ( IntegrationWorkerRegistry
     , launchIntegrationWorkerWith
+    , launchLocalIntegrationWorkerWith
     , completeBoundaryChecked
     , newIntegrationWorkerRegistry
     , shutdownIntegrationWorkers
+    , shutdownOrganizationIntegrationWorkers
     , supervisorLoop
     , shutdownRunningTurns
+    , runIntegrationAdmin
     ) where
 
 import Agent.CLI.MacOS.AgentSnapshot (activeAgentSnapshot)
@@ -47,6 +50,7 @@ import Agent.CLI.McpAdmin
 import Agent.CLI.NativeRuntime
     ( NativeProcessRuntime
     , nativeProcessIntegrationSupervisor
+    , acquireNativeLocalIntegrationRuntime
     , restartNativeMcpRuntime
     )
 import Agent.CLI.IntegrationGateway (gatewayIntegrationAuthority)
@@ -96,6 +100,7 @@ import System.OsPath (OsPath)
 data IntegrationWorkerRegistry = IntegrationWorkerRegistry
     { integrationWorkerNextId :: !(TVar Word64)
     , integrationWorkers :: !(TVar (Map Word64 (Async ())))
+    , localIntegrationWorkers :: !(TVar (Map Word64 (Async ())))
     }
 
 newIntegrationWorkerRegistry :: IO IntegrationWorkerRegistry
@@ -103,12 +108,24 @@ newIntegrationWorkerRegistry =
     IntegrationWorkerRegistry
         <$> newTVarIO 0
         <*> newTVarIO Map.empty
+        <*> newTVarIO Map.empty
 
 shutdownIntegrationWorkers :: IntegrationWorkerRegistry -> IO ()
-shutdownIntegrationWorkers registry = do
+shutdownIntegrationWorkers registry =
+    shutdownOrganizationIntegrationWorkers registry
+        `finally` shutdownWorkerMap registry.localIntegrationWorkers
+
+-- | Credential replacement retires organization callbacks, never device-local
+-- account administration. Both domains are still joined at engine shutdown.
+shutdownOrganizationIntegrationWorkers :: IntegrationWorkerRegistry -> IO ()
+shutdownOrganizationIntegrationWorkers registry =
+    shutdownWorkerMap registry.integrationWorkers
+
+shutdownWorkerMap :: TVar (Map Word64 (Async ())) -> IO ()
+shutdownWorkerMap workerMap = do
     workers <- atomically do
-        current <- readTVar registry.integrationWorkers
-        writeTVar registry.integrationWorkers Map.empty
+        current <- readTVar workerMap
+        writeTVar workerMap Map.empty
         pure (Map.elems current)
     mapM_ cancel workers
     mapM_ waitCatch workers
@@ -707,21 +724,16 @@ shutdownRunningTurns workerRegistry = do
     mapM_ (cancel . (.runningTurnWorker)) running
     mapM_ (waitCatch . (.runningTurnWorker)) running
 
--- | Keep the gateway credential lease while selecting and using the runtime.
--- A connected gateway is authoritative, matching turn startup; a direct
--- engine uses local integrations.
+-- | Account settings administer this Mac's local integrations even while a
+-- gateway is connected. Organization connections use EngineConnectionCommand.
 runIntegrationAdmin
     :: NativeProcessRuntime
     -> (IntegrationRuntime -> IO (Either Text RawJson))
     -> IO (Either Text RawJson)
 runIntegrationAdmin processRuntime action =
-    withNativeGatewayCredentialBoundary \credential _ -> do
-        let authority = gatewayIntegrationAuthority credential
-        acquireIntegrationRuntime
-            (nativeProcessIntegrationSupervisor processRuntime)
-            authority >>= \case
-                Left err -> pure (Left err)
-                Right runtime -> action runtime
+    acquireNativeLocalIntegrationRuntime processRuntime >>= \case
+        Left err -> pure (Left err)
+        Right runtime -> action runtime
 
 -- | A command is accepted only after the worker is registered. The gate keeps
 -- cancellation from racing registration. Normal completion and the shutdown
@@ -733,7 +745,7 @@ launchIntegrationWorker
     -> IO (Either Text RawJson)
     -> IO ()
 launchIntegrationWorker registry callback context action =
-    launchIntegrationWorkerWith
+    launchLocalIntegrationWorkerWith
         registry
         (either
             (sendIntegrationFailure callback context)
@@ -766,7 +778,24 @@ launchIntegrationWorkerWith
     -> (Either Text a -> IO ())
     -> IO (Either Text a)
     -> IO ()
-launchIntegrationWorkerWith registry complete action =
+launchIntegrationWorkerWith registry =
+    launchIntegrationWorkerIn registry registry.integrationWorkers
+
+launchLocalIntegrationWorkerWith
+    :: IntegrationWorkerRegistry
+    -> (Either Text a -> IO ())
+    -> IO (Either Text a)
+    -> IO ()
+launchLocalIntegrationWorkerWith registry =
+    launchIntegrationWorkerIn registry registry.localIntegrationWorkers
+
+launchIntegrationWorkerIn
+    :: IntegrationWorkerRegistry
+    -> TVar (Map Word64 (Async ()))
+    -> (Either Text a -> IO ())
+    -> IO (Either Text a)
+    -> IO ()
+launchIntegrationWorkerIn registry workerMap complete action =
     mask \_ -> do
         completionClaimed <- newTVarIO False
         let finish outcome = do
@@ -797,10 +826,10 @@ launchIntegrationWorkerWith registry complete action =
                             "engine stopped before integration operation completed")
                     atomically
                         (modifyTVar'
-                            registry.integrationWorkers
+                            workerMap
                             (Map.delete workerId))
         atomically $
-            modifyTVar' registry.integrationWorkers
+            modifyTVar' workerMap
                 (Map.insert workerId worker)
         putMVar gate ()
 

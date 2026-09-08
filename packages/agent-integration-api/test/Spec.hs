@@ -14,6 +14,26 @@ import Test.Hspec
 main :: IO ()
 main = hspec do
     describe "provider-neutral integration ownership" do
+        it "retains explicit exact device ownership without acquiring the ordinary provider" $
+            withEnvironment \env -> do
+                let provider _ toolEnv = fmap (fmap (\runtime -> runtime
+                        { integrationRuntimeEndpoint =
+                            LocalOverlayIntegrationEndpoint ["device_lookup"] testServer }))
+                        (emptyIntegrationProvider toolEnv)
+                bracket
+                    (newIntegrationSupervisorWithOrganizationProvider
+                        (\_ -> expectationFailure "ordinary provider invoked" >> emptyIntegrationProvider env)
+                        (Just provider) env)
+                    closeIntegrationSupervisor \supervisor -> do
+                        acquired <- acquireIntegrationRuntime supervisor
+                            (OrganizationIntegrationAuthority remoteConfig)
+                        case acquired of
+                            Right runtime -> case integrationRuntimeEndpoint runtime of
+                                CombinedOverlayIntegrationEndpoint config names _ -> do
+                                    config `shouldBe` remoteConfig
+                                    names `shouldBe` ["device_lookup"]
+                                _ -> expectationFailure "expected explicit device overlay"
+                            Left _ -> expectationFailure "overlay unavailable"
         it "never acquires a local provider for an organization authority" $
             withEnvironment \env ->
                 bracket
@@ -214,4 +234,5 @@ remoteConfig = McpServerConfig
     , mcpServerRootsEnabled = False
     , mcpServerSamplingEnabled = False
     , mcpServerLogLevel = Nothing
+    , mcpServerExcludedTools = []
     }

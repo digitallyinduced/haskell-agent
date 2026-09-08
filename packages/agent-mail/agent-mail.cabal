@@ -73,5 +73,6 @@ test-suite agent-mail-test
         , aeson
         , base
         , hspec >= 2.11 && < 2.12
+        , http-types
         , text
         , time

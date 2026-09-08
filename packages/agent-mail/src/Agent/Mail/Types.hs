@@ -272,6 +272,8 @@ data MailSecret
         , mailOAuthRefreshToken :: !(Maybe Text)
         , mailOAuthExpiresAt :: !(Maybe UTCTime)
         , mailOAuthScopes :: ![Text]
+        -- | Optional installed-client parameter retained for token refresh.
+        , mailOAuthClientSecret :: !(Maybe Text)
         }
     | MailImapSecret
         { mailSecretAccountId :: !Text

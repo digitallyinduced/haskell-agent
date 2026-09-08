@@ -43,6 +43,7 @@ mkDerivation {
   testHaskellDepends = [
     aeson agent-claude agent-cli-runtime agent-codex-dialect
     agent-connectivity agent-core agent-gemini agent-grok-build-dialect
+    agent-integration-api
     agent-json agent-mcp agent-openai agent-openrouter agent-responses
     agent-responses-types agent-store agent-tui agent-xai ansi-terminal
     async base base64-bytestring brick bytestring colour containers

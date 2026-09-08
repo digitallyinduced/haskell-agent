@@ -17,6 +17,7 @@ module Agent.CLI.NativeRuntime
     , newNativeProcessRuntimeWithIntegrations
     , newNativeProcessRuntimeWithOrganizationIntegrations
     , nativeProcessIntegrationSupervisor
+    , acquireNativeLocalIntegrationRuntime
     , nativeTurnOptions
     , applyNativeStartupPolicy
     , restartNativeMcpRuntime
@@ -27,6 +28,10 @@ module Agent.CLI.NativeRuntime
 import qualified Agent.CLI.NativeProcess as NativeProcess
 import Agent.Integration.API
     ( IntegrationSupervisor
+    , IntegrationRuntime(..)
+    , IntegrationAuthority(..)
+    , acquireIntegrationRuntime
+    , newIntegrationSupervisor
     , closeIntegrationSupervisor
     , newIntegrationSupervisorWithOrganizationProvider
     , resetIntegrationSupervisor
@@ -86,6 +91,7 @@ import System.OsPath (OsPath)
 data NativeProcessRuntime = NativeProcessRuntime
     { nativeProcessCore :: !NativeProcess.NativeProcessRuntime
     , nativeIntegrationSupervisor :: !IntegrationSupervisor
+    , nativeLocalIntegrationSupervisor :: !IntegrationSupervisor
     }
 
 newNativeProcessRuntime :: OsPath -> IO NativeProcessRuntime
@@ -103,15 +109,24 @@ newNativeProcessRuntimeWithOrganizationIntegrations
     -> OsPath -> IO NativeProcessRuntime
 newNativeProcessRuntimeWithOrganizationIntegrations provider organizationProvider root = mask \restore -> do
     integrationToolEnv <- restore (defaultToolEnv root)
+    localIntegrations <- restore (newIntegrationSupervisor provider integrationToolEnv)
+    -- Direct turns borrow the same local owner used by native account settings.
+    -- Changing gateway identity must retire banking, not an ongoing mail OAuth flow.
+    let borrowedLocalProvider _ =
+            fmap (fmap (\runtime -> runtime { closeIntegrationRuntime = pure () }))
+                (acquireIntegrationRuntime localIntegrations LocalIntegrationAuthority)
     integrations <-
         restore (newIntegrationSupervisorWithOrganizationProvider
-            provider organizationProvider integrationToolEnv)
+            borrowedLocalProvider organizationProvider integrationToolEnv)
+            `onException` closeIntegrationSupervisor localIntegrations
     core <- restore (NativeProcess.newNativeProcessRuntimeWithMcpHooks
         MCP.defaultMcpHostHooks
-        root) `onException` closeIntegrationSupervisor integrations
+        root) `onException` (closeIntegrationSupervisor integrations
+            `finally` closeIntegrationSupervisor localIntegrations)
     pure NativeProcessRuntime
         { nativeProcessCore = core
         , nativeIntegrationSupervisor = integrations
+        , nativeLocalIntegrationSupervisor = localIntegrations
         }
 
 closeNativeProcessRuntime :: NativeProcessRuntime -> IO ()
@@ -119,6 +134,7 @@ closeNativeProcessRuntime runtime =
     NativeProcess.closeNativeProcessRuntime runtime.nativeProcessCore
         `finally`
             closeIntegrationSupervisor runtime.nativeIntegrationSupervisor
+                `finally` closeIntegrationSupervisor runtime.nativeLocalIntegrationSupervisor
 
 restartNativeMcpRuntime :: NativeProcessRuntime -> IO ()
 restartNativeMcpRuntime runtime =
@@ -129,6 +145,14 @@ nativeProcessIntegrationSupervisor
     :: NativeProcessRuntime
     -> IntegrationSupervisor
 nativeProcessIntegrationSupervisor = (.nativeIntegrationSupervisor)
+
+-- | Native account administration is always device-local. It neither changes
+-- the turn's authority nor acquires/exposes local tools to organization turns.
+acquireNativeLocalIntegrationRuntime
+    :: NativeProcessRuntime -> IO (Either Text IntegrationRuntime)
+acquireNativeLocalIntegrationRuntime runtime =
+    acquireIntegrationRuntime runtime.nativeLocalIntegrationSupervisor
+        LocalIntegrationAuthority
 
 -- | Execute one typed native turn without reconstructing command-line
 -- arguments.

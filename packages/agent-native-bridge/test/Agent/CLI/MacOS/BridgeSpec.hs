@@ -12,9 +12,16 @@ import Agent.CLI.MacOS.Bridge
     )
 import Agent.CLI.MacOS.NativeSupervisor
     ( launchIntegrationWorkerWith
+    , launchLocalIntegrationWorkerWith
     , completeBoundaryChecked
     , newIntegrationWorkerRegistry
     , shutdownIntegrationWorkers
+    , shutdownOrganizationIntegrationWorkers
+    )
+import Agent.CLI.GatewayClient
+    ( GatewayCredential(..)
+    , registerGatewayCredentialInvalidatorAt
+    , saveGatewayCredentialAt
     )
 import Agent.CLI.NativeRuntime (StartupFailure(..))
 import Control.Concurrent
@@ -23,11 +30,13 @@ import Control.Concurrent
     , putMVar
     , takeMVar
     , threadDelay
+    , tryReadMVar
     , withMVar
     )
 import Control.Concurrent.Async (poll, wait, withAsync)
 import Control.Exception.Safe
-    ( bracket_
+    ( bracket
+    , bracket_
     , displayException
     , throwString
     , toException
@@ -37,6 +46,11 @@ import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.IORef
     ( atomicModifyIORef', modifyIORef', newIORef, readIORef, writeIORef )
 import Data.Maybe (isNothing)
+import Data.Either (isLeft)
+import System.Directory
+    ( createDirectory, getTemporaryDirectory, removeFile, removePathForcibly )
+import System.IO (hClose, openTempFile)
+import System.OsPath (unsafeEncodeUtf)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -54,6 +68,62 @@ spec = do
 integrationWorkerSpec :: Spec
 integrationWorkerSpec =
     describe "native integration worker supervision" do
+        it "preserves local OAuth work through a real credential invalidation and joins it on shutdown" do
+            temporaryRoot <- getTemporaryDirectory
+            let acquireHome = do
+                    (path, handle) <- openTempFile temporaryRoot "native-mail-workers"
+                    hClose handle
+                    removeFile path
+                    createDirectory path
+                    pure path
+            bracket acquireHome removePathForcibly \path ->
+                bracket newIntegrationWorkerRegistry shutdownIntegrationWorkers \registry -> do
+                    let home = unsafeEncodeUtf path
+                        credential = GatewayCredential
+                            "https://gateway.example" "wss://gateway.example/ws" "first"
+                    saveGatewayCredentialAt home credential `shouldReturn` Right ()
+                    bracket
+                        (registerGatewayCredentialInvalidatorAt home
+                            (shutdownOrganizationIntegrationWorkers registry))
+                        id \_ -> do
+                            localStarted <- newEmptyMVar
+                            organizationStarted <- newEmptyMVar
+                            resumePoll <- newEmptyMVar
+                            organizationBlock <- newEmptyMVar
+                            localResult <- newEmptyMVar
+                            organizationResult <- newEmptyMVar
+                            launchLocalIntegrationWorkerWith registry (putMVar localResult) do
+                                putMVar localStarted ()
+                                takeMVar resumePoll
+                                pure (Right ())
+                            launchIntegrationWorkerWith registry (putMVar organizationResult) do
+                                putMVar organizationStarted ()
+                                takeMVar organizationBlock
+                                pure (Right ())
+                            takeMVar localStarted
+                            takeMVar organizationStarted
+                            timeout 1000000 (saveGatewayCredentialAt home
+                                credential {gatewayAccessToken = "second"})
+                                `shouldReturn` Just (Right ())
+                            takeMVar organizationResult >>= (`shouldSatisfy` isLeft)
+                            tryReadMVar localResult `shouldReturn` Nothing
+                            putMVar resumePoll ()
+                            timeout 1000000 (takeMVar localResult)
+                                `shouldReturn` Just (Right ())
+                            -- A second pending local operation must still be
+                            -- cancelled/joined when the engine itself closes.
+                            shutdownStarted <- newEmptyMVar
+                            shutdownBlock <- newEmptyMVar
+                            shutdownResult <- newEmptyMVar
+                            launchLocalIntegrationWorkerWith registry (putMVar shutdownResult) do
+                                putMVar shutdownStarted ()
+                                takeMVar shutdownBlock
+                                pure (Right ())
+                            takeMVar shutdownStarted
+                            timeout 1000000 (shutdownIntegrationWorkers registry)
+                                `shouldReturn` Just ()
+                            takeMVar shutdownResult >>= (`shouldSatisfy` isLeft)
+
         it "completes once when cancelled while waiting for the output boundary" do
             registry <- newIntegrationWorkerRegistry
             waiting <- newEmptyMVar

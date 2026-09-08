@@ -30,6 +30,7 @@ mailSecretStorageValue = \case
         , mailOAuthRefreshToken
         , mailOAuthExpiresAt
         , mailOAuthScopes
+        , mailOAuthClientSecret
         } ->
             object
                 [ "id" .= mailSecretAccountId
@@ -38,6 +39,7 @@ mailSecretStorageValue = \case
                 , "refresh_token" .= mailOAuthRefreshToken
                 , "expires_at" .= mailOAuthExpiresAt
                 , "scopes" .= mailOAuthScopes
+                , "client_secret" .= mailOAuthClientSecret
                 ]
     MailImapSecret
         { mailSecretAccountId
@@ -60,6 +62,7 @@ parseMailSecretStorageValue = withObject "MailSecret" \value -> do
                 <*> value .:? "refresh_token"
                 <*> value .:? "expires_at"
                 <*> value .:? "scopes" .!= []
+                <*> value .:? "client_secret"
         "imap_password" ->
             MailImapSecret
                 <$> value .: "id"

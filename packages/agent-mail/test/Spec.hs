@@ -6,6 +6,7 @@ import Agent.Mail.OAuth
 import Agent.Mail.SecretCodec
 import Agent.Mail.Transport
 import Agent.Mail.Types
+import qualified Agent.Mail.Types as MailTypes
 import Data.Aeson (Result(..), Value(..), object, (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -15,6 +16,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Time (UTCTime(..), fromGregorian)
+import Network.HTTP.Types (mkStatus)
 import Test.Hspec
 
 main :: IO ()
@@ -88,6 +90,19 @@ main = hspec do
                     Success _ -> False
 
     describe "OAuth PKCE" do
+        it "requests Microsoft account selection without changing Google consent or PKCE" do
+            let url provider = mailOAuthAuthorizationUrl
+                    (MailOAuthClient provider "client" Nothing "http://localhost:54321")
+                    "state" "verifier"
+            url MicrosoftProvider `shouldSatisfy`
+                either (const False) (\value ->
+                    "prompt=select_account" `Text.isInfixOf` value
+                    && "code_challenge_method=S256" `Text.isInfixOf` value)
+            url GmailProvider `shouldSatisfy`
+                either (const False) (\value ->
+                    "prompt=consent" `Text.isInfixOf` value
+                    && not ("select_account" `Text.isInfixOf` value))
+
         it "matches the RFC 7636 S256 example" do
             mailOAuthPkceChallenge
                 "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
@@ -98,7 +113,61 @@ main = hspec do
             Text.words (mailOAuthScopes MicrosoftProvider)
                 `shouldContain` ["Mail.Send"]
 
+    describe "Microsoft mailbox response diagnostics" do
+        let decode status = decodeMailOAuthMailboxResponse MicrosoftProvider
+                (mkStatus status "")
+            diagnosticContains expected result =
+                result `shouldSatisfy` either (Text.isInfixOf expected) (const False)
+        it "decodes successful profile responses" do
+            decode 200 "{\"mail\":\"person@example.com\"}" `shouldBe`
+                Right (object ["mail" .= ("person@example.com" :: Text)])
+        it "identifies unsupported mailboxes without exposing provider details" do
+            let result = decode 404 "{\"error\":{\"code\":\"MailboxNotEnabledForRESTAPI\",\"message\":\"private-provider-detail\"}}"
+            diagnosticContains "does not have a supported Outlook mailbox" result
+            show result `shouldNotContain` "private-provider-detail"
+        it "distinguishes authorization and permission failures" do
+            diagnosticContains "rejected the mailbox authorization" (decode 401 "{}")
+            diagnosticContains "consent and access policies" (decode 403 "{}")
+        it "distinguishes throttling and service failures even with non-JSON bodies" do
+            diagnosticContains "limiting mailbox requests" (decode 429 "private-body")
+            diagnosticContains "temporarily unavailable" (decode 503 "private-body")
+        it "does not expose unknown provider errors or malformed successful responses" do
+            let result = decode 400 "{\"error\":{\"code\":\"Unknown\",\"message\":\"private-detail\"}}"
+            diagnosticContains "could not verify this mailbox" result
+            show result `shouldNotContain` "private-detail"
+            decode 200 "private-invalid-json" `shouldSatisfy` either
+                (not . Text.isInfixOf "private-invalid-json") (const False)
+        it "preserves Gmail diagnostics" do
+            decodeMailOAuthMailboxResponse GmailProvider (mkStatus 403 "") "{}"
+                `shouldBe` Left "Mail provider did not return a usable mailbox identity."
+
     describe "explicit secret storage codec" do
+        it "round trips the installed OAuth client parameter without exposing it in Show" do
+            let secret = (validOAuthCredential "account-1").mailCredentialSecret
+                    { MailTypes.mailOAuthClientSecret = Just "synthetic-desktop-parameter" }
+            AesonTypes.parseEither
+                parseMailSecretStorageValue
+                (mailSecretStorageValue secret)
+                `shouldBe` Right secret
+            show secret `shouldNotContain` "synthetic-desktop-parameter"
+            show secret `shouldNotContain` "access-token"
+            show secret `shouldNotContain` "refresh-token"
+
+        it "reads existing OAuth credentials without a client parameter" do
+            let secret = (validOAuthCredential "account-1").mailCredentialSecret
+                legacy = case mailSecretStorageValue secret of
+                    Object value -> Object (KeyMap.delete "client_secret" value)
+                    value -> value
+            AesonTypes.parseEither parseMailSecretStorageValue legacy
+                `shouldBe` Right secret
+
+        it "round trips OAuth credentials with no installed client parameter" do
+            let secret = (validOAuthCredential "account-1").mailCredentialSecret
+            AesonTypes.parseEither
+                parseMailSecretStorageValue
+                (mailSecretStorageValue secret)
+                `shouldBe` Right secret
+
         it "round trips only through the opt-in codec and redacts Show" do
             let secret = MailImapSecret
                     { mailSecretAccountId = "account-1"
@@ -479,6 +548,7 @@ validOAuthCredential accountId = MailCredential
         , mailOAuthExpiresAt = Nothing
         , mailOAuthScopes =
             ["https://www.googleapis.com/auth/gmail.readonly"]
+        , mailOAuthClientSecret = Nothing
         }
     }
 

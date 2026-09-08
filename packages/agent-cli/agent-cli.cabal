@@ -619,6 +619,7 @@ test-suite agent-cli-test
                     , agent-cli-runtime
                     , agent-connectivity
                     , agent-core
+                    , agent-integration-api
                     , agent-mcp
                     , agent-json
                     , agent-codex-dialect
