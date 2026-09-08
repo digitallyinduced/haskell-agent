@@ -105,8 +105,9 @@ import Control.Concurrent
     , threadDelay
     , tryPutMVar
     )
-import Control.Concurrent.Async (async, cancel, wait, waitCatch, withAsync)
+import Control.Concurrent.Async (async, cancel, poll, wait, waitCatch, withAsync)
 import Control.Monad (void)
+import Data.Maybe (isNothing)
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson
 import qualified Data.ByteString as BS
@@ -370,15 +371,27 @@ spec = describe "Agent.MCP" do
                     \client -> case client.clientTransport of
                         McpClientStdio transport -> do
                             readIORef transport.stdioReader >>= \case
-                                Just _ -> pure ()
+                                Just reader ->
+                                    poll reader >>= (`shouldSatisfy` isNothing)
                                 Nothing ->
                                     expectationFailure
                                         "stdio response reader was not started"
                             readIORef transport.stdioStderrReader >>= \case
-                                Just _ -> pure ()
+                                Just reader ->
+                                    poll reader >>= (`shouldSatisfy` isNothing)
                                 Nothing ->
                                     expectationFailure
                                         "stdio stderr reader was not started"
+                            -- Startup transfers the live readers to the
+                            -- client; closing that owner must still join both.
+                            closeMcpClient client
+                            readers <- sequence
+                                [ readIORef transport.stdioReader
+                                , readIORef transport.stdioStderrReader
+                                ]
+                            timeout 2000000
+                                (mapM_ (mapM_ (void . waitCatch)) readers)
+                                `shouldReturn` Just ()
                         _ ->
                             expectationFailure "expected a stdio transport"
 
