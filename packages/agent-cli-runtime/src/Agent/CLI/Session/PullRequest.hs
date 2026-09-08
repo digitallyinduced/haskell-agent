@@ -1,9 +1,10 @@
--- | Pure conversation pull-request association detection shared by frontends.
+-- | Conversation pull-request association detection and incremental indexing.
 module Agent.CLI.Session.PullRequest
     ( pullRequestURLs
     , conversationPullRequestURLs
     , sessionTurnPullRequestURL
     , sessionTurnPullRequestURLs
+    , advanceSessionPullRequestIndex
     ) where
 
 import Agent.CLI.Session.Types (SessionTurn(..))
@@ -18,12 +19,44 @@ import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Char (isAlphaNum)
+import Data.Int (Int64)
 import Data.List (foldl', nub)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Text.Read (readMaybe)
+
+-- | Advance a recency-ordered cache using ascending, bounded history pages.
+-- A current cache performs no history reads. Persist each completed page so
+-- interrupted indexing resumes without repeating the completed prefix.
+advanceSessionPullRequestIndex
+    :: Monad m
+    => (Int64 -> Int64 -> m (Either Text [(Int64, [Text])]))
+    -> (Int64 -> [Text] -> m (Either Text ()))
+    -> Int64
+    -> Maybe (Int64, [Text])
+    -> m (Either Text [Text])
+advanceSessionPullRequestIndex loadPage savePage total cached =
+    case cached of
+        Just (cursor, urls) | cursor >= 0 && cursor <= total -> scan cursor urls
+        _ -> scan 0 []
+  where
+    scan cursor urls
+        | cursor >= total = pure (Right urls)
+        | otherwise = loadPage cursor total >>= \case
+            Left err -> pure (Left err)
+            Right [] -> pure (Left "incomplete PR association history")
+            Right turns
+                | map fst turns /= [cursor .. cursor + fromIntegral (length turns) - 1]
+                    || fst (last turns) >= total ->
+                    pure (Left "invalid PR association history page")
+                | otherwise -> do
+                    let next = 1 + fst (last turns)
+                        associated = nub (concatMap snd (reverse turns) <> urls)
+                    savePage next associated >>= \case
+                        Left err -> pure (Left err)
+                        Right () -> scan next associated
 
 -- Only canonical public GitHub PR identities are accepted. Never pass arbitrary
 -- conversation URLs to gh (or to a shell). Strip Markdown/query/fragment tails.
