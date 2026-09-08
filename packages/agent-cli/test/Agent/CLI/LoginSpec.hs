@@ -4,6 +4,7 @@ import Agent.CLI.Login
 import Agent.CLI.CredentialStore (ManagedAuthKind(..))
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.Provider (Provider(..))
+import Agent.TUI.Markdown (inlinePlainText, parseInline)
 import Data.Either (isLeft)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
@@ -13,6 +14,15 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "deviceAuthorizationBody" do
+        it "exposes the complete verification URL without requiring hyperlink support" do
+            let url = "https://example.com/connect?user_code=a_b&next=[label](target)&copy;"
+                    <> Text.replicate 400 "a"
+                body = deviceAuthorizationBody "gateway" url "TEST-CODE" Nothing
+                fallback = filter (Text.isPrefixOf "Or copy") (Text.lines body)
+            fmap (inlinePlainText . parseInline) fallback
+                `shouldBe` ["Or copy this URL into your browser: " <> url]
+
     describe "applyLoginKey" do
         it "moves and wraps the selected credential" do
             let state = initialLoginState [openai, grok]

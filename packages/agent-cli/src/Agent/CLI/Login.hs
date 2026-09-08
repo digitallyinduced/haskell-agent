@@ -16,6 +16,7 @@ module Agent.CLI.Login
     , applyLoginKey
     , connectProviderAccount
     , advanceDevicePollSchedule
+    , deviceAuthorizationBody
     , devicePollReadiness
     , discoverLoginAccounts
     , discoverSelectableLoginAccounts
@@ -53,6 +54,7 @@ import Agent.CLI.Login.Internal.Device
     ( DevicePollReadiness(..)
     , DevicePollSchedule
     , advanceDevicePollSchedule
+    , deviceAuthorizationBody
     , devicePollReadiness
     , initialDevicePollSchedule
     )
