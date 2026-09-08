@@ -56,6 +56,7 @@ library
     exposed-modules:  Agent.Runtime.Compaction
                     , Agent.Runtime.ConversationStore
                     , Agent.Runtime.SessionState
+                    , Agent.Runtime.SessionOwner
                     , Agent.CLI.NativeProcess
                     , Agent.Runtime.Request
                     , Agent.Runtime.StartupPolicy
@@ -165,6 +166,7 @@ test-suite agent-cli-runtime-test
                     , Agent.CLI.SessionObservationSpec
                     , Agent.CLI.SessionRequestSpec
                     , Agent.CLI.SessionThreadsSpec
+                    , Agent.Runtime.SessionOwnerSpec
                     , Agent.CLI.SessionSpec
                     , Agent.CLI.SessionSpec.Compatibility
                     , Agent.CLI.SessionSpec.Fixtures
