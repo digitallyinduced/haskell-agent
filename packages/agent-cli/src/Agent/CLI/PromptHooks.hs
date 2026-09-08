@@ -14,6 +14,8 @@ import Agent.CLI.Secret (sanitizeSecretPromptText)
 import Agent.CLI.TUI.App
     ( FullscreenRuntime
     , requestFullscreenChoiceWithBody
+    , requestFullscreenPlanningChoice
+    , requestFullscreenPlanningText
     , requestFullscreenSecret
     , requestFullscreenText
     , showFullscreenToolImage
@@ -89,18 +91,14 @@ fullscreenAwarePlanHooks runtimeRef hooks = PlanModeHooks
                 notifyAttention stderr InputRequested
                 case options of
                     [] ->
-                        requestFullscreenText
+                        requestFullscreenPlanningText
                             runtime
-                            "Planning question"
                             question
-                            ""
                             >>= pure . nonBlank
                     choices ->
-                        requestFullscreenChoiceWithBody
+                        requestFullscreenPlanningChoice
                             runtime
-                            "Planning question"
                             question
-                            0
                             [(choice, "") | choice <- choices]
                             >>= pure . (>>= (`atMay` choices))
     }

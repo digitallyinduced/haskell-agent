@@ -66,6 +66,10 @@ import Agent.CLI.TUI.Types
     ( AppState(appMetaConsole, appMotionElapsedMillis, appTerminalFocus,
                appAgentEntries, appRuntime, appImagePreviews, appUi),
       choiceOverlay, resumeOverlay, textOverlay,
+      ChoiceOverlay(choicePresentation),
+      ChoicePresentation(ChoicePlanning),
+      TextOverlay(textInputMode),
+      TextInputMode(TextInputPlanning),
       activeTheme,
       FullscreenRuntime(runtimeNativeImagePreviews, runtimeWaveTrough,
                         runtimeColor, runtimeMotionMode),
@@ -220,9 +224,13 @@ drawApp state =
             Nothing ->
                 case (textOverlay state, choiceOverlay state, state.appUi.uiPermission) of
                     (Just prompt, _, _) ->
-                        drawTextPrompt state prompt : dimmedMainLayers
+                        if prompt.textInputMode == TextInputPlanning
+                            then mainLayers
+                            else drawTextPrompt state prompt : dimmedMainLayers
                     (Nothing, Just choice, _) ->
-                        drawChoice state choice : dimmedMainLayers
+                        if choice.choicePresentation == ChoicePlanning
+                            then mainLayers
+                            else drawChoice state choice : dimmedMainLayers
                     (Nothing, Nothing, Just permission) ->
                         drawPermission state permission : dimmedMainLayers
                     (Nothing, Nothing, Nothing) ->
@@ -256,6 +264,16 @@ drawMain state =
                 , drawFollowStatus state.appUi
                 , drawLiveTodos (activeConversationUi state)
                 , drawPromptActivity state
+                , case textOverlay state of
+                    Just prompt
+                        | prompt.textInputMode == TextInputPlanning ->
+                            drawTextPrompt state prompt
+                    _ -> emptyWidget
+                , case choiceOverlay state of
+                    Just choice
+                        | choice.choicePresentation == ChoicePlanning ->
+                            drawChoice state choice
+                    _ -> emptyWidget
                 , Composer.drawComposer state
                 , drawFooter state
                 ]

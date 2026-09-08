@@ -946,6 +946,25 @@ requestFullscreenPermission runtime workspace call = do
     enqueueAppEvent runtime (AppAskPermission summary reply)
     atomically (readTMVar reply)
 
+requestFullscreenPlanningText :: FullscreenRuntime -> Text -> IO (Maybe Text)
+requestFullscreenPlanningText runtime body = do
+    reply <- newEmptyTMVarIO
+    enqueueAppEvent runtime
+        (AppAskText TextInputPlanning "Planning question" body "" reply)
+    atomically (readTMVar reply)
+
+-- | Ask in the conversation layout, without obscuring the agent's explanation.
+requestFullscreenPlanningChoice
+    :: FullscreenRuntime
+    -> Text
+    -> [(Text, Text)]
+    -> IO (Maybe Int)
+requestFullscreenPlanningChoice runtime body rows = do
+    reply <- newEmptyTMVarIO
+    enqueueAppEvent runtime
+        (AppAskChoice ChoicePlanning "Planning question" body 0 rows reply)
+    atomically (readTMVar reply)
+
 requestFullscreenThemeChoice
     :: FullscreenRuntime
     -> Int
