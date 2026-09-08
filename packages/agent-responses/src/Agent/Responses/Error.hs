@@ -70,6 +70,11 @@ classifyErrorType errorType message code
     | normalizedCode == Just "usage_not_included" = UsageNotIncluded
     | normalizedCode `elem` map Just ["server_is_overloaded", "slow_down"] = OverloadedError
     | normalizedCode == Just "service_unavailable_error" = ServiceUnavailableError
+    -- The provider's upstream connection failed, not our client transport.
+    -- Preserve the provider envelope and retry delay, but allow the existing
+    -- interrupted-response retry path instead of treating this as a generic
+    -- API failure after output.
+    | normalizedCode == Just "upstream_connection_error" = ServiceUnavailableError
     | normalizedCode == Just "websocket_connection_limit_reached" =
         WebSocketConnectionLimitReached
     | normalizedCode == Just "cyber_policy" = CyberPolicyError
