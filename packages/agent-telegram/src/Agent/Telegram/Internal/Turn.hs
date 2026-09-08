@@ -34,7 +34,7 @@ import Control.Concurrent.MVar
     )
 import Control.Exception.Safe
     ( bracket
-    , finally
+    , bracket_
     , onException
     , tryAny
     )
@@ -74,7 +74,12 @@ runQueuedMediaTurn runtime pending = do
     progressMessageId <- newIORef Nothing
     handle <- sessionForPrompt runtime pending.pendingMediaChat pending.pendingMediaText
     let agentPrompt = telegramAgentPrompt pending.pendingMediaText
-    attachments <- downloadTelegramMediaAttachments runtime handle pending
+    bracket
+        (downloadTelegramMediaAttachments runtime handle pending)
+        (cleanupManagedTurnMedia . map snd)
+        (runWithAttachments progressMessageId handle agentPrompt)
+  where
+   runWithAttachments progressMessageId handle agentPrompt attachments = do
     let imageAttachments =
             [ media
             | (TelegramMediaPhoto, media) <- attachments
@@ -121,12 +126,11 @@ runQueuedMediaTurn runtime pending = do
                 progressMessageId
                 (not (isAmbientGroupPrompt pending.pendingMediaText))
                 (unsafeToFilePath handle.sessionTempDir)
-    createDirectoryIfMissing True bridgeDir
-    setFileMode bridgePath 0o700
-    priorTurnIndex <-
-        latestPersistedTurnIndex runtime handle.sessionMeta.metaId
-    result <-
-        (withTelegramBridge bridgeEnv $
+    (priorTurnIndex, result) <-
+        withTurnBridgeDirectory runtime bridgeDir do
+          priorTurnIndex <-
+              latestPersistedTurnIndex runtime handle.sessionMeta.metaId
+          result <- withTelegramBridge bridgeEnv $
             launchManagedTurnBounded
                 runtime.runtimeProcessManager
                 False
@@ -135,9 +139,9 @@ runQueuedMediaTurn runtime pending = do
                 False
                 (Just (20 * 60 * 1_000_000))
                 handle
-                gatewayRequest)
-            `finally` cleanupTelegramBridge runtime bridgePath bridgeDir
-    response <- (case result of
+                gatewayRequest
+          pure (priorTurnIndex, result)
+    response <- case result of
         Left err -> fail (Text.unpack err)
         Right _ ->
             loadSessionHandle
@@ -158,9 +162,18 @@ runQueuedMediaTurn runtime pending = do
                                 _ ->
                                     fail
                                         "agent completed without recording \
-                                        \the Telegram turn")
-        `finally` cleanupManagedTurnMedia request
+                                        \the Telegram turn"
     TelegramTurnResponse response <$> readIORef progressMessageId
+
+-- Install cleanup before chmod, persisted-turn lookup, or bridge startup.
+withTurnBridgeDirectory :: TelegramRuntime -> OsPath -> IO a -> IO a
+withTurnBridgeDirectory runtime bridgeDir action =
+    bracket_
+        (createDirectoryIfMissing True bridgeDir)
+        (cleanupTelegramBridge runtime bridgePath bridgeDir)
+        (setFileMode bridgePath 0o700 >> action)
+  where
+    bridgePath = unsafeToFilePath bridgeDir
 
 checkpointVoiceTranscript
     :: TelegramRuntime
@@ -550,11 +563,10 @@ runManagedAgentTurn
                 progressMessageId
                 groupActivityEnabled
                 (unsafeToFilePath handle.sessionTempDir)
-    createDirectoryIfMissing True bridgeDir
-    setFileMode bridgePath 0o700
-    priorTurnIndex <-
-        latestPersistedTurnIndex runtime handle.sessionMeta.metaId
-    response <- (withTelegramBridge bridgeEnv $
+    (priorTurnIndex, result) <- withTurnBridgeDirectory runtime bridgeDir do
+      priorTurnIndex <-
+          latestPersistedTurnIndex runtime handle.sessionMeta.metaId
+      result <- withTelegramBridge bridgeEnv $
         launchManagedTurnBounded
             runtime.runtimeProcessManager
             False
@@ -563,9 +575,9 @@ runManagedAgentTurn
             False
             (Just (20 * 60 * 1_000_000))
             handle
-            request)
-        `finally` cleanupTelegramBridge runtime bridgePath bridgeDir
-        >>= \case
+            request
+      pure (priorTurnIndex, result)
+    response <- case result of
             Left err -> fail (Text.unpack err)
             Right _ ->
                 loadSessionHandle

@@ -45,7 +45,7 @@ import Control.Concurrent ()
 import Control.Concurrent.Async (race_)
 import Control.Concurrent.Chan (newChan)
 import Control.Concurrent.MVar (newMVar)
-import Control.Exception.Safe (finally)
+import Control.Exception.Safe (bracket)
 import Control.Monad (when)
 import Data.Aeson ()
 import qualified Data.ByteString.Lazy as LBS ()
@@ -146,28 +146,28 @@ runTelegramWithStore store home config token = do
     manager <- HttpTls.newTlsManager
     let client = TelegramClient token manager
     bot <- TelegramClient.getTelegramBot client
-    processManager <-
-        newSessionProcessManagerWithLifetime ScopedSessionProcesses root
-    let runtime = TelegramRuntime
-            { runtimeClient = client
-            , runtimeBot = bot
-            , runtimeRespondToAllGroupMessages =
-                config.telegramRespondToAllGroupMessages
-            , runtimeWorkerCount = config.telegramWorkerCount
-            , runtimeGatewayDirectory = gatewayDir
-            , runtimePool = trustedPool store
-            , runtimeSessionsRoot = root
-            , runtimeStatePath = statePath
-            , runtimeStateVar = stateVar
-            , runtimeWorkQueue = workQueue
-            , runtimeScheduled = scheduled
-            , runtimeProcessManager = processManager
-            , runtimeTarget = target
-            , runtimeCwd = cwd
-            , runtimeEffort = effort
-            , runtimePolicy = policy
-            }
-    Text.putStrLn "Telegram gateway started (private and group chats)."
-    race_ (pollForever runtime) (dispatchForever runtime)
-        `finally` do
-            closeSessionProcessManager processManager
+    bracket
+        (newSessionProcessManagerWithLifetime ScopedSessionProcesses root)
+        closeSessionProcessManager
+        \processManager -> do
+            let runtime = TelegramRuntime
+                    { runtimeClient = client
+                    , runtimeBot = bot
+                    , runtimeRespondToAllGroupMessages =
+                        config.telegramRespondToAllGroupMessages
+                    , runtimeWorkerCount = config.telegramWorkerCount
+                    , runtimeGatewayDirectory = gatewayDir
+                    , runtimePool = trustedPool store
+                    , runtimeSessionsRoot = root
+                    , runtimeStatePath = statePath
+                    , runtimeStateVar = stateVar
+                    , runtimeWorkQueue = workQueue
+                    , runtimeScheduled = scheduled
+                    , runtimeProcessManager = processManager
+                    , runtimeTarget = target
+                    , runtimeCwd = cwd
+                    , runtimeEffort = effort
+                    , runtimePolicy = policy
+                    }
+            Text.putStrLn "Telegram gateway started (private and group chats)."
+            race_ (pollForever runtime) (dispatchForever runtime)

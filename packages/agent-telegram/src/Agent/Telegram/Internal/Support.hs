@@ -8,10 +8,7 @@ module Agent.Telegram.Internal.Support
     ) where
 
 
-import Agent.CLI.ManagedTurn
-    ( ManagedTurnMedia(..)
-    , ManagedTurnRequest(..)
-    )
+import Agent.CLI.ManagedTurn (ManagedTurnMedia(..))
 import Agent.CLI.Session
     ( SessionCreate(..)
     , SessionHandle(..)
@@ -50,10 +47,9 @@ import System.Directory.OsPath (doesFileExist, removeFile)
 import System.OsPath (OsPath, unsafeEncodeUtf)
 import Agent.Telegram.Internal.Runtime.Types
 import Agent.Telegram.Internal.Text (splitTelegramText)
-cleanupManagedTurnMedia :: ManagedTurnRequest -> IO ()
-cleanupManagedTurnMedia request =
-    forM_
-        (request.managedTurnImages <> request.managedTurnFiles)
+cleanupManagedTurnMedia :: [ManagedTurnMedia] -> IO ()
+cleanupManagedTurnMedia mediaFiles =
+    forM_ mediaFiles
         \media ->
             void $ tryAny $
                 removeFile (unsafeEncodeUtf media.managedTurnMediaPath)
