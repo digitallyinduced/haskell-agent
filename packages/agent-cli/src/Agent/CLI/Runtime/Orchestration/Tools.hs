@@ -112,6 +112,7 @@ import Agent.Provider (Provider(OpenAIProvider))
 import Agent.ResourceScope
     ( allocateResource
     , allocateFourResourcesConcurrently
+    , logSlowCleanup
     , releaseResource
     , withResourceScope
     )
@@ -203,7 +204,7 @@ runAgentTools request = withResourceScope \resourceScope -> do
                 toolStartup
                 toolModelRuntime
                 collaborationRuntime)
-            (.scratchCleanup)
+            (logSlowCleanup "session temporary resources" . (.scratchCleanup))
     let scratchRuntime =
             acquiredScratchRuntime
                 { scratchCleanup = releaseResource scratchKey }
@@ -222,29 +223,31 @@ runAgentTools request = withResourceScope \resourceScope -> do
                         collaborationRuntime
                         scratchRuntime
                         integrationRuntime)
-                    (.runtimeCloseMcp)
+                    (logSlowCleanup "session MCP resources" . (.runtimeCloseMcp))
                     (acquireLocalToolRuntime
                         request
                         toolModelRuntime
                         toolHostHooks
                         collaborationRuntime
                         scratchRuntime)
-                    (.localCoding.codingClose)
+                    (logSlowCleanup "local coding tools" . (.localCoding.codingClose))
                     (acquireWebFetchRuntime
                         request
                         toolStartup
                         toolModelRuntime)
-                    (mapM_ closeWebFetchRuntime)
+                    (logSlowCleanup "web fetch runtime" . mapM_ closeWebFetchRuntime)
                     (acquireLspStartup
                         request
                         toolStartup
                         toolModelRuntime)
-                    (mapM_ closeLspRuntime . (.lspStartupRuntime))
+                    (logSlowCleanup "language server runtime"
+                        . mapM_ closeLspRuntime . (.lspStartupRuntime))
                 )
                 ( allocateResource
                     resourceScope
                     (acquireComputerUseRuntime toolModelRuntime)
-                    (mapM_ ComputerUse.closeComputerUseRuntime)
+                    (logSlowCleanup "computer use runtime"
+                        . mapM_ ComputerUse.closeComputerUseRuntime)
                 )
             )
             (prepareInitialContextPreload request toolModelRuntime)
@@ -772,10 +775,11 @@ assembleSessionToolsRuntime AgentToolsRequest
             writeIORef sessionPlanMode.planSessionDir (Just dir)
             writeIORef subagentStoreRoot (Just dir)
         sessionCloseAll =
-            closeAgents
+            logSlowCleanup "collaboration agents" closeAgents
                 `finally`
-                    ((readIORef activeSessionLock
-                        >>= mapM_ releaseSessionLock)
+                    (logSlowCleanup "session lock"
+                        (readIORef activeSessionLock
+                            >>= mapM_ releaseSessionLock)
                         `finally`
                             (closeExtraTools
                                 `finally`
@@ -783,9 +787,10 @@ assembleSessionToolsRuntime AgentToolsRequest
                                         `finally`
                                             (coding.codingClose
                                                 `finally`
-                                                    (join
-                                                        (readIORef
-                                                            codeModeCloseRef)
+                                                    (logSlowCleanup "code mode runtime"
+                                                        (join
+                                                            (readIORef
+                                                                codeModeCloseRef))
                                                         `finally`
                                                             cleanupScratch)))))
         sessionAllTools = composeToolGroups allToolGroups
