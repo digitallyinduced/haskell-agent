@@ -7,6 +7,8 @@ module Agent.CLI.MacOS.EngineState
 
 import Agent.CLI.MacOS.BrowserBridge (BrowserHost)
 import Agent.CLI.MacOS.ComputerBridge (ComputerHost)
+import Agent.CLI.MacOS.ConnectionBridge (ConnectionCallback, ConnectionSecretCallback)
+import Agent.Integration.Connection (ConnectionCommand)
 import Agent.CLI.MacOS.EngineCallbacks
     ( IntegrationResultCallback
     , SearchCallback
@@ -35,6 +37,10 @@ data EngineCommand
     | EngineMcpRestart !Word64 !Text !(FunPtr McpResultCallback) !(Ptr ())
     | EngineIntegrationAdminList
         !(FunPtr IntegrationResultCallback) !(Ptr ())
+    | EngineConnectionCommand
+        !(Maybe Text) !ConnectionCommand
+        !(FunPtr ConnectionSecretCallback) !(Ptr ())
+        !(FunPtr ConnectionCallback) !(Ptr ())
     | EngineIntegrationAdminCall
         !Text !RawJson !(FunPtr IntegrationResultCallback) !(Ptr ())
     | EngineCancelTask !Text
@@ -55,6 +61,7 @@ data Engine = Engine
     , engineStagedImages :: !(TVar (Map Text [ImageAttachment]))
     , engineBrowser :: !BrowserHost
     , engineComputer :: !ComputerHost
+    , engineChartRenderingEnabled :: !(TVar Bool)
     , engineStagedTurnOptions :: !(TVar (Map Text NativeTurnOptions))
     , engineInteractions :: !InteractionRuntime
     }

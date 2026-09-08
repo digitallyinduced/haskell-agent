@@ -59,6 +59,15 @@ int ha_task_supervisor_abi_smoke(void) {
         ha_runtime_exit();
         return 11;
     }
+    if (ha_engine_set_chart_rendering_enabled(NULL, 1) != 1
+            || ha_engine_set_chart_rendering_enabled(engine, -1) != 2
+            || ha_engine_set_chart_rendering_enabled(engine, 2) != 2
+            || ha_engine_set_chart_rendering_enabled(engine, 1) != 0
+            || ha_engine_set_chart_rendering_enabled(engine, 0) != 0) {
+        ha_engine_destroy(engine);
+        ha_runtime_exit();
+        return 17;
+    }
     if (ha_engine_set_task_limit(engine, 0) != 2
             || ha_engine_set_task_limit(engine, 33) != 2
             || ha_engine_set_task_limit(engine, 2) != 0) {

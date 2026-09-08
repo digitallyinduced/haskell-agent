@@ -481,6 +481,14 @@ coreMigrations =
             , "GRANT SELECT, INSERT, UPDATE, DELETE ON harness.session_pull_requests TO ha_runtime"
             ]
         }
+    , Migration
+        { migrationVersion = 115
+        , migrationName = "recency ordered conversation pull request cache"
+        , migrationStatements =
+            [ "CREATE TABLE IF NOT EXISTS harness.session_pull_request_recency (session_id uuid PRIMARY KEY REFERENCES harness.sessions(session_id) ON DELETE CASCADE, next_turn_index bigint NOT NULL CHECK (next_turn_index >= 0), urls text[] NOT NULL)"
+            , "GRANT SELECT, INSERT, UPDATE, DELETE ON harness.session_pull_request_recency TO ha_runtime"
+            ]
+        }
     ]
 
 -- | Specialize all runtime grants for a validated cluster-global role.

@@ -12,6 +12,7 @@ import Agent.CLI.MacOS.Bridge
     )
 import Agent.CLI.MacOS.NativeSupervisor
     ( launchIntegrationWorkerWith
+    , completeBoundaryChecked
     , newIntegrationWorkerRegistry
     , shutdownIntegrationWorkers
     )
@@ -53,6 +54,33 @@ spec = do
 integrationWorkerSpec :: Spec
 integrationWorkerSpec =
     describe "native integration worker supervision" do
+        it "completes once when cancelled while waiting for the output boundary" do
+            registry <- newIntegrationWorkerRegistry
+            waiting <- newEmptyMVar
+            blocked <- newEmptyMVar
+            callbacks <- newIORef ([] :: [String])
+            let record value = atomicModifyIORef' callbacks \values ->
+                    (values <> [value], ())
+            launchIntegrationWorkerWith registry
+                (\_ -> completeBoundaryChecked
+                    (\_ -> putMVar waiting () >> takeMVar blocked)
+                    (record "success")
+                    (record "cancelled"))
+                (pure (Right ()))
+            takeMVar waiting
+            timeout 1000000 (shutdownIntegrationWorkers registry)
+                `shouldReturn` Just ()
+            readIORef callbacks `shouldReturn` ["cancelled"]
+
+        it "does not retry a callback after boundary delivery has begun" do
+            callbacks <- newIORef ([] :: [String])
+            let record value = modifyIORef' callbacks (<> [value])
+            completeBoundaryChecked
+                (\emit -> emit >> pure (Left "changed"))
+                (record "success")
+                (record "cancelled")
+            readIORef callbacks `shouldReturn` ["success"]
+
         it "keeps the mailbox launch nonblocking and completes once on shutdown" do
             registry <- newIntegrationWorkerRegistry
             started <- newEmptyMVar

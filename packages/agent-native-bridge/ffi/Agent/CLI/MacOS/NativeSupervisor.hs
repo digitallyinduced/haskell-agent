@@ -3,6 +3,7 @@
 module Agent.CLI.MacOS.NativeSupervisor
     ( IntegrationWorkerRegistry
     , launchIntegrationWorkerWith
+    , completeBoundaryChecked
     , newIntegrationWorkerRegistry
     , shutdownIntegrationWorkers
     , supervisorLoop
@@ -18,6 +19,8 @@ import Agent.CLI.MacOS.EngineCallbacks
     , invokeIntegrationResultCallback
     , invokeTaskSnapshotCallback
     )
+import Agent.Integration.Connection (IntegrationConnections(..), ConnectionCommand(..))
+import Agent.CLI.MacOS.ConnectionBridge (sendConnectionResult, connectionSecretStore)
 import Agent.CLI.MacOS.EngineEvents
 import Agent.CLI.MacOS.EngineMailbox
     ( EngineMailbox, acceptEngineCommand, readEngineCommand )
@@ -53,15 +56,18 @@ import Agent.Integration.API
     , acquireIntegrationRuntime
     , callIntegrationRuntimeAdmin
     , integrationRuntimeAdminDefinitions
+    , integrationRuntimeConnections
     )
 import Agent.Json (RawJson, rawJsonBytes)
 import Agent.Loop (ImageAttachment, emptyTokenUsage)
 import Agent.Runtime.Daemon.TaskScheduler (TaskIdentity(..), selectRunnableTasks)
 import Agent.Store.Postgres (ManagedPostgresConfig, Store)
+import Agent.Tools.RenderChart (renderChartTool)
 import Control.Concurrent.Async (Async, asyncWithUnmask, cancel, waitCatch)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, putMVar)
 import Control.Concurrent.STM
 import Control.Exception.Safe (bracket, finally, mask, tryAny)
+import qualified Control.Exception as Exception
 import Control.Monad (filterM, foldM, forM_, void, when)
 import Data.Aeson ((.:?))
 import qualified Data.Aeson as Aeson
@@ -119,6 +125,7 @@ supervisorLoop
     -> TVar (Map Text [ImageAttachment])
     -> BrowserHost
     -> ComputerHost
+    -> TVar Bool
     -> TVar (Map Text NativeTurnOptions)
     -> InteractionRuntime
     -> TVar (Map Text RunningTurn)
@@ -126,7 +133,7 @@ supervisorLoop
     -> IO ()
 supervisorLoop
         callback context config store root processRuntime commands
-        integrationWorkers stagedImages browser computer
+        integrationWorkers stagedImages browser computer chartRenderingEnabled
         stagedTurnOptions interactions workerRegistry =
     go
   where
@@ -188,6 +195,34 @@ supervisorLoop
                     withText "cannot restart MCP while tasks are active" $
                         invokeMcpResultCallback resultCallback resultContext
                             (-1) expected
+            go supervisor
+        EngineConnectionCommand expected command secret secretContext resultCallback resultContext -> do
+            launchIntegrationWorkerWith integrationWorkers
+                (\case
+                    -- Cancellation is joined while the credential writer
+                    -- lease is held. A data-free failure must not try to
+                    -- reacquire that lease in its terminal finalizer.
+                    Left _ -> sendConnectionResult resultCallback resultContext
+                        (Left "Connection operation failed or was cancelled.")
+                    outcome@(Right _) -> completeBoundaryChecked
+                        (emitForNativeGatewayBoundary expected)
+                        (sendConnectionResult resultCallback resultContext outcome)
+                        (sendConnectionResult resultCallback resultContext
+                            (Left "Gateway identity changed; reopen the connection dialog."))) $
+                (case command of
+                    CancelConnection _ -> id
+                    _ -> withGatewayCredentialTurnLease) $
+                withNativeGatewayCredentialBoundary \credential identity ->
+                    if identity /= expected
+                        then pure (Left "Gateway identity changed; reopen the connection dialog.")
+                        else acquireIntegrationRuntime
+                            (nativeProcessIntegrationSupervisor processRuntime)
+                            (gatewayIntegrationAuthority credential) >>= \case
+                                Left err -> pure (Left err)
+                                Right runtime -> case integrationRuntimeConnections runtime of
+                                    Nothing -> pure (Left "Connection management is unavailable for this account.")
+                                    Just connections -> runConnectionCommand connections
+                                        (connectionSecretStore secret secretContext) command
             go supervisor
         EngineIntegrationAdminList resultCallback resultContext -> do
             launchIntegrationWorker
@@ -470,6 +505,8 @@ supervisorLoop
             start.turnStartSessionId
             interactions
         nativeBrowserTools <- browserToolsWhenEnabled browser start.turnStartId
+        chartsEnabled <- readTVarIO chartRenderingEnabled
+        let nativePresentationTools = [renderChartTool | chartsEnabled]
         worker <- launchTrackedWorker start.turnStartId $
             bracket
                 (if start.turnStartComputerUse
@@ -519,7 +556,7 @@ supervisorLoop
                                                 commands
                                                 processRuntime
                                                 control
-                                                nativeBrowserTools
+                                                (nativeBrowserTools <> nativePresentationTools)
                                                 nativeComputerTool
                                                 start
                                                 pending.pendingTurnImages
@@ -703,10 +740,31 @@ launchIntegrationWorker registry callback context action =
             (sendIntegrationResult callback context))
         action
 
+-- | Waiting for the output lease is interruptible, but ownership of the host
+-- callback is claimed only inside that lease. Cancellation while waiting must
+-- still release the host context with one data-free terminal callback.
+completeBoundaryChecked
+    :: (IO () -> IO (Either Text ()))
+    -> IO ()
+    -> IO ()
+    -> IO ()
+completeBoundaryChecked boundary success failure = mask \_ -> do
+    delivered <- newTVarIO False
+    let once callback = do
+            claimed <- atomically do
+                previous <- readTVar delivered
+                writeTVar delivered True
+                pure (not previous)
+            when claimed callback
+    (boundary (once success) >>= \case
+        Left _ -> once failure
+        Right () -> pure ())
+        `Exception.onException` once failure
+
 launchIntegrationWorkerWith
     :: IntegrationWorkerRegistry
-    -> (Either Text RawJson -> IO ())
-    -> IO (Either Text RawJson)
+    -> (Either Text a -> IO ())
+    -> IO (Either Text a)
     -> IO ()
 launchIntegrationWorkerWith registry complete action =
     mask \_ -> do

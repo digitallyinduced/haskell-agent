@@ -81,6 +81,7 @@ library
                     , Agent.CLI.Models
                     , Agent.CLI.Permission.Types
                     , Agent.CLI.PrivateFileLock
+                    , Agent.CLI.Session.PullRequest
                     , Agent.CLI.Request
                     , Agent.CLI.Runtime.Options
                     , Agent.CLI.Session

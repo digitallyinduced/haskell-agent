@@ -19,8 +19,9 @@ library
     import: options
     hs-source-dirs: src
     exposed-modules: Agent.Integration.API
+                     Agent.Integration.Connection
     build-depends: base >= 4.17 && < 5, agent-core, agent-json, agent-mcp,
-                   aeson, text
+                   aeson, bytestring, safe-exceptions, text
 
 test-suite agent-integration-api-test
     import: options

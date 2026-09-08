@@ -15,6 +15,7 @@ import Agent.CLI.TUI.History
 import Agent.Json (rawJsonFromEncoding)
 import Agent.CLI.TUI.Composer (composerScrollbackAvailable)
 import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn, sessionTurnPullRequestURL)
+import Agent.CLI.Session.PullRequest (sessionTurnPullRequestURLs)
 import Agent.Responses.LoopBackend (toolResultToItem)
 import Agent.Responses.Types
 import Agent.ToolDispatch
@@ -979,6 +980,12 @@ spec = describe "bounded fullscreen history window" do
                 ]
         it "prefers a newly created PR over the user prompt and earlier messages" do
             sessionTurnPullRequestURL createdTurn `shouldBe` Just newURL
+        it "orders native associations with the current PR first without losing the earlier PR" do
+            sessionTurnPullRequestURLs createdTurn `shouldBe` [newURL, oldURL]
+        it "deduplicates the final assistant PR while retaining all other associations" do
+            sessionTurnPullRequestURLs
+                (createdTurn { turnAssistantText = Just ("Opened " <> finalURL) })
+                `shouldBe` [finalURL, oldURL, newURL]
         it "prefers the final assistant association over preceding tool output" do
             sessionTurnPullRequestURL
                 (createdTurn { turnAssistantText = Just ("Opened " <> finalURL) })
@@ -992,6 +999,18 @@ spec = describe "bounded fullscreen history window" do
             sessionTurnPullRequestURL
                 (sessionTurn TranscriptAppend oldURL [assistantMessage "Done"])
                 `shouldBe` Just oldURL
+        it "does not use a later call to qualify an earlier unrelated output" do
+            sessionTurnPullRequestURL
+                (sessionTurn TranscriptAppend oldURL
+                    [toolOutputItem [Aeson.String newURL], creationCall])
+                `shouldBe` Just oldURL
+        it "pairs failed display output with its persisted creation call" do
+            sessionTurnPullRequestURL
+                ((sessionTurn TranscriptAppend oldURL [creationCall])
+                    { turnError = Just "provider disconnected"
+                    , turnDisplayItems = [toolOutputItem [Aeson.String newURL]]
+                    })
+                `shouldBe` Just newURL
 
     it "restores pull request associations from persisted messages and failed display items" do
         let url = "https://github.com/owner/repository/pull/42"

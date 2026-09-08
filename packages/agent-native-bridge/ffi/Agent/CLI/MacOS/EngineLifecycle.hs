@@ -2,8 +2,11 @@
 module Agent.CLI.MacOS.EngineLifecycle (workerLifecycle) where
 
 import Agent.CLI.MacOS.BrowserBridge (BrowserHost)
-import Agent.CLI.MacOS.BundledIntegrations (bundledIntegrationProvider)
+import Agent.CLI.GatewayClient (registerGatewayCredentialInvalidator)
+import Agent.CLI.MacOS.BundledIntegrations
+    (bundledIntegrationProvider, bundledOrganizationIntegrationProvider)
 import Agent.CLI.MacOS.ComputerBridge (ComputerHost)
+import Agent.CLI.MacOS.ConnectionBridge (sendConnectionResult)
 import Agent.CLI.MacOS.EngineEvents (EventCallback)
 import Agent.CLI.MacOS.EngineCallbacks (invokeIntegrationResultCallback)
 import Agent.CLI.MacOS.EngineMailbox
@@ -24,7 +27,7 @@ import Agent.Loop (ImageAttachment)
 import Agent.Store.Postgres (ManagedPostgresConfig)
 import Control.Concurrent.MVar (newMVar)
 import Control.Concurrent.STM
-import Control.Exception.Safe (finally, tryAny)
+import Control.Exception.Safe (bracket, finally, tryAny, onException)
 import Control.Monad (forM_, void)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -43,24 +46,31 @@ workerLifecycle
     -> TVar (Map Text [ImageAttachment])
     -> BrowserHost
     -> ComputerHost
+    -> TVar Bool
     -> TVar (Map Text NativeTurnOptions)
     -> InteractionRuntime
     -> IO ()
 workerLifecycle
-        callback context config root commands stagedImages browser computer
+        callback context config root commands stagedImages browser computer chartRenderingEnabled
         stagedTurnOptions interactions =
     (do
         store <- newMVar Nothing
-        processRuntime <- newNativeProcessRuntimeWithIntegrations
-            bundledIntegrationProvider root
+        processRuntime <- newNativeProcessRuntimeWithOrganizationIntegrations
+            bundledIntegrationProvider bundledOrganizationIntegrationProvider root
         workerRegistry <- newTVarIO Map.empty
         integrationWorkers <- newIntegrationWorkerRegistry
-        let cleanup =
+        let closeResources =
                 shutdownRunningTurns workerRegistry
                     `finally` shutdownIntegrationWorkers integrationWorkers
                     `finally` closeNativeProcessRuntime processRuntime
                     `finally` closeEngineStore store
-        supervisorLoop
+        bracket
+            (registerGatewayCredentialInvalidator
+                (shutdownIntegrationWorkers integrationWorkers
+                    `finally` restartNativeMcpRuntime processRuntime)
+                `onException` closeResources)
+            (\unregister -> unregister `finally` closeResources)
+            \_ -> supervisorLoop
             callback
             context
             config
@@ -72,6 +82,7 @@ workerLifecycle
             stagedImages
             browser
             computer
+            chartRenderingEnabled
             stagedTurnOptions
             interactions
             workerRegistry
@@ -81,7 +92,7 @@ workerLifecycle
                 , supervisorRunning = Map.empty
                 , supervisorKnownTaskIds = Set.empty
                 }
-            `finally` cleanup)
+            )
         `finally`
             (atomically $
                 cancelPendingInteractions interactions.interactionPending)
@@ -99,6 +110,9 @@ cancelPendingCallbacks commands = do
                     invokeMcpResultCallback callback context (-1) expected
         EngineIntegrationAdminList callback context ->
             sendIntegrationStopped callback context
+        EngineConnectionCommand _ _ _ _ callback context ->
+            void $ tryAny $ sendConnectionResult callback context
+                (Left "Engine stopped before connection operation completed.")
         EngineIntegrationAdminCall _ _ callback context ->
             sendIntegrationStopped callback context
         _ -> pure ()
