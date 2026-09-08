@@ -62,6 +62,8 @@ library
                     , Agent.Runtime.StartupPolicy
                     , Agent.Runtime.TurnEngine
                     , Agent.Runtime.TurnExecution
+                    , Agent.Runtime.TurnRecord
+                    , Agent.CLI.Session.TurnRecord
                     , Agent.Runtime.TurnState
                     , Agent.CLI.AgentSessions.Process
                     , Agent.CLI.Auth
@@ -165,6 +167,7 @@ test-suite agent-cli-runtime-test
                     , Agent.CLI.SessionActivitySpec
                     , Agent.CLI.SessionObservationSpec
                     , Agent.CLI.SessionRequestSpec
+                    , Agent.CLI.TurnRecordSpec
                     , Agent.CLI.SessionThreadsSpec
                     , Agent.Runtime.SessionOwnerSpec
                     , Agent.CLI.SessionSpec

@@ -1,5 +1,19 @@
 # Shared session engine boundary
 
+## Typed turn persistence records
+
+`Agent.Runtime.TurnRecord` carries the engine's opaque `ModelItems` and
+`DisplayItems` projections through successful and interrupted turn persistence.
+Only `Agent.CLI.Session.TurnRecord.sessionTurnFromRecord`, a compatibility
+adapter owned by `agent-cli-runtime`, unwraps them into the existing `SessionTurn`
+storage format. Display-only activity cannot be passed as canonical history.
+The persisted schema is unchanged.
+
+This is a data boundary, not a new persistence scheduler. The CLI host still
+owns the existing timestamp/session creation, metadata append, slot publication,
+fullscreen history, eviction, and title-update ordering. Extracting that IO
+ownership remains a separate session-owner/composition step.
+
 ## Implemented: frontend-neutral turn lifecycle
 
 `agent-cli-runtime` owns the lifecycle policy in `Agent.Runtime.*`:

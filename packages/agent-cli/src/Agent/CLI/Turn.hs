@@ -56,7 +56,6 @@ import Agent.CLI.Session
     ( SessionHandle(..)
     , SessionMeta(..)
     , SessionPromptSnapshot(..)
-    , SessionTurn(..)
     , SessionTurnPage(..)
     , TranscriptEffect(..)
     , Persistence(..)
@@ -73,6 +72,8 @@ import Agent.CLI.Session
     )
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
 import qualified Agent.CLI.Session.Observation as Observation
+import Agent.CLI.Session.TurnRecord (sessionTurnFromRecord)
+import Agent.Runtime.TurnRecord qualified as Record
 import Agent.CLI.SessionEnv
     ( PreparedWorkspaceEnvironment(..)
     , SessionEnv(..)
@@ -628,10 +629,7 @@ persistIncompleteTurn
             writeIORef env.sessionPlanMode.planSessionDir
                 (Just handle.sessionDir)
             writeIORef env.sessionStoreRoot (Just handle.sessionDir)
-            let displayItems =
-                    Engine.displayItems
-                        executed.executedFinalization.finalizedDisplayItems
-                turn = SessionTurn
+            let turn = sessionTurnFromRecord Record.TurnRecord
                     { turnAt = now
                     , turnUserText = request.busyPromptText
                     , turnAssistantText =
@@ -641,8 +639,9 @@ persistIncompleteTurn
                     , turnError = Just errorText
                     , turnResponseId = (.responseId) <$> maybeTurn
                     , turnEffect = TranscriptAppend
-                    , turnItems = Engine.modelItems retainedItems
-                    , turnDisplayItems = displayItems
+                    , turnItems = retainedItems
+                    , turnDisplayItems =
+                        executed.executedFinalization.finalizedDisplayItems
                     , turnUsage = (.tokenUsage) <$> maybeTurn
                     , turnProviderTelemetry =
                         executed.executedLoop.executionProviderTelemetry
@@ -890,7 +889,7 @@ finishSuccessfulTurn executed loopResult = do
         handleProposedPlan env.sessionPlanMode loopResult.finalText
     printUnrenderedAssistant env assistantText
     let newItems =
-            Engine.modelItems executed.executedFinalization.finalizedModelItems
+            executed.executedFinalization.finalizedModelItems
         effect =
             if turnReplacesTranscript
                 executed.executedCommittedTurn.preparedBeforeItems
@@ -948,7 +947,7 @@ persistSuccessfulTurn
     :: ExecutedBusyTurn
     -> LoopResult
     -> Maybe Text
-    -> [ResponseItem]
+    -> Engine.ModelItems
     -> TranscriptEffect
     -> IO ()
 persistSuccessfulTurn
@@ -961,7 +960,7 @@ persistSuccessfulTurn
             writeIORef env.sessionPlanMode.planSessionDir
                 (Just handle.sessionDir)
             writeIORef env.sessionStoreRoot (Just handle.sessionDir)
-            let turn = SessionTurn
+            let turn = sessionTurnFromRecord Record.TurnRecord
                     { turnAt = now
                     , turnUserText = request.busyPromptText
                     , turnAssistantText = assistantText
@@ -969,7 +968,8 @@ persistSuccessfulTurn
                     , turnResponseId = Just loopResult.finalResponseId
                     , turnEffect = effect
                     , turnItems = newItems
-                    , turnDisplayItems = []
+                    , turnDisplayItems =
+                        executed.executedFinalization.finalizedDisplayItems
                     , turnUsage = Just loopResult.tokenUsage
                     , turnProviderTelemetry =
                         executed.executedLoop.executionProviderTelemetry
