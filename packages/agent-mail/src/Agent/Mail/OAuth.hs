@@ -14,6 +14,7 @@ module Agent.Mail.OAuth
     , exchangeMailOAuthCode
     , refreshMailOAuthToken
     , resolveMailOAuthMailbox
+    , decodeMailOAuthMailboxResponse
     ) where
 
 import Agent.Mail.Types (MailProvider(..))
@@ -315,6 +316,7 @@ resolveMailOAuthMailbox manager provider accessToken =
         GmailProvider ->
             getJson
                 manager
+                provider
                 accessToken
                 "https://gmail.googleapis.com/gmail/v1/users/me/profile"
                 >>= \case
@@ -338,11 +340,13 @@ resolveMailOAuthMailbox manager provider accessToken =
             identity <-
                 getJson
                     manager
+                    provider
                     accessToken
                     "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName,displayName"
             mailboxProbe <-
                 getJson
                     manager
+                    provider
                     accessToken
                     "https://graph.microsoft.com/v1.0/me/messages?$top=1&$select=id"
             pure do
@@ -378,10 +382,11 @@ resolveMailOAuthMailbox manager provider accessToken =
 
 getJson
     :: Manager
+    -> MailProvider
     -> Text
     -> Text
     -> IO (Either Text Aeson.Value)
-getJson manager accessToken rawUrl = do
+getJson manager provider accessToken rawUrl = do
     parsed <- tryAny (parseRequest (Text.unpack rawUrl))
     case parsed of
         Left _ -> pure (Left oauthUnavailable)
@@ -408,15 +413,44 @@ getJson manager accessToken rawUrl = do
                         pure (response.responseStatus, body)
             pure case attempted of
                 Left _ -> Left oauthUnavailable
-                Right (status, body)
-                    | not (statusIsSuccessful status) ->
-                        Left invalidMailboxIdentity
-                    | otherwise -> do
-                        bytes <- body
-                        either
-                            (const (Left invalidMailboxIdentity))
-                            Right
-                            (Aeson.eitherDecodeStrict' bytes)
+                Right (status, body) ->
+                    body >>= decodeMailOAuthMailboxResponse provider status
+
+-- | Decode a bounded mailbox response without exposing provider messages,
+-- request identifiers, or credential material in diagnostics.
+decodeMailOAuthMailboxResponse
+    :: MailProvider
+    -> Status
+    -> BS.ByteString
+    -> Either Text Aeson.Value
+decodeMailOAuthMailboxResponse provider status bytes
+    | statusIsSuccessful status =
+        either (const (Left invalidMailboxIdentity)) Right decoded
+    | provider /= MicrosoftProvider = Left invalidMailboxIdentity
+    | statusCode status == 429 =
+        Left "Microsoft is limiting mailbox requests. Please wait and try connecting again."
+    | statusCode status >= 500 =
+        Left "Microsoft mailbox services are temporarily unavailable. Please try again later."
+    | statusCode status == 401 =
+        Left "Microsoft rejected the mailbox authorization. Please reconnect and select the intended account."
+    | graphCode `elem`
+        [ Just "MailboxNotEnabledForRESTAPI"
+        , Just "MailboxNotSupportedForRESTAPI"
+        , Just "ErrorMailboxNotEnabledForRESTAPI"
+        ] =
+        Left "The selected Microsoft account does not have a supported Outlook mailbox. Select another account, or ask your Microsoft 365 administrator to enable its mailbox."
+    | statusCode status == 403 =
+        Left "Microsoft denied access to this mailbox. Reconnect and grant the requested mail permissions; for a work account, ask your administrator to check consent and access policies."
+    | otherwise =
+        Left "Microsoft could not verify this mailbox. Check that the selected account can open mail in Outlook on the web, then try connecting again."
+  where
+    decoded = Aeson.eitherDecodeStrict' bytes
+    graphCode :: Maybe Text
+    graphCode = either (const Nothing)
+        (parseMaybe (Aeson.withObject "Graph error" \value -> do
+            detail <- value .: "error"
+            Aeson.withObject "Graph error detail" (.: "code") detail))
+        decoded
 
 authorizationEndpoint :: MailProvider -> Text
 authorizationEndpoint = \case
@@ -436,7 +470,7 @@ tokenEndpoint = \case
 providerExtras :: MailProvider -> Text
 providerExtras GmailProvider =
     "&access_type=offline&prompt=consent"
-providerExtras MicrosoftProvider = ""
+providerExtras MicrosoftProvider = "&prompt=select_account"
 providerExtras ImapProvider = ""
 
 readOAuthBody

@@ -12,7 +12,7 @@ mkDerivation {
     crypton-connection http-client http-client-tls http-types network
     safe-exceptions tagsoup text time tls
   ];
-  testHaskellDepends = [ aeson base hspec text time ];
+  testHaskellDepends = [ aeson base hspec http-types text time ];
   description = "Low-level email types and provider transports";
   license = lib.meta.getLicenseFromSpdxId "MIT";
 }
