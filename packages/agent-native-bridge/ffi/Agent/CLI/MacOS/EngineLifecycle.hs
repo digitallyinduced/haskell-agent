@@ -8,7 +8,10 @@ import Agent.CLI.MacOS.BundledIntegrations
 import Agent.CLI.MacOS.ComputerBridge (ComputerHost)
 import Agent.CLI.MacOS.ConnectionBridge (sendConnectionResult)
 import Agent.CLI.MacOS.EngineEvents (EventCallback)
-import Agent.CLI.MacOS.EngineCallbacks (invokeIntegrationResultCallback)
+import Agent.CLI.MacOS.EngineCallbacks
+    ( invokeIntegrationResultCallback
+    , invokeTaskSnapshotCallback
+    )
 import Agent.CLI.MacOS.EngineMailbox
 import Agent.CLI.MacOS.EngineState
 import Agent.CLI.MacOS.EngineStore (closeEngineStore)
@@ -35,7 +38,7 @@ import Data.Map.Strict qualified as Map
 import Data.Sequence qualified as Seq
 import Data.Set qualified as Set
 import Data.Text (Text)
-import Foreign.Ptr (FunPtr, Ptr, nullPtr)
+import Foreign.Ptr (FunPtr, Ptr, castPtr, nullPtr)
 import System.OsPath (OsPath)
 
 workerLifecycle
@@ -116,6 +119,15 @@ cancelPendingCallbacks commands = do
                 (Left "Engine stopped before connection operation completed.")
         EngineIntegrationAdminCall _ _ callback context ->
             sendIntegrationStopped callback context
+        EngineTaskSnapshot callback context ->
+            void $ tryAny $
+                withText "engine stopped before task snapshot completed"
+                    \errorPointer errorLength ->
+                        invokeTaskSnapshotCallback
+                            callback context
+                            (-1)
+                            nullPtr 0 nullPtr 0 0
+                            (castPtr errorPointer) errorLength
         _ -> pure ()
   where
     sendIntegrationStopped callback context =

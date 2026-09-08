@@ -186,7 +186,7 @@ import Agent.CLI.TUI.App.Runtime
 import Agent.CLI.TUI.App.Mailbox
 import Agent.CLI.TUI.App.Reduce
 import Agent.CLI.TUI.App.Navigation
-    ( mouseScrollLines, historyBlock, selectedBlock )
+    ( mouseScrollLines, historyBlock, selectedBlock, scrollConversationPage )
 
 handleResumeKey :: V.Event -> EventM Name AppState ()
 handleResumeKey event = do
@@ -486,6 +486,18 @@ handleStaticChoiceKey :: V.Event -> EventM Name AppState ()
 handleStaticChoiceKey event = do
     choice <- gets choiceOverlay
     case (choice, event) of
+        (Just current, V.EvKey V.KPageUp [])
+            | current.choicePresentation == ChoicePlanning ->
+                scrollConversationPage Up
+        (Just current, V.EvKey V.KPageDown [])
+            | current.choicePresentation == ChoicePlanning ->
+                scrollConversationPage Down
+        (Just current, V.EvKey V.KUp [V.MMeta])
+            | current.choicePresentation == ChoicePlanning ->
+                scrollNotes (-1)
+        (Just current, V.EvKey V.KDown [V.MMeta])
+            | current.choicePresentation == ChoicePlanning ->
+                scrollNotes 1
         (Just current, V.EvKey V.KUp [])
             | current.choicePresentation == ChoiceDocument ->
                 scrollNotes (-1)
@@ -538,6 +550,11 @@ handleStaticChoiceKey event = do
                         <$> state.appChoice
                 }
         when previewingTheme invalidateCache
+        current <- gets choiceOverlay
+        case current of
+            Just choice | choice.choicePresentation == ChoicePlanning ->
+                makeVisible (ChoiceRow choice.choiceIndex)
+            _ -> pure ()
 
 handleFilterChoiceKey :: V.Event -> EventM Name AppState ()
 handleFilterChoiceKey event = case event of
@@ -643,11 +660,19 @@ confirmChoiceAt index = do
                             fmap (\overlay -> overlay { choiceIndex = index })
                                 <$> current.appChoice
                         }
-                resolveChoice True
+                if choice.choicePresentation == ChoicePlanning
+                    then makeVisible (ChoiceRow index)
+                    else resolveChoice True
         _ -> pure ()
 
 activateControl :: Name -> EventM Name AppState ()
 activateControl = \case
+    PlanningSubmit -> do
+        prompt <- gets textOverlay
+        case prompt of
+            Just current | current.textInputMode == TextInputPlanning ->
+                resolveTextPrompt True
+            _ -> resolveChoice True
     ComposerModel ->
         Composer.handlePromptControlClick
             applyLocalUiEventWith
@@ -696,6 +721,7 @@ activateQuickStartCommand command =
 
 isInteractiveControl :: Name -> Bool
 isInteractiveControl = \case
+    PlanningSubmit -> True
     ComposerModel -> True
     ComposerEffort -> True
     ComposerMode -> True
@@ -892,10 +918,12 @@ handleTextPromptKey event = case event of
             _ <- handleCtrlC
             when state.appUi.uiRunning (resolveTextPrompt False)
     V.EvKey V.KEnter [] -> resolveTextPrompt True
+    V.EvKey V.KUp [V.MMeta] -> scrollPromptDetails (-1)
+    V.EvKey V.KDown [V.MMeta] -> scrollPromptDetails 1
     V.EvKey V.KPageUp [] ->
-        vScrollPage (viewportScroll OverlayViewport) Up
+        scrollPromptPage Up
     V.EvKey V.KPageDown [] ->
-        vScrollPage (viewportScroll OverlayViewport) Down
+        scrollPromptPage Down
     V.EvMouseDown _ _ V.BScrollUp _ ->
         vScrollBy (viewportScroll OverlayViewport) (-mouseScrollLines)
     V.EvMouseDown _ _ V.BScrollDown _ ->
@@ -909,6 +937,20 @@ handleTextPromptKey event = case event of
                         <$> state.appTextPrompt
                 }
 
+  where
+    scrollPromptDetails amount = do
+        prompt <- gets textOverlay
+        case prompt of
+            Just current | current.textInputMode == TextInputPlanning ->
+                vScrollBy (viewportScroll OverlayViewport) amount
+            _ -> pure ()
+    scrollPromptPage direction = do
+        prompt <- gets textOverlay
+        case prompt of
+            Just current | current.textInputMode == TextInputPlanning ->
+                scrollConversationPage direction
+            _ -> vScrollPage (viewportScroll OverlayViewport) direction
+
 -- | Apply one text-editing key to a fullscreen prompt overlay.
 --
 -- Cursor offsets are normalized to grapheme boundaries before and after the
@@ -917,7 +959,7 @@ applyTextPromptEdit :: V.Event -> TextOverlay -> Maybe TextOverlay
 applyTextPromptEdit event prompt = case event of
     V.EvKey V.KEnter [V.MShift] ->
         Just $
-            if prompt.textInputMode == TextInputPlain
+            if prompt.textInputMode /= TextInputSecret
                 then insert "\n"
                 else prompt
     V.EvKey V.KBS [] ->

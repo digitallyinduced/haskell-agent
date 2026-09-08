@@ -98,6 +98,8 @@ data Name
     | ConversationReserve
     | ConversationImage !BlockId !Int
     | OverlayViewport
+    | PlanningPanel
+    | PlanningSubmit
     | ConversationBlock !AgentTarget !BlockId
     | ConversationChunkCache
         !AgentTarget
@@ -573,6 +575,7 @@ data AgentHover = AgentHover
 
 data ChoicePresentation
     = ChoiceDialog
+    | ChoicePlanning
     | ChoiceDocument
     | ChoiceOnboarding
     | ChoiceTheme
@@ -737,5 +740,6 @@ data MetaConsoleOverlay = MetaConsoleOverlay
 
 data TextInputMode
     = TextInputPlain
+    | TextInputPlanning
     | TextInputSecret
     deriving (Eq, Show)

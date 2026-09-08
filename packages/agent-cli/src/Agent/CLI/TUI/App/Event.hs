@@ -1142,6 +1142,9 @@ handleOverlayMouseDown state name button =
          , state.appUi.uiPermission
          , state.appMetaConsole
          ) of
+        (Just (PendingDialog _ prompt), _, _, _)
+            | prompt.textInputMode == TextInputPlanning ->
+                handlePlanningMouseDown name button
         (Just _, _, _, _) ->
             case button of
                 V.BScrollUp ->
@@ -1157,6 +1160,9 @@ handleOverlayMouseDown state name button =
             pure ()
         (Nothing, Nothing, Nothing, Nothing) ->
             handleNormalMouseDown name button
+        (Nothing, Just (PendingDialog _ choice), _, _)
+            | choice.choicePresentation == ChoicePlanning ->
+                handlePlanningMouseDown name button
         (Nothing, Just _, _, _) ->
             handleChoiceMouseDown name button
         (Nothing, Nothing, Just _, _) ->
@@ -1214,6 +1220,26 @@ handleNormalMouseDown name button =
         (link@MarkdownLink{}, V.BLeft) ->
             Composer.handleControlMouseDown link
         _ -> handleMouseDown name button
+
+-- | Wheel events belong to the surface under the pointer. A question must
+-- not intercept scrolling intended for the explanation above it.
+handlePlanningMouseDown :: Name -> V.Button -> EventM Name AppState ()
+handlePlanningMouseDown name button =
+    case (name, button) of
+        (PlanningSubmit, V.BLeft) ->
+            Composer.handleControlMouseDown PlanningSubmit
+        (ChoiceRow index, V.BLeft) ->
+            Composer.handleControlMouseDown (ChoiceRow index)
+        (_, V.BScrollUp) -> scrollPlanningSurface (-mouseScrollLines)
+        (_, V.BScrollDown) -> scrollPlanningSurface mouseScrollLines
+        _ -> pure ()
+  where
+    scrollPlanningSurface amount = case name of
+        PlanningPanel -> vScrollBy (viewportScroll OverlayViewport) amount
+        PlanningSubmit -> vScrollBy (viewportScroll OverlayViewport) amount
+        OverlayViewport -> vScrollBy (viewportScroll OverlayViewport) amount
+        ChoiceRow _ -> vScrollBy (viewportScroll OverlayViewport) amount
+        _ -> scrollConversationBy amount
 
 handleChoiceMouseDown
     :: Name
@@ -1320,6 +1346,10 @@ handleResizeEvent = do
     state <- get
     when (state.appTerminalFocus /= TerminalUnfocused) $
         getVtyHandle >>= liftIO . V.refresh
+    case choiceOverlay state of
+        Just choice | choice.choicePresentation == ChoicePlanning ->
+            makeVisible (ChoiceRow choice.choiceIndex)
+        _ -> pure ()
     queueConversationReflow
 
 handleInputEvent :: V.Event -> EventM Name AppState ()
