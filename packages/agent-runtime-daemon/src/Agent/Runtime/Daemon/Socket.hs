@@ -7,7 +7,7 @@ module Agent.Runtime.Daemon.Socket
     , verifyPeerOwner
     ) where
 
-import Control.Exception.Safe (IOException, bracket, catch, finally, onException, throwString, tryIO)
+import Control.Exception.Safe (IOException, bracket, bracketOnError, catch, throwString, tryIO)
 import Control.Monad (unless, when)
 import Network.Socket
 import System.Directory hiding (isSymbolicLink)
@@ -54,10 +54,10 @@ withUnixListener config action = do
         Just value -> pure value
 
 acceptOwnedPeer :: Socket -> IO Socket
-acceptOwnedPeer listener = do
-    (peer, _) <- accept listener
-    verifyPeerOwner peer `onException` close peer
-    pure peer
+acceptOwnedPeer listener =
+    bracketOnError (accept listener) (close . fst) $ \(peer, _) -> do
+        verifyPeerOwner peer
+        pure peer
 
 verifyPeerOwner :: Socket -> IO ()
 verifyPeerOwner peer = do
@@ -81,48 +81,43 @@ prepareSocketDirectory :: SocketConfig -> IO ()
 prepareSocketDirectory config = do
     let directory = takeDirectory config.path
     createDirectoryIfMissing True directory
-    descriptor <-
-        openFd
+    bracket
+        (openFd
             directory
             ReadOnly
-            defaultFileFlags {nofollow = True, cloexec = True, directory = True}
-    (do
+            defaultFileFlags {nofollow = True, cloexec = True, directory = True})
+        closeFd
+        $ \descriptor -> do
             status <- getFdStatus descriptor
             effectiveUser <- getEffectiveUserID
             unless (isDirectory status && fileOwner status == effectiveUser) $
                 throwString ("runtime socket directory is not a user-owned directory: " <> directory)
             setFdMode descriptor 0o700
-        )
-        `finally` closeFd descriptor
 
 prepareLockFile :: FilePath -> IO ()
-prepareLockFile path = do
-    descriptor <-
-        openFd path ReadWrite defaultFileFlags {creat = Just 0o600, nofollow = True, cloexec = True}
-    (do
+prepareLockFile path =
+    bracket
+        (openFd path ReadWrite defaultFileFlags {creat = Just 0o600, nofollow = True, cloexec = True})
+        closeFd
+        $ \descriptor -> do
             status <- getFdStatus descriptor
             effectiveUser <- getEffectiveUserID
             unless (isRegularFile status && fileOwner status == effectiveUser) $
                 throwString ("runtime lock is not a user-owned regular file: " <> path)
             setFdMode descriptor 0o600
-        )
-        `finally` closeFd descriptor
 
 openListener :: SocketConfig -> IO Listener
 openListener config = do
     removeStaleSocket config.path
-    listener <- socket AF_UNIX Stream defaultProtocol
-    (do
-            bind listener (SockAddrUnix config.path)
-            setFileMode config.path 0o600
-            listen listener config.backlog
-            status <- getSymbolicLinkStatus config.path
-            pure Listener
-                { listenerSocket = listener
-                , identity = identityOf status
-                }
-        )
-        `onException` close listener
+    bracketOnError (socket AF_UNIX Stream defaultProtocol) close $ \listener -> do
+        bind listener (SockAddrUnix config.path)
+        setFileMode config.path 0o600
+        listen listener config.backlog
+        status <- getSymbolicLinkStatus config.path
+        pure Listener
+            { listenerSocket = listener
+            , identity = identityOf status
+            }
 
 closeListener :: SocketConfig -> Listener -> IO ()
 closeListener config listener = do
