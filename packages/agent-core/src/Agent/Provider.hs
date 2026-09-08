@@ -16,6 +16,10 @@ module Agent.Provider
     , getNextToken
     , runWithTokenProvider
     , runWithTokenProviderAfter
+    , ReplaySafety(..)
+    , ProviderAttemptFailure(..)
+    , runWithTokenProviderAttempt
+    , runWithTokenProviderStreaming
     , seedTokenProvider
     , accountFailureFromApiError
     , accountFailureReason
@@ -30,6 +34,8 @@ import Agent.Error
     , credentialExhaustionReasonFromApiError
     )
 import Control.Applicative ((<|>))
+import Control.Monad (when)
+import Data.Bifunctor (first)
 import qualified Agent.Json.Decode as Json
 import qualified Data.Aeson as Aeson
 import Data.IORef
@@ -185,6 +191,10 @@ seedTokenProvider provider credential = do
                         Just firstCredential -> pure (Right firstCredential)
                         Nothing -> getNextToken provider Nothing
 
+-- | Compatibility entry point for actions whose account failures are known
+-- to be replay-safe. Streaming actions should use
+-- 'runWithTokenProviderStreaming'; actions with uncertain effects should
+-- return explicit metadata through 'runWithTokenProviderAttempt'.
 runWithTokenProvider
     :: TokenProvider
     -> (Credential -> IO (Either ApiError a))
@@ -203,6 +213,36 @@ runWithTokenProviderAfter
     -> (Credential -> IO (Either ApiError a))
     -> IO (Either ApiError a)
 runWithTokenProviderAfter provider initialFailure action =
+    runWithTokenProviderAttemptAfter provider initialFailure \credential ->
+        first (ProviderAttemptFailure ReplaySafe) <$> action credential
+
+-- | Whether repeating a failed action is safe, independently of whether its
+-- error suggests that another credential could succeed. Unknown is deliberately
+-- distinct from a known pre-effect failure and never permits account failover.
+data ReplaySafety = ReplaySafe | ReplayUnsafe | ReplayUnknown
+    deriving (Eq, Show)
+
+data ProviderAttemptFailure = ProviderAttemptFailure
+    { attemptReplaySafety :: !ReplaySafety
+    , attemptError :: !ApiError
+    } deriving (Eq, Show)
+
+-- | Account classification cannot override the action's replay boundary.
+-- Preserve the original error when replay is unsafe or unknown; do not rewrite
+-- its provider type merely to prevent the classifier from recognizing it.
+runWithTokenProviderAttempt
+    :: TokenProvider
+    -> (Credential -> IO (Either ProviderAttemptFailure a))
+    -> IO (Either ApiError a)
+runWithTokenProviderAttempt provider =
+    runWithTokenProviderAttemptAfter provider Nothing
+
+runWithTokenProviderAttemptAfter
+    :: TokenProvider
+    -> Maybe FailedCredential
+    -> (Credential -> IO (Either ProviderAttemptFailure a))
+    -> IO (Either ApiError a)
+runWithTokenProviderAttemptAfter provider initialFailure action =
     go maxProviderFailoverAttempts initialFailure
   where
     go attemptsLeft failed
@@ -211,8 +251,9 @@ runWithTokenProviderAfter provider initialFailure action =
         | otherwise = getNextToken provider failed >>= \case
             Left err -> pure (Left err)
             Right credential -> action credential >>= \case
-                Left err
-                    | Just failure <-
+                Left ProviderAttemptFailure{attemptReplaySafety, attemptError = err}
+                    | attemptReplaySafety == ReplaySafe
+                    , Just failure <-
                         provider.runClassifyAccountFailure credential err ->
                         go (attemptsLeft - 1) $ Just FailedCredential
                             { credential
@@ -220,7 +261,36 @@ runWithTokenProviderAfter provider initialFailure action =
                             , failureReason =
                                 accountFailureReason err failure
                             }
-                result -> pure result
+                Left failedAttempt -> pure (Left failedAttempt.attemptError)
+                Right result -> pure (Right result)
+
+-- | Credential failover for a streaming action. The transport identifies
+-- events that cross its replay boundary (including non-visible output and
+-- async tool admission), and must finish all event callbacks before returning.
+-- Latch the boundary /before/ invoking the consumer, which may start effects.
+--
+-- Absence of output is not proof that arbitrary external work is replay-safe:
+-- this adapter is for transports whose classified account errors before output
+-- represent a rejected request. Other actions must supply explicit failure
+-- metadata. Exceptions, including cancellation and consumer failures, propagate
+-- unchanged and are never caught or replayed here.
+runWithTokenProviderStreaming
+    :: TokenProvider
+    -> (event -> Bool)
+    -> (Credential -> (event -> IO ()) -> IO (Either ApiError a))
+    -> (event -> IO ())
+    -> IO (Either ApiError a)
+runWithTokenProviderStreaming provider outputObserved send onEvent =
+    runWithTokenProviderAttempt provider \credential -> do
+        emitted <- newIORef False
+        result <- send credential \event -> do
+            when (outputObserved event) (atomicWriteIORef emitted True)
+            onEvent event
+        observed <- readIORef emitted
+        pure $ first
+            (ProviderAttemptFailure
+                (if observed then ReplayUnsafe else ReplaySafe))
+            result
 
 maxProviderFailoverAttempts :: Int
 maxProviderFailoverAttempts = 64

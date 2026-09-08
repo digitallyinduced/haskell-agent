@@ -13,6 +13,7 @@ import qualified Agent.LoopSpec as LoopSpec
 import qualified Agent.OsPathSpec as OsPathSpec
 import qualified Agent.ProjectInstructionsSpec as ProjectInstructionsSpec
 import qualified Agent.Provider.OptionsSpec as ProviderOptionsSpec
+import qualified Agent.ProviderSpec as ProviderSpec
 import qualified Agent.ResourceScopeSpec as ResourceScopeSpec
 import qualified Agent.RetrySpec as RetrySpec
 import qualified Agent.SkillsSpec as SkillsSpec
@@ -57,6 +58,7 @@ main = hspec do
     OsPathSpec.spec
     ProjectInstructionsSpec.spec
     ProviderOptionsSpec.spec
+    ProviderSpec.spec
     ResourceScopeSpec.spec
     RetrySpec.spec
     SkillsSpec.spec

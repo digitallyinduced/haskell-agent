@@ -85,6 +85,7 @@ test-suite agent-gemini-test
                     , Agent.Gemini.ClientSpec
                     , Agent.Gemini.CredentialSpec
                     , Agent.Gemini.ErrorSpec
+                    , Agent.Gemini.LoopBackendSpec
                     , Agent.Gemini.RequestSpec
                     , Agent.Gemini.ResponseSpec
                     , Agent.Gemini.StreamSpec
