@@ -406,6 +406,7 @@ openCommandPalette = do
                 , choiceAdjustments = Nothing
                 , choiceAdjustmentIndices = []
                 , choiceCloseOnTurnEnd = False
+                , choiceDynamic = Nothing
                 }
             , appAgentHover = Nothing
             }

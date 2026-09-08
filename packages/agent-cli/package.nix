@@ -43,20 +43,19 @@ mkDerivation {
   testHaskellDepends = [
     aeson agent-claude agent-cli-runtime agent-codex-dialect
     agent-connectivity agent-core agent-gemini agent-grok-build-dialect
-    agent-integration-api
-    agent-json agent-mcp agent-openai agent-openrouter agent-responses
-    agent-responses-types agent-store agent-tui agent-xai ansi-terminal
-    async base base64-bytestring brick bytestring colour containers
-    dbus directory filelock filepath haskeline hspec http-client
-    http-types JuicyPixels network network-uri process QuickCheck
-    safe-exceptions stm temporary text time transformers unix vty
-    vty-unix wai warp
+    agent-integration-api agent-json agent-mcp agent-openai
+    agent-openrouter agent-responses agent-responses-types agent-store
+    agent-tui agent-xai ansi-terminal async base base64-bytestring
+    brick bytestring colour containers dbus directory filelock filepath
+    haskeline hspec http-client http-types JuicyPixels network
+    network-uri process QuickCheck safe-exceptions stm temporary text
+    time transformers unix vty vty-unix wai warp
   ];
   benchmarkHaskellDepends = [
-    aeson agent-core agent-json agent-mcp agent-responses
-    agent-responses-types agent-store agent-tui async base brick
-    bytestring containers deepseq directory filepath JuicyPixels
-    process safe-exceptions stm text time unix vty
+    aeson agent-cli-runtime agent-core agent-json agent-mcp
+    agent-openai agent-responses agent-responses-types agent-store
+    agent-tui async base brick bytestring containers deepseq directory
+    filepath JuicyPixels process safe-exceptions stm text time unix vty
   ];
   description = "Command-line interface for the universal agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

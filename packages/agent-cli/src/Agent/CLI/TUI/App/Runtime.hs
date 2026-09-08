@@ -946,6 +946,28 @@ requestFullscreenPermission runtime workspace call = do
     enqueueAppEvent runtime (AppAskPermission summary reply)
     atomically (readTMVar reply)
 
+-- | Updates belong to this reply token, never to whichever dialog happens to
+-- be open later. The refresh worker is cancelled and joined when it closes.
+requestFullscreenDynamicAdjustableFilterChoice
+    :: FullscreenRuntime
+    -> Text
+    -> Text
+    -> Int
+    -> [(Text, Text, Text, [Text], Int)]
+    -> ((Text -> [(Text, Text, Text, [Text], Int)] -> IO ()) -> IO ())
+    -> IO (Maybe (Text, Int))
+requestFullscreenDynamicAdjustableFilterChoice runtime title body initial rows refresh = do
+    reply <- newEmptyTMVarIO
+    let publish notice values =
+            enqueueAppEvent runtime
+                (AppUpdateDynamicAdjustableFilterChoice reply notice values)
+        close = enqueueAppEvent runtime (AppCloseDynamicAdjustableFilterChoice reply)
+    (do
+        enqueueAppEvent runtime
+            (AppAskDynamicAdjustableFilterChoice title body initial rows reply)
+        withAsync (refresh publish) \_ -> atomically (readTMVar reply))
+        `finally` close
+
 requestFullscreenPlanningText :: FullscreenRuntime -> Text -> IO (Maybe Text)
 requestFullscreenPlanningText runtime body = do
     reply <- newEmptyTMVarIO

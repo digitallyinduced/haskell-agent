@@ -242,6 +242,7 @@ handleEffortControlClick applyUiEvent = do
                             , choiceAdjustments = Nothing
                             , choiceAdjustmentIndices = []
                             , choiceCloseOnTurnEnd = True
+                            , choiceDynamic = Nothing
                             }
                         }
                 vScrollToBeginning (viewportScroll OverlayViewport)

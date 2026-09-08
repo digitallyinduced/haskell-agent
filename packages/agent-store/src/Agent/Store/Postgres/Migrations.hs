@@ -30,6 +30,7 @@ import qualified Hasql.Transaction as Transaction
 import qualified Hasql.Transaction.Sessions as Transactions
 
 import Agent.Store.Postgres.Hasql (mkStatement)
+import Agent.Store.Postgres.ModelCatalogCache (modelCatalogCacheSchemaStatements)
 
 import Agent.Store.Postgres.Connection
 import Agent.Store.Postgres.Scope (customSchemaStatements)
@@ -488,6 +489,11 @@ coreMigrations =
             [ "CREATE TABLE IF NOT EXISTS harness.session_pull_request_recency (session_id uuid PRIMARY KEY REFERENCES harness.sessions(session_id) ON DELETE CASCADE, next_turn_index bigint NOT NULL CHECK (next_turn_index >= 0), urls text[] NOT NULL)"
             , "GRANT SELECT, INSERT, UPDATE, DELETE ON harness.session_pull_request_recency TO ha_runtime"
             ]
+        }
+    , Migration
+        { migrationVersion = 116
+        , migrationName = "persistent gateway model catalog cache"
+        , migrationStatements = modelCatalogCacheSchemaStatements
         }
     ]
 

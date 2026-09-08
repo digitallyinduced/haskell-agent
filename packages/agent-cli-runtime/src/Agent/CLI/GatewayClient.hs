@@ -53,7 +53,12 @@ module Agent.CLI.GatewayClient
     , loadGatewayCredentialAt
     , fetchGatewayModels
     , fetchGatewayUsage
+    , cachedGatewayUsage
     , newGatewayModelAccess
+    , newGatewayModelAccessWithStore
+    , newGatewayModelAccessWithStoreAndFetch
+    , GatewayModelFetchFailure(..)
+    , newGatewayModelAccessWithStoreAndResult
     , newGatewayModelAccessWith
     , newGatewayModelAccessWithDictation
     , newGatewayModelAccessWithUsage

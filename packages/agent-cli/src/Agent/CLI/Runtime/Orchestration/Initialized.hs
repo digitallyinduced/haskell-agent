@@ -40,10 +40,12 @@ import Agent.CLI.GatewayClient
     , GatewayModelAccess
     , gatewayCredentialIdentity
     , newGatewayModelAccess
+    , newGatewayModelAccessWithStore
     , refreshGatewayModels
     )
 import Agent.CLI.GatewayModels
-    ( modelOptionsForGatewayModels, selectGatewayModelOption )
+    ( modelOptionsForGatewayModels, selectGatewayModelOption
+    , withGatewayModelsForStartup )
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , catalogConnection,
@@ -424,11 +426,12 @@ prepareInitializedWorkspace request = do
         , initializedSkills
         }
 
-resolveInitializedTargets
+withInitializedTargets
     :: InitializedRequest
     -> InitializedWorkspace
-    -> IO InitializedTargets
-resolveInitializedTargets request workspace = do
+    -> (InitializedTargets -> IO result)
+    -> IO result
+withInitializedTargets request workspace continue = do
     let startup = request.initializedStartup
         options = request.initializedOptions
         transition = request.initializedTransition
@@ -541,70 +544,73 @@ resolveInitializedTargets request workspace = do
         either (startupDie startup) pure resumedTargetResult
     projectTarget <-
         either (startupDie startup) pure projectTargetResult
-    (gatewayModelAccess, gatewayTarget) <- case connectedGateway of
-        Nothing -> pure (Nothing, Nothing)
-        Just credential -> do
-            access <- newGatewayModelAccess credential
-            models <- refreshGatewayModels access
-                >>= either (startupDie startup) pure
-            selected <- either (startupDie startup) pure $
-                selectGatewayModelOption
-                    (modelOptionsForGatewayModels catalog models)
-                    options.optModel
-                    (if isJust transition then Nothing else options.optProvider)
-                    (catMaybes
-                        [ transitionTarget, configuredOptionTarget
-                        , resumedTarget, projectTarget
-                        ])
-            pure (Just access, Just selected.modelTarget)
-    let targetHint =
-            gatewayTarget <|>
-            transitionTarget
-                <|> configuredOptionTarget
-                <|> resumedTarget
-                <|> if isNothing options.optModel
-                    then projectTarget
-                    else Nothing
-        requestedProvider
-            | Just target <- gatewayTarget = Just target.targetProvider
-            | otherwise =
-                (.targetProvider) <$> targetHint
-                    <|> options.optProvider
-                    <|> ((.metaProvider) . fst <$> resumed)
+    let withGatewayTarget continueGateway = case connectedGateway of
+            Nothing -> continueGateway (Nothing, Nothing)
+            Just credential -> do
+                access <- newGatewayModelAccessWithStore
+                    (trustedPool startup.startupDatabaseStore)
+                    credential
+                let select models =
+                        selectGatewayModelOption
+                            (modelOptionsForGatewayModels catalog models)
+                            options.optModel
+                            (if isJust transition then Nothing else options.optProvider)
+                            (catMaybes
+                                [ transitionTarget, configuredOptionTarget
+                                , resumedTarget, projectTarget
+                                ])
+                withGatewayModelsForStartup access select \result -> do
+                    selected <- either (startupDie startup) pure result
+                    continueGateway (Just access, Just selected.modelTarget)
+    withGatewayTarget \(gatewayModelAccess, gatewayTarget) -> do
+        let targetHint =
+                gatewayTarget <|>
+                transitionTarget
+                    <|> configuredOptionTarget
+                    <|> resumedTarget
                     <|> if isNothing options.optModel
-                        then projectModelProvider projectSettings
+                        then projectTarget
                         else Nothing
-        targetConnection =
-            targetHint >>= catalogConnection catalog . (.targetConnectionId)
-        customResponses
-            | isJust connectedGateway = Nothing
-            | otherwise =
-                targetConnection >>= \connection ->
-                    case connection.connectionKind of
-                        CustomResponsesConnection responses -> Just
-                            (connection.connectionId, responses)
-                        BuiltinConnection _ -> Nothing
-                        OrganizationGatewayConnection -> Nothing
-        checkStartupUsageInBackground =
-            isNothing connectedGateway
-                && isJust fullscreen
-                && isNothing transition
-                && isNothing resumed
-                && isNothing options.optProvider
-                && isNothing options.optModel
-    pure InitializedTargets
-        { initializedGatewayIdentity = connectedGatewayIdentity
-        , initializedGatewayModelAccess = gatewayModelAccess
-        , initializedTransitionTarget = transitionTarget
-        , initializedConfiguredTarget = configuredOptionTarget
-        , initializedResumedTarget = resumedTarget
-        , initializedProjectTarget = projectTarget
-        , initializedTargetHint = targetHint
-        , initializedRequestedProvider = requestedProvider
-        , initializedCustomResponses = customResponses
-        , initializedCheckStartupUsageInBackground =
-            checkStartupUsageInBackground
-        }
+            requestedProvider
+                | Just target <- gatewayTarget = Just target.targetProvider
+                | otherwise =
+                    (.targetProvider) <$> targetHint
+                        <|> options.optProvider
+                        <|> ((.metaProvider) . fst <$> resumed)
+                        <|> if isNothing options.optModel
+                            then projectModelProvider projectSettings
+                            else Nothing
+            targetConnection =
+                targetHint >>= catalogConnection catalog . (.targetConnectionId)
+            customResponses
+                | isJust connectedGateway = Nothing
+                | otherwise =
+                    targetConnection >>= \connection ->
+                        case connection.connectionKind of
+                            CustomResponsesConnection responses -> Just
+                                (connection.connectionId, responses)
+                            BuiltinConnection _ -> Nothing
+                            OrganizationGatewayConnection -> Nothing
+            checkStartupUsageInBackground =
+                isNothing connectedGateway
+                    && isJust fullscreen
+                    && isNothing transition
+                    && isNothing resumed
+                    && isNothing options.optProvider
+                    && isNothing options.optModel
+        continue InitializedTargets
+            { initializedGatewayIdentity = connectedGatewayIdentity
+            , initializedGatewayModelAccess = gatewayModelAccess
+            , initializedTransitionTarget = transitionTarget
+            , initializedConfiguredTarget = configuredOptionTarget
+            , initializedResumedTarget = resumedTarget
+            , initializedProjectTarget = projectTarget
+            , initializedTargetHint = targetHint
+            , initializedRequestedProvider = requestedProvider
+            , initializedCustomResponses = customResponses
+            , initializedCheckStartupUsageInBackground =
+                checkStartupUsageInBackground
+            }
 
 loadInitializedAuth
     :: InitializedRequest
@@ -1140,7 +1146,15 @@ newInitializedHttpRuntime auth refs activeHttpAuth =
 runInitialized :: InitializedRequest -> IO RunResult
 runInitialized request = do
     workspace <- prepareInitializedWorkspace request
-    targets <- resolveInitializedTargets request workspace
+    withInitializedTargets request workspace $
+        runInitializedWithTargets request workspace
+
+runInitializedWithTargets
+    :: InitializedRequest
+    -> InitializedWorkspace
+    -> InitializedTargets
+    -> IO RunResult
+runInitializedWithTargets request workspace targets = do
     routedAuth <- loadInitializedAuth request targets
     initializedAuth <-
         selectInitializedStartupAccount

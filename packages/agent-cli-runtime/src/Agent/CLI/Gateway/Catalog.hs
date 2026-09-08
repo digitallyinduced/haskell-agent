@@ -6,6 +6,10 @@ module Agent.CLI.Gateway.Catalog
     , GatewayModelProvider(..)
     , GatewayModelAccess
     , newGatewayModelAccess
+    , newGatewayModelAccessWithStore
+    , newGatewayModelAccessWithStoreAndFetch
+    , GatewayModelFetchFailure(..)
+    , newGatewayModelAccessWithStoreAndResult
     , newGatewayModelAccessWith
     , newGatewayModelAccessWithDictation
     , newGatewayModelAccessWithUsage
@@ -14,6 +18,7 @@ module Agent.CLI.Gateway.Catalog
     , gatewayModelIds
     , fetchGatewayModels
     , fetchGatewayUsage
+    , cachedGatewayUsage
     , transcribeGatewayPcm
     ) where
 
@@ -22,15 +27,20 @@ import Agent.CLI.Gateway.Dictation (transcribeGatewayPcmWith)
 import Agent.CLI.Gateway.Usage (fetchGatewayUsageWithCredential)
 import Agent.ClientIdentity (gatewayUserAgent)
 import Agent.OpenAI.Usage (UsageSnapshot)
-import Agent.Server.Client.GatewayIdentity (GatewayCredential(..))
+import Agent.Server.Client.GatewayIdentity (GatewayCredential(..), gatewayCredentialIdentity)
+import Agent.Store.Postgres.Connection (StorePool)
+import Agent.Store.Postgres.ModelCatalogCache qualified as Store
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception.Safe (tryAny)
-import Data.Aeson ((.:))
+import Control.Monad (void)
+import Data.Aeson ((.:), (.=))
+import Data.Bifunctor (first)
 import Data.Aeson qualified as Aeson
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (isPrint, isSpace)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef, atomicModifyIORef')
+import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -85,6 +95,18 @@ instance Aeson.FromJSON GatewayModel where
                 then pure (GatewayModel modelId protocol provider)
                 else fail "Gateway model provider and protocol are incompatible."
 
+instance Aeson.ToJSON GatewayModel where
+    toJSON model = Aeson.object
+        [ "id" .= model.gatewayModelId
+        , "protocol" .= (case model.gatewayModelProtocol of
+            GatewayResponsesProtocol -> "responses" :: Text
+            GatewayAnthropicProtocol -> "anthropic")
+        , "provider" .= (case model.gatewayModelProvider of
+            GatewayOpenAIProvider -> "openai" :: Text
+            GatewayXAIProvider -> "xai"
+            GatewayAnthropicProvider -> "anthropic")
+        ]
+
 instance Aeson.FromJSON GatewayModelProvider where
     parseJSON =
         Aeson.withText "GatewayModelProvider" \case
@@ -112,23 +134,78 @@ instance Aeson.FromJSON GatewayModelProtocol where
 -- The constructor is deliberately hidden: callers can list models but cannot
 -- accidentally inspect or log the credential captured by its fetch action.
 data GatewayModelAccess = GatewayModelAccess
-    { gatewayModelFetch :: !(IO (Either Text [GatewayModel]))
+    { gatewayModelFetch :: !(IO (Either GatewayModelFetchFailure [GatewayModel]))
     , gatewayUsageFetch :: !(Text -> IO (Either Text UsageSnapshot))
+    , gatewayUsageCache :: !(IORef (Map.Map Text UsageSnapshot))
     , gatewayModelCache :: !(IORef (Maybe [GatewayModel]))
     , gatewayModelRefreshLock :: !(MVar ())
+    , gatewayModelPersist :: !(Maybe [GatewayModel] -> IO ())
     , gatewayDictation
         :: !(((BS.ByteString -> IO ()) -> IO ())
             -> (Text -> IO ())
             -> IO (Either Text Text))
     }
 
+data GatewayModelFetchFailure
+    = GatewayModelAuthorizationRejected !Text
+    | GatewayModelRefreshFailed !Text
+    deriving (Eq, Show)
+
+gatewayModelFailureMessage :: GatewayModelFetchFailure -> Text
+gatewayModelFailureMessage = \case
+    GatewayModelAuthorizationRejected message -> message
+    GatewayModelRefreshFailed message -> message
+
 -- | Construct a cached model-list handle for a validated gateway credential.
 newGatewayModelAccess :: GatewayCredential -> IO GatewayModelAccess
 newGatewayModelAccess credential =
     newGatewayModelAccessWithActions
-        (fetchGatewayModels credential)
+        (fetchGatewayModelsResult credential)
         (fetchGatewayUsageWithCredential credential)
         (transcribeGatewayPcmWith credential)
+
+-- | Hydrate presentation data without contacting the gateway. The exact
+-- credential identity prevents cache reuse across accounts or organizations,
+-- including when a bearer is replaced at the same endpoint.
+newGatewayModelAccessWithStore :: StorePool -> GatewayCredential -> IO GatewayModelAccess
+newGatewayModelAccessWithStore pool credential =
+    newGatewayModelAccess credential >>= attachGatewayModelStore pool credential
+
+-- | Injectable persistent catalog transport. A fresh handle is always created:
+-- an existing credential-bound handle cannot be rebound to another cache key.
+newGatewayModelAccessWithStoreAndFetch
+    :: StorePool
+    -> GatewayCredential
+    -> IO (Either Text [GatewayModel])
+    -> IO GatewayModelAccess
+newGatewayModelAccessWithStoreAndFetch pool credential fetch =
+    newGatewayModelAccessWith fetch >>= attachGatewayModelStore pool credential
+
+-- | Trusted typed transport injection for authorization-invalidation tests.
+newGatewayModelAccessWithStoreAndResult
+    :: StorePool
+    -> GatewayCredential
+    -> IO (Either GatewayModelFetchFailure [GatewayModel])
+    -> IO GatewayModelAccess
+newGatewayModelAccessWithStoreAndResult pool credential fetch =
+    newGatewayModelAccessWithActions fetch unavailableGatewayUsage unavailableGatewayDictation
+        >>= attachGatewayModelStore pool credential
+
+attachGatewayModelStore :: StorePool -> GatewayCredential -> GatewayModelAccess -> IO GatewayModelAccess
+attachGatewayModelStore pool credential access = do
+    let identity = gatewayCredentialIdentity credential
+    stored <- tryAny (Store.loadModelCatalogCache pool identity)
+    let models = case stored of
+            Right (Right (Just payload)) ->
+                normalizeGatewayModels <$> Aeson.decodeStrict' (TextEncoding.encodeUtf8 payload)
+            _ -> Nothing
+        persist value = void $ tryAny $ case value of
+            Nothing -> Store.deleteModelCatalogCache pool identity
+            Just catalog ->
+                Store.upsertModelCatalogCache pool identity
+                    (TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode catalog)))
+    writeIORef access.gatewayModelCache models
+    pure access { gatewayModelPersist = persist }
 
 -- | Injectable constructor used by tests and alternative trusted transports.
 -- The resulting value remains opaque, so the fetch action cannot be read back
@@ -150,7 +227,7 @@ newGatewayModelAccessWithUsage
     -> IO GatewayModelAccess
 newGatewayModelAccessWithUsage fetch usage =
     newGatewayModelAccessWithActions
-        fetch
+        (first GatewayModelRefreshFailed <$> fetch)
         usage
         unavailableGatewayDictation
 
@@ -165,12 +242,12 @@ newGatewayModelAccessWithDictation
     -> IO GatewayModelAccess
 newGatewayModelAccessWithDictation fetch dictation =
     newGatewayModelAccessWithActions
-        fetch
+        (first GatewayModelRefreshFailed <$> fetch)
         unavailableGatewayUsage
         dictation
 
 newGatewayModelAccessWithActions
-    :: IO (Either Text [GatewayModel])
+    :: IO (Either GatewayModelFetchFailure [GatewayModel])
     -> (Text -> IO (Either Text UsageSnapshot))
     -> (((BS.ByteString -> IO ()) -> IO ())
         -> (Text -> IO ())
@@ -178,12 +255,15 @@ newGatewayModelAccessWithActions
     -> IO GatewayModelAccess
 newGatewayModelAccessWithActions fetch usage dictation = do
     cache <- newIORef Nothing
+    usageCache <- newIORef Map.empty
     refreshLock <- newMVar ()
     pure GatewayModelAccess
         { gatewayModelFetch = fetch
         , gatewayUsageFetch = usage
+        , gatewayUsageCache = usageCache
         , gatewayModelCache = cache
         , gatewayModelRefreshLock = refreshLock
+        , gatewayModelPersist = \_ -> pure ()
         , gatewayDictation = dictation
         }
 
@@ -214,7 +294,18 @@ fetchGatewayUsage access model
         tryAny (access.gatewayUsageFetch model) >>= \case
             Left _ ->
                 pure (Left "Could not refresh organization gateway usage.")
-            Right result -> pure result
+            Right result -> do
+                case result of
+                    Left _ -> pure ()
+                    Right snapshot ->
+                        atomicModifyIORef' access.gatewayUsageCache \cached ->
+                            (Map.insert model snapshot cached, ())
+                pure result
+
+-- | Last successful presentation snapshot for this exact connection and alias.
+cachedGatewayUsage :: GatewayModelAccess -> Text -> IO (Maybe UsageSnapshot)
+cachedGatewayUsage access model =
+    Map.lookup model <$> readIORef access.gatewayUsageCache
 
 -- | Record PCM through the opaque, gateway-bound dictation action.
 transcribeGatewayPcm
@@ -226,9 +317,8 @@ transcribeGatewayPcm access = access.gatewayDictation
 
 -- | Refresh the gateway's authorized model aliases.
 --
--- A failed refresh deliberately clears the previous value.  Continuing to
--- show a stale authorization list would let an organization revocation look
--- like an available model.
+-- Cached lists are presentation data, never authorization. Transient failures
+-- retain the last successful list; explicit authentication rejection clears it.
 refreshGatewayModels
     :: GatewayModelAccess
     -> IO (Either Text [GatewayModel])
@@ -237,20 +327,25 @@ refreshGatewayModels
             { gatewayModelFetch
             , gatewayModelCache
             , gatewayModelRefreshLock
+            , gatewayModelPersist
             } =
     withMVar gatewayModelRefreshLock \_ ->
         tryAny gatewayModelFetch >>= \case
-            Left _ -> do
-                writeIORef gatewayModelCache Nothing
+            Left _ ->
                 pure (Left "Could not refresh organization gateway models.")
             Right result ->
                 case result of
                     Left err -> do
-                        writeIORef gatewayModelCache Nothing
-                        pure (Left err)
+                        case err of
+                            GatewayModelAuthorizationRejected _ -> do
+                                writeIORef gatewayModelCache Nothing
+                                gatewayModelPersist Nothing
+                            GatewayModelRefreshFailed _ -> pure ()
+                        pure (Left (gatewayModelFailureMessage err))
                     Right models -> do
                         let normalized = normalizeGatewayModels models
                         writeIORef gatewayModelCache (Just normalized)
+                        gatewayModelPersist (Just normalized)
                         pure (Right normalized)
 
 -- | Read the most recent successful gateway refresh without issuing I/O.
@@ -264,8 +359,14 @@ cachedGatewayModels GatewayModelAccess { gatewayModelCache } =
 -- contain external content, while request headers contain the bearer token.
 fetchGatewayModels :: GatewayCredential -> IO (Either Text [GatewayModel])
 fetchGatewayModels credential =
+    first gatewayModelFailureMessage <$> fetchGatewayModelsResult credential
+
+fetchGatewayModelsResult
+    :: GatewayCredential
+    -> IO (Either GatewayModelFetchFailure [GatewayModel])
+fetchGatewayModelsResult credential =
     case validateGatewayCredential credential of
-        Left _ -> pure (Left "Gateway credential is invalid.")
+        Left _ -> pure (Left (GatewayModelAuthorizationRejected "Gateway credential is invalid."))
         Right () -> do
             response <- tryAny do
                 userAgent <- gatewayUserAgent
@@ -297,7 +398,7 @@ fetchGatewayModels credential =
                     manager
             pure case response of
                 Left _ ->
-                    Left "Could not reach the gateway models endpoint."
+                    Left (GatewayModelRefreshFailed "Could not reach the gateway models endpoint.")
                 Right value
                     | statusIsSuccessful (HTTP.responseStatus value) ->
                         case
@@ -306,15 +407,15 @@ fetchGatewayModels credential =
                                 :: Either String GatewayModelCatalogResponse
                             of
                             Left _ ->
-                                Left
-                                    "Gateway returned an unreadable models response."
-                            Right catalog
-                                | null catalog.gatewayModelCatalogData ->
-                                    Left "Gateway returned an empty model catalog."
-                                | otherwise ->
-                                    Right catalog.gatewayModelCatalogData
+                                Left (GatewayModelRefreshFailed
+                                    "Gateway returned an unreadable models response.")
+                            Right catalog -> Right catalog.gatewayModelCatalogData
                     | otherwise ->
-                        Left $
+                        let code = statusCode (HTTP.responseStatus value)
+                            failure = if code == 401 || code == 403
+                                then GatewayModelAuthorizationRejected
+                                else GatewayModelRefreshFailed
+                        in Left $ failure $
                             "Gateway models returned HTTP "
                                 <> Text.pack
                                     (show

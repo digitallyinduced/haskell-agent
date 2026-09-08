@@ -81,6 +81,8 @@ import Agent.CLI.TUI.Types
     , PendingAppEvent(..)
     , AppState(..)
     , ChoiceOverlay(..)
+    , newDynamicChoice
+    , refreshDynamicChoice
     , ChoicePresentation(..)
     , ChoiceSelection(..)
     , CommandPaletteAction(..)
@@ -171,6 +173,7 @@ import qualified Control.Exception as Exception
 import Control.Concurrent.STM
     ( atomically
     , readTVar
+    , readTMVar
     , newEmptyTMVarIO
     , newTChanIO
     , retry
@@ -207,6 +210,50 @@ import Agent.Tools.RenderChart (renderChartResult)
 
 spec :: Spec
 spec = do
+    describe "dynamic model choice" do
+        it "preserves filter, selected identity, and effort across reordered rows" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+                row key = (key, key, "", ["low", "high"], 0)
+            (_, updated) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp
+                    (AppAskDynamicAdjustableFilterChoice "Models" "" 0
+                        [row "alpha", row "beta"] reply)
+                , FullscreenScriptVty (V.EvKey (V.KChar 'b') [])
+                , FullscreenScriptVty (V.EvKey V.KRight [])
+                , FullscreenScriptApp
+                    (AppUpdateDynamicAdjustableFilterChoice reply ""
+                        [row "beta", row "alpha"])
+                , FullscreenScriptHalt
+                ]
+            case updated.appChoice of
+                Nothing -> expectationFailure "Model choice unexpectedly closed"
+                Just pending -> do
+                    pending.dialogOverlay.choiceQuery `shouldBe` "b"
+                    pending.dialogOverlay.choiceIndex `shouldBe` 0
+                    pending.dialogOverlay.choiceAdjustmentIndices `shouldBe` [1, 0]
+            _ <- runFullscreenScriptWithState updated
+                [FullscreenScriptVty (V.EvKey V.KEnter []), FullscreenScriptHalt]
+            atomically (readTMVar reply) `shouldReturn` Just ("beta", 1)
+
+        it "ignores updates and closure from an earlier picker" do
+            runtime <- newScriptRuntime initialUiState
+            previous <- newEmptyTMVarIO
+            current <- newEmptyTMVarIO
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+                rows = [("current", "Current", "", ["high"], 0)]
+            (_, updated) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp
+                    (AppAskDynamicAdjustableFilterChoice "Models" "" 0 rows current)
+                , FullscreenScriptApp
+                    (AppUpdateDynamicAdjustableFilterChoice previous "stale" [])
+                , FullscreenScriptApp (AppCloseDynamicAdjustableFilterChoice previous)
+                , FullscreenScriptHalt
+                ]
+            fmap (.dialogOverlay.choiceRows) updated.appChoice
+                `shouldBe` Just [("Current", "")]
+
     describe "durable chart previews" do
         it "queues history charts without rasterizing on reset or page load" do
             runtime <- newScriptRuntime initialUiState
@@ -1532,6 +1579,44 @@ spec = do
                         }
             adjustChoiceValue 1 adjusted
                 `shouldBe` adjusted
+
+    describe "dynamic model choice rows" do
+        it "preserves filter, focused identity and effort through reordering" do
+            reply <- newEmptyTMVarIO
+            let row key = (key, key, "", ["low", "high"], 0)
+                original = (newDynamicChoice "Models" "" 1
+                    [row "model-a", row "model-b"] reply)
+                    { choiceQuery = "model"
+                    , choiceAdjustmentIndices = [0, 1]
+                    }
+                updated = refreshDynamicChoice "Updated"
+                    [row "model-b", row "model-c", row "model-a"] original
+            updated.choiceQuery `shouldBe` "model"
+            updated.choiceBody `shouldBe` "Updated"
+            selectedChoice updated `shouldBe` Just (ChoiceSelection 0 (Just 1))
+        it "preserves effort by value when available values are reordered" do
+            reply <- newEmptyTMVarIO
+            let original = newDynamicChoice "Models" "" 0
+                    [("a", "a", "", ["low", "high"], 1)] reply
+                updated = refreshDynamicChoice ""
+                    [("a", "a", "", ["high", "low"], 1)] original
+            selectedChoice updated `shouldBe` Just (ChoiceSelection 0 (Just 0))
+        it "keeps an empty loading picker searchable until rows arrive" do
+            reply <- newEmptyTMVarIO
+            let loading = (newDynamicChoice "Models" "Loading…" 0 [] reply)
+                    { choiceQuery = "wanted" }
+                updated = refreshDynamicChoice ""
+                    [("a", "other", "", ["low"], 0), ("b", "wanted", "", ["high"], 0)]
+                    loading
+            selectedChoice loading `shouldBe` Nothing
+            selectedChoice updated `shouldBe` Just (ChoiceSelection 1 (Just 0))
+        it "clamps focus when its model disappears and accepts empty catalogs" do
+            reply <- newEmptyTMVarIO
+            let row key = (key, key, "", ["low"], 0)
+                original = newDynamicChoice "Models" "" 1 [row "a", row "b"] reply
+                updated = refreshDynamicChoice "" [row "a"] original
+            selectedChoice updated `shouldBe` Just (ChoiceSelection 0 (Just 0))
+            selectedChoice (refreshDynamicChoice "No models" [] updated) `shouldBe` Nothing
 
     describe "prompt target refresh" do
         it "preserves the live draft and cursor across a provider restart" do
@@ -3536,6 +3621,7 @@ choiceOverlay closeOnTurnEnd = ChoiceOverlay
     , choiceAdjustments = Nothing
     , choiceAdjustmentIndices = []
     , choiceCloseOnTurnEnd = closeOnTurnEnd
+    , choiceDynamic = Nothing
     }
 
 keyboardEventsForReads :: [IO ByteString.ByteString] -> IO [V.Event]

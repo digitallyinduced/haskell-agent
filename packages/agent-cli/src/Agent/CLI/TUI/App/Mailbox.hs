@@ -676,6 +676,14 @@ uiEventLogicalBytes = \case
     UiTurnEnded _ -> 128
     UiTurnRestarted -> 128
 
+dynamicChoiceLogicalBytes :: [Text] -> [(Text, Text, Text, [Text], Int)] -> Int
+dynamicChoiceLogicalBytes headings rows =
+    saturatingAdd 256 $ foldl'
+        (\size (key, label, detail, values, _) ->
+            saturatingAdd size (logicalTextsBytes (key : label : detail : values)))
+        (logicalTextsBytes headings)
+        rows
+
 appEventLogicalBytes :: AppEvent -> Int
 appEventLogicalBytes = \case
     AppUi event -> uiEventLogicalBytes event
@@ -707,6 +715,11 @@ appEventLogicalBytes = \case
                     0
                     rows
                 )
+    AppAskDynamicAdjustableFilterChoice title body _ rows _ ->
+        dynamicChoiceLogicalBytes [title, body] rows
+    AppUpdateDynamicAdjustableFilterChoice _ body rows ->
+        dynamicChoiceLogicalBytes [body] rows
+    AppCloseDynamicAdjustableFilterChoice _ -> 256
     AppAskText _ title body draft _ ->
         saturatingAdd 256 (logicalTextsBytes [title, body, draft])
     AppAskResume browser _ _ _ _ ->

@@ -10,6 +10,7 @@ module Agent.CLI.Picker
     , runOverlay
     , runOverlayWithDecoder
     , runOverlayWithUpdates
+    , runOverlayWithDecoderAndUpdates
     , withRawTty
     ) where
 
@@ -216,8 +217,19 @@ runOverlayWithUpdates
     -> state
     -> IO (Maybe (result, state))
 runOverlayWithUpdates render step awaitUpdate applyUpdate =
+    runOverlayWithDecoderAndUpdates decodePickerKey render step awaitUpdate applyUpdate
+
+runOverlayWithDecoderAndUpdates
+    :: (String -> Maybe PickerKey)
+    -> (state -> Text)
+    -> (PickerKey -> state -> Either result state)
+    -> IO update
+    -> (update -> state -> state)
+    -> state
+    -> IO (Maybe (result, state))
+runOverlayWithDecoderAndUpdates decode render step awaitUpdate applyUpdate =
     runOverlayInternal
-        decodePickerKey
+        decode
         render
         step
         (Just (awaitUpdate, applyUpdate))

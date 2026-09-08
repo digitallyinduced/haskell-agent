@@ -1,15 +1,17 @@
--- | Load the authoritative model options exposed by a connected organization
--- gateway for native clients that do not own a long-running CLI session.
+-- | Resolve organization-gateway model options for long-running CLI sessions
+-- and native clients that require an authoritative one-shot catalog.
 module Agent.CLI.GatewayModels
     ( loadGatewayModelOptionsAt
     , loadGatewayModelOptionsWithCredentialAt
     , modelOptionsForGatewayModels
     , modelOptionsForGatewayState
     , selectGatewayModelOption
+    , withGatewayModelsForStartup
     ) where
 
 import Agent.CLI.GatewayClient
     ( GatewayCredential
+    , GatewayModelAccess
     , GatewayModel(..)
     , GatewayModelProvider(..)
     , loadGatewayCredentialAt
@@ -35,7 +37,19 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import System.OsPath (OsPath)
 
--- | Select from the authoritative gateway catalog before authentication.
+-- | Resolve authoritative routing before initializing the provider runtime.
+-- Cached catalogs are suitable for immediate picker presentation, but an alias
+-- may have changed provider or dialect since the snapshot was persisted.
+-- Refreshing only the cache after initialization cannot rebuild that runtime.
+withGatewayModelsForStartup
+    :: GatewayModelAccess
+    -> ([GatewayModel] -> Either Text selection)
+    -> (Either Text selection -> IO result)
+    -> IO result
+withGatewayModelsForStartup access select continue =
+    refreshGatewayModels access >>= continue . (>>= select)
+
+-- | Select from a credential-scoped gateway catalog before authentication.
 -- Saved targets supply an alias preference, never provider identity: older
 -- gateway sessions recorded Grok aliases as OpenAI targets.
 selectGatewayModelOption
