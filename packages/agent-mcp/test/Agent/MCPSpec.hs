@@ -230,6 +230,7 @@ spec = describe "Agent.MCP" do
                 , mcpServerRootsEnabled = False
                 , mcpServerSamplingEnabled = False
                 , mcpServerLogLevel = Nothing
+                , mcpServerExcludedTools = []
                 }
         rendered `shouldContain` "API_TOKEN"
         rendered `shouldContain` "<redacted>"
@@ -593,6 +594,7 @@ spec = describe "Agent.MCP" do
                     , mcpServerRootsEnabled = True
                     , mcpServerSamplingEnabled = True
                     , mcpServerLogLevel = Nothing
+                    , mcpServerExcludedTools = []
                     }
                 ]
             bracket (pure fleet) closeMcpFleet \_ -> do
@@ -1149,6 +1151,7 @@ spec = describe "Agent.MCP" do
                     { mcpServerArgs = [log]
                     , mcpServerProtocol = McpProtocolLegacy
                     , mcpServerLogLevel = Just McpLogWarning
+                    , mcpServerExcludedTools = []
                     }
             fleet <- startMcpFleetWithProgressHooks hooks (const (pure ())) [config]
             bracket (pure fleet) closeMcpFleet \_ -> do
@@ -1186,6 +1189,7 @@ spec = describe "Agent.MCP" do
                     , mcpServerRootsEnabled = False
                     , mcpServerSamplingEnabled = False
                     , mcpServerLogLevel = Nothing
+                    , mcpServerExcludedTools = []
                     }
             fleet <- startMcpFleetWithProgressHooks hooks (const (pure ())) [config]
             bracket (pure fleet) closeMcpFleet \_ -> do
@@ -2027,6 +2031,7 @@ concurrentConfig script barrier name = McpServerConfig
     , mcpServerRootsEnabled = True
     , mcpServerSamplingEnabled = True
     , mcpServerLogLevel = Nothing
+    , mcpServerExcludedTools = []
     }
 
 data WorkerLifecycleOperation
@@ -2079,6 +2084,7 @@ baseConfig name command = McpServerConfig
     , mcpServerRootsEnabled = True
     , mcpServerSamplingEnabled = True
     , mcpServerLogLevel = Nothing
+    , mcpServerExcludedTools = []
     }
 
 withConcurrentFakeServer :: (FilePath -> FilePath -> IO a) -> IO a

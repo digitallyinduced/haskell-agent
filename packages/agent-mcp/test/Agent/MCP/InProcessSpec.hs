@@ -60,6 +60,39 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "in-process MCP server" do
+    it "reserves exact tools at discovery and dispatch without blocking other tools" do
+        adapter <- testServer (const (pure (Right True))) [echoTool]
+        let base = inProcessMcpToolServer adapter
+        Right [reserved] <- base.toolServerListTools
+        calls <- newIORef []
+        let ordinary = reserved { discoveredName = "ordinary" }
+            endpoint = base
+                { toolServerListTools = pure (Right [reserved, ordinary])
+                , toolServerCallTool = \request -> do
+                    modifyIORef' calls (<> [request.callToolName])
+                    pure (Right (McpCallToolResult False ["remote"] Nothing))
+                }
+            config = memoryConfig { mcpServerExcludedTools = ["echo"] }
+            arguments = rawJsonFromEncoding (toEncoding (object []))
+        bracket (startInMemoryMcpClient defaultMcpHostHooks config endpoint)
+            closeMcpClient \client -> do
+                ready <- ensureMcpClientReady client
+                fmap (map (.discoveredName) . fst) ready `shouldBe` Right ["ordinary"]
+                callDiscoveredTool client reserved arguments `shouldReturn`
+                    Left "This tool is owned by another integration endpoint."
+                callDiscoveredTool client ordinary arguments `shouldReturn` Right "remote"
+                readIORef calls `shouldReturn` ["ordinary"]
+        -- A replacement client retains the same host exclusion policy.
+        bracket (startInMemoryMcpClient defaultMcpHostHooks config endpoint)
+            closeMcpClient \client -> do
+                ready <- ensureMcpClientReady client
+                fmap (map (.discoveredName) . fst) ready `shouldBe` Right ["ordinary"]
+        -- No opt-in preserves the complete catalog.
+        bracket (startInMemoryMcpClient defaultMcpHostHooks memoryConfig endpoint)
+            closeMcpClient \client -> do
+                ready <- ensureMcpClientReady client
+                fmap (map (.discoveredName) . fst) ready `shouldBe` Right ["echo", "ordinary"]
+
     it "connects a typed endpoint without launching the configured command" do
         adapter <- testServer (const (pure (Right True))) [echoTool]
         let endpoint = inProcessMcpToolServer adapter
@@ -410,6 +443,7 @@ memoryConfig = McpServerConfig
     , mcpServerRootsEnabled = False
     , mcpServerSamplingEnabled = False
     , mcpServerLogLevel = Nothing
+    , mcpServerExcludedTools = []
     }
 
 echoTool :: AppTool

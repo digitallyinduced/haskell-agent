@@ -41,6 +41,10 @@ data IntegrationEndpoint
     | LocalIntegrationEndpoint !McpToolServer
     | RemoteIntegrationEndpoint !McpServerConfig
     | CombinedIntegrationEndpoint !McpServerConfig !McpToolServer
+    -- | Explicit distribution ownership of exact tools, never a fallback.
+    -- Reserved names stay local even when currently unavailable.
+    | LocalOverlayIntegrationEndpoint ![Text] !McpToolServer
+    | CombinedOverlayIntegrationEndpoint !McpServerConfig ![Text] !McpToolServer
 
 data IntegrationRuntime = IntegrationRuntime
     { integrationRuntimeEndpoint :: !IntegrationEndpoint
@@ -145,6 +149,8 @@ acquireIntegrationRuntime supervisor authority =
                                 { integrationRuntimeEndpoint = RemoteIntegrationEndpoint config })
                             LocalIntegrationEndpoint server -> pure (Right runtime
                                 { integrationRuntimeEndpoint = CombinedIntegrationEndpoint config server })
+                            LocalOverlayIntegrationEndpoint names server -> pure (Right runtime
+                                { integrationRuntimeEndpoint = CombinedOverlayIntegrationEndpoint config names server })
                             _ -> do
                                 closeIntegrationRuntime runtime
                                 pure (Left "Organization-local providers must not supply remote endpoints.")

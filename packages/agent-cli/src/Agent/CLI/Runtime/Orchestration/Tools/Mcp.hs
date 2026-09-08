@@ -8,7 +8,7 @@ import Agent.CLI.Config
     ( HarnessConfig(..), McpServerConfig(..)
     , mcpServersForRuntime, useProgressiveMcp )
 import Agent.CLI.FileUri (fileUri)
-import Agent.CLI.IntegrationGateway (availableIntegrationServerName)
+import Agent.CLI.IntegrationGateway (integrationEndpointServers)
 import Agent.CLI.McpElicitation (cliMcpElicitation)
 import Agent.CLI.McpOAuthStore (mcpOAuthStorePath)
 import Agent.CLI.McpStatus
@@ -27,7 +27,7 @@ import Agent.CLI.Session.Runtime.Types (StartupRuntime(..))
 import Agent.CLI.Startup.Auth (setStartupNotice, startupDie)
 import Agent.CLI.TUI.App (emitUiEvent)
 import Agent.Integration.API
-    (IntegrationRuntime(..), IntegrationEndpoint(..))
+    (IntegrationRuntime(..))
 import Agent.Loop (TurnInput(..))
 import qualified Agent.MCP as MCP
 import Agent.OsPath (unsafeToFilePath)
@@ -38,7 +38,6 @@ import Control.Exception.Safe
 import Control.Monad (forM_, unless, when)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -99,6 +98,7 @@ mcpConfiguration AgentToolsRequest
             , MCP.mcpServerRootsEnabled = config.mcpRoots
             , MCP.mcpServerSamplingEnabled = config.mcpSampling
             , MCP.mcpServerLogLevel = config.mcpLogLevel
+            , MCP.mcpServerExcludedTools = []
             }
         | (label, config) <-
             mcpServersForRuntime
@@ -133,30 +133,12 @@ acquireMcpRuntime request@AgentToolsRequest
     } integrationRuntime = do
     let (configuredServers, configuredProgressive) =
             mcpConfiguration request toolStartup
-        integrationServerName =
-            availableIntegrationServerName
-                [ serverName
-                | MCP.McpServerConfig
-                    { MCP.mcpServerName = serverName
-                    } <- configuredServers
-                ]
-        remoteServers =
-            [ config { MCP.mcpServerName = integrationServerName }
-            | runtime <- maybeToList integrationRuntime
-            , config <- case integrationRuntimeEndpoint runtime of
-                RemoteIntegrationEndpoint config -> [config]
-                CombinedIntegrationEndpoint config _ -> [config]
-                _ -> []]
-        localIntegrationServerName =
-            availableIntegrationServerName
-                (map (.mcpServerName) (configuredServers <> remoteServers))
+        (remoteServers, localServers) = maybe ([], [])
+            (integrationEndpointServers (map (.mcpServerName) configuredServers)
+                . integrationRuntimeEndpoint)
+            integrationRuntime
         inMemoryServers =
-            [(integrationsMcpConfig localIntegrationServerName, server)
-            | runtime <- maybeToList integrationRuntime
-            , server <- case integrationRuntimeEndpoint runtime of
-                LocalIntegrationEndpoint server -> [server]
-                CombinedIntegrationEndpoint _ server -> [server]
-                _ -> []]
+            [(integrationsMcpConfig name, server) | (name, server) <- localServers]
         -- Include the in-memory name in the reported configuration too: callers
         -- use this list to decide whether MCP tools exist at all.
         runtimeMcpServerConfigs = configuredServers <> remoteServers
@@ -300,4 +282,5 @@ integrationsMcpConfig serverName = MCP.McpServerConfig
     , MCP.mcpServerRootsEnabled = False
     , MCP.mcpServerSamplingEnabled = False
     , MCP.mcpServerLogLevel = Nothing
+    , MCP.mcpServerExcludedTools = []
     }

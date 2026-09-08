@@ -211,6 +211,9 @@ data McpServerConfig = McpServerConfig
     , mcpServerRootsEnabled :: !Bool
     , mcpServerSamplingEnabled :: !Bool
     , mcpServerLogLevel :: !(Maybe McpLogLevel)
+    -- | Host-owned exact tool exclusions, applied to discovery and dispatch.
+    -- They remain part of configuration identity across reconnects.
+    , mcpServerExcludedTools :: ![Text]
     } deriving (Eq)
 
 instance Show McpServerConfig where
@@ -235,6 +238,7 @@ instance Show McpServerConfig where
             <> show config.mcpServerSamplingEnabled
             <> ", mcpServerLogLevel = "
             <> show config.mcpServerLogLevel
+            <> ", mcpServerExcludedTools = " <> show config.mcpServerExcludedTools
             <> " }"
 
 -- | Host-provided integration points shared by every server in a fleet.

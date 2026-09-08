@@ -47,7 +47,7 @@ import Agent.MCP.Types
       McpError(..),
       McpServerCapabilities(capabilitySkills),
       McpServerInfo(serverInfoCapabilities),
-      McpServerConfig(mcpServerName),
+      McpServerConfig(mcpServerName, mcpServerExcludedTools),
       renderMcpError,
       mcpSkillEntryDecoder,
       mcpResourceContentDecoder,
@@ -156,6 +156,7 @@ discoverMcpTools client = do
         annotated =
             [ (tool.discoveredName, annotateHeaderParams isHttp tool)
             | tool <- tools
+            , tool.discoveredName `notElem` client.clientConfig.mcpServerExcludedTools
             ]
         accepted = [tool | (_, Right tool) <- annotated]
         warnings =
@@ -648,6 +649,9 @@ callDiscoveredToolWith
     -> RawJson
     -> Maybe (McpProgress -> IO ())
     -> IO (Either Text Text)
+callDiscoveredToolWith _ client tool _ _
+    | tool.discoveredName `elem` client.clientConfig.mcpServerExcludedTools =
+        pure (Left "This tool is owned by another integration endpoint.")
 callDiscoveredToolWith artifactDirectory client tool arguments _
     | McpClientInMemory server _ <- client.clientTransport = do
         state <- readTVarIO client.clientLifecycle

@@ -4,11 +4,12 @@ module Agent.CLI.IntegrationGateway
     ( gatewayIntegrationAuthority
     , gatewayIntegrationMcpConfig
     , availableIntegrationServerName
+    , integrationEndpointServers
     ) where
 
 import Agent.CLI.GatewayClient (GatewayCredential(..))
-import Agent.Integration.API (IntegrationAuthority(..))
-import Agent.MCP (McpServerConfig(..), McpProtocolPreference(..))
+import Agent.Integration.API (IntegrationAuthority(..), IntegrationEndpoint(..))
+import Agent.MCP (McpServerConfig(..), McpProtocolPreference(..), McpToolServer)
 import qualified Data.Set as Set
 import qualified Data.Text as Text
 
@@ -34,6 +35,7 @@ gatewayIntegrationMcpConfig credential = McpServerConfig
     , mcpServerRootsEnabled = False
     , mcpServerSamplingEnabled = False
     , mcpServerLogLevel = Nothing
+    , mcpServerExcludedTools = []
     }
 
 availableIntegrationServerName :: [Text.Text] -> Text.Text
@@ -48,3 +50,25 @@ availableIntegrationServerName configuredNames =
         candidate
             | index == 1 = "integrations"
             | otherwise = "integrations-" <> Text.pack (show index)
+
+-- | Explicit overlays own the canonical namespace. Remote tools retain a
+-- separate namespace, with reserved names denied even if local tools disappear.
+-- Plain combined endpoints deliberately retain their existing remote-first names.
+integrationEndpointServers
+    :: [Text.Text] -> IntegrationEndpoint
+    -> ([McpServerConfig], [(Text.Text, McpToolServer)])
+integrationEndpointServers configured endpoint = case endpoint of
+    NoIntegrationEndpoint -> ([], [])
+    LocalIntegrationEndpoint server -> ([], [(primary, server)])
+    LocalOverlayIntegrationEndpoint _ server -> ([], [(primary, server)])
+    RemoteIntegrationEndpoint config -> ([named primary config], [])
+    CombinedIntegrationEndpoint config server ->
+        ([named primary config], [(secondary, server)])
+    CombinedOverlayIntegrationEndpoint config names server ->
+        ([named secondary config
+            { mcpServerExcludedTools = config.mcpServerExcludedTools <> names }],
+            [(primary, server)])
+  where
+    primary = availableIntegrationServerName configured
+    secondary = availableIntegrationServerName (primary : configured)
+    named name config = config { mcpServerName = name }
