@@ -15,7 +15,8 @@ module Agent.CLI.ExternalProgram
     ) where
 
 import Control.Exception.Safe
-    ( catchAny
+    ( bracket
+    , catchAny
     , finally
     , onException
     , tryAny
@@ -167,12 +168,14 @@ withTemporaryTextFile
     -> IO a
 withTemporaryTextFile prefix contents action = do
     temporaryDirectory <- getTemporaryDirectory
-    bracketTemp temporaryDirectory
+    bracket
+        (openTempFile temporaryDirectory prefix)
+        (\(path, handle) -> hClose handle `finally` removeQuietly path)
+        \(path, handle) -> do
+            hClose handle
+            Text.writeFile path contents
+            action path
   where
-    bracketTemp temporaryDirectory = do
-        (path, handle) <- openTempFile temporaryDirectory prefix
-        (hClose handle >> Text.writeFile path contents >> action path)
-            `finally` removeQuietly path
     removeQuietly path =
         removeFile path `catchAny` const (pure ())
 

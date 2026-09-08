@@ -11,7 +11,7 @@ module Agent.CLI.Clipboard.MacOS
 
 import Agent.CLI.Error (formatException)
 import Agent.Loop (ImageAttachment(..))
-import Control.Exception.Safe (finally, tryAny)
+import Control.Exception.Safe (bracket, finally, tryAny)
 import Control.Monad (void)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -102,43 +102,44 @@ readMacClipboardPaths = do
 readMacClipboardClass :: String -> IO (Either Text ByteString)
 readMacClipboardClass typeClass = do
     tmpDir <- getTemporaryDirectory
-    result <- tryAny do
-        (path, handle) <- openBinaryTempFile tmpDir "agent-clipboard-.bin"
-        hClose handle
-        let cleanup = void (tryAny (removeFile path))
-        (do
-            removeFile path
-            let script =
-                    unlines
-                        [ "try"
-                        , "  set clipData to the clipboard as " <> typeClass
-                        , "  set outFile to open for access POSIX file "
-                            <> appleString path
-                            <> " with write permission"
-                        , "  set eof of outFile to 0"
-                        , "  write clipData to outFile"
-                        , "  close access outFile"
-                        , "  return \"ok\""
-                        , "on error errMsg"
-                        , "  try"
-                        , "    close access POSIX file " <> appleString path
-                        , "  end try"
-                        , "  error errMsg"
-                        , "end try"
-                        ]
-            (code, _out, err) <-
-                readProcessWithExitCode "osascript" ["-e", script] ""
-            case code of
-                ExitSuccess -> do
-                    bytes <- withBinaryFile path ReadMode \input ->
-                        BS.hGet input (maxClipboardImageBytes + 1)
-                    if BS.length bytes > maxClipboardImageBytes
-                        then pure (Left
-                            "clipboard image exceeds the 20 MB limit")
-                        else pure (Right bytes)
-                ExitFailure _ ->
-                    pure (Left (clipboardErrorMessage typeClass err)))
-            `finally` cleanup
+    result <- tryAny $
+        bracket
+            (openBinaryTempFile tmpDir "agent-clipboard-.bin")
+            (\(path, handle) ->
+                hClose handle `finally` void (tryAny (removeFile path)))
+            \(path, handle) -> do
+                hClose handle
+                removeFile path
+                let script =
+                        unlines
+                            [ "try"
+                            , "  set clipData to the clipboard as " <> typeClass
+                            , "  set outFile to open for access POSIX file "
+                                <> appleString path
+                                <> " with write permission"
+                            , "  set eof of outFile to 0"
+                            , "  write clipData to outFile"
+                            , "  close access outFile"
+                            , "  return \"ok\""
+                            , "on error errMsg"
+                            , "  try"
+                            , "    close access POSIX file " <> appleString path
+                            , "  end try"
+                            , "  error errMsg"
+                            , "end try"
+                            ]
+                (code, _out, err) <-
+                    readProcessWithExitCode "osascript" ["-e", script] ""
+                case code of
+                    ExitSuccess -> do
+                        bytes <- withBinaryFile path ReadMode \input ->
+                            BS.hGet input (maxClipboardImageBytes + 1)
+                        if BS.length bytes > maxClipboardImageBytes
+                            then pure (Left
+                                "clipboard image exceeds the 20 MB limit")
+                            else pure (Right bytes)
+                    ExitFailure _ ->
+                        pure (Left (clipboardErrorMessage typeClass err))
     case result of
         Left ex -> pure (Left (formatException ex))
         Right value -> pure value

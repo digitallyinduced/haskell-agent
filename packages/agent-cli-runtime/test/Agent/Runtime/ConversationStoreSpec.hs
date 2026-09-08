@@ -10,7 +10,7 @@ import Agent.Loop
     , emptyBackendSnapshot
     )
 import Agent.Responses.Types
-import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.Async (cancel, wait, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar
     , putMVar
@@ -41,6 +41,45 @@ spec = do
             conversationResidency store `shouldReturn` ConversationCold
             readConversationPreviousResponseId store
                 `shouldReturn` Just "response-1"
+
+        it "returns to cold state when a scoped reader is cancelled" do
+            entered <- newEmptyMVar
+            blocked <- newEmptyMVar
+            let checkpoint = TranscriptCheckpoint "turn:1" $
+                    pure [messageItem "cold"]
+            store <- newColdConversationStore Nothing checkpoint []
+
+            withAsync
+                (withConversationTranscript store \_ -> do
+                    putMVar entered ()
+                    takeMVar blocked)
+                \reader -> do
+                    takeMVar entered
+                    conversationResidency store
+                        `shouldReturn` ConversationResident
+                    cancel reader
+                    conversationResidency store
+                        `shouldReturn` ConversationCold
+
+        it "remains usable when checkpoint hydration is cancelled" do
+            entered <- newEmptyMVar
+            blocked <- newEmptyMVar
+            let checkpoint = TranscriptCheckpoint "blocked" do
+                    putMVar entered ()
+                    takeMVar blocked
+            store <- newColdConversationStore Nothing checkpoint []
+
+            withAsync
+                (withConversationTranscript store (\_ -> pure ()))
+                \reader -> do
+                    takeMVar entered
+                    cancel reader
+
+            conversationResidency store `shouldReturn` ConversationCold
+            let items = [messageItem "recovered"]
+            retargetConversationCheckpoint store
+                (TranscriptCheckpoint "replacement" (pure items))
+            withConversationTranscript store (`shouldBe` items)
 
         it "returns to cold state when a scoped reader throws" do
             let checkpoint = TranscriptCheckpoint "turn:1" $

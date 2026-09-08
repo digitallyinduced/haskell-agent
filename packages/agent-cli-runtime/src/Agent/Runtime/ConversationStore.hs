@@ -39,7 +39,7 @@ import Control.Concurrent.MVar
     , newMVar
     , readMVar
     )
-import Control.Exception.Safe (finally, mask)
+import Control.Exception.Safe (bracket)
 import Data.Text (Text)
 import Data.Word (Word64)
 
@@ -138,55 +138,56 @@ withConversationBackendState
 withConversationBackendState
         store@(ConversationStore stateVar)
         action =
-    mask \restore -> do
-        (generation, releaseHydration, snapshot) <-
-            modifyMVar stateVar \state ->
-                case state.stateTranscript of
-                    ResidentTranscript items CommittedResident ->
-                        pure
-                            ( state
-                            , ( state.stateGeneration
-                              , False
-                              , snapshotFromState state items
-                              )
-                            )
-                    ResidentTranscript items
-                            (HydratedResident checkpoint readers) ->
-                        pure
-                            ( state
+    bracket acquire release \(_, _, snapshot) ->
+        action snapshot
+  where
+    acquire =
+        modifyMVar stateVar \state ->
+            case state.stateTranscript of
+                ResidentTranscript items CommittedResident ->
+                    pure
+                        ( state
+                        , ( state.stateGeneration
+                          , False
+                          , snapshotFromState state items
+                          )
+                        )
+                ResidentTranscript items
+                        (HydratedResident checkpoint readers) ->
+                    pure
+                        ( state
+                            { stateTranscript =
+                                ResidentTranscript
+                                    items
+                                    (HydratedResident
+                                        checkpoint
+                                        (readers + 1))
+                            }
+                        , ( state.stateGeneration
+                          , True
+                          , snapshotFromState state items
+                          )
+                        )
+                ColdTranscript cold -> do
+                    items <- cold.checkpointLoad
+                    let resident =
+                            state
                                 { stateTranscript =
                                     ResidentTranscript
                                         items
-                                        (HydratedResident
-                                            checkpoint
-                                            (readers + 1))
+                                        (HydratedResident cold 1)
                                 }
-                            , ( state.stateGeneration
-                              , True
-                              , snapshotFromState state items
-                              )
-                            )
-                    ColdTranscript cold -> do
-                        items <- cold.checkpointLoad
-                        let resident =
-                                state
-                                    { stateTranscript =
-                                        ResidentTranscript
-                                            items
-                                            (HydratedResident cold 1)
-                                    }
-                        pure
-                            ( resident
-                            , ( state.stateGeneration
-                              , True
-                              , snapshotFromState state items
-                              )
-                            )
-        restore (action snapshot)
-            `finally`
-                if releaseHydration
-                    then releaseHydratedTranscript store generation
-                    else pure ()
+                    pure
+                        ( resident
+                        , ( state.stateGeneration
+                          , True
+                          , snapshotFromState state items
+                          )
+                        )
+    release (generation, releaseHydration, _) =
+        if releaseHydration
+            then releaseHydratedTranscript store generation
+            else pure ()
 
 -- | Publish a newer exact transcript and return its generation token.
 commitConversationTranscript
