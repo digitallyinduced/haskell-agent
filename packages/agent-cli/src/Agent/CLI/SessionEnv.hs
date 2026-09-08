@@ -23,6 +23,7 @@ import Agent.CLI.Compaction
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (Persistence, SessionHandle)
+import Agent.CLI.Session.Observation (SessionObservationPublisher)
 import Agent.Runtime.SessionState (SessionState)
 import Agent.CLI.Session.Workspace (WorkspaceContext)
 import Agent.CLI.SessionTitle (SessionTitleManager)
@@ -77,6 +78,10 @@ data SessionEnv = SessionEnv
     , sessionContextWindow :: !(IO (Maybe Int))
     , sessionPolicy :: !(IORef ApprovalPolicy)
     , sessionPersist :: !Persistence
+    -- | Scoped publisher for the current CLI turn, shared with the normalized
+    -- presentation callback. Nested follow-ups reuse the same service.
+    , sessionObservationPublisher :: !(IORef (Maybe SessionObservationPublisher))
+    , sessionObservationEnabled :: !Bool
     , sessionDatabasePool :: !StorePool
     , sessionTitleManager :: !SessionTitleManager
     , sessionTitleTurnCount :: !(IORef Int)

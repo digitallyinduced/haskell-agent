@@ -19,6 +19,7 @@ import qualified Agent.CLI.MacOS.BridgeHeaderSpec as BridgeHeaderSpec
 import qualified Agent.CLI.MacOS.BridgeSpec as BridgeSpec
 import qualified Agent.CLI.MacOS.BrowserBridgeFFISpec as BrowserBridgeFFISpec
 import qualified Agent.CLI.MacOS.ComputerBridgeSpec as ComputerBridgeSpec
+import qualified Agent.CLI.MacOS.SessionObservationBridgeSpec as SessionObservationBridgeSpec
 #endif
 
 main :: IO ()
@@ -38,4 +39,5 @@ main = hspec do
     BridgeHeaderSpec.spec
     BridgeSpec.spec
     ComputerBridgeSpec.spec
+    SessionObservationBridgeSpec.spec
 #endif
