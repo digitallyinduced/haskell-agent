@@ -4,7 +4,6 @@ import Agent.CLI.GatewayClient
 import Agent.CLI.SessionSpec.Fixtures (withTempStore)
 import Agent.Store.Postgres (trustedPool)
 import Agent.Store.Postgres.ModelCatalogCache qualified as ModelStore
-import Agent.Server.Client.GatewayIdentity (gatewayCredentialIdentity)
 import Agent.ClientIdentity (gatewayUserAgent)
 import Agent.OpenAI.Usage (UsageSnapshot(..))
 import Agent.CLI.PrivateFileLock (withPrivateFileLock)

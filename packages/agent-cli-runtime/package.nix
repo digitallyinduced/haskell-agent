@@ -24,10 +24,10 @@ mkDerivation {
     wai warp
   ];
   testHaskellDepends = [
-    aeson agent-core agent-json agent-responses agent-responses-types
-    agent-store async base bytestring containers directory filepath
-    hspec http-client http-types QuickCheck safe-exceptions stm text
-    time unix wai warp
+    aeson agent-core agent-json agent-openai agent-responses
+    agent-responses-types agent-store async base bytestring containers
+    directory filepath hspec http-client http-types QuickCheck
+    safe-exceptions stm text time unix wai warp
   ];
   description = "Headless shared runtime for agent frontends";
   license = lib.meta.getLicenseFromSpdxId "MIT";

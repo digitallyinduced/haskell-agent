@@ -179,6 +179,7 @@ test-suite agent-cli-runtime-test
     build-depends:    agent-cli-runtime
                     , agent-core
                     , agent-json
+                    , agent-openai
                     , agent-responses
                     , agent-responses-types
                     , agent-store
