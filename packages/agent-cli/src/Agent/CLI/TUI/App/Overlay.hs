@@ -723,7 +723,15 @@ openMarkdownLink :: Text -> EventM Name AppState ()
 openMarkdownLink url = do
     remoteSession <- liftIO isSshSession
     if remoteSession
-        then setLinkNotice remoteLinkInstructions
+        then do
+            copyAction <- gets (.appRuntime.runtimeCopy)
+            copied <- liftIO (copyAction url)
+            setLinkNotice $
+                remoteLinkInstructions <> "\n\n"
+                    <> (if copied
+                    then "URL copied. "
+                    else "Could not copy the URL. ")
+                    <> "Open this URL in your local browser: " <> url
         else do
             opened <- liftIO (openExternalUrl url)
             unless opened $ do
@@ -739,6 +747,13 @@ openMarkdownLink url = do
 setLinkNotice :: Text -> EventM Name AppState ()
 setLinkNotice message = modify' \state ->
     let updated = applyUiEvent (UiSetNotice (Just (warningNotice message))) state
+        markdownMessage = Text.concatMap escape message
+        escape character
+            -- Escape the scheme separator too: otherwise the URL recognizer
+            -- consumes subsequent Markdown escapes as literal URL characters.
+            | character `elem` ("\\`*_[]<>!#&:" :: String) =
+                "\\" <> Text.singleton character
+            | otherwise = Text.singleton character
     in updated
         { appChoice = fmap
             (\dialog ->
@@ -746,9 +761,9 @@ setLinkNotice message = modify' \state ->
                 in dialog
                     { dialogOverlay = overlay
                         { choiceBody =
-                            if message `Text.isInfixOf` overlay.choiceBody
+                            if markdownMessage `Text.isInfixOf` overlay.choiceBody
                                 then overlay.choiceBody
-                                else overlay.choiceBody <> "\n\n" <> message
+                                else overlay.choiceBody <> "\n\n" <> markdownMessage
                         }
                     })
             updated.appChoice

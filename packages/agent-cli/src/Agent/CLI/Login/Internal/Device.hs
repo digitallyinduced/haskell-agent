@@ -108,6 +108,9 @@ deviceAuthorizationBody
 deviceAuthorizationBody provider url userCode notice =
     Text.intercalate "\n\n" $
         [ "1. [Open the " <> provider <> " sign-in page](" <> url <> ")."
+        , "Or copy this URL into your browser: "
+            <> Text.replace ":" "\\:"
+                (Text.replace "&" "\\&" (markdownText (Text.length url) url))
         , "2. Enter this one-time code:"
         , "`" <> markdownText 100 userCode <> "`"
         , "3. Return here and choose **Check authorization**."

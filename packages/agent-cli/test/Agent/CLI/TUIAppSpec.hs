@@ -1538,7 +1538,9 @@ spec = do
             readIORef events `shouldReturn` [Left reset, Right ()]
 
     describe "fullscreen choice links" do
-        it "shows SSH link feedback once after repeated clicks without resolving the choice" do
+        forM_ [(copied, inDialog) | copied <- [False, True], inDialog <- [False, True]] \(copied, inDialog) ->
+          it ("preserves an SSH URL after repeated clicks (copy=" <> show copied
+                <> ", dialog=" <> show inDialog <> ")") do
             bracket
                 (lookupEnv "SSH_CONNECTION")
                 (\previous -> maybe (unsetEnv "SSH_CONNECTION")
@@ -1547,11 +1549,21 @@ spec = do
                     setEnv "SSH_CONNECTION" "192.0.2.1 1000 192.0.2.2 22"
                     runtime <- newScriptRuntime initialUiState
                     replies <- newIORef (0 :: Int)
-                    let name = MarkdownLink "https://example.com/connect"
+                    copiedUrls <- newIORef []
+                    let url = "https://e.test/?a_b=[label](target)&x=1"
+                        escapedUrl = "https://e.test/?a\\_b=\\[label\\](target)\\&x=1"
+                        name = MarkdownLink url
                         body = "[Sign in](https://example.com/connect)"
+                        notice = remoteLinkInstructions <> "\n\n"
+                            <> (if copied then "URL copied. " else "Could not copy the URL. ")
+                            <> "Open this URL in your local browser: " <> url
+                        runtimeWithCopy = runtime
+                            { runtimeCopy = \value ->
+                                modifyIORef' copiedUrls (<> [value]) >> pure copied
+                            }
                         initialState =
-                            (initialFullscreenAppState runtime [] AgentRoot [] 0)
-                                { appChoice = Just $
+                            (initialFullscreenAppState runtimeWithCopy [] AgentRoot [] 0)
+                                { appChoice = if not inDialog then Nothing else Just $
                                     PendingDialog
                                         (const (modifyIORef' replies (+ 1)))
                                         (choiceOverlay False) { choiceBody = body }
@@ -1564,7 +1576,13 @@ spec = do
                         runFullscreenScriptWithState initialState
                             (click <> click <> [FullscreenScriptHalt])
                     fmap (.dialogOverlay.choiceBody) finalState.appChoice
-                        `shouldBe` Just (body <> "\n\n" <> remoteLinkInstructions)
+                        `shouldBe` (if inDialog
+                            then Just (body <> "\n\n"
+                                <> Text.replace ":" "\\:" (Text.replace url escapedUrl notice))
+                            else Nothing)
+                    fmap (.noticeText) finalState.appUi.uiNotice `shouldBe` Just notice
+                    renderedAppText (120, 40) finalState `shouldSatisfy` Text.isInfixOf url
+                    readIORef copiedUrls `shouldReturn` [url, url]
                     finalState.appPressedControl `shouldBe` Nothing
                     readIORef replies `shouldReturn` 0
 
