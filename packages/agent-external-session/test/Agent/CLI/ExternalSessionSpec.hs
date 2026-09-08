@@ -7,7 +7,7 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(ParallelSafe)
     , defaultToolEnv
     )
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, finally)
 import Control.Monad (forM_)
 import Data.Aeson (Value, encode, object, (.=))
 import Data.Aeson.Types (Pair)
@@ -23,6 +23,7 @@ import System.Directory
     , createDirectoryIfMissing
     , createFileLink
     , getTemporaryDirectory
+    , listDirectory
     , removeFile
     , removePathForcibly
     )
@@ -733,6 +734,7 @@ withFixture action =
                 , externalNow = fail "externalNow was unexpectedly evaluated"
                 }
         action Fixture{root, cwd, env}
+            `finally` (listDirectory scratch `shouldReturn` [])
 
 latest
     :: ExternalSessionEnv

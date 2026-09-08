@@ -68,13 +68,10 @@ withTemporaryDatabase
     -> String
     -> (Database -> IO value)
     -> IO value
-withTemporaryDatabase scratch prefix action = do
-    (path, handle) <- openBinaryTempFile scratch prefix
-    hClose handle
-    setFileMode path (ownerReadMode `unionFileModes` ownerWriteMode)
-    let cleanup = mapM_ removeQuietly
-            [path, path <> "-journal", path <> "-wal", path <> "-shm"]
-    flip finally cleanup $
+withTemporaryDatabase scratch prefix action =
+    bracket (openBinaryTempFile scratch prefix) cleanup \(path, handle) -> do
+        hClose handle
+        setFileMode path (ownerReadMode `unionFileModes` ownerWriteMode)
         bracket
             (SQLite.open2
                 (Text.pack path)
@@ -88,6 +85,13 @@ withTemporaryDatabase scratch prefix action = do
                 SQLite.exec database "PRAGMA journal_mode = OFF"
                 SQLite.exec database "PRAGMA synchronous = OFF"
                 action database
+  where
+    -- Own the file from creation, including failures while closing the initial
+    -- handle, setting permissions, or opening SQLite. Close SQLite before
+    -- removing its files; hClose is harmless if the initial handle is closed.
+    cleanup (path, handle) =
+        hClose handle `finally` mapM_ removeQuietly
+            [path, path <> "-journal", path <> "-wal", path <> "-shm"]
 
 removeQuietly :: FilePath -> IO ()
 removeQuietly path =
