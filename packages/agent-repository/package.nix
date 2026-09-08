@@ -1,4 +1,4 @@
-{ mkDerivation, aeson, async, base, bytestring, containers, crypton
+{ mkDerivation, agent-cli-runtime, aeson, async, base, bytestring, containers, crypton
 , directory, filelock, filepath, hspec, lib, process
 , safe-exceptions, text, time, transformers, unix
 }:
@@ -7,7 +7,7 @@ mkDerivation {
   version = "0.1.0.0";
   src = ./.;
   libraryHaskellDepends = [
-    aeson async base bytestring containers crypton directory filelock
+    agent-cli-runtime aeson async base bytestring containers crypton directory filelock
     filepath process safe-exceptions text time transformers unix
   ];
   testHaskellDepends = [

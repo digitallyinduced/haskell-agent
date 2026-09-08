@@ -2,7 +2,7 @@
 , agent-codex-dialect, agent-connectivity, agent-core
 , agent-external-session, agent-gemini, agent-grok-build-dialect
 , agent-integration-api, agent-json, agent-mcp, agent-openai
-, agent-openrouter, agent-process, agent-repository
+, agent-openrouter, agent-process
 , agent-responses, agent-responses-types, agent-store, agent-syntax
 , agent-tui, agent-xai, ansi-terminal, async, base
 , base64-bytestring, brick, bytestring, colour, containers, crypton
@@ -25,7 +25,7 @@ mkDerivation {
     aeson agent-claude agent-cli-runtime agent-codex-dialect
     agent-connectivity agent-core agent-external-session agent-gemini
     agent-grok-build-dialect agent-integration-api agent-json agent-mcp
-    agent-openai agent-openrouter agent-process agent-repository
+    agent-openai agent-openrouter agent-process
     agent-responses agent-responses-types agent-store agent-syntax
     agent-tui agent-xai ansi-terminal async base base64-bytestring
     brick bytestring colour containers crypton crypton-connection dbus

@@ -306,7 +306,6 @@ library
                     , agent-cli-runtime:Agent.CLI.Session.StoreCodec as Agent.CLI.Session.StoreCodec
                     , agent-cli-runtime:Agent.CLI.SessionLock as Agent.CLI.SessionLock
     build-depends:    agent-cli-runtime >= 0.1 && < 0.2
-                    , agent-repository >= 0.1 && < 0.2
                     , agent-external-session >= 0.1 && < 0.2
                     , agent-integration-api >= 0.1 && < 0.2
                     , agent-connectivity >= 0.1 && < 0.2
