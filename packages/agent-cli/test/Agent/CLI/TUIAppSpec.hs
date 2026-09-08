@@ -732,6 +732,210 @@ spec = do
                     RowEnd width -> Text.replicate width " "
             rendered `shouldSatisfy` Text.isInfixOf marker
 
+    describe "planning question panel" do
+        it "keeps the explanation visible and wraps complete option descriptions" do
+            let explanation = "EXPLANATIONVISIBLE"
+                marker = "DESCRIPTIONEND"
+                ui = reduceUi (UiAssistantHistory explanation) initialUiState
+                size = (60, 36)
+            runtime <- newScriptRuntime ui
+            let initial = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    { appUi = ui }
+                panel = (choiceOverlay False)
+                    { choicePresentation = ChoicePlanning
+                    , choiceTitle = "Planning question"
+                    , choiceBody = "Which candidate should be selected?"
+                    , choiceRows =
+                        [(Text.replicate 18 "complete " <> marker, "")]
+                    }
+                state = initial
+                    { appChoice = Just (PendingDialog (const (pure ())) panel) }
+                rendered = renderedAppText size state
+            length (drawApp state) `shouldBe` length (drawApp initial)
+            rendered `shouldSatisfy` Text.isInfixOf explanation
+            rendered `shouldSatisfy` Text.isInfixOf marker
+            rendered `shouldSatisfy` Text.isInfixOf "Planning question"
+
+        it "moves the focused option without submitting until Enter" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+                key value = FullscreenScriptVty (V.EvKey value [])
+            (_, focused) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp
+                    (AppAskChoice ChoicePlanning "Planning question" "Choose" 0
+                        [("first", ""), ("second", "")] reply)
+                , key V.KDown
+                , FullscreenScriptHalt
+                ]
+            fmap ((.choiceIndex) . (.dialogOverlay)) focused.appChoice
+                `shouldBe` Just 1
+            atomically (tryReadTMVar reply) `shouldReturn` Nothing
+            (_, submitted) <- runFullscreenScriptWithState focused
+                [key V.KEnter, FullscreenScriptHalt]
+            atomically (tryReadTMVar reply) `shouldReturn` Just (Just 1)
+            isNothing submitted.appChoice `shouldBe` True
+
+        it "focuses clicked options without submitting them" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+                location = B.Location (0, 0)
+            (_, focused) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp
+                    (AppAskChoice ChoicePlanning "Planning question" "Choose" 0
+                        [("first", ""), ("second", "")] reply)
+                , FullscreenScriptMouseDown (ChoiceRow 1) V.BLeft location
+                , FullscreenScriptMouseRelease (ChoiceRow 1) V.BLeft location
+                , FullscreenScriptHalt
+                ]
+            fmap ((.choiceIndex) . (.dialogOverlay)) focused.appChoice
+                `shouldBe` Just 1
+            atomically (tryReadTMVar reply) `shouldReturn` Nothing
+
+        it "submits the focused option with the explicit submit button" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            (_, submitted) <- runFullscreenScriptWithState
+                (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                [ FullscreenScriptApp
+                    (AppAskChoice ChoicePlanning "Planning question" "Choose" 1
+                        [("first", ""), ("second", "")] reply)
+                , FullscreenScriptMouseDown PlanningSubmit V.BLeft (B.Location (0, 0))
+                , FullscreenScriptMouseRelease PlanningSubmit V.BLeft (B.Location (0, 0))
+                , FullscreenScriptHalt
+                ]
+            atomically (tryReadTMVar reply) `shouldReturn` Just (Just 1)
+            isNothing submitted.appChoice `shouldBe` True
+
+        it "scrolls the conversation only when the mouse is outside the question panel" do
+            let ui = reduceUi
+                    (UiAssistantHistory (Text.unlines (replicate 100 "Earlier explanation.")))
+                    initialUiState
+            runtime <- newScriptRuntime ui
+            reply <- newEmptyTMVarIO
+            let initial = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    { appUi = ui }
+            (_, panelScrolled) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp
+                    (AppAskChoice ChoicePlanning "Planning question" "Choose" 0
+                        [("first", "")] reply)
+                , FullscreenScriptMouseDown (ChoiceRow 0) V.BScrollUp (B.Location (0, 0))
+                , FullscreenScriptHalt
+                ]
+            panelScrolled.appUi.uiFollow `shouldBe` True
+            (_, conversationScrolled) <- runFullscreenScriptWithState panelScrolled
+                [ FullscreenScriptMouseDown ConversationViewport V.BScrollUp (B.Location (0, 0))
+                , FullscreenScriptHalt
+                ]
+            conversationScrolled.appUi.uiFollow `shouldBe` False
+            atomically (tryReadTMVar reply) `shouldReturn` Nothing
+
+        it "pages the conversation without changing or submitting the answer" do
+            let ui = reduceUi
+                    (UiAssistantHistory
+                        (Text.unlines (replicate 100 "Earlier explanation.")))
+                    initialUiState
+            runtime <- newScriptRuntime ui
+            reply <- newEmptyTMVarIO
+            let initial = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    { appUi = ui }
+            (_, scrolled) <- runFullscreenScriptWithState initial
+                [ FullscreenScriptApp
+                    (AppAskChoice ChoicePlanning "Planning question" "Choose" 0
+                        [("first", ""), ("second", "")] reply)
+                , FullscreenScriptVty (V.EvKey V.KPageUp [])
+                , FullscreenScriptHalt
+                ]
+            scrolled.appUi.uiFollow `shouldBe` False
+            fmap ((.choiceIndex) . (.dialogOverlay)) scrolled.appChoice
+                `shouldBe` Just 0
+            atomically (tryReadTMVar reply) `shouldReturn` Nothing
+
+        it "scrolls through an oversized option without losing its focus" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            let initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+                option = Text.unlines
+                    (replicate 30 "Detailed explanation." <> ["OPTIONTAIL"])
+            (_, frames, scrolled) <- runFullscreenScriptDetailed initial
+                ([ FullscreenScriptApp
+                    (AppAskChoice ChoicePlanning "Planning question" "Choose" 0
+                        [(option, "")] reply)
+                 ] <> replicate 40
+                    (FullscreenScriptVty (V.EvKey V.KDown [V.MMeta]))
+                   <> [FullscreenScriptHalt])
+            map renderedPictureText frames
+                `shouldSatisfy` any (Text.isInfixOf "OPTIONTAIL")
+            fmap ((.choiceIndex) . (.dialogOverlay)) scrolled.appChoice
+                `shouldBe` Just 0
+            atomically (tryReadTMVar reply) `shouldReturn` Nothing
+
+        it "keeps custom answers inline with the explanation" do
+            let explanation = "CUSTOMCONTEXT"
+                ui = reduceUi (UiAssistantHistory explanation) initialUiState
+                size = (80, 30)
+            runtime <- newScriptRuntime ui
+            let initial = (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    { appUi = ui }
+                overlay = (textOverlay "My answer" 9)
+                    { textInputMode = TextInputPlanning
+                    , textTitle = "Planning question"
+                    , textBody = "What should happen next?"
+                    }
+                state = initial
+                    { appTextPrompt =
+                        Just (PendingDialog (const (pure ())) overlay) }
+                rendered = renderedAppText size state
+            length (drawApp state) `shouldBe` length (drawApp initial)
+            rendered `shouldSatisfy` Text.isInfixOf explanation
+            rendered `shouldSatisfy` Text.isInfixOf "My answer"
+
+        it "edits and submits custom planning answers" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            (_, submitted) <- runFullscreenScriptWithState
+                (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                [ FullscreenScriptApp
+                    (AppAskText TextInputPlanning "Planning question"
+                        "What should happen next?" "My answer" reply)
+                , FullscreenScriptVty (V.EvKey (V.KChar '!') [])
+                , FullscreenScriptVty (V.EvKey V.KEnter [])
+                , FullscreenScriptHalt
+                ]
+            atomically (tryReadTMVar reply)
+                `shouldReturn` Just (Just "My answer!")
+            isNothing submitted.appTextPrompt `shouldBe` True
+
+        it "submits custom planning answers with the explicit submit button" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            (_, submitted) <- runFullscreenScriptWithState
+                (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                [ FullscreenScriptApp
+                    (AppAskText TextInputPlanning "Planning question"
+                        "What should happen next?" "My answer" reply)
+                , FullscreenScriptMouseDown PlanningSubmit V.BLeft (B.Location (0, 0))
+                , FullscreenScriptMouseRelease PlanningSubmit V.BLeft (B.Location (0, 0))
+                , FullscreenScriptHalt
+                ]
+            atomically (tryReadTMVar reply) `shouldReturn` Just (Just "My answer")
+            isNothing submitted.appTextPrompt `shouldBe` True
+
+        it "cancels the pending question with Escape" do
+            runtime <- newScriptRuntime initialUiState
+            reply <- newEmptyTMVarIO
+            (_, cancelled) <- runFullscreenScriptWithState
+                (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                [ FullscreenScriptApp
+                    (AppAskChoice ChoicePlanning "Planning question" "Choose" 0
+                        [("first", "")] reply)
+                , FullscreenScriptVty (V.EvKey V.KEsc [])
+                , FullscreenScriptHalt
+                ]
+            atomically (tryReadTMVar reply) `shouldReturn` Just Nothing
+            isNothing cancelled.appChoice `shouldBe` True
+
     describe "pending dialogs" do
         it "keeps each reply through edits and resolves simultaneous dialogs in priority order" do
             runtime <- newScriptRuntime initialUiState

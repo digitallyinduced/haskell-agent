@@ -72,6 +72,8 @@ module Agent.CLI.TUI.App
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
+    , requestFullscreenPlanningChoice
+    , requestFullscreenPlanningText
     , requestFullscreenDocument
     , requestFullscreenThemeChoice
     , requestFullscreenFilterChoice

@@ -71,14 +71,15 @@ import Agent.CLI.TUI.Types
       choiceOverlay,
       selectedChoiceIndex,
       ChoicePresentation(ChoiceOnboarding, ChoiceDialog, ChoiceDocument,
-                         ChoiceTheme),
+                         ChoiceTheme, ChoicePlanning),
       AppState(appRuntime,
                appDictation, appTextPrompt, appMetaConsole,
                appMotionElapsedMillis, appUi, appTerminalFocus),
       activeTheme,
       FullscreenRuntime(runtimeMotionMode, runtimeColor, runtimeWaveTrough),
       Name(ChoiceRow, PermissionRow, ResumeViewport,
-           ResumeSearchCursor, ResumeRow, OverlayViewport, MarkdownLink,
+           ResumeSearchCursor, ResumeRow, OverlayViewport, PlanningPanel,
+           PlanningSubmit, MarkdownLink,
            OverlayCursor, MetaConsoleCursor) )
 import Agent.CLI.Terminal ()
 import Agent.CLI.Timestamp ()
@@ -128,6 +129,7 @@ import Brick
       AttrName,
       Location(Location),
       Context(availHeight, availWidth),
+      Result(image),
       Size(Fixed, Greedy),
       VScrollBarOrientation(OnRight),
       ViewportType(Vertical),
@@ -202,7 +204,7 @@ import qualified Agent.TUI.Theme as Theme
       waveTroughForTheme )
 import qualified Agent.CLI.TUI.Transcript as Transcript ()
 import qualified Graphics.Vty as V
-    ( char )
+    ( char, imageHeight )
 import qualified Graphics.Vty.CrossPlatform as Vty ()
 
 
@@ -530,6 +532,7 @@ drawChoice appState choice
     | choice.choiceSearch = drawFilterChoice appState choice
     | otherwise = case choice.choicePresentation of
         ChoiceDialog -> drawDialogChoice appState choice
+        ChoicePlanning -> drawPlanningChoice appState choice
         ChoiceDocument -> drawDialogChoice appState choice
         ChoiceOnboarding -> drawOnboardingChoice appState choice
         ChoiceTheme -> drawDialogChoice appState choice
@@ -759,6 +762,76 @@ listAt index values
         value : _ -> Just value
         [] -> Nothing
 
+-- | Planning questions occupy their own retained section instead of obscuring
+-- the transcript. Measure only plain text here (no named extents or cursors),
+-- so short questions shrink to their contents while long questions remain
+-- independently scrollable within half the available terminal height.
+drawPlanningChoice :: AppState -> ChoiceOverlay -> Widget Name
+drawPlanningChoice appState choice =
+    Widget Greedy Fixed do
+        context <- getContext
+        let contentWidth = max 1 (context.availWidth - 5)
+            optionWidth = max 1 (contentWidth - 2)
+            prompt = terminalTxtWrap choice.choiceBody
+            rowBody (label, detail) =
+                terminalTxtWrap $
+                    label <> if Text.null detail then "" else "\n" <> detail
+            rows = choiceVisibleRows choice
+            compactFooter = context.availWidth < 60
+            footer =
+                vBox
+                    [ hBox
+                        [ clickable PlanningSubmit $
+                            withAttr Theme.strongAttr $
+                                txt (if compactFooter then "[Submit]" else "[Submit answer]")
+                        , terminalTxt $
+                            if compactFooter
+                                then " Enter · ↑/↓ choose · Esc"
+                                else "  Enter submit · ↑/↓ choose · Esc cancel"
+                        ]
+                    , terminalTxt "PgUp/PgDn history · Alt+↑/↓ details"
+                    ]
+        promptMeasurement <- render (hLimit contentWidth prompt)
+        rowMeasurements <- traverse
+            (\(_, row) -> render (hLimit optionWidth (rowBody row)))
+            rows
+        let naturalHeight =
+                V.imageHeight promptMeasurement.image + 1
+                    + sum (map (V.imageHeight . (.image)) rowMeasurements)
+            panelHeight = min
+                (max 1 (context.availHeight `div` 2))
+                (naturalHeight + 4)
+            contentHeight = max 1 (panelHeight - 4)
+            optionRow (index, row) =
+                let content = hBox
+                        [ txt (if choice.choiceIndex == index then "› " else "  ")
+                        , rowBody row
+                        ]
+                    styled
+                        | choice.choiceIndex == index =
+                            withAttr Theme.selectedAttr content
+                        | otherwise = content
+                in clickable (ChoiceRow index) styled
+        render $
+            vLimit panelHeight $
+                clickable PlanningPanel $
+                    overrideAttr Border.borderAttr Theme.borderActiveAttr $
+                        withBorderStyle unicodeRounded $
+                            borderWithLabel
+                                (waitingOverlayLabel appState choice.choiceTitle) $
+                                padLeftRight 1 $
+                                    vBox
+                                        [ vLimit contentHeight $
+                                            withVScrollBarRenderer conversationScrollbarRenderer $
+                                                withVScrollBars OnRight $
+                                                    viewport OverlayViewport Vertical $
+                                                        vBox
+                                                            [ padBottom (Pad 1) prompt
+                                                            , vBox (map optionRow rows)
+                                                            ]
+                                        , withAttr Theme.footerAttr footer
+                                        ]
+
 drawDialogChoice :: AppState -> ChoiceOverlay -> Widget Name
 drawDialogChoice appState choice =
     centerLayer $
@@ -941,7 +1014,10 @@ waitingOverlayLabel state label =
         ]
 
 drawTextPrompt :: AppState -> TextOverlay -> Widget Name
-drawTextPrompt state prompt =
+drawTextPrompt state prompt
+    | prompt.textInputMode == TextInputPlanning =
+        drawPlanningText state prompt
+    | otherwise =
     centerLayer $
         hLimitPercent 82 $
             vLimitPercent 78 $
@@ -965,6 +1041,55 @@ drawTextPrompt state prompt =
                                                 padLeftRight 1 $
                                                     renderTextDraft prompt
                                     ]
+
+drawPlanningText :: AppState -> TextOverlay -> Widget Name
+drawPlanningText state prompt =
+    Widget Greedy Fixed do
+        context <- getContext
+        let contentWidth = max 1 (context.availWidth - 5)
+            maximumHeight = max 1 (context.availHeight `div` 2)
+            draftLimit = max 1 (min 3 ((maximumHeight - 6) `div` 2))
+            (draftRows, _) = Composer.wrapDraftWindow
+                draftLimit
+                (max 1 (contentWidth - 3))
+                prompt.textDraft
+                prompt.textCursor
+            draftHeight = min draftLimit (length draftRows)
+            body = terminalTxtWrap prompt.textBody
+            compactFooter = context.availWidth < 60
+        bodyMeasurement <- render (hLimit contentWidth body)
+        let bodyHeight = max 1 $
+                min (V.imageHeight bodyMeasurement.image)
+                    (maximumHeight - 6 - draftHeight)
+        render $
+            vLimit maximumHeight $
+                clickable PlanningPanel $
+                    overrideAttr Border.borderAttr Theme.borderActiveAttr $
+                        withBorderStyle unicodeRounded $
+                            borderWithLabel
+                                (waitingOverlayLabel state prompt.textTitle) $
+                                padLeftRight 1 $
+                                    vBox
+                                        [ vLimit bodyHeight $
+                                            withVScrollBarRenderer conversationScrollbarRenderer $
+                                                withVScrollBars OnRight $
+                                                    viewport OverlayViewport Vertical body
+                                        , borderWithLabel (txt " Answer ") $
+                                            padLeftRight 1 $
+                                                vLimit draftLimit (renderTextDraft prompt)
+                                        , hBox
+                                            [ clickable PlanningSubmit $
+                                                withAttr Theme.strongAttr $
+                                                    txt (if compactFooter then "[Submit]" else "[Submit answer]")
+                                            , withAttr Theme.footerAttr $
+                                                terminalTxt $
+                                                    if compactFooter
+                                                        then " Enter · Esc cancel"
+                                                        else "  Enter submit · Esc cancel"
+                                            ]
+                                        , withAttr Theme.footerAttr $
+                                            terminalTxt "PgUp/PgDn history · Alt+↑/↓ details"
+                                        ]
 
 drawMetaConsole :: AppState -> MetaConsoleOverlay -> Widget Name
 drawMetaConsole state overlay =
@@ -1062,6 +1187,7 @@ maskedSecretText value =
 textOverlayDisplayText :: TextOverlay -> Text
 textOverlayDisplayText prompt = case prompt.textInputMode of
     TextInputPlain -> prompt.textDraft
+    TextInputPlanning -> prompt.textDraft
     TextInputSecret -> maskedSecretText prompt.textDraft
 
 -- | Secret prompts are deliberately single-line. Plain overlays preserve
@@ -1069,6 +1195,7 @@ textOverlayDisplayText prompt = case prompt.textInputMode of
 normalizeTextOverlayInsertion :: TextInputMode -> Text -> Text
 normalizeTextOverlayInsertion = \case
     TextInputPlain -> id
+    TextInputPlanning -> id
     TextInputSecret -> Text.takeWhile \character ->
         character /= '\n' && character /= '\r'
 
