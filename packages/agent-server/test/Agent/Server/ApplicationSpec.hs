@@ -4,6 +4,8 @@ import Agent.Server.Application (
     ApplicationConfig (..),
     newApplication,
  )
+import Network.HTTP.Client qualified as HTTP
+import Network.Wai.Handler.Warp qualified as Warp
 import Agent.Server.Auth
 import Agent.Server.Backend (Backend (..), SessionMutationLease (..))
 import Agent.Server.Supervisor
@@ -69,6 +71,30 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "agent-server WAI application" do
+    it "flushes an idle event stream before the first heartbeat" do
+        withApplication immediateRunner \application ->
+            Warp.testWithApplication (pure application) \port ->
+                bracket
+                    (HTTP.newManager HTTP.defaultManagerSettings)
+                    HTTP.closeManager
+                    \manager -> do
+                        initialRequest <-
+                            HTTP.parseRequest
+                                ("http://127.0.0.1:" <> show port <> "/v1/events")
+                        let request = initialRequest
+                                { HTTP.requestHeaders = validHeaders
+                                , HTTP.proxy = Nothing
+                                }
+                        -- Include response headers in the deadline: waiting only
+                        -- for the body would miss delayed stream establishment.
+                        result <- timeout (2 * 1000 * 1000) $
+                            HTTP.withResponse request manager \response -> do
+                                HTTP.responseStatus response `shouldBe` status200
+                                lookup "Content-Type" (HTTP.responseHeaders response)
+                                    `shouldBe` Just "text/event-stream"
+                                HTTP.brReadSome (HTTP.responseBody response) 13
+                        result `shouldBe` Just ": connected\n\n"
+
     it "decodes image-only turn requests" do
         let decode body = eitherDecode body :: Either String CreateTurnRequest
         request <-

@@ -149,6 +149,7 @@ test-suite agent-server-test
                     , directory
                     , filepath
                     , hspec >= 2.11 && < 2.12
+                    , http-client
                     , http-types
                     , safe-exceptions
                     , stm
@@ -158,3 +159,4 @@ test-suite agent-server-test
                     , unix
                     , wai
                     , wai-extra
+                    , warp
