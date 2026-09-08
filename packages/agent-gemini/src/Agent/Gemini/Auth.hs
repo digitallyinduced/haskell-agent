@@ -38,6 +38,7 @@ import Control.Exception.Safe
     ( IOException
     , SomeException
     , bracket
+    , bracketOnError
     , finally
     , fromException
     , tryAny
@@ -471,13 +472,16 @@ authenticateGoogleAccount oauthOptions codeAssistOptions presentUrl =
 --------------------------------------------------------------------------------
 
 openLoopbackSocket :: IO Net.Socket
-openLoopbackSocket = do
-    socket <- Net.socket Net.AF_INET Net.Stream Net.defaultProtocol
-    Net.setSocketOption socket Net.ReuseAddr 1
-    Net.bind socket
-        (Net.SockAddrInet 0 (Net.tupleToHostAddress (127, 0, 0, 1)))
-    Net.listen socket 1
-    pure socket
+openLoopbackSocket =
+    bracketOnError
+        (Net.socket Net.AF_INET Net.Stream Net.defaultProtocol)
+        Net.close
+        \socket -> do
+            Net.setSocketOption socket Net.ReuseAddr 1
+            Net.bind socket
+                (Net.SockAddrInet 0 (Net.tupleToHostAddress (127, 0, 0, 1)))
+            Net.listen socket 1
+            pure socket
 
 loopbackRedirectUri :: Net.Socket -> IO Text
 loopbackRedirectUri socket = Net.getSocketName socket >>= \case
