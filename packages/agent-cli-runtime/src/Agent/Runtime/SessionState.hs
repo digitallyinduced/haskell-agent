@@ -5,20 +5,45 @@
 -- with different restart lifetimes; keeping those references does not duplicate
 -- their contents or reset them when the frontend environment is rebuilt.
 module Agent.Runtime.SessionState
-    ( SessionState(..)
+    ( SessionState
     , newSessionState
     , newSessionStateWith
+    , restartSessionState
+    , borrowConversationRef
+    , readSessionTranscript
+    , withSessionTranscript
+    , readSessionPreviousResponseId
+    , readSessionAttachments
+    , currentSessionTranscriptGeneration
+    , evictSessionTranscript
+    , readSessionUsage
+    , addSessionUsage
+    , readLastAssistant
+    , clearLastAssistant
+    , readAutomaticCompaction
+    , installAutomaticCompaction
+    , clearAutomaticCompaction
+    , takeGrokContext
+    , clearGrokContext
     , commitConversationPatch
     , restoreConsumedPromptContext
     , takeStartupContext
     ) where
 
-import Agent.Loop (TokenUsage, addTokenUsage, emptyTokenUsage)
+import Agent.Loop (ImageAttachment, TokenUsage, addTokenUsage, emptyTokenUsage)
+import Agent.Responses.Types (ResponseItem)
 import Agent.Runtime.Compaction (AutomaticCompactionBoundary)
 import Agent.Runtime.ConversationStore
     ( ConversationStore
+    , TranscriptCheckpoint
+    , TranscriptGeneration
     , commitConversationTranscript
+    , currentTranscriptGeneration
+    , evictConversationTranscript
     , newConversationStore
+    , readConversationAttachments
+    , readConversationPreviousResponseId
+    , withConversationTranscript
     , writeConversationPreviousResponseId
     )
 import Agent.Runtime.TurnState
@@ -74,6 +99,80 @@ newSessionStateWith conversation startup usage compaction initialGrok = do
         , stateAutomaticCompaction = compaction
         }
 
+-- | Rebuild the per-run state without copying or resetting references owned by
+-- the surrounding session. The caller must have stopped the previous run.
+restartSessionState :: SessionState -> Maybe Text -> IO SessionState
+restartSessionState state =
+    newSessionStateWith state.stateConversation state.stateStartupContext
+        state.stateUsage state.stateAutomaticCompaction
+
+-- | Migration seam for legacy attachment/model-selection APIs that still
+-- accept the host-owned conversation slot. Do not use this to replace the slot
+-- during a running turn. New consumers should use runtime operations instead.
+-- This is deliberately the only reference exposed by the session state.
+borrowConversationRef :: SessionState -> IORef ConversationStore
+borrowConversationRef state = state.stateConversation
+
+readSessionTranscript :: SessionState -> IO [ResponseItem]
+readSessionTranscript state = withSessionTranscript state pure
+
+withSessionTranscript :: SessionState -> ([ResponseItem] -> IO a) -> IO a
+withSessionTranscript state action =
+    readIORef state.stateConversation >>= \store ->
+        withConversationTranscript store action
+
+readSessionPreviousResponseId :: SessionState -> IO (Maybe Text)
+readSessionPreviousResponseId state =
+    readIORef state.stateConversation >>= readConversationPreviousResponseId
+
+readSessionAttachments :: SessionState -> IO [ImageAttachment]
+readSessionAttachments state =
+    readIORef state.stateConversation >>= readConversationAttachments
+
+currentSessionTranscriptGeneration :: SessionState -> IO TranscriptGeneration
+currentSessionTranscriptGeneration state =
+    readIORef state.stateConversation >>= currentTranscriptGeneration
+
+evictSessionTranscript
+    :: SessionState -> TranscriptGeneration -> TranscriptCheckpoint -> IO Bool
+evictSessionTranscript state generation checkpoint =
+    readIORef state.stateConversation >>= \store ->
+        evictConversationTranscript store generation checkpoint
+
+readSessionUsage :: SessionState -> IO TokenUsage
+readSessionUsage state = readIORef state.stateUsage
+
+addSessionUsage :: SessionState -> TokenUsage -> IO ()
+addSessionUsage state delta =
+    atomicModifyIORef' state.stateUsage \current ->
+        (addTokenUsage current delta, ())
+
+readLastAssistant :: SessionState -> IO (Maybe Text)
+readLastAssistant state = readIORef state.stateLastAssistant
+
+clearLastAssistant :: SessionState -> IO ()
+clearLastAssistant state = writeIORef state.stateLastAssistant Nothing
+
+readAutomaticCompaction :: SessionState -> IO (Maybe AutomaticCompactionBoundary)
+readAutomaticCompaction state = readIORef state.stateAutomaticCompaction
+
+installAutomaticCompaction :: SessionState -> AutomaticCompactionBoundary -> IO ()
+installAutomaticCompaction state boundary =
+    writeIORef state.stateAutomaticCompaction (Just boundary)
+
+clearAutomaticCompaction :: SessionState -> IO ()
+clearAutomaticCompaction state = writeIORef state.stateAutomaticCompaction Nothing
+
+-- | Consume a prepared first-turn prefix once. Loading a fallback remains a
+-- host operation, outside mutation of the session state.
+takeGrokContext :: SessionState -> IO (Maybe Text)
+takeGrokContext state =
+    atomicModifyIORef' state.stateGrokFirstTurnContext \pending ->
+        (Nothing, pending)
+
+clearGrokContext :: SessionState -> IO ()
+clearGrokContext state = writeIORef state.stateGrokFirstTurnContext Nothing
+
 takeStartupContext :: SessionState -> IO (Maybe Text)
 takeStartupContext state =
     atomicModifyIORef' state.stateStartupContext \pending ->
@@ -121,8 +220,7 @@ commitConversationPatch state patch = do
         (case patch.patchGrokFirstTurnContext of
             KeepGrokContext -> Nothing
             RestoreGrokContext consumed -> Just consumed)
-    atomicModifyIORef' state.stateUsage \current ->
-        (addTokenUsage current patch.patchUsageDelta, ())
+    addSessionUsage state patch.patchUsageDelta
     case patch.patchLastAssistant of
         KeepField -> pure ()
         SetField value -> writeIORef state.stateLastAssistant value

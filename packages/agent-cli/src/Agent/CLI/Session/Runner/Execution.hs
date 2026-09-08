@@ -379,7 +379,7 @@ data SessionControlRuntime = SessionControlRuntime
     , controlRenderStateRef :: !(IORef RenderState)
     , controlAllowedToolsRef :: !(IORef (Set.Set Text.Text))
     , controlComputerUseEnabledRef :: !(IORef Bool)
-    , controlLastAssistantRef :: !(IORef (Maybe Text.Text))
+    , controlReadLastAssistant :: !(IO (Maybe Text.Text))
     , controlUnavailableProvidersRef :: !(IORef (Set.Set Provider))
     , controlStartupUnavailableRef :: !(IORef (Maybe (STM ApiError)))
     , controlRestartEffortRef :: !(IORef (Maybe Text.Text))
@@ -422,7 +422,6 @@ newSessionControlRuntime host SessionRequest{..} = do
                 (lookupAppTool
                     computerToolName
                     (sessionDirectTools refreshTools codeModeRuntime))
-    let lastAssistantRef = host.hostSessionState.stateLastAssistant
     unavailableProvidersRef <- newIORef unavailableProviders
     startupUnavailableRef <- newIORef startupUnavailable
     restartEffortRef <- newIORef Nothing
@@ -510,7 +509,7 @@ newSessionControlRuntime host SessionRequest{..} = do
         , controlRenderStateRef = renderStateRef
         , controlAllowedToolsRef = allowedToolsRef
         , controlComputerUseEnabledRef = computerUseEnabledRef
-        , controlLastAssistantRef = lastAssistantRef
+        , controlReadLastAssistant = RuntimeState.readLastAssistant host.hostSessionState
         , controlUnavailableProvidersRef = unavailableProvidersRef
         , controlStartupUnavailableRef = startupUnavailableRef
         , controlRestartEffortRef = restartEffortRef
@@ -547,7 +546,6 @@ buildSkillContextRuntime
     stderrHandle = host.hostStderrHandle
     loadsHostWorkspaceContext = host.hostLoadsWorkspaceContext
     renderStateRef = controls.controlRenderStateRef
-    lastAssistantRef = controls.controlLastAssistantRef
     steeringInputs = controls.controlSteeringInputs
     agentViewportRuntime = controls.controlAgentViewportRuntime
     installSkills context queueContext skills = do
@@ -626,9 +624,9 @@ buildSkillContextRuntime
         writeIORef usageRef emptyTokenUsage
         writeIORef contextOccupancyRef Nothing
         modifyIORef' renderStateRef clearRenderTokenRate
-        writeIORef lastAssistantRef Nothing
+        RuntimeState.clearLastAssistant host.hostSessionState
         writeIORef subagentSessions Map.empty
-        writeIORef host.hostSessionState.stateGrokFirstTurnContext Nothing
+        RuntimeState.clearGrokContext host.hostSessionState
         resetAgentViewport agentViewportRuntime
         case multiCtx of
             Just ctx -> resetSubagentRegistry ctx.multiRegistry
@@ -1699,13 +1697,13 @@ installSessionActions
                     ReplCopy request
                         | request.copyResponseIndex == 1
                         , Nothing <- request.copyDestination ->
-                        readIORef controls.controlLastAssistantRef
+                        controls.controlReadLastAssistant
                             >>= copyImmediate
                                 "last response"
                                 "no assistant response to copy"
                     ReplCopyCode index -> do
                         answer <-
-                            readIORef controls.controlLastAssistantRef
+                            controls.controlReadLastAssistant
                         let label =
                                 "code block " <> Text.pack (show index)
                         copyImmediate
@@ -1714,7 +1712,7 @@ installSessionActions
                             (answer >>= fencedCodeBlock index)
                     ReplCopyDiff -> do
                         answer <-
-                            readIORef controls.controlLastAssistantRef
+                            controls.controlReadLastAssistant
                         copyImmediate
                             "diff block"
                             "no diff block was found"

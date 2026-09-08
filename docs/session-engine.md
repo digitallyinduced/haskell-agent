@@ -96,12 +96,35 @@ and restoration preserves concurrently refreshed context.
 This is a mutable conversation owner, not a scheduler or an atomic transaction
 across references. Persistence and frontend composition still belong to the host.
 
+### Opaque session state
+
+`SessionState` no longer exports its constructor or mutable fields. Turn
+execution and frontend consumers use runtime operations for transcript
+residency, continuation/attachment reads, usage accumulation, last-assistant
+reads, compaction boundaries, and consumed prompt context. This keeps the
+existing ordered patch protocol in the runtime rather than duplicating it in
+frontends. Usage deltas remain individually atomic; this does not introduce
+cross-field transactions or change the exception/commit ordering above.
+
+`newSessionStateWith` remains a compatibility construction boundary: the host
+supplies conversation, generated-startup-context, usage, and compaction
+references whose lifetimes can span provider restarts. `restartSessionState`
+preserves those references while allocating fresh per-run framing and
+last-assistant state. The previous run must have stopped before it is rebuilt.
+
+The one reference-returning migration seam, `borrowConversationRef`, is limited
+to legacy attachment and model-selection helpers that still accept the host's
+conversation slot. Ordinary transcript reads and turn execution do not use it.
+Removing this seam requires migrating those helpers and their startup callers
+together; encapsulation does not yet prevent a legacy owner from replacing the
+conversation slot. Pending-state references are not otherwise exposed.
+
 These extractions provide turn execution, process resources, and conversation
-state, not a
-complete headless session owner. The dependency graph still includes
+state, not a complete headless session owner. The dependency graph still includes
 `agent-server -> agent-cli -> agent-cli-runtime`. The server still calls
 `Agent.CLI.NativeRuntime.runNativeTurn`, which lowers native requests into
-`CliOptions`; `NativeRunHooks.nativePrepareOptions` itself accepts that type.
+`CliOptions` internally. The public native hook uses `nativeStartupPolicy`
+rather than exposing those options.
 Startup, tool composition, turn preparation, terminal state in `SessionEnv`,
 normal persistence, and auxiliary rollback application remain in the CLI.
 Server sandbox option restrictions remain on the existing path.
