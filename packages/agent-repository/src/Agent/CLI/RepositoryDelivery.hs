@@ -48,6 +48,7 @@ import Crypto.Hash (Digest, SHA1, SHA256, hash)
 import Data.Aeson ((.:), (.:?), (.!=))
 import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.Aeson.KeyMap as KeyMap
+import Agent.CLI.Session.PullRequest (pullRequestURLs, conversationPullRequestURLs)
 import Data.List (nub)
 import Data.Maybe (fromMaybe)
 import Text.Read (readMaybe)
@@ -55,7 +56,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (isAlphaNum, isHexDigit, isSpace)
+import Data.Char (isHexDigit, isSpace)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -1770,75 +1771,6 @@ parseRepositoryPullRequest repository bytes = do
         | value `elem` ["PENDING", "EXPECTED"] = 2
         | otherwise = 0
 
-
--- Only canonical public GitHub PR identities are accepted. Never pass arbitrary
--- conversation URLs to gh (or to a shell). Strip Markdown/query/fragment tails.
-pullRequestURLs :: Text -> [Text]
-pullRequestURLs = nub . go
-  where
-    go input = case Text.breakOn "https://github.com/" input of
-        (_, rest) | Text.null rest -> []
-        (prefix, rest) ->
-            let suffix = Text.drop 19 rest
-                token = Text.takeWhile (\c -> isAlphaNum c || c `elem` ("-._/" :: String)) suffix
-                remaining = Text.drop (Text.length token) suffix
-                validBoundary = Text.null prefix || not (isAlphaNum (Text.last prefix) || Text.last prefix `elem` ("/_-." :: String))
-                found = case Text.splitOn "/" token of
-                    owner : repo : "pull" : number : _
-                        | validBoundary, validName owner, validName repo
-                        , Just n <- readMaybe (Text.unpack number) :: Maybe Int
-                        , n > 0, Text.all (\c -> c >= '0' && c <= '9') number ->
-                            ["https://github.com/" <> Text.toCaseFold owner <> "/" <> Text.toCaseFold repo <> "/pull/" <> Text.pack (show n)]
-                    _ -> []
-            in found <> go remaining
-    validName name = not (Text.null name) && name /= "." && name /= ".."
-        && Text.all (\c -> c < '\128' && (isAlphaNum c || c `elem` ("-_." :: String))) name
-
--- Evidence stays local to a paragraph. Quoted references/examples do not become
--- associations. Tools must be paired with a PR operation; raw search output alone
--- cannot attach every PR it happens to mention.
-conversationPullRequestURLs :: Text -> Maybe Text -> [Aeson.Value] -> [Text]
-conversationPullRequestURLs user assistant items = nub $
-    directUser <> concatMap evidence (maybe [] pure assistant <> [user] <> messages) <> toolURLs
-  where
-    directUser = case pullRequestURLs user of
-        [url] | Text.toCaseFold (Text.strip user) == url -> [url]
-        _ -> []
-    evidence = paragraphs . Text.splitOn "\n\n"
-    paragraphs (header : list : rest)
-        | null (pullRequestURLs header)
-        , any (`elem` ["pr", "prs", "pull"]) (Text.words (Text.map wordCharacter (Text.toCaseFold header)))
-        , any (`Text.isPrefixOf` Text.stripStart list) ["- ", "* ", "1. "] =
-            paragraph (header <> "\n" <> list) <> paragraphs rest
-    paragraphs (content : rest) = paragraph content <> paragraphs rest
-    paragraphs [] = []
-    wordCharacter c = if isAlphaNum c then c else ' '
-    paragraph content
-        | any (`Text.isInfixOf` lower) ["for reference", "example", "unrelated", "see also", "beispiel", "referenz"] = []
-        | any (`Text.isInfixOf` lower) ["created", "opened", "merged", "review", "fix", "address", "implement", "update", "check", "work on", "look at", "erstellt", "gemerg", "beheb", "prüf", "bearbeit"] =
-            pullRequestURLs (Text.unlines (filter (not . Text.isPrefixOf ">" . Text.stripStart) (Text.lines content)))
-        | otherwise = []
-      where lower = Text.toCaseFold (Text.unwords (filter (null . pullRequestURLs) (Text.words content)))
-    messages = [Text.intercalate "\n" (strings content) | Aeson.Object o <- items
-        , KeyMap.lookup "type" o == Just (Aeson.String "message")
-        , Just (Aeson.String role) <- [KeyMap.lookup "role" o], role `elem` ["user", "assistant"]
-        , Just content <- [KeyMap.lookup "content" o]]
-    calls = [callId | Aeson.Object o <- items
-        , Just (Aeson.String kind) <- [KeyMap.lookup "type" o]
-        , kind `elem` ["function_call", "custom_tool_call"]
-        , Just (Aeson.String callId) <- [KeyMap.lookup "call_id" o]
-        , let body = Text.toCaseFold (Text.intercalate " " (strings (Aeson.Object o)))
-        , any (`Text.isInfixOf` body) ["gh pr create", "gh pr checkout", "gh pr merge", "gh pr review", "create_pull_request"]]
-    toolURLs = concat [pullRequestURLs (Text.intercalate "\n" (strings output))
-        | Aeson.Object o <- items
-        , Just (Aeson.String kind) <- [KeyMap.lookup "type" o]
-        , kind `elem` ["function_call_output", "custom_tool_call_output"]
-        , Just (Aeson.String callId) <- [KeyMap.lookup "call_id" o], callId `elem` calls
-        , Just output <- [KeyMap.lookup "output" o]]
-    strings (Aeson.String value) = [value]
-    strings (Aeson.Array values) = foldMap strings values
-    strings (Aeson.Object values) = foldMap strings values
-    strings _ = []
 
 -- A conversation association is independent of checkout branch and fork origin.
 pullRequestByURL :: FilePath -> Text -> IO (Either DeliveryError RepositoryPullRequest)

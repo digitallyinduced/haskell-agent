@@ -14,13 +14,12 @@ import Control.Exception.Safe (mask, tryAny)
 import Agent.CLI.MacOS.NativeGatewayBoundary (withNativeSessionBoundary, validateNativeSessionBoundary)
 import Agent.CLI.MacOS.SessionTransferBridge (withNativeSessionStore)
 import Agent.CLI.Session
-    ( SessionMeta(..), SessionTurn(..), SessionTurnPage(..), isValidSessionId
+    ( SessionMeta(..), SessionTurnPage(..), isValidSessionId
     , loadSessionHistorySnapshot, loadSessionHistoryTurnsRangeBounded )
+import Agent.CLI.Session.PullRequest (advanceSessionPullRequestIndex, sessionTurnPullRequestURLs)
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Types (renderStoreError)
 import qualified Agent.Store.Postgres.Session as PRStore
-import qualified Data.Aeson as Aeson
-import qualified Data.List as PRList
 import System.OsPath (OsPath, decodeFS)
 import Control.Monad (when)
 import Data.Text (Text)
@@ -520,24 +519,13 @@ indexSessionPullRequests pool root sessionId =
         Left err -> pure (Left err)
         Right (_, _, total) -> PRStore.loadSessionPullRequests pool sessionId >>= \case
             Left err -> pure (Left (renderStoreError err))
-            Right cached -> do
-                let (cursor, urls) = case cached of
-                        Just value@(next, _) | next <= total -> value
-                        _ -> (0, [])
-                scan total cursor urls
+            Right cached ->
+                advanceSessionPullRequestIndex loadPage savePage total cached
   where
-    scan total cursor urls
-        | cursor >= total = pure (Right urls)
-        | otherwise = loadSessionHistoryTurnsRangeBounded pool root sessionId cursor total 32 >>= \case
-            Left err -> pure (Left err)
-            Right page -> case page.pageTurns of
-                [] -> pure (Left "incomplete PR association history")
-                turns -> do
-                    let next = 1 + maximum (map fst turns)
-                        discovered = concatMap (\(_, turn) ->
-                            RepositoryDelivery.conversationPullRequestURLs turn.turnUserText turn.turnAssistantText
-                                (map Aeson.toJSON (turn.turnItems <> turn.turnDisplayItems))) (reverse turns)
-                        associated = PRList.nub (discovered <> urls)
-                    PRStore.saveSessionPullRequests pool sessionId next associated >>= \case
-                        Left err -> pure (Left (renderStoreError err))
-                        Right () -> scan total next associated
+    loadPage cursor total =
+        fmap (fmap (\page -> map (\(index, turn) -> (index, sessionTurnPullRequestURLs turn)) page.pageTurns))
+            (loadSessionHistoryTurnsRangeBounded pool root sessionId cursor total 32)
+    savePage next associated =
+        PRStore.saveSessionPullRequests pool sessionId next associated >>= \case
+            Left err -> pure (Left (renderStoreError err))
+            Right () -> pure (Right ())

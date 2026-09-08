@@ -15,11 +15,7 @@ import Agent.CLI.Session
     )
 import Agent.CLI.Session.Types (TranscriptEffect(..))
 import Agent.CLI.Render (renderToolOutputValue)
-import Agent.CLI.RepositoryDelivery (conversationPullRequestURLs)
-import qualified Data.Aeson as Aeson
-import Data.Maybe (listToMaybe)
-import Control.Applicative ((<|>))
-import qualified Data.Map.Strict as Map
+import Agent.CLI.Session.PullRequest (sessionTurnPullRequestURL)
 import Agent.CLI.Plan
     ( ProposedPlanSegment(..)
     , feedProposedPlanStream
@@ -75,40 +71,6 @@ import Agent.TUI.Model
 import Data.Foldable (toList)
 import qualified Data.Sequence as Seq
 import qualified Data.Text as Text
-
-sessionTurnPullRequestURL :: SessionTurn -> Maybe Text.Text
-sessionTurnPullRequestURL turn =
-    firstURL "" turn.turnAssistantText []
-        <|> snd (foldl' inspectItem (Map.empty, Nothing)
-            (turn.turnItems <> turn.turnDisplayItems))
-        <|> firstURL turn.turnUserText Nothing []
-  where
-    firstURL :: Text.Text -> Maybe Text.Text -> [ResponseItem] -> Maybe Text.Text
-    firstURL user assistant items =
-        listToMaybe (conversationPullRequestURLs user assistant (map Aeson.toJSON items))
-    -- The shared detector returns a set of associations, not recency order.
-    -- Keep the newest message/output evidence, pairing each output only with
-    -- its preceding call, so an old PR in the user prompt cannot replace the
-    -- PR just created during this turn.
-    inspectItem current@(calls, latest) item =
-        case item of
-            FunctionCallItem call ->
-                (Map.insert call.callId item calls, latest)
-            CustomToolCallItem call ->
-                (Map.insert call.callId item calls, latest)
-            FunctionCallOutputItem output ->
-                inspectOutput output.callId
-            CustomToolCallOutputItem output ->
-                inspectOutput output.callId
-            MessageItem _ ->
-                (calls, firstURL "" Nothing [item] <|> latest)
-            _ -> current
-      where
-        inspectOutput callId =
-            case Map.lookup callId calls of
-                Nothing -> current
-                Just call ->
-                    (calls, firstURL "" Nothing [call, item] <|> latest)
 
 sessionHistoryPage
     :: HistoryGeneration

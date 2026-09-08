@@ -21,8 +21,20 @@ import Agent.Store.Postgres
     , trustedPool
     )
 import Agent.Store.Postgres.Managed (stopManagedPostgres)
+import Agent.Store.Postgres.Connection (withSession)
+import Agent.Store.Postgres.Config (ManagedPostgresConfig(..), ManagedPostgresPaths(..))
+import qualified Hasql.Session as Hasql
 import Agent.Store.Postgres.Session
 import Agent.Store.SessionItem
+
+-- Session temp roots can be long; leave room for PostgreSQL's socket filename.
+sessionTestPostgresConfig :: FilePath -> ManagedPostgresConfig
+sessionTestPostgresConfig stateDirectory =
+    let config = defaultManagedPostgresConfig stateDirectory ""
+    in config
+        { postgresPaths = config.postgresPaths
+            { postgresSocketDirectory = stateDirectory <> "/socket" }
+        }
 
 spec :: Spec
 spec = describe "PostgreSQL session schema" do
@@ -92,7 +104,7 @@ spec = describe "PostgreSQL session schema" do
     it "round-trips response items, tool calls, and outputs through relational rows" $
         withSystemTempDirectory "ha" \stateDirectory -> do
             let
-                config = defaultManagedPostgresConfig stateDirectory ""
+                config = sessionTestPostgresConfig stateDirectory
                 cleanup = do
                     _ <- stopManagedPostgres config
                     pure ()
@@ -273,9 +285,19 @@ spec = describe "PostgreSQL session schema" do
                                             })
                             createSession pool metadata
                                 `shouldReturn` Right True
+                            -- Simulate an older client before and after the
+                            -- recency cache is built. Its cursor and ordering
+                            -- must never be accepted as current-format data.
+                            withSession pool (Hasql.script
+                                "INSERT INTO harness.session_pull_requests (session_id, next_turn_index, urls) SELECT session_id, 5, ARRAY['https://github.com/o/app/pull/1'] FROM harness.sessions WHERE session_key = 'session-1'")
+                                `shouldReturn` Right ()
                             loadSessionPullRequests pool "session-1" `shouldReturn` Right Nothing
                             let prURLs = ["https://github.com/o/app/pull/1", "https://github.com/o/runtime/pull/2"]
                             saveSessionPullRequests pool "session-1" 5 prURLs `shouldReturn` Right ()
+                            loadSessionPullRequests pool "session-1" `shouldReturn` Right (Just (5, prURLs))
+                            withSession pool (Hasql.script
+                                "UPDATE harness.session_pull_requests SET next_turn_index = 6, urls = ARRAY[]::text[] WHERE session_id = (SELECT session_id FROM harness.sessions WHERE session_key = 'session-1')")
+                                `shouldReturn` Right ()
                             loadSessionPullRequests pool "session-1" `shouldReturn` Right (Just (5, prURLs))
                             saveSessionPullRequests pool "session-1" 3 [] `shouldReturn` Right ()
                             loadSessionPullRequests pool "session-1" `shouldReturn` Right (Just (5, prURLs))
@@ -948,7 +970,7 @@ spec = describe "PostgreSQL session schema" do
     it "keeps compaction as a model checkpoint while paging visual history across it" $
         withSystemTempDirectory "ha" \stateDirectory -> do
             let
-                config = defaultManagedPostgresConfig stateDirectory ""
+                config = sessionTestPostgresConfig stateDirectory
                 cleanup = do
                     _ <- stopManagedPostgres config
                     pure ()
@@ -1106,7 +1128,7 @@ spec = describe "PostgreSQL session schema" do
     it "clips visual history at an explicit reset, not at compaction" $
         withSystemTempDirectory "ha" \stateDirectory -> do
             let
-                config = defaultManagedPostgresConfig stateDirectory ""
+                config = sessionTestPostgresConfig stateDirectory
                 cleanup = do
                     _ <- stopManagedPostgres config
                     pure ()
