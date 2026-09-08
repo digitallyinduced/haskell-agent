@@ -128,6 +128,7 @@ import Agent.CLI.Terminal
     , TerminalKind(..)
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
+    , remoteLinkInstructions
     )
 import Agent.Loop (ImageAttachment(..), LoopEvent(..), emptyTurnOutput)
 import Brick
@@ -160,7 +161,8 @@ import Agent.TUI.Presentation
 import Agent.TUI.Motion
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.Async (waitCatch)
-import Control.Exception.Safe (bracket_)
+import Control.Exception.Safe (bracket, bracket_)
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Control.Exception (AsyncException(UserInterrupt))
 import qualified Control.Exception as Exception
 import Control.Concurrent.STM
@@ -180,7 +182,7 @@ import Data.IORef
     , readIORef
     , writeIORef
     )
-import Data.Maybe (isNothing)
+import Data.Maybe (isJust, isNothing)
 import qualified Data.Map.Strict as Map
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
@@ -1535,6 +1537,72 @@ spec = do
             V.shutdown wrapped
             readIORef events `shouldReturn` [Left reset, Right ()]
 
+    describe "fullscreen choice links" do
+        it "shows SSH link feedback once after repeated clicks without resolving the choice" do
+            bracket
+                (lookupEnv "SSH_CONNECTION")
+                (\previous -> maybe (unsetEnv "SSH_CONNECTION")
+                    (setEnv "SSH_CONNECTION") previous)
+                \_ -> do
+                    setEnv "SSH_CONNECTION" "192.0.2.1 1000 192.0.2.2 22"
+                    runtime <- newScriptRuntime initialUiState
+                    replies <- newIORef (0 :: Int)
+                    let name = MarkdownLink "https://example.com/connect"
+                        body = "[Sign in](https://example.com/connect)"
+                        initialState =
+                            (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                                { appChoice = Just $
+                                    PendingDialog
+                                        (const (modifyIORef' replies (+ 1)))
+                                        (choiceOverlay False) { choiceBody = body }
+                                }
+                        click =
+                            [ FullscreenScriptMouseDown name V.BLeft (B.Location (0, 0))
+                            , FullscreenScriptMouseRelease name V.BLeft (B.Location (0, 0))
+                            ]
+                    (_, finalState) <-
+                        runFullscreenScriptWithState initialState
+                            (click <> click <> [FullscreenScriptHalt])
+                    fmap (.dialogOverlay.choiceBody) finalState.appChoice
+                        `shouldBe` Just (body <> "\n\n" <> remoteLinkInstructions)
+                    finalState.appPressedControl `shouldBe` Nothing
+                    readIORef replies `shouldReturn` 0
+
+        it "records a link press without resolving the choice" do
+            runtime <- newScriptRuntime initialUiState
+            replies <- newIORef (0 :: Int)
+            let name = MarkdownLink "https://example.com/connect"
+                initialState =
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                        { appChoice = Just $
+                            PendingDialog
+                                (const (modifyIORef' replies (+ 1)))
+                                (choiceOverlay False)
+                        }
+            (_, pressed) <-
+                runFullscreenScriptWithState initialState
+                    [ FullscreenScriptMouseDown name V.BLeft (B.Location (0, 0))
+                    , FullscreenScriptHalt
+                    ]
+            pressed.appPressedControl `shouldBe` Just name
+            isJust pressed.appChoice `shouldBe` True
+            readIORef replies `shouldReturn` 0
+
+        it "does not record a right-button link press" do
+            runtime <- newScriptRuntime initialUiState
+            let name = MarkdownLink "https://example.com/connect"
+                initialState =
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                        { appChoice = Just $
+                            PendingDialog (const (pure ())) (choiceOverlay False)
+                        }
+            (_, pressed) <-
+                runFullscreenScriptWithState initialState
+                    [ FullscreenScriptMouseDown name V.BRight (B.Location (0, 0))
+                    , FullscreenScriptHalt
+                    ]
+            pressed.appPressedControl `shouldBe` Nothing
+
     describe "fullscreen transcript hover" do
         it "tracks pointer motion without selecting the transcript row" do
             runtime <- newScriptRuntime initialUiState
@@ -2278,6 +2346,8 @@ spec = do
 data FullscreenScriptEvent
     = FullscreenScriptApp !AppEvent
     | FullscreenScriptVty !V.Event
+    | FullscreenScriptMouseDown !Name !V.Button !B.Location
+    | FullscreenScriptMouseRelease !Name !V.Button !B.Location
     | FullscreenScriptMouseUp !Name !B.Location
     | FullscreenScriptHalt
 
@@ -2878,6 +2948,12 @@ runFullscreenScriptDetailedAt bounds initialState script = do
                     fullscreenApp.appHandleEvent (AppEvent event)
                 AppEvent (FullscreenScriptVty event) ->
                     fullscreenApp.appHandleEvent (VtyEvent event)
+                AppEvent (FullscreenScriptMouseDown name button location) ->
+                    fullscreenApp.appHandleEvent
+                        (MouseDown name button [] location)
+                AppEvent (FullscreenScriptMouseRelease name button location) ->
+                    fullscreenApp.appHandleEvent
+                        (MouseUp name (Just button) location)
                 AppEvent (FullscreenScriptMouseUp name location) ->
                     fullscreenApp.appHandleEvent
                         (MouseUp name Nothing location)

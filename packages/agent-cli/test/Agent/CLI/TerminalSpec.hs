@@ -1,11 +1,30 @@
 module Agent.CLI.TerminalSpec (spec) where
 
 import Agent.CLI.Terminal
+import Control.Exception.Safe (bracket)
+import Control.Monad (forM_)
 import qualified Data.Text as Text
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "SSH session detection" do
+        it "does not classify a local terminal as SSH" do
+            withSshEnvironment Nothing $
+                isSshSession `shouldReturn` False
+
+        it "recognizes each SSH environment marker independently" do
+            forM_ ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"] \name ->
+                withSshEnvironment (Just (name, "connection")) $
+                    isSshSession `shouldReturn` True
+
+        it "ignores empty SSH markers" do
+            withSshEnvironment Nothing do
+                forM_ ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"] \name ->
+                    setEnv name ""
+                isSshSession `shouldReturn` False
+
     describe "terminal protocol encoders" do
         it "reports an escaped working directory" do
             osc7WorkingDirectory "/tmp/a b"
@@ -63,3 +82,17 @@ spec = do
         it "drops an incomplete trailing CSI sequence" do
             stripAnsi "ready\ESC[38;5"
                 `shouldBe` "ready"
+
+withSshEnvironment :: Maybe (String, String) -> IO a -> IO a
+withSshEnvironment marker action =
+    bracket
+        (traverse (\name -> (name,) <$> lookupEnv name) names)
+        (mapM_ restore)
+        \_ -> do
+            mapM_ unsetEnv names
+            forM_ marker (uncurry setEnv)
+            action
+  where
+    names = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+    restore (name, Nothing) = unsetEnv name
+    restore (name, Just value) = setEnv name value

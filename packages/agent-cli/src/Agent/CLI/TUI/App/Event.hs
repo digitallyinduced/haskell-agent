@@ -1172,6 +1172,8 @@ handleChoiceMouseDown
     -> EventM Name AppState ()
 handleChoiceMouseDown name button =
     case (name, button) of
+        (link@MarkdownLink{}, V.BLeft) ->
+            Composer.handleControlMouseDown link
         (ChoiceRow index, V.BLeft) ->
             Composer.handleControlMouseDown (ChoiceRow index)
         (ChoiceRow _, V.BScrollUp) ->
