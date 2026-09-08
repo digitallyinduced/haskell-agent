@@ -36,6 +36,7 @@ import System.IO ( Handle, stderr, stdout )
 import System.OsPath ( OsPath )
 
 import qualified Agent.MCP as MCP
+import Agent.Tools.ResourceArbiter (ToolResourceArbiter)
 
 data ActiveHttpAuth = ActiveHttpAuth
     { activeHttpGeneration :: !Int
@@ -48,6 +49,7 @@ data AgentProcessRuntime = AgentProcessRuntime
     { processMcpSupervisor :: !MCP.McpSupervisor
     , processIntegrationSupervisor :: !IntegrationSupervisor
     , processSessionThreads :: !SessionThreadManager
+    , processToolResourceArbiter :: !ToolResourceArbiter
     -- | Starts the process-scoped stale-resource cleanup exactly once. Its
     -- owner joins it when the process runtime closes.
     , processStartCleanup :: !(IO () -> IO ())

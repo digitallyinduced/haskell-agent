@@ -26,6 +26,7 @@ import Agent.Tools.MultiAgents
     )
 import Agent.Tools.PlanMode (PlanModeHooks)
 import Agent.Tools.Types (AppTool, ToolEnv)
+import Agent.Tools.ResourceArbiter (ToolResourceArbiter)
 import Agent.Dialect (DialectId)
 import Control.Concurrent.MVar (MVar)
 import Data.IORef (IORef)
@@ -66,6 +67,7 @@ data SubagentRuntime = SubagentRuntime
     , subagentPlanHooks :: !PlanModeHooks
     , subagentSkillRoots :: !(IORef [OsPath])
     , subagentAllowedRoots :: !(IORef [OsPath])
+    , subagentToolResourceArbiter :: !ToolResourceArbiter
     , subagentRootAccessRequest :: !(IORef (Maybe (OsPath -> IO Bool)))
     , subagentSessionTmp :: !(IORef (Maybe OsPath))
     , subagentMcpTools :: ![AppTool]

@@ -228,6 +228,8 @@ runNativeOptions runtime output cwd hooks options =
                 runtime.nativeIntegrationSupervisor
             , processSessionThreads =
                 runtime.nativeProcessCore.nativeSessionThreads
+            , processToolResourceArbiter =
+                runtime.nativeProcessCore.nativeToolResourceArbiter
             , processStartCleanup =
                 runtime.nativeProcessCore.nativeStartCleanup
             , processMcpElicitation =

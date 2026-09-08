@@ -44,6 +44,7 @@ module Agent.ToolDispatch
     , dispatchToolHandler
     , dispatchToolHandlerDetailed
     , handlerName
+    , wrapToolHandler
     , toolArgumentsValue
     , decodeToolArguments
     ) where
@@ -327,6 +328,20 @@ data ToolHandler = ToolHandler
         -> Text
         -> IO (Either Text ToolHandlerResult)
     }
+
+-- | Wrap actual handler execution without losing canonical argument decoding,
+-- streaming updates, rich results, or the original provider call.
+wrapToolHandler
+    :: (ToolCall
+        -> IO (Either Text ToolHandlerResult)
+        -> IO (Either Text ToolHandlerResult))
+    -> ToolHandler
+    -> ToolHandler
+wrapToolHandler wrap handler =
+    handler
+        { toolHandlerRun = \emit call input ->
+            wrap call (handler.toolHandlerRun emit call input)
+        }
 
 typedTool :: Text -> Decoder args -> (args -> IO (Either Text Text)) -> ToolHandler
 typedTool name decoder run =

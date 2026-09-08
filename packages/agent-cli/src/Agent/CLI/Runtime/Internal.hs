@@ -86,6 +86,8 @@ import Agent.CLI.Status
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Worktree ( isUnderWorktreeRoot, worktreeRoot )
 import Agent.Tools.Types (defaultToolEnv)
+import Agent.Tools.ResourceArbiter
+    ( newToolResourceArbiter, closeToolResourceArbiter )
 import Control.Concurrent.Async ( withAsync )
 import Control.Concurrent.MVar ( newEmptyMVar, putMVar, takeMVar )
 import Control.Exception.Safe ( finally, mask_, onException )
@@ -221,6 +223,7 @@ runAgentWithRestarts options =
                 elicitationRef <- newIORef Nothing
                 rootsRef <- newIORef Nothing
                 samplingRef <- newIORef Nothing
+                toolResourceArbiter <- newToolResourceArbiter 1024
                 cleanupStarted <- newIORef False
                 cleanupRequest <- newEmptyMVar
                 -- Cleanup is intentionally process-scoped rather than
@@ -257,6 +260,7 @@ runAgentWithRestarts options =
                             , processIntegrationSupervisor =
                                 integrationSupervisor
                             , processSessionThreads = sessionThreads
+                            , processToolResourceArbiter = toolResourceArbiter
                             , processStartCleanup = startCleanup
                             , processMcpElicitation = elicitationRef
                             , processMcpRoots = rootsRef
@@ -267,7 +271,8 @@ runAgentWithRestarts options =
                         (runAgentWithRuntime
                             processRuntime foregroundRunMode options)
                         `finally`
-                            (closeSessionThreadManager sessionThreads
+                            (closeToolResourceArbiter toolResourceArbiter
+                                `finally` closeSessionThreadManager sessionThreads
                                 `finally`
                                     (MCP.closeMcpSupervisor
                                         mcpSupervisor
