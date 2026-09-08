@@ -719,7 +719,7 @@ handleShowSessionInfoAction runtime = do
     let env = runtime.actionEnv
     color <- resolveColor stdout
     params <- readSessionRequestParams env.sessionParams
-    usage <- readIORef env.sessionState.stateUsage
+    usage <- RuntimeState.readSessionUsage env.sessionState
     shellMode <- env.sessionShellMode
     (persistenceState, sessionId, sessionTitle) <-
         case env.sessionPersist of

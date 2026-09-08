@@ -301,8 +301,7 @@ handleSelection
 handleSelection
         env@SessionEnv
             { sessionRender = render
-            , sessionState = RuntimeState.SessionState
-                { stateConversation = conversationRef }
+            , sessionState = sessionState
             , sessionProvider = provider
             , sessionConnection = connectionId
             , sessionDialect = dialect
@@ -382,7 +381,7 @@ handleSelection
                             choice.modelTarget.targetModelId
                             choice.modelTarget.targetWireModelId
                             choice.modelTarget.targetDialect
-                            paramsRef render conversationRef persist
+                            paramsRef render (RuntimeState.borrowConversationRef sessionState) persist
                         env.sessionRefreshRequestParams
                         displayInfo message $
                             Text.putStrLn
@@ -470,8 +469,7 @@ chooseModel env@SessionEnv
     , sessionParams = paramsRef
     , sessionWorkspace = WorkspaceContext{home, projectRoot}
     , sessionRender = render
-    , sessionState = RuntimeState.SessionState
-        { stateConversation = conversationRef }
+    , sessionState = sessionState
     , sessionPersist = persist
     } next = do
     color <- resolveColor stderr
@@ -517,7 +515,7 @@ chooseModel env@SessionEnv
                     choice.modelTarget.targetModelId
                     choice.modelTarget.targetWireModelId
                     choice.modelTarget.targetDialect
-                    paramsRef render conversationRef persist
+                    paramsRef render (RuntimeState.borrowConversationRef sessionState) persist
                 env.sessionRefreshRequestParams
                 setSessionEffort env selectedEffort
                 selectionInfo env message $

@@ -76,11 +76,7 @@ import Agent.CLI.SessionEnv
     , SessionEnv(..)
     )
 import Agent.CLI.Session.History
-    ( currentLiveTranscriptGeneration
-    , durableTranscriptCheckpoint
-    , evictLiveTranscript
-    , readLivePreviousResponseId
-    , withLiveTranscript
+    ( durableTranscriptCheckpoint
     )
 import Agent.CLI.SessionTitle
     ( SessionTitleResult(..)
@@ -125,7 +121,6 @@ import Agent.Loop
     , LoopResult(..)
     , TurnInput(..)
     , TurnOutput(..)
-    , addTokenUsage
     , turnInputImages
     )
 import Agent.Provider (Provider(..))
@@ -204,17 +199,17 @@ runOneTurnWithContext includeTurnContext env promptText inputs = do
     -- Automatic compaction is scoped to one enclosing user turn. A committed
     -- boundary from an earlier attempt is already represented by the live and
     -- durable transcripts and must not affect this turn's suffix calculation.
-    writeIORef env.sessionState.stateAutomaticCompaction Nothing
+    RuntimeState.clearAutomaticCompaction env.sessionState
     bracket_
         env.sessionBeginWindowTitleBusy
         env.sessionEndWindowTitleBusy
         (bracket_
             env.sessionBeginTurnActivity
             env.sessionEndTurnActivity
-            (withLiveTranscript env.sessionState.stateConversation \beforeItems ->
+            (RuntimeState.withSessionTranscript env.sessionState \beforeItems ->
                 runOneTurnBusy
                     includeTurnContext env beforeItems promptText inputs))
-        `finally` writeIORef env.sessionState.stateAutomaticCompaction Nothing
+        `finally` RuntimeState.clearAutomaticCompaction env.sessionState
 
 timestampConversationBounds
     :: Persistence
@@ -295,11 +290,10 @@ prepareBusyTurn request = do
     let env = request.busyEnv
         planMode = env.sessionPlanMode
         taskPlan = env.sessionTaskPlan
-        grokFirstTurnContext = env.sessionState.stateGrokFirstTurnContext
     applyPendingSessionTitles env
     initialPlanState <- readIORef planMode.planStateRef
     when (initialPlanState == PlanPending) (activatePlanMode planMode)
-    prev <- readLivePreviousResponseId env.sessionState.stateConversation
+    prev <- RuntimeState.readSessionPreviousResponseId env.sessionState
     when request.busyIncludeTurnContext $
         env.sessionRecordImageGenerationInputs
             (concatMap turnInputImages request.busyInputs)
@@ -357,12 +351,13 @@ prepareBusyTurn request = do
                         null request.busyBeforeItems && prev == Nothing
                 if firstTurn
                     then do
-                        prefix <-
-                            takeGrokFirstTurnContext
-                                grokFirstTurnContext
+                        pending <- RuntimeState.takeGrokContext env.sessionState
+                        prefix <- maybe
                                 (loadGrokFirstTurnPrefix
                                     env.sessionPreparedWorkspaceEnvironment
                                     env.sessionWorkspace.cwd)
+                                pure
+                                pending
                         pure (UserMessage prefix : framed, Just prefix)
                     else pure (framed, Nothing)
             else pure (stampedInputs, Nothing)
@@ -485,7 +480,7 @@ executeBusyTurn request preparation = do
                     preparation.preparedPreviousResponseId
                 , executionPreparedTurn = prepared
                 }
-            (readIORef env.sessionState.stateAutomaticCompaction)
+            (RuntimeState.readAutomaticCompaction env.sessionState)
             (rollbackExceptionalTurn request preparation rootTurnId)
     let execution = executed.executedLoop
         automaticCompaction = executed.executedCompaction
@@ -779,8 +774,7 @@ finishGeneralFailureTurn executed err = do
             LoopIncomplete turn -> Just turn
             _ -> Nothing
     forM_ maybeIncompleteTurn \turn ->
-        atomicModifyIORef' env.sessionState.stateUsage \current ->
-            (addTokenUsage current turn.tokenUsage, ())
+        RuntimeState.addSessionUsage env.sessionState turn.tokenUsage
     -- Retain the same items in the live and durable transcripts. Response id,
     -- usage, and the incomplete reason remain available in turn metadata.
     persistIncompleteTurn
@@ -955,7 +949,7 @@ persistSuccessfulTurn
 evictDurableConversation :: SessionEnv -> SessionHandle -> IO ()
 evictDurableConversation env handle = do
     generation <-
-        currentLiveTranscriptGeneration env.sessionState.stateConversation
+        RuntimeState.currentSessionTranscriptGeneration env.sessionState
     let sessionId = handle.sessionMeta.metaId
         checkpoint =
             durableTranscriptCheckpoint
@@ -963,8 +957,7 @@ evictDurableConversation env handle = do
                 (sessionsRoot env.sessionWorkspace.home)
                 sessionId
     evicted <-
-        evictLiveTranscript
-            env.sessionState.stateConversation generation checkpoint
+        RuntimeState.evictSessionTranscript env.sessionState generation checkpoint
     when evicted performMajorGC
 
 -- | Wrap the last actual user payload in the Grok Build request envelope.

@@ -53,10 +53,6 @@ import Agent.CLI.Session
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.Runtime.SessionState qualified as RuntimeState
-import Agent.CLI.Session.History
-    ( readLiveAttachments
-    , readLiveTranscript
-    )
 import Agent.CLI.Style (roleError)
 import Agent.CLI.Status (formatFooterAccount)
 import Agent.CLI.Terminal (resolveColor)
@@ -99,8 +95,8 @@ syncFullscreenPrompt env = do
         params <- readSessionRequestParams env.sessionParams
         policy <- readIORef env.sessionPolicy
         account <- (.activeAccountLabel) <$> readActiveAccount env.sessionAccount
-        usage <- readIORef env.sessionState.stateUsage
-        attachments <- readLiveAttachments env.sessionState.stateConversation
+        usage <- RuntimeState.readSessionUsage env.sessionState
+        attachments <- RuntimeState.readSessionAttachments env.sessionState
         emitUiEvent runtime $ UiSetPrompt $
             buildPromptState
                 (dialectId env.sessionDialect)
@@ -119,7 +115,7 @@ syncFullscreenContext env =
     forM_ env.sessionFullscreen \runtime -> do
         occupancy <- readIORef env.sessionContextOccupancy
         params <- readSessionRequestParams env.sessionParams
-        history <- readLiveTranscript env.sessionState.stateConversation
+        history <- RuntimeState.readSessionTranscript env.sessionState
         contextWindow <- env.sessionContextWindow
         emitUiEvent runtime $
             UiSetContextUsage
@@ -198,7 +194,7 @@ runBtwQuestion registerCancel env question = do
         stderrHandle = env.sessionRender.renderStderr
     color <- resolveColor stdoutHandle
     params <- readSessionRequestParams env.sessionParams
-    transcript <- readLiveTranscript env.sessionState.stateConversation
+    transcript <- RuntimeState.readSessionTranscript env.sessionState
     let snapshot = sideCallSnapshot params transcript
     forM_ fullscreen \runtime ->
         emitUiEvent runtime
