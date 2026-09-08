@@ -78,6 +78,7 @@ import Agent.CLI.Render
 import Agent.CLI.Session
 import Agent.CLI.Session.History
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
+import qualified Agent.CLI.Session.Observation as Observation
 import Agent.CLI.SessionEnv
 import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.SessionLock
@@ -123,7 +124,7 @@ import Agent.Tools.Types
 import Agent.OsPath
 import Control.Concurrent.Async (Async, withAsync)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, withMVar)
 import Control.Concurrent.STM (STM)
 import Control.Exception.Safe
     ( catchAny
@@ -181,6 +182,8 @@ data SessionHostRuntime = SessionHostRuntime
     , hostSessionState :: !RuntimeState.SessionState
     , hostIoLock :: !(MVar ())
     , hostApprovalLock :: !(MVar ())
+    , hostObservationPublisher
+        :: !(IORef (Maybe Observation.SessionObservationPublisher))
     , hostNativeCapabilities :: !NativeRunCapabilities
     , hostLoadsWorkspaceContext :: !Bool
     , hostPreparedWorkspaceEnvironment
@@ -204,6 +207,8 @@ newSessionHostRuntime SessionRequest{..} = do
         initialGrokContext
     ioLock <- newMVar ()
     approvalLock <- newMVar ()
+    observationPublisher <- newIORef Nothing
+    observationInputWaitCount <- newMVar (0 :: Int)
     let fullscreen = startup.startupFullscreen
         nativeCapabilities =
             maybe
@@ -274,14 +279,27 @@ newSessionHostRuntime SessionRequest{..} = do
         startupWindowTitle
         withIoLock
         writeWindowTitle
+    let beginInputWait = do
+            windowTitle.windowTitleBeginInputWait
+            modifyMVar_ observationInputWaitCount \count -> do
+                readIORef observationPublisher >>= mapM_
+                    (\publisher -> Observation.setObservedWaiting publisher True)
+                pure (count + 1)
+        endInputWait = do
+            windowTitle.windowTitleEndInputWait
+            modifyMVar_ observationInputWaitCount \count -> do
+                let remaining = max 0 (count - 1)
+                readIORef observationPublisher >>= mapM_
+                    (\publisher -> Observation.setObservedWaiting publisher (remaining > 0))
+                pure remaining
     setPlanModeInputWaitHooks
         planMode
-        windowTitle.windowTitleBeginInputWait
-        windowTitle.windowTitleEndInputWait
+        beginInputWait
+        endInputWait
     setToolHumanInputWaitHooks
         toolEnv
-        windowTitle.windowTitleBeginInputWait
-        windowTitle.windowTitleEndInputWait
+        beginInputWait
+        endInputWait
     setToolRootAccessRequest toolEnv (Just requestRootAccess)
     let showTitleEvent = \case
             SessionTitleGenerated SessionTitleResult{..} ->
@@ -325,6 +343,7 @@ newSessionHostRuntime SessionRequest{..} = do
         , hostSessionState = runtimeState
         , hostIoLock = ioLock
         , hostApprovalLock = approvalLock
+        , hostObservationPublisher = observationPublisher
         , hostNativeCapabilities = nativeCapabilities
         , hostLoadsWorkspaceContext = loadsHostWorkspaceContext
         , hostPreparedWorkspaceEnvironment = preparedWorkspaceEnvironment
@@ -767,6 +786,8 @@ buildSessionLoopEventRuntime
     emitLoop event =
         projectPlanProtocol event >>= mapM_ emitPresentedLoop
     emitPresentedLoop event = do
+        readIORef host.hostObservationPublisher >>= mapM_
+            (\publisher -> Observation.publishObservedLoopEvent publisher event)
         recordAgentViewportEvent agentViewportRuntime event
         forM_ startup.startupNativeHooks \hooks ->
             hooks.nativeOnLoopEvent event
@@ -1528,6 +1549,8 @@ buildSessionEnv
         , sessionContextWindow = currentContextWindow
         , sessionPolicy = policyRef
         , sessionPersist = persist
+        , sessionObservationPublisher = host.hostObservationPublisher
+        , sessionObservationEnabled = isNothing startup.startupNativeHooks
         , sessionDatabasePool =
             trustedPool startup.startupDatabaseStore
         , sessionTitleManager = titleManager
