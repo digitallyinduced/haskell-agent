@@ -67,6 +67,10 @@ runtime library from depending on the CLI or TUI packages.
 
 ## Bounded process-resource extraction
 
+Background session workers now use a frontend-independent typed owner; see
+[session worker ownership](session-worker-ownership.md) for admission,
+cancellation, notification ordering, and the remaining composition boundary.
+
 `agent-cli-runtime` also owns `Agent.CLI.NativeProcess` and
 `Agent.CLI.Session.Threads`. These retain the legacy shared-module namespace,
 but belong to the runtime package, not `agent-cli`. They own process allocation,
