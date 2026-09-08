@@ -26,13 +26,21 @@ import Control.Concurrent.STM
     , readTMVar
     , readTVarIO
     )
-import Control.Exception.Safe (finally, tryAny)
+import Control.Exception.Safe (bracket, finally, tryAny)
 import Data.Either (isRight)
 import Data.IORef (newIORef)
 import qualified Data.Aeson as Aeson
 import qualified Data.Map.Strict as Map
 import Foreign.C.Types (CInt(..))
 import Foreign.StablePtr (castStablePtrToPtr, newStablePtr)
+import System.Directory
+    ( createDirectory
+    , getTemporaryDirectory
+    , removeFile
+    , removePathForcibly
+    )
+import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.IO (hClose, openTempFile)
 import Test.Hspec
     ( Spec
     , describe
@@ -101,7 +109,7 @@ spec = describe "native bridge FFI" do
 
     it "controls and snapshots native tasks through the exported bridge" do
 #ifdef darwin_HOST_OS
-        taskSupervisorAbiSmoke `shouldReturn` 0
+        withIsolatedHome $ taskSupervisorAbiSmoke `shouldReturn` 0
 #else
         pendingWith "the native bridge smoke test only links on macOS"
 #endif
@@ -214,6 +222,27 @@ spec = describe "native bridge FFI" do
 #endif
 
 #ifdef darwin_HOST_OS
+withIsolatedHome :: IO a -> IO a
+withIsolatedHome action =
+    bracket create removePathForcibly \home ->
+        bracket
+            (do
+                old <- lookupEnv "HOME"
+                setEnv "HOME" home
+                pure old)
+            (\case
+                Just old -> setEnv "HOME" old
+                Nothing -> unsetEnv "HOME")
+            (\_ -> action)
+  where
+    create = do
+        temporary <- getTemporaryDirectory
+        (path, handle) <- openTempFile temporary "agent-native-bridge-home"
+        hClose handle
+        removeFile path
+        createDirectory path
+        pure path
+
 repositoryCheckDestroyReentrancySmoke :: IO Bool
 repositoryCheckDestroyReentrancySmoke = do
     gate <- newEmptyMVar

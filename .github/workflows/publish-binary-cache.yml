@@ -127,18 +127,19 @@ jobs:
             exit 1
           fi
 
-          build_targets=(
-            # `nix profile add` installs packages.default, while `nix run`
-            # executes apps.default, backed by packages.agent-cli. They are
-            # different outputs on Linux, so publish both closures.
+          # `nix profile add` installs packages.default, while `nix run`
+          # executes apps.default, backed by packages.agent-cli. They are
+          # different outputs on Linux, so publish both closures.
+          release_targets=(
             .#default
             .#agent-cli
           )
+          extra_targets=()
           if [[ "$SYSTEM" == x86_64-linux ]]; then
             # Seed the public cache with the same roots used by the secretless
             # PR matrix. Source filtering lets a PR reuse every unchanged
             # package test while rebuilding only its affected graph.
-            build_targets+=(
+            extra_targets+=(
               .#checks.x86_64-linux.agent-cli
               .#checks.x86_64-linux.agent-external-session
               .#checks.x86_64-linux.agent-repository
@@ -156,38 +157,107 @@ jobs:
           if [[ "$SYSTEM" == aarch64-darwin ]]; then
             # The native bridge is now its own Cabal package rather than an
             # agent-cli component, so build its checked and wrapped outputs
-            # explicitly on the native runner.
-            build_targets+=(
+            # explicitly on the native runner. Keep these off the release
+            # `nix build` so a check failure cannot skip publishing agent-cli.
+            extra_targets+=(
               .#checks.aarch64-darwin.agent-native-bridge
               .#agent-native-bridge
             )
           fi
-
-          build_args=(
-            build
-            "${build_targets[@]}"
-            --no-link
-            --print-out-paths
-            --max-jobs 1
-            --cores "$BUILD_CORES"
+          build_targets=(
+            "${release_targets[@]}"
+            "${extra_targets[@]}"
           )
-          if [[ "$TRUSTED_REBUILD" == true ]]; then
-            # Never restore the Darwin output from the cache previously populated
-            # by the affected Mac. Dependencies still come from cache.nixos.org.
-            build_args+=(
-              --option accept-flake-config false
-              --option substituters https://cache.nixos.org/
-              --option extra-substituters ""
+
+          nix_build_roots() {
+            local out_file="$1"
+            shift
+            local args=(
+              build
+              "$@"
+              --no-link
+              --print-out-paths
+              --max-jobs 1
+              --cores "$BUILD_CORES"
             )
-          else
-            build_args+=(--accept-flake-config)
-          fi
+            if [[ "$TRUSTED_REBUILD" == true ]]; then
+              # Never restore the Darwin output from the cache previously
+              # populated by the affected Mac. Dependencies still come from
+              # cache.nixos.org.
+              args+=(
+                --option accept-flake-config false
+                --option substituters https://cache.nixos.org/
+                --option extra-substituters ""
+              )
+            else
+              args+=(--accept-flake-config)
+            fi
+            "$nix_bin" "${args[@]}" > "$out_file"
+          }
+
+          printf 'CACHE_EXTRA_FAILED=0\n' >> "$GITHUB_ENV"
 
           root_out_paths_file="$RUNNER_TEMP/haskell-agent-cache-root-out-paths"
-          "$nix_bin" "${build_args[@]}" > "$root_out_paths_file"
+          nix_build_roots "$root_out_paths_file" "${release_targets[@]}"
           if [[ ! -s "$root_out_paths_file" ]]; then
             echo "::error title=Missing build outputs::Nix did not report any store paths"
             exit 1
+          fi
+
+          if (( ${#extra_targets[@]} > 0 )); then
+            extra_out_paths_file="$RUNNER_TEMP/haskell-agent-cache-extra-out-paths"
+            extra_realised_file="$RUNNER_TEMP/haskell-agent-cache-extra-realised"
+            : > "$extra_realised_file"
+            set +e
+            nix_build_roots \
+              "$extra_out_paths_file" \
+              --keep-going \
+              "${extra_targets[@]}"
+            extra_status=$?
+            set -e
+            if [[ -s "$extra_out_paths_file" ]]; then
+              cat "$extra_out_paths_file" >> "$extra_realised_file"
+            fi
+            # `nix build --keep-going --print-out-paths` does not print
+            # after a failing Installable::build, even for realised
+            # extras. Collect those outputs from the extra derivations.
+            mapfile -t extra_drvs < <(
+              "$nix_bin" path-info \
+                --derivation \
+                "${extra_targets[@]}"
+            )
+            nix_store_bin="$(command -v nix-store || true)"
+            if (( ${#extra_drvs[@]} > 0 )) && [[ -n "$nix_store_bin" ]]; then
+              extra_all_outputs_file="$RUNNER_TEMP/haskell-agent-cache-extra-outputs"
+              extra_invalid_file="$RUNNER_TEMP/haskell-agent-cache-extra-invalid"
+              "$nix_store_bin" \
+                --query \
+                --outputs \
+                "${extra_drvs[@]}" |
+                sort -u > "$extra_all_outputs_file"
+              if [[ -s "$extra_all_outputs_file" ]]; then
+                mapfile -t extra_outputs < "$extra_all_outputs_file"
+                set +e
+                "$nix_store_bin" \
+                  --check-validity \
+                  --print-invalid \
+                  "${extra_outputs[@]}" \
+                  > "$extra_invalid_file"
+                set -e
+                sort -u "$extra_invalid_file" -o "$extra_invalid_file"
+                comm -23 \
+                  "$extra_all_outputs_file" \
+                  "$extra_invalid_file" \
+                  >> "$extra_realised_file"
+              fi
+            fi
+            if [[ -s "$extra_realised_file" ]]; then
+              cat "$extra_realised_file" >> "$root_out_paths_file"
+              sort -u "$root_out_paths_file" -o "$root_out_paths_file"
+            fi
+            if [[ "$extra_status" -ne 0 ]]; then
+              printf 'CACHE_EXTRA_FAILED=1\n' >> "$GITHUB_ENV"
+            fi
           fi
 
           # Keep this assertion next to the CI targets so a future app/package
@@ -305,3 +375,8 @@ jobs:
           "$nix_bin" run "$ATTIC_PACKAGE" -- \
             push --jobs 4 --stdin di:public \
             < "$RUNNER_TEMP/haskell-agent-cache-out-paths"
+
+          if [[ "${CACHE_EXTRA_FAILED:-0}" == 1 ]]; then
+            echo "::error title=Optional cache roots failed::Published the release closures; remaining check or native-bridge roots did not all build"
+            exit 1
+          fi

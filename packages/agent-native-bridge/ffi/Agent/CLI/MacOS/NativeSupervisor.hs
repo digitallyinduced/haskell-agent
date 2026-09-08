@@ -663,49 +663,61 @@ supervisorLoop
                 , "state" Aeson..= state
                 ]
 
-    sendTaskSnapshot snapshotCallback snapshotContext supervisor =
-        withGatewayCredentialLease $
-            loadNativeGatewayIdentity >>= \case
-                Left err ->
-                    withTextBytes err \errorPointer errorLength ->
-                        invokeTaskSnapshotCallback
-                            snapshotCallback
-                            snapshotContext
-                            (-1)
-                            nullPtr 0 nullPtr 0 0
-                            errorPointer errorLength
-                Right gatewayIdentity -> do
-                    forM_ supervisor.supervisorPending \pending ->
-                        when
-                            (nativeTurnRouteMatchesBoundary
-                                pending.pendingTurnGatewayIdentity
-                                gatewayIdentity) $
+    sendTaskSnapshot snapshotCallback snapshotContext supervisor = do
+        delivered <- tryAny $
+            withGatewayCredentialLease $
+                loadNativeGatewayIdentity >>= \case
+                    Left err ->
+                        sendSnapshotFailure snapshotCallback snapshotContext err
+                    Right gatewayIdentity -> do
+                        forM_ supervisor.supervisorPending \pending ->
+                            when
+                                (nativeTurnRouteMatchesBoundary
+                                    pending.pendingTurnGatewayIdentity
+                                    gatewayIdentity) $
+                                    sendSnapshotItem
+                                        snapshotCallback
+                                        snapshotContext
+                                        pending.pendingTurnStart.turnStartId
+                                        pending.pendingTurnStart.turnStartSessionId
+                                        0
+                        forM_
+                            (filter
+                                (\running ->
+                                    let control = running.runningTurnControl
+                                    in nativeTurnRouteMatchesBoundary
+                                        control.turnControlGatewayIdentity
+                                        gatewayIdentity)
+                                (Map.elems supervisor.supervisorRunning))
+                            \running -> do
+                                sessionId <- readTVarIO
+                                    running.runningTurnControl.turnControlSessionId
                                 sendSnapshotItem
                                     snapshotCallback
                                     snapshotContext
-                                    pending.pendingTurnStart.turnStartId
-                                    pending.pendingTurnStart.turnStartSessionId
-                                    0
-                    forM_
-                        (filter
-                            (\running ->
-                                let control = running.runningTurnControl
-                                in nativeTurnRouteMatchesBoundary
-                                    control.turnControlGatewayIdentity
-                                    gatewayIdentity)
-                            (Map.elems supervisor.supervisorRunning))
-                        \running -> do
-                            sessionId <- readTVarIO
-                                running.runningTurnControl.turnControlSessionId
-                            sendSnapshotItem
-                                snapshotCallback
-                                snapshotContext
-                                running.runningTurnControl.turnControlId
-                                sessionId
-                                1
-                    invokeTaskSnapshotCallback
-                        snapshotCallback snapshotContext
-                        1 nullPtr 0 nullPtr 0 0 nullPtr 0
+                                    running.runningTurnControl.turnControlId
+                                    sessionId
+                                    1
+                        invokeTaskSnapshotCallback
+                            snapshotCallback snapshotContext
+                            1 nullPtr 0 nullPtr 0 0 nullPtr 0
+        case delivered of
+            Right () -> pure ()
+            Left exception ->
+                void $ tryAny $
+                    sendSnapshotFailure
+                        snapshotCallback
+                        snapshotContext
+                        (Text.pack (show exception))
+
+    sendSnapshotFailure snapshotCallback snapshotContext err =
+        withTextBytes err \errorPointer errorLength ->
+            invokeTaskSnapshotCallback
+                snapshotCallback
+                snapshotContext
+                (-1)
+                nullPtr 0 nullPtr 0 0
+                errorPointer errorLength
 
     sendSnapshotItem snapshotCallback snapshotContext taskId sessionId state =
         withTextBytes taskId \taskPointer taskLength ->
