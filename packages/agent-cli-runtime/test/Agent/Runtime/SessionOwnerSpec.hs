@@ -1,7 +1,8 @@
 module Agent.Runtime.SessionOwnerSpec (spec) where
 
 import Agent.Runtime.SessionOwner
-import Control.Concurrent.Async (concurrently_, withAsync, wait)
+import Control.Concurrent (yield)
+import Control.Concurrent.Async (cancel, concurrently_, withAsync, wait)
 import Control.Concurrent.MVar
     (newEmptyMVar, putMVar, takeMVar, tryTakeMVar)
 import Control.Exception.Safe (finally)
@@ -102,6 +103,32 @@ spec = describe "runtime session owner" do
                     wait closer
             tryTakeMVar cleaned `shouldReturn` Just ()
 
+    it "does not resend cancellation after the cancelling caller is interrupted" $
+        withSessionOwner 1 \owner -> do
+            started <- newEmptyMVar
+            release <- newEmptyMVar
+            cleaning <- newEmptyMVar
+            finishCleanup <- newEmptyMVar
+            cleaned <- newEmptyMVar
+            submitSessionTurn owner "one" silent
+                ((putMVar started () >> takeMVar release >> pure (Right ()))
+                    `finally` (putMVar cleaning () >> takeMVar finishCleanup >> putMVar cleaned ()))
+                `shouldReturn` Right ()
+            within (takeMVar started)
+            withAsync (cancelSessionTurn owner "one") \canceller -> do
+                within (takeMVar cleaning)
+                cancel canceller
+            withAsync (closeSessionOwner owner) \closer -> do
+                -- The owner marks itself closed before joining cleanup.
+                -- Wait for that admission barrier without timing assumptions.
+                (do
+                    within (awaitClosed owner)
+                    -- Bound the observer, not the closer's cleanup.
+                    timeout 10000 (wait closer) `shouldReturn` Nothing)
+                    `finally` putMVar finishCleanup ()
+                wait closer
+            tryTakeMVar cleaned `shouldReturn` Just ()
+
     it "concurrent closes join all workers and reject future admission" $
         withSessionOwner 1 \owner -> do
             started <- newEmptyMVar
@@ -128,3 +155,8 @@ spec = describe "runtime session owner" do
 within :: IO a -> IO a
 within action =
     timeout 5000000 action >>= maybe (fail "session owner handshake timed out") pure
+
+awaitClosed :: SessionOwner -> IO ()
+awaitClosed owner = do
+    (closed, _) <- sessionOwnerSnapshot owner
+    if closed then pure () else yield >> awaitClosed owner

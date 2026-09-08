@@ -18,10 +18,11 @@ module Agent.Runtime.SessionOwner
     ) where
 
 import Control.Concurrent.Async
-    ( Async, AsyncCancelled, asyncWithUnmask, cancel, poll, waitCatch )
+    ( Async, AsyncCancelled(..), asyncThreadId, asyncWithUnmask, poll, wait, waitCatch )
+import Control.Concurrent (throwTo)
 import Control.Concurrent.MVar
     ( MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar
-    , putMVar, readMVar, takeMVar, withMVar
+    , putMVar, readMVar, takeMVar
     )
 import Control.Exception.Safe
     ( SomeException, bracket, displayException, fromException, mask, tryAny )
@@ -51,7 +52,7 @@ data Entry
 
 data OwnedWorker = OwnedWorker
     { workerAsync :: !(Async SessionOutcome)
-    , cancelGate :: !(MVar ())
+    , cancelSignal :: !(MVar (Maybe (Async ())))
     }
 
 data OwnerState = OwnerState
@@ -96,7 +97,7 @@ submitSessionTurn owner sessionId notify action = mask \_ ->
                         gate <- newEmptyMVar
                         -- This worker outlives submission, but is registered
                         -- before execution and retained until close joins it.
-                        cancelGate <- newMVar ()
+                        cancelSignal <- newMVar Nothing
                         workerAsync <- asyncWithUnmask \unmask -> do
                             takeMVar gate
                             result <- Exception.try (unmask action)
@@ -109,11 +110,8 @@ submitSessionTurn owner sessionId notify action = mask \_ ->
                                     else do
                                         void (tryAny (notify outcome))
                                         pure latest
-                                            { entries = Map.insert sessionId
-                                                (Finished outcome) latest.entries
-                                            }
                             pure outcome
-                        let worker = OwnedWorker { workerAsync, cancelGate }
+                        let worker = OwnedWorker { workerAsync, cancelSignal }
                         putMVar gate ()
                         pure
                             ( current { entries = Map.insert sessionId
@@ -138,17 +136,20 @@ sessionOwnerSnapshot owner =
 -- | Capture this generation, never accidentally wait for a later retry.
 prepareSessionWait
     :: SessionOwner -> Text -> IO (Maybe (SessionStatus, IO SessionOutcome))
-prepareSessionWait owner sessionId = do
-    current <- readMVar owner.state
-    pure $ case Map.lookup sessionId current.entries of
+prepareSessionWait owner sessionId =
+    modifyMVar owner.state \previous -> do
+        current <- settleState previous
+        pure (current, capture current)
+  where
+    capture current = case Map.lookup sessionId current.entries of
         Nothing -> Nothing
         Just (Finished outcome) -> Just (SessionFinished outcome, pure outcome)
         Just (Running worker) ->
             Just (SessionRunning, either exceptionOutcome id <$> waitCatch worker.workerAsync)
 
--- A second asynchronous exception can interrupt terminal publication while
--- acquiring the lock. Recover that outcome from the owned Async rather than
--- retaining a permanently busy slot.
+-- Retain the worker handle until the Async has actually terminated, not merely
+-- until its action and notification have returned. Close therefore joins every
+-- live worker, including one leaving its final publication boundary.
 settleState :: OwnerState -> IO OwnerState
 settleState current
     | current.closed = pure current
@@ -160,7 +161,14 @@ settleState current
     settle entry@(Running worker) =
         poll worker.workerAsync >>= \case
             Nothing -> pure entry
-            Just outcome -> pure (Finished (either exceptionOutcome id outcome))
+            Just outcome -> do
+                sender <- readMVar worker.cancelSignal
+                senderFinished <- case sender of
+                    Nothing -> pure True
+                    Just signal -> isJust <$> poll signal
+                pure $ if senderFinished
+                    then Finished (either exceptionOutcome id outcome)
+                    else entry
 
 -- | Cancel and join only the generation captured by this call.
 cancelSessionTurn :: SessionOwner -> Text -> IO Bool
@@ -170,11 +178,25 @@ cancelSessionTurn owner sessionId = do
         Just (Running worker) -> cancelOwnedWorker worker >> pure True
         _ -> pure False
 
--- Concurrent cancellation and close must not inject a second cancellation
--- into the first cancellation's interruptible cleanup.
+-- Signal exactly once, independently of the cancelling caller's lifetime.
+-- throwTo itself is interruptible before delivery, so a Boolean "sent" flag in
+-- the caller is insufficient: interrupted delivery could lose cancellation.
+-- The single sender is tracked alongside its target and joined by every
+-- cancellation/close caller. No caller interruption cancels this owned sender.
 cancelOwnedWorker :: OwnedWorker -> IO ()
-cancelOwnedWorker worker =
-    withMVar worker.cancelGate \_ -> cancel worker.workerAsync
+cancelOwnedWorker worker = mask \restore -> do
+    sender <- modifyMVar worker.cancelSignal \case
+        Just sender -> pure (Just sender, Just sender)
+        Nothing -> do
+            poll worker.workerAsync >>= \case
+                Just _ -> pure (Nothing, Nothing)
+                Nothing -> do
+                    sender <- asyncWithUnmask \unmask ->
+                        unmask (throwTo (asyncThreadId worker.workerAsync) AsyncCancelled)
+                    pure (Just sender, Just sender)
+    restore do
+        mapM_ wait sender
+        void (waitCatch worker.workerAsync)
 
 -- | All concurrent closers retain the same workers until they are joined.
 -- If a closer is interrupted, a subsequent close can still finish cleanup.

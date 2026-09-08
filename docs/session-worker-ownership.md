@@ -26,8 +26,10 @@ notification runs before readiness for another turn and must be nonblocking
 and must not call back into the owner. Cancellation and close must be initiated
 outside the worker being cancelled. Cancellation remains cooperative Haskell
 thread cancellation: an action or finalizer that masks forever can delay close.
-Concurrent cancellation requests are serialized per worker so they do not
-repeatedly interrupt the same cleanup.
+Each generation owns one cancellation sender, shared by concurrent cancellation
+requests and close. Interrupting a cancellation caller does not interrupt signal
+delivery or cause another caller to send a second cancellation into cleanup.
+Worker handles remain tracked until their `Async` has actually terminated.
 
 ## Remaining boundaries
 
