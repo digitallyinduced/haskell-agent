@@ -14,8 +14,8 @@ mkDerivation {
     process safe-exceptions stm text time unix uuid-types vector
   ];
   testHaskellDepends = [
-    async base bytestring hasql hspec safe-exceptions temporary text
-    time
+    async base bytestring filelock filepath hasql hspec safe-exceptions
+    temporary text time uuid-types
   ];
   benchmarkHaskellDepends = [
     async base containers contravariant hasql safe-exceptions temporary

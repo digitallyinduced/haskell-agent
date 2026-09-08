@@ -37,7 +37,6 @@ import Control.Concurrent.STM (atomically, orElse)
 import Control.Exception.Safe
     ( bracket
     , displayException
-    , finally
     , mask
     , onException
     , tryAny
@@ -243,27 +242,28 @@ withStoreConnectionFailureMonitor ::
     (IO () -> IO a) ->
     IO (Either StoreError a)
 withStoreConnectionFailureMonitor connection action =
-    mask \restore -> do
-        prepared <- tryAny prepareMonitor
-        case prepared of
+    bracket
+        (tryAny prepareMonitor)
+        (\case
+            Right (Right (_, unregister)) -> unregister
+            _ -> pure ())
+        \case
             Left err ->
                 pure . Left . StoreConnectionError $
                     "PostgreSQL connection monitor failed: "
                         <> Text.pack (displayException err)
             Right (Left err) -> pure (Left err)
-            Right (Right (waitForFailure, unregister)) -> do
+            Right (Right (waitForFailure, _)) -> do
                 alreadyFailed <-
                     atomically $
                         (True <$ waitForFailure)
                             `orElse` pure False
                 if alreadyFailed
-                    then do
-                        unregister
+                    then
                         pure . Left . StoreConnectionError $
                             "PostgreSQL connection socket was already readable"
                     else
-                        restore (Right <$> action (atomically waitForFailure))
-                            `finally` unregister
+                        Right <$> action (atomically waitForFailure)
   where
     driverConnection = connection.storeConnectionDriver
     prepareMonitor =
@@ -307,12 +307,10 @@ withStorePool
     -> (StorePool -> IO (Either StoreError a))
     -> IO (Either StoreError a)
 withStorePool config options action =
-    openStorePool config options >>= \case
-        Left err -> pure (Left err)
-        Right pool -> bracket
-            (pure pool)
-            closeStorePool
-            action
+    bracket
+        (openStorePool config options)
+        (either (const (pure ())) closeStorePool)
+        (either (pure . Left) action)
 
 -- | Check out a pooled connection for one Hasql session and return it
 -- automatically when the session finishes or fails.

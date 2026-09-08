@@ -17,7 +17,7 @@ module Agent.Store.Postgres.ServerTurn.OwnerFence (
 ) where
 
 import Agent.Store.Types (StoreError (..))
-import Control.Exception.Safe (displayException, finally, mask, mask_, tryAny)
+import Control.Exception.Safe (bracket, displayException, mask_, tryAny)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.UUID.Types as UUID
@@ -78,24 +78,24 @@ withAvailableExclusiveActionLocks ::
     ([Text] -> IO (Either StoreError value)) ->
     IO (Either StoreError value)
 withAvailableExclusiveActionLocks directory instanceIds action =
-    mask \restore ->
-        acquireAll [] instanceIds >>= \case
-            Left err -> pure (Left err)
-            Right locks ->
-                restore
-                    (action (map (.ownerActionFileLockInstanceId) locks))
-                    `finally` mapM_ releaseActionLock locks
+    withLocks [] instanceIds
   where
-    acquireAll acquired = \case
-        [] -> pure (Right (reverse acquired))
+    -- Each successful acquisition owns its own scope, including while later
+    -- locks are being acquired. Partial acquisition and cancellation therefore
+    -- unwind all earlier locks without a separate rollback path.
+    withLocks acquired = \case
+        [] -> action (reverse acquired)
         instanceId : remaining ->
-            tryAcquireExclusiveActionLock directory instanceId >>= \case
-                Left err -> do
-                    mapM_ releaseActionLock acquired
-                    pure (Left err)
-                Right Nothing -> acquireAll acquired remaining
-                Right (Just actionLock) ->
-                    acquireAll (actionLock : acquired) remaining
+            bracket
+                (tryAcquireExclusiveActionLock directory instanceId)
+                (either (const (pure ())) (mapM_ releaseActionLock))
+                \case
+                    Left err -> pure (Left err)
+                    Right Nothing -> withLocks acquired remaining
+                    Right (Just actionLock) ->
+                        withLocks
+                            (actionLock.ownerActionFileLockInstanceId : acquired)
+                            remaining
 
 actionLockPath :: FilePath -> Text -> FilePath
 actionLockPath directory instanceId =

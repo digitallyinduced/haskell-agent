@@ -5,7 +5,10 @@
 
 module Agent.Store.Postgres.ManagedSpec (spec) where
 
-import Control.Exception.Safe (finally)
+import Control.Concurrent.Async (cancel, withAsync)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception.Safe (finally, throwIO)
+import Control.Monad (void)
 import Data.ByteString (ByteString)
 import Data.Either (isLeft, isRight)
 import Data.Text (Text)
@@ -17,6 +20,7 @@ import qualified Hasql.Session as Session
 import Hasql.Statement (Statement)
 import qualified Hasql.Statement as Statement
 import System.IO.Temp (withSystemTempDirectory)
+import System.Timeout (timeout)
 import Test.Hspec
 
 import Agent.Store.Postgres
@@ -24,6 +28,7 @@ import Agent.Store.Postgres.Connection
     ( closeStorePool
     , defaultPoolConfig
     , openStorePool
+    , withStorePool
     , withSession
     )
 import Agent.Store.Postgres.Config (postgresSocketPath)
@@ -43,9 +48,48 @@ import Agent.Store.Postgres.UsageCache
     , upsertAccountUsageCache
     )
 
+assertStoreClosed :: Store -> Expectation
+assertStoreClosed store =
+    scopePool store "unused-role" >>= \case
+        Left err -> err `shouldBe` StoreConnectionError "PostgreSQL store is closed"
+        Right _ -> expectationFailure "scoped store was not closed"
+
 spec :: Spec
 spec =
     describe "managed PostgreSQL" do
+        it "closes a scoped store when its callback throws" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let config = defaultManagedPostgresConfig stateDirectory ""
+                (do
+                    captured <- newEmptyMVar
+                    withStore config (\store -> do
+                        putMVar captured store
+                        throwIO (userError "store callback failed"))
+                        `shouldThrow` anyIOException
+                    timeout 5000000 (takeMVar captured) >>= \case
+                        Nothing -> expectationFailure "store callback did not start"
+                        Just store -> assertStoreClosed store
+                    ) `finally` void (stopManagedPostgres config)
+
+        it "closes a scoped store when its callback is cancelled" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let config = defaultManagedPostgresConfig stateDirectory ""
+                (do
+                    captured <- newEmptyMVar
+                    blocked <- newEmptyMVar
+                    withAsync
+                        (withStore config \store -> do
+                            putMVar captured store
+                            () <- takeMVar blocked
+                            pure ())
+                        \worker -> do
+                            timeout 30000000 (takeMVar captured) >>= \case
+                                Nothing -> expectationFailure "store callback did not start"
+                                Just store -> do
+                                    cancel worker
+                                    assertStoreClosed store
+                    ) `finally` void (stopManagedPostgres config)
+
         it "starts on a private socket and applies the harness migrations" $
             -- Keep the prefix short because Darwin's Unix socket path limit
             -- also includes PostgreSQL's generated socket filename.
@@ -290,15 +334,9 @@ spec =
                 (do
                     ensureManagedPostgres config
                         >>= (`shouldSatisfy` isRight)
-                    openStorePool config defaultPoolConfig >>= \case
-                        Left err ->
-                            expectationFailure
-                                ("could not open bootstrap pool: " <> show err)
-                        Right ownerPool ->
-                            finally
-                                (runMigrations ownerPool legacyMigrations
-                                    `shouldReturn` Right ())
-                                (closeStorePool ownerPool)
+                    withStorePool config defaultPoolConfig
+                        (\ownerPool -> runMigrations ownerPool legacyMigrations)
+                        `shouldReturn` Right ()
                     (withStore config \store ->
                         withSession
                             (provisioningPool store)
