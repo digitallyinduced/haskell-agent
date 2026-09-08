@@ -77,3 +77,24 @@ spec = describe "typed session observation delivery" do
         bracket (wrapObservationCallback callback) freeHaskellFunPtr \pointer ->
             deliverUpdate pointer nullPtr (ObservationFrame frame)
         readIORef received >>= (`shouldBe` [(8, 9, 258), (2, 9, 258)])
+    it "distinguishes failed tool outcomes in native flags" do
+        received <- newIORef []
+        let callback _ kind _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ flags =
+                modifyIORef' received (<> [(kind, flags)])
+            toolFinished failed = SessionObservationEvent
+                { kind = ObservationToolFinished
+                , identifier = "call", name = "tool", text = "output"
+                , arguments = "", isError = failed
+                , summary = "", argumentsEncrypted = False
+                , isAsync = False, isTruncated = False
+                }
+            frame = SessionObservationFrame
+                { ownerID = "owner", turnID = "turn", sequence = 9
+                , generationStart = 5, durableTurnCount = 9
+                , state = ObservationRunning, reset = False
+                , truncated = False, userText = ""
+                , events = [toolFinished False, toolFinished True]
+                }
+        bracket (wrapObservationCallback callback) freeHaskellFunPtr \pointer ->
+            deliverUpdate pointer nullPtr (ObservationFrame frame)
+        readIORef received >>= (`shouldBe` [(7, 0), (7, 8), (2, 0)])

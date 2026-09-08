@@ -61,8 +61,9 @@ typedef void (*ha_event_callback)(
  *
  * TEXT, REASONING and STATUS use text. TOOL_STARTED uses text for arguments,
  * call_id, tool_name and tool_summary. TOOL_FINISHED uses text for output and
- * call_id. Tool flags: bit 0 encrypted arguments, bit 1 truncated, bit 2 async.
- * Unknown bits must be ignored. Other event kinds leave tool fields empty.
+ * call_id. Tool flags: bit 0 encrypted arguments, bit 1 truncated, bit 2 async,
+ * bit 3 tool outcome error. Unknown bits must be ignored. Other event kinds
+ * leave tool fields empty.
  *
  * RESET/READY flags: low two bits are 0 running, 1 waiting, 2 completed,
  * 3 interrupted; bit 8 means catch-up history was truncated. PERSISTED uses

@@ -149,6 +149,7 @@ deliverEvent send event =
         flags = (if event.argumentsEncrypted then 1 else 0)
             + (if event.isTruncated then 2 else 0)
             + (if event.isAsync then 4 else 0)
+            + (if event.isError then 8 else 0)
         tool kind = send kind event.text event.identifier event.name event.summary flags
     in case event.kind of
         Observation.ObservationText -> message 3 event.text
