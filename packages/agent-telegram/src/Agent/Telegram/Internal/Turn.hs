@@ -61,6 +61,11 @@ import System.Posix.Files (setFileMode)
 import Agent.Telegram.Internal.Runtime.Types
 import Agent.Telegram.Internal.Allowlist
 import Agent.Telegram.Internal.Support
+
+-- Allow substantial development tasks while still bounding each turn.
+telegramTurnTimeoutMicros :: Int
+telegramTurnTimeoutMicros = 12 * 60 * 60 * 1_000_000
+
 data TelegramTurnResponse = TelegramTurnResponse
     { telegramTurnText :: !Text
     , telegramTurnProgressMessageId :: !(Maybe Integer)
@@ -137,7 +142,7 @@ runQueuedMediaTurn runtime pending = do
                 runtime.runtimePolicy
                 True
                 False
-                (Just (20 * 60 * 1_000_000))
+                (Just telegramTurnTimeoutMicros)
                 handle
                 gatewayRequest
           pure (priorTurnIndex, result)
@@ -573,7 +578,7 @@ runManagedAgentTurn
             runtime.runtimePolicy
             True
             False
-            (Just (20 * 60 * 1_000_000))
+            (Just telegramTurnTimeoutMicros)
             handle
             request
       pure (priorTurnIndex, result)
