@@ -19,7 +19,7 @@ import Data.Bits ((.&.))
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Either (isLeft)
-import Data.IORef (atomicModifyIORef', newIORef)
+import Data.IORef (atomicModifyIORef', newIORef, modifyIORef', readIORef)
 import Data.Maybe (isNothing)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
@@ -56,6 +56,42 @@ decodeGatewayModels bytes =
 
 spec :: Spec
 spec = describe "gateway device authorization" do
+    it "invalidates idle credential owners before replacement and logout complete" $
+        withTempHome \home ->
+            withHomeEnvironment home do
+                let credential = GatewayCredential
+                        "https://gateway" "wss://gateway/v1/responses" "first"
+                    replacement = credential {gatewayAccessToken = "second"}
+                saveGatewayCredentialAt home credential `shouldReturn` Right ()
+                observed <- newIORef []
+                bracket
+                    (registerGatewayCredentialInvalidatorAt home do
+                        current <- loadGatewayCredentialAt home
+                        modifyIORef' observed (<> [current]))
+                    id \unregister -> do
+                        saveGatewayCredentialAt home replacement `shouldReturn` Right ()
+                        removeGatewayCredentialWith (readIORef observed)
+                            `shouldReturn` Right
+                                [Right (Just credential), Right (Just replacement)]
+                        unregister
+                        saveGatewayCredentialAt home credential `shouldReturn` Right ()
+                        readIORef observed `shouldReturn`
+                            [Right (Just credential), Right (Just replacement)]
+
+    it "fails credential replacement closed when an owner cannot retire" $
+        withTempHome \home -> do
+            let credential = GatewayCredential
+                    "https://gateway" "wss://gateway/v1/responses" "first"
+                replacement = credential {gatewayAccessToken = "second"}
+            saveGatewayCredentialAt home credential `shouldReturn` Right ()
+            bracket
+                (registerGatewayCredentialInvalidatorAt home
+                    (throwString "owner cleanup failed"))
+                id \_ -> do
+                    saveGatewayCredentialAt home replacement
+                        >>= (`shouldSatisfy` isLeft)
+                    loadGatewayCredentialAt home `shouldReturn` Right (Just credential)
+
     it "sends the versioned User-Agent when discovering gateway models" do
         received <- newEmptyMVar
         expected <- gatewayUserAgent

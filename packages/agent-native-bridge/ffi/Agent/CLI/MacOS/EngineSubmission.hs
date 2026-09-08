@@ -12,6 +12,9 @@ import Agent.CLI.MacOS.EngineCallbacks
     , TaskSnapshotCallback
     )
 import Agent.CLI.MacOS.EngineMailbox (acceptEngineCommand)
+import Agent.CLI.MacOS.ConnectionBridge
+import Agent.CLI.MacOS.NativeGatewayBoundary (loadNativeGatewayIdentity)
+import Agent.Integration.Connection
 import Agent.CLI.MacOS.EngineState (Engine(..), EngineCommand(..), SessionMutation(..))
 import Agent.CLI.MacOS.Marshalling
     ( anyNonEmptyNull
@@ -67,6 +70,87 @@ foreign export ccall ha_engine_mcp_server_restart
 
 foreign export ccall ha_engine_integration_admin_list
     :: Ptr () -> FunPtr IntegrationResultCallback -> Ptr () -> IO CInt
+
+foreign export ccall ha_engine_connections_list
+    :: Ptr () -> FunPtr ConnectionSecretCallback -> Ptr () -> FunPtr ConnectionCallback -> Ptr () -> IO CInt
+foreign export ccall ha_engine_connections_search
+    :: Ptr () -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr ConnectionSecretCallback -> Ptr () -> FunPtr ConnectionCallback -> Ptr () -> IO CInt
+foreign export ccall ha_engine_connection_begin
+    :: Ptr () -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr ConnectionSecretCallback -> Ptr () -> FunPtr ConnectionCallback -> Ptr () -> IO CInt
+foreign export ccall ha_engine_connection_submit
+    :: Ptr () -> Ptr Word8 -> CSize -> Ptr () -> CSize
+    -> FunPtr ConnectionSecretCallback -> Ptr () -> FunPtr ConnectionCallback -> Ptr () -> IO CInt
+foreign export ccall ha_engine_connection_poll
+    :: Ptr () -> Ptr Word8 -> CSize
+    -> FunPtr ConnectionSecretCallback -> Ptr () -> FunPtr ConnectionCallback -> Ptr () -> IO CInt
+foreign export ccall ha_engine_connection_cancel
+    :: Ptr () -> Ptr Word8 -> CSize
+    -> FunPtr ConnectionSecretCallback -> Ptr () -> FunPtr ConnectionCallback -> Ptr () -> IO CInt
+foreign export ccall ha_engine_connection_disconnect
+    :: Ptr () -> Ptr Word8 -> CSize
+    -> FunPtr ConnectionSecretCallback -> Ptr () -> FunPtr ConnectionCallback -> Ptr () -> IO CInt
+
+ha_engine_connections_list
+    :: Ptr () -> FunPtr ConnectionSecretCallback -> Ptr ()
+    -> FunPtr ConnectionCallback -> Ptr () -> IO CInt
+ha_engine_connections_list pointer = submitConnectionCommand pointer (pure (Right ListConnections))
+ha_engine_connections_search, ha_engine_connection_begin
+    :: Ptr () -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+    -> FunPtr ConnectionSecretCallback -> Ptr ()
+    -> FunPtr ConnectionCallback -> Ptr () -> IO CInt
+ha_engine_connections_search pointer a al b bl =
+    submitConnectionCommand pointer do
+        provider <- connectionText a al
+        query <- connectionText b bl
+        pure (SearchConnections <$> provider <*> query)
+ha_engine_connection_begin pointer a al b bl =
+    submitConnectionCommand pointer do
+        provider <- connectionText a al
+        identifier <- connectionText b bl
+        pure (BeginConnection <$> provider <*> identifier)
+ha_engine_connection_submit
+    :: Ptr () -> Ptr Word8 -> CSize -> Ptr () -> CSize
+    -> FunPtr ConnectionSecretCallback -> Ptr ()
+    -> FunPtr ConnectionCallback -> Ptr () -> IO CInt
+ha_engine_connection_submit pointer session len answers count =
+    submitConnectionCommand pointer do
+        decodedSession <- connectionText session len
+        decodedAnswers <- decodeConnectionAnswers answers count
+        pure (SubmitConnection <$> decodedSession <*> decodedAnswers)
+ha_engine_connection_poll, ha_engine_connection_cancel, ha_engine_connection_disconnect
+    :: Ptr () -> Ptr Word8 -> CSize
+    -> FunPtr ConnectionSecretCallback -> Ptr ()
+    -> FunPtr ConnectionCallback -> Ptr () -> IO CInt
+ha_engine_connection_poll pointer session len =
+    submitConnectionCommand pointer (fmap PollConnection <$> connectionText session len)
+ha_engine_connection_cancel pointer session len =
+    submitConnectionCommand pointer (fmap CancelConnection <$> connectionText session len)
+ha_engine_connection_disconnect pointer identifier len =
+    submitConnectionCommand pointer (fmap DisconnectConnection <$> connectionText identifier len)
+
+connectionText :: Ptr Word8 -> CSize -> IO (Either Text.Text Text.Text)
+connectionText bytes len
+    | len > 16384 || (len > 0 && bytes == nullPtr) = pure (Left "Invalid connection input.")
+    | len == 0 = pure (Right "")
+    | otherwise = either (const (Left "Invalid connection input.")) Right
+        <$> decodeUtf8Input bytes (fromIntegral len)
+
+submitConnectionCommand :: Ptr () -> IO (Either Text.Text ConnectionCommand)
+    -> FunPtr ConnectionSecretCallback -> Ptr () -> FunPtr ConnectionCallback -> Ptr () -> IO CInt
+submitConnectionCommand pointer decode secret secretContext callback context
+    | pointer == nullPtr = pure 1
+    | callback == nullFunPtr = pure 2
+    | otherwise = do
+        outcome <- tryAny do
+            decode >>= \case
+                Left _ -> pure 2
+                Right command -> loadNativeGatewayIdentity >>= \case
+                    Left _ -> pure 3
+                    Right identity -> enqueueIntegrationCommand pointer
+                        (EngineConnectionCommand identity command secret secretContext callback context)
+        pure (either (const 3) id outcome)
 
 foreign export ccall ha_engine_integration_admin_call
     :: Ptr () -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize
@@ -180,7 +264,12 @@ integrationABISynchronousValidationSmoke = do
     callStatus <-
         ha_engine_integration_admin_call
             nullPtr nullPtr 0 nullPtr 0 nullFunPtr nullPtr
-    pure (listStatus == 1 && callStatus == 1)
+    connectionList <- ha_engine_connections_list nullPtr nullFunPtr nullPtr nullFunPtr nullPtr
+    connectionSubmit <- ha_engine_connection_submit
+        nullPtr nullPtr 0 nullPtr 0 nullFunPtr nullPtr nullFunPtr nullPtr
+    invalidAnswers <- decodeConnectionAnswers nullPtr 65
+    pure (listStatus == 1 && callStatus == 1 && connectionList == 1 &&
+        connectionSubmit == 1 && either (const True) (const False) invalidAnswers)
 
 maximumIntegrationAdminNameBytes, maximumIntegrationAdminArgumentsBytes :: Word64
 maximumIntegrationAdminNameBytes = 256

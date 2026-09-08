@@ -1,4 +1,5 @@
--- | The public CLI knows only the authenticated aggregate MCP endpoint.
+-- | Provider-neutral authenticated gateway authority. Organization-local
+-- extensions require a separate explicit distribution opt-in.
 module Agent.CLI.IntegrationGateway
     ( gatewayIntegrationAuthority
     , gatewayIntegrationMcpConfig

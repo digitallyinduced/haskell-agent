@@ -15,6 +15,8 @@ module Agent.CLI.Gateway.Credentials
     , removeGatewayCredential
     , removeGatewayCredentialWith
     , validateGatewayCredential
+    , registerGatewayCredentialInvalidator
+    , registerGatewayCredentialInvalidatorAt
     ) where
 
 import Agent.CLI.Gateway.Origin
@@ -33,6 +35,7 @@ import Agent.OpenAI.WebSocketClient (validateGatewayWebSocketUrl)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Server.Client.GatewayIdentity (GatewayCredential(..))
 import Control.Concurrent (ThreadId, myThreadId)
+import Control.Concurrent.MVar (MVar, newMVar, modifyMVar_, withMVar)
 import Control.Concurrent.STM
     ( TVar
     , atomically
@@ -47,10 +50,38 @@ import Data.Aeson qualified as Aeson
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text (Text)
 import Data.Text qualified as Text
+import Data.Map.Strict qualified as Map
+import Data.Unique (Unique, newUnique)
 import System.Directory.OsPath qualified as Directory
 import System.IO.Unsafe (unsafePerformIO)
 import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
+
+-- Owners register before accepting credential-scoped work and unregister
+-- before closing. Mutation holds the writer lease, so callbacks must not
+-- acquire a credential lease (nor join finalizers that acquire one).
+{-# NOINLINE gatewayCredentialInvalidators #-}
+gatewayCredentialInvalidators :: MVar (Map.Map Unique (OsPath, IO ()))
+gatewayCredentialInvalidators = unsafePerformIO (newMVar Map.empty)
+
+registerGatewayCredentialInvalidator :: IO () -> IO (IO ())
+registerGatewayCredentialInvalidator action = do
+    home <- Directory.getHomeDirectory
+    registerGatewayCredentialInvalidatorAt home action
+
+registerGatewayCredentialInvalidatorAt :: OsPath -> IO () -> IO (IO ())
+registerGatewayCredentialInvalidatorAt home action = do
+    key <- newUnique
+    modifyMVar_ gatewayCredentialInvalidators
+        (pure . Map.insert key (home, action))
+    pure $ modifyMVar_ gatewayCredentialInvalidators
+        (pure . Map.delete key)
+
+invalidateGatewayCredentialOwnersAt :: OsPath -> IO ()
+invalidateGatewayCredentialOwnersAt home =
+    withMVar gatewayCredentialInvalidators \owners ->
+        foldr finally (pure ())
+            [action | (ownerHome, action) <- Map.elems owners, ownerHome == home]
 
 gatewayCredentialDecoder :: Hermes.Decoder GatewayCredential
 gatewayCredentialDecoder =
@@ -309,6 +340,7 @@ saveGatewayCredentialAtWith home credential afterSave =
         Right () -> do
             result <- tryAny $
                 withGatewayCredentialLockAt home do
+                    invalidateGatewayCredentialOwnersAt home
                     let path = gatewayCredentialPath home
                         directory = takeDirectory path
                     Directory.createDirectoryIfMissing True directory
@@ -385,6 +417,7 @@ removeGatewayCredentialWith afterRemove = do
     result <- tryAny do
         home <- Directory.getHomeDirectory
         withGatewayCredentialLockAt home do
+            invalidateGatewayCredentialOwnersAt home
             let path = gatewayCredentialPath home
             exists <- Directory.doesFileExist path
             when exists (Directory.removeFile path)

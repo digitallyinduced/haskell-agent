@@ -143,11 +143,20 @@ acquireMcpRuntime request@AgentToolsRequest
         remoteServers =
             [ config { MCP.mcpServerName = integrationServerName }
             | runtime <- maybeToList integrationRuntime
-            , RemoteIntegrationEndpoint config <- [integrationRuntimeEndpoint runtime]]
+            , config <- case integrationRuntimeEndpoint runtime of
+                RemoteIntegrationEndpoint config -> [config]
+                CombinedIntegrationEndpoint config _ -> [config]
+                _ -> []]
+        localIntegrationServerName =
+            availableIntegrationServerName
+                (map (.mcpServerName) (configuredServers <> remoteServers))
         inMemoryServers =
-            [(integrationsMcpConfig integrationServerName, server)
+            [(integrationsMcpConfig localIntegrationServerName, server)
             | runtime <- maybeToList integrationRuntime
-            , LocalIntegrationEndpoint server <- [integrationRuntimeEndpoint runtime]]
+            , server <- case integrationRuntimeEndpoint runtime of
+                LocalIntegrationEndpoint server -> [server]
+                CombinedIntegrationEndpoint _ server -> [server]
+                _ -> []]
         -- Include the in-memory name in the reported configuration too: callers
         -- use this list to decide whether MCP tools exist at all.
         runtimeMcpServerConfigs = configuredServers <> remoteServers

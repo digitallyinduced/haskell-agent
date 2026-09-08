@@ -35,6 +35,8 @@ module Agent.CLI.GatewayClient
     , saveGatewayCredential
     , removeGatewayCredential
     , removeGatewayCredentialWith
+    , registerGatewayCredentialInvalidator
+    , registerGatewayCredentialInvalidatorAt
     , openGatewayAuthorizationPage
     , connectGateway
     , disconnectGateway
