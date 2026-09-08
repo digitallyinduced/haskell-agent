@@ -29,10 +29,17 @@ let
       sandboxNix
       openssh
       patch
+      # Document processing must work inside the guest without downloading
+      # packages or depending on utilities installed on the host.
+      python3
+      poppler-utils
+      qpdf
       procps
       ripgrep
+      unzip
       util-linux
       which
+      zip
     ];
     pathsToLink = [
       "/bin"
