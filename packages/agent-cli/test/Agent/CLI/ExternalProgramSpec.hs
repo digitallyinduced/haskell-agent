@@ -1,6 +1,9 @@
 module Agent.CLI.ExternalProgramSpec (spec) where
 
 import Agent.CLI.ExternalProgram
+import Control.Concurrent.Async (cancel, withAsync)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception.Safe (throwString)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import qualified Data.Text.IO as Text
 import System.Directory (doesFileExist)
@@ -70,3 +73,24 @@ spec = describe "Agent.CLI.ExternalProgram" do
                 doesFileExist path `shouldReturn` True
             path <- readIORef pathRef
             doesFileExist path `shouldReturn` False
+
+        it "removes the temporary file when the action throws" do
+            pathRef <- newIORef ""
+            withTemporaryTextFile "agent-cleanup-" "draft" (\path -> do
+                writeIORef pathRef path
+                throwString "action failed")
+                `shouldThrow` anyException
+            path <- readIORef pathRef
+            doesFileExist path `shouldReturn` False
+
+        it "removes the temporary file when the action is cancelled" do
+            entered <- newEmptyMVar
+            blocked <- newEmptyMVar
+            withAsync
+                (withTemporaryTextFile "agent-cleanup-" "draft" \path -> do
+                    putMVar entered path
+                    takeMVar blocked)
+                \worker -> do
+                    path <- takeMVar entered
+                    cancel worker
+                    doesFileExist path `shouldReturn` False

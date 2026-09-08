@@ -99,7 +99,7 @@ import Control.Concurrent
     , threadDelay
     , withMVar
     )
-import Control.Exception.Safe (finally, mask, onException, tryAny)
+import Control.Exception.Safe (bracket, finally, mask, onException, tryAny)
 import Control.Monad (foldM)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -1204,34 +1204,35 @@ screenshotMainDisplayWith encoding (width, height) = do
                 ScreenshotJpeg ->
                     (".jpg", "jpg", "image/jpeg",
                         ["-s", "formatOptions", "80"])
-        (path, handle) <- openBinaryTempFile temporaryDirectory
-            ("agent-computer-use-" <> suffix)
-        hClose handle
-        let cleanup = removeFile path
-        flip finally cleanup do
-            capture <- readProcessWithExitCode
-                "/usr/sbin/screencapture"
-                ["-x", "-m", "-C", "-t", format, path]
-                ""
-            case capture of
-                (ExitFailure _, _, stderr) ->
-                    pure (Left (commandError "screencapture" stderr))
-                (ExitSuccess, _, _) -> do
-                    resized <- readProcessWithExitCode
-                        "/usr/bin/sips"
-                        ([ "-z", show height, show width ]
-                            <> formatOptions
-                            <> [path])
-                        ""
-                    case resized of
-                        (ExitFailure _, _, stderr) ->
-                            pure (Left (commandError "screenshot resize" stderr))
-                        (ExitSuccess, _, _) -> do
-                            bytes <- BS.readFile path
-                            pure $ if BS.null bytes
-                                then Left
-                                    "Screen capture returned an empty image. Grant Screen Recording permission to the terminal or agent app."
-                                else Right (ImageAttachment mime bytes)
+        bracket
+            (openBinaryTempFile temporaryDirectory
+                ("agent-computer-use-" <> suffix))
+            (\(path, handle) -> hClose handle `finally` removeFile path)
+            \(path, handle) -> do
+                hClose handle
+                capture <- readProcessWithExitCode
+                    "/usr/sbin/screencapture"
+                    ["-x", "-m", "-C", "-t", format, path]
+                    ""
+                case capture of
+                    (ExitFailure _, _, stderr) ->
+                        pure (Left (commandError "screencapture" stderr))
+                    (ExitSuccess, _, _) -> do
+                        resized <- readProcessWithExitCode
+                            "/usr/bin/sips"
+                            ([ "-z", show height, show width ]
+                                <> formatOptions
+                                <> [path])
+                            ""
+                        case resized of
+                            (ExitFailure _, _, stderr) ->
+                                pure (Left (commandError "screenshot resize" stderr))
+                            (ExitSuccess, _, _) -> do
+                                bytes <- BS.readFile path
+                                pure $ if BS.null bytes
+                                    then Left
+                                        "Screen capture returned an empty image. Grant Screen Recording permission to the terminal or agent app."
+                                    else Right (ImageAttachment mime bytes)
     pure $ either (Left . Text.pack . show) id attempted
 
 mainDisplayLogicalSize :: IO (Either Text (Int, Int))
