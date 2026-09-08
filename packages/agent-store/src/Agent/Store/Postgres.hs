@@ -205,13 +205,10 @@ withStore
     -> (Store -> IO a)
     -> IO (Either StoreError a)
 withStore config action =
-    openStore config >>= \case
-        Left err -> pure (Left err)
-        Right store ->
-            bracket
-                (pure store)
-                closeStore
-                (fmap Right . action)
+    bracket
+        (openStore config)
+        (either (const (pure ())) closeStore)
+        (either (pure . Left) (fmap Right . action))
 
 storeConfig :: Store -> ManagedPostgresConfig
 storeConfig = (.storeConfigInternal)

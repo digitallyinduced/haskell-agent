@@ -182,6 +182,26 @@ benchmark managed-startup-bench
                     , temporary
                     , text
 
+-- Compile only the internal host-lock module and its error type, without
+-- exposing implementation details or requiring a PostgreSQL server.
+test-suite owner-fence-test
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    ghc-options:      -threaded
+    hs-source-dirs:   test-internal, src
+    main-is:          OwnerFenceSpec.hs
+    other-modules:    Agent.Store.Postgres.ServerTurn.OwnerFence
+                    , Agent.Store.Types
+    build-depends:    async
+                    , base >= 4.14 && < 5
+                    , filelock
+                    , filepath
+                    , hspec
+                    , safe-exceptions
+                    , temporary
+                    , text
+                    , uuid-types
+
 test-suite agent-store-test
     import:           common-opts
     type:             exitcode-stdio-1.0
