@@ -1,8 +1,7 @@
--- Run against the internal library module without making it public:
--- nix develop -c cabal repl agent-server:lib:agent-server
--- :add test/AttachmentScopeCheck.hs
--- AttachmentScopeCheck.main
-module AttachmentScopeCheck (main) where
+-- Tests the internal module without widening the library's public API.
+-- nix develop -c cabal repl agent-server:test:agent-server-attachment-test
+-- :main
+module Main (main) where
 
 import Agent.Server.Identifier (newUUIDv7Text)
 import Agent.Server.Runtime.Attachments (withMaterializedTurnFiles)
