@@ -11,7 +11,21 @@ import Agent.CLI.NativeRuntime
     , nativePreparedDiscovery
     , nativeTurnOptions
     , applyNativeStartupPolicy
+    , newNativeProcessRuntimeWithOrganizationIntegrations
+    , closeNativeProcessRuntime
+    , nativeProcessIntegrationSupervisor
+    , acquireNativeLocalIntegrationRuntime
+    , restartNativeMcpRuntime
     )
+import Agent.Integration.API
+import Agent.Json (rawJsonFromEncoding)
+import qualified Data.Aeson as Aeson
+import Data.IORef
+import Data.Text (Text)
+import Control.Exception.Safe (bracket)
+import System.IO.Temp (withSystemTempDirectory)
+import Agent.CLI.GatewayClient (GatewayCredential(..))
+import Agent.CLI.IntegrationGateway (gatewayIntegrationMcpConfig)
 import Agent.CLI.Options
     ( CliOptions(..)
     , ScreenMode(..)
@@ -29,6 +43,74 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "nativeTurnOptions" do
+    it "keeps local account administration separate from organization connections" $
+        withSystemTempDirectory "native-local-admin" \root -> do
+            localStarts <- newIORef (0 :: Int)
+            localCloses <- newIORef (0 :: Int)
+            organizationStarts <- newIORef (0 :: Int)
+            organizationCloses <- newIORef (0 :: Int)
+            let payload = rawJsonFromEncoding (Aeson.toEncoding ([] :: [Aeson.Value]))
+                provider :: IORef Int -> IORef Int -> Text -> IntegrationProvider
+                provider starts closes label _ = do
+                    modifyIORef' starts (+ 1)
+                    pure (Right IntegrationRuntime
+                        { integrationRuntimeEndpoint = NoIntegrationEndpoint
+                        , integrationRuntimeAdminDefinitions = payload
+                        , callIntegrationRuntimeAdmin = \_ _ ->
+                            pure (Left (IntegrationUnavailable label))
+                        , integrationRuntimeConnections = Nothing
+                        , closeIntegrationRuntime = modifyIORef' closes (+ 1)
+                        })
+                localProvider env = do
+                    runtime <- provider localStarts localCloses "local mail" env
+                        >>= shouldReturnRight
+                    operations <- newIORef ([] :: [Text])
+                    pure (Right runtime
+                        { callIntegrationRuntimeAdmin = \name _ -> do
+                            modifyIORef' operations (<> [name])
+                            Right . rawJsonFromEncoding . Aeson.toEncoding
+                                <$> readIORef operations
+                        })
+                operationResult names = Right
+                    (rawJsonFromEncoding (Aeson.toEncoding (names :: [Text])))
+                organizationProvider _ = provider organizationStarts organizationCloses "banking"
+                config = gatewayIntegrationMcpConfig GatewayCredential
+                    { gatewayBaseUrl = "https://gateway.example"
+                    , gatewayWebSocketUrl = "wss://gateway.example/ws"
+                    , gatewayAccessToken = "fixture-token"
+                    }
+            bracket
+                (newNativeProcessRuntimeWithOrganizationIntegrations localProvider
+                    (Just organizationProvider) (unsafeEncodeUtf root))
+                closeNativeProcessRuntime \process -> do
+                    let supervisor = nativeProcessIntegrationSupervisor process
+                        acquire authority = acquireIntegrationRuntime supervisor authority
+                            >>= shouldReturnRight
+                    bank <- acquire (OrganizationIntegrationAuthority config)
+                    readIORef localStarts `shouldReturn` 0
+                    mail <- acquireNativeLocalIntegrationRuntime process >>= shouldReturnRight
+                    callIntegrationRuntimeAdmin mail "email.oauth.start" payload
+                        `shouldReturn` operationResult ["email.oauth.start"]
+                    callIntegrationRuntimeAdmin bank "email.oauth.start" payload
+                        `shouldReturn` Left (IntegrationUnavailable "banking")
+                    readIORef organizationCloses `shouldReturn` 0
+                    _ <- acquire LocalIntegrationAuthority
+                    readIORef localStarts `shouldReturn` 1
+                    readIORef organizationCloses `shouldReturn` 1
+                    _ <- acquire (OrganizationIntegrationAuthority config)
+                    readIORef localCloses `shouldReturn` 0
+                    restartNativeMcpRuntime process
+                    resumedMail <- acquireNativeLocalIntegrationRuntime process >>= shouldReturnRight
+                    callIntegrationRuntimeAdmin resumedMail "email.oauth.poll" payload
+                        `shouldReturn` operationResult ["email.oauth.start", "email.oauth.poll"]
+                    callIntegrationRuntimeAdmin resumedMail "email.oauth.cancel" payload
+                        `shouldReturn` operationResult
+                            ["email.oauth.start", "email.oauth.poll", "email.oauth.cancel"]
+                    readIORef localStarts `shouldReturn` 1
+                    readIORef localCloses `shouldReturn` 0
+            readIORef localCloses `shouldReturn` 1
+            readIORef organizationCloses `shouldReturn` 2
+
     it "preserves legacy host startup options exactly" do
         applyNativeStartupPolicy hostNativeStartupPolicy
             (unsafeEncodeUtf "/admitted") conflictingOptions

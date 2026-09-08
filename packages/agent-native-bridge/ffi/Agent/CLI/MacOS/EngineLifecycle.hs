@@ -17,6 +17,7 @@ import Agent.CLI.MacOS.McpAdminBridge (invokeMcpResultCallback)
 import Agent.CLI.MacOS.NativeSupervisor
     ( newIntegrationWorkerRegistry
     , shutdownIntegrationWorkers
+    , shutdownOrganizationIntegrationWorkers
     , shutdownRunningTurns
     , supervisorLoop
     )
@@ -66,7 +67,7 @@ workerLifecycle
                     `finally` closeEngineStore store
         bracket
             (registerGatewayCredentialInvalidator
-                (shutdownIntegrationWorkers integrationWorkers
+                (shutdownOrganizationIntegrationWorkers integrationWorkers
                     `finally` restartNativeMcpRuntime processRuntime)
                 `onException` closeResources)
             (\unregister -> unregister `finally` closeResources)
