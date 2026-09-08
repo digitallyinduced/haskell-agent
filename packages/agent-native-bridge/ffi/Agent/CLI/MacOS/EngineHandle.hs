@@ -41,6 +41,7 @@ ha_engine_create callback context
             stagedImages <- newTVarIO Map.empty
             browser <- BrowserHost <$> newMVar Nothing
             computer <- newComputerHost
+            chartRenderingEnabled <- newTVarIO False
             stagedTurnOptions <- newTVarIO Map.empty
             interactionTarget <- newTVarIO Nothing
             interactionLock <- newMVar ()
@@ -64,6 +65,7 @@ ha_engine_create callback context
                             stagedImages
                             browser
                             computer
+                            chartRenderingEnabled
                             stagedTurnOptions
                             interactions)
                 let engine = Engine
@@ -72,6 +74,7 @@ ha_engine_create callback context
                         , engineStagedImages = stagedImages
                         , engineBrowser = browser
                         , engineComputer = computer
+                        , engineChartRenderingEnabled = chartRenderingEnabled
                         , engineStagedTurnOptions = stagedTurnOptions
                         , engineInteractions = interactions
                         }

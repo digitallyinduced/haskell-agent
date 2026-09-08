@@ -38,6 +38,7 @@ import qualified Agent.Tools.TaskPlanSpec as TaskPlanSpec
 import qualified Agent.Tools.SecretSpec as SecretSpec
 import qualified Agent.Tools.ShowImageSpec as ShowImageSpec
 import qualified Agent.Tools.ViewImageSpec as ViewImageSpec
+import qualified Agent.Tools.RenderChartSpec as RenderChartSpec
 import qualified Agent.Transport.WebSocketSpec as WebSocketSpec
 import Test.Hspec (hspec)
 
@@ -78,6 +79,7 @@ main = hspec do
     SecretSpec.spec
     ShowImageSpec.spec
     ViewImageSpec.spec
+    RenderChartSpec.spec
     CodeModeHostSpec.spec
     CodeModeProtocolSpec.spec
     DangerousSpec.spec

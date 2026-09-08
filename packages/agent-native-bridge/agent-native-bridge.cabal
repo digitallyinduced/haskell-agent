@@ -158,6 +158,7 @@ test-suite agent-native-bridge-test
                     , Agent.CLI.ResourceAdminSpec
     build-depends:    agent-native-bridge
                     , agent-cli
+                    , agent-responses-types
                     , agent-integration-api
                     , agent-core
                     , agent-json
@@ -235,7 +236,6 @@ test-suite agent-native-bridge-test
                      , agent-cli-runtime
                      , agent-openai
                      , agent-openrouter
-                     , agent-responses-types
                      , agent-xai
                      , filelock
                      , JuicyPixels

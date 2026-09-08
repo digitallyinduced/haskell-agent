@@ -2,9 +2,14 @@ module Agent.CLI.MacOS.NativeLoopEventSpec (spec) where
 
 import Agent.CLI.MacOS.NativeLoopEvent
     ( encodeNativeLoopEvent
+    , encodeNativeLoopEventWithChartCalls
     , encodeNativeUsageEvent
     )
 import Agent.CLI.MacOS.NativeInteraction (boundedApprovalArguments)
+import Agent.CLI.SessionAdmin (sessionToolEvent, sessionToolEventWithChartCalls)
+import qualified Agent.Responses.Types as Responses
+import Agent.Json (rawJsonFromEncoding)
+import Agent.Tools.RenderChart (chartResultDocument, chartResultSummary)
 import Agent.Loop
     ( LoopEvent(..)
     , TokenUsage(..)
@@ -16,9 +21,15 @@ import Agent.ToolDispatch
     , ToolCallKind(..)
     , ToolCallMode(..)
     , ToolCallResult(..)
+    , ToolOutcome(..)
     , withToolCallMode
     )
 import qualified Data.ByteString as BS
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LBS
+import Data.Maybe (fromJust)
+import qualified Data.Set as Set
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Word (Word8, Word32)
@@ -26,6 +37,62 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "native loop event binary encoding" do
+    it "transports the complete chart independently of the bounded output preview" do
+        let result = ToolCallResult
+                { callId = "chart-call"
+                , output = chartEnvelope
+                , callKind = FunctionCallKind
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Nothing
+                }
+        Text.length chartEnvelope `shouldSatisfy` (> 8192)
+        let document = fromJust (chartResultDocument chartEnvelope)
+            summary = fromJust (chartResultSummary chartEnvelope)
+        encodeNativeLoopEventWithChartCalls (Set.singleton "chart-call") "turn" (ToolFinished result)
+            `shouldBe` Just (frame 5 8
+                ["turn", "chart-call", Text.unpack summary, Text.unpack document])
+        fmap (BS.take 8) (encodeNativeLoopEvent "turn" (ToolFinished result))
+            `shouldBe` Just (header 5 2)
+
+    it "projects the same complete chart from durable response items on reload" do
+        let item = Responses.FunctionCallOutputItem Responses.FunctionCallOutput
+                { Responses.itemId = Nothing
+                , Responses.callId = "chart-call"
+                , Responses.name = Nothing
+                , Responses.namespace = Nothing
+                , Responses.provider = Nothing
+                , Responses.output = rawJsonFromEncoding (Aeson.toEncoding chartEnvelope)
+                , Responses.status = Nothing
+                , Responses.async = Nothing
+                , Responses.localOutcome = Nothing
+                }
+        case sessionToolEventWithChartCalls (Set.singleton "chart-call") item of
+                    Just (Aeson.Object event) -> do
+                        KeyMap.lookup "chart" event
+                            `shouldBe` (chartResultDocument chartEnvelope
+                                >>= Aeson.decodeStrict' . TextEncoding.encodeUtf8)
+                        KeyMap.lookup "output" event
+                            `shouldBe` (Aeson.String <$> chartResultSummary chartEnvelope)
+                        KeyMap.lookup "truncated" event `shouldBe` Just (Aeson.Bool False)
+                        case sessionToolEvent item of
+                            Just (Aeson.Object ordinary) ->
+                                KeyMap.lookup "chart" ordinary `shouldBe` Nothing
+                            _ -> expectationFailure "ordinary output event missing"
+                    _ -> expectationFailure "chart history event missing"
+
+    it "does not attach a chart to a failed tool result" do
+        let result = ToolCallResult
+                { callId = "chart-call"
+                , output = chartEnvelope
+                , callKind = FunctionCallKind
+                , toolResultMode = BlockingToolCall
+                , toolResultImages = []
+                , toolResultOutcome = Just ToolFailed
+                }
+        fmap (BS.take 8) (encodeNativeLoopEventWithChartCalls (Set.singleton "chart-call") "turn" (ToolFinished result))
+            `shouldBe` Just (header 5 2)
+
     it "encodes text deltas with a versioned HAEV frame" do
         encodeNativeLoopEvent "turn" (TextDelta "hé")
             `shouldBe` Just (frame 2 0 ["turn", "hé"])
@@ -201,6 +268,29 @@ spec = describe "native loop event binary encoding" do
 
     it "does not encode turn-start lifecycle events as native loop frames" do
         encodeNativeLoopEvent "turn" TurnStarted `shouldBe` Nothing
+
+chartEnvelope :: Text.Text
+chartEnvelope = TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $
+    Aeson.object
+        [ "type" Aeson..= ("chart" :: Text.Text)
+        , "summary" Aeson..= ("Measurements: 1 series, 1000 points." :: Text.Text)
+        , "chart" Aeson..= Aeson.object
+            [ "version" Aeson..= (1 :: Int)
+            , "kind" Aeson..= ("line" :: Text.Text)
+            , "title" Aeson..= ("Measurements" :: Text.Text)
+            , "x_axis" Aeson..= Aeson.object ["type" Aeson..= ("number" :: Text.Text)]
+            , "y_axis" Aeson..= Aeson.object []
+            , "series" Aeson..=
+                [ Aeson.object
+                    [ "name" Aeson..= ("Observations" :: Text.Text)
+                    , "points" Aeson..=
+                        [ Aeson.object ["x" Aeson..= index, "y" Aeson..= index]
+                        | index <- [1 .. 1000 :: Int]
+                        ]
+                    ]
+                ]
+            ]
+        ]
 
 frame :: Word8 -> Word8 -> [String] -> BS.ByteString
 frame kind flags fields =

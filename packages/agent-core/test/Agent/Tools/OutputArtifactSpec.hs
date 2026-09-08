@@ -40,6 +40,19 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.Tools.OutputArtifact" do
+    it "retains validated chart documents instead of replacing them with temporary artifacts" do
+        withTempEnv \env -> do
+            let output = "{\"type\":\"chart\",\"summary\":\"Measurements\",\
+                    \\"chart\":{\"version\":1,\"kind\":\"bar\",\"title\":\"Measurements\",\
+                    \\"x_axis\":{\"type\":\"category\"},\"y_axis\":{},\
+                    \\"series\":[{\"name\":\"Count\",\"points\":[{\"x\":\"A\",\"y\":1}]}]}}"
+                boundedEnv = env { toolOutputInlineCap = 1 }
+            finalizeToolOutput boundedEnv (functionToolCall "chart" "render_chart" "{}") output
+                `shouldReturn` output
+            finalized <- finalizeToolOutput boundedEnv
+                (functionToolCall "ordinary" "read_file" "{}") output
+            finalized `shouldNotBe` output
+
     it "stores and reads an opaque handle" do
         withTempEnv \env -> do
             writeOutputArtifact env "hello" >>= \case

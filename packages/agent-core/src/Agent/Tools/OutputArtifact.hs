@@ -25,6 +25,7 @@ import Agent.OsPath (unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optBool, optInt, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (ToolCall(..), typedTool, typedToolWithCall)
+import Agent.Tools.RenderChart (chartResultDocument)
 import Agent.Tools.Types
     ( AppTool
     , ToolEnv(..)
@@ -457,6 +458,10 @@ artifactLinePreviewBytes = 32 * 1024
 -- | Replace an oversized provider-facing result with a compact artifact marker.
 finalizeToolOutput :: ToolEnv -> ToolCall -> Text -> IO Text
 finalizeToolOutput env call output
+    -- Chart documents are already independently bounded and must remain in
+    -- durable response items, not in session-temporary output artifacts.
+    | call.name == "render_chart", Just _ <- chartResultDocument output =
+        pure output
     | BS.length encoded <= max 0 env.toolOutputInlineCap = pure output
     | otherwise =
         writeOutputArtifactDetailed env encoded >>= \case

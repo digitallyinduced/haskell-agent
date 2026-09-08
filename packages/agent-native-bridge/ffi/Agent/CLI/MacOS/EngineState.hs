@@ -61,6 +61,7 @@ data Engine = Engine
     , engineStagedImages :: !(TVar (Map Text [ImageAttachment]))
     , engineBrowser :: !BrowserHost
     , engineComputer :: !ComputerHost
+    , engineChartRenderingEnabled :: !(TVar Bool)
     , engineStagedTurnOptions :: !(TVar (Map Text NativeTurnOptions))
     , engineInteractions :: !InteractionRuntime
     }
