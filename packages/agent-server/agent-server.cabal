@@ -102,6 +102,29 @@ executable agent-sandbox-worker
     build-depends:    agent-server
                     , base >= 4.17 && < 5
 
+test-suite agent-server-attachment-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test/internal, src
+    main-is:          AttachmentScopeCheck.hs
+    other-modules:    Agent.Server.Identifier
+                    , Agent.Server.Runtime.Attachments
+                    , Agent.Server.Types
+    ghc-options:      -threaded
+    build-depends:    agent-cli-runtime
+                    , agent-core
+                    , aeson
+                    , async
+                    , base >= 4.17 && < 5
+                    , base64-bytestring
+                    , bytestring
+                    , crypton
+                    , directory
+                    , filepath
+                    , safe-exceptions
+                    , text
+                    , time
+
 test-suite agent-server-test
     import:           common-options
     type:             exitcode-stdio-1.0
