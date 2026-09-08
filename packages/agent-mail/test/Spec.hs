@@ -6,6 +6,7 @@ import Agent.Mail.OAuth
 import Agent.Mail.SecretCodec
 import Agent.Mail.Transport
 import Agent.Mail.Types
+import qualified Agent.Mail.Types as MailTypes
 import Data.Aeson (Result(..), Value(..), object, (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -99,6 +100,32 @@ main = hspec do
                 `shouldContain` ["Mail.Send"]
 
     describe "explicit secret storage codec" do
+        it "round trips the installed OAuth client parameter without exposing it in Show" do
+            let secret = (validOAuthCredential "account-1").mailCredentialSecret
+                    { MailTypes.mailOAuthClientSecret = Just "synthetic-desktop-parameter" }
+            AesonTypes.parseEither
+                parseMailSecretStorageValue
+                (mailSecretStorageValue secret)
+                `shouldBe` Right secret
+            show secret `shouldNotContain` "synthetic-desktop-parameter"
+            show secret `shouldNotContain` "access-token"
+            show secret `shouldNotContain` "refresh-token"
+
+        it "reads existing OAuth credentials without a client parameter" do
+            let secret = (validOAuthCredential "account-1").mailCredentialSecret
+                legacy = case mailSecretStorageValue secret of
+                    Object value -> Object (KeyMap.delete "client_secret" value)
+                    value -> value
+            AesonTypes.parseEither parseMailSecretStorageValue legacy
+                `shouldBe` Right secret
+
+        it "round trips OAuth credentials with no installed client parameter" do
+            let secret = (validOAuthCredential "account-1").mailCredentialSecret
+            AesonTypes.parseEither
+                parseMailSecretStorageValue
+                (mailSecretStorageValue secret)
+                `shouldBe` Right secret
+
         it "round trips only through the opt-in codec and redacts Show" do
             let secret = MailImapSecret
                     { mailSecretAccountId = "account-1"
@@ -479,6 +506,7 @@ validOAuthCredential accountId = MailCredential
         , mailOAuthExpiresAt = Nothing
         , mailOAuthScopes =
             ["https://www.googleapis.com/auth/gmail.readonly"]
+        , mailOAuthClientSecret = Nothing
         }
     }
 
