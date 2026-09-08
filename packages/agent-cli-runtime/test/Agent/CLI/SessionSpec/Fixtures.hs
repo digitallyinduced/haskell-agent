@@ -25,6 +25,8 @@ import Agent.Responses.Types
 import Agent.Telemetry (TurnTelemetry(..))
 import Agent.Store.Postgres
     ( Store
+    , ManagedPostgresConfig(..)
+    , ManagedPostgresPaths(..)
     , closeStore
     , defaultManagedPostgresConfig
     , openStore
@@ -214,7 +216,13 @@ withTempStore action = do
                 stateDirectory = basePath FilePath.</> ".haskell-agent"
                 sessionsDirectory =
                     stateDirectory FilePath.</> "sessions"
-                config = defaultManagedPostgresConfig stateDirectory ""
+                initialConfig = defaultManagedPostgresConfig stateDirectory ""
+                -- Keep the socket close to the temporary root: macOS limits
+                -- Unix socket paths even when the data directory is valid.
+                config = initialConfig
+                    { postgresPaths = initialConfig.postgresPaths
+                        { postgresSocketDirectory = basePath FilePath.</> "s" }
+                    }
             Directory.createDirectoryIfMissing True sessionsDirectory
             bracket
                 (openStore config >>= either

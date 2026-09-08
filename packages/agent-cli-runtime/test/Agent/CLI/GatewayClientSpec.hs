@@ -1,7 +1,12 @@
 module Agent.CLI.GatewayClientSpec (spec) where
 
 import Agent.CLI.GatewayClient
+import Agent.CLI.SessionSpec.Fixtures (withTempStore)
+import Agent.Store.Postgres (trustedPool)
+import Agent.Store.Postgres.ModelCatalogCache qualified as ModelStore
+import Agent.Server.Client.GatewayIdentity (gatewayCredentialIdentity)
 import Agent.ClientIdentity (gatewayUserAgent)
+import Agent.OpenAI.Usage (UsageSnapshot(..))
 import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Agent.Json.Decode qualified as Hermes
 import Control.Concurrent
@@ -178,7 +183,7 @@ spec = describe "gateway device authorization" do
             "{\"data\":[{\"id\":\"company-model\",\"protocol\":\"responses\",\"provider\":\"anthropic\"}]}"
             `shouldSatisfy` isLeft
 
-    it "clears cached gateway models when refresh fails" do
+    it "retains cached gateway models when refresh fails" do
         results <- newIORef
             [ Right
                 [ GatewayModel " gpt-5.6-sol " GatewayResponsesProtocol GatewayOpenAIProvider
@@ -207,7 +212,63 @@ spec = describe "gateway device authorization" do
                     ]
         refreshGatewayModels access
             `shouldReturn` Left "gateway unavailable"
-        cachedGatewayModels access `shouldReturn` Nothing
+        cachedGatewayModels access `shouldReturn` Just
+            [ GatewayModel "gpt-5.6-sol" GatewayResponsesProtocol GatewayOpenAIProvider
+            , GatewayModel "sonnet" GatewayAnthropicProtocol GatewayAnthropicProvider
+            ]
+
+    it "round-trips persisted model provider and protocol identities" do
+        let models =
+                [ GatewayModel "openai-model" GatewayResponsesProtocol GatewayOpenAIProvider
+                , GatewayModel "xai-model" GatewayResponsesProtocol GatewayXAIProvider
+                , GatewayModel "anthropic-model" GatewayAnthropicProtocol GatewayAnthropicProvider
+                ]
+        Aeson.decode (Aeson.encode models) `shouldBe` Just models
+
+    it "persists gateway catalogs across handles and isolates replacement credentials" $
+        withTempStore \store _ -> do
+            let pool = trustedPool store
+                credential = GatewayCredential "https://gateway" "wss://gateway/v1/responses" "first"
+                models = [GatewayModel "company-model" GatewayResponsesProtocol GatewayOpenAIProvider]
+                newAccess = newGatewayModelAccessWithStoreAndFetch pool credential
+            access <- newAccess (pure (Right models))
+            cachedGatewayModels access `shouldReturn` Nothing
+            refreshGatewayModels access `shouldReturn` Right models
+            restored <- newGatewayModelAccessWithStore pool credential
+            cachedGatewayModels restored `shouldReturn` Just models
+            unavailable <- newAccess (pure (Left "gateway unavailable"))
+            refreshGatewayModels unavailable `shouldReturn` Left "gateway unavailable"
+            retained <- newGatewayModelAccessWithStore pool credential
+            cachedGatewayModels retained `shouldReturn` Just models
+            textFailure <- newAccess (pure (Left "Gateway models returned HTTP 403"))
+            refreshGatewayModels textFailure `shouldReturn` Left "Gateway models returned HTTP 403"
+            cachedGatewayModels textFailure `shouldReturn` Just models
+            replacement <- newGatewayModelAccessWithStore pool
+                credential { gatewayAccessToken = "second" }
+            cachedGatewayModels replacement `shouldReturn` Nothing
+            otherGateway <- newGatewayModelAccessWithStore pool
+                credential { gatewayBaseUrl = "https://other-gateway" }
+            cachedGatewayModels otherGateway `shouldReturn` Nothing
+            empty <- newAccess (pure (Right []))
+            refreshGatewayModels empty `shouldReturn` Right []
+            emptyRestored <- newGatewayModelAccessWithStore pool credential
+            cachedGatewayModels emptyRestored `shouldReturn` Just []
+            denied <- newGatewayModelAccessWithStoreAndResult pool credential
+                (pure (Left (GatewayModelAuthorizationRejected "Gateway models returned HTTP 403")))
+            refreshGatewayModels denied `shouldReturn` Left "Gateway models returned HTTP 403"
+            cachedGatewayModels denied `shouldReturn` Nothing
+            deniedRestored <- newGatewayModelAccessWithStore pool credential
+            cachedGatewayModels deniedRestored `shouldReturn` Nothing
+
+    it "ignores corrupt persisted model catalogs without contacting the gateway" $
+        withTempStore \store _ -> do
+            let pool = trustedPool store
+                credential = GatewayCredential "https://gateway" "wss://gateway/v1/responses" "first"
+            ModelStore.upsertModelCatalogCache pool
+                (gatewayCredentialIdentity credential) "not json"
+                `shouldReturn` Right ()
+            access <- newGatewayModelAccessWithStore pool credential
+            cachedGatewayModels access `shouldReturn` Nothing
 
     it "passes the exact public alias to the gateway usage transport" do
         aliases <- newIORef ([] :: [Text.Text])
@@ -231,6 +292,20 @@ spec = describe "gateway device authorization" do
         fetchGatewayUsage access "company-model"
             `shouldReturn`
                 Left "Could not refresh organization gateway usage."
+
+    it "retains successful usage snapshots per alias after transient failures" do
+        let snapshot = UsageSnapshot "organization" Nothing []
+        results <- newIORef [Right snapshot, Left "unavailable"]
+        access <- newGatewayModelAccessWithUsage (pure (Right [])) \_ ->
+            atomicModifyIORef' results \case
+                result : remaining -> (remaining, result)
+                [] -> ([], Left "unexpected refresh")
+        cachedGatewayUsage access "company-model" `shouldReturn` Nothing
+        fetchGatewayUsage access "company-model" `shouldReturn` Right snapshot
+        cachedGatewayUsage access "company-model" `shouldReturn` Just snapshot
+        cachedGatewayUsage access "other-model" `shouldReturn` Nothing
+        fetchGatewayUsage access "company-model" `shouldReturn` Left "unavailable"
+        cachedGatewayUsage access "company-model" `shouldReturn` Just snapshot
 
     it "keeps gateway dictation behind the opaque model access" do
         events <- newIORef ([] :: [Text.Text])
@@ -261,7 +336,7 @@ spec = describe "gateway device authorization" do
                 , "text:gateway transcript"
                 ]
 
-    it "clears cached gateway models when a fetch throws" do
+    it "retains cached gateway models when a fetch throws" do
         calls <- newIORef (0 :: Int)
         access <-
             newGatewayModelAccessWith do
@@ -284,7 +359,8 @@ spec = describe "gateway device authorization" do
         refreshGatewayModels access
             `shouldReturn`
                 Left "Could not refresh organization gateway models."
-        cachedGatewayModels access `shouldReturn` Nothing
+        cachedGatewayModels access `shouldReturn` Just
+            [GatewayModel "company-model" GatewayResponsesProtocol GatewayOpenAIProvider]
 
     it "does not expose a gateway bearer in model-list validation errors" do
         let credential =

@@ -1,20 +1,23 @@
--- | Load the authoritative model options exposed by a connected organization
--- gateway for native clients that do not own a long-running CLI session.
+-- | Resolve organization-gateway model options for long-running CLI sessions
+-- and native clients that require an authoritative one-shot catalog.
 module Agent.CLI.GatewayModels
     ( loadGatewayModelOptionsAt
     , loadGatewayModelOptionsWithCredentialAt
     , modelOptionsForGatewayModels
     , modelOptionsForGatewayState
     , selectGatewayModelOption
+    , withGatewayModelsForStartup
     ) where
 
 import Agent.CLI.GatewayClient
     ( GatewayCredential
+    , GatewayModelAccess
     , GatewayModel(..)
     , GatewayModelProvider(..)
     , loadGatewayCredentialAt
     , newGatewayModelAccess
     , refreshGatewayModels
+    , cachedGatewayModels
     )
 import Agent.CLI.ModelConfig
     ( ModelCatalog
@@ -29,13 +32,33 @@ import Agent.CLI.Models
     )
 import Agent.Provider
     ( Provider (ClaudeCodeProvider, OpenAIProvider, XAIProvider) )
+import Control.Concurrent.Async (withAsync)
+import Control.Monad (void)
 import Data.List (find, nubBy)
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import System.OsPath (OsPath)
 
--- | Select from the authoritative gateway catalog before authentication.
+-- | Start from a credential-scoped cached catalog when it satisfies selection.
+-- Cache misses, including a newly requested alias absent from the snapshot,
+-- retain authoritative synchronous selection. The warm refresh belongs to the
+-- continuation's lifetime and is cancelled and joined when that runtime exits.
+-- Cached metadata does not grant access: the gateway authorizes every request.
+withGatewayModelsForStartup
+    :: GatewayModelAccess
+    -> ([GatewayModel] -> Either Text selection)
+    -> (Either Text selection -> IO result)
+    -> IO result
+withGatewayModelsForStartup access select continue =
+    cachedGatewayModels access >>= \case
+        Just models | Right selected <- select models ->
+            withAsync (void (refreshGatewayModels access)) \_ ->
+                continue (Right selected)
+        _ ->
+            refreshGatewayModels access >>= continue . (>>= select)
+
+-- | Select from a credential-scoped gateway catalog before authentication.
 -- Saved targets supply an alias preference, never provider identity: older
 -- gateway sessions recorded Grok aliases as OpenAI targets.
 selectGatewayModelOption

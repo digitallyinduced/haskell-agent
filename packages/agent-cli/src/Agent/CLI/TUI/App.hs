@@ -76,6 +76,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenThemeChoice
     , requestFullscreenFilterChoice
     , requestFullscreenAdjustableFilterChoice
+    , requestFullscreenDynamicAdjustableFilterChoice
     , requestFullscreenOnboarding
     , requestFullscreenResume
     , requestFullscreenSecret

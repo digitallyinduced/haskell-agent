@@ -468,6 +468,32 @@ handleAppEvent = \case
         handleAskFilterChoiceEvent title initial rows reply
     AppAskAdjustableFilterChoice title initial rows reply ->
         handleAskAdjustableFilterChoiceEvent title initial rows reply
+    AppCloseDynamicAdjustableFilterChoice reply ->
+        modify' \state -> case state.appChoice of
+            Just pending
+                | Just dynamic <- pending.dialogOverlay.choiceDynamic
+                , dynamic.dynamicChoiceReply == reply ->
+                    state { appChoice = Nothing }
+            _ -> state
+    AppAskDynamicAdjustableFilterChoice title body initial rows reply -> do
+        state <- get
+        liftIO (state.appRuntime.runtimeNativeProgress False)
+        modify' \current -> current
+            { appChoice = Just $ dynamicChoiceDialog reply $
+                newDynamicChoice title body initial rows reply
+            , appAgentHover = Nothing
+            }
+        vScrollToBeginning (viewportScroll OverlayViewport)
+    AppUpdateDynamicAdjustableFilterChoice reply body rows ->
+        modify' \current -> current
+            { appChoice = case current.appChoice of
+                Just pending
+                    | Just dynamic <- pending.dialogOverlay.choiceDynamic
+                    , dynamic.dynamicChoiceReply == reply ->
+                        Just $ dynamicChoiceDialog reply $
+                            refreshDynamicChoice body rows pending.dialogOverlay
+                other -> other
+            }
     AppAskResume browser loadEntry deleteEntry searchEntries reply ->
         handleAskResumeEvent
             browser
@@ -911,6 +937,7 @@ handleAskChoiceEvent presentation title body initial rows reply = do
                 , choiceAdjustments = Nothing
                 , choiceAdjustmentIndices = []
                 , choiceCloseOnTurnEnd = False
+                , choiceDynamic = Nothing
                 }
             , appAgentHover = Nothing
             }
@@ -941,6 +968,7 @@ handleAskFilterChoiceEvent title initial rows reply = do
                 , choiceAdjustments = Nothing
                 , choiceAdjustmentIndices = []
                 , choiceCloseOnTurnEnd = False
+                , choiceDynamic = Nothing
                 }
             , appAgentHover = Nothing
             }
@@ -987,10 +1015,24 @@ handleAskAdjustableFilterChoiceEvent title initial adjustableRows reply = do
                 , choiceAdjustments = Just adjustments
                 , choiceAdjustmentIndices = adjustmentIndices
                 , choiceCloseOnTurnEnd = False
+                , choiceDynamic = Nothing
                 }
             , appAgentHover = Nothing
             }
     vScrollToBeginning (viewportScroll OverlayViewport)
+
+dynamicChoiceDialog
+    :: TMVar (Maybe (Text, Int))
+    -> ChoiceOverlay
+    -> PendingDialog (Maybe ChoiceSelection -> IO ()) ChoiceOverlay
+dynamicChoiceDialog reply choice =
+    PendingDialog
+        (\selected -> atomically $ putTMVar reply do
+            selection <- selected
+            dynamic <- choice.choiceDynamic
+            key <- lookup selection.choiceSelectionIndex (zip [0 ..] dynamic.dynamicChoiceKeys)
+            pure (key, fromMaybe 0 selection.choiceSelectionAdjustment))
+        choice
 
 handleAskResumeEvent
     :: ResumeBrowser

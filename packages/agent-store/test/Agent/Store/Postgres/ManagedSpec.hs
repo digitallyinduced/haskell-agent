@@ -31,6 +31,7 @@ import Agent.Store.Postgres.Connection
     , withStorePool
     , withSession
     )
+import qualified Agent.Store.Postgres.ModelCatalogCache as ModelCatalogCache
 import Agent.Store.Postgres.Config (postgresSocketPath)
 import Agent.Store.Postgres.Managed
     ( ensureManagedPostgres
@@ -132,6 +133,21 @@ spec =
                         "openai"
                         "account-1"
                         `shouldReturn` Right (Just usageEntry)
+                    let pool = trustedPool store
+                    ModelCatalogCache.upsertModelCatalogCache pool "connection-first" "[\"first\"]"
+                        `shouldReturn` Right ()
+                    ModelCatalogCache.loadModelCatalogCache pool "connection-first"
+                        `shouldReturn` Right (Just "[\"first\"]")
+                    ModelCatalogCache.loadModelCatalogCache pool "connection-second"
+                        `shouldReturn` Right Nothing
+                    ModelCatalogCache.upsertModelCatalogCache pool "connection-first" "[]"
+                        `shouldReturn` Right ()
+                    ModelCatalogCache.loadModelCatalogCache pool "connection-first"
+                        `shouldReturn` Right (Just "[]")
+                    ModelCatalogCache.deleteModelCatalogCache pool "connection-first"
+                        `shouldReturn` Right ()
+                    ModelCatalogCache.loadModelCatalogCache pool "connection-first"
+                        `shouldReturn` Right Nothing
                     ) >>= \case
                         Left err ->
                             expectationFailure

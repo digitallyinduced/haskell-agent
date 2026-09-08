@@ -8,6 +8,8 @@ module Agent.CLI.ModelPicker
     , pickModelState
     , pickModelStateWithEffort
     , pickModelStateWithEffortAndUsage
+    , pickModelStateWithUpdates
+    , refreshModelPickerState
     , formatCatalogListing
     , initialModelPickerState
     , applyModelPickerEvent
@@ -46,9 +48,12 @@ import Agent.ReasoningEffort
     , reasoningEffortText
     )
 import Agent.TUI.TextWidth (displayTerminalText)
-import Control.Monad (join)
+import Control.Monad (join, unless)
+import Control.Concurrent.Async (withAsync)
+import Control.Concurrent.STM (atomically, newEmptyTMVarIO, takeTMVar, tryTakeTMVar, putTMVar)
 import Data.Char (isPrint)
-import Data.List (elemIndex)
+import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.List (elemIndex, findIndex)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -210,6 +215,77 @@ pickModelStateWithEffortAndUsage color currentEffort usage models = do
                     (\key -> applyModelPickerEvent (toEvent key))
                     state0
             pure (join result)
+
+-- | A private, conflated update channel belongs to this invocation only.
+-- Network workers never draw directly or race the terminal's input decoder.
+pickModelStateWithUpdates
+    :: Bool
+    -> ReasoningEffort
+    -> Text
+    -> Map.Map Text Text
+    -> PickerState
+    -> ((PickerState -> Map.Map Text Text -> Text -> IO ()) -> IO ())
+    -> IO (Maybe ModelPickerSelection)
+pickModelStateWithUpdates color currentEffort notice usage models refresh = do
+    isTty <- hIsTerminalDevice stdin
+    if not isTty
+        then do
+            -- A non-interactive listing cannot redraw after it is printed.
+            -- Resolve the refresh first rather than printing a cold empty cache.
+            latest <- newIORef (models, usage, notice)
+            refresh \nextModels nextUsage nextNotice ->
+                writeIORef latest (nextModels, nextUsage, nextNotice)
+            (nextModels, nextUsage, nextNotice) <- readIORef latest
+            unless (Text.null nextNotice) $
+                Text.hPutStrLn stderr (displayPickerText nextNotice)
+            pickModelStateWithEffortAndUsage color currentEffort nextUsage nextModels
+        else do
+            updates <- newEmptyTMVarIO
+            let initial =
+                    ((initialModelPickerState currentEffort models)
+                        { modelPickerUsage = usage }, notice)
+                publish nextModels nextUsage nextNotice = atomically do
+                    _ <- tryTakeTMVar updates
+                    putTMVar updates (nextModels, nextUsage, nextNotice)
+                render (state, message) =
+                    renderModelPickerFrame color state
+                        <> "\n" <> roleMuted color (displayPickerText message)
+                step key (state, message) =
+                    fmap (, message) (applyModelPickerEvent (toEvent key) state)
+                apply (nextModels, nextUsage, nextNotice) (state, _) =
+                    (refreshModelPickerState currentEffort nextModels nextUsage state, nextNotice)
+            result <- withAsync (refresh publish) \_ ->
+                Picker.runOverlayWithDecoderAndUpdates
+                    decodeModelPickerKey render step
+                    (atomically (takeTMVar updates)) apply initial
+            pure (result >>= fst)
+
+-- | Preserve the filter, focused model identity, and each model's effort when
+-- a catalog or usage refresh replaces the displayed options.
+refreshModelPickerState
+    :: ReasoningEffort
+    -> PickerState
+    -> Map.Map Text Text
+    -> ModelPickerState
+    -> ModelPickerState
+refreshModelPickerState currentEffort models usage previous =
+    let oldModels = previous.modelPickerModels
+        filtered = models { pickerFilter = oldModels.pickerFilter }
+        focused = selectedOption oldModels >>= \selected ->
+            findIndex ((== selected.modelTarget) . (.modelTarget)) (visibleOptions filtered)
+        nextModels = filtered
+            { pickerIndex = fromMaybe
+                (max 0 (min (max 0 (length (visibleOptions filtered) - 1)) oldModels.pickerIndex))
+                focused
+            }
+        initial = initialModelPickerState currentEffort nextModels
+    in initial
+        { modelPickerEfforts =
+            Map.intersection
+                (Map.union previous.modelPickerEfforts initial.modelPickerEfforts)
+                initial.modelPickerEfforts
+        , modelPickerUsage = usage
+        }
 
 -- | Seed each row with the active effort for the current model and the target
 -- provider's normalized default for every other model.

@@ -11,6 +11,8 @@ module Agent.CLI.Session.Choices
 import Agent.CLI.Error (formatApiErrorInlineAt)
 import Agent.CLI.GatewayClient
     ( GatewayModelAccess
+    , cachedGatewayModels
+    , cachedGatewayUsage
     , fetchGatewayUsage
     , refreshGatewayModels
     )
@@ -25,6 +27,7 @@ import Agent.CLI.ModelPicker
     , initialModelEffort
     , modelEffortOptions
     , pickModelStateWithEffortAndUsage
+    , pickModelStateWithUpdates
     , renderEffortIndicator
     )
 import Agent.CLI.Models
@@ -48,6 +51,7 @@ import Agent.CLI.Terminal (resolveColor)
 import Agent.CLI.TUI.App
     ( FullscreenRuntime
     , requestFullscreenAdjustableFilterChoice
+    , requestFullscreenDynamicAdjustableFilterChoice
     , requestFullscreenChoice
     )
 import Agent.CLI.Options (defaultEffortFor)
@@ -74,9 +78,13 @@ import Agent.Provider
     , TokenProvider
     , getNextToken
     )
+import Control.Concurrent.Async (concurrently_)
+import Control.Concurrent.MVar (modifyMVar_, newMVar)
+import Control.Monad (unless, void)
+import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.List (elemIndex)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, maybeToList)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -130,52 +138,149 @@ modelChoiceWithEffort
         provider
         current
         currentDialect
-        currentEffort = do
-    scopedPicker >>= \case
-        Left err -> pure (Left err)
-        Right (title, picker, usage) ->
-            Right <$> presentPicker title picker usage
+        currentEffort =
+    case gatewayAccess of
+        Just access -> chooseGateway access
+        Nothing -> do
+            discovered <- discoverModelOptions connectionId provider
+            picker <-
+                initialPickerStateResolvedWith
+                    catalog discovered connectionId provider current currentDialect
+            Right <$> presentPicker "Models" picker Map.empty
   where
-    scopedPicker =
-        case gatewayAccess of
-            Just access ->
-                refreshGatewayModels access >>= \case
-                    Left err -> pure (Left err)
-                    Right [] ->
-                        pure
-                            (Left
-                                "The organization gateway does not offer any models.")
-                    Right models -> do
-                        let gatewayConnectionId =
-                                organizationGatewayConnectionId
-                            options =
-                                modelOptionsForGatewayModels catalog models
-                        picker <-
-                            initialPickerStateForOptions
-                                "organization gateway"
-                                options
-                                gatewayConnectionId
-                                provider
-                                current
-                                currentDialect
-                        usage <- loadGatewayModelUsage access options
-                        pure
-                            (Right
-                                ( "Models · organization gateway"
-                                , picker
-                                , usage
-                                ))
+    gatewayTitle = "Models · organization gateway"
+    emptyGatewayMessage = "The organization gateway does not offer any models."
+
+    gatewayPicker models =
+        initialPickerStateForOptions
+            "organization gateway"
+            (modelOptionsForGatewayModels catalog models)
+            organizationGatewayConnectionId provider current currentDialect
+
+    chooseGateway access = do
+        cached <- cachedGatewayModels access
+        case fullscreen of
             Nothing -> do
-                discovered <- discoverModelOptions connectionId provider
-                picker <-
-                    initialPickerStateResolvedWith
-                        catalog
-                        discovered
-                        connectionId
-                        provider
-                        current
-                        currentDialect
-                pure (Right ("Models", picker, Map.empty))
+                picker <- gatewayPicker (fromMaybe [] cached)
+                usage <- cachedGatewayModelUsage access picker.pickerAll
+                let notice = case cached of
+                        Nothing -> "Loading models…"
+                        Just [] -> emptyGatewayMessage
+                        Just _ -> ""
+                state <- newMVar (picker, usage, notice)
+                let refresh publish = do
+                        let update transform = modifyMVar_ state \previous -> do
+                                let next@(models, values, message) = transform previous
+                                publish models values message
+                                pure next
+                            updateUsage values = update \(models, previous, message) ->
+                                (models, Map.union values previous, message)
+                            refreshCatalog = refreshGatewayModels access >>= \case
+                                Left err -> do
+                                    retained <- cachedGatewayModels access
+                                    case retained of
+                                        Nothing -> do
+                                            empty <- gatewayPicker []
+                                            update \_ -> (empty, Map.empty, err)
+                                        Just _ -> update \(models, values, _) ->
+                                            (models, values, err <> " Showing cached models.")
+                                Right models -> do
+                                    refreshed <- gatewayPicker models
+                                    let added = filter
+                                            (\option -> all
+                                                ((/= option.modelTarget) . (.modelTarget))
+                                                picker.pickerAll)
+                                            refreshed.pickerAll
+                                    update \(_, values, _) ->
+                                        (refreshed, values,
+                                            if null refreshed.pickerAll then emptyGatewayMessage else "")
+                                    refreshGatewayModelUsage access added updateUsage
+                        concurrently_ refreshCatalog
+                            (refreshGatewayModelUsage access picker.pickerAll updateUsage)
+                Right <$> pickModelStateWithUpdates
+                    color currentEffort notice usage picker refresh
+            Just runtime -> do
+                initialPicker <- gatewayPicker (fromMaybe [] cached)
+                initialUsage <- cachedGatewayModelUsage access initialPicker.pickerAll
+                let initialBody = case cached of
+                        Nothing -> "Loading models…"
+                        Just [] -> emptyGatewayMessage
+                        Just _ -> ""
+                    optionEntries picker =
+                        Map.fromList
+                            [(modelOptionKey option, option) | option <- picker.pickerAll]
+                -- Retain every displayed identity until the reply is consumed:
+                -- selection may already be queued when a refresh removes a row.
+                registry <- newIORef (optionEntries initialPicker)
+                state <- newMVar (initialPicker, initialUsage, initialBody)
+                let refresh publish = do
+                        let update transform =
+                                modifyMVar_ state \previous -> do
+                                    let next@(picker, usage, body) = transform previous
+                                    modifyIORef' registry (Map.union (optionEntries picker))
+                                    publish body (dynamicRows picker usage)
+                                    pure next
+                            updateUsage usage =
+                                update \(picker, previousUsage, body) ->
+                                    (picker, Map.union usage previousUsage, body)
+                            refreshCatalog =
+                                refreshGatewayModels access >>= \case
+                                    Left err -> do
+                                        retained <- cachedGatewayModels access
+                                        case retained of
+                                            Nothing -> do
+                                                emptyPicker <- gatewayPicker []
+                                                update \_ -> (emptyPicker, Map.empty, err)
+                                            Just _ ->
+                                                update \(picker, usage, _) ->
+                                                    (picker, usage, err <> " Showing cached models.")
+                                    Right models -> do
+                                        picker <- gatewayPicker models
+                                        let body = if null picker.pickerAll
+                                                then emptyGatewayMessage else ""
+                                            initialKeys = optionEntries initialPicker
+                                            added =
+                                                filter
+                                                    (\option -> Map.notMember (modelOptionKey option) initialKeys)
+                                                    picker.pickerAll
+                                        update \(_, usage, _) -> (picker, usage, body)
+                                        refreshGatewayModelUsage access added updateUsage
+                        concurrently_
+                            refreshCatalog
+                            (refreshGatewayModelUsage access initialPicker.pickerAll updateUsage)
+                selected <-
+                    requestFullscreenDynamicAdjustableFilterChoice
+                        runtime gatewayTitle initialBody initialPicker.pickerIndex
+                        (dynamicRows initialPicker initialUsage)
+                        refresh
+                options <- readIORef registry
+                pure $ Right do
+                    (key, effortIndex) <- selected
+                    option <- Map.lookup key options
+                    effort <- atMay effortIndex (modelEffortOptions option)
+                    pure ModelPickerSelection
+                        { modelPickerOption = option
+                        , modelPickerEffort = effort
+                        }
+
+    dynamicRows picker usage =
+        [ (modelOptionKey option, label, detail, efforts, initialIndex)
+        | option <- picker.pickerAll
+        , let (label, detail, efforts, initialIndex) = row picker usage option
+        ]
+
+    row picker usage option =
+        let efforts = modelEffortOptions option
+            initial = initialModelEffort picker currentEffort option
+            initialIndex = fromMaybe 0 (elemIndex initial efforts)
+            usageText = Map.lookup option.modelTarget.targetModelId usage
+            withUsage separator text =
+                text <> maybe "" (separator <>) usageText
+        in ( withUsage "  " (modelRowLabel picker option)
+           , withUsage "\nUsage: " (modelDetail picker option)
+           , map (renderEffortIndicator option) efforts
+           , initialIndex
+           )
 
     presentPicker title picker usage =
         case fullscreen of
@@ -187,28 +292,11 @@ modelChoiceWithEffort
                     picker
             Just runtime -> do
                 let options = picker.pickerAll
-                    row option =
-                        let efforts = modelEffortOptions option
-                            initial =
-                                initialModelEffort picker currentEffort option
-                            initialIndex =
-                                fromMaybe 0 (elemIndex initial efforts)
-                            usageText =
-                                Map.lookup
-                                    option.modelTarget.targetModelId
-                                    usage
-                            withUsage separator text =
-                                text <> maybe "" (separator <>) usageText
-                        in ( withUsage "  " (modelRowLabel picker option)
-                           , withUsage "\nUsage: " (modelDetail picker option)
-                           , map (renderEffortIndicator option) efforts
-                           , initialIndex
-                           )
                 requestFullscreenAdjustableFilterChoice
                     runtime
                     title
                     picker.pickerIndex
-                    (map row options)
+                    (map (row picker usage) options)
                     >>= \case
                         Just (modelIndex, effortIndex)
                             | Just option <- atMay modelIndex options
@@ -220,26 +308,43 @@ modelChoiceWithEffort
                                         }
                         _ -> pure Nothing
 
-loadGatewayModelUsage
+modelOptionKey :: ModelOption -> Text
+modelOptionKey option =
+    Text.pack (show option.modelTarget)
+
+cachedGatewayModelUsage :: GatewayModelAccess -> [ModelOption] -> IO (Map.Map Text Text)
+cachedGatewayModelUsage access options =
+    Map.fromList . catMaybes <$> traverse load options
+  where
+    load option = do
+        let modelId = option.modelTarget.targetModelId
+        snapshot <- cachedGatewayUsage access modelId
+        pure ((modelId,) <$> (snapshot >>= formatModelUsageSummary))
+
+-- | Publish one usage update per bounded group, independently of the catalog.
+-- Retain completed results on timeout without rebuilding every row for every
+-- response (which would make presentation work quadratic in catalog size).
+refreshGatewayModelUsage
     :: GatewayModelAccess
     -> [ModelOption]
-    -> IO (Map.Map Text Text)
-loadGatewayModelUsage access options = do
-    loaded <-
-        timeout 2000000 $
-            Map.fromList . concat
-                <$> mapConcurrentlyBounded 4 loadUsage options
-    pure (fromMaybe Map.empty loaded)
+    -> (Map.Map Text Text -> IO ())
+    -> IO ()
+refreshGatewayModelUsage access options publish = do
+    completed <- newIORef Map.empty
+    void $ timeout 2000000 $ mapConcurrentlyBounded 4 (loadUsage completed) options
+    usage <- readIORef completed
+    unless (Map.null usage) (publish usage)
   where
-    loadUsage option = do
+    loadUsage completed option = do
         let modelId = option.modelTarget.targetModelId
         fetchGatewayUsage access modelId >>= \case
-            Left _ -> pure []
+            Left _ -> pure ()
             Right snapshot ->
-                pure
-                    [ (modelId, summary)
-                    | summary <- maybeToList (formatModelUsageSummary snapshot)
-                    ]
+                case formatModelUsageSummary snapshot of
+                    Nothing -> pure ()
+                    Just summary ->
+                        atomicModifyIORef' completed \usage ->
+                            (Map.insert modelId summary usage, ())
 
 discoverModelOptions :: Text -> Provider -> IO [ModelOption]
 discoverModelOptions connectionId provider

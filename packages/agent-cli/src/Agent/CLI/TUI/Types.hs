@@ -9,6 +9,9 @@ module Agent.CLI.TUI.Types
     , DictationSession(..)
     , ChoicePresentation(..)
     , ChoiceOverlay(..)
+    , DynamicChoice(..)
+    , newDynamicChoice
+    , refreshDynamicChoice
     , ChoiceSelection(..)
     , CommandPaletteAction(..)
     , CommandPaletteEntry(..)
@@ -80,6 +83,7 @@ import Data.IORef (IORef)
 import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Sequence (Seq)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -158,6 +162,16 @@ data AppEvent
         !Int
         ![(Text, Text, [Text], Int)]
         !(TMVar (Maybe (Int, Int)))
+    | AppAskDynamicAdjustableFilterChoice
+        !Text !Text !Int
+        ![(Text, Text, Text, [Text], Int)]
+        !(TMVar (Maybe (Text, Int)))
+    | AppUpdateDynamicAdjustableFilterChoice
+        !(TMVar (Maybe (Text, Int)))
+        !Text
+        ![(Text, Text, Text, [Text], Int)]
+    | AppCloseDynamicAdjustableFilterChoice
+        !(TMVar (Maybe (Text, Int)))
     | AppAskText
         !TextInputMode
         !Text
@@ -577,8 +591,73 @@ data ChoiceOverlay = ChoiceOverlay
     , choiceAdjustments :: !(Maybe [[Text]])
     , choiceAdjustmentIndices :: ![Int]
     , choiceCloseOnTurnEnd :: !Bool
+    , choiceDynamic :: !(Maybe DynamicChoice)
     }
     deriving (Eq, Show)
+
+data DynamicChoice = DynamicChoice
+    { dynamicChoiceReply :: !(TMVar (Maybe (Text, Int)))
+    , dynamicChoiceKeys :: ![Text]
+    }
+    deriving (Eq)
+
+instance Show DynamicChoice where
+    show choice = "DynamicChoice " <> show choice.dynamicChoiceKeys
+
+newDynamicChoice
+    :: Text -> Text -> Int -> [(Text, Text, Text, [Text], Int)]
+    -> TMVar (Maybe (Text, Int)) -> ChoiceOverlay
+newDynamicChoice title body initial rows reply = ChoiceOverlay
+    { choicePresentation = ChoiceDialog
+    , choiceTitle = title
+    , choiceBody = body
+    , choiceIndex = max 0 (min (max 0 (length rows - 1)) initial)
+    , choiceRows = [(label, detail) | (_, label, detail, _, _) <- rows]
+    , choiceSearch = True
+    , choiceQuery = ""
+    , choiceAdjustments = Just [values | (_, _, _, values, _) <- rows]
+    , choiceAdjustmentIndices =
+        [max 0 (min (max 0 (length values - 1)) index) | (_, _, _, values, index) <- rows]
+    , choiceCloseOnTurnEnd = False
+    , choiceDynamic = Just (DynamicChoice reply [key | (key, _, _, _, _) <- rows])
+    }
+
+-- | Keep focus by model identity and adjustment by value, not by row index.
+-- Removed focused rows fall back to the nearest remaining visible position.
+refreshDynamicChoice
+    :: Text -> [(Text, Text, Text, [Text], Int)] -> ChoiceOverlay -> ChoiceOverlay
+refreshDynamicChoice body rows previous =
+    case previous.choiceDynamic of
+        Nothing -> previous
+        Just dynamic ->
+            let oldKeys = dynamic.dynamicChoiceKeys
+                at index values = lookup index (zip [0 ..] values)
+                focused = selectedChoiceIndex previous >>= (`at` oldKeys)
+                oldValues = Map.fromList
+                    [ (key, value)
+                    | (key, values, index) <- zip3 oldKeys
+                        (fromMaybe [] previous.choiceAdjustments)
+                        previous.choiceAdjustmentIndices
+                    , Just value <- [at index values]
+                    ]
+                retainedRows =
+                    [ (key, label, detail, values,
+                        fromMaybe initial do
+                            value <- Map.lookup key oldValues
+                            lookup value (zip values [0 ..]))
+                    | (key, label, detail, values, initial) <- rows
+                    ]
+                next = (newDynamicChoice previous.choiceTitle body 0 retainedRows
+                    dynamic.dynamicChoiceReply) { choiceQuery = previous.choiceQuery }
+                visible = choiceVisibleRows next
+                newKeys = Map.fromList (zip [0 :: Int ..] [key | (key, _, _, _, _) <- rows])
+                visibleKeys =
+                    [(key, position)
+                    | (position, (source, _)) <- zip [0 ..] visible
+                    , Just key <- [Map.lookup source newKeys]
+                    ]
+                fallback = min previous.choiceIndex (max 0 (length visible - 1))
+            in next { choiceIndex = fromMaybe fallback (focused >>= (`lookup` visibleKeys)) }
 
 data ChoiceSelection = ChoiceSelection
     { choiceSelectionIndex :: !Int
