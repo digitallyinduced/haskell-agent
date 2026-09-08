@@ -17,7 +17,7 @@ import Agent.Loop
 import Agent.Provider
     ( Credential
     , TokenProvider
-    , runWithTokenProvider
+    , runWithTokenProviderStreaming
     )
 import Agent.Responses.LoopBackend
     ( responseItemToToolCall
@@ -68,8 +68,9 @@ tokenProviderStatelessGeminiBackend
     -> Backend
 tokenProviderStatelessGeminiBackend provider send =
     statelessGeminiBackend \params onEvent ->
-        runWithTokenProvider provider \credential ->
-            send credential params onEvent
+        -- Every Gemini stream event is text, reasoning, or a ready tool call.
+        runWithTokenProviderStreaming provider (const True)
+            (\credential -> send credential params) onEvent
 
 geminiStreamEventToLoopEvent
     :: GeminiStreamEvent

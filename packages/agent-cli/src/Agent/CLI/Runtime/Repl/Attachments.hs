@@ -18,7 +18,7 @@ import Agent.CLI.Session.Attachments
     ( putImagePreview, queueAttachedImages, queueClipboardImages )
 import Agent.CLI.SessionState (removeImageAttachmentAt)
 import Agent.CLI.Session.History
-    ( modifyLiveAttachments, readLiveAttachments )
+    ( modifyLiveAttachments )
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
 import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Style ( glyphOk, glyphSession, roleError, roleMuted )
@@ -54,8 +54,7 @@ handleClipboardInput
     -> IO RunResult
 handleClipboardInput
         SessionEnv
-            { sessionState = RuntimeState.SessionState
-                { stateConversation = conversationRef }
+            { sessionState = sessionState
             , sessionPreviewId = previewIdRef
             , sessionFullscreen = fullscreen
             }
@@ -120,12 +119,13 @@ handleClipboardInput
                 fullscreenEvent (UiSetNotice Nothing)
                 continueWith pastedDraft
   where
+    conversationRef = RuntimeState.borrowConversationRef sessionState
     fullscreenEvent event = case fullscreen of
         Nothing -> pure ()
         Just runtime -> emitUiEvent runtime event
     syncFullscreenImagePreviews =
         forM_ fullscreen \runtime ->
-            readLiveAttachments conversationRef
+            RuntimeState.readSessionAttachments sessionState
                 >>= setFullscreenImagePreviews runtime
     displayInfo message minimalAction = case fullscreen of
         Nothing -> minimalAction
@@ -143,8 +143,7 @@ handleAttachmentAction
 handleAttachmentAction
         env@SessionEnv
             { sessionRender = render
-            , sessionState = RuntimeState.SessionState
-                { stateConversation = conversationRef }
+            , sessionState = sessionState
             , sessionPreviewId = previewIdRef
             , sessionFullscreen = fullscreen
             }
@@ -208,7 +207,7 @@ handleAttachmentAction
                                     (glyphOk <> message))
                         continue
     ReplShowAttachments -> do
-        pending <- readLiveAttachments conversationRef
+        pending <- RuntimeState.readSessionAttachments sessionState
         color <- resolveColor stdout
         let message =
                 if null pending
@@ -250,12 +249,13 @@ handleAttachmentAction
                 (roleMuted color (glyphOk <> message))
         continue
   where
+    conversationRef = RuntimeState.borrowConversationRef sessionState
     fullscreenEvent event = case fullscreen of
         Nothing -> pure ()
         Just runtime -> emitUiEvent runtime event
     syncFullscreenImagePreviews =
         forM_ fullscreen \runtime ->
-            readLiveAttachments conversationRef
+            RuntimeState.readSessionAttachments sessionState
                 >>= setFullscreenImagePreviews runtime
     displayInfo message minimalAction = case fullscreen of
         Nothing -> minimalAction

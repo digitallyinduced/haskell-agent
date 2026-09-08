@@ -29,6 +29,7 @@ module Agent.Tools.Types
     , freeformGrammarAppToolWithExecution
     , withToolHumanInputWait
     , withToolResourceClaims
+    , withSharedToolResourceClaims
     , withAsyncToolCalls
     , appToolSupportsAsync
     , mkToolRegistry
@@ -64,7 +65,10 @@ import Agent.ToolDispatch
     , dispatchApprovedToolHandler
     , dispatchToolHandlerDetailed
     , handlerName
+    , wrapToolHandler
     )
+import Agent.Tools.ResourceArbiter
+    ( ToolResourceArbiter, newToolResourceArbiter, withToolResources )
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
     , ToolResource(..)
@@ -215,6 +219,7 @@ noBackgroundTaskHooks = BackgroundTaskHooks
 
 data ToolEnv = ToolEnv
     { toolCwd :: !OsPath
+    , toolResourceArbiter :: !ToolResourceArbiter
     , toolAllowedRoots :: !(IORef [OsPath])
       -- | Additional non-session filesystem roots. The current
       -- 'toolSessionTmp' is always allowed implicitly and receives absolute
@@ -246,6 +251,7 @@ data ToolEnv = ToolEnv
 
 defaultToolEnv :: OsPath -> IO ToolEnv
 defaultToolEnv cwd = do
+    arbiter <- newToolResourceArbiter 1024
     cancel <- newCancelFlag
     allowedRoots <- newIORef []
     rootAccessRequest <- newIORef Nothing
@@ -255,6 +261,7 @@ defaultToolEnv cwd = do
     backgroundTaskHooks <- newIORef noBackgroundTaskHooks
     pure ToolEnv
         { toolCwd = dropTrailingPathSeparator cwd
+        , toolResourceArbiter = arbiter
         , toolAllowedRoots = allowedRoots
         , toolRootAccessRequest = rootAccessRequest
         , toolHumanInputWaitHooks = humanInputWaitHooks
@@ -391,6 +398,24 @@ withToolResourceClaims
     -> AppTool
 withToolResourceClaims resolver tool =
     tool { appToolResourceClaims = Just resolver }
+
+-- | Opt a handler whose complete effects are scoped to its return into shared
+-- arbitration as well as turn-local ordering. Resolve before taking a lease,
+-- so claim resolution does not hold execution resources. Resolution
+-- failure denies dispatch rather than running with incomplete claims.
+--
+-- Never use this for a handler that yields a live process/session handle.
+-- Those need resource leases owned by the process supervisor itself.
+withSharedToolResourceClaims
+    :: ToolEnv -> ToolResourceResolver -> AppTool -> AppTool
+withSharedToolResourceClaims env resolver tool =
+    (withToolResourceClaims resolver tool)
+        { appToolHandler = wrapToolHandler
+            (\call action -> resolver call >>= \case
+                Left err -> pure (Left err)
+                Right claims -> withToolResources env.toolResourceArbiter claims action)
+            tool.appToolHandler
+        }
 
 -- | Explicitly opt a tool into provider-requested asynchronous execution.
 withAsyncToolCalls :: AppTool -> AppTool

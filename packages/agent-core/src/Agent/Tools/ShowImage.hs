@@ -35,7 +35,7 @@ import Agent.Tools.Types
     , ToolEnv
     , ToolExecutionPolicy(..)
     , jsonTool
-    , withToolResourceClaims
+    , withSharedToolResourceClaims
     )
 import Control.Exception.Safe (tryIO)
 import qualified Data.ByteString as BS
@@ -84,7 +84,7 @@ showImageArgsDecoder = objectArgs \object ->
 
 showImageTool :: ToolEnv -> ImageDisplayHooks -> AppTool
 showImageTool env hooks =
-    withToolResourceClaims (showImageClaims env) $
+    withSharedToolResourceClaims env (showImageClaims env) $
         jsonTool showImageToolName showImageDescription
             [ PropertySchema "path" PropertyString True $ Just
                 "Path of the image file to display. Relative paths use the workspace; absolute paths may resolve within the workspace or session temp directory. PNG, JPEG, GIF, BMP, and TIFF are supported."

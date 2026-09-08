@@ -30,7 +30,7 @@ import Agent.Tools.Types
     , ToolEnv
     , ToolExecutionPolicy(..)
     , jsonTool
-    , withToolResourceClaims
+    , withSharedToolResourceClaims
     )
 import Codec.Picture (decodeGifImages, decodeImage)
 import Control.Exception.Safe (tryIO)
@@ -65,7 +65,7 @@ viewImageArgsDecoder = objectArgs \object ->
 
 viewImageTool :: ToolEnv -> AppTool
 viewImageTool env =
-    withToolResourceClaims (viewImageClaims env) $
+    withSharedToolResourceClaims env (viewImageClaims env) $
         jsonTool viewImageToolName viewImageDescription
             [ PropertySchema "path" PropertyString True $ Just
                 "Local filesystem path to an image file."

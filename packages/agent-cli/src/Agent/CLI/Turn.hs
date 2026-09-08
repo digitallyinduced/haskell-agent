@@ -56,7 +56,6 @@ import Agent.CLI.Session
     ( SessionHandle(..)
     , SessionMeta(..)
     , SessionPromptSnapshot(..)
-    , SessionTurn(..)
     , SessionTurnPage(..)
     , TranscriptEffect(..)
     , Persistence(..)
@@ -65,22 +64,22 @@ import Agent.CLI.Session
     , ensureSession
     , ensureSessionWithPromptSnapshot
     , loadRecentSessionTurns
+    , loadSessionHistorySnapshot
     , sessionConversationText
     , sessionsRoot
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
     )
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
+import qualified Agent.CLI.Session.Observation as Observation
+import Agent.CLI.Session.TurnRecord (sessionTurnFromRecord)
+import Agent.Runtime.TurnRecord qualified as Record
 import Agent.CLI.SessionEnv
     ( PreparedWorkspaceEnvironment(..)
     , SessionEnv(..)
     )
 import Agent.CLI.Session.History
-    ( currentLiveTranscriptGeneration
-    , durableTranscriptCheckpoint
-    , evictLiveTranscript
-    , readLivePreviousResponseId
-    , withLiveTranscript
+    ( durableTranscriptCheckpoint
     )
 import Agent.CLI.SessionTitle
     ( SessionTitleResult(..)
@@ -125,7 +124,6 @@ import Agent.Loop
     , LoopResult(..)
     , TurnInput(..)
     , TurnOutput(..)
-    , addTokenUsage
     , turnInputImages
     )
 import Agent.Provider (Provider(..))
@@ -154,7 +152,7 @@ import Agent.Tools.TaskPlan
     , taskPlanReminderText
     )
 import Agent.OsPath (toText, unsafeToFilePath)
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, void, when)
 import Control.Exception.Safe (bracket_, finally, onException, tryAny)
 import Data.IORef
     ( IORef
@@ -204,17 +202,17 @@ runOneTurnWithContext includeTurnContext env promptText inputs = do
     -- Automatic compaction is scoped to one enclosing user turn. A committed
     -- boundary from an earlier attempt is already represented by the live and
     -- durable transcripts and must not affect this turn's suffix calculation.
-    writeIORef env.sessionState.stateAutomaticCompaction Nothing
+    RuntimeState.clearAutomaticCompaction env.sessionState
     bracket_
         env.sessionBeginWindowTitleBusy
         env.sessionEndWindowTitleBusy
         (bracket_
             env.sessionBeginTurnActivity
             env.sessionEndTurnActivity
-            (withLiveTranscript env.sessionState.stateConversation \beforeItems ->
+            (RuntimeState.withSessionTranscript env.sessionState \beforeItems ->
                 runOneTurnBusy
                     includeTurnContext env beforeItems promptText inputs))
-        `finally` writeIORef env.sessionState.stateAutomaticCompaction Nothing
+        `finally` RuntimeState.clearAutomaticCompaction env.sessionState
 
 timestampConversationBounds
     :: Persistence
@@ -259,8 +257,75 @@ runOneTurnBusy includeTurnContext env@SessionEnv{}
         then id
         else withEscCancel config.loopCancel env.sessionStdinControl) do
     prepared <- prepareBusyTurn request
-    executed <- executeBusyTurn request prepared
-    finishBusyTurn executed
+    withObservedBusyTurn env promptText do
+        executed <- executeBusyTurn request prepared
+        finishBusyTurn executed
+
+-- | Start publication only after prompt preparation has made the session
+-- durable. Recursive plan follow-ups and reasoning-effort restarts share the
+-- same service, but receive a fresh live-turn identity and history boundary.
+-- The renderer reads the shared reference after plan-protocol projection, so
+-- this does not wrap loopOnEvent or duplicate events on recursive execution.
+withObservedBusyTurn :: SessionEnv -> Text -> IO a -> IO a
+withObservedBusyTurn env _ action
+    | not env.sessionObservationEnabled = action
+withObservedBusyTurn env promptText action =
+    case env.sessionPersist of
+        PersistenceDisabled -> action
+        PersistenceEnabled slotRef -> do
+            -- Observation is ancillary: isolate setup, never the turn action.
+            boundary <- tryAny do
+                handle <- ensureSession slotRef
+                snapshot <- loadSessionHistorySnapshot
+                    handle.sessionPool
+                    (System.OsPath.takeDirectory handle.sessionDir)
+                    handle.sessionMeta.metaId
+                pure (handle, snapshot)
+            case boundary of
+                Right (handle, Right (_, generationStart, totalTurns)) -> do
+                    existing <- readIORef env.sessionObservationPublisher
+                    let runObserved publisher = do
+                            started <- tryAny $ Observation.beginObservedTurn
+                                publisher generationStart totalTurns promptText
+                            case started of
+                                Left _ -> runUnobserved
+                                Right () -> action
+                    case existing of
+                        Just publisher -> runObserved publisher
+                        Nothing ->
+                            Observation.withOptionalSessionObservationPublisher
+                                handle.sessionMeta.metaId \publisher ->
+                                    bracket_
+                                        (writeIORef
+                                            env.sessionObservationPublisher
+                                            publisher)
+                                        (writeIORef
+                                            env.sessionObservationPublisher
+                                            Nothing)
+                                        (maybe action runObserved publisher)
+                _ -> runUnobserved
+  where
+    -- A failed nested-turn setup must not publish into the preceding turn.
+    runUnobserved = do
+        previous <- readIORef env.sessionObservationPublisher
+        bracket_
+            (writeIORef env.sessionObservationPublisher Nothing)
+            (writeIORef env.sessionObservationPublisher previous)
+            action
+
+-- | Read the history boundary after the append committed. Neither a model
+-- TurnFinished event nor an input-wait transition is a durable completion.
+completeObservedSessionTurn :: SessionEnv -> SessionHandle -> Bool -> IO ()
+completeObservedSessionTurn env handle interrupted = void $ tryAny do
+    publisher <- readIORef env.sessionObservationPublisher
+    forM_ publisher \observer -> do
+        boundary <- loadSessionHistorySnapshot
+            handle.sessionPool
+            (System.OsPath.takeDirectory handle.sessionDir)
+            handle.sessionMeta.metaId
+        forM_ boundary \(_, generationStart, totalTurns) ->
+            Observation.completeObservedTurn
+                observer generationStart totalTurns interrupted
 
 data BusyTurnRequest = BusyTurnRequest
     { busyIncludeTurnContext :: Bool
@@ -295,11 +360,10 @@ prepareBusyTurn request = do
     let env = request.busyEnv
         planMode = env.sessionPlanMode
         taskPlan = env.sessionTaskPlan
-        grokFirstTurnContext = env.sessionState.stateGrokFirstTurnContext
     applyPendingSessionTitles env
     initialPlanState <- readIORef planMode.planStateRef
     when (initialPlanState == PlanPending) (activatePlanMode planMode)
-    prev <- readLivePreviousResponseId env.sessionState.stateConversation
+    prev <- RuntimeState.readSessionPreviousResponseId env.sessionState
     when request.busyIncludeTurnContext $
         env.sessionRecordImageGenerationInputs
             (concatMap turnInputImages request.busyInputs)
@@ -357,12 +421,13 @@ prepareBusyTurn request = do
                         null request.busyBeforeItems && prev == Nothing
                 if firstTurn
                     then do
-                        prefix <-
-                            takeGrokFirstTurnContext
-                                grokFirstTurnContext
+                        pending <- RuntimeState.takeGrokContext env.sessionState
+                        prefix <- maybe
                                 (loadGrokFirstTurnPrefix
                                     env.sessionPreparedWorkspaceEnvironment
                                     env.sessionWorkspace.cwd)
+                                pure
+                                pending
                         pure (UserMessage prefix : framed, Just prefix)
                     else pure (framed, Nothing)
             else pure (stampedInputs, Nothing)
@@ -485,7 +550,7 @@ executeBusyTurn request preparation = do
                     preparation.preparedPreviousResponseId
                 , executionPreparedTurn = prepared
                 }
-            (readIORef env.sessionState.stateAutomaticCompaction)
+            (RuntimeState.readAutomaticCompaction env.sessionState)
             (rollbackExceptionalTurn request preparation rootTurnId)
     let execution = executed.executedLoop
         automaticCompaction = executed.executedCompaction
@@ -564,10 +629,7 @@ persistIncompleteTurn
             writeIORef env.sessionPlanMode.planSessionDir
                 (Just handle.sessionDir)
             writeIORef env.sessionStoreRoot (Just handle.sessionDir)
-            let displayItems =
-                    Engine.displayItems
-                        executed.executedFinalization.finalizedDisplayItems
-                turn = SessionTurn
+            let turn = sessionTurnFromRecord Record.TurnRecord
                     { turnAt = now
                     , turnUserText = request.busyPromptText
                     , turnAssistantText =
@@ -577,8 +639,9 @@ persistIncompleteTurn
                     , turnError = Just errorText
                     , turnResponseId = (.responseId) <$> maybeTurn
                     , turnEffect = TranscriptAppend
-                    , turnItems = Engine.modelItems retainedItems
-                    , turnDisplayItems = displayItems
+                    , turnItems = retainedItems
+                    , turnDisplayItems =
+                        executed.executedFinalization.finalizedDisplayItems
                     , turnUsage = (.tokenUsage) <$> maybeTurn
                     , turnProviderTelemetry =
                         executed.executedLoop.executionProviderTelemetry
@@ -587,6 +650,7 @@ persistIncompleteTurn
                 appendTurnWithMetaUpdateIndexed handle turn \meta ->
                     meta { metaLastResponseId = Nothing }
             writeIORef slotRef (PersistenceActive handle')
+            completeObservedSessionTurn env handle' True
             forM_ env.sessionFullscreen \runtime -> do
                 commitFullscreenHistoryTurn
                     runtime
@@ -779,8 +843,7 @@ finishGeneralFailureTurn executed err = do
             LoopIncomplete turn -> Just turn
             _ -> Nothing
     forM_ maybeIncompleteTurn \turn ->
-        atomicModifyIORef' env.sessionState.stateUsage \current ->
-            (addTokenUsage current turn.tokenUsage, ())
+        RuntimeState.addSessionUsage env.sessionState turn.tokenUsage
     -- Retain the same items in the live and durable transcripts. Response id,
     -- usage, and the incomplete reason remain available in turn metadata.
     persistIncompleteTurn
@@ -826,7 +889,7 @@ finishSuccessfulTurn executed loopResult = do
         handleProposedPlan env.sessionPlanMode loopResult.finalText
     printUnrenderedAssistant env assistantText
     let newItems =
-            Engine.modelItems executed.executedFinalization.finalizedModelItems
+            executed.executedFinalization.finalizedModelItems
         effect =
             if turnReplacesTranscript
                 executed.executedCommittedTurn.preparedBeforeItems
@@ -884,7 +947,7 @@ persistSuccessfulTurn
     :: ExecutedBusyTurn
     -> LoopResult
     -> Maybe Text
-    -> [ResponseItem]
+    -> Engine.ModelItems
     -> TranscriptEffect
     -> IO ()
 persistSuccessfulTurn
@@ -897,7 +960,7 @@ persistSuccessfulTurn
             writeIORef env.sessionPlanMode.planSessionDir
                 (Just handle.sessionDir)
             writeIORef env.sessionStoreRoot (Just handle.sessionDir)
-            let turn = SessionTurn
+            let turn = sessionTurnFromRecord Record.TurnRecord
                     { turnAt = now
                     , turnUserText = request.busyPromptText
                     , turnAssistantText = assistantText
@@ -905,7 +968,8 @@ persistSuccessfulTurn
                     , turnResponseId = Just loopResult.finalResponseId
                     , turnEffect = effect
                     , turnItems = newItems
-                    , turnDisplayItems = []
+                    , turnDisplayItems =
+                        executed.executedFinalization.finalizedDisplayItems
                     , turnUsage = Just loopResult.tokenUsage
                     , turnProviderTelemetry =
                         executed.executedLoop.executionProviderTelemetry
@@ -917,6 +981,7 @@ persistSuccessfulTurn
             writeIORef env.sessionTitleTurnCount titleTurns
             let countedMeta = countedHandle.sessionMeta
             writeIORef slotRef (PersistenceActive countedHandle)
+            completeObservedSessionTurn env countedHandle False
             forM_ env.sessionFullscreen \runtime -> do
                 commitFullscreenHistoryTurn
                     runtime
@@ -955,7 +1020,7 @@ persistSuccessfulTurn
 evictDurableConversation :: SessionEnv -> SessionHandle -> IO ()
 evictDurableConversation env handle = do
     generation <-
-        currentLiveTranscriptGeneration env.sessionState.stateConversation
+        RuntimeState.currentSessionTranscriptGeneration env.sessionState
     let sessionId = handle.sessionMeta.metaId
         checkpoint =
             durableTranscriptCheckpoint
@@ -963,8 +1028,7 @@ evictDurableConversation env handle = do
                 (sessionsRoot env.sessionWorkspace.home)
                 sessionId
     evicted <-
-        evictLiveTranscript
-            env.sessionState.stateConversation generation checkpoint
+        RuntimeState.evictSessionTranscript env.sessionState generation checkpoint
     when evicted performMajorGC
 
 -- | Wrap the last actual user payload in the Grok Build request envelope.

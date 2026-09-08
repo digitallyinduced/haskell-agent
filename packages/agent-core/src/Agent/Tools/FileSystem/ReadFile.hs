@@ -28,7 +28,7 @@ import Agent.Tools.Types
     , ToolEnv
     , ToolExecutionPolicy(..)
     , jsonTool
-    , withToolResourceClaims
+    , withSharedToolResourceClaims
     )
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -59,7 +59,7 @@ readFileArgsDecoder = objectArgs \object -> ReadFileArgs
         <*> optText object "format"
 
 readFileTool :: ToolEnv -> AppTool
-readFileTool env = withToolResourceClaims (readFileClaims env) $
+readFileTool env = withSharedToolResourceClaims env (readFileClaims env) $
     jsonTool "read_file" readFileDescription
     [ PropertySchema "target_file" PropertyString True $ Just
         "The path of the file to read. Relative paths use the workspace; absolute paths may resolve within the workspace or session temp directory."

@@ -58,7 +58,6 @@ import Agent.CLI.Runtime.Types
     ( PendingTurnPresentation
     , RunResult(RunSwitchProvider)
     )
-import Agent.CLI.Session.History ( readLiveAttachments )
 import Agent.CLI.Session.Interaction
     ( buildPromptState
     , syncFullscreenContext
@@ -160,10 +159,7 @@ repl env = replWithDraft env ""
 replWithDraft :: SessionEnv -> Text -> IO RunResult
 replWithDraft env@SessionEnv
     { sessionRender = render
-    , sessionState = RuntimeState.SessionState
-        { stateConversation = conversationRef
-        , stateUsage = usageRef
-        }
+    , sessionState = sessionState
     , sessionProvider = provider
     , sessionModelCatalog = catalog
     , sessionGatewayModels = gatewayModelsRef
@@ -210,9 +206,9 @@ replWithDraft env@SessionEnv
     let planActive = planState == PlanActive
         planPending = planState == PlanPending
     policy <- readIORef policyRef
-    pendingAttachments <- readLiveAttachments conversationRef
+    pendingAttachments <- RuntimeState.readSessionAttachments sessionState
     let idleMode = replModeFromState planState policy
-    usage <- readIORef usageRef
+    usage <- RuntimeState.readSessionUsage sessionState
     account <- (.activeAccountLabel) <$> readActiveAccount accountRef
     mlineResult <- case fullscreen of
         Just runtime -> do

@@ -2,6 +2,7 @@
 
 let
   sandboxNix = pkgs.nix.appendPatches [ ./nix-gvisor-pty-keepalive.patch ];
+  pdfInspector = pkgs.callPackage ./pdf-inspector.nix { };
 
   rootContents = pkgs.buildEnv {
     name = "agent-sandbox-root-contents";
@@ -29,10 +30,18 @@ let
       sandboxNix
       openssh
       patch
+      # Document processing must work inside the guest without downloading
+      # packages or depending on utilities installed on the host.
+      pdfInspector
+      python3
+      poppler-utils
+      qpdf
       procps
       ripgrep
+      unzip
       util-linux
       which
+      zip
     ];
     pathsToLink = [
       "/bin"

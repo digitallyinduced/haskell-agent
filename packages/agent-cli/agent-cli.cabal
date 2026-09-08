@@ -158,6 +158,7 @@ library
                     , Agent.CLI.TUI.Render.Workspace
                     , Paths_agent_cli
     exposed-modules:  Agent.CLI
+                    , Agent.CLI.TUI.Keyboard
                     , Agent.CLI.IntegrationGateway
                     , Agent.CLI.ActiveAccount
                     , Agent.CLI.AccountPicker
@@ -365,6 +366,8 @@ library
                     , vector
                     , vty >= 6.4 && < 7
                     , vty-crossplatform >= 0.4 && < 0.5
+                    , vty-unix >= 0.2 && < 0.5
+                    , terminfo
                     , wai
                     , warp
     if os(darwin)
@@ -659,6 +662,7 @@ test-suite agent-cli-test
                     , transformers
                     , unix
                     , vty >= 6.4 && < 7
+                    , vty-unix >= 0.2 && < 0.5
                     , wai
                     , warp
 benchmark image-preview-latency-bench

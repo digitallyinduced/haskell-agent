@@ -121,7 +121,7 @@ import Agent.CLI.Session.Attachments ( queueAttachedImages )
 import Agent.CLI.Session.Choices
     ( accountUsageText, showAccountUsage )
 import Agent.CLI.Session.History
-    ( modifyLiveAttachments, readLiveAttachments, readLiveTranscript )
+    ( modifyLiveAttachments )
 import Agent.CLI.Session.Interaction ( runBtwQuestion )
 import Agent.CLI.Session.Selection
     ( currentSessionId, pickAgentChoice )
@@ -333,15 +333,13 @@ submitReplLine handlerContext finishTurn retryPendingTurn slashCatalog skillInvo
         , handlerStdoutColor = stdoutColor
         } = handlerContext
     SessionEnv
-        { sessionState = RuntimeState.SessionState
-            { stateConversation = conversationRef }
-        , sessionPersist = persist
+        { sessionPersist = persist
         , sessionFullscreen = fullscreen
         } = env
     submitLine
             slashCatalog skillInvocations
             continue color pasted line = do
-        attachmentCount <- length <$> readLiveAttachments conversationRef
+        attachmentCount <- length <$> RuntimeState.readSessionAttachments env.sessionState
         case submissionPromptText attachmentCount line of
             Nothing -> continue
             Just promptLine -> do
@@ -742,7 +740,7 @@ showQueuedPrompts handlerContext next = do
 showContextReport :: ReplHandlerContext -> IO RunResult -> IO RunResult
 showContextReport handlerContext next = do
         currentParams <- readSessionRequestParams env.sessionParams
-        history <- readLiveTranscript conversationRef
+        history <- RuntimeState.readSessionTranscript env.sessionState
         occupancy <- readIORef contextOccupancyRef
         contextWindow <- currentContextWindow
         activeTools <- env.sessionActiveToolNames
@@ -759,7 +757,6 @@ showContextReport handlerContext next = do
         next
   where
     env = handlerContext.handlerSessionEnv
-    conversationRef = env.sessionState.stateConversation
     contextOccupancyRef = env.sessionContextOccupancy
     currentContextWindow = env.sessionContextWindow
     displayInfo = displayReplInfo handlerContext
@@ -993,7 +990,7 @@ submitSkillInvocation handlerContext finishTurn invocations next color line invo
                         finishTurn False result
   where
     env = handlerContext.handlerSessionEnv
-    conversationRef = env.sessionState.stateConversation
+    conversationRef = RuntimeState.borrowConversationRef env.sessionState
     fullscreen = env.sessionFullscreen
     render = env.sessionRender
     fullscreenEvent = emitReplEvent env
@@ -1041,7 +1038,7 @@ submitExpandedPrompt handlerContext finishTurn pasted next color original expand
                 finishTurn False result
   where
     env = handlerContext.handlerSessionEnv
-    conversationRef = env.sessionState.stateConversation
+    conversationRef = RuntimeState.borrowConversationRef env.sessionState
     fullscreen = env.sessionFullscreen
     render = env.sessionRender
     fullscreenEvent = emitReplEvent env
@@ -1065,7 +1062,7 @@ submitPrompt handlerContext finishTurn pasted next color text = do
                 (isNothing fullscreen)
                 images
             forM_ fullscreen \runtime ->
-                readLiveAttachments conversationRef
+                RuntimeState.readSessionAttachments env.sessionState
                     >>= setFullscreenImagePreviews runtime
             displayReplInfo handlerContext message $
                 Text.putStrLn
@@ -1095,7 +1092,7 @@ submitPrompt handlerContext finishTurn pasted next color text = do
                         finishTurn False result
   where
     env = handlerContext.handlerSessionEnv
-    conversationRef = env.sessionState.stateConversation
+    conversationRef = RuntimeState.borrowConversationRef env.sessionState
     fullscreen = env.sessionFullscreen
 
 showWorkingTreeDiff :: ReplHandlerContext -> IO RunResult -> Bool -> IO RunResult

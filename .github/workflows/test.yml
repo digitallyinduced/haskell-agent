@@ -53,6 +53,7 @@ jobs:
             timeout_minutes: 120
           - name: Linux integrations
             targets: >-
+              .#checks.x86_64-linux.pdf-inspector
               .#checks.x86_64-linux.agent-sandbox-runner
               .#checks.x86_64-linux.nixos-module
     env:

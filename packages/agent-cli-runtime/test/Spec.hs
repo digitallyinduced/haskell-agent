@@ -1,8 +1,11 @@
 module Main (main) where
 
 import qualified Agent.CLI.SessionActivitySpec as SessionActivitySpec
+import qualified Agent.CLI.SessionObservationSpec as SessionObservationSpec
 import qualified Agent.CLI.SessionRequestSpec as SessionRequestSpec
+import qualified Agent.CLI.TurnRecordSpec as TurnRecordSpec
 import qualified Agent.CLI.SessionThreadsSpec as SessionThreadsSpec
+import qualified Agent.Runtime.SessionOwnerSpec as SessionOwnerSpec
 import Agent.CLI.Session.TitlePolicy (titleRefreshIndex)
 import Agent.CLI.Session.PullRequest (advanceSessionPullRequestIndex)
 import Data.IORef
@@ -29,8 +32,11 @@ import Test.Hspec
 main :: IO ()
 main = hspec do
     SessionActivitySpec.spec
+    SessionObservationSpec.spec
     SessionRequestSpec.spec
+    TurnRecordSpec.spec
     SessionThreadsSpec.spec
+    SessionOwnerSpec.spec
     describe "pull request cache indexing" do
         it "persists a long history once and performs no reads for a current cache" do
             reads <- newIORef (0 :: Int)

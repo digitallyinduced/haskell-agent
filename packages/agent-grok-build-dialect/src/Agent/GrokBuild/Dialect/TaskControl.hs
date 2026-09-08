@@ -24,8 +24,10 @@ import Agent.GrokBuild.Dialect.Json
     )
 import Agent.GrokBuild.Dialect.Shell
     ( GrokSession
+    , ShellTaskSnapshot(..)
+    , formatTaskSnapshot
     , killTask
-    , readTaskOutput
+    , readTaskSnapshot
     )
 import Agent.GrokBuild.Dialect.Task (isSubagentIdText)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
@@ -111,8 +113,14 @@ maxTaskOutputWaitMs = 600000
 data TaskOutputEntry = TaskOutputEntry
     { taskOutputId :: !Text
     , output :: !Text
-    , terminal :: !Bool
+    , taskState :: !TaskState
     }
+
+data TaskState = TaskMissing | TaskActive | TaskFinished
+    deriving (Eq)
+
+terminal :: TaskOutputEntry -> Bool
+terminal entry = entry.taskState == TaskFinished
 
 runOneTaskOutput
     :: GrokSession
@@ -134,20 +142,21 @@ runOneTaskOutput session multi timeout taskId = case multi of
         pure TaskOutputEntry
             { taskOutputId = taskId
             , output = formatAgentWait taskId timedOut (Just status)
-            , terminal = isFinalStatus status
+            , taskState = case status of
+                NotFound -> TaskMissing
+                _ | isFinalStatus status -> TaskFinished
+                  | otherwise -> TaskActive
             }
     _ -> do
-        text <- stripAnsi <$> readTaskOutput session taskId timeout
+        snapshot <- readTaskSnapshot session taskId timeout
         pure TaskOutputEntry
             { taskOutputId = taskId
-            , output = text
-            , terminal = terminalCommandOutput text
+            , output = stripAnsi (formatTaskSnapshot taskId snapshot)
+            , taskState = case snapshot of
+                ShellTaskUnknown -> TaskMissing
+                ShellTaskRunning _ _ -> TaskActive
+                ShellTaskCompleted _ -> TaskFinished
             }
-
-terminalCommandOutput :: Text -> Bool
-terminalCommandOutput text =
-    "exit:" `Text.isPrefixOf` text
-        || "killed " `Text.isPrefixOf` text
 
 formatMultiTaskOutput :: Bool -> [TaskOutputEntry] -> Text
 formatMultiTaskOutput waits entries =
@@ -156,7 +165,7 @@ formatMultiTaskOutput waits entries =
         | entry <- entries
         ]
         <> "\n\n"
-        <> Text.pack (show (length (filter (.terminal) entries)))
+        <> Text.pack (show (length (filter terminal entries)))
         <> "/"
         <> Text.pack (show (length entries))
         <> " tasks completed ("
@@ -245,16 +254,20 @@ runWaitTasks session multi args
         entries <- mapConcurrently
             (runOneTaskOutput session multi Nothing)
             taskIds
-        let completed = length (filter (.terminal) entries)
+        let completed = length (filter terminal entries)
             satisfied = case args.waitMode of
                 WaitAny -> completed > 0
                 WaitAll -> completed == length entries
         now <- getCurrentTime
         let elapsedMs =
                 floor (realToFrac (diffUTCTime now started) * (1000 :: Double))
-        if satisfied || elapsedMs >= timeoutMs
-            then pure $ Right $ formatWaitResult args.waitMode completed entries
-            else threadDelay 50000 >> waitLoop taskIds started
+        case filter (\entry -> entry.taskState == TaskMissing) entries of
+            missing@(_ : _) ->
+                pure (Left (Text.intercalate "\n" (map (.output) missing)))
+            [] ->
+                if satisfied || elapsedMs >= timeoutMs
+                    then pure $ Right $ formatWaitResult args.waitMode completed entries
+                    else threadDelay 50000 >> waitLoop taskIds started
 
 validateTaskIds :: [Text] -> Either Text [Text]
 validateTaskIds taskIds
@@ -279,7 +292,7 @@ formatWaitResult mode completed entries =
     Text.intercalate "\n"
         [ entry.taskOutputId
             <> ": "
-            <> if entry.terminal then "completed" else "running"
+            <> if terminal entry then "completed" else "running"
         | entry <- entries
         ]
         <> "\n\n"

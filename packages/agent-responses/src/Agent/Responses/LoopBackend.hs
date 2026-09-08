@@ -45,7 +45,7 @@ import Agent.Loop
 import Agent.Provider
     ( Credential
     , TokenProvider
-    , runWithTokenProvider
+    , runWithTokenProviderStreaming
     )
 import Agent.Responses.LoopBackend.Input
 import Agent.Responses.LoopBackend.Output
@@ -201,8 +201,8 @@ tokenProviderStatelessResponsesBackend
     -> Backend
 tokenProviderStatelessResponsesBackend provider send =
     statelessResponsesBackend \params onEvent ->
-        runWithTokenProvider provider \credential ->
-            send credential params onEvent
+        runWithTokenProviderStreaming provider streamOutputObserved
+            (\credential -> send credential params) onEvent
 
 -- | Credentialed counterpart to
 -- 'statelessResponsesBackendPreservingCheckpointHistory'.
@@ -218,8 +218,8 @@ tokenProviderStatelessResponsesBackendPreservingCheckpointHistory
         provider
         send =
     statelessResponsesBackendPreservingCheckpointHistory \params onEvent ->
-        runWithTokenProvider provider \credential ->
-            send credential params onEvent
+        runWithTokenProviderStreaming provider streamOutputObserved
+            (\credential -> send credential params) onEvent
 
 -- | Credentialed counterpart to
 -- 'statelessResponsesBackendPreservingHistory'.
@@ -233,5 +233,5 @@ tokenProviderStatelessResponsesBackendPreservingHistory
     -> Backend
 tokenProviderStatelessResponsesBackendPreservingHistory provider send =
     statelessResponsesBackendPreservingHistory \params onEvent ->
-        runWithTokenProvider provider \credential ->
-            send credential params onEvent
+        runWithTokenProviderStreaming provider streamOutputObserved
+            (\credential -> send credential params) onEvent

@@ -5,10 +5,12 @@ import Agent.Error
     , ErrorType(..)
     )
 import Agent.Loop
+import Agent.OpenAI.Error (mkOpenAIError)
 import Agent.OpenAI.LoopBackend
 import Agent.Responses.Request (stripReplayedItemStatus)
 import Agent.Responses.Types
 import Agent.ToolDispatch
+import Control.Monad (forM_)
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
@@ -519,6 +521,47 @@ spec = do
                 , TextDelta "complete"
                 ]
 
+        it "discards hidden output before retrying upstream_connection_error" do
+            attempts <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            events <- newIORef []
+            let upstreamFailure = mkOpenAIError ApiErrorType
+                    "ParseException \"not enough bytes\""
+                    (Just "upstream_connection_error")
+                    Nothing
+                send _request _previous onEvent = do
+                    modifyIORef' attempts (+ 1)
+                    attempt <- readIORef attempts
+                    if attempt == 1
+                        then do
+                            onEvent ResponseOutputItemAddedEvent
+                                { item = assistantItem "partial"
+                                , outputIndex = Just 0
+                                , sequenceNumber = Nothing
+                                }
+                            pure (Left upstreamFailure)
+                        else do
+                            onEvent (deltaEvent EventOutputTextDelta "complete")
+                            pure (Right
+                                (testResponse "resp-replayed"
+                                    [assistantItem "complete"]))
+                backend = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    send
+                    (pure baseParams)
+            result <- submitWithState transcript backend Nothing [UserMessage "one"]
+                (modifyIORef' events . (:))
+            result `shouldBe`
+                Right (emptyTurnOutput "resp-replayed" [] (Just "complete"))
+            readIORef attempts `shouldReturn` 2
+            reverse <$> readIORef events `shouldReturn`
+                [ ActivityUpdated
+                    "Codex is unavailable; retrying in 0s (attempt 1)…"
+                , ResponseAttemptDiscarded
+                , ActivityUpdated "Retrying Codex request (attempt 1)…"
+                , TextDelta "complete"
+                ]
+
         it "discards hidden model output before retrying an overload" do
             attempts <- newIORef (0 :: Int)
             transcript <- newIORef []
@@ -594,12 +637,13 @@ spec = do
                 , ActivityUpdated "Retrying Codex request (attempt 2)…"
                 ]
 
-        it "resubmits after unavailability behind a restart boundary" do
+        it "resubmits after upstream_connection_error behind a restart boundary" do
             attempts <- newIORef (0 :: Int)
             transcript <- newIORef []
             events <- newIORef []
-            let unavailable = ProviderError ServiceUnavailableError
-                    "service unavailable"
+            let upstreamFailure = mkOpenAIError ApiErrorType
+                    "ParseException \"not enough bytes\""
+                    (Just "upstream_connection_error")
                     Nothing
                 send _request _previous onEvent = do
                     modifyIORef' attempts (+ 1)
@@ -607,7 +651,7 @@ spec = do
                     if attempt == 1
                         then do
                             onEvent (deltaEvent EventOutputTextDelta "partial")
-                            pure (Left unavailable)
+                            pure (Left upstreamFailure)
                         else do
                             onEvent (deltaEvent EventOutputTextDelta "complete")
                             pure (Right
@@ -698,53 +742,61 @@ spec = do
                 , TextDelta "complete"
                 ]
 
-        it "does not replay an overload after admitting a completed async tool call" do
-            attempts <- newIORef (0 :: Int)
-            admitted <- newIORef []
-            let overload = ProviderError OverloadedError "busy" Nothing
-                asyncCall =
-                    FunctionCallItem FunctionCall
-                        { itemId = Nothing
-                        , callId = "fc-async"
-                        , name = "shell"
-                        , namespace = Nothing
-                        , provider = Nothing
-                        , arguments = "{}"
-                        , encryptedFunctionArgs = Nothing
-                        , status = Just ItemCompleted
-                        , async = Just True
-                        }
-                send _request _previous onEvent = do
-                    modifyIORef' attempts (+ 1)
-                    onEvent ResponseOutputItemDoneEvent
-                        { item = asyncCall
-                        , outputIndex = Just 0
-                        , sequenceNumber = Nothing
-                        }
-                    pure (Left overload)
-                backend = openAiBackendWithRetryPolicy
-                    (constantDelay 0 <> limitRetries 3)
-                    send
-                    (pure baseParams)
-            result <- backend.submitTurnWithCallbacks
-                emptyBackendSnapshot
-                Nothing
-                [UserMessage "one"]
-                BackendCallbacks
-                    { onLoopEvent = const (pure ())
-                    , onRecoveryCheckpoint = const (pure ())
-                    , onAsyncToolCall =
-                        \call -> modifyIORef' admitted (call.callId :)
-                    }
-            result `shouldBe` Left (ProviderError
-                (UnknownErrorType "replay_unsafe")
-                ( "provider failed after asynchronous tool call; "
-                    <> "refusing to replay: "
-                    <> Text.pack (show overload)
-                )
-                Nothing)
-            readIORef attempts `shouldReturn` 1
-            readIORef admitted `shouldReturn` ["fc-async"]
+        it "does not replay transient failures after admitting an async tool call" do
+            let upstreamFailure = mkOpenAIError ApiErrorType
+                    "ParseException \"not enough bytes\""
+                    (Just "upstream_connection_error")
+                    Nothing
+            forM_
+                [ ProviderError OverloadedError "busy" Nothing
+                , upstreamFailure
+                ]
+                \transientFailure -> do
+                    attempts <- newIORef (0 :: Int)
+                    admitted <- newIORef []
+                    let asyncCall =
+                            FunctionCallItem FunctionCall
+                                { itemId = Nothing
+                                , callId = "fc-async"
+                                , name = "shell"
+                                , namespace = Nothing
+                                , provider = Nothing
+                                , arguments = "{}"
+                                , encryptedFunctionArgs = Nothing
+                                , status = Just ItemCompleted
+                                , async = Just True
+                                }
+                        send _request _previous onEvent = do
+                            modifyIORef' attempts (+ 1)
+                            onEvent ResponseOutputItemDoneEvent
+                                { item = asyncCall
+                                , outputIndex = Just 0
+                                , sequenceNumber = Nothing
+                                }
+                            pure (Left transientFailure)
+                        backend = openAiBackendWithRetryPolicy
+                            (constantDelay 0 <> limitRetries 3)
+                            send
+                            (pure baseParams)
+                    result <- backend.submitTurnWithCallbacks
+                        emptyBackendSnapshot
+                        Nothing
+                        [UserMessage "one"]
+                        BackendCallbacks
+                            { onLoopEvent = const (pure ())
+                            , onRecoveryCheckpoint = const (pure ())
+                            , onAsyncToolCall =
+                                \call -> modifyIORef' admitted (call.callId :)
+                            }
+                    result `shouldBe` Left (ProviderError
+                        (UnknownErrorType "replay_unsafe")
+                        ( "provider failed after asynchronous tool call; "
+                            <> "refusing to replay: "
+                            <> Text.pack (show transientFailure)
+                        )
+                        Nothing)
+                    readIORef attempts `shouldReturn` 1
+                    readIORef admitted `shouldReturn` ["fc-async"]
 
         it "does not replay after admitting a completed async tool call" do
             attempts <- newIORef (0 :: Int)

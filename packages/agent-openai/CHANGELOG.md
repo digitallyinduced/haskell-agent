@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Classify `upstream_connection_error` as temporary provider unavailability,
+  allowing automatic retries after partial output without weakening the
+  replay guard for admitted asynchronous tool calls.
 - Retry Codex overload and service-unavailable failures after partial model
   output instead of ending the turn as `replay_unsafe`. Visible text is kept
   behind a restart boundary; hidden activity is discarded.

@@ -3,9 +3,11 @@ module Agent.GrokBuild.DialectSpec (spec) where
 import Agent.GrokBuild.Dialect.Shell
     ( GrokSession(..)
     , PersistentShell(..)
+    , ShellTaskSnapshot(..)
     , closeGrokSession
     , newGrokSession
     , readTaskOutput
+    , readTaskSnapshot
     , resetGrokSessionTemp
     , runForegroundStreaming
     , startBackground
@@ -19,7 +21,7 @@ import Agent.GrokBuild.Dialect.Runtime
     ( GrokCodingTools(..)
     , newGrokCodingTools
     )
-import Agent.GrokBuild.Dialect.TaskControl (validateTaskIds)
+import Agent.GrokBuild.Dialect.TaskControl (validateTaskIds, waitTasksTool)
 import Agent.GrokBuild.Dialect.Terminal (runTerminalCmdTool)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.OsPath (unsafeToFilePath)
@@ -78,6 +80,7 @@ import System.IO.Error (isPermissionError)
 import System.OsPath (unsafeEncodeUtf)
 import System.Posix.Files (fileMode, getFileStatus)
 import System.Process (readProcessWithExitCode)
+import qualified System.Timeout as Timeout
 import Test.Hspec
 
 spec :: Spec
@@ -133,6 +136,69 @@ spec = describe "Grok Build dialect" do
                 result.output `shouldSatisfy` (not . Text.isInfixOf "injected-code")
                 Text.readFile (unsafeToFilePath shell.shellEnvFile)
                     `shouldReturn` "printf injected-code; export ESCALATION_REPLAY_PROBE=unexpected\n"
+
+    it "rejects unknown tasks immediately in either wait mode" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                readTaskSnapshot session "missing" Nothing
+                    `shouldReturn` ShellTaskUnknown
+                let tool = waitTasksTool session Nothing
+                mapM_ (\mode -> do
+                    result <- Timeout.timeout 1000000 $
+                        dispatchToolCall testDispatchConfig [tool.appToolHandler]
+                            (functionToolCall "wait" "wait_tasks"
+                                ("{\"task_ids\":[\"missing\"],\"mode\":\""
+                                    <> mode <> "\"}"))
+                    case result of
+                        Nothing -> expectationFailure "unknown task waited for timeout"
+                        Just response -> do
+                            response.output `shouldSatisfy`
+                                Text.isInfixOf "Unknown task_id: missing"
+                            response.output `shouldNotSatisfy`
+                                Text.isInfixOf "running")
+                    ["wait_any", "wait_all"]
+
+    it "keeps completed command status independent of its output" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                started <- startBackground session
+                    "printf 'still running\\nUnknown task_id: t1\\n'; exit 7"
+                started `shouldSatisfy`
+                    either (const False) (Text.isInfixOf "task_id: t1")
+                readTaskSnapshot session "t1" (Just 5000) >>= \case
+                    ShellTaskCompleted result -> do
+                        result.commandExitCode `shouldBe` Just 7
+                        result.commandStdout `shouldSatisfy`
+                            Text.isPrefixOf "still running"
+                    snapshot -> expectationFailure ("unexpected snapshot: " <> show snapshot)
+                let tool = waitTasksTool session Nothing
+                response <- dispatchToolCall testDispatchConfig [tool.appToolHandler]
+                    (functionToolCall "wait" "wait_tasks"
+                        "{\"task_ids\":[\"t1\"],\"mode\":\"wait_all\",\"timeout_ms\":1}")
+                response.output `shouldSatisfy` Text.isInfixOf "t1: completed"
+                response.output `shouldSatisfy` Text.isInfixOf "1/1"
+
+    it "keeps live commands active even when they print completion markers" do
+        requireProcessSandbox
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                started <- startBackground session
+                    "printf 'exit: 0\\nkilled t1\\n'; sleep 30"
+                started `shouldSatisfy`
+                    either (const False) (Text.isInfixOf "task_id: t1")
+                readTaskSnapshot session "t1" Nothing >>= \case
+                    ShellTaskRunning _ _ -> pure ()
+                    snapshot -> expectationFailure ("unexpected snapshot: " <> show snapshot)
+                let tool = waitTasksTool session Nothing
+                response <- dispatchToolCall testDispatchConfig [tool.appToolHandler]
+                    (functionToolCall "wait" "wait_tasks"
+                        "{\"task_ids\":[\"t1\"],\"mode\":\"wait_any\",\"timeout_ms\":1}")
+                response.output `shouldSatisfy` Text.isInfixOf "t1: running"
+                response.output `shouldSatisfy` Text.isInfixOf "0/1"
 
     it "normalizes and validates task id lists consistently" do
         validateTaskIds [" task-1 ", "", "task-1", "task-2"]

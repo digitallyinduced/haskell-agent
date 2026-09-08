@@ -2,9 +2,14 @@ module Agent.CLI.NativeProcessSpec (spec) where
 
 import Agent.CLI.Session.Threads (launchSessionThread)
 import Agent.CLI.NativeProcess
+import Agent.Tools.ResourceArbiter
+    ( ToolResourceArbiterError(..), withToolResources, toolResourceArbiterCounts )
+import Agent.Tools.Scheduling
+    ( ToolAccess(..), ToolResource(..), ToolResourceClaim(..) )
+import Control.Concurrent.STM (atomically)
 import Control.Concurrent.MVar
     ( newEmptyMVar, putMVar, takeMVar, tryTakeMVar )
-import Control.Exception.Safe (bracket, finally)
+import Control.Exception.Safe (bracket, finally, try)
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import System.OsPath (unsafeEncodeUtf)
 import System.Timeout (timeout)
@@ -48,6 +53,23 @@ spec = describe "shared native process resources" do
 
     it "closes an unused cleanup worker without requiring a cleanup request" do
         withinDeadline (withRuntime (const (pure ())))
+
+    it "joins resource-owning session workers and closes their shared authority" do
+        started <- newEmptyMVar
+        blocked <- newEmptyMVar
+        arbiter <- withinDeadline $ withRuntime \runtime -> do
+            let arbiter = runtime.nativeToolResourceArbiter
+                claim = ToolResourceClaim ToolWrite (ToolNamedResource "test")
+            launchSessionThread runtime.nativeSessionThreads "resource-owner"
+                (withToolResources arbiter [claim] $
+                    putMVar started () >> takeMVar blocked >> pure (Right ()))
+                `shouldReturn` Right "started session resource-owner"
+            takeMVar started
+            atomically (toolResourceArbiterCounts arbiter) `shouldReturn` (0, 1)
+            pure arbiter
+        atomically (toolResourceArbiterCounts arbiter) `shouldReturn` (0, 0)
+        try (withToolResources arbiter [] (pure ()))
+            `shouldReturn` Left ToolResourceArbiterClosed
 
 -- Bounds interruptible test handshakes; this is not a hard deadline for
 -- masked resource cleanup.

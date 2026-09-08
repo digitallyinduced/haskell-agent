@@ -9,6 +9,18 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "ApiError JSON parsing" do
+        it "classifies an upstream connection interruption as service unavailability" do
+            decodeOpenAIError "{\"error\":{\"type\":\"server_error\",\"code\":\"upstream_connection_error\",\"message\":\"ParseException \\\"not enough bytes\\\"\",\"retry_after\":2}}"
+                `shouldBe` Right
+                    (ProviderError ServiceUnavailableError
+                        "ParseException \"not enough bytes\" (code: upstream_connection_error)"
+                        (Just 2))
+
+        it "does not make an unclassified parse failure replay-safe" do
+            mkOpenAIError ApiErrorType "ParseException \"not enough bytes\"" Nothing Nothing
+                `shouldBe` ProviderError ApiErrorType
+                    "ParseException \"not enough bytes\"" Nothing
+
         it "normalizes previous_response_not_found codes to a typed error" do
             decodeOpenAIError "{\"error\":{\"type\":\"invalid_request_error\",\"code\":\"previous_response_not_found\",\"message\":\"Previous response with id 'resp_123' not found.\"}}"
                 `shouldBe` Right

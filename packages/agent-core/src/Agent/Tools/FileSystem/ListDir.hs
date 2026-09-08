@@ -33,7 +33,7 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , ToolExecutionPolicy(..)
     , jsonTool
-    , withToolResourceClaims
+    , withSharedToolResourceClaims
     )
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
@@ -49,7 +49,7 @@ listDirArgsDecoder :: Decoder ListDirArgs
 listDirArgsDecoder = objectArgs \object -> ListDirArgs <$> reqText object "target_directory"
 
 listDirTool :: ToolEnv -> AppTool
-listDirTool env = withToolResourceClaims (listDirClaims env) $
+listDirTool env = withSharedToolResourceClaims env (listDirClaims env) $
     jsonTool "list_dir" listDirDescription
     [ PropertySchema "target_directory" PropertyString True $ Just
         "Path to a directory within an allowed filesystem root. Relative paths use the workspace root; absolute paths may resolve within the workspace or session temp directory."

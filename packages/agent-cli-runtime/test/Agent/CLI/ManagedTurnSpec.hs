@@ -1,5 +1,6 @@
 module Agent.CLI.ManagedTurnSpec (spec) where
 
+import Agent.CLI.AgentSessions.Process (waitForManagedSessionReadyWith)
 import Agent.CLI.ManagedTurn
     ( ManagedTurnMedia(..)
     , ManagedTurnRequest(..)
@@ -27,10 +28,44 @@ import System.Directory
 import System.FilePath ((</>))
 import Control.Exception.Safe (finally)
 import Data.Unique (newUnique, hashUnique)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
+import System.Exit (ExitCode(..))
 import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.CLI.ManagedTurn" do
+    describe "managed session readiness" do
+        let observeExit finalContents exitCode = do
+                contents <- newIORef Nothing
+                reads <- newIORef (0 :: Int)
+                result <- waitForManagedSessionReadyWith
+                    (modifyIORef' reads (+ 1) >> readIORef contents)
+                    (writeIORef contents finalContents >> pure (Just exitCode))
+                readIORef reads `shouldReturn` 2
+                pure result
+
+        it "accepts readiness published between the initial read and process exit" do
+            observeExit (Just "ready\n") ExitSuccess `shouldReturn` Right ()
+
+        it "preserves an error published between the initial read and process exit" do
+            observeExit (Just "error\ncould not acquire lock") (ExitFailure 1)
+                `shouldReturn` Left "could not acquire lock"
+
+        it "does not mistake a successful exit without readiness for readiness" do
+            observeExit Nothing ExitSuccess
+                `shouldReturn` Left "agent session exited before acquiring its lock"
+
+        it "reports the exit code when the final marker is incomplete" do
+            observeExit (Just "rea") (ExitFailure 7)
+                `shouldReturn`
+                    Left "agent session exited before acquiring its lock (exit code 7)"
+
+        it "returns published readiness without requiring the child to exit" do
+            waitForManagedSessionReadyWith
+                (pure (Just "ready\n"))
+                (expectationFailure "unexpected exit observation" >> pure Nothing)
+                `shouldReturn` Right ()
+
     it "loads --prompt-file as plain text" $
         withManagedTempDir \dir -> do
             let pathFile = dir </> "prompt.txt"

@@ -78,6 +78,7 @@ import Agent.CLI.Render
 import Agent.CLI.Session
 import Agent.CLI.Session.History
 import Agent.CLI.Session.Workspace (WorkspaceContext(..))
+import qualified Agent.CLI.Session.Observation as Observation
 import Agent.CLI.SessionEnv
 import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.SessionLock
@@ -123,7 +124,7 @@ import Agent.Tools.Types
 import Agent.OsPath
 import Control.Concurrent.Async (Async, withAsync)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar_, newMVar, withMVar)
 import Control.Concurrent.STM (STM)
 import Control.Exception.Safe
     ( catchAny
@@ -181,6 +182,8 @@ data SessionHostRuntime = SessionHostRuntime
     , hostSessionState :: !RuntimeState.SessionState
     , hostIoLock :: !(MVar ())
     , hostApprovalLock :: !(MVar ())
+    , hostObservationPublisher
+        :: !(IORef (Maybe Observation.SessionObservationPublisher))
     , hostNativeCapabilities :: !NativeRunCapabilities
     , hostLoadsWorkspaceContext :: !Bool
     , hostPreparedWorkspaceEnvironment
@@ -204,6 +207,8 @@ newSessionHostRuntime SessionRequest{..} = do
         initialGrokContext
     ioLock <- newMVar ()
     approvalLock <- newMVar ()
+    observationPublisher <- newIORef Nothing
+    observationInputWaitCount <- newMVar (0 :: Int)
     let fullscreen = startup.startupFullscreen
         nativeCapabilities =
             maybe
@@ -274,14 +279,27 @@ newSessionHostRuntime SessionRequest{..} = do
         startupWindowTitle
         withIoLock
         writeWindowTitle
+    let beginInputWait = do
+            windowTitle.windowTitleBeginInputWait
+            modifyMVar_ observationInputWaitCount \count -> do
+                readIORef observationPublisher >>= mapM_
+                    (\publisher -> Observation.setObservedWaiting publisher True)
+                pure (count + 1)
+        endInputWait = do
+            windowTitle.windowTitleEndInputWait
+            modifyMVar_ observationInputWaitCount \count -> do
+                let remaining = max 0 (count - 1)
+                readIORef observationPublisher >>= mapM_
+                    (\publisher -> Observation.setObservedWaiting publisher (remaining > 0))
+                pure remaining
     setPlanModeInputWaitHooks
         planMode
-        windowTitle.windowTitleBeginInputWait
-        windowTitle.windowTitleEndInputWait
+        beginInputWait
+        endInputWait
     setToolHumanInputWaitHooks
         toolEnv
-        windowTitle.windowTitleBeginInputWait
-        windowTitle.windowTitleEndInputWait
+        beginInputWait
+        endInputWait
     setToolRootAccessRequest toolEnv (Just requestRootAccess)
     let showTitleEvent = \case
             SessionTitleGenerated SessionTitleResult{..} ->
@@ -325,6 +343,7 @@ newSessionHostRuntime SessionRequest{..} = do
         , hostSessionState = runtimeState
         , hostIoLock = ioLock
         , hostApprovalLock = approvalLock
+        , hostObservationPublisher = observationPublisher
         , hostNativeCapabilities = nativeCapabilities
         , hostLoadsWorkspaceContext = loadsHostWorkspaceContext
         , hostPreparedWorkspaceEnvironment = preparedWorkspaceEnvironment
@@ -360,7 +379,7 @@ data SessionControlRuntime = SessionControlRuntime
     , controlRenderStateRef :: !(IORef RenderState)
     , controlAllowedToolsRef :: !(IORef (Set.Set Text.Text))
     , controlComputerUseEnabledRef :: !(IORef Bool)
-    , controlLastAssistantRef :: !(IORef (Maybe Text.Text))
+    , controlReadLastAssistant :: !(IO (Maybe Text.Text))
     , controlUnavailableProvidersRef :: !(IORef (Set.Set Provider))
     , controlStartupUnavailableRef :: !(IORef (Maybe (STM ApiError)))
     , controlRestartEffortRef :: !(IORef (Maybe Text.Text))
@@ -403,7 +422,6 @@ newSessionControlRuntime host SessionRequest{..} = do
                 (lookupAppTool
                     computerToolName
                     (sessionDirectTools refreshTools codeModeRuntime))
-    let lastAssistantRef = host.hostSessionState.stateLastAssistant
     unavailableProvidersRef <- newIORef unavailableProviders
     startupUnavailableRef <- newIORef startupUnavailable
     restartEffortRef <- newIORef Nothing
@@ -491,7 +509,7 @@ newSessionControlRuntime host SessionRequest{..} = do
         , controlRenderStateRef = renderStateRef
         , controlAllowedToolsRef = allowedToolsRef
         , controlComputerUseEnabledRef = computerUseEnabledRef
-        , controlLastAssistantRef = lastAssistantRef
+        , controlReadLastAssistant = RuntimeState.readLastAssistant host.hostSessionState
         , controlUnavailableProvidersRef = unavailableProvidersRef
         , controlStartupUnavailableRef = startupUnavailableRef
         , controlRestartEffortRef = restartEffortRef
@@ -528,7 +546,6 @@ buildSkillContextRuntime
     stderrHandle = host.hostStderrHandle
     loadsHostWorkspaceContext = host.hostLoadsWorkspaceContext
     renderStateRef = controls.controlRenderStateRef
-    lastAssistantRef = controls.controlLastAssistantRef
     steeringInputs = controls.controlSteeringInputs
     agentViewportRuntime = controls.controlAgentViewportRuntime
     installSkills context queueContext skills = do
@@ -607,9 +624,9 @@ buildSkillContextRuntime
         writeIORef usageRef emptyTokenUsage
         writeIORef contextOccupancyRef Nothing
         modifyIORef' renderStateRef clearRenderTokenRate
-        writeIORef lastAssistantRef Nothing
+        RuntimeState.clearLastAssistant host.hostSessionState
         writeIORef subagentSessions Map.empty
-        writeIORef host.hostSessionState.stateGrokFirstTurnContext Nothing
+        RuntimeState.clearGrokContext host.hostSessionState
         resetAgentViewport agentViewportRuntime
         case multiCtx of
             Just ctx -> resetSubagentRegistry ctx.multiRegistry
@@ -767,6 +784,8 @@ buildSessionLoopEventRuntime
     emitLoop event =
         projectPlanProtocol event >>= mapM_ emitPresentedLoop
     emitPresentedLoop event = do
+        readIORef host.hostObservationPublisher >>= mapM_
+            (\publisher -> Observation.publishObservedLoopEvent publisher event)
         recordAgentViewportEvent agentViewportRuntime event
         forM_ startup.startupNativeHooks \hooks ->
             hooks.nativeOnLoopEvent event
@@ -1544,6 +1563,8 @@ buildSessionEnv
         , sessionContextWindow = currentContextWindow
         , sessionPolicy = policyRef
         , sessionPersist = persist
+        , sessionObservationPublisher = host.hostObservationPublisher
+        , sessionObservationEnabled = isNothing startup.startupNativeHooks
         , sessionDatabasePool =
             trustedPool startup.startupDatabaseStore
         , sessionTitleManager = titleManager
@@ -1692,13 +1713,13 @@ installSessionActions
                     ReplCopy request
                         | request.copyResponseIndex == 1
                         , Nothing <- request.copyDestination ->
-                        readIORef controls.controlLastAssistantRef
+                        controls.controlReadLastAssistant
                             >>= copyImmediate
                                 "last response"
                                 "no assistant response to copy"
                     ReplCopyCode index -> do
                         answer <-
-                            readIORef controls.controlLastAssistantRef
+                            controls.controlReadLastAssistant
                         let label =
                                 "code block " <> Text.pack (show index)
                         copyImmediate
@@ -1707,7 +1728,7 @@ installSessionActions
                             (answer >>= fencedCodeBlock index)
                     ReplCopyDiff -> do
                         answer <-
-                            readIORef controls.controlLastAssistantRef
+                            controls.controlReadLastAssistant
                         copyImmediate
                             "diff block"
                             "no diff block was found"

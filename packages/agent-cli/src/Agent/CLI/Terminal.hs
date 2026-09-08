@@ -4,6 +4,8 @@ module Agent.CLI.Terminal
     , TerminalCapabilities(..)
     , rawAttrs
     , detectTerminalCapabilities
+    , isSshSession
+    , remoteLinkInstructions
     , formatTerminalCapabilities
     , resolveColor
     , osc7WorkingDirectory
@@ -40,6 +42,7 @@ module Agent.CLI.Terminal
     ) where
 
 import Agent.CLI.FileUri (fileUri)
+import Agent.CLI.Environment (lookupNonEmpty)
 import Control.Exception.Safe (bracket_)
 import qualified Data.ByteString.Base64 as Base64
 import Data.Char (ord, toLower, toUpper)
@@ -132,6 +135,17 @@ detectTerminalCapabilities handle = do
         , terminalKittyKeyboard =
             not tmux && oneOf [TerminalGhostty, TerminalKitty, TerminalWezTerm]
         }
+
+-- | SSH identifies the process host, not the computer displaying its terminal.
+-- A browser launched on this host cannot open a window on the SSH client.
+isSshSession :: IO Bool
+isSshSession =
+    any isJust <$> traverse lookupNonEmpty
+        ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+
+remoteLinkInstructions :: Text
+remoteLinkInstructions =
+    "Over SSH, use your terminal's Open Link action (usually Cmd-click on macOS or Ctrl-click on Linux/Windows) to open this URL on your local computer."
 
 formatTerminalCapabilities :: TerminalCapabilities -> Text
 formatTerminalCapabilities capabilities =

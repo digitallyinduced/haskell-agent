@@ -32,7 +32,6 @@ import Agent.CLI.Session
     , setSessionRecap
     , setSessionTurnSummary
     )
-import Agent.CLI.Session.History (readLiveTranscript)
 import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.Runtime.SessionState qualified as RuntimeState
 import Agent.CLI.Style (roleMuted)
@@ -50,7 +49,7 @@ runSessionRecap registerCancel env kind = do
     let fullscreen = env.sessionFullscreen
         stdoutHandle = env.sessionRender.renderStdout
     params <- readSessionRequestParams env.sessionParams
-    transcript <- readLiveTranscript env.sessionState.stateConversation
+    transcript <- RuntimeState.readSessionTranscript env.sessionState
     let snapshot = sideCallSnapshot params transcript
     color <- resolveColor stdoutHandle
     let mainTurns = mainTurnCount transcript
@@ -171,7 +170,7 @@ recapFailed env message = do
 runSessionTurnSummary :: SessionEnv -> IO ()
 runSessionTurnSummary env = do
     params <- readSessionRequestParams env.sessionParams
-    transcript <- readLiveTranscript env.sessionState.stateConversation
+    transcript <- RuntimeState.readSessionTranscript env.sessionState
     let snapshot = sideCallSnapshot params transcript
     result <-
         runTurnSummaryWithCancel

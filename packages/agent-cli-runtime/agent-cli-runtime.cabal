@@ -56,11 +56,14 @@ library
     exposed-modules:  Agent.Runtime.Compaction
                     , Agent.Runtime.ConversationStore
                     , Agent.Runtime.SessionState
+                    , Agent.Runtime.SessionOwner
                     , Agent.CLI.NativeProcess
                     , Agent.Runtime.Request
                     , Agent.Runtime.StartupPolicy
                     , Agent.Runtime.TurnEngine
                     , Agent.Runtime.TurnExecution
+                    , Agent.Runtime.TurnRecord
+                    , Agent.CLI.Session.TurnRecord
                     , Agent.Runtime.TurnState
                     , Agent.CLI.AgentSessions.Process
                     , Agent.CLI.Auth
@@ -91,6 +94,7 @@ library
                     , Agent.CLI.Session.Threads
                     , Agent.CLI.Session.Types
                     , Agent.CLI.Session.Activity
+                    , Agent.CLI.Session.Observation
                     , Agent.CLI.Session.Request
                     , Agent.CLI.SessionLock
                     , Agent.CLI.Transcription
@@ -161,8 +165,11 @@ test-suite agent-cli-runtime-test
                     , Agent.CLI.ModelsSpec
                     , Agent.CLI.NativeProcessSpec
                     , Agent.CLI.SessionActivitySpec
+                    , Agent.CLI.SessionObservationSpec
                     , Agent.CLI.SessionRequestSpec
+                    , Agent.CLI.TurnRecordSpec
                     , Agent.CLI.SessionThreadsSpec
+                    , Agent.Runtime.SessionOwnerSpec
                     , Agent.CLI.SessionSpec
                     , Agent.CLI.SessionSpec.Compatibility
                     , Agent.CLI.SessionSpec.Fixtures
@@ -187,6 +194,7 @@ test-suite agent-cli-runtime-test
                     , http-types
                     , QuickCheck
                     , safe-exceptions
+                    , stm
                     , text
                     , time
                     , unix

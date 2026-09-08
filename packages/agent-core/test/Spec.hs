@@ -13,6 +13,7 @@ import qualified Agent.LoopSpec as LoopSpec
 import qualified Agent.OsPathSpec as OsPathSpec
 import qualified Agent.ProjectInstructionsSpec as ProjectInstructionsSpec
 import qualified Agent.Provider.OptionsSpec as ProviderOptionsSpec
+import qualified Agent.ProviderSpec as ProviderSpec
 import qualified Agent.ResourceScopeSpec as ResourceScopeSpec
 import qualified Agent.RetrySpec as RetrySpec
 import qualified Agent.SkillsSpec as SkillsSpec
@@ -39,6 +40,7 @@ import qualified Agent.Tools.SecretSpec as SecretSpec
 import qualified Agent.Tools.ShowImageSpec as ShowImageSpec
 import qualified Agent.Tools.ViewImageSpec as ViewImageSpec
 import qualified Agent.Tools.RenderChartSpec as RenderChartSpec
+import qualified Agent.Tools.ResourceArbiterSpec as ResourceArbiterSpec
 import qualified Agent.Transport.WebSocketSpec as WebSocketSpec
 import Test.Hspec (hspec)
 
@@ -57,6 +59,7 @@ main = hspec do
     OsPathSpec.spec
     ProjectInstructionsSpec.spec
     ProviderOptionsSpec.spec
+    ProviderSpec.spec
     ResourceScopeSpec.spec
     RetrySpec.spec
     SkillsSpec.spec
@@ -80,6 +83,7 @@ main = hspec do
     ShowImageSpec.spec
     ViewImageSpec.spec
     RenderChartSpec.spec
+    ResourceArbiterSpec.spec
     CodeModeHostSpec.spec
     CodeModeProtocolSpec.spec
     DangerousSpec.spec

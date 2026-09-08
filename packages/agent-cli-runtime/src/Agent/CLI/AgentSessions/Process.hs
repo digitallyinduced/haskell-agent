@@ -10,6 +10,7 @@ module Agent.CLI.AgentSessions.Process
     , newSessionProcessManagerWithLifetime
     , sessionProcessStatus
     , signalManagedSessionReady
+    , waitForManagedSessionReadyWith
     ) where
 
 import Agent.CLI.Error (formatException)
@@ -499,24 +500,44 @@ signalManagedSessionReady result =
             Left err -> "error\n" <> err
 
 waitForManagedSessionReady :: ProcessHandle -> FilePath -> IO (Either Text ())
-waitForManagedSessionReady process path = go
+waitForManagedSessionReady process path =
+    waitForManagedSessionReadyWith
+        (either (const Nothing) Just <$> try @_ @SomeException (TextIO.readFile path))
+        (getProcessExitCode process)
+
+-- | Poll readiness with explicit observations so publication/exit interleavings
+-- can be tested without relying on process scheduling.
+waitForManagedSessionReadyWith
+    :: IO (Maybe Text)
+    -> IO (Maybe ExitCode)
+    -> IO (Either Text ())
+waitForManagedSessionReadyWith readContents readExitCode = go
   where
     go = do
-        contents <- try @_ @SomeException (TextIO.readFile path)
-        case contents of
-            Right "ready\n" -> pure (Right ())
-            Right text
-                | Just err <- Text.stripPrefix "error\n" text ->
-                    pure (Left err)
-            _ ->
-                getProcessExitCode process >>= \case
+        result <- readinessResult <$> readContents
+        case result of
+            Just ready -> pure ready
+            Nothing ->
+                readExitCode >>= \case
                     Nothing -> threadDelay 10000 >> go
-                    Just ExitSuccess ->
-                        pure (Left "agent session exited before acquiring its lock")
-                    Just (ExitFailure code) ->
-                        pure $ Left
-                            ("agent session exited before acquiring its lock (exit code "
-                                <> Text.pack (show code) <> ")")
+                    Just exitCode -> do
+                        -- The child may publish and exit after the first read.
+                        -- Once exit is observed, its final marker is stable.
+                        finalResult <- readinessResult <$> readContents
+                        pure $ case finalResult of
+                            Just ready -> ready
+                            Nothing -> Left (earlyExitMessage exitCode)
+
+    readinessResult (Just "ready\n") = Just (Right ())
+    readinessResult (Just text)
+        | Just err <- Text.stripPrefix "error\n" text = Just (Left err)
+    readinessResult _ = Nothing
+
+    earlyExitMessage ExitSuccess =
+        "agent session exited before acquiring its lock"
+    earlyExitMessage (ExitFailure code) =
+        "agent session exited before acquiring its lock (exit code "
+            <> Text.pack (show code) <> ")"
 
 removePrivateFile :: FilePath -> IO ()
 removePrivateFile path = do

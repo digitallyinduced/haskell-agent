@@ -248,14 +248,11 @@ copyResponse context request =
 loadAssistantResponses
     :: SessionEnv
     -> IO (Either Text [Text])
-loadAssistantResponses env@SessionEnv
-        { sessionState = RuntimeState.SessionState
-            { stateLastAssistant = lastAssistantRef }
-        } =
+loadAssistantResponses env =
     loadPersistedTranscript env >>= \case
         Left err -> pure (Left err)
         Right persisted -> do
-            latest <- readIORef lastAssistantRef
+            latest <- RuntimeState.readLastAssistant env.sessionState
             let responses =
                     maybe
                         []
@@ -319,7 +316,7 @@ copyCodeBlock
     -> IO ()
 copyCodeBlock context index = do
     answer <-
-        readIORef context.handlerSessionEnv.sessionState.stateLastAssistant
+        RuntimeState.readLastAssistant context.handlerSessionEnv.sessionState
     let label = "code block " <> Text.pack (show index)
     copyCommand
         context
@@ -330,7 +327,7 @@ copyCodeBlock context index = do
 copyDiffBlock :: ReplHandlerContext -> IO ()
 copyDiffBlock context = do
     answer <-
-        readIORef context.handlerSessionEnv.sessionState.stateLastAssistant
+        RuntimeState.readLastAssistant context.handlerSessionEnv.sessionState
     copyCommand
         context
         "diff block"

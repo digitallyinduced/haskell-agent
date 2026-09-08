@@ -2,6 +2,8 @@
 {-# OPTIONS_GHC -O0 -Wno-unused-imports #-}
 module Agent.CLI.TUI.App.Run where
 
+import Agent.CLI.TUI.Keyboard (mkKeyboardVty)
+
 import Agent.CLI.Clipboard ( formatImageSize )
 import Agent.CLI.Dictation ( DictationControl(..)
     , DictationResult(..)
@@ -217,7 +219,7 @@ runFullscreen runtime workerAction = do
     initialClock <- getMonotonicTimeNSec
     terminal <- detectTerminalCapabilities stdout
     let makeVty = do
-            vty <- Vty.mkVty fullscreenVtyConfig
+            vty <- mkKeyboardVty fullscreenVtyConfig
             let setupVty = do
                     let output = V.outputIface vty
                     -- Without this mode terminals paste image clipboard

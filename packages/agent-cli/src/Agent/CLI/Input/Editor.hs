@@ -133,6 +133,25 @@ reduceEditorKey entries state key =
             , editorSelected = 0
             , editorSlashDismissed = False
             }
+        EditorWordLeft -> redraw state
+            { editorCursor =
+                Text.length
+                    (Text.dropWhileEnd (not . isSpace)
+                        (Text.dropWhileEnd isSpace
+                            (Text.take state.editorCursor state.editorText)))
+            , editorSelected = 0
+            , editorSlashDismissed = False
+            }
+        EditorWordRight -> redraw state
+            { editorCursor =
+                Text.length state.editorText
+                    - Text.length
+                        (Text.dropWhile (not . isSpace)
+                            (Text.dropWhile isSpace
+                                (Text.drop state.editorCursor state.editorText)))
+            , editorSelected = 0
+            , editorSlashDismissed = False
+            }
         EditorHome -> redraw state
             { editorCursor = 0
             , editorSelected = 0

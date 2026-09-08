@@ -178,7 +178,7 @@ import Agent.CLI.Subagents.Runtime
                       subagentOptions, subagentNetworkRecovery,
                       subagentGhciEnabled, subagentBashEnabled,
                       subagentPolicy, subagentPlanHooks, subagentSkillRoots,
-                      subagentAllowedRoots, subagentRootAccessRequest,
+                      subagentAllowedRoots, subagentToolResourceArbiter, subagentRootAccessRequest,
                       subagentParams, subagentMcpTools, subagentRegistry,
                       subagentSessions, subagentStoreRoot, subagentTypes,
                       subagentLegacyTarget, subagentConnection, subagentMapModel,
@@ -237,7 +237,7 @@ import Agent.ToolDispatch (canonicalToolName, ToolDispatchConfig(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolSchema(..)
-    , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp)
+    , ToolEnv(toolAllowedRoots, toolRootAccessRequest, toolSkillRoots, toolSessionTmp, toolResourceArbiter)
     )
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async ( waitSTM, withAsync )
@@ -737,6 +737,7 @@ buildSessionSubagentRuntime AgentSessionRequest
         , subagentPlanHooks = planHooks
         , subagentSkillRoots = toolEnv.toolSkillRoots
         , subagentAllowedRoots = toolEnv.toolAllowedRoots
+        , subagentToolResourceArbiter = toolEnv.toolResourceArbiter
         , subagentRootAccessRequest = toolEnv.toolRootAccessRequest
         , subagentParams = promptRuntime.sessionParamsRef
         , subagentMcpTools = mcpTools

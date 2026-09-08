@@ -61,6 +61,8 @@ import Agent.CLI.WindowTitle (oscWindowTitleBytes)
 import Agent.CLI.Status (formatTokenUsage)
 import Agent.CLI.Timestamp (currentShortMessageTimestamp)
 import Agent.CLI.Terminal ( TerminalCapabilities(..)
+    , isSshSession
+    , remoteLinkInstructions
     , detectTerminalCapabilities
     , kittyAltCsiBodies
     , kittyCtrlCsiBodies
@@ -719,24 +721,63 @@ isQuickStartControl = \case
 
 openMarkdownLink :: Text -> EventM Name AppState ()
 openMarkdownLink url = do
-    opened <- liftIO (openExternalUrl url)
-    unless opened $ do
-        copyAction <- gets (.appRuntime.runtimeCopy)
-        copied <- liftIO (copyAction url)
-        modify' $
-            applyUiEvent
-                (UiSetNotice
-                    (Just (warningNotice
-                        (if copied
-                            then "Could not open that link; URL copied."
-                            else "Could not open that link."))))
+    remoteSession <- liftIO isSshSession
+    if remoteSession
+        then do
+            copyAction <- gets (.appRuntime.runtimeCopy)
+            copied <- liftIO (copyAction url)
+            setLinkNotice $
+                remoteLinkInstructions <> "\n\n"
+                    <> (if copied
+                    then "URL copied. "
+                    else "Could not copy the URL. ")
+                    <> "Open this URL in your local browser: " <> url
+        else do
+            opened <- liftIO (openExternalUrl url)
+            unless opened $ do
+                copyAction <- gets (.appRuntime.runtimeCopy)
+                copied <- liftIO (copyAction url)
+                setLinkNotice $
+                    if copied
+                        then "Could not open that link; URL copied."
+                        else "Could not open that link."
+
+-- Keep feedback inside a choice dialog: the conversation notice underneath
+-- the modal can be obscured by the sign-in page.
+setLinkNotice :: Text -> EventM Name AppState ()
+setLinkNotice message = modify' \state ->
+    let updated = applyUiEvent (UiSetNotice (Just (warningNotice message))) state
+        markdownMessage = Text.concatMap escape message
+        escape character
+            -- Escape the scheme separator too: otherwise the URL recognizer
+            -- consumes subsequent Markdown escapes as literal URL characters.
+            | character `elem` ("\\`*_[]<>!#&:" :: String) =
+                "\\" <> Text.singleton character
+            | otherwise = Text.singleton character
+    in updated
+        { appChoice = fmap
+            (\dialog ->
+                let overlay = dialog.dialogOverlay
+                in dialog
+                    { dialogOverlay = overlay
+                        { choiceBody =
+                            if markdownMessage `Text.isInfixOf` overlay.choiceBody
+                                then overlay.choiceBody
+                                else overlay.choiceBody <> "\n\n" <> markdownMessage
+                        }
+                    })
+            updated.appChoice
+        }
 
 openExternalUrl :: Text -> IO Bool
-openExternalUrl url =
-    case externalUrlCommand url of
-        Nothing -> pure False
-        Just command ->
-            launchExternalUrlCommand command
+openExternalUrl url = do
+    remoteSession <- isSshSession
+    if remoteSession
+        then pure False
+        else case externalUrlCommand url of
+            Nothing -> pure False
+            Just command ->
+                launchExternalUrlCommand command
 
 -- | Start the platform URL opener without waiting for it to exit. Browser
 -- launchers may remain attached for the lifetime of the browser, and waiting

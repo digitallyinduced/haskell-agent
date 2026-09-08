@@ -5,7 +5,7 @@ module Agent.CLI.Login.Internal.Gateway
     , selectGatewayLoginFlow
     ) where
 
-import Agent.CLI.Environment (lookupNonEmpty)
+import Agent.CLI.Terminal (isSshSession, remoteLinkInstructions)
 import Agent.CLI.Error (formatException)
 import Agent.CLI.GatewayClient
     ( GatewayAuthorization(..)
@@ -52,7 +52,6 @@ import Control.Concurrent.MVar
     )
 import Control.Exception.Safe (onException, tryAny)
 import Control.Monad (unless)
-import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -77,13 +76,11 @@ selectGatewayLoginFlow operatingSystem remoteSession
 
 currentGatewayLoginFlow :: IO GatewayLoginFlow
 currentGatewayLoginFlow = do
-    sshConnection <- lookupNonEmpty "SSH_CONNECTION"
-    sshClient <- lookupNonEmpty "SSH_CLIENT"
-    sshTty <- lookupNonEmpty "SSH_TTY"
+    remoteSession <- isSshSession
     pure $
         selectGatewayLoginFlow
             SystemInfo.os
-            (any isJust [sshConnection, sshClient, sshTty])
+            remoteSession
 
 connectFullscreenGateway :: FullscreenRuntime -> IO (Maybe LoginNotice)
 connectFullscreenGateway runtime = do
@@ -215,6 +212,7 @@ connectFullscreenGatewayDevice
     :: FullscreenRuntime
     -> IO (Maybe LoginNotice)
 connectFullscreenGatewayDevice runtime = do
+    remoteSession <- isSshSession
     requestedAt <- getCurrentTime
     requested <-
         withLoginProgress runtime
@@ -229,8 +227,10 @@ connectFullscreenGatewayDevice runtime = do
             let device =
                     authorization.authorizationDevice
                 notice =
-                    Just
-                        "Open the verification link in a browser on your local computer."
+                    Just $
+                        if remoteSession
+                            then remoteLinkInstructions
+                            else "Open the verification link in a browser on your local computer."
             awaitAuthorization
                 authorization
                 (initialDevicePollSchedule

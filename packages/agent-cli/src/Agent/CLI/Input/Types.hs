@@ -70,6 +70,8 @@ data EditorKey
     | EditorDelete
     | EditorLeft
     | EditorRight
+    | EditorWordLeft
+    | EditorWordRight
     | EditorHome
     | EditorEnd
     | EditorUp
