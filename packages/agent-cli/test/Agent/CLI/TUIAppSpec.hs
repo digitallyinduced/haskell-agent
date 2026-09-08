@@ -198,9 +198,30 @@ import Graphics.Vty.Span (SpanOp(..))
 import qualified Agent.CLI.TUI.Composer as Composer
 import System.Timeout (timeout)
 import Test.Hspec
+import qualified Agent.CLI.TUI.App as History
+import Agent.Tools.RenderChart (renderChartResult)
 
 spec :: Spec
 spec = do
+    describe "durable chart previews" do
+        it "restores previews on history reset and page load and clears them on replacement" do
+            runtime <- newScriptRuntime initialUiState
+            envelope <- either (fail . Text.unpack) pure (renderChartResult
+                "{\"version\":1,\"kind\":\"bar\",\"title\":\"Requests\",\"x_axis\":{\"type\":\"category\",\"label\":\"Region\"},\"y_axis\":{\"label\":\"Count\"},\"series\":[{\"name\":\"Requests\",\"points\":[{\"x\":\"EU\",\"y\":4}]}]}")
+            let durable cursor = HistoryTurn
+                    { historyTurnCursor = HistoryCursor cursor
+                    , historyTurnBlocks = Seq.singleton (markerBlock (BlockId 1) "Requests")
+                    , historyTurnCharts = Map.singleton (BlockId 1) envelope
+                    }
+                page turns = HistoryPage (HistoryGeneration 1) HistoryNewer
+                    (Seq.fromList turns) (HistoryCursor 0) 2 False False
+                initial = initialFullscreenAppState runtime [] AgentRoot [] 0
+                reset = History.resetHistoryPage (page [durable 0]) initial
+                loaded = History.applyLoadedHistoryPage (page [durable 1]) reset
+                cleared = History.resetHistoryPage (page []) loaded
+            Map.size reset.appSubmittedImagePreviews `shouldBe` 1
+            Map.size loaded.appSubmittedImagePreviews `shouldBe` 2
+            Map.null cleared.appSubmittedImagePreviews `shouldBe` True
     describe "pull request event state" do
         let url = "https://github.com/owner/repository/pull/42"
             association generation =
@@ -2432,6 +2453,7 @@ replacementAfterHistoryReplacement scenario = do
             }
         durableTurn = HistoryTurn
             { historyTurnCursor = HistoryCursor 0
+            , historyTurnCharts = Map.empty
             , historyTurnBlocks = Seq.singleton durableBlock
             }
         initialState =
@@ -2485,6 +2507,7 @@ replacementPreservesFollow follow = do
         (initialUiState { uiFollow = follow })
     let durableTurn = HistoryTurn
             { historyTurnCursor = HistoryCursor 0
+            , historyTurnCharts = Map.empty
             , historyTurnBlocks =
                 Seq.singleton
                     (markerBlock
@@ -2517,6 +2540,7 @@ startupMessagesPrecedeFirstCommittedTurn = do
                 reduceUi (UiUserSubmitted "first prompt") initialUiState
         durableTurn = HistoryTurn
             { historyTurnCursor = HistoryCursor 0
+            , historyTurnCharts = Map.empty
             , historyTurnBlocks = durableUi.uiBlocks
             }
         initialState =
@@ -2549,6 +2573,7 @@ interTurnMessagesPrecedeNextCommittedTurn = do
                         reduceUi (UiUserSubmitted prompt) initialUiState
             in HistoryTurn
                 { historyTurnCursor = HistoryCursor cursor
+                , historyTurnCharts = Map.empty
                 , historyTurnBlocks = durableUi.uiBlocks
                 }
         commit cursor prompt response =
@@ -2584,6 +2609,7 @@ resetDoesNotRetainPriorSystemMessages = do
                 reduceUi (UiUserSubmitted "new prompt") initialUiState
         durableTurn = HistoryTurn
             { historyTurnCursor = HistoryCursor 0
+            , historyTurnCharts = Map.empty
             , historyTurnBlocks = durableUi.uiBlocks
             }
         initialState =
@@ -2621,6 +2647,7 @@ committedPreviewKeys = do
                 }
         durableTurn = HistoryTurn
             { historyTurnCursor = HistoryCursor 0
+            , historyTurnCharts = Map.empty
             , historyTurnBlocks =
                 Seq.singleton (markerBlock (BlockId 0) "question")
             }
@@ -2727,6 +2754,7 @@ historyTestTurn :: Int -> BlockId -> HistoryTurn
 historyTestTurn cursor blockId =
     HistoryTurn
         { historyTurnCursor = HistoryCursor (fromIntegral cursor)
+        , historyTurnCharts = Map.empty
         , historyTurnBlocks =
             Seq.singleton
                 (markerBlock blockId ("turn " <> Text.pack (show cursor)))
@@ -2813,6 +2841,7 @@ unfocusedHistoryResetIsVisible = do
         cursor = HistoryCursor 0
         durableTurn = HistoryTurn
             { historyTurnCursor = cursor
+            , historyTurnCharts = Map.empty
             , historyTurnBlocks =
                 Seq.singleton
                     (markerBlock
@@ -3131,6 +3160,7 @@ cachedHistoryState blocks = do
     let ui = reduceUi (UiFocusChanged FocusScrollback) initialUiState
         turn = HistoryTurn
             { historyTurnCursor = HistoryCursor 0
+            , historyTurnCharts = Map.empty
             , historyTurnBlocks = Seq.fromList blocks
             }
         window =

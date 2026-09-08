@@ -3,6 +3,7 @@
 module Agent.CLI.TUI.App.History where
 
 import Agent.CLI.Clipboard ( formatImageSize )
+import Agent.CLI.ChartImage (chartResultImage)
 import Agent.CLI.Dictation ( DictationControl(..)
     , DictationResult(..)
     , dictateWith
@@ -99,6 +100,7 @@ import Agent.CLI.TUI.ImagePreview ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
     , nativePreviewPlacements
     , prepareTuiImagePreview
+    , prepareNativeTuiImagePreview
     , previewCountForWidth
     , previewCellSize
     , renderTuiImagePreview
@@ -203,17 +205,18 @@ resetHistoryPage page state =
             remapHistoryPage state.appNextHistoryBlockId page
         window =
             either (const empty) id (applyHistoryPage remapped empty)
-    in state
-        { appUi = reduceUi UiConversationCleared state.appUi
-        , appPullRequestURL = Nothing
-        , appHistoryWindow = window
-        , appHistorySelectedBlock = Nothing
-        , appHistoryLiveStart = Nothing
-        , appNextHistoryBlockId = nextBlockId
-        , appCompletionFlashes = Map.empty
-        , appConversationAnchor = Nothing
-        , appSubmittedImagePreviews = Map.empty
-        }
+        nextState = state
+            { appUi = reduceUi UiConversationCleared state.appUi
+            , appPullRequestURL = Nothing
+            , appHistoryWindow = window
+            , appHistorySelectedBlock = Nothing
+            , appHistoryLiveStart = Nothing
+            , appNextHistoryBlockId = nextBlockId
+            , appCompletionFlashes = Map.empty
+            , appConversationAnchor = Nothing
+            , appSubmittedImagePreviews = Map.empty
+            }
+    in restoreHistoryChartPreviews nextState
 
 setHistoryGeneration :: HistoryGeneration -> AppState -> AppState
 setHistoryGeneration generation state =
@@ -258,7 +261,7 @@ applyLoadedHistoryPage page state =
                     , appHistorySelectedBlock = selected
                     , appNextHistoryBlockId = nextBlockId
                     }
-            in nextState
+            in restoreHistoryChartPreviews nextState
                 { appSubmittedImagePreviews =
                     retainSubmittedImagePreviews nextState
                         nextState.appSubmittedImagePreviews
@@ -300,7 +303,11 @@ commitLiveHistoryTurn durableTurn commit state =
                 state.appNextHistoryBlockId
                 (precedingBlocks <> durableTurn.historyTurnBlocks)
         remappedTurn =
-            durableTurn { historyTurnBlocks = remappedBlocks }
+            durableTurn
+                { historyTurnBlocks = remappedBlocks
+                , historyTurnCharts =
+                    remapHistoryCharts blockIdRemap durableTurn.historyTurnCharts
+                }
         baseWindow =
             case commit of
                 HistoryCommitReset ->
@@ -351,7 +358,7 @@ commitLiveHistoryTurn durableTurn commit state =
                             (toList ui.uiBlocks))
                     state.appCompletionFlashes
             }
-    in nextState
+    in restoreHistoryChartPreviews nextState
         { appSubmittedImagePreviews =
             retainSubmittedImagePreviews nextState remappedPreviews
         }
@@ -394,15 +401,51 @@ remapHistoryPage nextId page =
         (remaining, turns) =
             foldl'
                 (\(current, accumulated) turn ->
-                    let (next, blocks, _) =
+                    let (next, blocks, identifiers) =
                             remapHistoryBlocks
                                 current
                                 turn.historyTurnBlocks
                     in (next, accumulated |> turn
-                        { historyTurnBlocks = blocks }))
+                        { historyTurnBlocks = blocks
+                        , historyTurnCharts =
+                            remapHistoryCharts identifiers turn.historyTurnCharts
+                        }))
                 (nextId, Seq.empty)
                 page.historyPageTurns
     in (remaining, page { historyPageTurns = turns })
+
+remapHistoryCharts :: Map.Map BlockId BlockId -> Map.Map BlockId Text -> Map.Map BlockId Text
+remapHistoryCharts identifiers charts =
+    Map.fromList
+        [ (newId, envelope)
+        | (oldId, envelope) <- Map.toList charts
+        , Just newId <- [Map.lookup oldId identifiers]
+        ]
+
+-- | Materialize only a bounded tail of chart previews after history changes.
+-- Existing previews are reused; neither resize nor transcript redraw rasterizes.
+restoreHistoryChartPreviews :: AppState -> AppState
+restoreHistoryChartPreviews state =
+    state { appSubmittedImagePreviews =
+        retainSubmittedImagePreviews state restored }
+  where
+    candidates = reverse
+        [ (block.blockId, envelope)
+        | turn <- toList state.appHistoryWindow.historyWindowTurns
+        , block <- toList turn.historyTurnBlocks
+        , Just envelope <- [Map.lookup block.blockId turn.historyTurnCharts]
+        ]
+    restored = foldl' restore state.appSubmittedImagePreviews
+        (take submittedImagePreviewCountBudget candidates)
+    restore previews (blockId, envelope)
+        | Map.member blockId previews = previews
+        | otherwise =
+            case chartResultImage envelope >>= preparePreview of
+                Left _ -> previews
+                Right preview -> Map.insert blockId [preview] previews
+    preparePreview
+        | state.appRuntime.runtimeNativeImagePreviews = prepareNativeTuiImagePreview
+        | otherwise = prepareTuiImagePreview
 
 remapHistoryBlocks
     :: Int

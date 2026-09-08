@@ -201,6 +201,7 @@ library
                     , Agent.CLI.ExternalProgram
                     , Agent.CLI.FileUri
                     , Agent.CLI.ImagePreview
+                    , Agent.CLI.ChartImage
                     , Agent.CLI.GatewayModels
                     , Agent.CLI.GitDiff
                     , Agent.CLI.Input
@@ -552,6 +553,7 @@ test-suite agent-cli-test
                     , Agent.CLI.IntegrationGatewaySpec
                     , Agent.CLI.GitDiffSpec
                     , Agent.CLI.ImagePreviewSpec
+                    , Agent.CLI.ChartImageSpec
                     , Agent.CLI.InputSpec
                     , Agent.CLI.InterruptSpec
                     , Agent.CLI.LoginSpec

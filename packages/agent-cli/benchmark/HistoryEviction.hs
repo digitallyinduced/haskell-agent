@@ -164,6 +164,7 @@ makeTurn :: Int -> Int -> Int -> HistoryTurn
 makeTurn salt size ident =
     HistoryTurn
         { historyTurnCursor = HistoryCursor (fromIntegral ident)
+        , historyTurnCharts = Map.empty
         , historyTurnBlocks = Seq.fromList
             [ UiBlock
                 { blockId = BlockId (ident * 4 + offset)

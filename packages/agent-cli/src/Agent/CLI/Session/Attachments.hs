@@ -1,6 +1,7 @@
 -- | Queue and preview image attachments for an interactive session.
 module Agent.CLI.Session.Attachments
     ( putImagePreview
+    , putChartPreview
     , queueAttachedImages
     , queueClipboardImages
     ) where
@@ -134,13 +135,21 @@ queueClipboardImages
         Left err -> pure (Left err)
 
 putImagePreview :: IORef Int -> Bool -> [ImageAttachment] -> IO ()
-putImagePreview previewIdRef color images = do
+putImagePreview = putSizedImagePreview False
+
+putChartPreview :: IORef Int -> Bool -> [ImageAttachment] -> IO ()
+putChartPreview = putSizedImagePreview True
+
+putSizedImagePreview :: Bool -> IORef Int -> Bool -> [ImageAttachment] -> IO ()
+putSizedImagePreview chart previewIdRef color images = do
     protocol <- detectImagePreviewProtocol stdout
     inTmux <- isJust <$> lookupEnv "TMUX"
     size <- getTerminalSize
     let (termRows, termCols) = fromMaybe (24, 80) size
-        columns = previewColumnsFor termCols
-        rows = previewRowsFor termRows
+        columns = if chart then max 1 (min 72 (termCols - 2)) else previewColumnsFor termCols
+        -- The chart is 8:5; Kitty derives width from rows. Allow roughly
+        -- two pixels of cell height per pixel of cell width on narrow panes.
+        rows = if chart then max 1 (minimum [24, termRows - 4, columns * 5 `div` 16]) else previewRowsFor termRows
     startId <- atomicModifyIORef' previewIdRef \n ->
         (n + max 1 (length images), n)
     case renderImagePreview

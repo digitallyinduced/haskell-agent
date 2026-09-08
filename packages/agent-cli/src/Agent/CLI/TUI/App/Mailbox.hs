@@ -927,7 +927,8 @@ historyTurnLogicalBytes turn =
         foldl'
             (\size block ->
                 saturatingAdd size (uiBlockLogicalBytes block))
-            0
+            (foldl' (\size envelope -> saturatingAdd size (logicalTextBytes envelope))
+                0 turn.historyTurnCharts)
             turn.historyTurnBlocks
 
 historyPageLogicalBytes :: HistoryPage -> Int

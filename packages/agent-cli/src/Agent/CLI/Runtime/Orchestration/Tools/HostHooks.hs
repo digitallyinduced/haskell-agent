@@ -2,9 +2,11 @@
 module Agent.CLI.Runtime.Orchestration.Tools.HostHooks
     ( ToolHostHooks(..)
     , buildToolHostHooks
+    , terminalChartTool
     ) where
 
 import Agent.CLI.Options (isOneShot)
+import Agent.CLI.ChartImage (terminalChartTool)
 import Agent.CLI.Plan (cliPlanHooks)
 import Agent.CLI.PromptHooks
     ( fullscreenAwareImageHooks, fullscreenAwarePlanHooks, fullscreenAwareSecretHooks )
@@ -12,13 +14,14 @@ import Agent.CLI.Runtime.Orchestration.Tools.Model
 import Agent.CLI.Runtime.Orchestration.Tools.Request
 import Agent.CLI.Runtime.Orchestration.Types (NativeRunCapabilities(..), NativeRunHooks(..))
 import Agent.CLI.Secret (promptSecretLine)
-import Agent.CLI.Session.Attachments (putImagePreview)
+import Agent.CLI.Session.Attachments (putImagePreview, putChartPreview)
 import Agent.CLI.Session.Runtime.Types (StartupRuntime(..))
 import Agent.CLI.SessionState (SessionState(..))
 import Agent.CLI.Terminal (resolveColor)
 import Agent.Tools.PlanMode (PlanModeHooks(..), PlanDecision(..))
 import Agent.Tools.Secret (SecretPrompt(..), SecretPromptHooks(..))
 import Agent.Tools.ShowImage (ImageDisplayHooks(..), ImageDisplayRequest(..))
+import qualified Data.Text.IO as TextIO
 
 data ToolHostHooks = ToolHostHooks
     { toolPlanHooks :: PlanModeHooks
@@ -73,7 +76,10 @@ buildToolHostHooks AgentToolsRequest
     -- same graphics path as pasted attachments.
     baseImageHooks = ImageDisplayHooks \request -> do
         color <- resolveColor stderrHandle
-        putImagePreview
+        case (request.displayPath, request.displayCaption) of
+            ("render_chart", Just caption) -> TextIO.putStrLn caption
+            _ -> pure ()
+        (if request.displayPath == "render_chart" then putChartPreview else putImagePreview)
             startup.startupSessionState.sessionPreviewId
             color
             [request.displayImage]

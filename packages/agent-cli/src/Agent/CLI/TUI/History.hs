@@ -68,6 +68,8 @@ data HistoryDirection
 data HistoryTurn = HistoryTurn
     { historyTurnCursor :: !HistoryCursor
     , historyTurnBlocks :: !(Seq UiBlock)
+    , historyTurnCharts :: !(Map BlockId Text.Text)
+      -- ^ Validated complete chart envelopes, independent of bounded text previews.
     }
     deriving (Eq, Show)
 
@@ -460,11 +462,12 @@ withinBudget window =
         && historyWindowLoadedBytes window <= window.historyWindowMaxBytes
 
 historyTurnBytes :: HistoryTurn -> Int
-historyTurnBytes =
-    sum
+historyTurnBytes turn =
+    sum (map ((2 *) . Text.length) (Map.elems turn.historyTurnCharts))
+    + (sum
         . fmap historyBlockBytes
         . toList
-        . (.historyTurnBlocks)
+        $ turn.historyTurnBlocks)
 
 historyBlockBytes :: UiBlock -> Int
 historyBlockBytes block =

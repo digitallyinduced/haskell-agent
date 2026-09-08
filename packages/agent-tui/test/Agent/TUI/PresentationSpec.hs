@@ -1,6 +1,7 @@
 module Agent.TUI.PresentationSpec (spec) where
 
 import Agent.TUI.Presentation
+import Agent.Tools.RenderChart (renderChartResult)
 import Agent.ToolDispatch
     ( customToolCall
     , functionToolCall
@@ -10,6 +11,17 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "tool presentation" do
+    it "summarizes chart results without leaking the document or terminal controls" do
+        let call = functionToolCall "chart" "render_chart" "{}"
+            input = "{\"version\":1,\"kind\":\"line\",\"title\":\"Revenue\\u001b[2J\",\"x_axis\":{\"type\":\"number\"},\"y_axis\":{},\"series\":[{\"name\":\"Sales\",\"points\":[{\"x\":1,\"y\":2}]}]}"
+        case renderChartResult input of
+            Left err -> expectationFailure (Text.unpack err)
+            Right output -> do
+                let presented = formatToolOutput call output
+                presented `shouldSatisfy` Text.isInfixOf "Revenue"
+                presented `shouldNotSatisfy` Text.isInfixOf "\"points\""
+                presented `shouldNotSatisfy` Text.isInfixOf "\ESC"
+
     it "separates only real filesystem paths from tool actions" do
         let readFile =
                 functionToolCall

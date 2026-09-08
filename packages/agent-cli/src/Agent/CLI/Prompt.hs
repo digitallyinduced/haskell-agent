@@ -352,6 +352,13 @@ secretInputGuidance available
 -- | Point the model at inline image display when the host can present one.
 imageDisplayGuidance :: Set Text -> Text
 imageDisplayGuidance available
+    | "render_chart" `Set.member` available =
+        Text.unlines
+            [ "Chart display:"
+            , "- Use render_chart for line, bar, area, and scatter charts from actual data. Supply clear labels and units."
+            , "- The host displays charts in the conversation, with a text fallback where graphics are unavailable. Do not promise hover or zoom."
+            , imageDisplayGuidance (Set.delete "render_chart" available)
+            ]
     | "show_image" `Set.notMember` available = ""
     | otherwise =
         Text.unlines
