@@ -10,10 +10,22 @@ module Agent.Codex.Dialect.Shell
     , resetCodexShellSession
     , closeCodexShellSession
     , startCodexShellCommand
+    , startCodexShellCommandAuthorized
     , continueCodexShellCommand
+    , continueCodexShellCommandAuthorized
+    , codexShellCommandIsEscalated
     ) where
 
 import Agent.Cancel (waitCancel)
+import Agent.ToolDispatch (ToolInvocationAuthorization)
+import Agent.Tools.ShellPermission
+    ( ShellExecutionAuthorization
+    , ShellPermissionRequest(..)
+    , defaultShellExecutionAuthorization
+    , shellExecutionAuthorization
+    , shellExecutionIsEscalated
+    , consumeShellExecutionAuthorization
+    )
 import Agent.Tools.Background
     ( CompletionGate
     , consumeCompletion
@@ -33,7 +45,7 @@ import Agent.Tools.IO
     , interruptShellCommand
     , runningLiveOutput
     , runningOutputSince
-    , startShellCommandWithInputAndCompletion
+    , startShellCommandWithInputAndCompletionAuthorized
     , stopShellCommand
     , writeShellCommandInput
     )
@@ -79,6 +91,7 @@ data ManagedCommand = ManagedCommand
     , managedCursor :: !(MVar RunningOutputCursor)
     , managedCompletion :: !CompletionGate
     , managedYielded :: !(MVar Bool)
+    , managedEscalated :: !Bool
     }
 
 data SessionStore = SessionStore
@@ -148,9 +161,20 @@ startCodexShellCommand
     -> Int
     -> (Text -> Text -> IO ())
     -> IO (Either Text CodexShellResult)
-startCodexShellCommand session workdir command yieldMs onSnapshot =
+startCodexShellCommand =
+    startCodexShellCommandAuthorized defaultShellExecutionAuthorization
+
+startCodexShellCommandAuthorized
+    :: ShellExecutionAuthorization
+    -> CodexShellSession
+    -> OsPath
+    -> Text
+    -> Int
+    -> (Text -> Text -> IO ())
+    -> IO (Either Text CodexShellResult)
+startCodexShellCommandAuthorized authorization session workdir command yieldMs onSnapshot =
     mask \restore -> do
-        startManagedCommand session workdir command >>= \case
+        startManagedCommand authorization session workdir command >>= \case
             Left err -> pure (Left err)
             Right (commandId, task) ->
                 restore
@@ -166,25 +190,46 @@ continueCodexShellCommand
     -> Text
     -> Int
     -> IO (Either Text CodexShellResult)
-continueCodexShellCommand session commandId input yieldMs =
+continueCodexShellCommand = continueCodexShellCommandAuthorized Nothing
+
+codexShellCommandIsEscalated :: CodexShellSession -> Int -> IO (Either Text Bool)
+codexShellCommandIsEscalated session commandId =
+    runExceptT $ (.managedEscalated) <$> lookupManagedCommand session commandId
+
+continueCodexShellCommandAuthorized
+    :: Maybe ToolInvocationAuthorization
+    -> CodexShellSession
+    -> Int
+    -> Text
+    -> Int
+    -> IO (Either Text CodexShellResult)
+continueCodexShellCommandAuthorized authorization session commandId input yieldMs =
     runExceptT do
         task <- lookupManagedCommand session commandId
         ExceptT $
             withMVar task.managedLock \() ->
                 runExceptT $
-                    continueLocked session commandId task input yieldMs
+                    continueLocked authorization session commandId task input yieldMs
 
 continueLocked
-    :: CodexShellSession
+    :: Maybe ToolInvocationAuthorization
+    -> CodexShellSession
     -> Int
     -> ManagedCommand
     -> Text
     -> Int
     -> ExceptT Text IO CodexShellResult
-continueLocked session commandId task input yieldMs = do
+continueLocked authorization session commandId task input yieldMs = do
     -- Re-check after taking the command-specific lock: reset/close may have
     -- removed this command between the initial lookup and lock acquisition.
     void $ lookupManagedCommand session commandId
+    when (task.managedEscalated && not (Text.null input) && input /= "\ETX") do
+        authorized <- either throwE pure $
+            shellExecutionAuthorization authorization
+                (RequireEscalatedSandbox "Input to a process running outside the sandbox")
+        consumed <- lift $ consumeShellExecutionAuthorization authorized
+        when (not consumed) $
+            throwE "Sandbox escalation approval has expired or already been used."
     lift (tryReadMVar task.managedRunning.runningResult) >>= \case
         Just result ->
             ExceptT $ finishCommand session commandId task result
@@ -302,11 +347,12 @@ takeRunningOutput task =
     pure (nextCursor, output)
 
 startManagedCommand
-    :: CodexShellSession
+    :: ShellExecutionAuthorization
+    -> CodexShellSession
     -> OsPath
     -> Text
     -> IO (Either Text (Int, ManagedCommand))
-startManagedCommand session workdir command =
+startManagedCommand authorization session workdir command =
     do
         (stale, result) <-
             modifyMVar session.sessionCommands \case
@@ -356,7 +402,8 @@ startManagedCommand session workdir command =
                                                     { commandStdout = out
                                                     , commandStderr = err
                                                     })
-                            startShellCommandWithInputAndCompletion
+                            startShellCommandWithInputAndCompletionAuthorized
+                                authorization
                                 session.sessionEnv
                                 workdir
                                 command
@@ -376,6 +423,7 @@ startManagedCommand session workdir command =
                                                     <*> pure cursor
                                                     <*> pure completion
                                                     <*> pure yielded
+                                                    <*> pure (shellExecutionIsEscalated authorization)
                                             pure (commandId, task))
                                             `onException` do
                                                 void $ tryPutMVar yielded False

@@ -30,6 +30,10 @@ module Agent.ToolDispatch
     , typedRichToolWithCall
     , typedStreamingTool
     , typedStreamingRichTool
+    , typedAuthorizedStreamingRichTool
+    , ToolInvocationAuthorization
+    , consumeToolInvocationAuthorization
+    , dispatchApprovedToolHandler
     , textTool
     , streamingTextTool
     , streamingRichTextTool
@@ -56,7 +60,8 @@ import Agent.Dialect
 import Agent.Json.Decode (Decoder)
 import qualified Agent.Json.Decode as Json
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (SomeException, tryAny)
+import Control.Exception.Safe (SomeException, bracket, tryAny)
+import Data.IORef (IORef, newIORef, atomicModifyIORef', writeIORef)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
@@ -327,6 +332,34 @@ data ToolHandler = ToolHandler
         -> Text
         -> IO (Either Text ToolHandlerResult)
     }
+    | AuthorizedToolHandler
+    { toolHandlerName :: !Text
+    , authorizedToolHandlerRun
+        :: Maybe ToolInvocationAuthorization
+        -> (Text -> IO ())
+        -> ToolCall
+        -> Text
+        -> IO (Either Text ToolHandlerResult)
+    }
+
+-- | Created only by the host's approved dispatch entry point. Never decoded
+-- from tool arguments or stored in a shared environment.
+data ToolInvocationAuthorization =
+    ToolInvocationAuthorization !ToolCall !(IORef Bool)
+
+consumeToolInvocationAuthorization :: ToolInvocationAuthorization -> IO Bool
+consumeToolInvocationAuthorization (ToolInvocationAuthorization _ available) =
+    atomicModifyIORef' available (\current -> (False, current))
+
+typedAuthorizedStreamingRichTool
+    :: Text
+    -> Decoder args
+    -> (Maybe ToolInvocationAuthorization
+        -> (Text -> IO ()) -> args -> IO (Either Text ToolHandlerResult))
+    -> ToolHandler
+typedAuthorizedStreamingRichTool name decoder run =
+    AuthorizedToolHandler name \authorization emit _call value ->
+        decodeAndRun decoder value (run authorization emit)
 
 typedTool :: Text -> Decoder args -> (args -> IO (Either Text Text)) -> ToolHandler
 typedTool name decoder run =
@@ -437,11 +470,29 @@ dispatchToolHandlerDetailed
     -> ToolCall
     -> IO ToolDispatchOutcome
 dispatchToolHandlerDetailed config maybeHandler call = do
+    dispatchToolHandlerWithAuthorization Nothing config maybeHandler call
+
+-- | Host boundary: call only after fresh user confirmation of this exact call.
+-- Generic dispatch deliberately never supplies this capability.
+dispatchApprovedToolHandler
+    :: ToolDispatchConfig -> Maybe ToolHandler -> ToolCall -> IO ToolCallResult
+dispatchApprovedToolHandler config handler call =
+    bracket (newIORef True) (`writeIORef` False) \available ->
+        (.toolDispatchResult) <$>
+            dispatchToolHandlerWithAuthorization
+                (Just (ToolInvocationAuthorization call available)) config handler call
+
+dispatchToolHandlerWithAuthorization
+    :: Maybe ToolInvocationAuthorization
+    -> ToolDispatchConfig -> Maybe ToolHandler -> ToolCall
+    -> IO ToolDispatchOutcome
+dispatchToolHandlerWithAuthorization authorization config maybeHandler call = do
     let callName = call.name
         input = canonicalToolArguments call.name call.arguments
         runTool = case maybeHandler of
             Just handler ->
                 runHandler
+                    authorization
                     (config.toolDispatchOnOutput call)
                     call
                     input
@@ -553,13 +604,21 @@ handlerName :: ToolHandler -> Text
 handlerName handler = handler.toolHandlerName
 
 runHandler
-    :: (Text -> IO ())
+    :: Maybe ToolInvocationAuthorization
+    -> (Text -> IO ())
     -> ToolCall
     -> Text
     -> ToolHandler
     -> IO (Either Text ToolHandlerResult)
-runHandler emitOutput call value handler =
-    handler.toolHandlerRun emitOutput call value
+runHandler authorization emitOutput call value = \case
+    ToolHandler{toolHandlerRun} ->
+        toolHandlerRun emitOutput call value
+    AuthorizedToolHandler{authorizedToolHandlerRun} ->
+        case authorization of
+            Just (ToolInvocationAuthorization approved _)
+                | approved /= call ->
+                    pure (Left "Execution authorization does not match this invocation.")
+            _ -> authorizedToolHandlerRun authorization emitOutput call value
 
 decodeAndRun
     :: Decoder args

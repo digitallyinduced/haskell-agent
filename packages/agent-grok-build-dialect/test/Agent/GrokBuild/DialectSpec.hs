@@ -20,6 +20,7 @@ import Agent.GrokBuild.Dialect.Runtime
     , newGrokCodingTools
     )
 import Agent.GrokBuild.Dialect.TaskControl (validateTaskIds)
+import Agent.GrokBuild.Dialect.Terminal (runTerminalCmdTool)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.OsPath (unsafeToFilePath)
 import Agent.ToolDispatch
@@ -34,15 +35,20 @@ import Agent.Tools.Background (setBackgroundTaskHooks)
 import Agent.Tools.IO (CommandResult(..))
 import Agent.Tools.Types
     ( AppTool(..)
+    , ApprovalRequirement(..)
     , BackgroundTaskHooks(..)
     , BackgroundTaskNotice(..)
     , ToolEnv
     , ToolRegistry
     , appToolHandlers
     , defaultToolEnv
+    , dispatchApprovedRegisteredToolCall
+    , dispatchRegisteredToolCall
     , mkToolRegistry
+    , lookupRegisteredTool
     , setToolSessionTmp
     , toolSchedulingPlanFor
+    , toolApprovalRequirement
     )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
@@ -76,6 +82,45 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Grok Build dialect" do
+    it "requires fresh approval and rejects unapproved terminal escalation" do
+        withGrokRegistry \registry close -> do
+            let call = escalatedTerminalCall "printf approved" False
+            let tool = maybe (error "missing terminal") id $
+                    lookupRegisteredTool "run_terminal_cmd" registry
+            toolApprovalRequirement tool call `shouldReturn` FreshApprovalRequired
+            result <- dispatchRegisteredToolCall testDispatchConfig registry call
+            result.output `shouldSatisfy` Text.isInfixOf "requires fresh user approval"
+            close
+
+    it "rejects invalid escalation permission values and blank justifications" do
+        withGrokRegistry \registry close -> do
+            let malformed fields = functionToolCall "invalid" "run_terminal_cmd"
+                    ("{\"command\":\"touch should-not-exist\",\"description\":\"probe\"," <> fields <> "}")
+            mapM_ (\call -> do
+                result <- dispatchApprovedRegisteredToolCall testDispatchConfig registry call
+                result.output `shouldSatisfy` Text.isPrefixOf "ERR ")
+                [ malformed "\"sandbox_permissions\":\"always\""
+                , malformed "\"sandbox_permissions\":\"require_escalated\""
+                , malformed "\"sandbox_permissions\":\"require_escalated\",\"justification\":\" \""
+                ]
+            close
+
+    it "does not replay persisted shell code into an approved escalated command" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                shell <- readMVar session.grokShell
+                Text.writeFile (unsafeToFilePath shell.shellEnvFile)
+                    "printf injected-code; export ESCALATION_REPLAY_PROBE=unexpected\n"
+                let registry = either (error . Text.unpack) id $
+                        mkToolRegistry [runTerminalCmdTool session]
+                result <- dispatchApprovedRegisteredToolCall testDispatchConfig registry
+                    (escalatedTerminalCall "printf approved" False)
+                result.output `shouldSatisfy` Text.isInfixOf "approved"
+                result.output `shouldSatisfy` (not . Text.isInfixOf "injected-code")
+                Text.readFile (unsafeToFilePath shell.shellEnvFile)
+                    `shouldReturn` "printf injected-code; export ESCALATION_REPLAY_PROBE=unexpected\n"
+
     it "normalizes and validates task id lists consistently" do
         validateTaskIds [" task-1 ", "", "task-1", "task-2"]
             `shouldBe` Right ["task-1", "task-2"]
@@ -545,6 +590,14 @@ terminalCall ident command background =
             <> ",\"description\":\"probe\",\"background\":"
             <> (if background then "true" else "false")
             <> "}"
+
+escalatedTerminalCall :: Text -> Bool -> ToolCall
+escalatedTerminalCall command background =
+    functionToolCall "escalation-probe" "run_terminal_cmd" $
+        "{\"command\":" <> jsonString command
+            <> ",\"description\":\"probe\",\"background\":"
+            <> (if background then "true" else "false")
+            <> ",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"Test exact-command authorization\"}"
 
 jsonString :: Text -> Text
 jsonString text =

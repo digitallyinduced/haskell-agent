@@ -38,6 +38,7 @@ module Agent.Tools.Types
     , toolExecutionPolicyFor
     , toolSchedulingPlanFor
     , dispatchRegisteredToolCall
+    , dispatchApprovedRegisteredToolCall
     , dispatchRegisteredToolCallDetailed
     , jsonToolParameters
     , appToolHandlers
@@ -60,6 +61,7 @@ import Agent.ToolDispatch
     , ToolHandler
     , canonicalToolName
     , dispatchToolHandler
+    , dispatchApprovedToolHandler
     , dispatchToolHandlerDetailed
     , handlerName
     )
@@ -525,6 +527,19 @@ dispatchRegisteredToolCall config registry call =
     dispatchToolHandler config
         (acceptedHandler registry call)
         call
+
+-- | Dispatch after the host approval callback has accepted this exact call.
+-- Only freshly confirmed tools receive an invocation capability.
+dispatchApprovedRegisteredToolCall
+    :: ToolDispatchConfig -> ToolRegistry -> ToolCall -> IO ToolCallResult
+dispatchApprovedRegisteredToolCall config registry call =
+    case lookupRegisteredTool call.name registry of
+        Just tool -> do
+            requirement <- toolApprovalRequirement tool call
+            if requirement == FreshApprovalRequired
+                then dispatchApprovedToolHandler config (acceptedHandler registry call) call
+                else dispatchRegisteredToolCall config registry call
+        Nothing -> dispatchRegisteredToolCall config registry call
 
 dispatchRegisteredToolCallDetailed
     :: ToolDispatchConfig

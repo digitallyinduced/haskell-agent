@@ -18,10 +18,13 @@ module Agent.Tools.IO
     , listDirectoryEntries
     , runShellCommand
     , runShellCommandStreaming
+    , runShellCommandStreamingAuthorized
     , startShellCommand
     , startShellCommandWithCompletion
+    , startShellCommandWithCompletionAuthorized
     , startShellCommandWithInput
     , startShellCommandWithInputAndCompletion
+    , startShellCommandWithInputAndCompletionAuthorized
     , configuredProcess
     , configuredProcessEnv
     , sessionTempProcessEnv
@@ -60,6 +63,12 @@ import Agent.Tools.OutputArtifact
     )
 import System.OsPath (OsPath)
 import Agent.Tools.Types (ToolEnv(..))
+import Agent.Tools.ShellPermission
+    ( ShellExecutionAuthorization
+    , defaultShellExecutionAuthorization
+    , shellExecutionIsEscalated
+    , consumeShellExecutionAuthorization
+    )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( Async
@@ -263,7 +272,14 @@ runShellCommandStreaming
     -> Int
     -> (Text -> Text -> IO ())
     -> IO CommandResult
-runShellCommandStreaming env workdir command timeoutMs onSnapshot =
+runShellCommandStreaming =
+    runShellCommandStreamingAuthorized defaultShellExecutionAuthorization
+
+runShellCommandStreamingAuthorized
+    :: ShellExecutionAuthorization
+    -> ToolEnv -> OsPath -> Text -> Int
+    -> (Text -> Text -> IO ()) -> IO CommandResult
+runShellCommandStreamingAuthorized authorization env workdir command timeoutMs onSnapshot =
     mask \restore -> do
     let baseSpec = (shell (Text.unpack command))
             { cwd = Just (unsafeToFilePath workdir)
@@ -273,7 +289,7 @@ runShellCommandStreaming env workdir command timeoutMs onSnapshot =
             , create_group = True
             }
     try @_ @SomeException
-        (configuredProcess env baseSpec >>= createProcess) >>= \case
+        (configuredProcessAuthorized authorization env baseSpec >>= createProcess) >>= \case
         Left err -> pure CommandResult
             { commandExitCode = Just 127
             , commandStdout = ""
@@ -435,6 +451,20 @@ startShellCommandWithInputAndCompletion
 startShellCommandWithInputAndCompletion =
     startShellCommandWithStdin True
 
+startShellCommandWithInputAndCompletionAuthorized
+    :: ShellExecutionAuthorization
+    -> ToolEnv -> OsPath -> Text -> (CommandResult -> IO ())
+    -> IO (Either Text RunningCommand)
+startShellCommandWithInputAndCompletionAuthorized authorization =
+    startShellCommandWithStdinAuthorized authorization True
+
+startShellCommandWithCompletionAuthorized
+    :: ShellExecutionAuthorization
+    -> ToolEnv -> OsPath -> Text -> (CommandResult -> IO ())
+    -> IO (Either Text RunningCommand)
+startShellCommandWithCompletionAuthorized authorization =
+    startShellCommandWithStdinAuthorized authorization False
+
 startShellCommandWithStdin
     :: Bool
     -> ToolEnv
@@ -442,7 +472,14 @@ startShellCommandWithStdin
     -> Text
     -> (CommandResult -> IO ())
     -> IO (Either Text RunningCommand)
-startShellCommandWithStdin keepStdin env workdir command onComplete = do
+startShellCommandWithStdin =
+    startShellCommandWithStdinAuthorized defaultShellExecutionAuthorization
+
+startShellCommandWithStdinAuthorized
+    :: ShellExecutionAuthorization -> Bool
+    -> ToolEnv -> OsPath -> Text -> (CommandResult -> IO ())
+    -> IO (Either Text RunningCommand)
+startShellCommandWithStdinAuthorized authorization keepStdin env workdir command onComplete = do
     let baseSpec = (shell (Text.unpack command))
             { cwd = Just (unsafeToFilePath workdir)
             , std_in = CreatePipe
@@ -451,7 +488,7 @@ startShellCommandWithStdin keepStdin env workdir command onComplete = do
             , create_group = True
             }
     try @_ @SomeException
-        (configuredProcess env baseSpec >>= \spec ->
+        (configuredProcessAuthorized authorization env baseSpec >>= \spec ->
             acquireRunningCommand env spec keepStdin onComplete) >>= \case
         Left err -> pure $ Left $ "Failed to start command: " <> Text.pack (show err)
         Right running -> pure (Right running)
@@ -460,10 +497,19 @@ startShellCommandWithStdin keepStdin env workdir command onComplete = do
 -- that denies shared temp contents. Managed session layouts hide sibling
 -- scratch files while leaving the parent directory itself inspectable.
 configuredProcess :: ToolEnv -> CreateProcess -> IO CreateProcess
-configuredProcess env spec = do
+configuredProcess = configuredProcessAuthorized defaultShellExecutionAuthorization
+
+configuredProcessAuthorized
+    :: ShellExecutionAuthorization -> ToolEnv -> CreateProcess -> IO CreateProcess
+configuredProcessAuthorized authorization env spec = do
+    authorized <- consumeShellExecutionAuthorization authorization
+    unless authorized $
+        ioError (userError "Shell execution authorization was already consumed or has expired.")
     sessionTmp <- readIORef env.toolSessionTmp
     processEnv <- configuredProcessEnvFor sessionTmp spec.env
-    command <- configuredCommandSpec sessionTmp spec.cmdspec
+    command <- if shellExecutionIsEscalated authorization
+        then pure spec.cmdspec
+        else configuredCommandSpec sessionTmp spec.cmdspec
     pure spec
         { cmdspec = command
         , env = case processEnv of

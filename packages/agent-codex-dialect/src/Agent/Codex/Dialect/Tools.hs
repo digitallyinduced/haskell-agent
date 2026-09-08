@@ -21,13 +21,12 @@ import Agent.Tools.ViewImage (viewImageTool)
 import Agent.ToolDispatch
     ( ToolOutcome(..)
     , ToolHandlerResult(..)
-    , typedStreamingRichTool
-    , typedRichToolWithCall
+    , typedAuthorizedStreamingRichTool
+    , ToolInvocationAuthorization
     , ToolCall(..)
     , ToolCallKind(..)
     , decodeToolArguments
     , textTool
-    , typedStreamingTool
     , typedTool
     )
 import Agent.Codex.Dialect.ApplyPatch
@@ -38,8 +37,9 @@ import Agent.Codex.Dialect.ApplyPatch
 import Agent.Codex.Dialect.Shell
     ( CodexShellResult(..)
     , CodexShellSession
-    , continueCodexShellCommand
-    , startCodexShellCommand
+    , continueCodexShellCommandAuthorized
+    , codexShellCommandIsEscalated
+    , startCodexShellCommandAuthorized
     )
 import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.Dangerous (blockedShellCommandReasonAt)
@@ -50,7 +50,7 @@ import Agent.Tools.IO
     ( CommandResult(..)
     , commandResultArtifacts
     , resolveUnderCwd
-    , runShellCommandStreaming
+    , runShellCommandStreamingAuthorized
     )
 import Agent.Tools.MultiAgents (MultiAgentContext, multiAgentTools)
 import Agent.Tools.PlanMode
@@ -74,10 +74,17 @@ import Agent.Tools.Scheduling
     , ToolResourceClaim(..)
     )
 import Agent.Tools.ShellReadOnly (shellCommandIsReadOnly)
+import Agent.Tools.ShellPermission
+    ( ShellPermissionRequest(..)
+    , shellPermissionFieldsDecoder
+    , shellPermissionApproval
+    , shellExecutionAuthorization
+    )
 import Agent.Tools.Types
     ( AppTool
     , AppToolGroup(..)
     , ApprovalRule(..)
+    , ApprovalRequirement(..)
     , ToolExecutionPolicy(..)
     , ToolEnv(..)
     , freeformApplyPatchAppToolWithExecution
@@ -145,6 +152,7 @@ data ShellCommandArgs = ShellCommandArgs
     , workdir :: Maybe Text
     , timeoutMs :: Maybe Int
     , yieldTimeMs :: Maybe Int
+    , sandboxPermission :: ShellPermissionRequest
     }
 
 shellCommandArgsDecoder :: Json.Decoder ShellCommandArgs
@@ -154,6 +162,7 @@ shellCommandArgsDecoder = Json.object $
         <*> optionalText "workdir"
         <*> optionalIntOrString "timeout_ms"
         <*> optionalIntOrString "yield_time_ms"
+        <*> shellPermissionFieldsDecoder
 
 shellCommandTool :: ToolEnv -> CodexShellSession -> AppTool
 shellCommandTool env session =
@@ -171,10 +180,14 @@ shellCommandTool env session =
                 "Maximum command runtime; commands that reach it are stopped. Mutually exclusive with yield_time_ms."
             , PropertySchema "yield_time_ms" PropertyInteger False $ Just
                 "Wait before returning a session_id for a command that is still running. Defaults to 10000 ms when neither timing control is set. Completion is reported automatically; do not repeatedly poll. Mutually exclusive with timeout_ms."
+            , PropertySchema "sandbox_permissions" PropertyString False $ Just
+                "use_default (default), or require_escalated to request fresh approval to run this exact command outside the sandbox."
+            , PropertySchema "justification" PropertyString False $ Just
+                "Required nonempty explanation when sandbox_permissions is require_escalated."
             ])
-        AlwaysPrompt
+        (ClassifyApproval shellPermissionApproval)
         TurnSequential
-        (typedStreamingRichTool
+        (typedAuthorizedStreamingRichTool
             "shell_command"
             shellCommandArgsDecoder
             (runShell env session))
@@ -208,7 +221,8 @@ shellDescription =
     \- Use `$TMPDIR` as the only temporary-file root. Put task-specific subdirectories there; do not create alternate scratch directories in the home directory or workspace. Literal `/tmp` and `/private/tmp` paths are rejected.\n\
     \- By default, a command that is still running after 10000 ms is retained and returned with a session_id. Completion is reported automatically; do not poll or run sleep commands while waiting.\n\
     \- Set `timeout_ms` only when the command should be stopped after a fixed runtime, or `yield_time_ms` to change the initial wait.\n\
-    \- Use `write_stdin` only to send input, interrupt, inspect a current snapshot, or perform one bounded wait."
+    \- Use `write_stdin` only to send input, interrupt, inspect a current snapshot, or perform one bounded wait.\n\
+    \- If sandbox isolation blocks a required command (for example Swift package manifests), request require_escalated with a justification. This requires fresh user approval; do not automatically retry or disable isolation globally."
 
 defaultShellYieldMs :: Int
 defaultShellYieldMs = 10000
@@ -216,12 +230,14 @@ defaultShellYieldMs = 10000
 runShell
     :: ToolEnv
     -> CodexShellSession
+    -> Maybe ToolInvocationAuthorization
     -> (Text -> IO ())
     -> ShellCommandArgs
     -> IO (Either Text ToolHandlerResult)
-runShell env session emitOutput args
+runShell env session authorization emitOutput args
     | args.timeoutMs /= Nothing && args.yieldTimeMs /= Nothing =
         pure (Left "timeout_ms and yield_time_ms are mutually exclusive")
+    | Left err <- executionAuthorization = pure (Left err)
     | otherwise = do
         workdir <- case args.workdir of
             Nothing -> pure (Right env.toolCwd)
@@ -240,30 +256,38 @@ runShell env session emitOutput args
                             Just requestedTimeout ->
                                 runWithTimeout dir requestedTimeout
   where
+    executionAuthorization = shellExecutionAuthorization authorization args.sandboxPermission
     runWithYield dir requestedYield = do
         let yieldMs = clampMs requestedYield
-        startCodexShellCommand
-            session
-            dir
-            args.command
-            yieldMs
-            (\out err -> emitOutput (commandBody out err))
-            >>= pure . fmap shellHandlerResult
+        case executionAuthorization of
+            Left err -> pure (Left err)
+            Right authorized -> startCodexShellCommandAuthorized
+                authorized
+                session
+                dir
+                args.command
+                yieldMs
+                (\out err -> emitOutput (commandBody out err))
+                >>= pure . fmap shellHandlerResult
 
     runWithTimeout dir requestedTimeout = do
         let timeoutMs = clampMs requestedTimeout
-        result <- runShellCommandStreaming
-            env
-            dir
-            args.command
-            timeoutMs
-            (\out err -> emitOutput (commandBody out err))
-        let finished = finishedHandlerResult result
-        pure $ Right $
-            if result.commandTimedOut
-                then finished { resultText = "Error: Command timed out after "
-                    <> Text.pack (show timeoutMs) <> "ms" }
-                else finished
+        case executionAuthorization of
+            Left err -> pure (Left err)
+            Right authorized -> do
+                result <- runShellCommandStreamingAuthorized
+                    authorized
+                    env
+                    dir
+                    args.command
+                    timeoutMs
+                    (\out err -> emitOutput (commandBody out err))
+                let finished = finishedHandlerResult result
+                pure $ Right $
+                    if result.commandTimedOut
+                        then finished { resultText = "Error: Command timed out after "
+                            <> Text.pack (show timeoutMs) <> "ms" }
+                        else finished
 
 data WriteStdinArgs = WriteStdinArgs
     { sessionId :: Int
@@ -289,9 +313,10 @@ writeStdinTool session =
         , PropertySchema "yield_time_ms" PropertyInteger False $ Just
             "Wait before returning output. Defaults to 5000 ms; maximum 300000 ms."
         ]
-        (ClassifyReadOnly writeStdinIsReadOnly)
+        (ClassifyApproval (writeStdinApproval session))
         TurnSequential
-        (typedRichToolWithCall "write_stdin" writeStdinArgsDecoder (\_ -> runWriteStdin session))
+        (typedAuthorizedStreamingRichTool "write_stdin" writeStdinArgsDecoder
+            (\authorization _ -> runWriteStdin session authorization))
 
 writeStdinResourceClaims
     :: ToolCall
@@ -309,17 +334,23 @@ writeStdinDescription :: Text
 writeStdinDescription =
     "Writes text to or inspects an existing shell_command session and returns newly produced output. Completion is reported automatically, so do not call this repeatedly to poll."
 
-writeStdinIsReadOnly :: ToolCall -> IO Bool
-writeStdinIsReadOnly call =
-    pure $ case decodeToolArguments writeStdinArgsDecoder call.arguments of
-        Right args -> maybe True Text.null args.chars
-        Left _ -> True
+writeStdinApproval :: CodexShellSession -> ToolCall -> IO ApprovalRequirement
+writeStdinApproval session call =
+    case decodeToolArguments writeStdinArgsDecoder call.arguments of
+        Right args
+            | maybe True (\input -> Text.null input || input == "\ETX") args.chars ->
+                pure ApprovalNotRequired
+            | otherwise -> codexShellCommandIsEscalated session args.sessionId >>= \case
+                Right True -> pure FreshApprovalRequired
+                _ -> pure ApprovalPromptRequired
+        Left _ -> pure ApprovalPromptRequired
 
 runWriteStdin
     :: CodexShellSession
+    -> Maybe ToolInvocationAuthorization
     -> WriteStdinArgs
     -> IO (Either Text ToolHandlerResult)
-runWriteStdin session args = do
+runWriteStdin session authorization args = do
     let
         requestedYield = fromMaybe 5000 args.yieldTimeMs
         -- An empty interaction is a wait, not a command. Apply a minimum wait
@@ -329,7 +360,8 @@ runWriteStdin session args = do
             | maybe True Text.null args.chars =
                 min 300000 (max 5000 requestedYield)
             | otherwise = clampMs requestedYield
-    fmap shellHandlerResult <$> continueCodexShellCommand
+    fmap shellHandlerResult <$> continueCodexShellCommandAuthorized
+        authorization
         session
         args.sessionId
         (fromMaybe "" args.chars)

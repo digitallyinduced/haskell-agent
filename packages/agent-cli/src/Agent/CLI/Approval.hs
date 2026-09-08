@@ -10,6 +10,7 @@ module Agent.CLI.Approval
     , approveToolDecisionWithReporter
     , approveToolDecisionWithReporterAndPersistence
     , approveToolDecisionWithReporterAndPersistenceClassified
+    , approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
     , approveFilesystemRootAccess
     , childApprove
     , planApproval

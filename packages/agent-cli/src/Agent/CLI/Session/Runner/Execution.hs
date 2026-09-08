@@ -41,7 +41,7 @@ import Agent.CLI.Notification
     , notifyAttention
     )
 import Agent.CLI.Approval
-import Agent.CLI.Permission (promptPermission, promptRootAccess)
+import Agent.CLI.Permission (promptPermission, promptPermissionOnce, promptRootAccess)
 import Agent.CLI.Plan
     ( ProposedPlanSegment(..)
     , ProposedPlanStream
@@ -932,12 +932,14 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                                 (saveProjectAutoApprove workspace.projectRoot True)
         classify = const (pure classifiedReadOnly)
         approve request report persist =
-            approveToolDecisionWithReporterAndPersistenceClassified
+            approveToolDecisionWithReporterAndPersistenceClassifiedWithPrompt
                 classify
-                (\requested ->
+                (\requiresExplicit requested ->
                     withToolHumanInputWait toolEnv $
                         withMVar host.hostIoLock \_ ->
-                            request requested)
+                            if requiresExplicit
+                                then requestFreshApproval requested
+                                else request requested)
                 (\notice ->
                     withMVar host.hostIoLock \_ ->
                         report notice)
@@ -947,6 +949,20 @@ buildSessionApprovalRuntime host controls SessionRequest{..} =
                 controls.controlToolRegistry
                 planMode
                 call
+        -- Existing external/fullscreen protocols do not carry once-only
+        -- approval semantics. Do not silently downgrade a fresh request to
+        -- their generic permission dialog.
+        requestFreshApproval requested =
+            case startup.startupNativeHooks of
+                Just _ -> pure Nothing
+                Nothing -> case promptRequest of
+                    Just _ -> pure Nothing
+                    Nothing -> case host.hostFullscreen of
+                        Just _ -> pure Nothing
+                        Nothing ->
+                            withStdinPaused stdinControl do
+                                color <- resolveColor host.hostStderrHandle
+                                promptPermissionOnce color (toText workspace.cwd) requested
         reportLineApproval = \case
             ApprovalWarning message -> do
                 color <- resolveColor host.hostStderrHandle
@@ -1291,7 +1307,7 @@ installSessionToolRuntimes
                             pure (Left "Tool call rejected by user.")
                         Right True -> do
                             eventRuntime.loopEventEmit (ToolStarted call)
-                            result <- dispatchRegisteredToolCall
+                            result <- dispatchApprovedRegisteredToolCall
                                 config.loopDispatch
                                 controls.controlToolRegistry
                                 call

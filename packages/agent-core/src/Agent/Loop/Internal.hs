@@ -43,7 +43,7 @@ import Agent.Tools.Scheduling
     )
 import Agent.Tools.Types
     ( ToolRegistry
-    , dispatchRegisteredToolCall
+    , dispatchApprovedRegisteredToolCall
     , toolSupportsAsync
     , toolSchedulingPlanFor
     )
@@ -1535,7 +1535,7 @@ runPreparedToolCallWithCompletion completed config (PreparedToolCall call approv
                             , toolResultOutcome = Just ToolDenied
                             }
                 ToolApprovalGranted ->
-                    dispatchRegisteredToolCall
+                    dispatchApprovedRegisteredToolCall
                         config.loopDispatch
                             { toolDispatchOnOutput = \progressCall output ->
                                 config.loopDispatch.toolDispatchOnOutput progressCall output
