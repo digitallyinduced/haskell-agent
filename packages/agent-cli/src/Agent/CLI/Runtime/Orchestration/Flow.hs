@@ -64,7 +64,7 @@ import Agent.CLI.Runtime.Orchestration.Restart
 import Agent.CLI.Runtime.Orchestration.Startup
     ( clearNativeProgress, setNativeProgress )
 import Agent.CLI.Runtime.Orchestration.Types
-    ( AgentProcessRuntime(processNetworkRecovery)
+    ( AgentProcessRuntime(processNetworkRecovery, processToolResourceArbiter)
     , AgentRunMode
         ( runInBackground
         , runStdout
@@ -156,7 +156,7 @@ import Agent.TUI.Model
       UiState(uiQueuedInputs) )
 import Agent.TUI.Motion ( nativeProgressAnimationEnabled )
 import Agent.TUI.Theme ( ThemeKind )
-import Agent.Tools.Types ( defaultToolEnv, ToolEnv(toolCancel) )
+import Agent.Tools.Types ( defaultToolEnv, ToolEnv(toolCancel, toolResourceArbiter) )
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.MVar
     ( MVar, newEmptyMVar, newMVar, readMVar, tryPutMVar )
@@ -1135,7 +1135,11 @@ runPreparedAgentIteration
         interface.iterationTerminal
         runMode.runStdout
         terminalCwd
-    toolEnv <- defaultToolEnv cwd
+    freshToolEnv <- defaultToolEnv cwd
+    let toolEnv = freshToolEnv
+            { toolResourceArbiter =
+                request.iterationProcessRuntime.processToolResourceArbiter
+            }
     interface.iterationInstallToolRuntime toolEnv
     let startup =
             interface.iterationBuildStartupRuntime

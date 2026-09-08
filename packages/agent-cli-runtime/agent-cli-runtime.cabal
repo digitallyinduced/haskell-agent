@@ -194,6 +194,7 @@ test-suite agent-cli-runtime-test
                     , http-types
                     , QuickCheck
                     , safe-exceptions
+                    , stm
                     , text
                     , time
                     , unix

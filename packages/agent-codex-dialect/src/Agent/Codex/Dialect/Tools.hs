@@ -85,6 +85,7 @@ import Agent.Tools.Types
     , jsonTool
     , rawJsonAppToolWithExecution
     , withToolResourceClaims
+    , withSharedToolResourceClaims
     )
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -398,7 +399,7 @@ applyPatchArgsDecoder = Json.withType \case
 
 applyPatchTool :: ToolEnv -> AppTool
 applyPatchTool env =
-    withToolResourceClaims (applyPatchResourceClaims env) $
+    withSharedToolResourceClaims env (applyPatchResourceClaims env) $
     freeformApplyPatchAppToolWithExecution
         "apply_patch" applyPatchDescription AlwaysPrompt TurnSequential
         (textTool "apply_patch" (applyPatch env))

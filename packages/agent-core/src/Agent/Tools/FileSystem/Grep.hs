@@ -28,7 +28,7 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , ToolExecutionPolicy(..)
     , jsonTool
-    , withToolResourceClaims
+    , withSharedToolResourceClaims
     )
 import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
@@ -103,7 +103,7 @@ grepArgsDecoder = objectArgs \object -> do
             <*> (fromMaybe False <$> optBool object "multiline")
 
 grepTool :: ToolEnv -> AppTool
-grepTool env = withToolResourceClaims (grepClaims env) $
+grepTool env = withSharedToolResourceClaims env (grepClaims env) $
     jsonTool "grep" grepDescription
     [ PropertySchema "pattern" PropertyString True $ Just
         "The regular expression pattern to search for in file contents (rg --regexp)"

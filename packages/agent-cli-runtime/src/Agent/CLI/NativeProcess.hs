@@ -4,6 +4,7 @@ module Agent.CLI.NativeProcess
     ( NativeProcessRuntime
         ( nativeMcpSupervisor
         , nativeSessionThreads
+        , nativeToolResourceArbiter
         , nativeNetworkRecovery
         , nativeStartCleanup
         , nativeMcpElicitation
@@ -18,6 +19,8 @@ module Agent.CLI.NativeProcess
 
 import Agent.CLI.Session.Threads
     ( SessionThreadManager, closeSessionThreadManager, newSessionThreadManager )
+import Agent.Tools.ResourceArbiter
+    ( ToolResourceArbiter, newToolResourceArbiter, closeToolResourceArbiter )
 import Agent.Connectivity.NetworkPath
     ( NetworkRecoveryMonitor
     , closeNetworkRecoveryMonitor
@@ -37,6 +40,7 @@ import System.OsPath (OsPath)
 data NativeProcessRuntime = NativeProcessRuntime
     { nativeMcpSupervisor :: !MCP.McpSupervisor
     , nativeSessionThreads :: !SessionThreadManager
+    , nativeToolResourceArbiter :: !ToolResourceArbiter
     , nativeNetworkRecovery :: !NetworkRecoveryMonitor
     , nativeStartCleanup :: !(IO () -> IO ())
     , nativeMcpElicitation
@@ -60,6 +64,7 @@ newNativeProcessRuntime = newNativeProcessRuntimeWithMcpHooks MCP.defaultMcpHost
 newNativeProcessRuntimeWithMcpHooks
     :: MCP.McpHostHooks -> OsPath -> IO NativeProcessRuntime
 newNativeProcessRuntimeWithMcpHooks hostHooks root = mask \restore -> do
+    arbiter <- newToolResourceArbiter 1024
     elicitationRef <- newIORef Nothing
     rootsRef <- newIORef Nothing
     samplingRef <- newIORef Nothing
@@ -99,6 +104,7 @@ newNativeProcessRuntimeWithMcpHooks hostHooks root = mask \restore -> do
     pure NativeProcessRuntime
         { nativeMcpSupervisor = mcpSupervisor
         , nativeSessionThreads = sessionThreads
+        , nativeToolResourceArbiter = arbiter
         , nativeNetworkRecovery = networkMonitor
         , nativeStartCleanup = startCleanup
         , nativeMcpElicitation = elicitationRef
@@ -109,7 +115,8 @@ newNativeProcessRuntimeWithMcpHooks hostHooks root = mask \restore -> do
 
 closeNativeProcessRuntime :: NativeProcessRuntime -> IO ()
 closeNativeProcessRuntime runtime =
-    closeSessionThreadManager runtime.nativeSessionThreads
+    closeToolResourceArbiter runtime.nativeToolResourceArbiter
+        `finally` closeSessionThreadManager runtime.nativeSessionThreads
         `finally`
             (MCP.closeMcpSupervisor runtime.nativeMcpSupervisor
                 `finally`

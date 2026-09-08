@@ -1223,6 +1223,7 @@ prepareChild
         freshEnv <- defaultToolEnv env.subCwd
         pure freshEnv
             { toolAllowedRoots = runtime.subagentAllowedRoots
+            , toolResourceArbiter = runtime.subagentToolResourceArbiter
             , toolRootAccessRequest = runtime.subagentRootAccessRequest
             }
     skillRoots <- readIORef runtime.subagentSkillRoots
