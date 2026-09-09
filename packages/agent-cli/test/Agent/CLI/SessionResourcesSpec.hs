@@ -3,7 +3,7 @@ module Agent.CLI.SessionResourcesSpec (spec) where
 import Agent.CLI.Runtime.Orchestration.Tools.Resources
 import Agent.ResourceScope
     ( ResourceScope, allocateAcquire, registerResource, releaseResource )
-import Control.Concurrent.Async (cancel, concurrently_, race, withAsync)
+import Control.Concurrent.Async (Concurrently(..), cancel, race, withAsync)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception.Safe (finally, throwIO, tryAny)
 import Control.Monad (forM_, void)
@@ -40,8 +40,8 @@ spec = describe "session resource ownership" do
                             | otherwise =
                                 ("coding", scopes.codingResources,
                                  "mcp", scopes.mcpResources)
-                    concurrently_
-                        (do
+                    runConcurrently $
+                        Concurrently (do
                             -- Both acquisitions have begun before either
                             -- completes; this also detects serialized startup.
                             void $ allocateAcquire firstScope $
@@ -50,7 +50,7 @@ spec = describe "session resource ownership" do
                                     (const (record released firstName))
                             record completed firstName
                             putMVar firstCompleted ())
-                        (do
+                        *> Concurrently (do
                             void $ allocateAcquire secondScope $
                                 mkAcquire
                                     (putMVar secondStarted ()
@@ -61,6 +61,31 @@ spec = describe "session resource ownership" do
                         `shouldReturn` [firstName, secondName]
             result `shouldBe` Just ()
             readIORef released `shouldReturn` ["mcp", "coding"]
+
+    it "joins cancelled applicative acquisitions before releasing owned resources" do
+        released <- newIORef []
+        codingAcquired <- newEmptyMVar
+        mcpStarted <- newEmptyMVar
+        blocked <- newEmptyMVar
+        result <- timeout 2000000 $ tryAny $
+            withSessionResourceScopes \scopes ->
+                runConcurrently $
+                    (,,)
+                        <$> Concurrently (do
+                            retain scopes.codingResources released "coding"
+                            putMVar codingAcquired ())
+                        <*> Concurrently
+                            (void $ allocateAcquire scopes.mcpResources $
+                                mkAcquire
+                                    ((putMVar mcpStarted () >> takeMVar blocked :: IO ())
+                                        `finally` record released "acquisition stopped")
+                                    (const (record released "mcp")))
+                        <*> Concurrently (do
+                            takeMVar codingAcquired
+                            takeMVar mcpStarted
+                            throwIO (userError "initial context failed") :: IO ())
+        result `shouldSatisfy` maybe False isLeft
+        readIORef released `shouldReturn` ["acquisition stopped", "coding"]
 
     it "releases completed startup resources when another acquisition is cancelled" do
         released <- newIORef []

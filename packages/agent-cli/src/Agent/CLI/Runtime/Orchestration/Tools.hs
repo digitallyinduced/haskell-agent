@@ -134,7 +134,7 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , appToolsFromGroups
     )
-import Control.Concurrent.Async ( concurrently )
+import Control.Concurrent.Async ( Concurrently(..), concurrently )
 import Control.Exception.Safe
     ( SomeException, mask_, throwIO, try )
 import Control.Monad ( forM_, when, void )
@@ -156,6 +156,15 @@ import qualified Data.Text as Text (unpack, pack)
 data LocalToolRuntime = LocalToolRuntime
     { localCoding :: CodingTools
     , localInitialSkills :: SkillCatalog
+    }
+
+data StartupResources = StartupResources
+    { startupMcp :: McpRuntime
+    , startupLocalTools :: LocalToolRuntime
+    , startupWebFetch :: Maybe WebFetchRuntime
+    , startupLsp :: LspStartup
+    , startupComputerUse :: Maybe ComputerUse.ComputerUseRuntime
+    , startupInitialContext :: (SessionInitialContext, InitialContextPreload)
     }
 
 data CodingRuntime = CodingRuntime
@@ -214,52 +223,49 @@ runAgentTools request = withSessionResourceScopes \resources -> do
                 collaborationRuntime)
             (logSlowCleanup "session temporary resources" . (.scratchCleanup))
     integrationRuntime <- acquireSessionIntegrationRuntime request
-    ( ((((_, mcpRuntime), (_, localToolRuntime)),
-          ((_, webFetchRuntime), (_, lspStartup))),
-         (_, runtimeComputerUse))
-      , (initialContext, initialContextPreload)
-      ) <-
-        concurrently
-            ( concurrently
-                ( concurrently
-                    ( concurrently
-                        ( allocateAcquire resources.mcpResources $
-                            mkAcquire
-                                (acquireMcpRuntime
-                                    request toolStartup toolModelRuntime
-                                    collaborationRuntime scratchRuntime
-                                    integrationRuntime)
-                                (logSlowCleanup "session MCP resources" . (.runtimeCloseMcp))
-                        )
-                        ( allocateAcquire resources.codingResources
-                            (acquireLocalToolRuntime
-                                request toolModelRuntime toolHostHooks
-                                collaborationRuntime scratchRuntime)
-                        )
-                    )
-                    ( concurrently
-                        ( allocateAcquire resources.webFetchResources $
-                            mkAcquire
-                                (acquireWebFetchRuntime
-                                    request toolStartup toolModelRuntime)
-                                (logSlowCleanup "web fetch runtime" . mapM_ closeWebFetchRuntime)
-                        )
-                        ( allocateAcquire resources.lspResources $
-                            mkAcquire
-                                (acquireLspStartup
-                                    request toolStartup toolModelRuntime)
-                                (logSlowCleanup "language server runtime" . mapM_ closeLspRuntime . (.lspStartupRuntime))
-                        )
-                    )
-                )
-                ( allocateAcquire resources.computerUseResources $
-                    mkAcquire
-                        (acquireComputerUseRuntime toolModelRuntime)
-                        (logSlowCleanup "computer use runtime" . mapM_ ComputerUse.closeComputerUseRuntime)
-                )
-            )
-            (prepareInitialContextPreload request toolModelRuntime)
-    let lspRuntime = lspStartup.lspStartupRuntime
+    let acquireOwnedMcp =
+            snd <$> allocateAcquire resources.mcpResources
+                (mkAcquire
+                    (acquireMcpRuntime
+                        request toolStartup toolModelRuntime
+                        collaborationRuntime scratchRuntime integrationRuntime)
+                    (logSlowCleanup "session MCP resources" . (.runtimeCloseMcp)))
+        acquireOwnedCoding =
+            snd <$> allocateAcquire resources.codingResources
+                (acquireLocalToolRuntime
+                    request toolModelRuntime toolHostHooks
+                    collaborationRuntime scratchRuntime)
+        acquireOwnedWebFetch =
+            snd <$> allocateAcquire resources.webFetchResources
+                (mkAcquire
+                    (acquireWebFetchRuntime request toolStartup toolModelRuntime)
+                    (logSlowCleanup "web fetch runtime" . mapM_ closeWebFetchRuntime))
+        acquireOwnedLsp =
+            snd <$> allocateAcquire resources.lspResources
+                (mkAcquire
+                    (acquireLspStartup request toolStartup toolModelRuntime)
+                    (logSlowCleanup "language server runtime" . mapM_ closeLspRuntime . (.lspStartupRuntime)))
+        acquireOwnedComputerUse =
+            snd <$> allocateAcquire resources.computerUseResources
+                (mkAcquire
+                    (acquireComputerUseRuntime toolModelRuntime)
+                    (logSlowCleanup "computer use runtime" . mapM_ ComputerUse.closeComputerUseRuntime))
+    -- Startup is concurrent; resource scopes determine shutdown order.
+    startupResources <- runConcurrently $
+        StartupResources
+            <$> Concurrently acquireOwnedMcp
+            <*> Concurrently acquireOwnedCoding
+            <*> Concurrently acquireOwnedWebFetch
+            <*> Concurrently acquireOwnedLsp
+            <*> Concurrently acquireOwnedComputerUse
+            <*> Concurrently (prepareInitialContextPreload request toolModelRuntime)
+    let mcpRuntime = startupResources.startupMcp
+        localToolRuntime = startupResources.startupLocalTools
+        webFetchRuntime = startupResources.startupWebFetch
+        lspStartup = startupResources.startupLsp
+        runtimeComputerUse = startupResources.startupComputerUse
+        (initialContext, initialContextPreload) = startupResources.startupInitialContext
+        lspRuntime = lspStartup.lspStartupRuntime
         runtimeCoding = localToolRuntime.localCoding
         runtimeExtraTools =
             maybe [] (pure . webFetchRuntimeTool) webFetchRuntime
