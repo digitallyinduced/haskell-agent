@@ -10,7 +10,13 @@ import Control.Concurrent.MVar
     , takeMVar
     )
 import Control.Exception.Safe (throwIO, tryAny)
-import Control.Monad (replicateM_, when)
+import qualified Control.Exception as Exception
+    ( MaskingState(MaskedInterruptible)
+    , getMaskingState
+    )
+import Control.Monad (replicateM_, void, when)
+import Control.Monad.Trans.Resource (ResourceCleanupException(..))
+import Data.Acquire (mkAcquire)
 import Data.IORef
 import Data.List (sort)
 import System.Timeout (timeout)
@@ -18,6 +24,126 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.ResourceScope" do
+    it "releases composed acquisitions in reverse dependency order" do
+        released <- newIORef []
+        withResourceScope \scope -> do
+            (_, values) <- allocateAcquire scope do
+                first <- mkAcquire (pure (1 :: Int)) (record released)
+                second <- mkAcquire (pure (first + 1)) (record released)
+                pure (first, second)
+            values `shouldBe` (1, 2)
+        readIORef released `shouldReturn` [2, 1]
+
+    it "reports checked closure failures after attempting every finalizer" do
+        released <- newIORef []
+        scope <- newResourceScope
+        _ <- registerResource scope (record released 1)
+        _ <- registerResource scope do
+            record released 2
+            throwIO (userError "second release failed")
+        _ <- registerResource scope do
+            record released 3
+            throwIO (userError "third release failed")
+        closeResourceScopeChecked scope `shouldThrow`
+            (\exception -> length (rceOtherCleanupExceptions exception) == 1)
+        readIORef released `shouldReturn` [3, 2, 1]
+        closeResourceScopeChecked scope
+        closeResourceScope scope
+        readIORef released `shouldReturn` [3, 2, 1]
+
+    it "does not make scope finalizers uninterruptible" do
+        mapM_ (\close -> do
+            maskingState <- newIORef Nothing
+            scope <- newResourceScope
+            _ <- registerResource scope $
+                Exception.getMaskingState >>= writeIORef maskingState . Just
+            close scope
+            readIORef maskingState `shouldReturn` Just Exception.MaskedInterruptible)
+            [closeResourceScope, closeResourceScopeChecked]
+
+    it "does not repeat early release during checked closure" do
+        released <- newIORef []
+        scope <- newResourceScope
+        (key, _) <- allocateAcquire scope $
+            mkAcquire (pure (1 :: Int)) (record released)
+        releaseResource key
+        closeResourceScopeChecked scope
+        readIORef released `shouldReturn` [1]
+
+    it "rejects acquisition after checked closure without running its constructor" do
+        scope <- newResourceScope
+        acquired <- newIORef False
+        closeResourceScopeChecked scope
+        outcome <- tryAny $ void $ allocateAcquire scope $
+            mkAcquire (writeIORef acquired True) (const (pure ()))
+        outcome `shouldSatisfy` isLeft
+        readIORef acquired `shouldReturn` False
+
+    it "rolls back partial composition before returning an acquisition failure" do
+        released <- newIORef []
+        withResourceScope \scope -> do
+            result <- tryAny $ void $ allocateAcquire scope do
+                _ <- mkAcquire (pure (1 :: Int)) (record released)
+                mkAcquire
+                    (throwIO (userError "dependent acquisition failed") :: IO ())
+                    (const (record released 2))
+            result `shouldSatisfy` isLeft
+            readIORef released `shouldReturn` [1]
+        readIORef released `shouldReturn` [1]
+
+    it "releases a composed acquisition once after early release" do
+        released <- newIORef []
+        withResourceScope \scope -> do
+            (key, _) <- allocateAcquire scope do
+                _ <- mkAcquire (pure (1 :: Int)) (record released)
+                mkAcquire (pure (2 :: Int)) (record released)
+            releaseResource key
+            releaseResource key
+            readIORef released `shouldReturn` [2, 1]
+        readIORef released `shouldReturn` [2, 1]
+
+    it "attempts every composed finalizer before reporting an early release exception" do
+        released <- newIORef []
+        result <- tryAny $ withResourceScope \scope -> do
+            (key, _) <- allocateAcquire scope do
+                _ <- mkAcquire (pure (1 :: Int)) (record released)
+                _ <- mkAcquire (pure (2 :: Int)) \value -> do
+                    record released value
+                    throwIO (userError "dependent release failed")
+                mkAcquire (pure (3 :: Int)) (record released)
+            releaseResource key
+        result `shouldSatisfy` isLeft
+        readIORef released `shouldReturn` [3, 2, 1]
+
+    it "attempts every composed finalizer during best-effort scope closure" do
+        released <- newIORef []
+        withResourceScope \scope -> do
+            _ <- allocateAcquire scope do
+                _ <- mkAcquire (pure (1 :: Int)) (record released)
+                mkAcquire (pure (2 :: Int)) \value -> do
+                    record released value
+                    throwIO (userError "dependent release failed")
+            pure ()
+        readIORef released `shouldReturn` [2, 1]
+
+    it "rolls back completed composition when dependent acquisition is cancelled" do
+        released <- newIORef []
+        dependentStarted <- newEmptyMVar
+        blocked <- newEmptyMVar
+        withResourceScope \scope -> do
+            outcome <- race
+                (allocateAcquire scope do
+                    _ <- mkAcquire (pure (1 :: Int)) (record released)
+                    mkAcquire
+                        (putMVar dependentStarted () >> takeMVar blocked :: IO ())
+                        (const (record released 2)))
+                (takeMVar dependentStarted)
+            case outcome of
+                Left _ -> expectationFailure "blocked acquisition unexpectedly completed"
+                Right () -> pure ()
+            readIORef released `shouldReturn` [1]
+        readIORef released `shouldReturn` [1]
+
     it "releases resources in reverse acquisition order" do
         released <- newIORef ([] :: [Int])
         scope <- newResourceScope

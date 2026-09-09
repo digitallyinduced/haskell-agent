@@ -110,11 +110,12 @@ import Agent.OpenAI.ImageGeneration
     )
 import Agent.Provider (Provider(OpenAIProvider))
 import Agent.ResourceScope
-    ( allocateResource
-    , allocateFourResourcesConcurrently
-    , releaseResource
-    , withResourceScope
+    ( ResourceScope
+    , allocateAcquire
+    , registerResource
     )
+import Agent.CLI.Runtime.Orchestration.Tools.Resources
+    ( SessionResourceScopes(..), withSessionResourceScopes )
 import Agent.Skills
     ( SkillCatalog(..)
     , SkillInvocation
@@ -132,12 +133,13 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , appToolsFromGroups
     )
-import Control.Concurrent.Async ( concurrently, concurrently_ )
+import Control.Concurrent.Async ( concurrently )
 import Control.Exception.Safe
-    ( SomeException, bracketOnError, finally, mask_, throwIO, try )
-import Control.Monad ( forM_, join, when, void )
+    ( SomeException, mask_, throwIO, try )
+import Control.Monad ( forM_, when, void )
+import Data.Acquire (Acquire, mkAcquire)
 import Data.IORef
-    (IORef, newIORef, readIORef, writeIORef)
+    (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Maybe (isJust)
 import Data.Unique (newUnique, hashUnique)
 import System.Info (os)
@@ -159,7 +161,6 @@ data CodingRuntime = CodingRuntime
     { runtimeCoding :: CodingTools
     , runtimeExtraTools :: [AppTool]
     , runtimeComputerUse :: Maybe ComputerUse.ComputerUseRuntime
-    , runtimeCloseExtraTools :: IO ()
     }
 
 data SessionControlRuntime = SessionControlRuntime
@@ -167,7 +168,6 @@ data SessionControlRuntime = SessionControlRuntime
     , controlBashEnabledRef :: IORef Bool
     , controlSkillsRef :: IORef SkillCatalog
     , controlSkillInvocationsRef :: IORef [SkillInvocation]
-    , controlCodeModeCloseRef :: IORef (IO ())
     , controlClaimCurrentSession :: SessionHandle -> IO ()
     , controlSessionTools :: [AppTool]
     }
@@ -181,99 +181,88 @@ data SessionToolsRuntime = SessionToolsRuntime
     , sessionGatewayTools :: [AppTool]
     , sessionPlanMode :: PlanModeEnv
     , sessionNoteDirectory :: OsPath -> IO ()
-    , sessionCloseAll :: IO ()
     , sessionResumedPlanPending :: Bool
     }
 
 runAgentTools
     :: AgentToolsRequest windowTitleResult
     -> IO RunResult
-runAgentTools request = withResourceScope \resourceScope -> do
+runAgentTools request = withSessionResourceScopes \resources -> do
     toolStartup <- loadToolStartup request
     let toolModelRuntime = resolveToolModel request toolStartup
         toolHostHooks =
             buildToolHostHooks request toolStartup toolModelRuntime
-    collaborationRuntime <-
-        newCollaborationRuntime request toolStartup toolModelRuntime
-    (scratchKey, acquiredScratchRuntime) <-
-        allocateResource
-            resourceScope
+    (_, collaborationRuntime) <-
+        allocateAcquire resources.activityResources
+            (acquireCollaborationRuntime request toolStartup toolModelRuntime)
+    -- The current lock changes on conversation reset. Drain the slot only
+    -- after session activities stop; the preparation owner still protects
+    -- the original resume lock before this boundary is established.
+    _ <- registerResource resources.sessionLockResources do
+        current <- atomicModifyIORef'
+            collaborationRuntime.collaborationActiveSessionLock
+            (\value -> (Nothing, value))
+        mapM_ releaseSessionLock current
+    (_, scratchRuntime) <-
+        allocateAcquire resources.scratchResources $
+        mkAcquire
             (prepareScratchRuntime
                 request
                 toolStartup
                 toolModelRuntime
                 collaborationRuntime)
             (.scratchCleanup)
-    let scratchRuntime =
-            acquiredScratchRuntime
-                { scratchCleanup = releaseResource scratchKey }
     integrationRuntime <- acquireSessionIntegrationRuntime request
-    ( (acquiredResources, (computerUseKey, runtimeComputerUse))
+    ( ((((_, mcpRuntime), (_, localToolRuntime)),
+          ((_, webFetchRuntime), (_, lspStartup))),
+         (_, runtimeComputerUse))
       , (initialContext, initialContextPreload)
       ) <-
         concurrently
             ( concurrently
-                ( allocateFourResourcesConcurrently
-                    resourceScope
-                    (acquireMcpRuntime
-                        request
-                        toolStartup
-                        toolModelRuntime
-                        collaborationRuntime
-                        scratchRuntime
-                        integrationRuntime)
-                    (.runtimeCloseMcp)
-                    (acquireLocalToolRuntime
-                        request
-                        toolModelRuntime
-                        toolHostHooks
-                        collaborationRuntime
-                        scratchRuntime)
-                    (.localCoding.codingClose)
-                    (acquireWebFetchRuntime
-                        request
-                        toolStartup
-                        toolModelRuntime)
-                    (mapM_ closeWebFetchRuntime)
-                    (acquireLspStartup
-                        request
-                        toolStartup
-                        toolModelRuntime)
-                    (mapM_ closeLspRuntime . (.lspStartupRuntime))
+                ( concurrently
+                    ( concurrently
+                        ( allocateAcquire resources.mcpResources $
+                            mkAcquire
+                                (acquireMcpRuntime
+                                    request toolStartup toolModelRuntime
+                                    collaborationRuntime scratchRuntime
+                                    integrationRuntime)
+                                (.runtimeCloseMcp)
+                        )
+                        ( allocateAcquire resources.codingResources
+                            (acquireLocalToolRuntime
+                                request toolModelRuntime toolHostHooks
+                                collaborationRuntime scratchRuntime)
+                        )
+                    )
+                    ( concurrently
+                        ( allocateAcquire resources.webFetchResources $
+                            mkAcquire
+                                (acquireWebFetchRuntime
+                                    request toolStartup toolModelRuntime)
+                                (mapM_ closeWebFetchRuntime)
+                        )
+                        ( allocateAcquire resources.lspResources $
+                            mkAcquire
+                                (acquireLspStartup
+                                    request toolStartup toolModelRuntime)
+                                (mapM_ closeLspRuntime . (.lspStartupRuntime))
+                        )
+                    )
                 )
-                ( allocateResource
-                    resourceScope
-                    (acquireComputerUseRuntime toolModelRuntime)
-                    (mapM_ ComputerUse.closeComputerUseRuntime)
+                ( allocateAcquire resources.computerUseResources $
+                    mkAcquire
+                        (acquireComputerUseRuntime toolModelRuntime)
+                        (mapM_ ComputerUse.closeComputerUseRuntime)
                 )
             )
             (prepareInitialContextPreload request toolModelRuntime)
-    let ( (mcpKey, acquiredMcpRuntime)
-          , (localToolKey, acquiredLocalToolRuntime)
-          , (webFetchKey, webFetchRuntime)
-          , (lspKey, lspStartup)
-          ) = acquiredResources
-        mcpRuntime =
-            acquiredMcpRuntime
-                { runtimeCloseMcp =
-                    releaseResource mcpKey
-                }
-        localToolRuntime =
-            acquiredLocalToolRuntime
-                { localCoding =
-                    acquiredLocalToolRuntime.localCoding
-                        { codingClose = releaseResource localToolKey }
-                }
-        lspRuntime = lspStartup.lspStartupRuntime
+    let lspRuntime = lspStartup.lspStartupRuntime
         runtimeCoding = localToolRuntime.localCoding
         runtimeExtraTools =
             maybe [] (pure . webFetchRuntimeTool) webFetchRuntime
                 <> maybe [] (pure . lspRuntimeTool) lspRuntime
-        runtimeCloseExtraTools =
-            releaseResource computerUseKey
-                `finally` concurrently_
-                    (releaseResource lspKey)
-                    (releaseResource webFetchKey)
         codingRuntime = CodingRuntime{..}
     mapM_
         (reportStartupWarning request.startup)
@@ -306,6 +295,7 @@ runAgentTools request = withResourceScope \resourceScope -> do
             codingRuntime
             sessionControlRuntime
     launchAgentToolsSession
+        resources.codeModeResources
         request
         toolStartup
         toolModelRuntime
@@ -341,7 +331,7 @@ acquireLocalToolRuntime
     -> ToolHostHooks
     -> CollaborationRuntime
     -> ScratchRuntime
-    -> IO LocalToolRuntime
+    -> Acquire LocalToolRuntime
 acquireLocalToolRuntime AgentToolsRequest
     { startup
     , baseToolEnv
@@ -367,7 +357,7 @@ acquireLocalToolRuntime AgentToolsRequest
                     baseToolEnv
                         { toolCwd = context.nativeDiscoveryProjectRoot }
                 Nothing -> baseToolEnv
-    bracketOnError
+    localCoding <- mkAcquire
         (codingToolsForWithTypes
             dialect
             codingToolEnv
@@ -378,9 +368,8 @@ acquireLocalToolRuntime AgentToolsRequest
             multiCtx
             agentTypesRef)
         (.codingClose)
-        \localCoding -> do
-            let localInitialSkills = initialSkills
-            pure LocalToolRuntime{..}
+    let localInitialSkills = initialSkills
+    pure LocalToolRuntime{..}
 
 acquireWebFetchRuntime
     :: AgentToolsRequest windowTitleResult
@@ -527,7 +516,6 @@ newSessionControlRuntime AgentToolsRequest
     controlBashEnabledRef <- newIORef options.optBash
     controlSkillsRef <- newIORef initialSkills
     controlSkillInvocationsRef <- newIORef []
-    controlCodeModeCloseRef <- newIORef (pure ())
     let controlClaimCurrentSession handle = mask_ do
             let desired = sessionLockPath handle.sessionDir
             readIORef activeSessionLock >>= \case
@@ -638,27 +626,21 @@ assembleSessionToolsRuntime AgentToolsRequest
     } CollaborationRuntime
     { collaborationPersistSlotRef = persistSlotRef
     , collaborationSubagentStoreRoot = subagentStoreRoot
-    , collaborationActiveSessionLock = activeSessionLock
-    , collaborationCloseAgents = closeAgents
     } ScratchRuntime
     { scratchPromptRequest = promptRequest
     , scratchImageGenerationHistory = imageGenerationHistory
     , scratchExternalSessionTools = externalSessionAppTools
     , scratchSessionTmp = sessionTmp
-    , scratchCleanup = cleanupScratch
     } McpRuntime
     { runtimeMcpServerConfigs = mcpServerConfigs
     , runtimeProgressiveMcp = progressiveMcp
     , runtimeMcpFleet = mcpFleet
-    , runtimeCloseMcp = closeMcp
     } CodingRuntime
     { runtimeCoding = coding
     , runtimeExtraTools = extraTools
     , runtimeComputerUse = computerUseRuntime
-    , runtimeCloseExtraTools = closeExtraTools
     } SessionControlRuntime
     { controlSkillInvocationsRef = skillInvocationsRef
-    , controlCodeModeCloseRef = codeModeCloseRef
     , controlSessionTools = persistedSessionTools
     } = do
     let artifactDirectory = Just (unsafeToFilePath sessionTmp)
@@ -771,29 +753,13 @@ assembleSessionToolsRuntime AgentToolsRequest
         sessionNoteDirectory dir = do
             writeIORef sessionPlanMode.planSessionDir (Just dir)
             writeIORef subagentStoreRoot (Just dir)
-        sessionCloseAll =
-            closeAgents
-                `finally`
-                    ((readIORef activeSessionLock
-                        >>= mapM_ releaseSessionLock)
-                        `finally`
-                            (closeExtraTools
-                                `finally`
-                                    (closeMcp
-                                        `finally`
-                                            (coding.codingClose
-                                                `finally`
-                                                    (join
-                                                        (readIORef
-                                                            codeModeCloseRef)
-                                                        `finally`
-                                                            cleanupScratch)))))
         sessionAllTools = composeToolGroups allToolGroups
         sessionTools = composeToolGroups activeToolGroups
     pure SessionToolsRuntime{..}
 
 launchAgentToolsSession
-    :: AgentToolsRequest windowTitleResult
+    :: ResourceScope
+    -> AgentToolsRequest windowTitleResult
     -> ToolStartup
     -> ToolModelRuntime
     -> ToolHostHooks
@@ -806,7 +772,7 @@ launchAgentToolsSession
     -> SessionControlRuntime
     -> SessionToolsRuntime
     -> IO RunResult
-launchAgentToolsSession AgentToolsRequest{..} ToolStartup
+launchAgentToolsSession codeModeResourceScope AgentToolsRequest{..} ToolStartup
     { toolOpenRouterOptions = openRouterOptions
     } ToolModelRuntime
     { toolProvider = provider
@@ -853,7 +819,6 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
     , controlBashEnabledRef = bashEnabledRef
     , controlSkillsRef = skillsRef
     , controlSkillInvocationsRef = skillInvocationsRef
-    , controlCodeModeCloseRef = codeModeCloseRef
     , controlClaimCurrentSession = claimCurrentSession
     , controlSessionTools = agentSessionAppTools
     } SessionToolsRuntime
@@ -865,7 +830,6 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
     , sessionGatewayTools = gatewayTools
     , sessionPlanMode = planMode
     , sessionNoteDirectory = noteSessionDir
-    , sessionCloseAll = closeAll
     , sessionResumedPlanPending = resumedPlanPending
     } = do
     when resumedPlanPending (activatePlanMode planMode)
@@ -894,8 +858,7 @@ launchAgentToolsSession AgentToolsRequest{..} ToolStartup
         , checkStartupUsageInBackground
         , claimCurrentSession
         , claudeBypassEnabled
-        , closeAll
-        , codeModeCloseRef
+        , codeModeResourceScope
         , coding
         , createSubagentWorktree
         , customGenericOptions

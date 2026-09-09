@@ -220,6 +220,7 @@ import Agent.OpenRouter.Options (ClientOptions)
 import Agent.Provider
     (Credential(..), Provider(..), TokenProvider,
      tokenProviderBillingMode)
+import Agent.ResourceScope (ResourceScope, allocateAcquire)
 import Agent.Responses.GenericClient (GenericClientOptions)
 import Agent.Responses.Types
     (ResponseItem, ResponseCreateParams(model))
@@ -244,6 +245,7 @@ import Control.Concurrent.Async ( waitSTM, withAsync )
 import Control.Concurrent.STM ( STM, retry )
 import Control.Exception.Safe ( mask_, finally )
 import Control.Monad ( forM_, void, when )
+import Data.Acquire (mkAcquire)
 import Data.Functor ( (<&>) )
 import Data.IORef
     ( IORef,
@@ -264,7 +266,7 @@ import System.OsPath (OsPath)
 import qualified Agent.MCP as MCP
 import qualified Data.Text.IO as Text ( hPutStr )
 
-data AgentSessionRequest closeResult windowTitleResult = AgentSessionRequest
+data AgentSessionRequest windowTitleResult = AgentSessionRequest
     { loaded :: LoadedAuth
     , connectedGateway :: Maybe GatewayCredential
     , learnAboutUserRequested :: Bool
@@ -280,8 +282,7 @@ data AgentSessionRequest closeResult windowTitleResult = AgentSessionRequest
     , checkStartupUsageInBackground :: Bool
     , claimCurrentSession :: SessionHandle -> IO ()
     , claudeBypassEnabled :: Bool
-    , closeAll :: IO closeResult
-    , codeModeCloseRef :: IORef (IO ())
+    , codeModeResourceScope :: ResourceScope
     , coding :: CodingTools
     , createSubagentWorktree
         :: OsPath -> IO (Either Text SubagentWorktree)
@@ -399,18 +400,17 @@ data SessionLiveRuntime = SessionLiveRuntime
     }
 
 runAgentSession
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> IO RunResult
-runAgentSession request@AgentSessionRequest{closeAll} =
-    flip finally closeAll do
-        validateSessionMcpTools request
-        codeRuntime <- prepareSessionCodeRuntime request
-        promptRuntime <- prepareSessionPromptRuntime request codeRuntime
-        liveRuntime <- prepareSessionLiveRuntime request promptRuntime
-        launchPreparedSession request promptRuntime liveRuntime
+runAgentSession request = do
+    validateSessionMcpTools request
+    codeRuntime <- prepareSessionCodeRuntime request
+    promptRuntime <- prepareSessionPromptRuntime request codeRuntime
+    liveRuntime <- prepareSessionLiveRuntime request promptRuntime
+    launchPreparedSession request promptRuntime liveRuntime
 
 validateSessionMcpTools
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> IO ()
 validateSessionMcpTools AgentSessionRequest
     { coding
@@ -439,7 +439,7 @@ validateSessionMcpTools AgentSessionRequest
             Nothing -> pure ()
 
 prepareSessionCodeRuntime
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> IO SessionCodeRuntime
 prepareSessionCodeRuntime AgentSessionRequest
     { loaded
@@ -453,7 +453,7 @@ prepareSessionCodeRuntime AgentSessionRequest
     , startup
     , options
     , tools
-    , codeModeCloseRef
+    , codeModeResourceScope
     , allTools
     , effortText
     , workspace = WorkspaceContext{cwd}
@@ -501,15 +501,20 @@ prepareSessionCodeRuntime AgentSessionRequest
             | otherwise =
                 "image generation code mode unavailable; \
                 \disabling image generation: "
+    -- Attach cleanup during acquisition, before warnings or subsequent startup
+    -- work can throw. The enclosing session owns this scope.
+    (_, initializedCodeMode) <-
+        allocateAcquire codeModeResourceScope $
+            mkAcquire initializeCodeMode \case
+                Left _ -> pure ()
+                Right runtime -> mapM_ (.codeModeClose) runtime
     (sessionCodeModeRuntime, suppressDirectImageGeneration) <-
-        initializeCodeMode >>= \case
+        case initializedCodeMode of
             Left err -> do
                 reportStartupWarning startup
                     (codeModeFallbackWarning <> err)
                 pure (Nothing, True)
             Right runtime -> pure (runtime, False)
-    writeIORef codeModeCloseRef
-        (maybe (pure ()) (.codeModeClose) sessionCodeModeRuntime)
     sessionReservedId <- reservedSessionId persist
     let providerTools =
             filterStartupUnavailableTools
@@ -582,7 +587,7 @@ prepareSessionCodeRuntime AgentSessionRequest
     pure SessionCodeRuntime{..}
 
 prepareSessionPromptRuntime
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> SessionCodeRuntime
     -> IO SessionPromptRuntime
 prepareSessionPromptRuntime AgentSessionRequest
@@ -660,7 +665,7 @@ isClaudeBridgeTool tool =
             _ -> False
 
 sessionCatalogContextWindowForParams
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> (Text -> Text)
     -> ResponseCreateParams
     -> Maybe Int
@@ -676,7 +681,7 @@ sessionCatalogContextWindowForParams AgentSessionRequest
         (mapTransportModel currentModel)
 
 sessionCurrentModelContextWindow
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> SessionPromptRuntime
     -> (Text -> Text)
     -> IO (Maybe Int)
@@ -689,7 +694,7 @@ sessionCurrentModelContextWindow request promptRuntime mapTransportModel = do
             currentParams
 
 sessionContextWindowForParams
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> (Text -> Text)
     -> Int
     -> ResponseCreateParams
@@ -702,7 +707,7 @@ sessionContextWindowForParams request mapTransportModel fallback params =
             params)
 
 buildSessionSubagentRuntime
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> SessionPromptRuntime
     -> SubagentRuntime
 buildSessionSubagentRuntime AgentSessionRequest
@@ -765,7 +770,7 @@ buildSessionSubagentRuntime AgentSessionRequest
         }
 
 prepareSessionLiveRuntime
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> SessionPromptRuntime
     -> IO SessionLiveRuntime
 prepareSessionLiveRuntime request@AgentSessionRequest
@@ -806,7 +811,7 @@ prepareSessionLiveRuntime request@AgentSessionRequest
     pure SessionLiveRuntime{..}
 
 sessionWindowTitle
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> Text
 sessionWindowTitle AgentSessionRequest
     { resumed
@@ -824,7 +829,7 @@ sessionWindowTitle AgentSessionRequest
                 promptRequest
 
 loadSessionStartupContext
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> SessionPromptRuntime
     -> IO (IORef (Maybe Text))
 loadSessionStartupContext AgentSessionRequest
@@ -876,7 +881,7 @@ loadSessionStartupContext AgentSessionRequest
         | otherwise = promptRuntime.sessionInitialPrevious
 
 evictResumedConversation
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> IORef LiveConversation
     -> IO ()
 evictResumedConversation AgentSessionRequest
@@ -898,7 +903,7 @@ evictResumedConversation AgentSessionRequest
         when evicted performMajorGC
 
 recordSessionCompactionUsage
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> IORef TokenUsage
     -> TokenUsage
     -> IO ()
@@ -918,7 +923,7 @@ recordSessionCompactionUsage AgentSessionRequest
             modifyIORef' usageRef (`addTokenUsage` usage)
 
 claimPersistedSession
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> IO ()
 claimPersistedSession AgentSessionRequest
     { persist
@@ -935,7 +940,7 @@ claimPersistedSession AgentSessionRequest
         PersistenceDisabled -> pure ()
 
 buildProviderSessionRequest
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> SessionPromptRuntime
     -> SessionLiveRuntime
     -> Maybe (STM ApiError)
@@ -1064,7 +1069,7 @@ buildProviderSessionRequest
             }
 
 withSessionStartupAvailability
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> Bool
     -> (Maybe (STM ApiError) -> IO result)
     -> IO result
@@ -1088,7 +1093,7 @@ withSessionStartupAvailability AgentSessionRequest
         | otherwise = action Nothing
 
 runSessionWithInterruptHandling
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> String
     -> IO RunResult
     -> IO RunResult
@@ -1104,7 +1109,7 @@ runSessionWithInterruptHandling AgentSessionRequest
                 withResumeHintOnQuit fullscreen progName persist action
 
 launchPreparedSession
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> SessionPromptRuntime
     -> SessionLiveRuntime
     -> IO RunResult
@@ -1142,7 +1147,7 @@ runSession = SessionRunner.runSession sessionRunnerContinuation
 -- | The session owns composition and presentation. Provider runtimes only
 -- supply transport capabilities, scoped around this continuation.
 launchProvider
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> SessionPromptRuntime
     -> SessionLiveRuntime
     -> Bool
@@ -1204,7 +1209,7 @@ launchProvider request promptRuntime liveRuntime shouldProbeAtStartup startupUna
         _ -> withProviderRuntime config host use
 
 prepareProviderConfig
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> SessionPromptRuntime
     -> NativeRunCapabilities
     -> IO ProviderConfig
@@ -1282,7 +1287,7 @@ prepareProviderConfig request promptRuntime nativeCapabilities = case request.pr
             }
 
 installProviderSubagents
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> SessionLiveRuntime
     -> ProviderSubagents
     -> IO ()
@@ -1359,7 +1364,7 @@ installProviderSubagents request liveRuntime capabilities =
                         "This provider requires a separate child session; it cannot run as an in-process gateway subagent."))
 
 handleOpenAiStartupResult
-    :: AgentSessionRequest closeResult windowTitleResult
+    :: AgentSessionRequest windowTitleResult
     -> NativeRunCapabilities
     -> Bool
     -> Either CodexAuthFailed RunResult

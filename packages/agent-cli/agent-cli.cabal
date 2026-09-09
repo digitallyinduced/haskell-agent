@@ -97,6 +97,7 @@ library
                     , Agent.CLI.Runtime.Orchestration.Session
                     , Agent.CLI.Runtime.Orchestration.Startup
                     , Agent.CLI.Runtime.Orchestration.Tools
+                    , Agent.CLI.Runtime.Orchestration.Tools.Resources
                     , Agent.CLI.Runtime.Orchestration.Tools.Request
                     , Agent.CLI.Runtime.Orchestration.Tools.Model
                     , Agent.CLI.Runtime.Orchestration.Tools.Collaboration
@@ -356,6 +357,7 @@ library
                     , process >= 1.6.26
                     , retry >= 0.9.3.1 && < 0.10
                     , safe-exceptions
+                    , resourcet
                     , scientific
                     , stm
                     , tagsoup
@@ -596,6 +598,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TranscriptExportSpec
                     , Agent.CLI.SessionHistorySpec
                     , Agent.CLI.SessionStateSpec
+                    , Agent.CLI.SessionResourcesSpec
                     , Agent.CLI.SessionTitleSpec
                     , Agent.CLI.SkillsSpec
                     , Agent.CLI.SubagentStoreSpec
@@ -659,6 +662,7 @@ test-suite agent-cli-test
                     , process
                     , QuickCheck >= 2.14 && < 2.16
                     , safe-exceptions
+                    , resourcet
                     , stm
                     , text
                     , time
