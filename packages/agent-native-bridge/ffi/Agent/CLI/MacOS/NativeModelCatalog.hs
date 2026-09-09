@@ -23,7 +23,11 @@ import Agent.CLI.Models
     , selectedOption
     )
 import Agent.CLI.Project
-    ( ProjectModel(..), ProjectSettings(..), loadProjectSettings, resolveProjectRoot )
+    ( ProjectModel(..)
+    , inheritProjectLastModel
+    , loadProjectSettings
+    , resolveProjectRoot
+    )
 import Agent.CLI.Session (SessionMeta(..))
 import Agent.Dialect (dialectSlug)
 import Agent.Provider (Provider(..), providerSlug)
@@ -47,6 +51,7 @@ loadNativeModelCatalog
     contextResult <- currentModelContext
         store
         root
+        home
         requestedCwd
         gatewayIdentity
         request.modelsListSessionId
@@ -113,10 +118,11 @@ currentModelContext
     :: Store
     -> OsPath
     -> OsPath
+    -> OsPath
     -> Maybe Text
     -> Maybe Text
     -> IO (Either Text (OsPath, Maybe ModelTarget))
-currentModelContext store root cwd gatewayIdentity = \case
+currentModelContext store root home cwd gatewayIdentity = \case
     Just sessionId ->
         validateNativeSessionBoundary
             (trustedPool store)
@@ -132,7 +138,8 @@ currentModelContext store root cwd gatewayIdentity = \case
                             ))
     Nothing -> do
         projectRoot <- resolveProjectRoot cwd
-        settings <- loadProjectSettings projectRoot
+        checkoutSettings <- loadProjectSettings projectRoot
+        settings <- inheritProjectLastModel home projectRoot checkoutSettings
         pure $ Right
             ( cwd
             , (.projectModelTarget) <$> settings.settingsLastModel

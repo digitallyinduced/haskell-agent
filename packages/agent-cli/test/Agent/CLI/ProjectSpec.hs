@@ -56,7 +56,7 @@ spec = describe "Agent.CLI.Project" do
                 `shouldBe` fromFilePath "/Users/marc/.haskell-agent/settings.json"
 
     describe "withInheritedLastModel" do
-        it "inherits the user last model when the checkout has none" do
+        it "inherits the user last model when checkout and primary have none" do
             let userModel =
                     ProjectModel
                         { projectModelTarget =
@@ -67,30 +67,61 @@ spec = describe "Agent.CLI.Project" do
                     { settingsLastModel = Just userModel }
                 project = defaultProjectSettings
                     { settingsAutoApprove = True }
-                merged = withInheritedLastModel project user
+                merged = withInheritedLastModel project defaultProjectSettings user
             merged.settingsLastModel `shouldBe` Just userModel
             merged.settingsAutoApprove `shouldBe` True
 
-        it "keeps a checkout last model instead of the user default" do
+        it "inherits the primary last model before the user default" do
+            let primaryModel =
+                    ProjectModel
+                        { projectModelTarget =
+                            target XAIProvider "xai"
+                                "grok-4.6" "grok-4.6" GrokBuildDialect
+                        }
+                userModel =
+                    ProjectModel
+                        { projectModelTarget =
+                            target OpenAIProvider "openai"
+                                "gpt-5.6-sol" "gpt-5.6-sol" CodexDialect
+                        }
+                primary = defaultProjectSettings
+                    { settingsLastModel = Just primaryModel }
+                user = defaultProjectSettings
+                    { settingsLastModel = Just userModel }
+                project = defaultProjectSettings
+                    { settingsAutoApprove = True }
+                merged = withInheritedLastModel project primary user
+            merged.settingsLastModel `shouldBe` Just primaryModel
+            merged.settingsAutoApprove `shouldBe` True
+
+        it "keeps a checkout last model instead of primary or user defaults" do
             let checkoutModel =
                     ProjectModel
                         { projectModelTarget =
                             target OpenAIProvider "openai"
                                 "gpt-5.6-sol" "gpt-5.6-sol" CodexDialect
                         }
-                userModel =
+                primaryModel =
                     ProjectModel
                         { projectModelTarget =
                             target XAIProvider "xai"
                                 "grok-4.6" "grok-4.6" GrokBuildDialect
                         }
+                userModel =
+                    ProjectModel
+                        { projectModelTarget =
+                            target OpenAIProvider "openai"
+                                "gpt-6-astra" "gpt-6-astra" CodexDialect
+                        }
                 user = defaultProjectSettings
                     { settingsLastModel = Just userModel }
+                primary = defaultProjectSettings
+                    { settingsLastModel = Just primaryModel }
                 project = defaultProjectSettings
                     { settingsLastModel = Just checkoutModel
                     , settingsAutoApprove = True
                     }
-                merged = withInheritedLastModel project user
+                merged = withInheritedLastModel project primary user
             merged.settingsLastModel `shouldBe` Just checkoutModel
             merged.settingsAutoApprove `shouldBe` True
 
@@ -191,6 +222,71 @@ spec = describe "Agent.CLI.Project" do
                     userSettings.settingsLastModel
                         `shouldBe` projectSettings.settingsLastModel
                     userSettingsPath home `shouldBe` projectSettingsPath home
+
+        it "writes a worktree model switch to the primary clone without moving auto-approve" $
+            withTempDir "agent-wt-" \root ->
+                withTempDir "agent-home-" \home -> do
+                    let mainRepo = root </> fromFilePath "main"
+                        linked = root </> fromFilePath "linked"
+                    createDirectoryIfMissing True mainRepo
+                    git_ mainRepo ["init"]
+                    git_ mainRepo ["config", "user.email", "test@example.com"]
+                    git_ mainRepo ["config", "user.name", "Test"]
+                    git_ mainRepo ["config", "commit.gpgsign", "false"]
+                    git_ mainRepo ["commit", "--allow-empty", "-m", "init"]
+                    git_ mainRepo ["worktree", "add", "--detach", toFilePath linked]
+                    primary <- canonicalizePath mainRepo
+                    worktree <- canonicalizePath linked
+                    saveProjectAutoApprove primary False
+                    saveProjectAutoApprove worktree True
+                    persistModelSwitch TopLevelSwitch home worktree
+                        (target XAIProvider "xai"
+                            "grok-4.6" "grok-4.6" GrokBuildDialect)
+
+                    primarySettings <- loadProjectSettings primary
+                    worktreeSettings <- loadProjectSettings worktree
+                    userSettings <- loadUserSettings home
+                    let expectedModel = Just ProjectModel
+                            { projectModelTarget =
+                                target XAIProvider "xai"
+                                    "grok-4.6" "grok-4.6" GrokBuildDialect
+                            }
+                    resolvePrimaryProjectRoot worktree `shouldReturn` primary
+                    primarySettings.settingsAutoApprove `shouldBe` False
+                    worktreeSettings.settingsAutoApprove `shouldBe` True
+                    primarySettings.settingsLastModel `shouldBe` expectedModel
+                    worktreeSettings.settingsLastModel `shouldBe` expectedModel
+                    userSettings.settingsLastModel `shouldBe` expectedModel
+
+        it "inherits a primary last model into a fresh worktree" $
+            withTempDir "agent-wt-" \root ->
+                withTempDir "agent-home-" \home -> do
+                    let mainRepo = root </> fromFilePath "main"
+                        linked = root </> fromFilePath "linked"
+                    createDirectoryIfMissing True mainRepo
+                    git_ mainRepo ["init"]
+                    git_ mainRepo ["config", "user.email", "test@example.com"]
+                    git_ mainRepo ["config", "user.name", "Test"]
+                    git_ mainRepo ["config", "commit.gpgsign", "false"]
+                    git_ mainRepo ["commit", "--allow-empty", "-m", "init"]
+                    git_ mainRepo ["worktree", "add", "--detach", toFilePath linked]
+                    primary <- canonicalizePath mainRepo
+                    worktree <- canonicalizePath linked
+                    saveProjectModel primary
+                        (target XAIProvider "xai"
+                            "grok-4.6" "grok-4.6" GrokBuildDialect)
+                    saveProjectModel home
+                        (target OpenAIProvider "openai"
+                            "gpt-5.6-sol" "gpt-5.6-sol" CodexDialect)
+                    saveProjectAutoApprove worktree True
+                    checkoutSettings <- loadProjectSettings worktree
+                    inherited <- inheritProjectLastModel home worktree checkoutSettings
+                    inherited.settingsAutoApprove `shouldBe` True
+                    inherited.settingsLastModel `shouldBe` Just ProjectModel
+                        { projectModelTarget =
+                            target XAIProvider "xai"
+                                "grok-4.6" "grok-4.6" GrokBuildDialect
+                        }
 
         it "keeps a delegated model switch out of checkout and user settings" $
             withTempDir "agent-project-" \project ->
@@ -367,6 +463,21 @@ spec = describe "Agent.CLI.Project" do
                 settings.settingsAutoApprove `shouldBe` True
                 primarySettings <- loadProjectSettings =<< canonicalizePath mainRepo
                 primarySettings.settingsAutoApprove `shouldBe` False
+
+        it "resolves a linked worktree to the primary clone" $
+            withTempDir "agent-wt-" \root -> do
+                let mainRepo = root </> fromFilePath "main"
+                    linked = root </> fromFilePath "linked"
+                createDirectoryIfMissing True mainRepo
+                git_ mainRepo ["init"]
+                git_ mainRepo ["config", "user.email", "test@example.com"]
+                git_ mainRepo ["config", "user.name", "Test"]
+                git_ mainRepo ["config", "commit.gpgsign", "false"]
+                git_ mainRepo ["commit", "--allow-empty", "-m", "init"]
+                git_ mainRepo ["worktree", "add", "--detach", toFilePath linked]
+                expected <- canonicalizePath mainRepo
+                resolvePrimaryProjectRoot linked `shouldReturn` expected
+                resolvePrimaryProjectRoot mainRepo `shouldReturn` expected
 
         it "falls back to cwd outside a git repo" $
             withTempDir "agent-nogit-" \root -> do
