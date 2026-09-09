@@ -98,9 +98,8 @@ applyComposerUiEvent uiEvent state =
             if isDraft then draftText else state.appHistoryDraft
         , appUi =
             case uiEvent of
-                UiSetPrompt _ | state.appComposerOwnsImagePreviews ->
+                UiSetPrompt prompt | state.appComposerOwnsImagePreviews ->
                     let ui = state.appUi
-                        prompt = ui.uiPrompt
                     in ui { uiPrompt =
                         prompt { promptAttachments = length state.appImagePreviews } }
                 _ -> state.appUi

@@ -3,6 +3,7 @@ module Agent.CLI.SessionState
     ( SessionState(..)
     , newSessionState
     , removeImageAttachmentAt
+    , removeImageAttachment
     ) where
 
 import Agent.CLI.Session.ConversationStore (newConversationStore)
@@ -38,7 +39,18 @@ newSessionState = do
         , sessionPreviewId = previewId
         }
 
--- | Remove one pending attachment by its stable zero-based composer index.
+-- | Remove the captured image, independent of any difference between the
+-- composer index and session attachments retained by earlier slash commands.
+removeImageAttachment
+    :: ImageAttachment
+    -> [ImageAttachment]
+    -> ([ImageAttachment], Bool)
+removeImageAttachment image pending =
+    case break (== image) pending of
+        (before, _ : after) -> (before <> after, True)
+        _ -> (pending, False)
+
+-- | Remove one pending attachment by its zero-based composer index.
 removeImageAttachmentAt
     :: Int
     -> [ImageAttachment]

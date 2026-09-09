@@ -40,6 +40,21 @@ spec =
             removeImageAttachmentAt 2 pending
                 `shouldBe` (pending, False)
 
+        it "removes a captured image without removing earlier retained session images" do
+            state <- newSessionState
+            let retained = ImageAttachment "image/png" "retained-by-help"
+                captured = ImageAttachment "image/png" "new-composer-image"
+            -- An earlier slash command can leave session images pending even
+            -- though its submission cleared the composer's local previews.
+            modifyLiveAttachments state.sessionConversation
+                (\_ -> ([retained, captured], ()))
+            modifyLiveAttachments state.sessionConversation
+                (removeImageAttachment captured) `shouldReturn` True
+            readLiveAttachments state.sessionConversation `shouldReturn` [retained]
+            modifyLiveAttachments state.sessionConversation
+                (removeImageAttachment captured) `shouldReturn` False
+            readLiveAttachments state.sessionConversation `shouldReturn` [retained]
+
         it "starts a new user session with empty composer state" do
             state <- newSessionState
             readIORef state.sessionDraft `shouldReturn` ""

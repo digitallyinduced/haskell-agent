@@ -239,6 +239,8 @@ readChangeNotes provider interrupt color = do
                 else pure (Text.strip text)
         ReplClipboardPasteCaptured _ ->
             readChangeNotes provider interrupt color
+        ReplRemoveCapturedImage _ ->
+            readChangeNotes provider interrupt color
         ReplClipboardPasteOrText _ _ text ->
             if Text.null (Text.strip text)
                 then readChangeNotes provider interrupt color
@@ -295,6 +297,9 @@ askQuestion provider interrupt resolveColor question options = do
                                     provider interrupt resolveColor question []
                                 else pure (Just (Text.strip text))
                         ReplClipboardPasteCaptured _ ->
+                            askQuestion
+                                provider interrupt resolveColor question []
+                        ReplRemoveCapturedImage _ ->
                             askQuestion
                                 provider interrupt resolveColor question []
                         ReplClipboardPasteOrText _ _ text ->

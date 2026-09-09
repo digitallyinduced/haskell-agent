@@ -31,6 +31,7 @@ module Agent.CLI.TUI.Composer
     , handleControlMouseUp
     , handleEffortControlClick
     , handlePromptControlClick
+    , handleImageRemoveClick
     , immediateBtwQuestion
     , immediateReplCommand
     , isKillKey
@@ -210,6 +211,53 @@ handlePromptControlClick applyUiEvent choice = do
                         (warningNotice
                             "Prompt settings can be changed when input is ready.")))
                 id
+
+-- | Edit locally owned attachments immediately, but apply the corresponding
+-- session mutation in input order after any earlier queued messages.
+handleImageRemoveClick
+    :: ApplyLocalUiEvent
+    -> Int
+    -> EventM Name AppState ()
+handleImageRemoveClick applyUiEvent index = do
+    state <- get
+    let ui = state.appUi
+        overlayOpen =
+            maybe False (const True) state.appTextPrompt
+                || maybe False (const True) state.appChoice
+                || maybe False (const True) state.appMetaConsole
+                || maybe False (const True) ui.uiPermission
+    if state.appComposerOwnsImagePreviews && not overlayOpen
+        then do
+            previous <- liftIO (readIORef state.appRuntime.runtimeImagePreviews)
+            if index < 0
+                then pure ()
+                else case splitAt index previous of
+                  (_, []) -> pure ()
+                  (before, (image, _) : after) -> do
+                    queued <- liftIO $ atomically $
+                        appendFullscreenInput state.appRuntime.runtimeInput FullscreenInput
+                            { fullscreenInputLine = ReplRemoveCapturedImage image
+                            , fullscreenInputQueued = True
+                            , fullscreenInputDisplay = Nothing
+                            }
+                    case queued of
+                        Left message ->
+                            applyUiEvent (UiSetNotice (Just (warningNotice message))) id
+                        Right () -> do
+                            let pending = before <> after
+                            liftIO do
+                                writeIORef state.appRuntime.runtimeImagePreviews pending
+                                modifyIORef' state.appRuntime.runtimeImagePreviewRevision (+ 1)
+                            modify' \current -> current
+                                { appImagePreviews = map snd pending }
+                            applyUiEvent
+                                (UiSetPrompt ui.uiPrompt { promptAttachments = length pending })
+                                id
+                            applyUiEvent
+                                (UiSetNotice (Just (successNotice "attachment removed")))
+                                id
+        else handlePromptControlClick applyUiEvent
+            (\draft -> ReplRemovePendingImage draft index)
 
 handleEffortControlClick
     :: ApplyLocalUiEvent

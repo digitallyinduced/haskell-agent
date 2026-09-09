@@ -135,7 +135,7 @@ import Agent.CLI.Terminal
     , kittyKeyboardPop
     , remoteLinkInstructions
     )
-import Agent.Loop (ImageAttachment(..), LoopEvent(..), emptyTurnOutput)
+import Agent.Loop (ImageAttachment(..), LoopEvent(..), TokenUsage(..), emptyTurnOutput)
 import Brick
     ( App(..)
     , BrickEvent(..)
@@ -248,6 +248,47 @@ spec = do
                         refreshed.appUi.uiDraft `shouldBe` "unfinished draft"
                         refreshed.appUi.uiCursor `shouldBe` 4
 
+        it "refreshes every other prompt field while preserving locally owned attachment counts" $
+            withPastedImageFixtures \path _ -> do
+                let running = reduceUi (UiSetDraft "unfinished draft" 4) $
+                        reduceUi (UiLoop TurnStarted) initialUiState
+                    incoming = running.uiPrompt
+                        { promptModel = "updated-model"
+                        , promptEffort = "high"
+                        , promptEffortOptions = ["low", "high"]
+                        , promptMode = "plan"
+                        , promptAccount = "updated-account"
+                        , promptAccountSelectable = True
+                        , promptUsage = TokenUsage 120 30 20
+                        , promptLimitStatus = Just (PromptLimitStatus "75% remaining" False)
+                        , promptAttachments = 7
+                        }
+                runtime <- newScriptRuntime running
+                (_, pasted) <- runFullscreenScriptWithState
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    [ FullscreenScriptVty (V.EvPaste (encoded (Text.pack path)))
+                    , FullscreenScriptApp (AppUi (UiSetPrompt incoming))
+                    , FullscreenScriptHalt
+                    ]
+                pasted.appUi.uiPrompt
+                    `shouldBe` incoming { promptAttachments = 1 }
+                pasted.appUi.uiDraft `shouldBe` "unfinished draft"
+                pasted.appUi.uiCursor `shouldBe` 4
+                let later = incoming
+                        { promptModel = "subsequent-model"
+                        , promptMode = "ask"
+                        , promptUsage = TokenUsage 240 60 40
+                        }
+                (_, submitted) <- runFullscreenScriptWithState pasted
+                    [ FullscreenScriptVty (V.EvKey V.KEnter [])
+                    , FullscreenScriptApp (AppUi (UiSetPrompt later))
+                    , FullscreenScriptHalt
+                    ]
+                submitted.appComposerOwnsImagePreviews `shouldBe` True
+                null submitted.appImagePreviews `shouldBe` True
+                submitted.appUi.uiPrompt
+                    `shouldBe` later { promptAttachments = 0 }
+
         it "leaves existing previews and the draft untouched when the input queue is full" $
             withPastedImageFixtures \firstPath secondPath -> do
                 let running = reduceUi (UiSetDraft "unfinished draft" 4) $
@@ -281,6 +322,126 @@ spec = do
                         "Prompt queue is full; wait for a queued prompt to be consumed."
                 queued <- atomically (Composer.readFullscreenInputs runtime.runtimeInput)
                 Seq.length queued `shouldBe` Composer.fullscreenInputCountLimit
+
+        it "removes the selected active-turn image immediately without changing earlier queued messages" $
+            withPastedImageFixtures \firstPath secondPath -> do
+                let running = reduceUi (UiSetDraft "queued message" 4) $
+                        reduceUi (UiLoop TurnStarted) initialUiState
+                runtime <- newScriptRuntime running
+                (_, earlier) <- runFullscreenScriptWithState
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    [ FullscreenScriptVty (V.EvPaste (encoded (Text.pack firstPath)))
+                    , FullscreenScriptVty (V.EvKey V.KEnter [])
+                    , FullscreenScriptHalt
+                    ]
+                earlierQueue <- atomically (Composer.readFullscreenInputs runtime.runtimeInput)
+                (_, pasted) <- runFullscreenScriptWithState earlier
+                    [ FullscreenScriptVty (V.EvPaste (encoded (Text.pack secondPath)))
+                    , FullscreenScriptVty (V.EvPaste (encoded (Text.pack firstPath)))
+                    , FullscreenScriptApp (AppUi (UiSetDraft "next draft" 3))
+                    , FullscreenScriptHalt
+                    ]
+                before <- readIORef runtime.runtimeImagePreviews
+                length before `shouldBe` 2
+                revision <- readIORef runtime.runtimeImagePreviewRevision
+                (_, removed) <- runFullscreenScriptWithState pasted
+                    [ FullscreenScriptMouseDown (ComposerImageRemove 0) V.BLeft (B.Location (0, 0))
+                    , FullscreenScriptMouseUp (ComposerImageRemove 0) (B.Location (0, 0))
+                    , FullscreenScriptHalt
+                    ]
+                removed.appImagePreviews == map snd (drop 1 before) `shouldBe` True
+                removed.appUi.uiPrompt.promptAttachments `shouldBe` 1
+                removed.appUi.uiDraft `shouldBe` "next draft"
+                removed.appUi.uiCursor `shouldBe` 3
+                removed.appUi.uiRunning `shouldBe` True
+                removed.appUi.uiAwaitingInput `shouldBe` False
+                (.noticeText) <$> removed.appUi.uiNotice
+                    `shouldBe` Just "attachment removed"
+                after <- readIORef runtime.runtimeImagePreviews
+                after == drop 1 before `shouldBe` True
+                readIORef runtime.runtimeImagePreviewRevision `shouldReturn` (revision + 1)
+                (_, submitted) <- runFullscreenScriptWithState removed
+                    [ FullscreenScriptVty (V.EvKey V.KEnter [])
+                    , FullscreenScriptHalt
+                    ]
+                null submitted.appImagePreviews `shouldBe` True
+                queued <- atomically (Composer.readFullscreenInputs runtime.runtimeInput)
+                map (.fullscreenInputLine) (toList queued)
+                    `shouldBe` map (.fullscreenInputLine) (toList earlierQueue)
+                        <> map (ReplClipboardPasteCaptured . pure . fst) before
+                        <> map (ReplRemoveCapturedImage . fst) (take 1 before)
+                        <> [ReplText "next draft"]
+
+        it "captures the selected image identity after an earlier slash command submission" $
+            withPastedImageFixtures \firstPath secondPath -> do
+                let running = reduceUi (UiLoop TurnStarted) initialUiState
+                runtime <- newScriptRuntime running
+                (_, firstPaste) <- runFullscreenScriptWithState
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    [ FullscreenScriptVty (V.EvPaste (encoded (Text.pack firstPath)))
+                    , FullscreenScriptHalt
+                    ]
+                earlierImages <- map fst <$> readIORef runtime.runtimeImagePreviews
+                (_, commandQueued) <- runFullscreenScriptWithState
+                    firstPaste
+                        { appSlashDismissed = True
+                        , appUi = reduceUi (UiSetDraft "/help" 5) firstPaste.appUi
+                        }
+                    [ FullscreenScriptVty (V.EvKey V.KEnter [])
+                    , FullscreenScriptHalt
+                    ]
+                null commandQueued.appImagePreviews `shouldBe` True
+                (_, secondPaste) <- runFullscreenScriptWithState commandQueued
+                    [ FullscreenScriptVty (V.EvPaste (encoded (Text.pack secondPath)))
+                    , FullscreenScriptHalt
+                    ]
+                selectedImages <- map fst <$> readIORef runtime.runtimeImagePreviews
+                selectedImages `shouldNotBe` earlierImages
+                (_, removed) <- runFullscreenScriptWithState secondPaste
+                    [ FullscreenScriptMouseDown (ComposerImageRemove 0) V.BLeft (B.Location (0, 0))
+                    , FullscreenScriptMouseUp (ComposerImageRemove 0) (B.Location (0, 0))
+                    , FullscreenScriptHalt
+                    ]
+                null removed.appImagePreviews `shouldBe` True
+                queued <- atomically (Composer.readFullscreenInputs runtime.runtimeInput)
+                map (.fullscreenInputLine) (toList queued)
+                    `shouldBe`
+                        [ ReplClipboardPasteCaptured earlierImages
+                        , ReplText "/help"
+                        , ReplClipboardPasteCaptured selectedImages
+                        ] <> map ReplRemoveCapturedImage selectedImages
+
+        it "retains an active-turn image when its removal cannot be queued" $
+            withPastedImageFixtures \path _ -> do
+                let running = reduceUi (UiSetDraft "unfinished draft" 4) $
+                        reduceUi (UiLoop TurnStarted) initialUiState
+                runtime <- newScriptRuntime running
+                (_, pasted) <- runFullscreenScriptWithState
+                    (initialFullscreenAppState runtime [] AgentRoot [] 0)
+                    [ FullscreenScriptVty (V.EvPaste (encoded (Text.pack path)))
+                    , FullscreenScriptHalt
+                    ]
+                before <- readIORef runtime.runtimeImagePreviews
+                revision <- readIORef runtime.runtimeImagePreviewRevision
+                replicateM_ (Composer.fullscreenInputCountLimit - 1) do
+                    atomically (Composer.appendFullscreenInput runtime.runtimeInput
+                        (FullscreenInput ReplEof True Nothing))
+                        `shouldReturn` Right ()
+                (_, rejected) <- runFullscreenScriptWithState pasted
+                    [ FullscreenScriptMouseDown (ComposerImageRemove 0) V.BLeft (B.Location (0, 0))
+                    , FullscreenScriptMouseUp (ComposerImageRemove 0) (B.Location (0, 0))
+                    , FullscreenScriptHalt
+                    ]
+                rejected.appImagePreviews == pasted.appImagePreviews `shouldBe` True
+                rejected.appUi.uiPrompt.promptAttachments `shouldBe` 1
+                rejected.appUi.uiDraft `shouldBe` "unfinished draft"
+                rejected.appUi.uiCursor `shouldBe` 4
+                after <- readIORef runtime.runtimeImagePreviews
+                after == before `shouldBe` True
+                readIORef runtime.runtimeImagePreviewRevision `shouldReturn` revision
+                (.noticeText) <$> rejected.appUi.uiNotice
+                    `shouldBe` Just
+                        "Prompt queue is full; wait for a queued prompt to be consumed."
 
     describe "dynamic model choice" do
         it "preserves filter, selected identity, and effort across reordered rows" do
@@ -3401,7 +3562,13 @@ withPastedImageFixtures action =
             secondPath = directory </> "second.png"
         writePng firstPath (generateImage (\_ _ -> PixelRGB8 255 0 0) 4 3)
         writePng secondPath (generateImage (\_ _ -> PixelRGB8 0 255 0) 4 3)
-        action firstPath secondPath
+        -- Submitting a draft persists REPL history; keep it inside the fixture.
+        bracket
+            (lookupEnv "HOME")
+            (\previous -> maybe (unsetEnv "HOME") (setEnv "HOME") previous)
+            \_ -> do
+                setEnv "HOME" directory
+                action firstPath secondPath
 
 newScriptRuntime :: UiState -> IO FullscreenRuntime
 newScriptRuntime ui = do
