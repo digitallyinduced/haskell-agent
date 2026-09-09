@@ -279,7 +279,7 @@ spec = describe "Agent.CLI.Config" do
             fmap (.configWorktree) result
                 `shouldBe` Right WorktreeConfig
                     { worktreeFetchLatestUpstream = True
-                    , worktreeInactiveDays = 7
+                    , worktreeInactiveDays = 1
                     }
 
     it "loads the managed worktree fetch opt-out" $
@@ -290,7 +290,7 @@ spec = describe "Agent.CLI.Config" do
             fmap (.configWorktree) result
                 `shouldBe` Right WorktreeConfig
                     { worktreeFetchLatestUpstream = False
-                    , worktreeInactiveDays = 7
+                    , worktreeInactiveDays = 1
                     }
 
     it "loads configurable worktree inactivity expiry" $

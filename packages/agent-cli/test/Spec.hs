@@ -116,6 +116,9 @@ import qualified Agent.CLI.TUIMeasuredViewportSpec as TUIMeasuredViewportSpec
 import qualified Agent.CLI.UsageSpec as UsageSpec
 import qualified Agent.CLI.WebLspSpec as WebLspSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
+import qualified Agent.CLI.WorktreeCleanSpec as WorktreeCleanSpec
+import qualified Agent.CLI.WorktreeIgnoredSpec as WorktreeIgnoredSpec
+import qualified Agent.CLI.WorktreeIncorporationSpec as WorktreeIncorporationSpec
 import qualified Agent.CLI.WorktreeAdminSpec as WorktreeAdminSpec
 import qualified Agent.CLI.Worktree.SnapshotSpec as SnapshotSpec
 import qualified Agent.CLI.Worktree.ProvenanceSpec as ProvenanceSpec
@@ -252,6 +255,9 @@ specs = do
     UsageSpec.spec
     WebLspSpec.spec
     WorktreeSpec.spec
+    WorktreeCleanSpec.spec
+    WorktreeIgnoredSpec.spec
+    WorktreeIncorporationSpec.spec
     WorktreeAdminSpec.spec
     ProvenanceSpec.spec
     SnapshotSpec.spec
