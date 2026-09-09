@@ -8,6 +8,7 @@ module Agent.ToolArgs
     , reqInt
     , optText
     , optTextList
+    , jsonInt
     , optInt
     , optIntOrString
     , readExactInt
@@ -23,6 +24,7 @@ import Control.Monad (join)
 import Agent.Json.Decode (Decoder, FieldsDecoder)
 import Agent.Json (rawJsonDecoder)
 import qualified Agent.Json.Decode as Json
+import qualified Data.Scientific as Scientific
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Read as TextRead
@@ -58,7 +60,7 @@ reqTextList _ key =
 
 reqInt :: Object -> Text -> FieldsDecoder Int
 reqInt _ key =
-    Json.atKey key Json.int
+    Json.atKey key jsonInt
 
 -- | Optional string; an empty string counts as absent.
 optText :: Object -> Text -> FieldsDecoder (Maybe Text)
@@ -75,11 +77,20 @@ optTextList _ key =
     join <$> Json.atKeyOptional key
         (Json.nullable (Json.list Json.text <|> ((: []) <$> Json.text)))
 
+-- | Exact bounded integer from a JSON number. Whole-number floats such as
+-- @-50.0@ are accepted because models emit them for Schema @"number"@ and
+-- sometimes @"integer"@ fields; Hermes 'int' rejects those tokens.
+jsonInt :: Decoder Int
+jsonInt = do
+    value <- Json.scientific
+    maybe (fail "Expected integer") pure (Scientific.toBoundedInteger value)
+
 -- | Optional exact, bounded integer. An absent or null field is 'Nothing';
--- fractional, out-of-range, and wrongly typed values fail.
+-- whole-number JSON floats such as @-50.0@ are accepted. Fractional,
+-- out-of-range, and wrongly typed values fail.
 optInt :: Object -> Text -> FieldsDecoder (Maybe Int)
 optInt _ key =
-    join <$> Json.atKeyOptional key (Json.nullable Json.int)
+    join <$> Json.atKeyOptional key (Json.nullable jsonInt)
 
 -- | 'optInt' plus compatibility for integer strings emitted by some model
 -- tool surfaces.
@@ -88,7 +99,7 @@ optIntOrString _ key =
     join <$> Json.atKeyOptional key (Json.nullable intOrString)
   where
     intOrString =
-        Json.int
+        jsonInt
             <|> Json.withText
                 (\value -> maybe (fail "Expected integer") pure (readExactInt value))
 
@@ -127,7 +138,7 @@ optBoolStrict _ key =
 intOr :: Object -> Text -> Int -> FieldsDecoder Int
 intOr _ key def =
     maybe def id . join
-        <$> Json.atKeyOptional key (Json.nullable Json.int)
+        <$> Json.atKeyOptional key (Json.nullable jsonInt)
 
 -- | Optional array field decoded element-wise with the supplied Hermes
 -- decoder. The message is retained in the API for model-facing call sites;

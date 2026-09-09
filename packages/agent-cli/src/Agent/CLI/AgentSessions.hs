@@ -78,6 +78,7 @@ import Agent.Dialect
 import Agent.Provider (Provider)
 import Agent.Json.Decode (optionalKey)
 import qualified Agent.Json.Decode as Hermes
+import Agent.ToolArgs (jsonInt)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Types
@@ -151,7 +152,7 @@ waitAgentSessionTool env = jsonTool
     (typedTool "wait_agent_session"
         (Hermes.object $ WaitAgentSessionArgs
             <$> Hermes.atKey "session_id" Hermes.text
-            <*> optionalKey "timeout_ms" Hermes.int)
+            <*> optionalKey "timeout_ms" jsonInt)
         (runWaitAgentSession env))
 
 runWaitAgentSession :: AgentSessionToolsEnv -> WaitAgentSessionArgs -> IO (Either Text Text)
@@ -355,7 +356,7 @@ readAgentSessionArgsDecoder :: Hermes.Decoder ReadAgentSessionArgs
 readAgentSessionArgsDecoder = Hermes.object $
     ReadAgentSessionArgs
         <$> Hermes.atKey "session_id" Hermes.text
-        <*> optionalKey "limit" Hermes.int
+        <*> optionalKey "limit" jsonInt
 
 readAgentSessionTool :: AgentSessionToolsEnv -> AppTool
 readAgentSessionTool env = jsonTool

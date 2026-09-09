@@ -22,10 +22,12 @@ import Agent.Tools.OutputArtifact
     , readOutputArtifact
     , writeOutputArtifact
     )
+import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolEnv(..)
     , defaultToolEnv
+    , jsonToolParameters
     , setToolSessionTmp
     )
 import Control.Concurrent.Async (mapConcurrently)
@@ -35,7 +37,7 @@ import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (find, nub)
-import Data.Maybe (fromJust)
+import Data.Maybe (fromJust, fromMaybe)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Encoding
 import System.Directory
@@ -253,6 +255,50 @@ spec = describe "Agent.Tools.OutputArtifact" do
                                 <> "\",\"pattern\":\"amount\",\"context_chars\":30}")
                     result `shouldSatisfy` \case
                         Right value -> Text.isInfixOf "19900" value && Text.length value < 1000
+                        Left _ -> False
+
+    it "advertises integer pagination parameters" do
+        withTempEnv \env -> do
+            let types name =
+                    [ (property.propertyName, property.propertyType)
+                    | tool <- artifactTools env Nothing
+                    , tool.appToolName == name
+                    , property <- fromMaybe [] (jsonToolParameters tool)
+                    , property.propertyName `elem`
+                        ["offset", "limit", "cursor", "max_chars", "head_limit", "context_chars"]
+                    ]
+            types "read_tool_output" `shouldBe`
+                [ ("offset", PropertyInteger)
+                , ("limit", PropertyInteger)
+                , ("cursor", PropertyInteger)
+                , ("max_chars", PropertyInteger)
+                ]
+            types "search_tool_output" `shouldBe`
+                [ ("head_limit", PropertyInteger)
+                , ("cursor", PropertyInteger)
+                , ("context_chars", PropertyInteger)
+                ]
+
+    it "accepts whole-number JSON floats for line pagination" do
+        withTempEnv \env -> do
+            writeOutputArtifact env "alpha\nbeta\ngamma\n" >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right handle -> do
+                    result <- runArtifactTool env "read_tool_output" $
+                        functionToolCall "read" "read_tool_output"
+                            ("{\"handle\":\"" <> handle
+                                <> "\",\"offset\":2.0,\"limit\":1.0}")
+                    result `shouldSatisfy` \case
+                        Right value ->
+                            Text.isInfixOf "beta" value
+                                && not (Text.isInfixOf "SIMDException" value)
+                        Left _ -> False
+                    negative <- runArtifactTool env "read_tool_output" $
+                        functionToolCall "read" "read_tool_output"
+                            ("{\"handle\":\"" <> handle
+                                <> "\",\"offset\":-50.0}")
+                    negative `shouldSatisfy` \case
+                        Right value -> not (Text.isInfixOf "SIMDException" value)
                         Left _ -> False
 
     it "rejects mixed line and character pagination arguments" do

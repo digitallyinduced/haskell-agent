@@ -32,8 +32,24 @@ spec = describe "ToolArgs" do
         decodeSearch "{\"query\":\"invoice\",\"limit\":null}"
             `shouldBe` Right (SearchArgs "invoice" 10 Nothing)
 
+    it "accepts whole-number JSON floats for integers" do
+        decodeSearch "{\"query\":\"invoice\",\"limit\":5.0}"
+            `shouldBe` Right (SearchArgs "invoice" 5 Nothing)
+        decodeSearch "{\"query\":\"invoice\",\"limit\":-50.0}"
+            `shouldBe` Right (SearchArgs "invoice" (-50) Nothing)
+        Json.decodeText
+            (objectArgs \object -> reqInt object "offset")
+            "{\"offset\":-50.0}"
+            `shouldBe` Right (-50)
+        Json.decodeText
+            (objectArgs \object -> optIntOrString object "offset")
+            "{\"offset\":-50.0}"
+            `shouldBe` Right (Just (-50))
+
     it "rejects wrongly typed optional integers" do
         decodeSearch "{\"query\":\"invoice\",\"limit\":\"5\"}"
+            `shouldSatisfy` isLeft
+        decodeSearch "{\"query\":\"invoice\",\"limit\":1.9}"
             `shouldSatisfy` isLeft
 
     it "accepts stringy booleans only through the compatibility helper" do
