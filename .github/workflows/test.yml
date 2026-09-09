@@ -43,7 +43,7 @@ jobs:
               .#checks.x86_64-linux.package-boundaries
             # Repository integration tests deliberately exercise Git and gh
             # process timeouts; after their extraction they run in one suite.
-            timeout_minutes: 60
+            timeout_minutes: 90
           - name: Native CLI
             targets: .#checks.x86_64-linux.agent-cli-executable
           - name: Static CLI runtime
