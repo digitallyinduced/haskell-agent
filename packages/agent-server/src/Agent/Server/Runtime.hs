@@ -4,6 +4,7 @@ module Agent.Server.Runtime
     , openServerRuntime
     , closeServerRuntime
     , serverRuntimeBackend
+    , installSessionEventSink
     , requestFreshToolApproval
     ) where
 
@@ -97,6 +98,16 @@ import Agent.Server.Identifier (newUUIDv7Text)
 import Agent.Server.Runtime.SessionCodec
 import Agent.Server.Runtime.Attachments (withMaterializedTurnFiles)
 import Agent.Server.RepositoryCheckout qualified as RepositoryCheckout
+import Agent.Server.SessionSetup
+    ( SessionEventSink(..)
+    , SessionSetupRegistry
+    , awaitSessionSetup
+    , cancelSessionSetup
+    , closeSessionSetupRegistry
+    , newSessionSetupRegistry
+    , noopSessionEventSink
+    , startRepositorySetup
+    )
 import Agent.Server.Runtime.TurnStore qualified as TurnStore
 import Agent.Server.Sandbox
     ( TenantSandbox
@@ -158,7 +169,7 @@ import Data.Aeson
     , (.=)
     )
 import Data.Bifunctor (first)
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (find)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -174,16 +185,22 @@ import System.OsPath (OsPath, unsafeEncodeUtf)
 data ServerRuntime = ServerRuntime
     { runtimeBackend :: !Backend
     , runtimeClose :: !(IO ())
+    , runtimeSessionEvents :: !(IORef SessionEventSink)
     }
 
 serverRuntimeBackend :: ServerRuntime -> Backend
 serverRuntimeBackend = (.runtimeBackend)
+
+installSessionEventSink :: ServerRuntime -> SessionEventSink -> IO ()
+installSessionEventSink runtime =
+    writeIORef runtime.runtimeSessionEvents
 
 openServerRuntime
     :: ResolvedServerConfig
     -> IO (Either Text ServerRuntime)
 openServerRuntime config = mask \restore -> do
     instanceId <- newUUIDv7Text
+    sessionEvents <- newIORef noopSessionEventSink
     case config.resolvedServerMode of
         MultiTenantMode multi -> do
             postgresConfig <-
@@ -200,6 +217,7 @@ openServerRuntime config = mask \restore -> do
                                 multi
                                 stores
                                 instanceId
+                                sessionEvents
                         pure $
                             Right ServerRuntime
                                 { runtimeBackend =
@@ -208,6 +226,7 @@ openServerRuntime config = mask \restore -> do
                                     closeTenantRuntimeManager manager
                                         `finally`
                                             closeTenantStoreManager stores
+                                , runtimeSessionEvents = sessionEvents
                                 }
         LocalSingleUserMode -> do
             postgresConfig <-
@@ -242,6 +261,7 @@ openServerRuntime config = mask \restore -> do
                                             (Left
                                                 "could not initialize the native agent runtime")
                                     Right native -> do
+                                        setups <- newSessionSetupRegistry
                                         let environment = RuntimeEnvironment
                                                 { environmentConfig = config
                                                 , environmentStore = store
@@ -254,6 +274,9 @@ openServerRuntime config = mask \restore -> do
                                                 , environmentHome =
                                                     config.resolvedHome
                                                 , environmentSandbox = Nothing
+                                                , environmentSetups = setups
+                                                , environmentSessionEvents =
+                                                    sessionEvents
                                                 }
                                             backend =
                                                 productionBackend
@@ -267,6 +290,8 @@ openServerRuntime config = mask \restore -> do
                                                         environment
                                                         `finally`
                                                             closeStore store
+                                                , runtimeSessionEvents =
+                                                    sessionEvents
                                                 }
 
 closeServerRuntime :: ServerRuntime -> IO ()
@@ -281,6 +306,8 @@ data RuntimeEnvironment = RuntimeEnvironment
     , environmentTenantId :: !TenantId
     , environmentHome :: !FilePath
     , environmentSandbox :: !(Maybe TenantSandbox)
+    , environmentSetups :: !SessionSetupRegistry
+    , environmentSessionEvents :: !(IORef SessionEventSink)
     }
 
 data TenantRuntimeSlot
@@ -300,6 +327,7 @@ data TenantRuntimeManager = TenantRuntimeManager
     , tenantRuntimeMaximum :: !Int
     , tenantRuntimeInstanceId :: !Text
     , tenantRuntimeState :: !(MVar TenantRuntimeState)
+    , tenantRuntimeSessionEvents :: !(IORef SessionEventSink)
     }
 
 data TenantRuntimeAcquisition
@@ -316,8 +344,9 @@ newTenantRuntimeManager
     -> MultiTenantConfig
     -> TenantStoreManager
     -> Text
+    -> IORef SessionEventSink
     -> IO TenantRuntimeManager
-newTenantRuntimeManager config multi stores instanceId = do
+newTenantRuntimeManager config multi stores instanceId sessionEvents = do
     state <- newMVar TenantRuntimeState
         { tenantRuntimeClosed = False
         , tenantRuntimeSlots = Map.empty
@@ -329,6 +358,7 @@ newTenantRuntimeManager config multi stores instanceId = do
         , tenantRuntimeMaximum = config.resolvedMaxActiveTenants
         , tenantRuntimeInstanceId = instanceId
         , tenantRuntimeState = state
+        , tenantRuntimeSessionEvents = sessionEvents
         }
 
 acquireTenantRuntime
@@ -507,7 +537,8 @@ createTenantRuntime manager tenant = mask \restore ->
                                                             (Left
                                                                 (tenantRuntimeUnavailable
                                                                     err))
-                                                    Right turnStoreOwner ->
+                                                    Right turnStoreOwner -> do
+                                                        setups <- newSessionSetupRegistry
                                                         pure $
                                                             Right
                                                                 RuntimeEnvironment
@@ -527,6 +558,10 @@ createTenantRuntime manager tenant = mask \restore ->
                                                                         tenant.resolvedTenantHome
                                                                     , environmentSandbox =
                                                                         Just sandbox
+                                                                    , environmentSetups =
+                                                                        setups
+                                                                    , environmentSessionEvents =
+                                                                        manager.tenantRuntimeSessionEvents
                                                                     }
 
 closeTenantRuntimeManager :: TenantRuntimeManager -> IO ()
@@ -563,12 +598,15 @@ closeTenantRuntimeManager manager = mask \restore -> do
 
 closeRuntimeEnvironment :: RuntimeEnvironment -> IO ()
 closeRuntimeEnvironment environment =
-    closeNativeProcessRuntime environment.environmentNative
+    closeSessionSetupRegistry environment.environmentSetups
         `finally`
-            ( mapM_ closeTenantSandbox environment.environmentSandbox
+            ( closeNativeProcessRuntime environment.environmentNative
                 `finally`
-                    TurnStore.closeTurnStoreOwner
-                        environment.environmentTurnStoreOwner
+                    ( mapM_ closeTenantSandbox environment.environmentSandbox
+                        `finally`
+                            TurnStore.closeTurnStoreOwner
+                                environment.environmentTurnStoreOwner
+                    )
             )
 
 multiTenantBackend :: Text -> TenantRuntimeManager -> Backend
@@ -952,21 +990,24 @@ createSessionForBoundary environment boundary request =
         boundary.accessTenantId
         request >>= \case
             Left err -> pure (Left err)
-            Right (cwd, cleanupOnFailure, repositoryBranch) ->
-                loadModelOptions environment boundary cwd >>= \case
-                    Left err -> cleanupOnFailure >> pure (Left err)
+            Right workspace ->
+                loadModelOptions
+                    environment
+                    boundary
+                    workspace.createWorkspaceCatalogCwd >>= \case
+                    Left err -> workspace.createWorkspaceCleanup >> pure (Left err)
                     Right (catalog, options) ->
                         case selectModel
                             boundary
                             catalog
                             options
                             request.createSessionModel of
-                                Left err -> cleanupOnFailure >> pure (Left err)
+                                Left err -> workspace.createWorkspaceCleanup >> pure (Left err)
                                 Right option ->
                                     case resolveEffort
                                         option.modelTarget.targetProvider
                                         request.createSessionEffort of
-                                            Left err -> cleanupOnFailure >> pure (Left err)
+                                            Left err -> workspace.createWorkspaceCleanup >> pure (Left err)
                                             Right effort -> do
                                                 created <- tryAny $
                                                     createSession SessionCreate
@@ -980,7 +1021,8 @@ createSessionForBoundary environment boundary request =
                                                         , createGatewayIdentity =
                                                             boundary.accessGatewayBoundary.gatewayBoundaryIdentity
                                                         , createCwd =
-                                                            unsafeEncodeUtf cwd
+                                                            unsafeEncodeUtf
+                                                                workspace.createWorkspaceCwd
                                                         , createEffort =
                                                             reasoningEffortText effort
                                                         , createTitleHint =
@@ -992,23 +1034,69 @@ createSessionForBoundary environment boundary request =
                                                                 request.createSessionTitle
                                                         }
                                                 case created of
-                                                    Left _ -> cleanupOnFailure
-                                                    Right _ -> pure ()
+                                                    Left _ -> workspace.createWorkspaceCleanup
+                                                    Right handle ->
+                                                        startPendingRepositorySetup
+                                                            environment
+                                                            boundary
+                                                            handle.sessionMeta.metaId
+                                                            workspace
                                                 pure case created of
                                                     Left _ ->
                                                         Left (internalApiError "could not create the session")
                                                     Right handle ->
-                                                        Right (sessionValue False handle.sessionMeta repositoryBranch)
+                                                        Right
+                                                            ( sessionValue
+                                                                False
+                                                                handle.sessionMeta
+                                                                workspace.createWorkspaceBranch
+                                                            )
+
+data CreateSessionWorkspace = CreateSessionWorkspace
+    { createWorkspaceCwd :: !FilePath
+    , createWorkspaceCatalogCwd :: !FilePath
+    , createWorkspaceCleanup :: !(IO ())
+    , createWorkspaceBranch :: !(Maybe Text)
+    , createWorkspacePending ::
+        !(Maybe
+            ( RepositoryCheckout.PreparedRepositoryLayout
+            , RepositoryDescriptor
+            ))
+    }
+
+startPendingRepositorySetup
+    :: RuntimeEnvironment
+    -> AccessBoundary
+    -> Text
+    -> CreateSessionWorkspace
+    -> IO ()
+startPendingRepositorySetup environment boundary sessionId workspace =
+    case workspace.createWorkspacePending of
+        Nothing -> pure ()
+        Just (layout, descriptor) -> do
+            sink <- readIORef environment.environmentSessionEvents
+            startRepositorySetup
+                environment.environmentSetups
+                (\eventType payload ->
+                    sink.emitSessionEvent
+                        boundary
+                        sessionId
+                        eventType
+                        payload)
+                sessionId
+                layout
+                descriptor
 
 resolveCreateSessionWorkspace
     :: ResolvedServerConfig
     -> TenantId
     -> CreateSessionRequest
-    -> IO (Either ApiError (FilePath, IO (), Maybe Text))
+    -> IO (Either ApiError CreateSessionWorkspace)
 resolveCreateSessionWorkspace config tenantId request =
     case request.createSessionRepository of
         Nothing ->
-            fmap (, pure (), Nothing) <$> resolveTenantWorkspacePath config tenantId request.createSessionCwd
+            fmap workspaceWithoutRepository
+                <$> resolveTenantWorkspacePath config tenantId request.createSessionCwd
         Just descriptor
             | Just _ <- request.createSessionCwd ->
                 pure $
@@ -1023,7 +1111,7 @@ resolveCreateSessionWorkspace config tenantId request =
                     Left err -> pure (Left err)
                     Right workspaceRoot -> do
                         correlation <- newUUIDv7Text
-                        RepositoryCheckout.prepareRepositoryCheckout
+                        RepositoryCheckout.prepareRepositoryLayout
                             workspaceRoot
                             correlation
                             descriptor >>= \case
@@ -1035,13 +1123,30 @@ resolveCreateSessionWorkspace config tenantId request =
                                             , apiErrorMessage = message
                                             , apiErrorDetails = Nothing
                                             }
-                                Right checkout ->
+                                Right layout ->
                                     pure $
                                         Right
-                                            ( checkout.checkoutPath
-                                            , checkout.cleanupCheckout
-                                            , Just checkout.checkoutBranch
-                                            )
+                                            CreateSessionWorkspace
+                                                { createWorkspaceCwd =
+                                                    layout.layoutCheckoutPath
+                                                , createWorkspaceCatalogCwd =
+                                                    workspaceRoot
+                                                , createWorkspaceCleanup =
+                                                    layout.layoutCleanup
+                                                , createWorkspaceBranch =
+                                                    Just layout.layoutBranch
+                                                , createWorkspacePending =
+                                                    Just (layout, descriptor)
+                                                }
+  where
+    workspaceWithoutRepository cwd =
+        CreateSessionWorkspace
+            { createWorkspaceCwd = cwd
+            , createWorkspaceCatalogCwd = cwd
+            , createWorkspaceCleanup = pure ()
+            , createWorkspaceBranch = Nothing
+            , createWorkspacePending = Nothing
+            }
 
 getSessionForBoundary
     :: RuntimeEnvironment
@@ -1102,6 +1207,7 @@ deleteSessionForBoundary environment boundary sessionId =
     loadAuthorizedMeta environment boundary sessionId >>= \case
         Left err -> pure (Left err)
         Right meta -> do
+            cancelSessionSetup environment.environmentSetups sessionId
             deleted <-
                 first sessionOperationError
                     <$> deleteSession
@@ -1230,72 +1336,77 @@ runTurn environment control spec =
         spec.turnSpecSessionId >>= \case
             Left err -> pure (Left err.apiErrorMessage)
             Right meta ->
-                resolveTenantWorkspacePath
-                    environment.environmentConfig
-                    spec.turnSpecBoundary.accessTenantId
-                    (Just (unsafeToFilePath meta.metaCwd)) >>= \case
-                        Left err -> pure (Left err.apiErrorMessage)
-                        Right cwd ->
-                            case parseReasoningEffort meta.metaEffort of
-                                Left err -> pure (Left err)
-                                Right effort ->
-                                    withMaterializedTurnFiles cwd spec \turnPrompt ->
-                                        withFile "/dev/null" WriteMode \output -> do
-                                            finalOutput <- newIORef Nothing
-                                            let baseHooks =
-                                                    nativeHooks
-                                                        environment
-                                                        control
-                                                        spec.turnSpecSessionId
-                                                        cwd
-                                                        meta.metaDialect
-                                                hooks =
-                                                    baseHooks
-                                                        { nativeOnLoopEvent = \event -> do
-                                                            case event of
-                                                                Loop.TurnFinished value ->
-                                                                    writeIORef
-                                                                        finalOutput
-                                                                        (Just value)
-                                                                _ -> pure ()
-                                                            baseHooks.nativeOnLoopEvent event
-                                                        }
-                                            runNativeTurn
-                                                environment.environmentNative
-                                                output
-                                                hooks
-                                                NativeTurnRequest
-                                                    { nativeTurnPrompt =
-                                                        turnPrompt
-                                                    , nativeTurnImages =
-                                                        spec.turnSpecImages
-                                                    , nativeTurnSession =
-                                                        NativeResumeSession
-                                                            spec.turnSpecSessionId
-                                                    , nativeTurnProvider = Nothing
-                                                    , nativeTurnModel = Nothing
-                                                    , nativeTurnCwd =
-                                                        unsafeEncodeUtf cwd
-                                                    , nativeTurnEffort =
-                                                        Just effort
-                                                    , nativeTurnInteractionMode =
-                                                        serverInteractionMode
-                                                            environment
-                                                    , nativeTurnShellMode =
-                                                        tenantShellMode environment
-                                                    }
-                                                >>= \case
-                                                    Left err -> pure (Left err)
-                                                    Right () ->
-                                                        readIORef finalOutput
-                                                            >>= pure
-                                                                . maybe
-                                                                    ( Left
-                                                                        "agent turn completed without a terminal output"
-                                                                    )
-                                                                    ( Right
-                                                                        . turnExecutionOutput
-                                                                    )
+                awaitSessionSetup
+                    environment.environmentSetups
+                    spec.turnSpecSessionId >>= \case
+                    Left message -> pure (Left message)
+                    Right () ->
+                        resolveTenantWorkspacePath
+                            environment.environmentConfig
+                            spec.turnSpecBoundary.accessTenantId
+                            (Just (unsafeToFilePath meta.metaCwd)) >>= \case
+                                Left err -> pure (Left err.apiErrorMessage)
+                                Right cwd ->
+                                    case parseReasoningEffort meta.metaEffort of
+                                        Left err -> pure (Left err)
+                                        Right effort ->
+                                            withMaterializedTurnFiles cwd spec \turnPrompt ->
+                                                withFile "/dev/null" WriteMode \output -> do
+                                                    finalOutput <- newIORef Nothing
+                                                    let baseHooks =
+                                                            nativeHooks
+                                                                environment
+                                                                control
+                                                                spec.turnSpecSessionId
+                                                                cwd
+                                                                meta.metaDialect
+                                                        hooks =
+                                                            baseHooks
+                                                                { nativeOnLoopEvent = \event -> do
+                                                                    case event of
+                                                                        Loop.TurnFinished value ->
+                                                                            writeIORef
+                                                                                finalOutput
+                                                                                (Just value)
+                                                                        _ -> pure ()
+                                                                    baseHooks.nativeOnLoopEvent event
+                                                                }
+                                                    runNativeTurn
+                                                        environment.environmentNative
+                                                        output
+                                                        hooks
+                                                        NativeTurnRequest
+                                                            { nativeTurnPrompt =
+                                                                turnPrompt
+                                                            , nativeTurnImages =
+                                                                spec.turnSpecImages
+                                                            , nativeTurnSession =
+                                                                NativeResumeSession
+                                                                    spec.turnSpecSessionId
+                                                            , nativeTurnProvider = Nothing
+                                                            , nativeTurnModel = Nothing
+                                                            , nativeTurnCwd =
+                                                                unsafeEncodeUtf cwd
+                                                            , nativeTurnEffort =
+                                                                Just effort
+                                                            , nativeTurnInteractionMode =
+                                                                serverInteractionMode
+                                                                    environment
+                                                            , nativeTurnShellMode =
+                                                                tenantShellMode environment
+                                                            }
+                                                        >>= \case
+                                                            Left err -> pure (Left err)
+                                                            Right () ->
+                                                                readIORef finalOutput
+                                                                    >>= pure
+                                                                        . maybe
+                                                                            ( Left
+                                                                                "agent turn completed without a terminal output"
+                                                                            )
+                                                                            ( Right
+                                                                                . turnExecutionOutput
+                                                                            )
 
 turnExecutionOutput :: Loop.TurnOutput -> TurnExecutionOutput
 turnExecutionOutput output =

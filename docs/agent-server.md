@@ -4,6 +4,12 @@
 HTTP API. It manages durable PostgreSQL sessions, bounded process-local turn
 state, human approval requests, and a replayable Server-Sent Events stream.
 
+A create-session request that includes a GitHub repository returns as soon as
+the session record exists. Clone, credential configuration, and working-branch
+creation then run as session setup and are published on the event stream as
+`session.setup.started`, `session.setup.step`, `session.setup.completed`, and
+`session.setup.failed`. The first turn waits until that checkout finishes.
+
 ## Start it
 
 From the repository:
