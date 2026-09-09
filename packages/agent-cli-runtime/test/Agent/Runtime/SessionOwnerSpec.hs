@@ -4,8 +4,9 @@ import Agent.Runtime.SessionOwner
 import Control.Concurrent (yield)
 import Control.Concurrent.Async (cancel, concurrently_, withAsync, wait)
 import Control.Concurrent.MVar
-    (newEmptyMVar, putMVar, takeMVar, tryTakeMVar)
+    (newEmptyMVar, putMVar, readMVar, takeMVar, tryPutMVar, tryTakeMVar)
 import Control.Exception.Safe (finally)
+import Control.Monad (void)
 import qualified Data.Map.Strict as Map
 import System.Timeout (timeout)
 import Test.Hspec
@@ -144,6 +145,41 @@ spec = describe "runtime session owner" do
             sessionOwnerSnapshot owner `shouldReturn` (True, Map.empty)
             submitSessionTurn owner "two" silent (pure (Right ()))
                 `shouldReturn` Left OwnerClosed
+
+    it "signals all workers before joining dependent cleanup" $
+        withSessionOwner 2 \owner -> do
+            firstStarted <- newEmptyMVar
+            secondStarted <- newEmptyMVar
+            blocked <- newEmptyMVar
+            firstCleaning <- newEmptyMVar
+            secondCleaning <- newEmptyMVar
+            firstFinished <- newEmptyMVar
+            secondFinished <- newEmptyMVar
+            let run started cleaning sibling finished =
+                    (putMVar started () >> readMVar blocked >> pure (Right ()))
+                        `finally` do
+                            void (tryPutMVar cleaning ())
+                            readMVar sibling
+                            putMVar finished ()
+                -- Release both handshakes on failure so the regression fails
+                -- with a timeout rather than hanging the test owner's cleanup.
+                releaseCleanup = do
+                    void (tryPutMVar firstCleaning ())
+                    void (tryPutMVar secondCleaning ())
+            (do
+                submitSessionTurn owner "first" silent
+                    (run firstStarted firstCleaning secondCleaning firstFinished)
+                    `shouldReturn` Right ()
+                submitSessionTurn owner "second" silent
+                    (run secondStarted secondCleaning firstCleaning secondFinished)
+                    `shouldReturn` Right ()
+                within (takeMVar firstStarted)
+                within (takeMVar secondStarted)
+                within (closeSessionOwner owner)
+                tryTakeMVar firstFinished `shouldReturn` Just ()
+                tryTakeMVar secondFinished `shouldReturn` Just ()
+                sessionOwnerSnapshot owner `shouldReturn` (True, Map.empty))
+                `finally` releaseCleanup
 
     it "supports a zero-capacity owner without launching workers" $
         withSessionOwner 0 \owner ->

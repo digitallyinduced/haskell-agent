@@ -185,7 +185,16 @@ cancelSessionTurn owner sessionId = do
 -- cancellation/close caller. No caller interruption cancels this owned sender.
 cancelOwnedWorker :: OwnedWorker -> IO ()
 cancelOwnedWorker worker = mask \restore -> do
-    sender <- modifyMVar worker.cancelSignal \case
+    sender <- requestWorkerCancellation worker
+    restore do
+        mapM_ wait sender
+        void (waitCatch worker.workerAsync)
+
+-- Request delivery without waiting for it: a worker may defer cancellation
+-- until another worker starts cleanup. The sender remains owned by the worker.
+requestWorkerCancellation :: OwnedWorker -> IO (Maybe (Async ()))
+requestWorkerCancellation worker =
+    modifyMVar worker.cancelSignal \case
         Just sender -> pure (Just sender, Just sender)
         Nothing -> do
             poll worker.workerAsync >>= \case
@@ -194,9 +203,6 @@ cancelOwnedWorker worker = mask \restore -> do
                     sender <- asyncWithUnmask \unmask ->
                         unmask (throwTo (asyncThreadId worker.workerAsync) AsyncCancelled)
                     pure (Just sender, Just sender)
-    restore do
-        mapM_ wait sender
-        void (waitCatch worker.workerAsync)
 
 -- | All concurrent closers retain the same workers until they are joined.
 -- If a closer is interrupted, a subsequent close can still finish cleanup.
@@ -207,6 +213,11 @@ closeSessionOwner owner = mask \restore -> do
             ( current { closed = True }
             , [worker | Running worker <- Map.elems current.entries]
             )
-    restore (mapM_ cancelOwnedWorker workers)
+    -- Start every cancellation before joining any worker. Sequential
+    -- cancel-and-join can deadlock when cleanup depends on a sibling stopping.
+    senders <- traverse requestWorkerCancellation workers
+    restore do
+        mapM_ (mapM_ wait) senders
+        mapM_ (\worker -> void (waitCatch worker.workerAsync)) workers
     modifyMVar_ owner.state \current ->
         pure current { entries = Map.empty }
