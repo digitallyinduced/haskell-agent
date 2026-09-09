@@ -279,8 +279,17 @@ The server is queried only when that reference is missing or invalid, or when
 fetching the cached branch reports that it no longer exists. Successful
 discovery and fetching refresh the local reference; unrelated fetch failures
 are not retried. If the server changes its default but retains the old branch,
-refresh explicitly with `git remote set-head origin --auto` (substitute the
-selected remote name).
+fetch the new default branch into its remote-tracking reference before
+refreshing the cache. For a new default named `main` on `origin`:
+
+```sh
+git fetch origin refs/heads/main:refs/remotes/origin/main &&
+git remote set-head origin --auto
+```
+
+Substitute the selected remote and its new default branch name.
+`set-head --auto` requires the new remote-tracking reference to exist; the
+agent's isolated fetches do not create it.
 
 ### Organization gateway model routing
 

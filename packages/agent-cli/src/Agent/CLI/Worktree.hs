@@ -848,7 +848,8 @@ fetchLatestUpstream report repo = do
 -- Git shares this symbolic reference across linked worktrees. Its target need
 -- not exist locally: our isolated fetch deliberately leaves tracking refs alone.
 -- A default-branch change that retains the old branch requires an explicit
--- `git remote set-head <remote> --auto` to refresh this cache.
+-- fetch into the new remote-tracking ref before
+-- `git remote set-head <remote> --auto` (see README).
 cachedRemoteDefaultBranch :: OsPath -> Text -> IO (Maybe Text)
 cachedRemoteDefaultBranch repo remote = do
     let prefix = "refs/remotes/" <> remote <> "/"
