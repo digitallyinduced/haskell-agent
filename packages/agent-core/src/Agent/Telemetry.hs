@@ -8,6 +8,8 @@ module Agent.Telemetry
     , modelTelemetryDecoder
     , turnTelemetryDecoder
     , turnTelemetryListDecoder
+    , reportedContextWindow
+    , preferReportedContextWindow
     , telemetrySummary
     ) where
 
@@ -108,6 +110,27 @@ turnTelemetryDecoder = Json.object $
 
 turnTelemetryListDecoder :: Json.Decoder [TurnTelemetry]
 turnTelemetryListDecoder = Json.list turnTelemetryDecoder
+
+-- | Tightest positive context window reported for models used in this turn.
+-- Catalog metadata is not consulted; Claude Code may enforce 200k while a
+-- catalog entry still names a larger window.
+reportedContextWindow :: TurnTelemetry -> Maybe Int
+reportedContextWindow telemetry =
+    case
+        [ window
+        | model <- Map.elems telemetry.telemetryModels
+        , Just window <- [model.modelContextWindow]
+        , window > 0
+        ] of
+        [] -> Nothing
+        windows -> Just (minimum windows)
+
+-- | Prefer a positive provider-reported window over catalog metadata.
+preferReportedContextWindow :: Maybe Int -> Int -> Int
+preferReportedContextWindow reported fallback =
+    case reported of
+        Just window | window > 0 -> window
+        _ -> fallback
 
 nonNegativeInt :: Json.Decoder Int
 nonNegativeInt = do

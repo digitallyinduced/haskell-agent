@@ -155,8 +155,8 @@
       "id": "claude-fable-5-1",
       "connection": "claude-code",
       "dialect": "claude-code",
-      "context_window": 1048576,
-      "label": "5.1 · frontier · subscription · 1M context",
+      "context_window": 200000,
+      "label": "5.1 · frontier · subscription",
       "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"],
       "default_reasoning_effort": "high"
     }

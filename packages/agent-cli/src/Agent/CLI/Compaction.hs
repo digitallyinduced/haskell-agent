@@ -15,6 +15,7 @@ module Agent.CLI.Compaction
     , autoCompactOpenAiBackendWith
     , autoCompactOpenAiBackendWithApi
     , autoCompactBackendWith
+    , rememberReportedContextWindow
     , boundCompletedToolContinuations
     , compactOpenAIWith
     , installCompactOutcome
@@ -118,6 +119,9 @@ import Agent.Provider
     ( Provider(..)
     , TokenProvider
     , runWithTokenProvider
+    )
+import Agent.Telemetry
+    ( reportedContextWindow
     )
 import qualified Agent.OpenRouter.Client as OpenRouter
 import qualified Agent.OpenRouter.Options as OpenRouter
@@ -1431,6 +1435,25 @@ autoCompactOpenAiBackendWithApi compactAction =
         (const (pure ()))
         estimateProjectedFromCache
         (\_outcome _inputs -> pure CompactionNotInstalled)
+
+-- | Keep the latest positive context window from provider turn telemetry so
+-- later submissions can compact against the enforced limit, not the catalog.
+rememberReportedContextWindow
+    :: IORef (Maybe Int)
+    -> BackendMiddleware
+rememberReportedContextWindow reportedRef backend =
+    backendWithCallbacks \snapshot previous inputs callbacks -> do
+        result <-
+            backend.submitTurnWithCallbacks snapshot previous inputs callbacks
+        case result of
+            Right backendResult
+                | Just window <-
+                    backendResult.backendOutput.providerTelemetry
+                        >>= reportedContextWindow ->
+                    writeIORef reportedRef (Just window)
+            _ ->
+                pure ()
+        pure result
 
 -- | Provider-neutral automatic compaction. The caller supplies both the
 -- threshold and the isolated summarization action; successful checkpoints
