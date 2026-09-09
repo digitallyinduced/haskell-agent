@@ -30,7 +30,7 @@ import Control.Concurrent.Async (race)
 import Control.Concurrent.MVar (withMVar)
 import Control.Concurrent.STM
 import Control.Exception.Safe (finally)
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -472,6 +472,10 @@ restoreSubagentResolvedWithCwd
             Pending -> pure (Left "cannot restore a pending subagent")
             NotFound -> pure (Left "cannot restore a missing subagent record")
             _ -> do
+                -- An interrupted close can leave service-owned cleanup running.
+                -- Keep the record closed until that cleanup has been joined.
+                when (status == Closed) $
+                    releaseRecordResources registry record
                 resetCancel record.recordCancel
                 atomically do
                     releaseSlotSTM registry record

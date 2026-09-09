@@ -73,6 +73,51 @@ interruptedResourceCleanup resetAfterInterruption = do
             ) `finally` releaseGate
         ) `finally` (releaseGate >> closeSubagentRegistry registry)
 
+interruptedRestoreCleanup :: Bool -> IO ()
+interruptedRestoreCleanup interruptRestore = do
+    cleanupStarted <- newEmptyMVar
+    cleanupRelease <- newEmptyMVar
+    workerStarted <- newEmptyMVar
+    restoreStarted <- newEmptyMVar
+    releases <- newIORef (0 :: Int)
+    registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath ".")
+        (\_ _ _ _ -> putMVar workerStarted () >> atomically retry)
+        (\_ _ -> pure ())
+    let releaseGate = void (tryPutMVar cleanupRelease ())
+        cleanup = do
+            atomicModifyIORef' releases \n -> (n + 1, ())
+            putMVar cleanupStarted ()
+            readMVar cleanupRelease
+    (do
+        Right agentId <- spawnSubagentWithCwdPrepared registry (fromFilePath ".")
+            (\_ -> pure (subagentLease cleanup))
+            Nothing 0 "owned" Nothing
+        timeout 5000000 (readMVar workerStarted) `shouldReturn` Just ()
+        Async.withAsync (closeSubagent registry agentId) \closer ->
+            (do
+                timeout 5000000 (readMVar cleanupStarted) `shouldReturn` Just ()
+                timeout 5000000 (Async.cancel closer) `shouldReturn` Just ()
+                let restore = restoreSubagent registry agentId Nothing 1 Nothing Nothing
+                Async.withAsync (putMVar restoreStarted () >> restore) \restorer ->
+                    (do
+                        timeout 5000000 (readMVar restoreStarted) `shouldReturn` Just ()
+                        timeout 100000 (Async.wait restorer) `shouldReturn` Nothing
+                        getStatus registry agentId `shouldReturn` Closed
+                        if interruptRestore
+                            then do
+                                timeout 5000000 (Async.cancel restorer) `shouldReturn` Just ()
+                                getStatus registry agentId `shouldReturn` Closed
+                                releaseGate
+                                timeout 5000000 restore `shouldReturn` Just (Right agentId)
+                            else do
+                                releaseGate
+                                timeout 5000000 (Async.wait restorer) `shouldReturn` Just (Right agentId)
+                        getStatus registry agentId `shouldReturn` Completed Nothing
+                        readIORef releases `shouldReturn` 1
+                    ) `finally` releaseGate
+            ) `finally` releaseGate
+        ) `finally` (releaseGate >> closeSubagentRegistry registry)
+
 messagePayload :: InterAgentMessage -> Text
 messagePayload message = case message.messageContent of
     PlainInterAgentContent text -> text
@@ -863,6 +908,12 @@ spec = describe "Agent.Subagents" do
 
     it "retains resource cleanup ownership after an interrupted close" do
         interruptedResourceCleanup False
+
+    it "joins retained cleanup before restoring an interrupted close" do
+        interruptedRestoreCleanup False
+
+    it "keeps a restore interrupted during retained cleanup closed and retryable" do
+        interruptedRestoreCleanup True
 
     it "waits for retained resource cleanup before resetting the registry" do
         interruptedResourceCleanup True
